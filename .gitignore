@@ -1,0 +1,35 @@
+# Created by venv; see https://docs.python.org/3/library/venv.html
+# Ambiente virtual
+venv/
+env/
+.env/
+
+# Cache do Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Configurações do sistema
+.DS_Store
+Thumbs.db
+
+# Logs e arquivos temporários
+*.log
+*.tmp
+
+# Banco de dados local
+*.sqlite3
+
+# Arquivos de IDEs
+.vscode/
+.idea/
+*.code-workspace
+
+# Arquivos do sistema operacional
+*.swp
+*.swo
+
+# Arquivos de build/distribuição
+build/
+dist/
+*.egg-info/

@@ -13,8 +13,7 @@ def get_current_user_from_cookie():
 
     try:
         payload = jwt.decode(token, SECRET_KEY, algorithms=['HS256'])
-        print(payload)
-        return Usuario.query.get(payload['id'])
+        return Usuario.query.get(payload['sub'])
     except jwt.ExpiredSignatureError:
         return None
     except jwt.InvalidTokenError:

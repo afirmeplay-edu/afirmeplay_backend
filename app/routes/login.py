@@ -29,7 +29,8 @@ def login():
         return jsonify({"erro": "Credenciais inválidas."}), 401
 
     token_payload = {
-        "id": usuario.id,
+        "sub":usuario.id,
+        "tenant_id":usuario.tenant_id,
         "role": usuario.role.value,
         "exp": datetime.datetime.utcnow() + datetime.timedelta(hours=1)
     }
@@ -41,6 +42,7 @@ def login():
         "nome": usuario.nome,
         "email": usuario.email,
         "matricula": usuario.matricula,
+        "tenant_id":usuario.tenant_id,
         "role": usuario.role.value
     }
 

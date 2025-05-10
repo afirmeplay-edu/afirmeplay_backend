@@ -19,7 +19,9 @@ class Avaliacao(db.Model):
     allow_review = db.Column(db.Boolean, nullable=False)
     instructions = db.Column(db.Text)
     data_aplicacao = db.Column(db.Date)
-    tenant_id = db.Column(db.String, db.ForeignKey('escolas.id'), nullable=False)
+    escola_id = db.Column(db.String, db.ForeignKey('escolas.id'), nullable=False)
     created_by = db.Column(db.String, nullable=False)
     updated_at = db.Column(db.DateTime, server_default=db.func.now())
     criado_em = db.Column(db.DateTime, server_default=db.func.now())
+
+    questoes = db.relationship('Questao', backref='avaliacao', cascade='all, delete-orphan', lazy=True)

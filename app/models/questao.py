@@ -19,7 +19,7 @@ class Questao(db.Model):
     tags = db.Column(db.ARRAY(db.String))  # Lista de tags
     avaliacao_id = db.Column(db.String, db.ForeignKey('avaliacoes.id'))
     alternativas = db.Column(db.JSON)
-    tenant_id = db.Column(db.String, db.ForeignKey('escolas.id'), nullable=False)
+    escola_id = db.Column(db.String, db.ForeignKey('escolas.id'), nullable=False)
     criado_em = db.Column(db.DateTime, server_default=db.func.now())
     created_by = db.Column(db.String)  # ID do criador (usuário)
     updated_at = db.Column(db.DateTime, onupdate=db.func.now())

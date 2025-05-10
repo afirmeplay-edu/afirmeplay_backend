@@ -21,6 +21,6 @@ def authenticate_usuario(usuario, senha):
 def get_current_tenant_id():
     token = request.cookies.get('access_token')
     decode = jwt.decode(token, SECRET_KEY, algorithms=['HS256'])
-    return decode['tenant_id']
+    return decode['escola_id']
     # identity = get_jwt_identity()
     # return identity.get("tenant_id")

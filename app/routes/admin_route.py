@@ -20,7 +20,8 @@ def criar_usuario():
     senha = data.get('senha')
     role = data.get('role')
     matricula = data.get('matricula')
-    tenant_id = data.get('tenant_id')
+    escola_id = data.get("escola_id")
+    # tenant_id = data.get('tenant_id')
 
     roles_validas = ['aluno', 'professor', 'coordenador', 'diretor',"admin"]
     if role not in roles_validas:
@@ -41,10 +42,11 @@ def criar_usuario():
     novo_usuario = Usuario(
         nome=nome,
         email=email,
+        escola_id=escola_id,
         senha_hash=generate_password_hash(senha),
         role=RoleEnum(role),
         matricula=matricula if role == 'aluno' else None,
-        tenant_id = tenant_id
+        # tenant_id = tenant_id
     )
 
     db.session.add(novo_usuario)

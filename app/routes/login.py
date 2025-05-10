@@ -3,6 +3,7 @@ from app.utils.auth import authenticate_usuario
 import datetime
 import jwt
 from app.models.usuario import Usuario
+from app.models.escola import Escola  # certifique-se que essa importação está correta
 
 import os
 
@@ -19,30 +20,36 @@ def login():
     if not identificador or not senha:
         return jsonify({"erro": "Identificador (e-mail ou matrícula) e senha são obrigatórios."}), 400
 
-    # tenta encontrar por matrícula (Aluno)
+    # tenta encontrar o usuário
     usuario = Usuario.query.filter_by(matricula=identificador).first()
-    
     if not usuario:
         usuario = Usuario.query.filter_by(email=identificador).first()
 
-    if not usuario or not authenticate_usuario(usuario ,senha):
+    if not usuario or not authenticate_usuario(usuario, senha):
         return jsonify({"erro": "Credenciais inválidas."}), 401
 
+    # Define o tenant_id com base na escola vinculada ao usuário
+    escola_id = None
+    if usuario.role != 'ADMIN':
+        if not usuario.escola_id:
+            return jsonify({"erro": "Usuário não vinculado a uma escola ou município."}), 400
+        escola_id = usuario.escola_id
+
     token_payload = {
-        "sub":usuario.id,
-        "tenant_id":usuario.tenant_id,
+        "sub": usuario.id,
+        "escola_id": escola_id,
         "role": usuario.role.value,
         "exp": datetime.datetime.utcnow() + datetime.timedelta(hours=1)
     }
 
     token = jwt.encode(token_payload, SECRET_KEY, algorithm='HS256')
-    
+
     usuario_data = {
         "id": usuario.id,
         "nome": usuario.nome,
         "email": usuario.email,
         "matricula": usuario.matricula,
-        "tenant_id":usuario.tenant_id,
+        "escola_id": escola_id,
         "role": usuario.role.value
     }
 
@@ -56,4 +63,3 @@ def login():
         max_age=3600
     )
     return response
-  

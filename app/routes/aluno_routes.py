@@ -31,7 +31,7 @@ def criar_aluno():
             matricula=data.get("matricula"),
             role=RoleEnum("aluno"),
             escola_id=data["escola_id"],
-            # tenant_id=get_current_tenant_id()
+            tenant_id=get_current_tenant_id()
         )
         db.session.add(novo_usuario)
         db.session.flush()  # Garante que novo_usuario.id esteja disponível
@@ -52,7 +52,7 @@ def criar_aluno():
             education_stage_id=data.get("education_stage_id"),
             escola_id=data["escola_id"],
             grade_id=data.get("grade_id"),
-            # tenant_id=get_current_tenant_id()
+            tenant_id=get_current_tenant_id()
         )
         db.session.add(novo_aluno)
         db.session.commit()
@@ -65,21 +65,20 @@ def criar_aluno():
     
     
 
-@bp.route('/', methods=['GET'])
+@bp.route('/escola/<string:escola_id>', methods=['GET'])
 @jwt_required()
 @role_required("admin","professor","coordenador","diretor")
-def listar_alunos():
-    escola_id = get_current_tenant_id()
+def listar_alunos(escola_id):
+    escola_id = escola_id
     alunos = Aluno.query.filter_by(escola_id=escola_id).all()
     return jsonify([{ "id": a.id, "nome": a.nome, "matricula": a.matricula, "birth_date:": a.birth_date, "education_stage_id":a.education_stage_id, "grade_id":a.grade_id, "criado_em":a.criado_em } for a in alunos])
 
 
 
-@bp.route('/<string:aluno_id>', methods=['PUT'])
+@bp.route('/<string:aluno_id>/<string:escola_id>', methods=['PUT'])
 @jwt_required()
 @role_required("admin", "professor", "coordenador", "diretor")
-def atualizar_aluno(aluno_id):
-    escola_id = get_current_tenant_id()
+def atualizar_aluno(aluno_id, escola_id):
     aluno = Aluno.query.filter_by(id=aluno_id, escola_id=escola_id).first()
 
     if not aluno:

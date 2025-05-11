@@ -20,7 +20,7 @@ def criar_usuario():
     senha = data.get('senha')
     role = data.get('role')
     matricula = data.get('matricula')
-    escola_id = data.get("escola_id")
+    tenant_id = data.get("tenant_id")
     # tenant_id = data.get('tenant_id')
 
     roles_validas = ['aluno', 'professor', 'coordenador', 'diretor',"admin"]
@@ -42,7 +42,7 @@ def criar_usuario():
     novo_usuario = Usuario(
         nome=nome,
         email=email,
-        escola_id=escola_id,
+        tenant_id=tenant_id,
         senha_hash=generate_password_hash(senha),
         role=RoleEnum(role),
         matricula=matricula if role == 'aluno' else None,

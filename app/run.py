@@ -4,7 +4,7 @@ from flask_cors import CORS
 app = create_app()
 
 # para permitir somente o backend CORS(app, resources={r"/*": {"origins": "http://localhost:5173"}}, supports_credentials=True)
-CORS(app, supports_credentials=True)
+CORS(app,  resources={r"/*": {"origins": "https://innovplay.vercel.app"}},supports_credentials=True)
 
 with app.app_context():
     db.create_all()

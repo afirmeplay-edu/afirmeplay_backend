@@ -17,4 +17,6 @@ class Aluno(db.Model):
     grade_id = db.Column(db.String, db.ForeignKey('grades.id'))
     turma_id = db.Column(db.String, db.ForeignKey('turmas.id'))
     escola_id = db.Column(db.String, db.ForeignKey('escolas.id'), nullable=False)
+    tenant_id = db.Column(db.String, db.ForeignKey('municipios.id'), nullable=False)
+    
  

@@ -22,6 +22,7 @@ class Usuario(db.Model):
     senha_hash = db.Column(db.String, nullable=False)
     role = db.Column(db.Enum(RoleEnum), nullable=False)
     escola_id = db.Column(db.String, db.ForeignKey('escolas.id'), nullable=False)
+    tenant_id = db.Column(db.String, db.ForeignKey('municipios.id'), nullable=False)
 
     aluno = db.relationship('Aluno', backref='usuario', uselist=False)
     professor = db.relationship('Professor', backref='usuario', uselist=False)

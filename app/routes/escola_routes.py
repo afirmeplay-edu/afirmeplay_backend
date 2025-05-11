@@ -3,6 +3,7 @@ from app.models.escola import Escola
 from app import db
 from app.decorators.role_required import role_required
 from flask_jwt_extended import jwt_required
+from app.utils.auth import get_current_tenant_id
 
 import uuid
 
@@ -33,7 +34,8 @@ def criar_escola():
 @jwt_required()
 @role_required("admin", "diretor", "coordenador")
 def listar_escolas():
-    escolas = Escola.query.all()
+    tenant_id = get_current_tenant_id()
+    escolas = Escola.query.filter_by(municipio_id=tenant_id).all()
     return jsonify([
         {
             "id": e.id,

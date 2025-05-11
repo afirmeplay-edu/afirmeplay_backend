@@ -29,15 +29,17 @@ def login():
         return jsonify({"erro": "Credenciais inválidas."}), 401
 
     # Define o tenant_id com base na escola vinculada ao usuário
-    escola_id = None
-    if usuario.role != 'ADMIN':
+    tenant_id = None
+    if usuario.role == 'ALUNO':
         if not usuario.escola_id:
-            return jsonify({"erro": "Usuário não vinculado a uma escola ou município."}), 400
-        escola_id = usuario.escola_id
+            return jsonify({"erro": "Aluno não vinculado a uma escola ou município."}), 400
+        tenant_id = usuario.escola_id
+    else:
+        tenant_id = usuario.tenant_id
 
     token_payload = {
         "sub": usuario.id,
-        "escola_id": escola_id,
+        "tenant_id": tenant_id,
         "role": usuario.role.value,
         "exp": datetime.datetime.utcnow() + datetime.timedelta(hours=1)
     }
@@ -49,7 +51,7 @@ def login():
         "nome": usuario.nome,
         "email": usuario.email,
         "matricula": usuario.matricula,
-        "escola_id": escola_id,
+        "tenant_id": tenant_id,
         "role": usuario.role.value
     }
 

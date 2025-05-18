@@ -1,4 +1,5 @@
-from app import create_app, db
+# from app import create_app, db
+from . import create_app, db
 from flask_cors import CORS
 import requests
 import os

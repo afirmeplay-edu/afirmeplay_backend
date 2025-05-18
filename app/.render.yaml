@@ -1,7 +1,10 @@
 services:
     - type: web
-      name: flask-app
+      name: innovaplay-backend
       env: python
-      buildCommand: ""
-      startCommand: gunicorn app:app
       plan: free
+      buildCommand: ""
+      startCommand: gunicorn run:app
+      envVars:
+          - key: SELF_URL
+            value: https://innovaplay-backend.onrender.com

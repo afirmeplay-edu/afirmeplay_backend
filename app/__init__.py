@@ -2,10 +2,8 @@ from flask import Flask
 from flask_sqlalchemy import SQLAlchemy
 from flask_jwt_extended import JWTManager
 
-from .routes import question_routes
 from .config import Config
 from dotenv import load_dotenv
-import app.utils.error_handler
 import os
 
 db = SQLAlchemy()
@@ -31,7 +29,7 @@ def create_app():
     jwt.init_app(app)
 
     # Importar rotas
-    from .routes import school_routes, test_routes, login,logout,admin_route,educationStage_routes,grades_routes,persistUser_routes,city_routes,student_routes
+    from .routes import school_routes, test_routes, question_routes, login,logout,admin_route,educationStage_routes,grades_routes,persistUser_routes,city_routes,student_routes
     
     app.register_blueprint(school_routes.bp)
     app.register_blueprint(test_routes.bp)

@@ -1,7 +1,7 @@
 from functools import wraps
 from flask import request, jsonify
 import jwt
-from app.models.usuario import Usuario
+from app.models.user import User
 import os
 
 SECRET_KEY = os.getenv("JWT_SECRET_KEY")
@@ -13,7 +13,15 @@ def get_current_user_from_cookie():
 
     try:
         payload = jwt.decode(token, SECRET_KEY, algorithms=['HS256'])
-        return Usuario.query.get(payload['sub'])
+        user = User.query.get(payload['sub'])
+        if not user:
+            return None
+            
+        return {
+            "id": user.id,
+            "role": user.role.value
+        }
+    
     except jwt.ExpiredSignatureError:
         return None
     except jwt.InvalidTokenError:
@@ -24,7 +32,7 @@ def role_required(*roles):
         @wraps(f)
         def wrapper(*args, **kwargs):
             user = get_current_user_from_cookie()
-            if not user or user.role.value not in roles:
+            if not user or user['role'] not in roles:
                 return jsonify({"erro": "Acesso negado."}), 403
             return f(*args, **kwargs)
         return wrapper

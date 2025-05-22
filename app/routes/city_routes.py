@@ -1,24 +1,22 @@
 from flask import Blueprint, request, jsonify
 from app import db
-from app.models.municipio import Municipio
+from app.models.city import City
 from flask_jwt_extended import jwt_required
 from app.decorators.role_required import role_required
 from app.utils.auth import get_current_tenant_id
-import uuid
 
-bp = Blueprint('municipios', __name__, url_prefix='/municipios')
+bp = Blueprint('city', __name__, url_prefix='/city')
 
 # POST - Criar município
 @bp.route("/", methods=["POST"])
-# @jwt_required()
-# @role_required("admin", "diretor", "coordenador")
+@jwt_required()
+@role_required("admin")
 def criar_municipio():
     data = request.get_json()
 
-    novo_municipio = Municipio(
-        id=str(uuid.uuid4()),
-        nome=data["nome"],
-        estado=data["estado"]
+    novo_municipio = City(
+        name=data["name"],
+        state=data["state"]
     )
 
     db.session.add(novo_municipio)
@@ -29,33 +27,33 @@ def criar_municipio():
 # GET - Listar todos os municípios
 @bp.route("/", methods=["GET"])
 @jwt_required()
-@role_required("admin", "diretor", "coordenador")
+@role_required("admin")
 def listar_municipios():
-    municipios = Municipio.query.all()
+    city = City.query.all()
 
     return jsonify([
         {
-            "id": m.id,
-            "nome": m.nome,
-            "estado": m.estado,
-            "criado_em": m.criado_em.isoformat()
+            "id": c.id,
+            "name": c.name,
+            "state": c.state,
+            "created_at": c.created_at.isoformat()
         }
-        for m in municipios
+        for c in city
     ])
 
 # PUT - Atualizar município
 @bp.route("/<string:municipio_id>", methods=["PUT"])
 @jwt_required()
-@role_required("admin", "diretor", "coordenador")
+@role_required("admin")
 def atualizar_municipio(municipio_id):
-    municipio = Municipio.query.get(municipio_id)
+    municipio = City.query.get(municipio_id)
 
     if not municipio:
         return jsonify({"erro": "Município não encontrado"}), 404
 
     data = request.get_json()
-    municipio.nome = data.get("nome", municipio.nome)
-    municipio.estado = data.get("estado", municipio.estado)
+    municipio.name = data.get("name", municipio.name)
+    municipio.state = data.get("state", municipio.state)
 
     db.session.commit()
     return jsonify({"mensagem": "Município atualizado com sucesso"})
@@ -63,9 +61,9 @@ def atualizar_municipio(municipio_id):
 # DELETE - Excluir município
 @bp.route("/<string:municipio_id>", methods=["DELETE"])
 @jwt_required()
-@role_required("admin", "diretor", "coordenador")
+@role_required("admin")
 def deletar_municipio(municipio_id):
-    municipio = Municipio.query.get(municipio_id)
+    municipio = City.query.get(municipio_id)
 
     if not municipio:
         return jsonify({"erro": "Município não encontrado"}), 404

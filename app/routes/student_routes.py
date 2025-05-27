@@ -5,7 +5,7 @@ from app.models.school import School
 from app.models.user import RoleEnum
 from sqlalchemy.exc import SQLAlchemyError, IntegrityError
 import logging
-from app.decorators.role_required import role_required, get_current_user_from_cookie
+from app.decorators.role_required import role_required, get_current_user_from_token
 from app.utils.auth import get_current_tenant_id
 from datetime import datetime
 from app import db
@@ -93,7 +93,7 @@ def criar_aluno():
 @role_required("admin", "diretor", "coordenador", "professor")
 def listar_alunos():
     try:
-        user = get_current_user_from_cookie()
+        user = get_current_user_from_token()
 
         if not user:
             return jsonify({"message": "Usuário não encontrado"}), 404

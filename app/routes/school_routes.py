@@ -1,7 +1,7 @@
 from flask import Blueprint, request, jsonify
 from app.models.school import School
 from app import db
-from app.decorators.role_required import role_required, get_current_user_from_cookie
+from app.decorators.role_required import role_required, get_current_user_from_token
 from flask_jwt_extended import jwt_required
 from app.utils.auth import get_current_tenant_id
 from sqlalchemy.exc import SQLAlchemyError
@@ -76,45 +76,49 @@ def criar_escola():
 @role_required("admin", "diretor", "coordenador", "professor")
 def listar_escolas():
     try:
-        user = get_current_user_from_cookie()
+        user = get_current_user_from_token()
 
         if not user:
-            return jsonify({"message": "Usuário não encontrado"}), 404
+            return jsonify({"error": "User not found"}), 404
 
         schools = []
         if user['role'] == "admin":
             # Admin pode ver todas as escolas
             schools = School.query.all()
         elif user['role'] == "professor":
-            # Professor só vê a escola onde está alocado
-            schools = School.query.filter_by(id=user.get('school_id')).all()
+            # Professor vê todas as escolas onde está alocado
+            from app.models.schoolTeacher import TeacherSchool
+            teacher_schools = TeacherSchool.query.filter_by(teacher_id=user['id']).all()
+            school_ids = [ts.school_id for ts in teacher_schools]
+            if school_ids:
+                schools = School.query.filter(School.id.in_(school_ids)).all()
+            else:
+                return jsonify({"message": "Professor não está alocado em nenhuma escola"}), 404
         else:
             # Diretor e coordenador veem escolas da mesma cidade
             city_id = get_current_tenant_id()
             if not city_id:
-                return jsonify({"message": "ID da cidade não disponível para este usuário"}), 400
+                return jsonify({"error": "City ID not available for this user"}), 400
             schools = School.query.filter_by(city_id=city_id).all()
 
-        return jsonify([
-            {
-                "id": e.id,
-                "name": e.name,
-                "domain": e.domain,
-                "address": e.address,
-                "city_id": e.city_id,
-                "created_at": e.created_at.isoformat() if e.created_at else None
-            } for e in schools
-        ]), 200
+        return jsonify([{
+            "id": e.id,
+            "name": e.name,
+            "domain": e.domain,
+            "address": e.address,
+            "city_id": e.city_id,
+            "created_at": e.created_at.isoformat() if e.created_at else None
+        } for e in schools]), 200
 
     except SQLAlchemyError as e:
-        logging.error(f"Erro no banco de dados ao listar escolas: {e}")
-        return jsonify({"message": "Erro interno do servidor ao consultar dados", "details": str(e)}), 500
+        logging.error(f"Database error while listing schools: {e}")
+        return jsonify({"error": "Internal server error while querying data", "details": str(e)}), 500
     except AttributeError as e:
-        logging.error(f"Erro de atributo ao processar usuário ou papel: {e}")
-        return jsonify({"message": "Erro ao processar dados do usuário", "details": str(e)}), 500
+        logging.error(f"Attribute error while processing user or role: {e}")
+        return jsonify({"error": "Error processing user data", "details": str(e)}), 500
     except Exception as e:
-        logging.error(f"Erro inesperado na rota listar_escolas: {e}", exc_info=True)
-        return jsonify({"message": "Ocorreu um erro inesperado no servidor"}), 500
+        logging.error(f"Unexpected error in list_schools route: {e}", exc_info=True)
+        return jsonify({"error": "An unexpected error occurred on the server"}), 500
 
    
 # PUT - Atualizar escola

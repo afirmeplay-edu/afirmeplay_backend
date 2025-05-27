@@ -1,4 +1,4 @@
-from flask import Blueprint, request, jsonify, make_response
+from flask import Blueprint, request, jsonify
 from app.utils.auth import authenticate_usuario
 import datetime
 import jwt
@@ -62,17 +62,12 @@ def login():
             "role": usuario.role.value
         }
 
-        response = make_response(jsonify({"mensagem": "Login bem-sucedido.", "usuario": usuario_data}))
-        response.set_cookie(
-            "access_token",
-            token,
-            httponly=True,
-            secure=False,
-            samesite='None',
-            max_age=3600
-        )
         logging.info(f"Login bem-sucedido para usuário: {usuario.email} com papel: {usuario.role}")
-        return response
+        return jsonify({
+            "mensagem": "Login bem-sucedido.",
+            "user": usuario_data,
+            "token": token
+        })
     except Exception as e:
         logging.error(f"Erro inesperado durante o login para identificador {identificador}: {e}", exc_info=True)
         return jsonify({"erro": "Ocorreu um erro interno no servidor."}), 500

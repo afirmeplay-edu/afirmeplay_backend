@@ -1,10 +1,12 @@
-from flask import Blueprint, jsonify
+from flask import Blueprint, jsonify, request
 from app.utils.auth import get_current_tenant_id
-from app.models.user import User
+from app.models.user import User, RoleEnum
 from app.decorators.role_required import role_required, get_current_user_from_token
 from flask_jwt_extended import jwt_required
 from sqlalchemy.exc import SQLAlchemyError
 import logging
+from werkzeug.security import generate_password_hash
+from app import db
 
 bp = Blueprint('users', __name__, url_prefix='/users')
 
@@ -47,4 +49,98 @@ def list_users():
         return jsonify({"erro": "Erro ao consultar usuários", "detalhes": str(e)}), 500
     except Exception as e:
         logging.error(f"Erro inesperado ao listar usuários: {e}", exc_info=True)
-        return jsonify({"erro": "Erro interno do servidor"}), 500 
+        return jsonify({"erro": "Erro interno do servidor"}), 500
+
+@bp.route('', methods=['POST'])
+@jwt_required()
+@role_required("admin", "professor", "coordenador", "diretor")
+def create_user():
+    try:
+        data = request.get_json()
+        if not data:
+            return jsonify({"error": "No data provided"}), 400
+
+        required_fields = ["name", "email", "password"]
+        for field in required_fields:
+            if field not in data:
+                return jsonify({"error": f"Missing required field: {field}"}), 400
+
+        # Check if email already exists
+        existing_user = User.query.filter_by(email=data["email"]).first()
+        if existing_user:
+            return jsonify({
+                "message": "User already exists",
+                "user": {
+                    "id": existing_user.id,
+                    "name": existing_user.name,
+                    "email": existing_user.email,
+                    "registration": existing_user.registration,
+                    "role": existing_user.role.value
+                }
+            }), 200
+
+        # Check if registration already exists
+        if data.get("registration") and User.query.filter_by(registration=data["registration"]).first():
+            return jsonify({"error": "Registration number already exists"}), 400
+
+        # Create user
+        novo_usuario = User(
+            name=data["name"],
+            email=data["email"],
+            password_hash=generate_password_hash(data["password"]),
+            registration=data.get("registration"),
+            role=RoleEnum("aluno")
+        )
+        db.session.add(novo_usuario)
+        db.session.commit()
+
+        return jsonify({
+            "message": "User created successfully!",
+            "user": {
+                "id": novo_usuario.id,
+                "name": novo_usuario.name,
+                "email": novo_usuario.email,
+                "registration": novo_usuario.registration,
+                "role": novo_usuario.role.value
+            }
+        }), 201
+
+    except SQLAlchemyError as e:
+        db.session.rollback()
+        logging.error(f"Database error: {str(e)}")
+        return jsonify({"error": "Database error occurred", "details": str(e)}), 500
+    except Exception as e:
+        db.session.rollback()
+        logging.error(f"Error creating user: {str(e)}", exc_info=True)
+        return jsonify({"error": "Error creating user", "details": str(e)}), 500
+
+@bp.route('/<string:user_id>', methods=['GET'])
+@jwt_required()
+@role_required("admin", "tecadmin", "diretor", "coordenador", "professor", "aluno")
+def get_user_by_id(user_id):
+    try:
+        logging.info(f"Fetching user with ID: {user_id}")
+
+        user = User.query.get(user_id)
+
+        if not user:
+            logging.warning(f"User not found with ID: {user_id}")
+            return jsonify({"message": "User not found"}), 404
+
+        return jsonify({
+            "id": user.id,
+            "name": user.name,
+            "email": user.email,
+            "registration": user.registration,
+            "role": user.role.value,
+            "city_id": user.city_id,
+            "created_at": user.created_at.isoformat() if user.created_at else None,
+            "updated_at": user.updated_at.isoformat() if user.updated_at else None
+        }), 200
+
+    except SQLAlchemyError as e:
+        logging.error(f"Database error while fetching user by ID: {str(e)}")
+        return jsonify({"message": "Internal server error while querying data", "details": str(e)}), 500
+    except Exception as e:
+        logging.error(f"Unexpected error in get_user_by_id route: {str(e)}", exc_info=True)
+        return jsonify({"message": "An unexpected error occurred", "details": str(e)}), 500 

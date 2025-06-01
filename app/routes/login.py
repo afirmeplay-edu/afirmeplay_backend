@@ -4,6 +4,7 @@ import datetime
 import jwt
 from app.models.user import User, RoleEnum
 from app.models.school import School  # certifique-se que essa importação está correta
+from app.models.student import Student # Import Student model
 import logging
 import os
 
@@ -31,25 +32,32 @@ def login():
             logging.warning(f"Falha de login para o usuário: {identificador}")
             return jsonify({"erro": "Credenciais inválidas."}), 401
 
-        # Define o tenant_id com base na escola vinculada ao usuário
+        tenant_id = None
+
+        # Define o tenant_id com base na role
+        if usuario.role == RoleEnum('aluno'):
+            # Para aluno, buscar school_id na tabela student
+            student = Student.query.filter_by(user_id=usuario.id).first()
+            if not student or not student.school_id:
+                 logging.error(f"Usuário aluno {usuario.id} sem registro de estudante ou school_id associado.")
+                 return jsonify({"erro": "Aluno não vinculado a uma escola."}), 400
+            tenant_id = student.school_id
+        elif usuario.role == RoleEnum('admin'):
+            tenant_id = None # Admin pode ver tudo, sem restrição de tenant
+        else:
+            # Para outras roles, usar city_id do usuário
+            if not usuario.city_id:
+                 logging.error(f"Usuário {usuario.id} ({usuario.role}) sem city_id vinculado.")
+                 return jsonify({"erro": f"{usuario.role} não vinculado a um município."}), 400
+            tenant_id = usuario.city_id
+
+
         token_payload = {
             "sub": usuario.id,
-            "city_id": None,
+            "tenant_id": tenant_id,
             "role": usuario.role.value,
             "exp": datetime.datetime.utcnow() + datetime.timedelta(hours=1)
         }
-        if usuario.role == RoleEnum('aluno'):
-            if not usuario.escola_id:
-                logging.error(f"Usuário {usuario.id} ({usuario.role}) sem escola_id vinculado.")
-                return jsonify({"erro": "Aluno não vinculado a uma escola ou município."}), 400
-            token_payload["city_id"] = usuario.escola_id
-        elif usuario.role == RoleEnum('admin'):
-            token_payload["city_id"] = None
-        else:
-            if not usuario.city_id and usuario.role != RoleEnum('admin'):
-                logging.error(f"Usuário {usuario.id} ({usuario.role}) sem city_id vinculado.")
-                return jsonify({"erro": f"{usuario.role} não vinculado a um município."}), 400
-            token_payload["city_id"] = usuario.city_id
 
         token = jwt.encode(token_payload, SECRET_KEY, algorithm='HS256')
 
@@ -58,11 +66,12 @@ def login():
             "name": usuario.name,
             "email": usuario.email,
             "registration": usuario.registration,
-            "tenant_id": token_payload["city_id"],
+            "tenant_id": tenant_id,
+            "created_at": usuario.created_at,
             "role": usuario.role.value
         }
 
-        logging.info(f"Login bem-sucedido para usuário: {usuario.email} com papel: {usuario.role}")
+        logging.info(f"Login bem-sucedido para usuário: {usuario.email} com papel: {usuario.role} e tenant_id: {tenant_id}")
         return jsonify({
             "mensagem": "Login bem-sucedido.",
             "user": usuario_data,

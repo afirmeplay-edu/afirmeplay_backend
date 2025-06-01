@@ -15,14 +15,7 @@ def create_app():
     
     app = Flask(__name__)
     
-    # Configuração do CORS
-    CORS(app, resources={
-        r"/*": {
-            "origins": ["http://localhost:3000"],
-            "methods": ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-            "allow_headers": ["Content-Type", "Authorization"]
-        }
-    })
+   
 
     # Configuração do JWT
     app.config['JWT_SECRET_KEY'] = os.getenv('JWT_SECRET_KEY')
@@ -39,7 +32,7 @@ def create_app():
     jwt.init_app(app)
 
     # Importar rotas
-    from .routes import school_routes, test_routes, question_routes, login,logout,admin_route,educationStage_routes,grades_routes,persistUser_routes,city_routes,student_routes, user_routes
+    from .routes import school_routes, test_routes, question_routes, login,logout,admin_route,educationStage_routes,grades_routes,persistUser_routes,city_routes,student_routes, user_routes, class_routes
     
     app.register_blueprint(school_routes.bp)
     app.register_blueprint(test_routes.bp)
@@ -53,5 +46,6 @@ def create_app():
     app.register_blueprint(city_routes.bp)
     app.register_blueprint(student_routes.bp)
     app.register_blueprint(user_routes.bp)
+    app.register_blueprint(class_routes.bp)
 
     return app

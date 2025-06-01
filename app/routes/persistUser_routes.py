@@ -2,6 +2,7 @@
 
 from flask import Blueprint, jsonify
 from app.decorators.role_required import get_current_user_from_token
+from app.models.user import User
 import datetime
 import jwt
 import os
@@ -18,19 +19,25 @@ def me():
 
     # Create new access token
     token_payload = {
-        "sub": user["id"],
-        "city_id": None,
-        "role": user["role"],
+        "sub": user.get("id"),
+        "city_id": user.get("city_id"),
+        "role": user.get("role"),
         "exp": datetime.datetime.utcnow() + datetime.timedelta(hours=1)
     }
     new_token = jwt.encode(token_payload, SECRET_KEY, algorithm='HS256')
 
+    userData = User.query.get(user.get("id"))
+
     usuario_data = {
-        "id": user["id"],
-        "role": user["role"]
+        "id": userData.id,
+        "name": userData.name,
+        "email": userData.email,
+        "registration": userData.registration,
+        "role": userData.role.value,
+        "city_id": userData.city_id
     }
 
     return jsonify({
-        "usuario": usuario_data,
+        "user": usuario_data,
         "token": new_token
     })

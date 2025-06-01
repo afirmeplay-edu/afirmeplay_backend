@@ -12,6 +12,7 @@ from app import db
 from flask_jwt_extended import jwt_required
 from werkzeug.security import generate_password_hash
 from marshmallow import ValidationError
+from app.models.studentClass import Class
 
 bp = Blueprint('students', __name__, url_prefix="/students")
 
@@ -30,12 +31,17 @@ def handle_generic_error(error):
     logging.error(f"Unexpected error: {str(error)}", exc_info=True)
     return jsonify({"error": "An unexpected error occurred", "details": str(error)}), 500
 
-@bp.route("", methods=["POST"])
+
+@bp.route("", methods=['POST'])
 @jwt_required()
 @role_required("admin", "professor", "coordenador", "diretor")
-def criar_aluno():
+def criar_usuario_e_aluno():
     try:
+        logging.info("Iniciando criação de usuário/aluno combinada")
+
         data = request.get_json()
+        logging.info(f"Dados recebidos: {data}")
+
         if not data:
             return jsonify({"error": "No data provided"}), 400
 
@@ -44,48 +50,97 @@ def criar_aluno():
             if field not in data:
                 return jsonify({"error": f"Missing required field: {field}"}), 400
 
-        # Criação do usuário com dados básicos
-        novo_usuario = User(
-            name=data["name"],
-            email=data["email"],
-            password_hash=generate_password_hash(data["password"]),
-            registration=data.get("registration"),
-            role=RoleEnum("aluno"),
-        )
-        db.session.add(novo_usuario)
-        db.session.flush()
+        # Tenta encontrar o usuário pelo email
+        usuario = User.query.filter_by(email=data["email"]).first()
 
-        # Converte a data de nascimento se enviada
+        if usuario:
+            logging.info(f"Usuário existente encontrado: {usuario.email}")
+            # Verificar se o usuário já é um aluno
+            if Student.query.filter_by(user_id=usuario.id).first():
+                logging.warning(f"Usuário {usuario.email} já é um aluno.")
+                return jsonify({"error": "User is already a student"}), 400
+        else:
+            logging.info("Usuário não encontrado, criando novo usuário.")
+            # Verificar se matrícula já existe (caso fornecida) - apenas para novo usuário
+            if data.get("registration") and User.query.filter_by(registration=data["registration"]).first():
+                return jsonify({"error": "Registration number already exists"}), 400
+
+            # Criar usuário (role padrão: aluno)
+            usuario = User(
+                name=data["name"],
+                email=data["email"],
+                password_hash=generate_password_hash(data["password"]),
+                registration=data.get("registration"),
+                role=RoleEnum("aluno")
+            )
+            db.session.add(usuario)
+            db.session.flush() 
+            print(usuario.id)
+            logging.info(f"Novo usuário criado com sucesso. ID: {usuario.id}")
+
+        # Buscar turma
+        class_obj = Class.query.get(data["class_id"])
+        if not class_obj:
+            # Se o usuário foi criado neste request, precisamos desfazê-lo
+            if not usuario.id:
+                db.session.rollback()
+                return jsonify({"error": "Class not found"}), 404
+
+        # Verificar formato da data de nascimento (se fornecida)
         birth_date = None
         if "birth_date" in data:
             try:
                 birth_date = datetime.strptime(data["birth_date"], "%Y-%m-%d").date()
             except ValueError:
-                return jsonify({"error": "Invalid birth date format. Use YYYY-MM-DD"}), 400
+                # Se o usuário foi criado neste request, precisamos desfazê-lo
+                if not usuario.id:
+                    db.session.rollback()
+                    return jsonify({"error": "Invalid birth date format. Use YYYY-MM-DD"}), 400
 
-        # Criação do aluno vinculado ao usuário
+        # Criar aluno
         novo_aluno = Student(
-            name=data["name"],
-            email=data["email"],
-            password_hash=generate_password_hash(data["password"]),
-            user_id=novo_usuario.id,
-            registration=data.get("registration"),
+            name=usuario.name,
+            user_id=usuario.id,
+            registration=usuario.registration,
             birth_date=birth_date,
             class_id=data["class_id"],
             grade_id=data.get("grade_id"),
+            school_id=class_obj.school_id
         )
         db.session.add(novo_aluno)
         db.session.commit()
 
-        return jsonify({"message": "Student created successfully!", "id": novo_aluno.id}), 201
+        logging.info(f"Aluno criado com sucesso para o usuário ID: {usuario.id}")
 
-    except IntegrityError as e:
+        return jsonify({
+            "message": "Student and/or User created successfully!",
+            "user": {
+                "id": usuario.id,
+                "name": usuario.name,
+                "email": usuario.email,
+                "registration": usuario.registration,
+                "role": usuario.role.value
+            },
+            "student": {
+                "id": novo_aluno.id,
+                "name": novo_aluno.name,
+                "registration": novo_aluno.registration,
+                "birth_date": str(novo_aluno.birth_date) if novo_aluno.birth_date else None,
+                "class_id": novo_aluno.class_id,
+                "grade_id": str(novo_aluno.grade_id) if novo_aluno.grade_id else None,
+                "school_id": novo_aluno.school_id
+            }
+        }), 201
+
+    except SQLAlchemyError as e:
         db.session.rollback()
-        return jsonify({"error": "Database integrity error", "details": str(e)}), 400
+        logging.error(f"Database error during user/student creation: {str(e)}")
+        return jsonify({"error": "Database error occurred", "details": str(e)}), 500
     except Exception as e:
         db.session.rollback()
-        logging.error(f"Error creating student: {str(e)}", exc_info=True)
-        return jsonify({"error": "Error creating student", "details": str(e)}), 500
+        logging.error(f"Unexpected error during user/student creation: {str(e)}", exc_info=True)
+        return jsonify({"error": "Unexpected error occurred", "details": str(e)}), 500
+
 
 # GET - Listar alunos
 @bp.route('', methods=['GET'])
@@ -211,3 +266,106 @@ def deletar_aluno(aluno_id):
         db.session.rollback()
         logging.error(f"Error deleting student: {str(e)}", exc_info=True)
         return jsonify({"error": "Error deleting student", "details": str(e)}), 500
+
+@bp.route('/school/<string:school_id>', methods=['GET'])
+@jwt_required()
+@role_required("admin", "professor", "coordenador", "diretor")
+def get_students_by_school(school_id):
+    try:
+        logging.info(f"Fetching students for school_id: {school_id}")
+        
+        user = get_current_user_from_token()
+        if not user:
+            logging.error("User not found in token")
+            return jsonify({"message": "User not found"}), 404
+
+        # Verify if the school exists
+        school = School.query.filter_by(id=school_id).first()
+        if not school:
+            logging.error(f"School not found with id: {school_id}")
+            return jsonify({"message": "School not found"}), 404
+
+        # Check user permissions
+        if user['role'] == "professor":
+            # Professor can only see students from their assigned school
+            if user.get('school_id') != school_id:
+                logging.warning(f"Professor {user.get('id')} tried to access students from school {school_id}")
+                return jsonify({"message": "You don't have permission to view students from this school"}), 403
+        elif user['role'] in ["diretor", "coordenador"]:
+            # Director and coordinator can only see students from schools in their city
+            city_id = get_current_tenant_id()
+            if not city_id:
+                logging.error(f"City ID not found for user {user.get('id')}")
+                return jsonify({"message": "City ID not available"}), 400
+            if school.city_id != city_id:
+                logging.warning(f"User {user.get('id')} tried to access students from school in different city")
+                return jsonify({"message": "You don't have permission to view students from this school"}), 403
+
+        # Get all students from the school
+        try:
+            students = Student.query.filter_by(school_id=school_id).all()
+            logging.info(f"Found {len(students)} students for school {school_id}")
+        except SQLAlchemyError as e:
+            logging.error(f"Database error while querying students: {str(e)}")
+            return jsonify({"message": "Error querying students from database"}), 500
+
+        return jsonify([
+            {
+                "id": student.id,
+                "name": student.name,
+                "email": student.email,
+                "registration": student.registration,
+                "birth_date": student.birth_date.isoformat() if student.birth_date else None,
+                "class_id": student.class_id,
+                "grade_id": student.grade_id,
+                "school_id": student.school_id,
+                "created_at": student.created_at.isoformat() if student.created_at else None
+            } for student in students
+        ]), 200
+
+    except SQLAlchemyError as e:
+        logging.error(f"Database error while fetching students by school: {str(e)}")
+        return jsonify({"message": "Internal server error while querying data", "details": str(e)}), 500
+    except Exception as e:
+        logging.error(f"Unexpected error in get_students_by_school route: {str(e)}", exc_info=True)
+        return jsonify({"message": "An unexpected error occurred", "details": str(e)}), 500
+
+@bp.route('/classes/<string:class_id>', methods=['GET'])
+@jwt_required()
+@role_required("admin", "diretor", "coordenador", "professor")
+def get_students_by_class(class_id):
+    try:
+        logging.info(f"Fetching students for class_id: {class_id}")
+
+        # Check if the class exists (optional, but good practice)
+        class_obj = Class.query.get(class_id)
+        if not class_obj:
+            logging.warning(f"Class not found with ID: {class_id}")
+            return jsonify({"message": "Class not found"}), 404
+
+        students = Student.query.filter_by(class_id=class_id).all()
+
+        if not students:
+            logging.info(f"No students found for class_id: {class_id}")
+            return jsonify([]), 200  # Return empty list if no students found
+
+        return jsonify([
+            {
+                "id": student.id,
+                "name": student.name,
+                "registration": student.registration,
+                "birth_date": student.birth_date.isoformat() if student.birth_date else None,
+                "class_id": student.class_id,
+                "user_id": student.user_id,
+                "grade_id": student.grade_id,
+                "school_id": student.school_id,
+                "created_at": student.created_at.isoformat() if student.created_at else None
+            } for student in students
+        ]), 200
+
+    except SQLAlchemyError as e:
+        logging.error(f"Database error while fetching students by class: {str(e)}")
+        return jsonify({"message": "Internal server error while querying data", "details": str(e)}), 500
+    except Exception as e:
+        logging.error(f"Unexpected error in get_students_by_class route: {str(e)}", exc_info=True)
+        return jsonify({"message": "An unexpected error occurred", "details": str(e)}), 500

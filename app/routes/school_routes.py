@@ -15,7 +15,7 @@ bp = Blueprint('school', __name__, url_prefix='/school')
 # POST - Criar escola
 @bp.route('', methods=['POST'])
 @jwt_required()
-@role_required("admin", "diretor")
+@role_required("admin",  "diretor", "coordenador",)
 def criar_escola():
     try:
         data = request.get_json()
@@ -210,3 +210,52 @@ def deletar_escola(escola_id):
             "erro": "Erro interno do servidor",
             "detalhes": str(e)
         }), 500
+
+# GET - Buscar escola específica
+@bp.route('/<string:escola_id>', methods=['GET'])
+@jwt_required()
+@role_required("admin", "diretor", "coordenador", "professor")
+def buscar_escola(escola_id):
+    try:
+        user = get_current_user_from_token()
+
+        if not user:
+            return jsonify({"error": "User not found"}), 404
+
+        escola = School.query.get(escola_id)
+        if not escola:
+            return jsonify({"error": "School not found"}), 404
+
+        # Verifica permissões
+        if user['role'] == "admin":
+            # Admin pode ver qualquer escola
+            pass
+        elif user['role'] == "professor":
+            # Professor só pode ver escolas onde está alocado
+            from app.models.schoolTeacher import TeacherSchool
+            teacher_school = TeacherSchool.query.filter_by(
+                teacher_id=user['id'],
+                school_id=escola_id
+            ).first()
+            if not teacher_school:
+                return jsonify({"error": "You don't have permission to view this school"}), 403
+        else:
+            # Diretor e coordenador só podem ver escolas da sua cidade
+            if escola.city_id != get_current_tenant_id():
+                return jsonify({"error": "You don't have permission to view this school"}), 403
+
+        return jsonify({
+            "id": escola.id,
+            "name": escola.name,
+            "domain": escola.domain,
+            "address": escola.address,
+            "city_id": escola.city_id,
+            "created_at": escola.created_at.isoformat() if escola.created_at else None
+        }), 200
+
+    except SQLAlchemyError as e:
+        logging.error(f"Database error while fetching school: {e}")
+        return jsonify({"error": "Internal server error while querying data", "details": str(e)}), 500
+    except Exception as e:
+        logging.error(f"Unexpected error in get_school route: {e}", exc_info=True)
+        return jsonify({"error": "An unexpected error occurred on the server"}), 500

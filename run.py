@@ -28,9 +28,15 @@ app = create_app()
 #     return "pong",200
      
             
-# para permitir somente o backend CORS(app, resources={r"/*": {"origins": "http://localhost:5173"}}, supports_credentials=True)
-# resources={r"/*": {"origins": "https://innovplay.vercel.app"}}
-CORS(app,  supports_credentials=True)
+
+ # Configuração do CORS
+CORS(app, resources={
+     r"/*": {
+        "origins": ["http://localhost:8080","https://innovplay.vercel.app"],
+        "methods": ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+        "allow_headers": ["Content-Type", "Authorization"]
+        }
+    })
 
 with app.app_context():
     db.create_all()

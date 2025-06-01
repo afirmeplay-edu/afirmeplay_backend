@@ -21,6 +21,6 @@ def get_current_tenant_id():
     token = auth_header.split(' ')[1]
     try:
         decode = jwt.decode(token, SECRET_KEY, algorithms=['HS256'])
-        return decode['city_id']
+        return decode['tenant_id']
     except:
         return None

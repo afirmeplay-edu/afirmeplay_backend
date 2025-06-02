@@ -1,0 +1,1310 @@
+openapi: 3.0.0
+info:
+  title: invaPlay Backend API
+  version: 1.0.0
+  description: API documentation for the invaPlay Backend application, managing users, students, schools, classes, and grades.
+
+servers:
+  - url: http://localhost:5000 # Assuming the API is served from the root
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+security:
+  - bearerAuth: []
+
+paths:
+  /login:
+    post:
+      summary: Authenticate user and generate JWT
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                email:
+                  type: string
+                  format: email
+                  description: User's email
+                password:
+                  type: string
+                  format: password
+                  description: User's password
+              required:
+                - email
+                - password
+      responses:
+        '200':
+          description: Authentication successful
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  access_token:
+                    type: string
+                    description: JWT access token
+                  user:
+                    type: object
+                    properties:
+                      id:
+                        type: string
+                      name:
+                        type: string
+                      email:
+                        type: string
+                      role:
+                        type: string
+                      city_id:
+                        type: string
+        '401':
+          $ref: '#/responses/UnauthorizedError'
+        '500':
+          $ref: '#/responses/InternalServerError'
+
+  /users:
+    get:
+      summary: Get list of users
+      responses:
+        '200':
+          description: A list of users
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/schemas/User'
+        '401':
+          $ref: '#/responses/UnauthorizedError'
+        '403':
+          $ref: '#/responses/ForbiddenError'
+        '500':
+          $ref: '#/responses/InternalServerError'
+    post:
+      summary: Create a new user
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name:
+                  type: string
+                email:
+                  type: string
+                  format: email
+                password:
+                  type: string
+                registration:
+                  type: string
+                  nullable: true
+                role:
+                  type: string
+                  enum: [aluno, professor, coordenador, diretor, admin]
+                city_id:
+                  type: string
+              required:
+                - name
+                - email
+                - password
+                - role
+                - city_id
+      responses:
+        '201':
+          description: User created successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                  user:
+                    $ref: '#/schemas/User'
+        '400':
+          $ref: '#/responses/BadRequestError'
+        '401':
+          $ref: '#/responses/UnauthorizedError'
+        '403':
+          $ref: '#/responses/ForbiddenError'
+        '500':
+          $ref: '#/responses/InternalServerError'
+
+  /users/{user_id}:
+    get:
+      summary: Get user details by ID
+      parameters:
+        - name: user_id
+          in: path
+          required: true
+          schema:
+            type: string
+          description: ID of the user to get details for
+      responses:
+        '200':
+          description: User details
+          content:
+            application/json:
+              schema:
+                $ref: '#/schemas/UserWithStudentDetails' # Assuming user details might include student details if applicable
+        '401':
+          $ref: '#/responses/UnauthorizedError'
+        '403':
+          $ref: '#/responses/ForbiddenError'
+        '404':
+          $ref: '#/responses/NotFoundError'
+        '500':
+          $ref: '#/responses/InternalServerError'
+    put:
+      summary: Update user details by ID
+      parameters:
+        - name: user_id
+          in: path
+          required: true
+          schema:
+            type: string
+          description: ID of the user to update
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name:
+                  type: string
+                email:
+                  type: string
+                  format: email
+                password:
+                  type: string
+                registration:
+                  type: string
+                  nullable: true
+                role:
+                  type: string
+                  enum: [aluno, professor, coordenador, diretor, admin]
+                city_id:
+                  type: string
+      responses:
+        '200':
+          description: User updated successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+        '400':
+          $ref: '#/responses/BadRequestError'
+        '401':
+          $ref: '#/responses/UnauthorizedError'
+        '403':
+          $ref: '#/responses/ForbiddenError'
+        '404':
+          $ref: '#/responses/NotFoundError'
+        '500':
+          $ref: '#/responses/InternalServerError'
+    delete:
+      summary: Delete a user by ID
+      parameters:
+        - name: user_id
+          in: path
+          required: true
+          schema:
+            type: string
+          description: ID of the user to delete
+      responses:
+        '200':
+          description: User deleted successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+        '401':
+          $ref: '#/responses/UnauthorizedError'
+        '403':
+          $ref: '#/responses/ForbiddenError'
+        '404':
+          $ref: '#/responses/NotFoundError'
+        '500':
+          $ref: '#/responses/InternalServerError'
+
+  /students:
+    get:
+      summary: Get list of students with full details
+      responses:
+        '200':
+          description: A list of students with user, school, class, and grade details
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/schemas/StudentDetails'
+        '401':
+          $ref: '#/responses/UnauthorizedError'
+        '403':
+          $ref: '#/responses/ForbiddenError'
+        '500':
+          $ref: '#/responses/InternalServerError'
+    post:
+      summary: Create a new user and/or student
+      description: Creates a new user (if email not found) and a new student linked to the user.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name:
+                  type: string
+                  description: User/Student name
+                email:
+                  type: string
+                  format: email
+                  description: User email (used to find existing user or create new one)
+                password:
+                  type: string
+                  description: Password for new user (ignored if user exists)
+                class_id:
+                  type: string
+                  description: ID of the class the student belongs to
+                city_id:
+                  type: string
+                  description: City ID for the user (used for new user creation)
+                registration:
+                  type: string
+                  nullable: true
+                  description: Student registration number (optional)
+                birth_date:
+                  type: string
+                  format: date
+                  nullable: true
+                  description: Student birth date (YYYY-MM-DD) (optional)
+                grade_id:
+                  type: string
+                  nullable: true
+                  description: ID of the grade the student belongs to (optional)
+              required:
+                - name
+                - email
+                - password
+                - class_id
+                - city_id
+      responses:
+        '201':
+          description: Student and/or User created successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                  user:
+                    $ref: '#/schemas/User'
+                  student:
+                    $ref: '#/schemas/Student'
+        '400':
+          $ref: '#/responses/BadRequestError'
+        '401':
+          $ref: '#/responses/UnauthorizedError'
+        '403':
+          $ref: '#/responses/ForbiddenError'
+        '404':
+          $ref: '#/responses/NotFoundError'
+        '500':
+          $ref: '#/responses/InternalServerError'
+
+  /students/{student_id}/{class_id}:
+    put:
+      summary: Update student details (Unusual Path)
+      description: Updates student details.
+      Note: The path includes class_id which is unusual for a general student update.
+      parameters:
+        - name: student_id
+          in: path
+          required: true
+          schema:
+            type: string
+          description: ID of the student to update
+        - name: class_id
+          in: path
+          required: true
+          schema:
+            type: string
+          description: ID of the class (Path seems unusual, likely meant to be student_id only)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name:
+                  type: string
+                email:
+                  type: string
+                registration:
+                  type: string
+                class_id:
+                  type: string
+                grade_id:
+                  type: string
+                birth_date:
+                  type: string
+                format: date
+                nullable: true
+      responses:
+        '200':
+          description: Student updated successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+        '400':
+          $ref: '#/responses/BadRequestError'
+        '401':
+          $ref: '#/responses/UnauthorizedError'
+        '403':
+          $ref: '#/responses/ForbiddenError'
+        '404':
+          $ref: '#/responses/NotFoundError'
+        '500':
+          $ref: '#/responses/InternalServerError'
+
+  /students/{student_id}:
+    delete:
+      summary: Delete a student by ID
+      parameters:
+        - name: student_id
+          in: path
+          required: true
+          schema:
+            type: string
+          description: ID of the student to delete
+      responses:
+        '200':
+          description: Student deleted successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+        '401':
+          $ref: '#/responses/UnauthorizedError'
+        '403':
+          $ref: '#/responses/ForbiddenError'
+        '404':
+          $ref: '#/responses/NotFoundError'
+        '500':
+          $ref: '#/responses/InternalServerError'
+
+  /students/school/{school_id}:
+    get:
+      summary: Get students by school ID
+      parameters:
+        - name: school_id
+          in: path
+          required: true
+          schema:
+            type: string
+          description: ID of the school
+      responses:
+        '200':
+          description: A list of students belonging to the specified school
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/schemas/StudentDetails'
+        '401':
+          $ref: '#/responses/UnauthorizedError'
+        '403':
+          $ref: '#/responses/ForbiddenError'
+        '404':
+          $ref: '#/responses/NotFoundError'
+        '500':
+          $ref: '#/responses/InternalServerError'
+
+  /students/classes/{class_id}:
+    get:
+      summary: Get students by class ID
+      parameters:
+        - name: class_id
+          in: path
+          required: true
+          schema:
+            type: string
+          description: ID of the class
+      responses:
+        '200':
+          description: A list of students belonging to the specified class
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/schemas/StudentDetails'
+        '401':
+          $ref: '#/responses/UnauthorizedError'
+        '403':
+          $ref: '#/responses/ForbiddenError'
+        '404':
+          $ref: '#/responses/NotFoundError'
+        '500':
+          $ref: '#/responses/InternalServerError'
+
+  /students/school/{school_id}/class/{class_id}:
+    get:
+      summary: Get students by school and class ID
+      parameters:
+        - name: school_id
+          in: path
+          required: true
+          schema:
+            type: string
+          description: ID of the school
+        - name: class_id
+          in: path
+          required: true
+          schema:
+            type: string
+          description: ID of the class
+      responses:
+        '200':
+          description: A list of students belonging to the specified school and class
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/schemas/StudentDetails'
+        '401':
+          $ref: '#/responses/UnauthorizedError'
+        '403':
+          $ref: '#/responses/ForbiddenError'
+        '404':
+          $ref: '#/responses/NotFoundError'
+        '500':
+          $ref: '#/responses/InternalServerError'
+
+  /classes:
+    get:
+      summary: Get list of classes with school and grade details
+      responses:
+        '200':
+          description: A list of classes with related school and grade details
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/schemas/ClassDetails'
+        '401':
+          $ref: '#/responses/UnauthorizedError'
+        '500':
+          $ref: '#/responses/InternalServerError'
+    post:
+      summary: Create a new class
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name:
+                  type: string
+                school_id:
+                  type: string
+                grade_id:
+                  type: string
+                  nullable: true
+              required:
+                - name
+                - school_id
+      responses:
+        '201':
+          description: Class created successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                  class:
+                    $ref: '#/schemas/Class'
+        '400':
+          $ref: '#/responses/BadRequestError'
+        '401':
+          $ref: '#/responses/UnauthorizedError'
+        '500':
+          $ref: '#/responses/InternalServerError'
+
+  /classes/school/{school_id}:
+    get:
+      summary: Get classes by school ID with student count
+      parameters:
+        - name: school_id
+          in: path
+          required: true
+          schema:
+            type: string
+          description: ID of the school
+      responses:
+        '200':
+          description: A list of classes belonging to the specified school, including student count
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    id:
+                      type: string
+                    name:
+                      type: string
+                    school_id:
+                      type: string
+                    grade_id:
+                      type: string
+                      nullable: true
+                    students_count:
+                      type: integer
+                    school:
+                      $ref: '#/schemas/SchoolDetails'
+                    grade:
+                      $ref: '#/schemas/Grade'
+                      nullable: true
+        '401':
+          $ref: '#/responses/UnauthorizedError'
+        '500':
+          $ref: '#/responses/InternalServerError'
+
+  /classes/{class_id}:
+    get:
+      summary: Get class details by ID with students, school, and grade info
+      parameters:
+        - name: class_id
+          in: path
+          required: true
+          schema:
+            type: string
+          description: ID of the class to get details for
+      responses:
+        '200':
+          description: Class details with related students, school, and grade information
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  id:
+                    type: string
+                  name:
+                    type: string
+                  school_id:
+                    type: string
+                  grade_id:
+                    type: string
+                    nullable: true
+                  school:
+                    $ref: '#/schemas/SchoolDetails'
+                  grade:
+                    $ref: '#/schemas/Grade'
+                    nullable: true
+                  students:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id:
+                          type: string
+                        name:
+                          type: string
+        '401':
+          $ref: '#/responses/UnauthorizedError'
+        '404':
+          $ref: '#/responses/NotFoundError'
+        '500':
+          $ref: '#/responses/InternalServerError'
+    put:
+      summary: Update class details by ID
+      parameters:
+        - name: class_id
+          in: path
+          required: true
+          schema:
+            type: string
+          description: ID of the class to update
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name:
+                  type: string
+                school_id:
+                  type: string
+                grade_id:
+                  type: string
+                  nullable: true
+      responses:
+        '200':
+          description: Class updated successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+        '400':
+          $ref: '#/responses/BadRequestError'
+        '401':
+          $ref: '#/responses/UnauthorizedError'
+        '404':
+          $ref: '#/responses/NotFoundError'
+        '500':
+          $ref: '#/responses/InternalServerError'
+    delete:
+      summary: Delete a class by ID
+      parameters:
+        - name: class_id
+          in: path
+          required: true
+          schema:
+            type: string
+          description: ID of the class to delete
+      responses:
+        '200':
+          description: Class deleted successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+        '401':
+          $ref: '#/responses/UnauthorizedError'
+        '404':
+          $ref: '#/responses/NotFoundError'
+        '500':
+          $ref: '#/responses/InternalServerError'
+
+  /classes/{class_id}/add_student:
+    put:
+      summary: Add a student to a class
+      parameters:
+        - name: class_id
+          in: path
+          required: true
+          schema:
+            type: string
+          description: ID of the class to add the student to
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                student_id:
+                  type: string
+                  description: ID of the student to add
+              required:
+                - student_id
+      responses:
+        '200':
+          description: Student successfully added to class
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+        '400':
+          $ref: '#/responses/BadRequestError'
+        '401':
+          $ref: '#/responses/UnauthorizedError'
+        '403':
+          $ref: '#/responses/ForbiddenError'
+        '404':
+          $ref: '#/responses/NotFoundError'
+        '500':
+          $ref: '#/responses/InternalServerError'
+
+  /classes/{class_id}/remove_student:
+    put:
+      summary: Remove a student from a class
+      parameters:
+        - name: class_id
+          in: path
+          required: true
+          schema:
+            type: string
+          description: ID of the class to remove the student from
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                student_id:
+                  type: string
+                  description: ID of the student to remove
+              required:
+                - student_id
+      responses:
+        '200':
+          description: Student successfully removed from class
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+        '400':
+          $ref: '#/responses/BadRequestError'
+        '401':
+          $ref: '#/responses/UnauthorizedError'
+        '403':
+          $ref: '#/responses/ForbiddenError'
+        '404':
+          $ref: '#/responses/NotFoundError'
+        '500':
+          $ref: '#/responses/InternalServerError'
+
+  /school:
+    get:
+      summary: Get list of schools with city, student and class counts
+      responses:
+        '200':
+          description: A list of schools with related city information and student/class counts
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    id:
+                      type: string
+                    name:
+                      type: string
+                    domain:
+                      type: string
+                    address:
+                      type: string
+                    city_id:
+                      type: string
+                    created_at:
+                      type: string
+                      format: date-time
+                      nullable: true
+                    students_count:
+                      type: integer
+                    classes_count:
+                      type: integer
+                    city:
+                      $ref: '#/schemas/CityDetails'
+                      nullable: true
+        '401':
+          $ref: '#/responses/UnauthorizedError'
+        '403':
+          $ref: '#/responses/ForbiddenError'
+        '404':
+          $ref: '#/responses/NotFoundError'
+        '500':
+          $ref: '#/responses/InternalServerError'
+    post:
+      summary: Create a new school
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name:
+                  type: string
+                domain:
+                  type: string
+                  nullable: true
+                address:
+                  type: string
+                  nullable: true
+                city_id:
+                  type: string
+              required:
+                - name
+                - city_id
+      responses:
+        '201':
+          description: School created successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  mensagem:
+                    type: string
+                  id:
+                    type: string
+        '400':
+          $ref: '#/responses/BadRequestError'
+        '401':
+          $ref: '#/responses/UnauthorizedError'
+        '403':
+          $ref: '#/responses/ForbiddenError'
+        '500':
+          $ref: '#/responses/InternalServerError'
+
+  /school/{escola_id}:
+    get:
+      summary: Get school details by ID with city, student and class counts
+      parameters:
+        - name: escola_id
+          in: path
+          required: true
+          schema:
+            type: string
+          description: ID of the school to get details for
+      responses:
+        '200':
+          description: School details with related city information and student/class counts
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  id:
+                    type: string
+                  name:
+                    type: string
+                  domain:
+                    type: string
+                  address:
+                    type: string
+                  city_id:
+                    type: string
+                  created_at:
+                    type: string
+                    format: date-time
+                    nullable: true
+                  students_count:
+                    type: integer
+                  classes_count:
+                    type: integer
+                  city:
+                    $ref: '#/schemas/CityDetails'
+                    nullable: true
+        '401':
+          $ref: '#/responses/UnauthorizedError'
+        '403':
+          $ref: '#/responses/ForbiddenError'
+        '404':
+          $ref: '#/responses/NotFoundError'
+        '500':
+          $ref: '#/responses/InternalServerError'
+    put:
+      summary: Update school details by ID
+      parameters:
+        - name: escola_id
+          in: path
+          required: true
+          schema:
+            type: string
+          description: ID of the school to update
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name:
+                  type: string
+                domain:
+                  type: string
+                  nullable: true
+                address:
+                  type: string
+                  nullable: true
+                city_id:
+                  type: string
+              required: [] # Allow partial updates
+      responses:
+        '200':
+          description: School updated successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  mensagem:
+                    type: string
+                  id:
+                    type: string
+        '400':
+          $ref: '#/responses/BadRequestError'
+        '401':
+          $ref: '#/responses/UnauthorizedError'
+        '403':
+          $ref: '#/responses/ForbiddenError'
+        '404':
+          $ref: '#/responses/NotFoundError'
+        '500':
+          $ref: '#/responses/InternalServerError'
+    delete:
+      summary: Delete a school by ID
+      parameters:
+        - name: escola_id
+          in: path
+          required: true
+          schema:
+            type: string
+          description: ID of the school to delete
+      responses:
+        '200':
+          description: School deleted successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  mensagem:
+                    type: string
+                  id:
+                    type: string
+        '401':
+          $ref: '#/responses/UnauthorizedError'
+        '403':
+          $ref: '#/responses/ForbiddenError'
+        '404':
+          $ref: '#/responses/NotFoundError'
+        '500':
+          $ref: '#/responses/InternalServerError'
+
+  /grades:
+    get:
+      summary: Get list of grades with education stage details
+      responses:
+        '200':
+          description: A list of grades with related education stage information
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/schemas/GradeDetails'
+        '401':
+          $ref: '#/responses/UnauthorizedError'
+        '500':
+          $ref: '#/responses/InternalServerError'
+
+schemas:
+    User:
+      type: object
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        email:
+          type: string
+          format: email
+        registration:
+          type: string
+          nullable: true
+        role:
+          type: string
+          enum: [aluno, professor, coordenador, diretor, admin]
+        city_id:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+          nullable: true
+        updated_at:
+          type: string
+          format: date-time
+          nullable: true
+      required:
+        - id
+        - name
+        - email
+        - role
+
+    UserWithStudentDetails: # Schema for user endpoint returning student details
+      allOf:
+        - $ref: '#/schemas/User'
+        - type: object
+          properties:
+            student:
+              $ref: '#/schemas/StudentDetails'
+              nullable: true
+
+    Student:
+      type: object
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        registration:
+          type: string
+          nullable: true
+        birth_date:
+          type: string
+          format: date
+          nullable: true
+        class_id:
+          type: string
+          nullable: true
+        grade_id:
+          type: string
+          nullable: true
+        school_id:
+          type: string
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+          nullable: true
+      required:
+        - id
+        - name
+
+    StudentDetails: # Schema for student endpoints returning full details
+      allOf:
+        - $ref: '#/schemas/Student'
+        - type: object
+          properties:
+            user:
+              $ref: '#/schemas/User'
+              nullable: true
+            school:
+              $ref: '#/schemas/SchoolDetails'
+              nullable: true
+            class:
+              $ref: '#/schemas/Class'
+              nullable: true
+            grade:
+              $ref: '#/schemas/Grade'
+              nullable: true
+
+    School:
+      type: object
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        domain:
+          type: string
+          nullable: true
+        address:
+          type: string
+          nullable: true
+        city_id:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+          nullable: true
+      required:
+        - id
+        - name
+        - city_id
+
+    SchoolDetails: # Simplified schema for nested school details
+      type: object
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+      required:
+        - id
+        - name
+
+    City:
+      type: object
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        state:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+          nullable: true
+      required:
+        - id
+        - name
+        - state
+
+    CityDetails: # Simplified schema for nested city details
+      type: object
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        state:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+          nullable: true
+      required:
+        - id
+        - name
+        - state
+
+    Class:
+      type: object
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        school_id:
+          type: string
+        grade_id:
+          type: string
+          nullable: true
+      required:
+        - id
+        - name
+        - school_id
+
+    ClassDetails: # Schema for class endpoints returning full details
+      allOf:
+        - $ref: '#/schemas/Class'
+        - type: object
+          properties:
+            school:
+              $ref: '#/schemas/SchoolDetails'
+              nullable: true
+            grade:
+              $ref: '#/schemas/Grade'
+              nullable: true
+
+    Grade:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        education_stage_id:
+          type: string
+          format: uuid
+          nullable: true
+      required:
+        - id
+        - name
+
+    GradeDetails: # Schema for grade endpoints returning full details
+      allOf:
+        - $ref: '#/schemas/Grade'
+        - type: object
+          properties:
+            education_stage:
+              $ref: '#/schemas/EducationStage'
+              nullable: true
+
+    EducationStage:
+      type: object
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+      required:
+        - id
+        - name
+
+responses:
+    UnauthorizedError:
+      description: Authentication required or invalid token
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              message:
+                type: string
+    ForbiddenError:
+      description: User does not have the necessary permissions
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              message:
+                type: string
+    NotFoundError:
+      description: Resource not found
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              error:
+                type: string
+    BadRequestError:
+      description: Invalid request payload or parameters
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              error:
+                type: string
+              details:
+                type: object # Can be a string or a more detailed object
+    InternalServerError:
+      description: Unexpected server error
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              error:
+                type: string
+              details:
+                type: string

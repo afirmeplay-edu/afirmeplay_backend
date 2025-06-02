@@ -7,8 +7,56 @@ from sqlalchemy.exc import SQLAlchemyError
 import logging
 from werkzeug.security import generate_password_hash
 from app import db
+from app.models.student import Student
+from app.models.school import School
+from app.models.studentClass import Class
+from app.models.grades import Grade
+from sqlalchemy.orm import joinedload
 
 bp = Blueprint('users', __name__, url_prefix='/users')
+
+def format_student_details(student):
+    user_details = None
+    school_details = None
+    if student.school:
+        school_details = {
+            "id": student.school.id,
+            "name": student.school.name,
+            "domain": student.school.domain,
+            "address": student.school.address,
+            "city_id": student.school.city_id,
+            "created_at": student.school.created_at.isoformat() if student.school.created_at else None
+        }
+
+    class_details = None
+    if student.class_:
+        class_details = {
+            "id": student.class_.id,
+            "name": student.class_.name,
+            "school_id": student.class_.school_id,
+            "grade_id": str(student.class_.grade_id) if student.class_.grade_id else None
+        }
+
+    grade_details = None
+    if student.grade:
+        grade_details = {
+            "id": student.grade.id,
+            "name": student.grade.name
+        }
+
+    return {
+        "id": student.id,
+        "name": student.name,
+        "registration": student.registration,
+        "birth_date": student.birth_date.isoformat() if student.birth_date else None,
+        "class_id": student.class_id,
+        "grade_id": student.grade_id,
+        "school_id": student.school_id,
+        "created_at": student.created_at.isoformat() if student.created_at else None,
+        "school": school_details,
+        "class": class_details,
+        "grade": grade_details
+    }
 
 @bp.route('/list', methods=['GET'])
 @jwt_required()
@@ -127,7 +175,7 @@ def get_user_by_id(user_id):
             logging.warning(f"User not found with ID: {user_id}")
             return jsonify({"message": "User not found"}), 404
 
-        return jsonify({
+        user_data = {
             "id": user.id,
             "name": user.name,
             "email": user.email,
@@ -136,7 +184,20 @@ def get_user_by_id(user_id):
             "city_id": user.city_id,
             "created_at": user.created_at.isoformat() if user.created_at else None,
             "updated_at": user.updated_at.isoformat() if user.updated_at else None
-        }), 200
+        }
+
+        if user.role == RoleEnum.aluno:
+            student = Student.query.options(
+                joinedload(Student.school),
+                joinedload(Student.class_),
+                joinedload(Student.grade)
+            ).filter_by(user_id=user.id).first()
+
+            if student:
+                student_details = format_student_details(student)
+                user_data['student_details'] = student_details
+
+        return jsonify(user_data), 200
 
     except SQLAlchemyError as e:
         logging.error(f"Database error while fetching user by ID: {str(e)}")

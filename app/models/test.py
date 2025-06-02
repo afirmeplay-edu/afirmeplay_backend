@@ -14,8 +14,8 @@ class Test(db.Model):
     max_score = db.Column(db.Float)
     time_limit = db.Column(db.DateTime)
     created_by = db.Column(db.String, db.ForeignKey('users.id'))
-    created_at = db.Column(db.DateTime, default=datetime.utcnow)
-    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at = db.Column(db.DateTime, server_default=db.func.utc_now())
+    updated_at = db.Column(db.DateTime, server_default=db.func.utc_now(), onupdate=db.func.utc_now())
     subject = db.Column(db.String, db.ForeignKey('subject.id'))
     grade_id = db.Column(UUID(as_uuid=True), db.ForeignKey("grade.id"))
 

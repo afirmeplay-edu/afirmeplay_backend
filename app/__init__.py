@@ -1,7 +1,8 @@
-from flask import Flask
+from flask import Flask, send_from_directory
 from flask_sqlalchemy import SQLAlchemy
 from flask_cors import CORS
 from flask_jwt_extended import JWTManager
+from flask_swagger_ui import get_swaggerui_blueprint
 
 from .config import Config
 from dotenv import load_dotenv
@@ -9,6 +10,18 @@ import os
 
 db = SQLAlchemy()
 jwt = JWTManager()
+
+SWAGGER_URL = '/api'  # URL for Swagger UI
+API_URL = '/swagger.yaml' # URL where our Swagger spec will be served
+
+# Call factory function to create our blueprint
+swaggerui_blueprint = get_swaggerui_blueprint(
+    SWAGGER_URL,
+    API_URL,
+    config={
+        'app_name': "InvaPlay Backend API Documentation"
+    }
+)
 
 def create_app():
     load_dotenv()
@@ -47,5 +60,13 @@ def create_app():
     app.register_blueprint(student_routes.bp)
     app.register_blueprint(user_routes.bp)
     app.register_blueprint(class_routes.bp)
+    
+    # Registrar blueprint do Swagger UI
+    app.register_blueprint(swaggerui_blueprint, url_prefix=SWAGGER_URL)
+
+    # Rota para servir o arquivo swagger.yaml a partir do diretório raiz do projeto
+    @app.route('/swagger.yaml')
+    def serve_swagger_yaml():
+        return send_from_directory(os.path.dirname(app.root_path), 'swagger.yaml')
 
     return app

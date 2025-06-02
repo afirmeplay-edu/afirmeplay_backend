@@ -7,25 +7,25 @@ import threading
 
 app = create_app()
 
-# PING_INTERVAL = 14 * 60
-# SELF_URL = os.environ.get("SELF_URL","https://innovaplay-backend.onrender.com")
+PING_INTERVAL = 14 * 60
+SELF_URL = os.environ.get("SELF_URL","https://innovaplay-backend.onrender.com")
 
-# def keep_alive():
-#     while True:
-#         try:
-#             res = requests.get(SELF_URL)
-#             print(f"[KEEPALIVE] Status: {res.status_code}")
-#         except Exception as e:
-#             print(f"[KEEPALIVE ERROR] {e}")
+def keep_alive():
+    while True:
+        try:
+            res = requests.get(SELF_URL)
+            print(f"[KEEPALIVE] Status: {res.status_code}")
+        except Exception as e:
+            print(f"[KEEPALIVE ERROR] {e}")
             
             
-# def start_keep_alive():
-#     thread = threading.Thread(target=keep_alive, daemon=True)
-#     thread.start()
+def start_keep_alive():
+    thread = threading.Thread(target=keep_alive, daemon=True)
+    thread.start()
     
-# @app.route("/ping")
-# def ping():
-#     return "pong",200
+@app.route("/ping")
+def ping():
+    return "pong",200
      
             
 
@@ -42,6 +42,6 @@ with app.app_context():
     db.create_all()
 
 if __name__ == "__main__":
-    # start_keep_alive()
-    app.run(debug=True)
-    # app.run(host="0.0.0.0", port=5000)
+    start_keep_alive()
+    # app.run(debug=True)
+    app.run(host="0.0.0.0", port=5000)

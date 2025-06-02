@@ -6,7 +6,9 @@ from flask_jwt_extended import jwt_required
 from app.utils.auth import get_current_tenant_id
 from sqlalchemy.exc import SQLAlchemyError
 import logging
-
+from app.models.city import City
+from app.models.studentClass import Class
+from app.models.student import Student
 
 import uuid
 
@@ -81,17 +83,33 @@ def listar_escolas():
         if not user:
             return jsonify({"error": "User not found"}), 404
 
+        # Base query with explicit joins
+        query = db.session.query(
+            School,
+            City,
+            db.func.count(Student.id).label('students_count'),
+            db.func.count(Class.id).label('classes_count')
+        ).join(
+            City, School.city_id == City.id
+        ).outerjoin(
+            Student, School.id == Student.school_id
+        ).outerjoin(
+            Class, School.id == Class.school_id
+        ).group_by(
+            School.id, City.id
+        )
+
         schools = []
         if user['role'] == "admin":
             # Admin pode ver todas as escolas
-            schools = School.query.all()
+            schools = query.all()
         elif user['role'] == "professor":
             # Professor vê todas as escolas onde está alocado
             from app.models.schoolTeacher import TeacherSchool
             teacher_schools = TeacherSchool.query.filter_by(teacher_id=user['id']).all()
             school_ids = [ts.school_id for ts in teacher_schools]
             if school_ids:
-                schools = School.query.filter(School.id.in_(school_ids)).all()
+                schools = query.filter(School.id.in_(school_ids)).all()
             else:
                 return jsonify({"message": "Professor não está alocado em nenhuma escola"}), 404
         else:
@@ -99,16 +117,24 @@ def listar_escolas():
             city_id = get_current_tenant_id()
             if not city_id:
                 return jsonify({"error": "City ID not available for this user"}), 400
-            schools = School.query.filter_by(city_id=city_id).all()
+            schools = query.filter(School.city_id == city_id).all()
 
         return jsonify([{
-            "id": e.id,
-            "name": e.name,
-            "domain": e.domain,
-            "address": e.address,
-            "city_id": e.city_id,
-            "created_at": e.created_at.isoformat() if e.created_at else None
-        } for e in schools]), 200
+            "id": school.id,
+            "name": school.name,
+            "domain": school.domain,
+            "address": school.address,
+            "city_id": school.city_id,
+            "created_at": school.created_at.isoformat() if school.created_at else None,
+            "students_count": students_count,
+            "classes_count": classes_count,
+            "city": {
+                "id": city.id,
+                "name": city.name,
+                "state": city.state,
+                "created_at": city.created_at.isoformat() if city.created_at else None
+            } if city else None
+        } for school, city, students_count, classes_count in schools]), 200
 
     except SQLAlchemyError as e:
         logging.error(f"Database error while listing schools: {e}")
@@ -222,9 +248,28 @@ def buscar_escola(escola_id):
         if not user:
             return jsonify({"error": "User not found"}), 404
 
-        escola = School.query.get(escola_id)
-        if not escola:
+        # Query with explicit joins
+        result = db.session.query(
+            School,
+            City,
+            db.func.count(Student.id).label('students_count'),
+            db.func.count(Class.id).label('classes_count')
+        ).join(
+            City, School.city_id == City.id
+        ).outerjoin(
+            Student, School.id == Student.school_id
+        ).outerjoin(
+            Class, School.id == Class.school_id
+        ).filter(
+            School.id == escola_id
+        ).group_by(
+            School.id, City.id
+        ).first()
+
+        if not result:
             return jsonify({"error": "School not found"}), 404
+
+        school, city, students_count, classes_count = result
 
         # Verifica permissões
         if user['role'] == "admin":
@@ -235,22 +280,30 @@ def buscar_escola(escola_id):
             from app.models.schoolTeacher import TeacherSchool
             teacher_school = TeacherSchool.query.filter_by(
                 teacher_id=user['id'],
-                school_id=escola_id
+                school_id=school.id
             ).first()
             if not teacher_school:
                 return jsonify({"error": "You don't have permission to view this school"}), 403
         else:
-            # Diretor e coordenador só podem ver escolas da sua cidade
-            if escola.city_id != get_current_tenant_id():
+            # Diretor e coordenador só podem ver escolas da mesma cidade
+            if school.city_id != get_current_tenant_id():
                 return jsonify({"error": "You don't have permission to view this school"}), 403
 
         return jsonify({
-            "id": escola.id,
-            "name": escola.name,
-            "domain": escola.domain,
-            "address": escola.address,
-            "city_id": escola.city_id,
-            "created_at": escola.created_at.isoformat() if escola.created_at else None
+            "id": school.id,
+            "name": school.name,
+            "domain": school.domain,
+            "address": school.address,
+            "city_id": school.city_id,
+            "created_at": school.created_at.isoformat() if school.created_at else None,
+            "students_count": students_count,
+            "classes_count": classes_count,
+            "city": {
+                "id": city.id,
+                "name": city.name,
+                "state": city.state,
+                "created_at": city.created_at.isoformat() if city.created_at else None
+            } if city else None
         }), 200
 
     except SQLAlchemyError as e:

@@ -47,7 +47,7 @@ def criar_usuario_e_aluno():
         if not data:
             return jsonify({"error": "No data provided"}), 400
 
-        required_fields = ["name", "email", "password", "class_id", "city_id"]
+        required_fields = ["name", "email", "password", "class_id"]
         for field in required_fields:
             if field not in data:
                 return jsonify({"error": f"Missing required field: {field}"}), 400
@@ -74,7 +74,6 @@ def criar_usuario_e_aluno():
                 password_hash=generate_password_hash(data["password"]),
                 registration=data.get("registration"),
                 role=RoleEnum("aluno"),
-                city_id=data["city_id"]
             )
             db.session.add(usuario)
             db.session.flush() 

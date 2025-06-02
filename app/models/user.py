@@ -22,8 +22,8 @@ class User(db.Model):
     password_hash = db.Column(db.String)
     registration = db.Column(db.String(50), nullable=True, unique=True)
     role = db.Column(db.Enum(RoleEnum), nullable=False)
-    created_at = db.Column(db.DateTime, default=datetime.utcnow)
-    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at = db.Column(db.DateTime, server_default=db.func.utc_now())
+    updated_at = db.Column(db.DateTime, server_default=db.func.utc_now(), onupdate=db.func.utc_now())
 
     student = db.relationship("Student", backref="users", uselist=False)
     teacher = db.relationship("Teacher", backref="users", uselist=False)

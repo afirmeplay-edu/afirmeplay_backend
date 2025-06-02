@@ -21,8 +21,8 @@ class Question(db.Model):
     test_id = db.Column(db.String, db.ForeignKey('test.id'))
     question_type = db.Column(db.String)
     created_by = db.Column(db.String, db.ForeignKey('users.id'))
-    created_at = db.Column(db.DateTime, default=datetime.utcnow)
-    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at = db.Column(db.DateTime, server_default=db.func.utc_now())
+    updated_at = db.Column(db.DateTime, server_default=db.func.utc_now(), onupdate=db.func.utc_now())
     
     # title = db.Column(db.String, nullable=False)
     # description = db.Column(db.Text)

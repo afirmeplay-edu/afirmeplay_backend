@@ -5,6 +5,9 @@ from flask_jwt_extended import jwt_required
 from app.decorators.role_required import role_required
 from sqlalchemy.exc import SQLAlchemyError, IntegrityError
 import logging
+from app.models.student import Student
+from app.models.school import School
+from app.models.grades import Grade
 
 bp = Blueprint('classes', __name__, url_prefix="/classes")
 
@@ -29,7 +32,23 @@ def handle_generic_error(error):
 @jwt_required()
 def get_classes_by_school(school_id):
     try:
-        classes = Class.query.filter_by(school_id=school_id).all()
+        # Query with explicit joins
+        classes = db.session.query(
+            Class,
+            School,
+            Grade,
+            db.func.count(Student.id).label('students_count')
+        ).join(
+            School, Class.school_id == School.id
+        ).outerjoin(
+            Grade, Class.grade_id == Grade.id
+        ).outerjoin(
+            Student, Class.id == Student.class_id
+        ).filter(
+            Class.school_id == school_id
+        ).group_by(
+            Class.id, School.id, Grade.id
+        ).all()
         
         if not classes:
             return jsonify([]), 200  # Return empty list if no classes found
@@ -39,10 +58,16 @@ def get_classes_by_school(school_id):
             "name": c.name,
             "school_id": c.school_id,
             "grade_id": str(c.grade_id) if c.grade_id else None,
-            "students_count": len(c.students),
-            "subjects_count": len(c.class_subjects),
-            "tests_count": len(c.class_tests)
-        } for c in classes]), 200
+            "students_count": students_count,
+            "school": {
+                "id": school.id,
+                "name": school.name
+            } if school else None,
+            "grade": {
+                "id": grade.id,
+                "name": grade.name
+            } if grade else None
+        } for c, school, grade, students_count in classes]), 200
 
     except Exception as e:
         logging.error(f"Error getting classes by school: {str(e)}", exc_info=True)
@@ -52,13 +77,31 @@ def get_classes_by_school(school_id):
 @jwt_required()
 def get_classes():
     try:
-        classes = Class.query.all()
+        # Query with explicit joins
+        classes = db.session.query(
+            Class,
+            School,
+            Grade
+        ).join(
+            School, Class.school_id == School.id
+        ).outerjoin(
+            Grade, Class.grade_id == Grade.id
+        ).all()
+
         return jsonify([{
             "id": c.id,
             "name": c.name,
             "school_id": c.school_id,
-            "grade_id": str(c.grade_id) if c.grade_id else None
-        } for c in classes]), 200
+            "grade_id": str(c.grade_id) if c.grade_id else None,
+            "school": {
+                "id": school.id,
+                "name": school.name
+            } if school else None,
+            "grade": {
+                "id": grade.id,
+                "name": grade.name
+            } if grade else None
+        } for c, school, grade in classes]), 200
     except Exception as e:
         logging.error(f"Error getting classes: {str(e)}", exc_info=True)
         return jsonify({"error": "Error getting classes", "details": str(e)}), 500
@@ -67,18 +110,42 @@ def get_classes():
 @jwt_required()
 def get_class(class_id):
     try:
-        class_obj = Class.query.get(class_id)
-        if not class_obj:
+        # Query with explicit joins
+        result = db.session.query(
+            Class,
+            School,
+            Grade,
+            Student
+        ).join(
+            School, Class.school_id == School.id
+        ).outerjoin(
+            Grade, Class.grade_id == Grade.id
+        ).outerjoin(
+            Student, Class.id == Student.class_id
+        ).filter(
+            Class.id == class_id
+        ).all()
+
+        if not result:
             return jsonify({"error": "Class not found"}), 404
+
+        class_obj, school, grade = result[0][:3]
+        students = [s for _, _, _, s in result if s is not None]
 
         return jsonify({
             "id": class_obj.id,
             "name": class_obj.name,
             "school_id": class_obj.school_id,
             "grade_id": str(class_obj.grade_id) if class_obj.grade_id else None,
-            "students": [{"id": s.id, "name": s.name} for s in class_obj.students],
-            "class_subjects": [{"id": cs.id} for cs in class_obj.class_subjects],
-            "class_tests": [{"id": ct.id} for ct in class_obj.class_tests]
+            "school": {
+                "id": school.id,
+                "name": school.name
+            } if school else None,
+            "grade": {
+                "id": grade.id,
+                "name": grade.name
+            } if grade else None,
+            "students": [{"id": s.id, "name": s.name} for s in students]
         }), 200
     except Exception as e:
         logging.error(f"Error getting class: {str(e)}", exc_info=True)
@@ -167,4 +234,94 @@ def create_class():
     except Exception as e:
         db.session.rollback()
         logging.error(f"Error creating class: {str(e)}", exc_info=True)
-        return jsonify({"error": "Error creating class", "details": str(e)}), 500 
+        return jsonify({"error": "Error creating class", "details": str(e)}), 500
+
+@bp.route('/<string:class_id>/add_student', methods=['PUT'])
+@jwt_required()
+@role_required("admin", "diretor", "coordenador", "professor")
+def add_student_to_class(class_id):
+    try:
+        logging.info(f"Attempting to add student to class ID: {class_id}")
+
+        data = request.get_json()
+        if not data or "student_id" not in data:
+            return jsonify({"error": "No data provided or missing student_id"}), 400
+
+        student_id = data["student_id"]
+
+        class_obj = Class.query.get(class_id)
+        if not class_obj:
+            logging.warning(f"Class not found with ID: {class_id}")
+            return jsonify({"error": "Class not found"}), 404
+
+        student = Student.query.get(student_id)
+        if not student:
+            logging.warning(f"Student not found with ID: {student_id}")
+            return jsonify({"error": "Student not found"}), 404
+
+        # Check if student is already in this class (optional)
+        if student.class_id == class_id:
+            return jsonify({"message": f"Student {student_id} is already in class {class_id}"}), 200
+
+        # Update the student's class_id
+        student.class_id = class_id
+
+        db.session.commit()
+
+        logging.info(f"Student {student_id} successfully added to class {class_id}")
+
+        return jsonify({"message": f"Student successfully added to class {class_id}"}), 200
+
+    except SQLAlchemyError as e:
+        db.session.rollback()
+        logging.error(f"Database error while adding student to class: {str(e)}")
+        return jsonify({"message": "Internal server error while adding student to class", "details": str(e)}), 500
+    except Exception as e:
+        db.session.rollback()
+        logging.error(f"Unexpected error in add_student_to_class route: {str(e)}", exc_info=True)
+        return jsonify({"message": "An unexpected error occurred", "details": str(e)}), 500
+
+@bp.route('/<string:class_id>/remove_student', methods=['PUT'])
+@jwt_required()
+@role_required("admin", "diretor", "coordenador", "professor")
+def remove_student_from_class(class_id):
+    try:
+        logging.info(f"Attempting to remove student from class ID: {class_id}")
+
+        data = request.get_json()
+        if not data or "student_id" not in data:
+            return jsonify({"error": "No data provided or missing student_id"}), 400
+
+        student_id = data["student_id"]
+
+        class_obj = Class.query.get(class_id)
+        if not class_obj:
+            logging.warning(f"Class not found with ID: {class_id}")
+            return jsonify({"error": "Class not found"}), 404
+
+        student = Student.query.get(student_id)
+        if not student:
+            logging.warning(f"Student not found with ID: {student_id}")
+            return jsonify({"error": "Student not found"}), 404
+
+        # Check if student is actually in this class (optional)
+        if student.class_id != class_id:
+            return jsonify({"message": f"Student {student_id} is not in class {class_id}"}), 200
+
+        # Update the student's class_id to null
+        student.class_id = None
+
+        db.session.commit()
+
+        logging.info(f"Student {student_id} successfully removed from class {class_id}")
+
+        return jsonify({"message": f"Student successfully removed from class {class_id}"}), 200
+
+    except SQLAlchemyError as e:
+        db.session.rollback()
+        logging.error(f"Database error while removing student from class: {str(e)}")
+        return jsonify({"message": "Internal server error while removing student from class", "details": str(e)}), 500
+    except Exception as e:
+        db.session.rollback()
+        logging.error(f"Unexpected error in remove_student_from_class route: {str(e)}", exc_info=True)
+        return jsonify({"message": "An unexpected error occurred", "details": str(e)}), 500 

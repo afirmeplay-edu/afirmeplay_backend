@@ -1,6 +1,6 @@
 from flask import Blueprint, request, jsonify
 from app.models.student import Student
-from app.models.user import User
+from app.models.user import User, RoleEnum
 from app.models.school import School
 from app.models.user import RoleEnum
 from sqlalchemy.exc import SQLAlchemyError, IntegrityError
@@ -13,6 +13,8 @@ from flask_jwt_extended import jwt_required
 from werkzeug.security import generate_password_hash
 from marshmallow import ValidationError
 from app.models.studentClass import Class
+from app.models.grades import Grade
+from sqlalchemy.orm import joinedload
 
 bp = Blueprint('students', __name__, url_prefix="/students")
 
@@ -45,7 +47,7 @@ def criar_usuario_e_aluno():
         if not data:
             return jsonify({"error": "No data provided"}), 400
 
-        required_fields = ["name", "email", "password", "class_id"]
+        required_fields = ["name", "email", "password", "class_id", "city_id"]
         for field in required_fields:
             if field not in data:
                 return jsonify({"error": f"Missing required field: {field}"}), 400
@@ -71,7 +73,8 @@ def criar_usuario_e_aluno():
                 email=data["email"],
                 password_hash=generate_password_hash(data["password"]),
                 registration=data.get("registration"),
-                role=RoleEnum("aluno")
+                role=RoleEnum("aluno"),
+                city_id=data["city_id"]
             )
             db.session.add(usuario)
             db.session.flush() 
@@ -142,6 +145,63 @@ def criar_usuario_e_aluno():
         return jsonify({"error": "Unexpected error occurred", "details": str(e)}), 500
 
 
+# Helper function to format student data with related details
+def format_student_details(student, user=None, school=None, class_obj=None, grade=None):
+    user_details = None
+    if user:
+        user_details = {
+            "id": user.id,
+            "name": user.name,
+            "email": user.email,
+            "registration": user.registration,
+            "role": user.role.value,
+            "city_id": user.city_id,
+            "created_at": user.created_at.isoformat() if user.created_at else None,
+            "updated_at": user.updated_at.isoformat() if user.updated_at else None
+        }
+
+    school_details = None
+    if school:
+        school_details = {
+            "id": school.id,
+            "name": school.name,
+            "domain": school.domain,
+            "address": school.address,
+            "city_id": school.city_id,
+            "created_at": school.created_at.isoformat() if school.created_at else None
+        }
+
+    class_details = None
+    if class_obj:
+        class_details = {
+            "id": class_obj.id,
+            "name": class_obj.name,
+            "school_id": class_obj.school_id,
+            "grade_id": str(class_obj.grade_id) if class_obj.grade_id else None
+        }
+
+    grade_details = None
+    if grade:
+        grade_details = {
+            "id": grade.id,
+            "name": grade.name
+        }
+
+    return {
+        "id": student.id,
+        "name": student.name,
+        "registration": student.registration,
+        "birth_date": student.birth_date.isoformat() if student.birth_date else None,
+        "class_id": student.class_id,
+        "grade_id": student.grade_id,
+        "school_id": student.school_id,
+        "created_at": student.created_at.isoformat() if student.created_at else None,
+        "user": user_details,
+        "school": school_details,
+        "class": class_details,
+        "grade": grade_details
+    }
+
 # GET - Listar alunos
 @bp.route('', methods=['GET'])
 @jwt_required()
@@ -153,38 +213,48 @@ def listar_alunos():
         if not user:
             return jsonify({"message": "Usuário não encontrado"}), 404
 
+        # Base query with joins
+        query = db.session.query(
+            Student,
+            User,
+            School,
+            Class,
+            Grade
+        ).join(
+            User, Student.user_id == User.id
+        ).join(
+            School, Student.school_id == School.id
+        ).join(
+            Class, Student.class_id == Class.id
+        ).join(
+            Grade, Student.grade_id == Grade.id
+        )
+
         students = []
         if user['role'] == "admin":
             # Admin pode ver todos os alunos
-            students = Student.query.all()
+            students = query.all()
         elif user['role'] == "professor":
             # Professor só vê alunos da escola onde está alocado
             school_id = user.get('school_id')
             if not school_id:
                 return jsonify({"message": "Professor não está alocado em nenhuma escola"}), 400
-            students = Student.query.filter_by(school_id=school_id).all()
+            students = query.filter(Student.school_id == school_id).all()
         else:
             # Diretor e coordenador veem alunos de todas as escolas da cidade
             city_id = get_current_tenant_id()
             if not city_id:
                 return jsonify({"message": "ID da cidade não disponível para este usuário"}), 400
-            
-            # Busca todas as escolas da cidade
-            schools = School.query.filter_by(city_id=city_id).all()
-            school_ids = [school.id for school in schools]
-            
-            # Busca todos os alunos das escolas da cidade
-            students = Student.query.filter(Student.school_id.in_(school_ids)).all()
 
-        return jsonify([
-            {
-                "id": aluno.id,
-                "name": aluno.name,
-                "email": aluno.email,
-                "school_id": aluno.school_id,
-                "created_at": aluno.created_at.isoformat() if aluno.created_at else None
-            } for aluno in students
-        ]), 200
+            # Busca todas as escolas da cidade
+            schools_in_city = School.query.filter_by(city_id=city_id).all()
+            school_ids = [school.id for school in schools_in_city]
+
+            # Busca todos os alunos das escolas da cidade
+            students = query.filter(Student.school_id.in_(school_ids)).all()
+
+        return jsonify([format_student_details(student, user, school, class_obj, grade) 
+                       for student, user, school, class_obj, grade in students]), 200
 
     except SQLAlchemyError as e:
         logging.error(f"Erro no banco de dados ao listar alunos: {e}")
@@ -194,7 +264,7 @@ def listar_alunos():
         return jsonify({"message": "Erro ao processar dados do usuário", "details": str(e)}), 500
     except Exception as e:
         logging.error(f"Erro inesperado na rota listar_alunos: {e}", exc_info=True)
-        return jsonify({"message": "Ocorreu um erro inesperado no servidor"}), 500 
+        return jsonify({"message": "Ocorreu um erro inesperado no servidor"}), 500
 
 @bp.route('/<string:student_id>/<string:class_id>', methods=['PUT'])
 @jwt_required()
@@ -309,19 +379,8 @@ def get_students_by_school(school_id):
             logging.error(f"Database error while querying students: {str(e)}")
             return jsonify({"message": "Error querying students from database"}), 500
 
-        return jsonify([
-            {
-                "id": student.id,
-                "name": student.name,
-                "email": student.email,
-                "registration": student.registration,
-                "birth_date": student.birth_date.isoformat() if student.birth_date else None,
-                "class_id": student.class_id,
-                "grade_id": student.grade_id,
-                "school_id": student.school_id,
-                "created_at": student.created_at.isoformat() if student.created_at else None
-            } for student in students
-        ]), 200
+        return jsonify([format_student_details(student, user, school, class_obj, grade) 
+                       for student, user, school, class_obj, grade in students]), 200
 
     except SQLAlchemyError as e:
         logging.error(f"Database error while fetching students by school: {str(e)}")
@@ -349,23 +408,53 @@ def get_students_by_class(class_id):
             logging.info(f"No students found for class_id: {class_id}")
             return jsonify([]), 200  # Return empty list if no students found
 
-        return jsonify([
-            {
-                "id": student.id,
-                "name": student.name,
-                "registration": student.registration,
-                "birth_date": student.birth_date.isoformat() if student.birth_date else None,
-                "class_id": student.class_id,
-                "user_id": student.user_id,
-                "grade_id": student.grade_id,
-                "school_id": student.school_id,
-                "created_at": student.created_at.isoformat() if student.created_at else None
-            } for student in students
-        ]), 200
+        return jsonify([format_student_details(student, user, school, class_obj, grade) 
+                       for student, user, school, class_obj, grade in students]), 200
 
     except SQLAlchemyError as e:
         logging.error(f"Database error while fetching students by class: {str(e)}")
         return jsonify({"message": "Internal server error while querying data", "details": str(e)}), 500
     except Exception as e:
         logging.error(f"Unexpected error in get_students_by_class route: {str(e)}", exc_info=True)
+        return jsonify({"message": "An unexpected error occurred", "details": str(e)}), 500
+
+@bp.route('/school/<string:school_id>/class/<string:class_id>', methods=['GET'])
+@jwt_required()
+@role_required("admin", "diretor", "coordenador", "professor")
+def get_students_by_school_and_class(school_id, class_id):
+    try:
+        logging.info(f"Fetching students for school_id: {school_id} and class_id: {class_id}")
+
+        # Query with explicit joins
+        students = db.session.query(
+            Student,
+            User,
+            School,
+            Class,
+            Grade
+        ).join(
+            User, Student.user_id == User.id
+        ).join(
+            School, Student.school_id == School.id
+        ).join(
+            Class, Student.class_id == Class.id
+        ).join(
+            Grade, Student.grade_id == Grade.id
+        ).filter(
+            Student.school_id == school_id,
+            Student.class_id == class_id
+        ).all()
+
+        if not students:
+            logging.info(f"No students found for school_id: {school_id} and class_id: {class_id}")
+            return jsonify([]), 200  # Return empty list if no students found
+
+        return jsonify([format_student_details(student, user, school, class_obj, grade) 
+                       for student, user, school, class_obj, grade in students]), 200
+
+    except SQLAlchemyError as e:
+        logging.error(f"Database error while fetching students by school and class: {str(e)}")
+        return jsonify({"message": "Internal server error while querying data", "details": str(e)}), 500
+    except Exception as e:
+        logging.error(f"Unexpected error in get_students_by_school_and_class route: {str(e)}", exc_info=True)
         return jsonify({"message": "An unexpected error occurred", "details": str(e)}), 500

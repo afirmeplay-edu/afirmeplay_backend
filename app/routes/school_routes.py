@@ -23,6 +23,7 @@ def criar_escola():
         data = request.get_json()
         
         if not data:
+            logging.error("Dados não fornecidos na requisição")
             return jsonify({"erro": "Dados não fornecidos"}), 400
             
         # Validação dos campos obrigatórios

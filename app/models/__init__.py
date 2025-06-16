@@ -10,4 +10,5 @@ from .classTest import ClassTest
 from .educationStage import EducationStage
 from .grades import Grade
 from .skill import Skill
+from .question import Question
 

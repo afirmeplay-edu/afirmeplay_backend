@@ -3,12 +3,11 @@ from sqlalchemy.dialects.postgresql import UUID
 import uuid
 
 
-class SchoolTeacher(db.Model):
-    __tablename__ = 'school_teacher'
+class TeacherClass(db.Model):
+    __tablename__ = 'teacher_class'
 
     id = db.Column(db.String, primary_key=True, default=lambda: str(uuid.uuid4()))
-    registration = db.Column(db.String)
-    school_id = db.Column(db.String, db.ForeignKey('school.id'))
     teacher_id = db.Column(db.String, db.ForeignKey('teacher.id'))
+    class_id = db.Column(db.String, db.ForeignKey('class.id'))
     created_at = db.Column(db.DateTime, server_default=db.text('CURRENT_TIMESTAMP'))
-    updated_at = db.Column(db.DateTime, server_default=db.text('CURRENT_TIMESTAMP'), onupdate=db.text('CURRENT_TIMESTAMP'))
+    updated_at = db.Column(db.DateTime, server_default=db.text('CURRENT_TIMESTAMP'), onupdate=db.text('CURRENT_TIMESTAMP')) 

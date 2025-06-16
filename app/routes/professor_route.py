@@ -4,76 +4,296 @@ from app.models.user import User
 from app.models.user import RoleEnum
 from app.models.teacher import Teacher
 from app.models.school import School
-
+from app.models.schoolTeacher import SchoolTeacher
 from app.utils.auth import get_current_tenant_id
 from werkzeug.security import generate_password_hash
-
 from datetime import datetime
-
 from app import db
 from app.utils.auth import get_current_tenant_id
 from flask_jwt_extended import jwt_required
-from app.decorators.role_required import role_required
+from app.decorators.role_required import role_required, get_current_user_from_token
+import logging
+from sqlalchemy.exc import SQLAlchemyError, IntegrityError
+from sqlalchemy.orm import joinedload
 
-bp = Blueprint('professores', __name__, url_prefix="/professores")
+bp = Blueprint('teacher', __name__, url_prefix="/teacher")
 
-@bp.route('/', methods=['POST'])
+@bp.errorhandler(SQLAlchemyError)
+def handle_db_error(error):
+    db.session.rollback()
+    logging.error(f"Erro no banco de dados: {str(error)}")
+    return jsonify({"erro": "Ocorreu um erro no banco de dados", "detalhes": str(error)}), 500
+
+@bp.errorhandler(Exception)
+def handle_generic_error(error):
+    logging.error(f"Erro inesperado: {str(error)}", exc_info=True)
+    return jsonify({"erro": "Ocorreu um erro inesperado", "detalhes": str(error)}), 500
+
+@bp.route('', methods=['POST'])
 @jwt_required()
 @role_required("admin", "diretor")
 def criar_professor():
-    dados = request.get_json()
-    
-    nome = dados.get("nome")
-    email = dados.get("email")
-    senha = dados.get("senha")
-    matricula = dados.get("matricula")
-    birth_date = dados.get("birth_date")
-    escolas_ids = dados.get("escolas_ids", [])  # Lista de escolas a vincular
-
-    # Validação básica
-    if not all([nome, email, senha, matricula]):
-        return jsonify({"erro": "Nome, email, senha e matrícula são obrigatórios"}), 400
-
-    if User.query.filter_by(email=email).first():
-        return jsonify({"erro": "Email já cadastrado"}), 400
-
-    if Teacher.query.filter_by(matricula=matricula).first():
-        return jsonify({"erro": "Matrícula já cadastrada"}), 400
-
-    # Criar usuário associado
-    senha_hash = generate_password_hash(senha)
-    usuario = User(nome=nome, email=email, senha_hash=senha_hash, role=RoleEnum("professor"), matricula=matricula)
-    db.session.add(usuario)
-    db.session.flush()  # Para obter o ID gerado
-
-    # Converter data de nascimento
     try:
-        data_nascimento = datetime.strptime(birth_date, "%Y-%m-%d").date() if birth_date else None
-    except ValueError:
-        return jsonify({"erro": "Formato de data inválido. Use YYYY-MM-DD."}), 400
+        logging.info("Iniciando criação de usuário/professor combinada")
+        
+        dados = request.get_json()
+        logging.info(f"Dados recebidos: {dados}")
 
-    # Obter tenant_id (ex: município) do contexto do token
-    tenant_id = get_current_tenant_id()
+        if not dados:
+            return jsonify({"erro": "Nenhum dado fornecido"}), 400
 
-    # Criar professor
-    professor = Teacher(
-        nome=nome,
-        email=email,
-        senha_hash=senha_hash,
-        usuario_id=usuario.id,
-        birth_date=data_nascimento,
-        matricula=matricula,
-        tenant_id=tenant_id
-    )
+        campos_obrigatorios = ["nome", "email", "senha", "matricula"]
+        for campo in campos_obrigatorios:
+            if campo not in dados:
+                return jsonify({"erro": f"Campo obrigatório ausente: {campo}"}), 400
 
-    # Associar escolas
-    if escolas_ids:
-        escolas = School.query.filter(School.id.in_(escolas_ids), School.city_id == tenant_id).all()
-        if len(escolas) != len(escolas_ids):
-            return jsonify({"erro": "Uma ou mais escolas não encontradas ou não pertencem ao município"}), 400
-        professor.escolas.extend(escolas)
+        # Verificar se usuário já existe
+        usuario = User.query.filter_by(email=dados["email"]).first()
 
-    db.session.add(professor)
-    db.session.commit()
+        if usuario:
+            logging.info(f"Usuário existente encontrado: {usuario.email}")
+            # Verificar se o usuário já é um professor
+            if Teacher.query.filter_by(user_id=usuario.id).first():
+                logging.warning(f"Usuário {usuario.email} já é um professor.")
+                return jsonify({"erro": "Usuário já é um professor"}), 400
+        else:
+            logging.info("Usuário não encontrado, criando novo usuário.")
+            # Verificar se matrícula já existe
+            if User.query.filter_by(matricula=dados["matricula"]).first():
+                return jsonify({"erro": "Matrícula já cadastrada"}), 400
 
-    return jsonify({"mensagem": "Professor criado com sucesso", "id": professor.id}), 201
+            # Criar usuário (role: professor)
+            usuario = User(
+                nome=dados["nome"],
+                email=dados["email"],
+                senha_hash=generate_password_hash(dados["senha"]),
+                matricula=dados["matricula"],
+                role=RoleEnum("professor")
+            )
+            db.session.add(usuario)
+            db.session.flush()
+            logging.info(f"Novo usuário criado com sucesso. ID: {usuario.id}")
+
+        # Converter data de nascimento
+        data_nascimento = None
+        if "birth_date" in dados:
+            try:
+                data_nascimento = datetime.strptime(dados["birth_date"], "%Y-%m-%d").date()
+            except ValueError:
+                if not usuario.id:
+                    db.session.rollback()
+                return jsonify({"erro": "Formato de data inválido. Use YYYY-MM-DD"}), 400
+
+        # Obter tenant_id (município) do contexto do token
+        tenant_id = get_current_tenant_id()
+
+        # Criar professor
+        professor = Teacher(
+            nome=usuario.nome,
+            email=usuario.email,
+            senha_hash=usuario.senha_hash,
+            usuario_id=usuario.id,
+            birth_date=data_nascimento,
+            matricula=usuario.matricula,
+            tenant_id=tenant_id
+        )
+        db.session.add(professor)
+        db.session.flush()
+
+        # Vincular professor às escolas
+        escolas_ids = dados.get("escolas_ids", [])
+        if escolas_ids:
+            escolas = School.query.filter(School.id.in_(escolas_ids), School.city_id == tenant_id).all()
+            if len(escolas) != len(escolas_ids):
+                db.session.rollback()
+                return jsonify({"erro": "Uma ou mais escolas não encontradas ou não pertencem ao município"}), 400
+            
+            # Criar vínculos com as escolas
+            for escola in escolas:
+                school_teacher = SchoolTeacher(
+                    registration=professor.matricula,
+                    school_id=escola.id,
+                    teacher_id=professor.id
+                )
+                db.session.add(school_teacher)
+
+        db.session.commit()
+        logging.info(f"Professor criado com sucesso para o usuário ID: {usuario.id}")
+
+        return jsonify({
+            "mensagem": "Professor criado com sucesso",
+            "usuario": {
+                "id": usuario.id,
+                "nome": usuario.nome,
+                "email": usuario.email,
+                "matricula": usuario.matricula,
+                "role": usuario.role.value
+            },
+            "professor": {
+                "id": professor.id,
+                "nome": professor.nome,
+                "email": professor.email,
+                "matricula": professor.matricula,
+                "birth_date": str(professor.birth_date) if professor.birth_date else None,
+                "tenant_id": professor.tenant_id,
+                "escolas_ids": escolas_ids
+            }
+        }), 201
+
+    except SQLAlchemyError as e:
+        db.session.rollback()
+        logging.error(f"Erro no banco de dados durante a criação do usuário/professor: {str(e)}")
+        return jsonify({"erro": "Ocorreu um erro no banco de dados", "detalhes": str(e)}), 500
+    except Exception as e:
+        db.session.rollback()
+        logging.error(f"Erro inesperado durante a criação do usuário/professor: {str(e)}", exc_info=True)
+        return jsonify({"erro": "Ocorreu um erro inesperado", "detalhes": str(e)}), 500
+
+@bp.route('/school/<string:school_id>', methods=['GET'])
+@jwt_required()
+@role_required("admin", "diretor", "coordenador", "professor")
+def listar_professores_por_escola(school_id):
+    try:
+        user = get_current_user_from_token()
+        if not user:
+            return jsonify({"erro": "Usuário não encontrado"}), 404
+
+        # Verificar se a escola existe
+        escola = School.query.get(school_id)
+        if not escola:
+            return jsonify({"erro": "Escola não encontrada"}), 404
+
+        # Verificar permissões
+        tenant_id = get_current_tenant_id()
+        if user['role'] == "professor":
+            # Professor só pode ver professores da sua própria escola
+            if not any(st.school_id == school_id for st in SchoolTeacher.query.filter_by(teacher_id=user.get('teacher_id')).all()):
+                return jsonify({"erro": "Você não tem permissão para ver professores desta escola"}), 403
+        elif user['role'] in ["diretor", "coordenador"]:
+            # Diretor e coordenador só podem ver escolas do seu município
+            if escola.city_id != tenant_id:
+                return jsonify({"erro": "Você não tem permissão para ver professores desta escola"}), 403
+
+        # Buscar professores da escola
+        professores = db.session.query(
+            Teacher,
+            User,
+            SchoolTeacher
+        ).join(
+            User, Teacher.user_id == User.id
+        ).join(
+            SchoolTeacher, Teacher.id == SchoolTeacher.teacher_id
+        ).filter(
+            SchoolTeacher.school_id == school_id
+        ).all()
+
+        resultado = []
+        for professor, usuario, vinculo in professores:
+            resultado.append({
+                "professor": {
+                    "id": professor.id,
+                    "name": professor.name,
+                    "email": professor.email,
+                    "registration": professor.registration,
+                    "birth_date": str(professor.birth_date) if professor.birth_date else None,
+                    "tenant_id": professor.tenant_id
+                },
+                "usuario": {
+                    "id": usuario.id,
+                    "name": usuario.name,
+                    "email": usuario.email,
+                    "registration": usuario.registration,
+                    "role": usuario.role.value
+                },
+                "vinculo_escola": {
+                    "registration": vinculo.registration,
+                    "school_id": vinculo.school_id
+                }
+            })
+
+        return jsonify({
+            "mensagem": "Professores encontrados com sucesso",
+            "escola": {
+                "id": escola.id,
+                "name": escola.name
+            },
+            "professores": resultado
+        }), 200
+
+    except SQLAlchemyError as e:
+        db.session.rollback()
+        logging.error(f"Erro no banco de dados ao listar professores: {str(e)}")
+        return jsonify({"erro": "Ocorreu um erro no banco de dados", "detalhes": str(e)}), 500
+    except Exception as e:
+        db.session.rollback()
+        logging.error(f"Erro inesperado ao listar professores: {str(e)}", exc_info=True)
+        return jsonify({"erro": "Ocorreu um erro inesperado", "detalhes": str(e)}), 500
+
+@bp.route('/', methods=['GET'])
+@jwt_required()
+@role_required("admin", "diretor", "coordenador")
+def listar_professores():
+    try:
+        user = get_current_user_from_token()
+        if not user:
+            return jsonify({"erro": "Usuário não encontrado"}), 404
+
+        # Obter tenant_id (município) do contexto do token
+        tenant_id = get_current_tenant_id()
+
+        # Base query com joins
+        query = db.session.query(
+            Teacher,
+            User,
+            SchoolTeacher
+        ).join(
+            User, Teacher.user_id == User.id
+        ).join(
+            SchoolTeacher, Teacher.id == SchoolTeacher.teacher_id
+        )
+
+        # Filtrar por município se não for admin
+        if user['role'] != "admin":
+            query = query.filter(Teacher.tenant_id == tenant_id)
+
+        # Executar query
+        professores = query.all()
+
+        # Organizar resultados
+        resultado = []
+        for professor, usuario, vinculo in professores:
+            resultado.append({
+                "professor": {
+                    "id": professor.id,
+                    "name": professor.name,
+                    "email": professor.email,
+                    "registration": professor.registration,
+                    "birth_date": str(professor.birth_date) if professor.birth_date else None,
+                    "tenant_id": professor.tenant_id
+                },
+                "usuario": {
+                    "id": usuario.id,
+                    "name": usuario.name,
+                    "email": usuario.email,
+                    "registration": usuario.registration,
+                    "role": usuario.role.value
+                },
+                "vinculo_escola": {
+                    "registration": vinculo.registration,
+                    "school_id": vinculo.school_id
+                }
+            })
+
+        return jsonify({
+            "mensagem": "Professores encontrados com sucesso",
+            "professores": resultado
+        }), 200
+
+    except SQLAlchemyError as e:
+        db.session.rollback()
+        logging.error(f"Erro no banco de dados ao listar professores: {str(e)}")
+        return jsonify({"erro": "Ocorreu um erro no banco de dados", "detalhes": str(e)}), 500
+    except Exception as e:
+        db.session.rollback()
+        logging.error(f"Erro inesperado ao listar professores: {str(e)}", exc_info=True)
+        return jsonify({"erro": "Ocorreu um erro inesperado", "detalhes": str(e)}), 500

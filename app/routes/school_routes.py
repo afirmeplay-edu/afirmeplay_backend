@@ -313,3 +313,78 @@ def buscar_escola(escola_id):
     except Exception as e:
         logging.error(f"Unexpected error in get_school route: {e}", exc_info=True)
         return jsonify({"error": "An unexpected error occurred on the server"}), 500
+
+# GET - Buscar escolas por cidade
+@bp.route('/city/<string:city_id>', methods=['GET'])
+@jwt_required()
+@role_required("admin", "diretor", "coordenador", "professor")
+def buscar_escolas_por_cidade(city_id):
+    try:
+        user = get_current_user_from_token()
+
+        if not user:
+            return jsonify({"error": "Usuário não encontrado"}), 404
+
+        # Query com joins explícitos
+        query = db.session.query(
+            School,
+            City,
+            db.func.count(Student.id).label('students_count'),
+            db.func.count(Class.id).label('classes_count')
+        ).join(
+            City, School.city_id == City.id
+        ).outerjoin(
+            Student, School.id == Student.school_id
+        ).outerjoin(
+            Class, School.id == Class.school_id
+        ).filter(
+            School.city_id == city_id
+        ).group_by(
+            School.id, City.id
+        )
+
+        # Verifica permissões
+        if user['role'] == "admin":
+            # Admin pode ver todas as escolas
+            schools = query.all()
+        elif user['role'] == "professor":
+            # Professor vê apenas escolas onde está alocado
+            from app.models.schoolTeacher import TeacherSchool
+            teacher_schools = TeacherSchool.query.filter_by(teacher_id=user['id']).all()
+            school_ids = [ts.school_id for ts in teacher_schools]
+            if school_ids:
+                schools = query.filter(School.id.in_(school_ids)).all()
+            else:
+                return jsonify({"message": "Professor não está alocado em nenhuma escola"}), 404
+        else:
+            # Diretor e coordenador só podem ver escolas da mesma cidade
+            if city_id != get_current_tenant_id():
+                return jsonify({"error": "Você não tem permissão para visualizar escolas desta cidade"}), 403
+            schools = query.all()
+
+        if not schools:
+            return jsonify({"message": "Nenhuma escola encontrada para esta cidade"}), 404
+
+        return jsonify([{
+            "id": school.id,
+            "name": school.name,
+            "domain": school.domain,
+            "address": school.address,
+            "city_id": school.city_id,
+            "created_at": school.created_at.isoformat() if school.created_at else None,
+            "students_count": students_count,
+            "classes_count": classes_count,
+            "city": {
+                "id": city.id,
+                "name": city.name,
+                "state": city.state,
+                "created_at": city.created_at.isoformat() if city.created_at else None
+            } if city else None
+        } for school, city, students_count, classes_count in schools]), 200
+
+    except SQLAlchemyError as e:
+        logging.error(f"Erro no banco de dados ao buscar escolas por cidade: {e}")
+        return jsonify({"error": "Erro interno do servidor ao consultar dados", "details": str(e)}), 500
+    except Exception as e:
+        logging.error(f"Erro inesperado na rota de busca de escolas por cidade: {e}", exc_info=True)
+        return jsonify({"error": "Ocorreu um erro inesperado no servidor"}), 500

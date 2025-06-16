@@ -5,7 +5,15 @@ import requests
 import os
 import threading
 
+# Adicionar logs para debug
+print("Iniciando aplicação...")
+print(f"Diretório atual: {os.getcwd()}")
+print(f"Conteúdo do diretório: {os.listdir('.')}")
+
 app = create_app()
+
+# Log da URL do banco de dados
+print(f"DATABASE_URL: {os.getenv('DATABASE_URL')}")
 
 PING_INTERVAL = 14 * 60
 SELF_URL = os.environ.get("SELF_URL","https://innovaplay-backend.onrender.com")
@@ -27,21 +35,26 @@ def start_keep_alive():
 def ping():
     return "pong",200
      
-            
+# Configuração do CORS
+CORS(app, 
+     resources={r"/*": {
+         "origins": ["http://localhost:8080", "https://innovplay.vercel.app"],
+         "methods": ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+         "allow_headers": ["Content-Type", "Authorization", "Accept"],
+         "expose_headers": ["Content-Type", "Authorization"],
+         "supports_credentials": False,
+         "max_age": 3600
+     }},
+     supports_credentials=False)
 
- # Configuração do CORS
-CORS(app, resources={
-     r"/*": {
-        "origins": ["http://localhost:8080","https://innovplay.vercel.app"],
-        "methods": ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-        "allow_headers": ["Content-Type", "Authorization"]
-        }
-    })
-
+print("Tentando criar tabelas do banco de dados...")
 with app.app_context():
-    db.create_all()
+    try:
+        db.create_all()
+        print("Tabelas criadas com sucesso!")
+    except Exception as e:
+        print(f"Erro ao criar tabelas: {str(e)}")
 
 if __name__ == "__main__":
     # start_keep_alive()
-    # app.run(debug=True)
-    app.run(host="0.0.0.0", port=5000)
+    app.run(debug=True, host="0.0.0.0", port=5000)

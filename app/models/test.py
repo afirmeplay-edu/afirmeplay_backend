@@ -1,6 +1,6 @@
 from app import db
 import uuid
-from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.dialects.postgresql import UUID, JSON
 from datetime import datetime
 
 class Test(db.Model):
@@ -14,10 +14,17 @@ class Test(db.Model):
     max_score = db.Column(db.Float)
     time_limit = db.Column(db.DateTime)
     created_by = db.Column(db.String, db.ForeignKey('users.id'))
-    created_at = db.Column(db.DateTime, server_default=db.func.utc_now())
-    updated_at = db.Column(db.DateTime, server_default=db.func.utc_now(), onupdate=db.func.utc_now())
+    created_at = db.Column(db.DateTime, server_default=db.text('CURRENT_TIMESTAMP'))
+    updated_at = db.Column(db.DateTime, server_default=db.text('CURRENT_TIMESTAMP'), onupdate=db.text('CURRENT_TIMESTAMP'))
     subject = db.Column(db.String, db.ForeignKey('subject.id'))
     grade_id = db.Column(UUID(as_uuid=True), db.ForeignKey("grade.id"))
+    
+    # Novos campos
+    municipalities = db.Column(JSON)  # Lista de municípios
+    schools = db.Column(JSON)  # Lista de escolas
+    course = db.Column(db.String(100))  # Curso (Ensino Fundamental, etc)
+    model = db.Column(db.String(50))  # SAEB, PROVA, etc
+    subjects_info = db.Column(JSON)  # Informações sobre as disciplinas e quantidade de questões
 
     questions = db.relationship("Question", backref="test")
     class_tests = db.relationship("ClassTest", backref="test")

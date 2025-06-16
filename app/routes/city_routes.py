@@ -8,7 +8,7 @@ from app.utils.auth import get_current_tenant_id
 bp = Blueprint('city', __name__, url_prefix='/city')
 
 # POST - Criar município
-@bp.route("/", methods=["POST"])
+@bp.route("", methods=["POST"])
 @jwt_required()
 @role_required("admin")
 def criar_municipio():
@@ -25,7 +25,7 @@ def criar_municipio():
     return jsonify({"mensagem": "Município criado com sucesso", "id": novo_municipio.id}), 201
 
 # GET - Listar municípios
-@bp.route("/", methods=["GET"])
+@bp.route("", methods=["GET"])
 @jwt_required()
 @role_required("admin", "diretor", "coordenador", "professor")
 def listar_municipios():
@@ -52,7 +52,7 @@ def listar_municipios():
     ])
 
 # GET - Buscar município específico
-@bp.route("/<string:municipio_id>", methods=["GET"])
+@bp.route("<string:municipio_id>", methods=["GET"])
 @jwt_required()
 @role_required("admin", "diretor", "coordenador", "professor")
 def buscar_municipio(municipio_id):
@@ -74,7 +74,7 @@ def buscar_municipio(municipio_id):
     })
 
 # PUT - Atualizar município
-@bp.route("/<string:municipio_id>", methods=["PUT"])
+@bp.route("<string:municipio_id>/", methods=["PUT"])
 @jwt_required()
 @role_required("admin", "diretor", "coordenador")
 def atualizar_municipio(municipio_id):
@@ -96,7 +96,7 @@ def atualizar_municipio(municipio_id):
     return jsonify({"mensagem": "Município atualizado com sucesso"})
 
 # DELETE - Excluir município
-@bp.route("/<string:municipio_id>", methods=["DELETE"])
+@bp.route("<string:municipio_id>/", methods=["DELETE"])
 @jwt_required()
 @role_required("admin")
 def deletar_municipio(municipio_id):

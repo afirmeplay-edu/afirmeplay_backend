@@ -5,14 +5,14 @@ from flask_jwt_extended import jwt_required
 
 bp = Blueprint('education_stages', __name__, url_prefix="/education_stages")
 
-@bp.route("/", methods=["GET"])
+@bp.route("", methods=["GET"])
 @jwt_required()
 def getEducationStages():
     stages = EducationStage.query.all()
     result = [{"id": s.id, "name": s.name} for s in stages]
     return jsonify(result)
 
-@bp.route("/<string:stage_id>", methods=["GET"])
+@bp.route("<string:stage_id>", methods=["GET"])
 @jwt_required()
 def getGradesByEducationId(stage_id):
     grades = Grade.query.filter_by(education_stage_id=stage_id).all()

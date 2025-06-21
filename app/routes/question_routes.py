@@ -277,6 +277,38 @@ def update_question(question_id):
         logging.error(f"Error updating question: {str(e)}", exc_info=True)
         return jsonify({"error": "Error updating question", "details": str(e)}), 500
 
+@bp.route('', methods=['DELETE'])
+@jwt_required()
+@role_required("admin", "professor", "coordenador", "diretor")
+def bulk_delete_questions():
+    """ Rota para deletar múltiplas questões em massa. """
+    try:
+        data = request.get_json()
+        if not data or 'ids' not in data or not isinstance(data['ids'], list):
+            return jsonify({"error": "A list of 'ids' is required in the request body"}), 400
+
+        question_ids = data['ids']
+        if not question_ids:
+            return jsonify({"message": "No question IDs provided to delete"}), 200
+
+        # Filtra as questões a serem deletadas
+        questions_to_delete = Question.query.filter(Question.id.in_(question_ids)).all()
+
+        if not questions_to_delete:
+            return jsonify({"error": "None of the provided question IDs were found"}), 404
+
+        for question in questions_to_delete:
+            db.session.delete(question)
+        
+        db.session.commit()
+
+        return jsonify({'message': f'{len(questions_to_delete)} questions deleted successfully'}), 200
+
+    except Exception as e:
+        db.session.rollback()
+        logging.error(f"Error bulk deleting questions: {str(e)}", exc_info=True)
+        return jsonify({"error": "Error bulk deleting questions", "details": str(e)}), 500
+
 @bp.route('/<string:question_id>', methods=['DELETE'])
 @jwt_required()
 @role_required("admin", "professor", "coordenador", "diretor")

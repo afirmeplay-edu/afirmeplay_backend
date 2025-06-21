@@ -261,6 +261,37 @@ def atualizar_avaliacao(test_id):
         logging.error(f"Error updating test: {str(e)}", exc_info=True)
         return jsonify({"error": "Error updating test", "details": str(e)}), 500
 
+@bp.route('', methods=['DELETE'])
+@jwt_required()
+@role_required("admin", "professor", "coordenador", "diretor")
+def bulk_delete_tests():
+    """ Rota para deletar múltiplos testes em massa. """
+    try:
+        data = request.get_json()
+        if not data or 'ids' not in data or not isinstance(data['ids'], list):
+            return jsonify({"error": "A list of 'ids' is required in the request body"}), 400
+
+        test_ids = data['ids']
+        if not test_ids:
+            return jsonify({"message": "No test IDs provided to delete"}), 200
+
+        tests_to_delete = Test.query.filter(Test.id.in_(test_ids)).all()
+
+        if not tests_to_delete:
+            return jsonify({"error": "None of the provided test IDs were found"}), 404
+
+        for test in tests_to_delete:
+            db.session.delete(test)
+        
+        db.session.commit()
+
+        return jsonify({'message': f'{len(tests_to_delete)} tests deleted successfully'}), 200
+
+    except Exception as e:
+        db.session.rollback()
+        logging.error(f"Error bulk deleting tests: {str(e)}", exc_info=True)
+        return jsonify({"error": "Error bulk deleting tests", "details": str(e)}), 500
+
 @bp.route('/<string:test_id>', methods=['DELETE'])
 @jwt_required()
 @role_required("admin", "professor", "coordenador", "diretor")

@@ -8,6 +8,8 @@ from app.decorators.role_required import role_required, get_current_user_from_to
 from sqlalchemy.exc import SQLAlchemyError, IntegrityError
 from datetime import datetime
 import logging
+from app.utils.response_formatters import format_test_response
+from sqlalchemy.orm import joinedload, subqueryload
 
 bp = Blueprint('tests', __name__, url_prefix="/test")
 
@@ -122,41 +124,30 @@ def criar_avaliacao():
 @role_required("admin", "professor", "coordenador", "diretor")
 def listar_avaliacoes():
     try:
-        tenant_id = get_current_tenant_id()
-        if not tenant_id:
-            return jsonify({"error": "Tenant ID not found"}), 400
+        user = get_current_user_from_token()
+        if not user:
+            return jsonify({"error": "User not found or token invalid"}), 401
 
-        avaliacoes = Test.query.filter_by(tenant_id=tenant_id).all()
+        query = Test.query.options(
+            joinedload(Test.creator),
+            joinedload(Test.subject_rel),
+            joinedload(Test.grade),
+            subqueryload(Test.questions).options(
+                joinedload(Question.subject),
+                joinedload(Question.grade),
+                joinedload(Question.education_stage),
+                joinedload(Question.creator),
+                joinedload(Question.last_modifier)
+            )
+        )
+
+        # Se o usuário for professor, filtra para ver apenas os seus testes
+        if user['role'] == 'professor':
+            query = query.filter(Test.created_by == user['id'])
+
+        avaliacoes = query.all()
         
-        resultado = [{
-            'id': a.id,
-            'title': a.title,
-            'description': a.description,
-            'type': a.type,
-            'subject': a.subject,
-            'grade_id': str(a.grade_id) if a.grade_id else None,
-            'max_score': a.max_score,
-            'time_limit': a.time_limit.isoformat() if a.time_limit else None,
-            'created_by': a.created_by,
-            'created_at': a.created_at.isoformat() if a.created_at else None,
-            'updated_at': a.updated_at.isoformat() if a.updated_at else None,
-            'municipalities': a.municipalities,
-            'schools': a.schools,
-            'course': a.course,
-            'model': a.model,
-            'subjects_info': a.subjects_info,
-            'questions': [
-                {
-                    'id': q.id,
-                    'title': q.title,
-                    'question_type': q.question_type,
-                    'command': q.command
-                }
-                for q in a.questions
-            ]
-        } for a in avaliacoes]
-
-        return jsonify(resultado), 200
+        return jsonify([format_test_response(a) for a in avaliacoes]), 200
 
     except Exception as e:
         logging.error(f"Error listing tests: {str(e)}", exc_info=True)
@@ -167,62 +158,32 @@ def listar_avaliacoes():
 @role_required("admin", "professor", "coordenador", "diretor")
 def listar_avaliacoes_por_usuario(user_id):
     try:
-        # Obtém o usuário atual do token
         user = get_current_user_from_token()
         if not user:
             return jsonify({"error": "Usuário não encontrado"}), 404
 
-        # Se o user_id for 'me', usa o ID do usuário atual
         if user_id == 'me':
             user_id = user['id']
 
-        # Obtém o tenant_id apenas se não for admin
-        tenant_id = None
-        if user['role'] != "admin":
-            tenant_id = get_current_tenant_id()
-            if not tenant_id:
-                return jsonify({"error": "Tenant ID not found"}), 400
-
-        # Monta a query base
-        query = Test.query
-        if tenant_id:
-            query = query.filter_by(tenant_id=tenant_id)
-        query = query.filter_by(created_by=user_id)
+        query = Test.query.options(
+            joinedload(Test.creator),
+            joinedload(Test.subject_rel),
+            joinedload(Test.grade),
+            subqueryload(Test.questions).options(
+                joinedload(Question.subject),
+                joinedload(Question.grade),
+                joinedload(Question.education_stage),
+                joinedload(Question.creator),
+                joinedload(Question.last_modifier)
+            )
+        ).filter(Test.created_by == user_id)
         
         avaliacoes = query.all()
         
         if not avaliacoes:
             return jsonify({"message": "Nenhuma avaliação encontrada para este usuário"}), 404
 
-        resultado = [{
-            'id': a.id,
-            'title': a.title,
-            'description': a.description,
-            'type': a.type,
-            'subject': a.subject,
-            'grade_id': str(a.grade_id) if a.grade_id else None,
-            'max_score': a.max_score,
-            'time_limit': a.time_limit.isoformat() if a.time_limit else None,
-            'created_by': a.created_by,
-            'created_at': a.created_at.isoformat() if a.created_at else None,
-            'updated_at': a.updated_at.isoformat() if a.updated_at else None,
-            'municipalities': a.municipalities,
-            'schools': a.schools,
-            'course': a.course,
-            'model': a.model,
-            'subjects_info': a.subjects_info,
-            'questions': [
-                {
-                    'id': q.id,
-                    'title': q.title,
-                    'question_type': q.question_type,
-                    'command': q.command
-                }
-                for q in a.questions
-            ]
-        } for a in avaliacoes]
-
-        return jsonify(resultado), 200
+        return jsonify([format_test_response(a) for a in avaliacoes]), 200
 
     except Exception as e:
         logging.error(f"Erro ao listar avaliações do usuário: {str(e)}", exc_info=True)
@@ -233,37 +194,23 @@ def listar_avaliacoes_por_usuario(user_id):
 @role_required("admin", "professor", "coordenador", "diretor")
 def obter_avaliacao(test_id):
     try:
-        test = Test.query.get(test_id)
+        test = Test.query.options(
+            joinedload(Test.creator),
+            joinedload(Test.subject_rel),
+            joinedload(Test.grade),
+            subqueryload(Test.questions).options(
+                joinedload(Question.subject),
+                joinedload(Question.grade),
+                joinedload(Question.education_stage),
+                joinedload(Question.creator),
+                joinedload(Question.last_modifier)
+            )
+        ).get(test_id)
+        
         if not test:
             return jsonify({"error": "Test not found"}), 404
 
-        return jsonify({
-            'id': test.id,
-            'title': test.title,
-            'description': test.description,
-            'type': test.type,
-            'subject': test.subject,
-            'grade_id': str(test.grade_id) if test.grade_id else None,
-            'max_score': test.max_score,
-            'time_limit': test.time_limit.isoformat() if test.time_limit else None,
-            'created_by': test.created_by,
-            'created_at': test.created_at.isoformat() if test.created_at else None,
-            'updated_at': test.updated_at.isoformat() if test.updated_at else None,
-            'municipalities': test.municipalities,
-            'schools': test.schools,
-            'course': test.course,
-            'model': test.model,
-            'subjects_info': test.subjects_info,
-            'questions': [
-                {
-                    'id': q.id,
-                    'title': q.title,
-                    'question_type': q.question_type,
-                    'command': q.command
-                }
-                for q in test.questions
-            ]
-        }), 200
+        return jsonify(format_test_response(test)), 200
 
     except Exception as e:
         logging.error(f"Error getting test: {str(e)}", exc_info=True)

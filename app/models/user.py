@@ -27,6 +27,4 @@ class User(db.Model):
 
     student = db.relationship("Student", backref="users", uselist=False)
     teacher = db.relationship("Teacher", backref="users", uselist=False)
-    created_tests = db.relationship("Test", backref="creator", foreign_keys='Test.created_by')
-    created_questions = db.relationship("Question", backref="creator", foreign_keys='Question.created_by')
     city_id = db.Column(db.String, db.ForeignKey('city.id'), nullable=True)

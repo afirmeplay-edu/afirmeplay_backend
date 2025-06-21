@@ -26,7 +26,10 @@ class Test(db.Model):
     model = db.Column(db.String(50))  # SAEB, PROVA, etc
     subjects_info = db.Column(JSON)  # Informações sobre as disciplinas e quantidade de questões
 
-    questions = db.relationship("Question", backref="test")
+    # Relacionamentos
+    creator = db.relationship('User', foreign_keys=[created_by])
+    subject_rel = db.relationship('Subject', foreign_keys=[subject])
+    grade = db.relationship('Grade', foreign_keys=[grade_id])
     class_tests = db.relationship("ClassTest", backref="test")
     # titulo = db.Column(db.String, nullable=False)
     # descricao = db.Column(db.Text)

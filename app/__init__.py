@@ -46,7 +46,7 @@ def create_app():
     jwt.init_app(app)
 
     # Importar rotas
-    from .routes import school_routes, test_routes, question_routes, login, logout, admin_route, educationStage_routes, grades_routes, persistUser_routes, city_routes, student_routes, user_routes, class_routes, schoolTeacher, teacherClass, professor_route, subject_routes
+    from .routes import school_routes, test_routes, question_routes, login, logout, admin_route, educationStage_routes, grades_routes, persistUser_routes, city_routes, student_routes, user_routes, class_routes, schoolTeacher, teacherClass, professor_route, subject_routes, skill_routes
     
     app.register_blueprint(school_routes.bp)
     app.register_blueprint(test_routes.bp)
@@ -65,6 +65,7 @@ def create_app():
     app.register_blueprint(teacherClass.teacher_class_bp)
     app.register_blueprint(professor_route.bp)
     app.register_blueprint(subject_routes.bp)
+    app.register_blueprint(skill_routes.skill_bp)
     
     # Registrar blueprint do Swagger UI
     app.register_blueprint(swaggerui_blueprint, url_prefix=SWAGGER_URL)

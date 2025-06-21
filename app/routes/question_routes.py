@@ -1,9 +1,14 @@
 from flask import Blueprint, request, jsonify
 from app.models.question import Question
+from app.models.subject import Subject
+from app.models.grades import Grade
+from app.models.educationStage import EducationStage
+from app.models.test import Test
+from app.models.user import User
 from app import db
 from app.utils.auth import get_current_tenant_id
 from flask_jwt_extended import jwt_required
-from app.decorators.role_required import role_required
+from app.decorators.role_required import role_required, get_current_user_from_token
 from sqlalchemy.exc import SQLAlchemyError, IntegrityError
 from datetime import datetime
 import logging
@@ -12,6 +17,8 @@ import uuid
 import os
 from PIL import Image
 import io
+from sqlalchemy.orm import aliased, joinedload
+from app.utils.response_formatters import format_question_response
 
 bp = Blueprint('questions', __name__, url_prefix='/questions')
 
@@ -93,7 +100,7 @@ def create_question():
         if not data:
             return jsonify({"error": "No data provided"}), 400
 
-        required_fields = ['text', 'question_type', 'subject_id', 'grade_level', 'created_by']
+        required_fields = ['text', 'type', 'subjectId', 'grade', 'createdBy']
         for field in required_fields:
             if field not in data:
                 return jsonify({"error": f"Missing required field: {field}"}), 400
@@ -108,10 +115,10 @@ def create_question():
             images.extend(extract_images_from_html(data['formattedSolution']))
 
         # Validações específicas por tipo de questão
-        if data['question_type'] == 'multipleChoice':
-            if not data.get('alternatives') or not isinstance(data['alternatives'], list):
+        if data['type'] == 'multipleChoice':
+            if not data.get('options') or not isinstance(data.get('options'), list):
                 return jsonify({"error": "Multiple choice questions must have alternatives"}), 400
-            if not any(alt.get('isCorrect') for alt in data['alternatives']):
+            if not any(alt.get('isCorrect') for alt in data['options']):
                 return jsonify({"error": "At least one alternative must be marked as correct"}), 400
 
         question = Question(
@@ -135,8 +142,9 @@ def create_question():
             value=data.get('value'),
             topics=data.get('topics'),
             version=data.get('version', 1),
-            created_by=data.get('created_by'),
-            last_modified_by=data.get('lastModifiedBy')
+            created_by=data.get('createdBy'),
+            last_modified_by=data.get('lastModifiedBy'),
+            education_stage_id=data.get('educationStageId')
         )
 
         db.session.add(question)
@@ -157,51 +165,39 @@ def create_question():
 @role_required("admin", "professor", "coordenador", "diretor")
 def list_questions():
     try:
-        tenant_id = get_current_tenant_id()
-        if not tenant_id:
-            return jsonify({"error": "Tenant ID not found"}), 400
+        user = get_current_user_from_token()
+        if not user:
+            return jsonify({"error": "User not found or token invalid"}), 401
 
         test_id = request.args.get('test_id')
         question_type = request.args.get('type')
         subject_id = request.args.get('subject_id')
+        created_by = request.args.get('created_by')
         
-        query = Question.query.filter_by(tenant_id=tenant_id)
+        query = Question.query.options(
+            joinedload(Question.subject),
+            joinedload(Question.grade),
+            joinedload(Question.education_stage),
+            joinedload(Question.test),
+            joinedload(Question.creator),
+            joinedload(Question.last_modifier)
+        )
         
+        if user['role'] == 'professor':
+            query = query.filter(Question.created_by == user['id'])
+        elif created_by:
+            query = query.filter(Question.created_by == created_by)
+
         if test_id:
-            query = query.filter_by(test_id=test_id)
+            query = query.filter(Question.test_id == test_id)
         if question_type:
-            query = query.filter_by(question_type=question_type)
+            query = query.filter(Question.question_type == question_type)
         if subject_id:
-            query = query.filter_by(subject_id=subject_id)
+            query = query.filter(Question.subject_id == subject_id)
 
         questions = query.all()
         
-        return jsonify([{
-            'id': q.id,
-            'number': q.number,
-            'text': q.text,
-            'formattedText': q.formatted_text,
-            'subjectId': q.subject_id,
-            'title': q.title,
-            'description': q.description,
-            'command': q.command,
-            'subtitle': q.subtitle,
-            'options': q.alternatives,
-            'skills': q.skill,
-            'grade': q.grade_level,
-            'difficulty': q.difficulty_level,
-            'solution': q.correct_answer,
-            'formattedSolution': q.formatted_solution,
-            'test_id': q.test_id,
-            'type': q.question_type,
-            'value': q.value,
-            'topics': q.topics,
-            'version': q.version,
-            'created_at': q.created_at.isoformat() if q.created_at else None,
-            'created_by': q.created_by,
-            'updated_at': q.updated_at.isoformat() if q.updated_at else None,
-            'lastModifiedBy': q.last_modified_by
-        } for q in questions]), 200
+        return jsonify([format_question_response(q) for q in questions]), 200
 
     except Exception as e:
         logging.error(f"Error listing questions: {str(e)}", exc_info=True)
@@ -212,36 +208,19 @@ def list_questions():
 @role_required("admin", "professor", "coordenador", "diretor")
 def get_question(question_id):
     try:
-        question = Question.query.get(question_id)
+        question = Question.query.options(
+            joinedload(Question.subject),
+            joinedload(Question.grade),
+            joinedload(Question.education_stage),
+            joinedload(Question.test),
+            joinedload(Question.creator),
+            joinedload(Question.last_modifier)
+        ).get(question_id)
+
         if not question:
             return jsonify({"error": "Question not found"}), 404
 
-        return jsonify({
-            'id': question.id,
-            'number': question.number,
-            'text': question.text,
-            'formattedText': question.formatted_text,
-            'subjectId': question.subject_id,
-            'title': question.title,
-            'description': question.description,
-            'command': question.command,
-            'subtitle': question.subtitle,
-            'options': question.alternatives,
-            'skills': question.skill,
-            'grade': question.grade_level,
-            'difficulty': question.difficulty_level,
-            'solution': question.correct_answer,
-            'formattedSolution': question.formatted_solution,
-            'test_id': question.test_id,
-            'type': question.question_type,
-            'value': question.value,
-            'topics': question.topics,
-            'version': question.version,
-            'created_at': question.created_at.isoformat() if question.created_at else None,
-            'created_by': question.created_by,
-            'updated_at': question.updated_at.isoformat() if question.updated_at else None,
-            'lastModifiedBy': question.last_modified_by
-        }), 200
+        return jsonify(format_question_response(question)), 200
 
     except Exception as e:
         logging.error(f"Error getting question: {str(e)}", exc_info=True)
@@ -260,23 +239,34 @@ def update_question(question_id):
         if not data:
             return jsonify({"error": "No data provided"}), 400
 
-        fields = [
-            'number', 'text', 'formattedText', 'subject_id', 'title', 'description',
-            'command', 'subtitle', 'alternatives', 'skill', 'grade_level',
-            'difficulty_level', 'correct_answer', 'formatted_solution', 'test_id',
-            'question_type', 'value', 'topics', 'version'
-        ]
+        # Mapeia chaves do JSON (camelCase) para atributos do modelo (snake_case)
+        field_map = {
+            'number': 'number',
+            'text': 'text',
+            'formattedText': 'formatted_text',
+            'subjectId': 'subject_id',
+            'title': 'title',
+            'description': 'description',
+            'command': 'command',
+            'subtitle': 'subtitle',
+            'options': 'alternatives',
+            'skills': 'skill',
+            'grade': 'grade_level',
+            'educationStageId': 'education_stage_id',
+            'difficulty': 'difficulty_level',
+            'solution': 'correct_answer',
+            'formattedSolution': 'formatted_solution',
+            'test_id': 'test_id',
+            'type': 'question_type',
+            'value': 'value',
+            'topics': 'topics',
+            'lastModifiedBy': 'last_modified_by'
+        }
 
-        for field in fields:
-            if field in data:
-                if field == 'formattedText':
-                    setattr(question, 'formatted_text', data[field])
-                elif field == 'alternatives':
-                    setattr(question, 'alternatives', data[field])
-                else:
-                    setattr(question, field, data[field])
-
-        question.last_modified_by = data.get('lastModifiedBy')
+        for json_key, model_attr in field_map.items():
+            if json_key in data:
+                setattr(question, model_attr, data[json_key])
+        
         question.version += 1
 
         db.session.commit()

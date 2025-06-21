@@ -11,5 +11,4 @@ class Grade(db.Model):
 
     classes = db.relationship("Class", backref="grade")
     students = db.relationship("Student", backref="grade")
-    tests = db.relationship("Test", backref="grade")
     # questions = db.relationship("Question", backref="grade_level")

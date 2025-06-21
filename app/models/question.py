@@ -44,6 +44,14 @@ class Question(db.Model):
     updated_at = db.Column(db.DateTime, server_default=db.text('CURRENT_TIMESTAMP'), onupdate=db.text('CURRENT_TIMESTAMP'))
     last_modified_by = db.Column(db.String, db.ForeignKey('users.id'))
     
+    # Relacionamentos
+    subject = db.relationship('Subject', backref='questions')
+    grade = db.relationship('Grade', backref='questions')
+    education_stage = db.relationship('EducationStage', backref='questions')
+    test = db.relationship('Test', backref='questions')
+    creator = db.relationship('User', foreign_keys=[created_by])
+    last_modifier = db.relationship('User', foreign_keys=[last_modified_by])
+    
     # title = db.Column(db.String, nullable=False)
     # description = db.Column(db.Text)
     # command = db.Column(db.Text)  # Enunciado principal

@@ -8,4 +8,3 @@ class EducationStage(db.Model):
     name = db.Column(db.String(100))
 
     grades = db.relationship("Grade", backref="education_stage")
-    questions = db.relationship("Question", backref="education_stage")

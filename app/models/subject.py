@@ -9,5 +9,4 @@ class Subject(db.Model):
     name = db.Column(db.String(100))
 
     # tests = db.relationship("Test", backref="subject")
-    questions = db.relationship("Question", backref="subject")
     class_subjects = db.relationship("ClassSubject", backref="subject")

@@ -125,6 +125,7 @@ def create_question():
             number=data.get('number'),
             text=data.get('text'),
             formatted_text=data.get('formattedText'),
+            secondstatement=data.get('secondStatement'),
             images=images,
             subject_id=data.get('subjectId'),
             title=data.get('title'),

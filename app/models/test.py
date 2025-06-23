@@ -16,7 +16,7 @@ class Test(db.Model):
     created_by = db.Column(db.String, db.ForeignKey('users.id'))
     created_at = db.Column(db.DateTime, server_default=db.text('CURRENT_TIMESTAMP'))
     updated_at = db.Column(db.DateTime, server_default=db.text('CURRENT_TIMESTAMP'), onupdate=db.text('CURRENT_TIMESTAMP'))
-    subject = db.Column(db.String, db.ForeignKey('subject.id'))
+    subject = db.Column(db.String, db.ForeignKey('subject.id'), nullable=True)
     grade_id = db.Column(UUID(as_uuid=True), db.ForeignKey("grade.id"))
     
     # Novos campos
@@ -31,6 +31,17 @@ class Test(db.Model):
     subject_rel = db.relationship('Subject', foreign_keys=[subject])
     grade = db.relationship('Grade', foreign_keys=[grade_id])
     class_tests = db.relationship("ClassTest", backref="test")
+    
+    # Relacionamento para acessar as classes onde a avaliação foi aplicada
+    @property
+    def applied_classes(self):
+        """Retorna as classes onde esta avaliação foi aplicada."""
+        from app.models.studentClass import Class
+        from app.models.classTest import ClassTest
+        
+        class_ids = [ct.class_id for ct in self.class_tests]
+        return Class.query.filter(Class.id.in_(class_ids)).all() if class_ids else []
+    
     # titulo = db.Column(db.String, nullable=False)
     # descricao = db.Column(db.Text)
     # tipo = db.Column(db.String, nullable=False)

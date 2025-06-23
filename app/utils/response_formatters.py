@@ -1,6 +1,8 @@
 from app.models.educationStage import EducationStage
 from app.models.city import City
 from app.models.school import School
+from app.models.studentClass import Class
+from app.models.grades import Grade
 
 def format_question_response(q, exclude_fields=None):
     if exclude_fields is None:
@@ -16,6 +18,7 @@ def format_question_response(q, exclude_fields=None):
         'difficulty': q.difficulty_level,
         'solution': q.correct_answer,
         'formattedSolution': q.formatted_solution,
+        'secondStatement': q.secondstatement,
         'type': q.question_type,
         'value': q.value,
         'topics': q.topics,
@@ -58,6 +61,33 @@ def format_test_response(test):
         schools_objs = School.query.filter(School.id.in_(test.schools)).all()
         schools_list = [{'id': s.id, 'name': s.name} for s in schools_objs]
 
+    # Buscar informações sobre as classes onde a avaliação foi aplicada
+    applied_classes_info = []
+    if test.class_tests:
+        for ct in test.class_tests:
+            class_obj = Class.query.get(ct.class_id)
+            if class_obj:
+                school_obj = School.query.get(class_obj.school_id)
+                grade_obj = Grade.query.get(class_obj.grade_id)
+                
+                applied_classes_info.append({
+                    "class_test_id": ct.id,
+                    "class": {
+                        "id": class_obj.id,
+                        "name": class_obj.name,
+                        "school": {
+                            "id": school_obj.id,
+                            "name": school_obj.name
+                        } if school_obj else None,
+                        "grade": {
+                            "id": grade_obj.id,
+                            "name": grade_obj.name
+                        } if grade_obj else None
+                    },
+                    "application": ct.application.isoformat() if ct.application else None,
+                    "expiration": ct.expiration.isoformat() if ct.expiration else None
+                })
+
     return {
         'id': test.id,
         'title': test.title,
@@ -75,5 +105,6 @@ def format_test_response(test):
         'schools': schools_list,
         'model': test.model,
         'subjects_info': test.subjects_info,
+        'applied_classes': applied_classes_info,
         'questions': [format_question_response(q, exclude_fields=exclude_from_question) for q in test.questions]
     } 

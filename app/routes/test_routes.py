@@ -1,6 +1,10 @@
 from flask import Blueprint, request, jsonify, abort
 from app.models.test import Test
 from app.models.question import Question
+from app.models.classTest import ClassTest
+from app.models.studentClass import Class
+from app.models.school import School
+from app.models.grades import Grade
 from app import db
 from app.utils.auth import get_current_tenant_id
 from flask_jwt_extended import jwt_required
@@ -54,9 +58,13 @@ def criar_avaliacao():
                 logging.error("Informações de disciplinas ausentes para tipo SIMULADO")
                 return jsonify({"error": "Subjects information is required for SIMULADO type"}), 400
         elif data['type'] == 'AVALIACAO':
-            if not data.get('subject'):
-                logging.error("Disciplina ausente para tipo AVALIACAO")
-                return jsonify({"error": "Subject is required for AVALIACAO type"}), 400
+            # Para AVALIACAO, pode ter subject (disciplina única) ou subjects (múltiplas disciplinas)
+            has_subject = data.get('subject')
+            has_subjects = data.get('subjects') and isinstance(data.get('subjects'), list) and len(data.get('subjects')) > 0
+            
+            if not has_subject and not has_subjects:
+                logging.error("Disciplina ou disciplinas ausentes para tipo AVALIACAO")
+                return jsonify({"error": "Subject or subjects array is required for AVALIACAO type"}), 400
 
         logging.info("Criando nova avaliação com os dados fornecidos")
         print(data)
@@ -64,8 +72,8 @@ def criar_avaliacao():
             title=data.get('title'),
             description=data.get('description'),
             type=data.get('type'),
-            subject=data.get('subject'),
-            grade_id=data.get('grade_id'),
+            subject=data.get('subject') if data.get('subject') else None,
+            grade_id=data.get('grade') or data.get('grade_id'),  # Aceita tanto 'grade' quanto 'grade_id'
             intructions=data.get('intructions'),
             max_score=data.get('max_score'),
             time_limit=datetime.fromisoformat(data.get('time_limit')) if data.get('time_limit') else None,
@@ -74,12 +82,17 @@ def criar_avaliacao():
             schools=data.get('schools'),
             course=data.get('course'),
             model=data.get('model'),
-            subjects_info=data.get('subjects_info')
+            subjects_info=data.get('subjects') or data.get('subjects_info')  # Aceita tanto 'subjects' quanto 'subjects_info'
         )
 
         # Adiciona questões se fornecidas
         if 'questions' in data and isinstance(data['questions'], list):
             for question_data in data['questions']:
+                # Extrai o ID do grade se for um objeto
+                grade_level = question_data.get('grade')
+                if isinstance(grade_level, dict) and 'id' in grade_level:
+                    grade_level = grade_level['id']
+                
                 # Cria uma nova questão sem verificar se já existe
                 question = Question(
                     number=question_data.get('number'),
@@ -92,14 +105,14 @@ def criar_avaliacao():
                     subtitle=question_data.get('subtitle'),
                     alternatives=question_data.get('options'),
                     skill=question_data.get('skills'),
-                    grade_level=question_data.get('grade'),
+                    grade_level=grade_level,
                     difficulty_level=question_data.get('difficulty'),
                     correct_answer=question_data.get('solution'),
                     formatted_solution=question_data.get('formattedSolution'),
                     question_type=question_data.get('type'),
                     value=question_data.get('value'),
                     topics=question_data.get('topics'),
-                    created_by=data.get('created_by')
+                    created_by=question_data.get('created_by') or data.get('created_by')  # Usa o da questão ou o da avaliação
                 )
                 db.session.add(question)
                 nova_avaliacao.questions.append(question)
@@ -309,3 +322,151 @@ def deletar_avaliacao(test_id):
         db.session.rollback()
         logging.error(f"Error deleting test: {str(e)}", exc_info=True)
         return jsonify({"error": "Error deleting test", "details": str(e)}), 500
+
+@bp.route('/<string:test_id>/apply', methods=['POST'])
+@jwt_required()
+@role_required("admin", "professor", "coordenador", "diretor")
+def aplicar_avaliacao_classe(test_id):
+    """Aplica uma avaliação a uma ou múltiplas classes."""
+    try:
+        data = request.get_json()
+        if not data:
+            return jsonify({"error": "No data provided"}), 400
+
+        # Verificar se a avaliação existe
+        test = Test.query.get(test_id)
+        if not test:
+            return jsonify({"error": "Test not found"}), 404
+
+        # Validar campos obrigatórios
+        if 'classes' not in data or not isinstance(data['classes'], list):
+            return jsonify({"error": "Classes list is required"}), 400
+
+        if not data['classes']:
+            return jsonify({"error": "At least one class must be provided"}), 400
+
+        applied_classes = []
+        errors = []
+
+        for class_data in data['classes']:
+            class_id = class_data.get('class_id')
+            application = class_data.get('application')
+            expiration = class_data.get('expiration')
+
+            if not class_id:
+                errors.append("class_id is required for each class")
+                continue
+
+            # Verificar se já existe uma aplicação para esta classe e avaliação
+            existing_application = ClassTest.query.filter_by(
+                class_id=class_id,
+                test_id=test_id
+            ).first()
+
+            if existing_application:
+                errors.append(f"Test is already applied to class {class_id}")
+                continue
+
+            # Criar nova aplicação
+            try:
+                class_test = ClassTest(
+                    class_id=class_id,
+                    test_id=test_id,
+                    application=datetime.fromisoformat(application) if application else None,
+                    expiration=datetime.fromisoformat(expiration) if expiration else None
+                )
+                db.session.add(class_test)
+                applied_classes.append(class_id)
+            except ValueError as e:
+                errors.append(f"Invalid date format for class {class_id}: {str(e)}")
+
+        if applied_classes:
+            db.session.commit()
+            
+            response = {
+                "message": f"Test applied to {len(applied_classes)} classes successfully",
+                "applied_classes": applied_classes
+            }
+            
+            if errors:
+                response["warnings"] = errors
+                
+            return jsonify(response), 201
+        else:
+            return jsonify({"error": "No classes were applied", "details": errors}), 400
+
+    except Exception as e:
+        db.session.rollback()
+        logging.error(f"Error applying test to classes: {str(e)}", exc_info=True)
+        return jsonify({"error": "Error applying test to classes", "details": str(e)}), 500
+
+@bp.route('/<string:test_id>/classes', methods=['GET'])
+@jwt_required()
+@role_required("admin", "professor", "coordenador", "diretor")
+def listar_classes_avaliacao(test_id):
+    """Lista todas as classes onde uma avaliação foi aplicada."""
+    try:
+        # Verificar se a avaliação existe
+        test = Test.query.get(test_id)
+        if not test:
+            return jsonify({"error": "Test not found"}), 404
+
+        # Buscar todas as aplicações da avaliação
+        class_tests = ClassTest.query.filter_by(test_id=test_id).all()
+        
+        classes_info = []
+        for ct in class_tests:
+            # Buscar informações da classe
+            class_obj = Class.query.get(ct.class_id)
+            if class_obj:
+                school_obj = School.query.get(class_obj.school_id)
+                grade_obj = Grade.query.get(class_obj.grade_id)
+                
+                classes_info.append({
+                    "class_test_id": ct.id,
+                    "class": {
+                        "id": class_obj.id,
+                        "name": class_obj.name,
+                        "school": {
+                            "id": school_obj.id,
+                            "name": school_obj.name
+                        } if school_obj else None,
+                        "grade": {
+                            "id": grade_obj.id,
+                            "name": grade_obj.name
+                        } if grade_obj else None
+                    },
+                    "application": ct.application.isoformat() if ct.application else None,
+                    "expiration": ct.expiration.isoformat() if ct.expiration else None
+                })
+
+        return jsonify(classes_info), 200
+
+    except Exception as e:
+        logging.error(f"Error listing classes for test: {str(e)}", exc_info=True)
+        return jsonify({"error": "Error listing classes for test", "details": str(e)}), 500
+
+@bp.route('/<string:test_id>/classes/<string:class_id>', methods=['DELETE'])
+@jwt_required()
+@role_required("admin", "professor", "coordenador", "diretor")
+def remover_aplicacao_avaliacao(test_id, class_id):
+    """Remove a aplicação de uma avaliação de uma classe específica."""
+    try:
+        # Verificar se a aplicação existe
+        class_test = ClassTest.query.filter_by(
+            test_id=test_id,
+            class_id=class_id
+        ).first()
+
+        if not class_test:
+            return jsonify({"error": "Test application to class not found"}), 404
+
+        db.session.delete(class_test)
+        db.session.commit()
+
+        return jsonify({"message": "Test application removed successfully"}), 200
+
+    except Exception as e:
+        db.session.rollback()
+        logging.error(f"Error removing test application: {str(e)}", exc_info=True)
+        return jsonify({"error": "Error removing test application", "details": str(e)}), 500

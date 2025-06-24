@@ -242,6 +242,22 @@ def atualizar_avaliacao(test_id):
         if not data:
             return jsonify({"error": "No data provided"}), 400
 
+        # Validação específica para cada tipo de avaliação se o tipo estiver sendo atualizado
+        if 'type' in data:
+            if data['type'] == 'SIMULADO':
+                if not data.get('subjects_info'):
+                    logging.error("Informações de disciplinas ausentes para tipo SIMULADO")
+                    return jsonify({"error": "Subjects information is required for SIMULADO type"}), 400
+            elif data['type'] == 'AVALIACAO':
+                # Para AVALIACAO, pode ter subject (disciplina única) ou subjects (múltiplas disciplinas)
+                has_subject = data.get('subject')
+                has_subjects = data.get('subjects') and isinstance(data.get('subjects'), list) and len(data.get('subjects')) > 0
+                
+                if not has_subject and not has_subjects:
+                    logging.error("Disciplina ou disciplinas ausentes para tipo AVALIACAO")
+                    return jsonify({"error": "Subject or subjects array is required for AVALIACAO type"}), 400
+
+        # Campos que podem ser atualizados
         campos = [
             'title', 'description', 'type', 'subject', 'grade_id',
             'max_score', 'time_limit', 'intructions', 'municipalities',
@@ -252,17 +268,14 @@ def atualizar_avaliacao(test_id):
             if campo in data:
                 if campo == 'time_limit' and data[campo]:
                     setattr(test, campo, datetime.fromisoformat(data[campo]))
+                elif campo == 'grade_id':
+                    # Aceita tanto 'grade' quanto 'grade_id'
+                    setattr(test, campo, data.get('grade') or data.get('grade_id'))
+                elif campo == 'subjects_info':
+                    # Aceita tanto 'subjects' quanto 'subjects_info'
+                    setattr(test, campo, data.get('subjects') or data.get('subjects_info'))
                 else:
                     setattr(test, campo, data[campo])
-
-        if 'questions' in data and isinstance(data['questions'], list):
-            test.questions = []
-            for question_data in data['questions']:
-                question = Question.query.get(question_data['id'])
-                if question:
-                    test.questions.append(question)
-                else:
-                    return jsonify({"error": f"Question with ID {question_data['id']} not found"}), 404
 
         db.session.commit()
         return jsonify({'message': 'Test updated successfully'}), 200

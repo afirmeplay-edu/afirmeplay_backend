@@ -46,7 +46,7 @@ def format_question_response(q, exclude_fields=None):
 
 def format_test_response(test):
     # Campos do Test que são análogos aos da Question e que serão excluídos da formatação da questão
-    exclude_from_question = ['subject', 'grade', 'createdBy', 'title', 'description']
+    exclude_from_question = ['grade', 'createdBy', 'title', 'description']
     
     # Busca os nomes para os campos que armazenam IDs
     course_obj = EducationStage.query.get(test.course) if test.course else None

@@ -17,8 +17,8 @@ import uuid
 import os
 from PIL import Image
 import io
-from sqlalchemy.orm import aliased, joinedload
-from app.utils.response_formatters import format_question_response
+from sqlalchemy.orm import aliased, joinedload, subqueryload
+from app.utils.response_formatters import format_question_response, format_test_response
 
 bp = Blueprint('questions', __name__, url_prefix='/questions')
 
@@ -175,6 +175,31 @@ def list_questions():
         subject_id = request.args.get('subject_id')
         created_by = request.args.get('created_by')
         
+        # Se um test_id foi fornecido, retorna a avaliação completa com suas questões
+        if test_id:
+            test = Test.query.options(
+                joinedload(Test.creator),
+                joinedload(Test.subject_rel),
+                joinedload(Test.grade),
+                subqueryload(Test.questions).options(
+                    joinedload(Question.subject),
+                    joinedload(Question.grade),
+                    joinedload(Question.education_stage),
+                    joinedload(Question.creator),
+                    joinedload(Question.last_modifier)
+                )
+            ).get(test_id)
+            
+            if not test:
+                return jsonify({"error": "Test not found"}), 404
+            
+            # Verifica permissões do usuário
+            if user['role'] == 'professor' and test.created_by != user['id']:
+                return jsonify({"error": "Access denied"}), 403
+            
+            return jsonify(format_test_response(test)), 200
+        
+        # Se não foi fornecido test_id, retorna apenas as questões (comportamento original)
         query = Question.query.options(
             joinedload(Question.subject),
             joinedload(Question.grade),
@@ -189,8 +214,6 @@ def list_questions():
         elif created_by:
             query = query.filter(Question.created_by == created_by)
 
-        if test_id:
-            query = query.filter(Question.test_id == test_id)
         if question_type:
             query = query.filter(Question.question_type == question_type)
         if subject_id:

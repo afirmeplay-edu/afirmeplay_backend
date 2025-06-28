@@ -71,6 +71,9 @@ def create_app():
     # Registrar blueprint do Swagger UI
     app.register_blueprint(swaggerui_blueprint, url_prefix=SWAGGER_URL)
 
+    # Importar modelos para garantir que as tabelas sejam criadas
+    from .models import City, School, SchoolTeacher, Teacher, Student, Subject, Class, ClassSubject, ClassTest, Test, EducationStage, Grade, Skill, Question, StudentAnswer, UserQuickLinks, TeacherClass, User
+
     # Rota para servir o arquivo swagger.yaml a partir do diretório raiz do projeto
     @app.route('/swagger.yaml')
     def serve_swagger_yaml():

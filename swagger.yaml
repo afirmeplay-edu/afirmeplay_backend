@@ -1031,6 +1031,1463 @@ paths:
         '500':
           $ref: '#/responses/InternalServerError'
 
+  /city:
+    get:
+      summary: Get list of cities
+      responses:
+        '200':
+          description: A list of cities
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/schemas/City'
+        '401':
+          $ref: '#/responses/UnauthorizedError'
+        '403':
+          $ref: '#/responses/ForbiddenError'
+        '404':
+          $ref: '#/responses/NotFoundError'
+        '500':
+          $ref: '#/responses/InternalServerError'
+    post:
+      summary: Create a new city
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name:
+                  type: string
+                state:
+                  type: string
+              required:
+                - name
+                - state
+      responses:
+        '201':
+          description: City created successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  mensagem:
+                    type: string
+                  id:
+                    type: string
+        '400':
+          $ref: '#/responses/BadRequestError'
+        '401':
+          $ref: '#/responses/UnauthorizedError'
+        '403':
+          $ref: '#/responses/ForbiddenError'
+        '500':
+          $ref: '#/responses/InternalServerError'
+
+  /city/{city_id}:
+    get:
+      summary: Get city details by ID
+      parameters:
+        - name: city_id
+          in: path
+          required: true
+          schema:
+            type: string
+          description: ID of the city to get details for
+      responses:
+        '200':
+          description: City details
+          content:
+            application/json:
+              schema:
+                $ref: '#/schemas/City'
+        '401':
+          $ref: '#/responses/UnauthorizedError'
+        '403':
+          $ref: '#/responses/ForbiddenError'
+        '404':
+          $ref: '#/responses/NotFoundError'
+        '500':
+          $ref: '#/responses/InternalServerError'
+    put:
+      summary: Update city details by ID
+      parameters:
+        - name: city_id
+          in: path
+          required: true
+          schema:
+            type: string
+          description: ID of the city to update
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name:
+                  type: string
+                state:
+                  type: string
+      responses:
+        '200':
+          description: City updated successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  mensagem:
+                    type: string
+        '400':
+          $ref: '#/responses/BadRequestError'
+        '401':
+          $ref: '#/responses/UnauthorizedError'
+        '403':
+          $ref: '#/responses/ForbiddenError'
+        '404':
+          $ref: '#/responses/NotFoundError'
+        '500':
+          $ref: '#/responses/InternalServerError'
+    delete:
+      summary: Delete a city by ID
+      parameters:
+        - name: city_id
+          in: path
+          required: true
+          schema:
+            type: string
+          description: ID of the city to delete
+      responses:
+        '200':
+          description: City deleted successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  mensagem:
+                    type: string
+        '401':
+          $ref: '#/responses/UnauthorizedError'
+        '403':
+          $ref: '#/responses/ForbiddenError'
+        '404':
+          $ref: '#/responses/NotFoundError'
+        '500':
+          $ref: '#/responses/InternalServerError'
+
+  /education_stages:
+    get:
+      summary: Get list of education stages
+      responses:
+        '200':
+          description: A list of education stages
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/schemas/EducationStage'
+        '401':
+          $ref: '#/responses/UnauthorizedError'
+        '500':
+          $ref: '#/responses/InternalServerError'
+
+  /education_stages/{stage_id}:
+    get:
+      summary: Get grades by education stage ID
+      parameters:
+        - name: stage_id
+          in: path
+          required: true
+          schema:
+            type: string
+          description: ID of the education stage
+      responses:
+        '200':
+          description: A list of grades for the specified education stage
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/schemas/Grade'
+        '401':
+          $ref: '#/responses/UnauthorizedError'
+        '500':
+          $ref: '#/responses/InternalServerError'
+
+  /subjects:
+    get:
+      summary: Get list of subjects
+      responses:
+        '200':
+          description: A list of subjects
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/schemas/Subject'
+        '500':
+          $ref: '#/responses/InternalServerError'
+
+  /skills:
+    get:
+      summary: Get list of all skills
+      responses:
+        '200':
+          description: A list of all skills
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/schemas/Skill'
+        '500':
+          $ref: '#/responses/InternalServerError'
+
+  /skills/subject/{subject_id}:
+    get:
+      summary: Get skills by subject ID
+      parameters:
+        - name: subject_id
+          in: path
+          required: true
+          schema:
+            type: string
+          description: ID of the subject
+      responses:
+        '200':
+          description: A list of skills for the specified subject
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/schemas/Skill'
+        '404':
+          $ref: '#/responses/NotFoundError'
+        '500':
+          $ref: '#/responses/InternalServerError'
+
+  /questions:
+    get:
+      summary: Get list of questions
+      parameters:
+        - name: test_id
+          in: query
+          schema:
+            type: string
+          description: Filter questions by test ID
+        - name: type
+          in: query
+          schema:
+            type: string
+          description: Filter questions by type
+        - name: subject_id
+          in: query
+          schema:
+            type: string
+          description: Filter questions by subject ID
+        - name: created_by
+          in: query
+          schema:
+            type: string
+          description: Filter questions by creator
+      responses:
+        '200':
+          description: A list of questions or a complete test with questions
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - type: array
+                    items:
+                      $ref: '#/schemas/Question'
+                  - $ref: '#/schemas/TestWithQuestions'
+        '401':
+          $ref: '#/responses/UnauthorizedError'
+        '403':
+          $ref: '#/responses/ForbiddenError'
+        '404':
+          $ref: '#/responses/NotFoundError'
+        '500':
+          $ref: '#/responses/InternalServerError'
+    post:
+      summary: Create a new question
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                text:
+                  type: string
+                type:
+                  type: string
+                subjectId:
+                  type: string
+                grade:
+                  type: string
+                createdBy:
+                  type: string
+                formattedText:
+                  type: string
+                secondStatement:
+                  type: string
+                title:
+                  type: string
+                description:
+                  type: string
+                command:
+                  type: string
+                subtitle:
+                  type: string
+                options:
+                  type: array
+                  items:
+                    type: object
+                skills:
+                  type: array
+                difficulty:
+                  type: string
+                solution:
+                  type: string
+                formattedSolution:
+                  type: string
+                test_id:
+                  type: string
+                value:
+                  type: number
+                topics:
+                  type: array
+                version:
+                  type: integer
+                lastModifiedBy:
+                  type: string
+                educationStageId:
+                  type: string
+              required:
+                - text
+                - type
+                - subjectId
+                - grade
+                - createdBy
+      responses:
+        '201':
+          description: Question created successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                  id:
+                    type: string
+        '400':
+          $ref: '#/responses/BadRequestError'
+        '401':
+          $ref: '#/responses/UnauthorizedError'
+        '403':
+          $ref: '#/responses/ForbiddenError'
+        '500':
+          $ref: '#/responses/InternalServerError'
+    delete:
+      summary: Bulk delete questions
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                question_ids:
+                  type: array
+                  items:
+                    type: string
+              required:
+                - question_ids
+      responses:
+        '200':
+          description: Questions deleted successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+        '400':
+          $ref: '#/responses/BadRequestError'
+        '401':
+          $ref: '#/responses/UnauthorizedError'
+        '403':
+          $ref: '#/responses/ForbiddenError'
+        '500':
+          $ref: '#/responses/InternalServerError'
+
+  /questions/{question_id}:
+    get:
+      summary: Get question details by ID
+      parameters:
+        - name: question_id
+          in: path
+          required: true
+          schema:
+            type: string
+          description: ID of the question
+      responses:
+        '200':
+          description: Question details
+          content:
+            application/json:
+              schema:
+                $ref: '#/schemas/Question'
+        '401':
+          $ref: '#/responses/UnauthorizedError'
+        '403':
+          $ref: '#/responses/ForbiddenError'
+        '404':
+          $ref: '#/responses/NotFoundError'
+        '500':
+          $ref: '#/responses/InternalServerError'
+    put:
+      summary: Update question by ID
+      parameters:
+        - name: question_id
+          in: path
+          required: true
+          schema:
+            type: string
+          description: ID of the question to update
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                text:
+                  type: string
+                type:
+                  type: string
+                subjectId:
+                  type: string
+                grade:
+                  type: string
+                formattedText:
+                  type: string
+                secondStatement:
+                  type: string
+                title:
+                  type: string
+                description:
+                  type: string
+                command:
+                  type: string
+                subtitle:
+                  type: string
+                options:
+                  type: array
+                  items:
+                    type: object
+                skills:
+                  type: array
+                difficulty:
+                  type: string
+                solution:
+                  type: string
+                formattedSolution:
+                  type: string
+                value:
+                  type: number
+                topics:
+                  type: array
+                version:
+                  type: integer
+                lastModifiedBy:
+                  type: string
+                educationStageId:
+                  type: string
+      responses:
+        '200':
+          description: Question updated successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+        '400':
+          $ref: '#/responses/BadRequestError'
+        '401':
+          $ref: '#/responses/UnauthorizedError'
+        '403':
+          $ref: '#/responses/ForbiddenError'
+        '404':
+          $ref: '#/responses/NotFoundError'
+        '500':
+          $ref: '#/responses/InternalServerError'
+    delete:
+      summary: Delete a question by ID
+      parameters:
+        - name: question_id
+          in: path
+          required: true
+          schema:
+            type: string
+          description: ID of the question to delete
+      responses:
+        '200':
+          description: Question deleted successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+        '401':
+          $ref: '#/responses/UnauthorizedError'
+        '403':
+          $ref: '#/responses/ForbiddenError'
+        '404':
+          $ref: '#/responses/NotFoundError'
+        '500':
+          $ref: '#/responses/InternalServerError'
+
+  /test:
+    get:
+      summary: Get list of tests
+      responses:
+        '200':
+          description: A list of tests
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/schemas/Test'
+        '401':
+          $ref: '#/responses/UnauthorizedError'
+        '403':
+          $ref: '#/responses/ForbiddenError'
+        '500':
+          $ref: '#/responses/InternalServerError'
+    post:
+      summary: Create a new test
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                title:
+                  type: string
+                type:
+                  type: string
+                model:
+                  type: string
+                course:
+                  type: string
+                created_by:
+                  type: string
+                description:
+                  type: string
+                subject:
+                  type: string
+                grade:
+                  type: string
+                grade_id:
+                  type: string
+                intructions:
+                  type: string
+                max_score:
+                  type: number
+                time_limit:
+                  type: string
+                  format: date-time
+                municipalities:
+                  type: array
+                schools:
+                  type: array
+                subjects:
+                  type: array
+                subjects_info:
+                  type: array
+                questions:
+                  type: array
+                  items:
+                    type: object
+              required:
+                - title
+                - type
+                - model
+                - course
+                - created_by
+      responses:
+        '201':
+          description: Test created successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                  id:
+                    type: string
+        '400':
+          $ref: '#/responses/BadRequestError'
+        '401':
+          $ref: '#/responses/UnauthorizedError'
+        '403':
+          $ref: '#/responses/ForbiddenError'
+        '500':
+          $ref: '#/responses/InternalServerError'
+    delete:
+      summary: Bulk delete tests
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                test_ids:
+                  type: array
+                  items:
+                    type: string
+              required:
+                - test_ids
+      responses:
+        '200':
+          description: Tests deleted successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+        '400':
+          $ref: '#/responses/BadRequestError'
+        '401':
+          $ref: '#/responses/UnauthorizedError'
+        '403':
+          $ref: '#/responses/ForbiddenError'
+        '500':
+          $ref: '#/responses/InternalServerError'
+
+  /test/user/{user_id}:
+    get:
+      summary: Get tests by user ID
+      parameters:
+        - name: user_id
+          in: path
+          required: true
+          schema:
+            type: string
+          description: ID of the user (use 'me' for current user)
+      responses:
+        '200':
+          description: A list of tests created by the user
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/schemas/Test'
+        '401':
+          $ref: '#/responses/UnauthorizedError'
+        '403':
+          $ref: '#/responses/ForbiddenError'
+        '404':
+          $ref: '#/responses/NotFoundError'
+        '500':
+          $ref: '#/responses/InternalServerError'
+
+  /test/{test_id}:
+    get:
+      summary: Get test details by ID
+      parameters:
+        - name: test_id
+          in: path
+          required: true
+          schema:
+            type: string
+          description: ID of the test
+      responses:
+        '200':
+          description: Test details
+          content:
+            application/json:
+              schema:
+                $ref: '#/schemas/Test'
+        '401':
+          $ref: '#/responses/UnauthorizedError'
+        '403':
+          $ref: '#/responses/ForbiddenError'
+        '404':
+          $ref: '#/responses/NotFoundError'
+        '500':
+          $ref: '#/responses/InternalServerError'
+    put:
+      summary: Update test by ID
+      parameters:
+        - name: test_id
+          in: path
+          required: true
+          schema:
+            type: string
+          description: ID of the test to update
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                title:
+                  type: string
+                type:
+                  type: string
+                model:
+                  type: string
+                course:
+                  type: string
+                description:
+                  type: string
+                subject:
+                  type: string
+                grade:
+                  type: string
+                grade_id:
+                  type: string
+                intructions:
+                  type: string
+                max_score:
+                  type: number
+                time_limit:
+                  type: string
+                  format: date-time
+                municipalities:
+                  type: array
+                schools:
+                  type: array
+                subjects:
+                  type: array
+                subjects_info:
+                  type: array
+      responses:
+        '200':
+          description: Test updated successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+        '400':
+          $ref: '#/responses/BadRequestError'
+        '401':
+          $ref: '#/responses/UnauthorizedError'
+        '403':
+          $ref: '#/responses/ForbiddenError'
+        '404':
+          $ref: '#/responses/NotFoundError'
+        '500':
+          $ref: '#/responses/InternalServerError'
+    delete:
+      summary: Delete a test by ID
+      parameters:
+        - name: test_id
+          in: path
+          required: true
+          schema:
+            type: string
+          description: ID of the test to delete
+      responses:
+        '200':
+          description: Test deleted successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+        '401':
+          $ref: '#/responses/UnauthorizedError'
+        '403':
+          $ref: '#/responses/ForbiddenError'
+        '404':
+          $ref: '#/responses/NotFoundError'
+        '500':
+          $ref: '#/responses/InternalServerError'
+
+  /test/{test_id}/apply:
+    post:
+      summary: Apply test to classes
+      parameters:
+        - name: test_id
+          in: path
+          required: true
+          schema:
+            type: string
+          description: ID of the test
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                class_ids:
+                  type: array
+                  items:
+                    type: string
+              required:
+                - class_ids
+      responses:
+        '200':
+          description: Test applied to classes successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+        '400':
+          $ref: '#/responses/BadRequestError'
+        '401':
+          $ref: '#/responses/UnauthorizedError'
+        '403':
+          $ref: '#/responses/ForbiddenError'
+        '404':
+          $ref: '#/responses/NotFoundError'
+        '500':
+          $ref: '#/responses/InternalServerError'
+
+  /test/{test_id}/classes:
+    get:
+      summary: Get classes where test is applied
+      parameters:
+        - name: test_id
+          in: path
+          required: true
+          schema:
+            type: string
+          description: ID of the test
+      responses:
+        '200':
+          description: A list of classes where the test is applied
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/schemas/Class'
+        '401':
+          $ref: '#/responses/UnauthorizedError'
+        '403':
+          $ref: '#/responses/ForbiddenError'
+        '404':
+          $ref: '#/responses/NotFoundError'
+        '500':
+          $ref: '#/responses/InternalServerError'
+
+  /test/{test_id}/classes/{class_id}:
+    delete:
+      summary: Remove test application from class
+      parameters:
+        - name: test_id
+          in: path
+          required: true
+          schema:
+            type: string
+          description: ID of the test
+        - name: class_id
+          in: path
+          required: true
+          schema:
+            type: string
+          description: ID of the class
+      responses:
+        '200':
+          description: Test application removed successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+        '401':
+          $ref: '#/responses/UnauthorizedError'
+        '403':
+          $ref: '#/responses/ForbiddenError'
+        '404':
+          $ref: '#/responses/NotFoundError'
+        '500':
+          $ref: '#/responses/InternalServerError'
+
+  /answers:
+    post:
+      summary: Submit student answers
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                student_id:
+                  type: string
+                test_id:
+                  type: string
+                answers:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      question_id:
+                        type: string
+                      answer:
+                        type: string
+              required:
+                - student_id
+                - test_id
+                - answers
+      responses:
+        '201':
+          description: Answers submitted successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+        '400':
+          $ref: '#/responses/BadRequestError'
+        '500':
+          $ref: '#/responses/InternalServerError'
+
+  /user-quick-links/{user_id}:
+    get:
+      summary: Get user quick links
+      parameters:
+        - name: user_id
+          in: path
+          required: true
+          schema:
+            type: string
+          description: ID of the user
+      responses:
+        '200':
+          description: User quick links
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - type: object
+                    properties:
+                      quickLinks:
+                        type: array
+                  - $ref: '#/schemas/UserQuickLinks'
+        '401':
+          $ref: '#/responses/UnauthorizedError'
+        '403':
+          $ref: '#/responses/ForbiddenError'
+        '404':
+          $ref: '#/responses/NotFoundError'
+        '500':
+          $ref: '#/responses/InternalServerError'
+    post:
+      summary: Create or update user quick links
+      parameters:
+        - name: user_id
+          in: path
+          required: true
+          schema:
+            type: string
+          description: ID of the user
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                quickLinks:
+                  type: array
+              required:
+                - quickLinks
+      responses:
+        '200':
+          description: Quick links updated successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  mensagem:
+                    type: string
+                  id:
+                    type: string
+                  user_id:
+                    type: string
+                  quickLinks:
+                    type: array
+                  updated_at:
+                    type: string
+                    format: date-time
+        '201':
+          description: Quick links created successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  mensagem:
+                    type: string
+                  id:
+                    type: string
+                  user_id:
+                    type: string
+                  quickLinks:
+                    type: array
+                  created_at:
+                    type: string
+                    format: date-time
+        '400':
+          $ref: '#/responses/BadRequestError'
+        '401':
+          $ref: '#/responses/UnauthorizedError'
+        '403':
+          $ref: '#/responses/ForbiddenError'
+        '404':
+          $ref: '#/responses/NotFoundError'
+        '500':
+          $ref: '#/responses/InternalServerError'
+    delete:
+      summary: Delete user quick links
+      parameters:
+        - name: user_id
+          in: path
+          required: true
+          schema:
+            type: string
+          description: ID of the user
+      responses:
+        '200':
+          description: Quick links deleted successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  mensagem:
+                    type: string
+        '401':
+          $ref: '#/responses/UnauthorizedError'
+        '403':
+          $ref: '#/responses/ForbiddenError'
+        '404':
+          $ref: '#/responses/NotFoundError'
+        '500':
+          $ref: '#/responses/InternalServerError'
+
+  /logout:
+    post:
+      summary: Logout user
+      responses:
+        '200':
+          description: Logout successful
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  mensagem:
+                    type: string
+
+  /persist-user:
+    get:
+      summary: Get current user and refresh token
+      responses:
+        '200':
+          description: Current user data and new token
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  user:
+                    $ref: '#/schemas/User'
+                  token:
+                    type: string
+        '401':
+          $ref: '#/responses/UnauthorizedError'
+
+  /teacher:
+    get:
+      summary: Get list of teachers
+      responses:
+        '200':
+          description: A list of teachers
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/schemas/Teacher'
+        '401':
+          $ref: '#/responses/UnauthorizedError'
+        '403':
+          $ref: '#/responses/ForbiddenError'
+        '500':
+          $ref: '#/responses/InternalServerError'
+    post:
+      summary: Create a new teacher
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                nome:
+                  type: string
+                email:
+                  type: string
+                  format: email
+                senha:
+                  type: string
+                matricula:
+                  type: string
+                birth_date:
+                  type: string
+                  format: date
+                escolas_ids:
+                  type: array
+                  items:
+                    type: string
+              required:
+                - nome
+                - email
+                - senha
+                - matricula
+      responses:
+        '201':
+          description: Teacher created successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  mensagem:
+                    type: string
+                  usuario:
+                    type: object
+                    properties:
+                      id:
+                        type: string
+                      nome:
+                        type: string
+                      email:
+                        type: string
+                      matricula:
+                        type: string
+                  professor:
+                    type: object
+                    properties:
+                      id:
+                        type: string
+                      nome:
+                        type: string
+                      email:
+                        type: string
+                      matricula:
+                        type: string
+                      birth_date:
+                        type: string
+                        format: date
+                      tenant_id:
+                        type: string
+                      escolas_ids:
+                        type: array
+                        items:
+                          type: string
+        '400':
+          $ref: '#/responses/BadRequestError'
+        '401':
+          $ref: '#/responses/UnauthorizedError'
+        '403':
+          $ref: '#/responses/ForbiddenError'
+        '500':
+          $ref: '#/responses/InternalServerError'
+
+  /teacher/school/{school_id}:
+    get:
+      summary: Get teachers by school ID
+      parameters:
+        - name: school_id
+          in: path
+          required: true
+          schema:
+            type: string
+          description: ID of the school
+      responses:
+        '200':
+          description: A list of teachers in the specified school
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    professor:
+                      $ref: '#/schemas/Teacher'
+                    usuario:
+                      $ref: '#/schemas/User'
+                    vinculo:
+                      type: object
+                      properties:
+                        id:
+                          type: string
+                        registration:
+                          type: string
+                        school_id:
+                          type: string
+        '401':
+          $ref: '#/responses/UnauthorizedError'
+        '403':
+          $ref: '#/responses/ForbiddenError'
+        '404':
+          $ref: '#/responses/NotFoundError'
+        '500':
+          $ref: '#/responses/InternalServerError'
+
+  /admin/criar-usuario:
+    post:
+      summary: Create user (admin only)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name:
+                  type: string
+                email:
+                  type: string
+                  format: email
+                password:
+                  type: string
+                role:
+                  type: string
+                  enum: [aluno, professor, coordenador, diretor, admin, tecadmin]
+                registration:
+                  type: string
+                city_id:
+                  type: string
+              required:
+                - name
+                - email
+                - password
+                - role
+      responses:
+        '201':
+          description: User created successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  mensagem:
+                    type: string
+        '400':
+          $ref: '#/responses/BadRequestError'
+        '401':
+          $ref: '#/responses/UnauthorizedError'
+        '403':
+          $ref: '#/responses/ForbiddenError'
+        '500':
+          $ref: '#/responses/InternalServerError'
+
+  /teacher-class:
+    post:
+      summary: Create teacher-class relationship
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                teacher_id:
+                  type: string
+                class_id:
+                  type: string
+              required:
+                - teacher_id
+                - class_id
+      responses:
+        '201':
+          description: Teacher-class relationship created successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                  teacher_class:
+                    type: object
+                    properties:
+                      id:
+                        type: string
+                      teacher_id:
+                        type: string
+                      class_id:
+                        type: string
+        '400':
+          $ref: '#/responses/BadRequestError'
+        '401':
+          $ref: '#/responses/UnauthorizedError'
+        '403':
+          $ref: '#/responses/ForbiddenError'
+        '500':
+          $ref: '#/responses/InternalServerError'
+
+  /teacher-class/{id}:
+    delete:
+      summary: Delete teacher-class relationship
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+          description: ID of the teacher-class relationship
+      responses:
+        '200':
+          description: Teacher-class relationship deleted successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+        '400':
+          $ref: '#/responses/BadRequestError'
+        '401':
+          $ref: '#/responses/UnauthorizedError'
+        '403':
+          $ref: '#/responses/ForbiddenError'
+        '404':
+          $ref: '#/responses/NotFoundError'
+        '500':
+          $ref: '#/responses/InternalServerError'
+
+  /school-teacher:
+    post:
+      summary: Create school-teacher relationship
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                registration:
+                  type: string
+                school_id:
+                  type: string
+                teacher_id:
+                  type: string
+              required:
+                - registration
+                - school_id
+                - teacher_id
+      responses:
+        '201':
+          description: School-teacher relationship created successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                  school_teacher:
+                    type: object
+                    properties:
+                      id:
+                        type: string
+                      registration:
+                        type: string
+                      school_id:
+                        type: string
+                      teacher_id:
+                        type: string
+        '400':
+          $ref: '#/responses/BadRequestError'
+        '401':
+          $ref: '#/responses/UnauthorizedError'
+        '403':
+          $ref: '#/responses/ForbiddenError'
+        '500':
+          $ref: '#/responses/InternalServerError'
+
+  /school-teacher/{id}:
+    delete:
+      summary: Delete school-teacher relationship
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+          description: ID of the school-teacher relationship
+      responses:
+        '200':
+          description: School-teacher relationship deleted successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+        '400':
+          $ref: '#/responses/BadRequestError'
+        '401':
+          $ref: '#/responses/UnauthorizedError'
+        '403':
+          $ref: '#/responses/ForbiddenError'
+        '404':
+          $ref: '#/responses/NotFoundError'
+        '500':
+          $ref: '#/responses/InternalServerError'
+
 schemas:
     User:
       type: object
@@ -1131,10 +2588,8 @@ schemas:
           type: string
         domain:
           type: string
-          nullable: true
         address:
           type: string
-          nullable: true
         city_id:
           type: string
         created_at:
@@ -1257,6 +2712,210 @@ schemas:
       required:
         - id
         - name
+
+    Subject:
+      type: object
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+      required:
+        - id
+        - name
+
+    Skill:
+      type: object
+      properties:
+        id:
+          type: string
+        code:
+          type: string
+        description:
+          type: string
+        subject_id:
+          type: string
+        grade_id:
+          type: string
+      required:
+        - id
+        - code
+        - description
+
+    Question:
+      type: object
+      properties:
+        id:
+          type: string
+        number:
+          type: integer
+        text:
+          type: string
+        formatted_text:
+          type: string
+        secondstatement:
+          type: string
+        images:
+          type: array
+          items:
+            type: object
+        subject_id:
+          type: string
+        title:
+          type: string
+        description:
+          type: string
+        command:
+          type: string
+        subtitle:
+          type: string
+        alternatives:
+          type: array
+          items:
+            type: object
+        skill:
+          type: array
+        grade_level:
+          type: string
+        difficulty_level:
+          type: string
+        correct_answer:
+          type: string
+        formatted_solution:
+          type: string
+        test_id:
+          type: string
+        question_type:
+          type: string
+        value:
+          type: number
+        topics:
+          type: array
+        version:
+          type: integer
+        created_by:
+          type: string
+        last_modified_by:
+          type: string
+        education_stage_id:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+      required:
+        - id
+        - text
+        - question_type
+
+    Test:
+      type: object
+      properties:
+        id:
+          type: string
+        title:
+          type: string
+        description:
+          type: string
+        type:
+          type: string
+        subject:
+          type: string
+        grade_id:
+          type: string
+        intructions:
+          type: string
+        max_score:
+          type: number
+        time_limit:
+          type: string
+          format: date-time
+        created_by:
+          type: string
+        municipalities:
+          type: array
+        schools:
+          type: array
+        course:
+          type: string
+        model:
+          type: string
+        subjects_info:
+          type: array
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+      required:
+        - id
+        - title
+        - type
+        - course
+        - model
+        - created_by
+
+    TestWithQuestions:
+      allOf:
+        - $ref: '#/schemas/Test'
+        - type: object
+          properties:
+            questions:
+              type: array
+              items:
+                $ref: '#/schemas/Question'
+
+    UserQuickLinks:
+      type: object
+      properties:
+        id:
+          type: string
+        user_id:
+          type: string
+        quickLinks:
+          type: array
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+      required:
+        - id
+        - user_id
+        - quickLinks
+
+    Teacher:
+      type: object
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        email:
+          type: string
+          format: email
+        registration:
+          type: string
+        birth_date:
+          type: string
+          format: date
+        tenant_id:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+      required:
+        - id
+        - name
+        - email
+        - registration
 
 responses:
     UnauthorizedError:

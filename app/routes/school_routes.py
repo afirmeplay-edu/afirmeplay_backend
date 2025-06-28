@@ -9,6 +9,7 @@ import logging
 from app.models.city import City
 from app.models.studentClass import Class
 from app.models.student import Student
+from app.models.schoolTeacher import SchoolTeacher
 
 import uuid
 
@@ -105,10 +106,17 @@ def listar_escolas():
             # Admin pode ver todas as escolas
             schools = query.all()
         elif user['role'] == "professor":
-            # Professor vê todas as escolas onde está alocado
-            from app.models.schoolTeacher import TeacherSchool
-            teacher_schools = TeacherSchool.query.filter_by(teacher_id=user['id']).all()
+            # Professor: buscar primeiro na tabela teacher e depois suas escolas vinculadas
+            from app.models.teacher import Teacher
+            teacher = Teacher.query.filter_by(user_id=user['id']).first()
+            
+            if not teacher:
+                return jsonify({"error": "Professor não encontrado na tabela teacher"}), 404
+            
+            # Buscar escolas onde o professor está vinculado
+            teacher_schools = SchoolTeacher.query.filter_by(teacher_id=teacher.id).all()
             school_ids = [ts.school_id for ts in teacher_schools]
+            
             if school_ids:
                 schools = query.filter(School.id.in_(school_ids)).all()
             else:
@@ -277,10 +285,16 @@ def buscar_escola(escola_id):
             # Admin pode ver qualquer escola
             pass
         elif user['role'] == "professor":
-            # Professor só pode ver escolas onde está alocado
-            from app.models.schoolTeacher import TeacherSchool
-            teacher_school = TeacherSchool.query.filter_by(
-                teacher_id=user['id'],
+            # Professor: buscar primeiro na tabela teacher e depois verificar se está vinculado à escola
+            from app.models.teacher import Teacher
+            teacher = Teacher.query.filter_by(user_id=user['id']).first()
+            
+            if not teacher:
+                return jsonify({"error": "Professor não encontrado na tabela teacher"}), 404
+            
+            # Verificar se o professor está vinculado à escola específica
+            teacher_school = SchoolTeacher.query.filter_by(
+                teacher_id=teacher.id,
                 school_id=school.id
             ).first()
             if not teacher_school:
@@ -348,10 +362,17 @@ def buscar_escolas_por_cidade(city_id):
             # Admin pode ver todas as escolas
             schools = query.all()
         elif user['role'] == "professor":
-            # Professor vê apenas escolas onde está alocado
-            from app.models.schoolTeacher import TeacherSchool
-            teacher_schools = TeacherSchool.query.filter_by(teacher_id=user['id']).all()
+            # Professor: buscar primeiro na tabela teacher e depois suas escolas vinculadas
+            from app.models.teacher import Teacher
+            teacher = Teacher.query.filter_by(user_id=user['id']).first()
+            
+            if not teacher:
+                return jsonify({"error": "Professor não encontrado na tabela teacher"}), 404
+            
+            # Buscar escolas onde o professor está vinculado
+            teacher_schools = SchoolTeacher.query.filter_by(teacher_id=teacher.id).all()
             school_ids = [ts.school_id for ts in teacher_schools]
+            
             if school_ids:
                 schools = query.filter(School.id.in_(school_ids)).all()
             else:
@@ -388,3 +409,114 @@ def buscar_escolas_por_cidade(city_id):
     except Exception as e:
         logging.error(f"Erro inesperado na rota de busca de escolas por cidade: {e}", exc_info=True)
         return jsonify({"error": "Ocorreu um erro inesperado no servidor"}), 500
+
+# POST - Adicionar professor a escola(s)
+@bp.route('/add-teacher', methods=['POST'])
+@jwt_required()
+@role_required("admin", "diretor")
+def adicionar_professor_escola():
+    try:
+        data = request.get_json()
+        
+        if not data:
+            logging.error("Dados não fornecidos na requisição")
+            return jsonify({"erro": "Dados não fornecidos"}), 400
+            
+        # Validação dos campos obrigatórios
+        required_fields = ['teacher_id', 'school_ids']
+        missing_fields = [field for field in required_fields if field not in data]
+        
+        if missing_fields:
+            return jsonify({
+                "erro": "Campos obrigatórios faltando",
+                "campos_faltantes": missing_fields
+            }), 400
+
+        # Validação do formato dos dados
+        if not isinstance(data['teacher_id'], str):
+            return jsonify({"erro": "ID do professor inválido"}), 400
+            
+        if not isinstance(data['school_ids'], list) or len(data['school_ids']) == 0:
+            return jsonify({"erro": "Lista de IDs das escolas inválida ou vazia"}), 400
+
+        # Verificar se todos os IDs das escolas são strings válidas
+        for school_id in data['school_ids']:
+            if not isinstance(school_id, str):
+                return jsonify({"erro": "ID da escola inválido na lista"}), 400
+
+        # Verificar se o professor existe
+        from app.models.teacher import Teacher
+        teacher = Teacher.query.get(data['teacher_id'])
+        if not teacher:
+            return jsonify({"erro": "Professor não encontrado"}), 404
+
+        # Verificar se as escolas existem
+        schools = School.query.filter(School.id.in_(data['school_ids'])).all()
+        if len(schools) != len(data['school_ids']):
+            found_ids = [school.id for school in schools]
+            missing_ids = [school_id for school_id in data['school_ids'] if school_id not in found_ids]
+            return jsonify({
+                "erro": "Algumas escolas não foram encontradas",
+                "escolas_nao_encontradas": missing_ids
+            }), 404
+
+        # Verificar permissões (diretor só pode adicionar professores a escolas da sua cidade)
+        user = get_current_user_from_token()
+        if user['role'] == "diretor":
+            city_id = get_current_tenant_id()
+            if not city_id:
+                return jsonify({"error": "City ID not available for this user"}), 400
+            
+            # Verificar se todas as escolas pertencem à cidade do diretor
+            for school in schools:
+                if school.city_id != city_id:
+                    return jsonify({
+                        "erro": "Você não tem permissão para adicionar professores a escolas de outras cidades"
+                    }), 403
+
+        # Verificar se já existem associações
+        existing_associations = SchoolTeacher.query.filter_by(teacher_id=data['teacher_id']).all()
+        existing_school_ids = [assoc.school_id for assoc in existing_associations]
+        
+        # Filtrar apenas escolas que ainda não estão associadas
+        new_school_ids = [school_id for school_id in data['school_ids'] if school_id not in existing_school_ids]
+        
+        if not new_school_ids:
+            return jsonify({
+                "mensagem": "Professor já está associado a todas as escolas especificadas",
+                "associacoes_existentes": existing_school_ids
+            }), 200
+
+        # Criar novas associações
+        novas_associacoes = []
+        for school_id in new_school_ids:
+            nova_associacao = SchoolTeacher(
+                teacher_id=data['teacher_id'],
+                school_id=school_id
+            )
+            novas_associacoes.append(nova_associacao)
+
+        try:
+            db.session.add_all(novas_associacoes)
+            db.session.commit()
+        except SQLAlchemyError as e:
+            db.session.rollback()
+            logging.error(f"Erro ao adicionar professor às escolas no banco de dados: {str(e)}")
+            return jsonify({
+                "erro": "Erro ao salvar associações no banco de dados",
+                "detalhes": str(e)
+            }), 500
+
+        return jsonify({
+            "mensagem": "Professor adicionado às escolas com sucesso!",
+            "professor_id": data['teacher_id'],
+            "escolas_adicionadas": new_school_ids,
+            "associacoes_existentes": existing_school_ids if existing_school_ids else None
+        }), 201
+
+    except Exception as e:
+        logging.error(f"Erro inesperado ao adicionar professor às escolas: {str(e)}", exc_info=True)
+        return jsonify({
+            "erro": "Erro interno do servidor",
+            "detalhes": str(e)
+        }), 500

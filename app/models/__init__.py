@@ -7,10 +7,13 @@ from .subject import Subject
 from .studentClass import Class
 from .classSubject import ClassSubject
 from .classTest import ClassTest
+from .test import Test
 from .educationStage import EducationStage
 from .grades import Grade
 from .skill import Skill
 from .question import Question
 from .studentAnswer import StudentAnswer
 from .userQuickLinks import UserQuickLinks
+from .teacherClass import TeacherClass
+from .user import User
 

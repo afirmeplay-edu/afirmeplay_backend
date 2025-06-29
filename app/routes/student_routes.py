@@ -36,7 +36,7 @@ def handle_generic_error(error):
 
 @bp.route("", methods=['POST'])
 @jwt_required()
-@role_required("admin", "professor", "coordenador", "diretor")
+@role_required("admin", "professor", "coordenador", "diretor", "tecadm")
 def criar_usuario_e_aluno():
     try:
         logging.info("Iniciando criação de usuário/aluno combinada")

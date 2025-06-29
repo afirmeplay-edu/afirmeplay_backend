@@ -60,7 +60,7 @@ def format_student_details(student):
 
 @bp.route('/list', methods=['GET'])
 @jwt_required()
-@role_required("admin", "tecadmin")
+@role_required("admin", "tecadm")
 def list_users():
     try:
         current_user = get_current_user_from_token()
@@ -71,7 +71,7 @@ def list_users():
         query = User.query
 
         # Filtra por city_id se for tecadmin
-        if current_user['role'] == "tecadmin":
+        if current_user['role'] == "tecadm":
             city_id = get_current_tenant_id()
             if not city_id:
                 return jsonify({"erro": "ID da cidade não disponível"}), 400
@@ -101,7 +101,7 @@ def list_users():
 
 @bp.route('', methods=['POST'])
 @jwt_required()
-@role_required("admin", "professor", "coordenador", "diretor")
+@role_required("admin", "professor", "coordenador", "diretor", "tecadm")
 def create_user():
     try:
         data = request.get_json()
@@ -137,7 +137,7 @@ def create_user():
             email=data["email"],
             password_hash=generate_password_hash(data["password"]),
             registration=data.get("registration"),
-            role=RoleEnum("aluno")
+            role=RoleEnum(data.get("role"))
         )
         db.session.add(novo_usuario)
         db.session.commit()
@@ -164,7 +164,7 @@ def create_user():
 
 @bp.route('/<string:user_id>', methods=['GET'])
 @jwt_required()
-@role_required("admin", "tecadmin", "diretor", "coordenador", "professor", "aluno")
+@role_required("admin", "tecadm", "diretor", "coordenador", "professor", "aluno")
 def get_user_by_id(user_id):
     try:
         logging.info(f"Fetching user with ID: {user_id}")

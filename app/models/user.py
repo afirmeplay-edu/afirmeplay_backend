@@ -11,7 +11,7 @@ class RoleEnum(Enum):
     COORDENADOR = "coordenador"
     DIRETOR = "diretor"
     ADMIN = "admin"
-    
+    TECADM = "tecadm"
 
 class User(db.Model):
     __tablename__ = 'users'

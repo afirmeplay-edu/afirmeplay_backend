@@ -5,15 +5,9 @@ import requests
 import os
 import threading
 
-# Adicionar logs para debug
-print("Iniciando aplicação...")
-print(f"Diretório atual: {os.getcwd()}")
-print(f"Conteúdo do diretório: {os.listdir('.')}")
 
 app = create_app()
 
-# Log da URL do banco de dados
-print(f"DATABASE_URL: {os.getenv('DATABASE_URL')}")
 
 PING_INTERVAL = 14 * 60
 SELF_URL = os.environ.get("SELF_URL","https://innovaplay-backend.onrender.com")

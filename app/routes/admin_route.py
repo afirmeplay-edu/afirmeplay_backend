@@ -22,7 +22,7 @@ def criar_usuario():
     registration = data.get('registration')
     city_id = data.get("city_id")
 
-    roles_validas = ['aluno', 'professor', 'coordenador', 'diretor',"admin",'tecadmin']
+    roles_validas = ['aluno', 'professor', 'coordenador', 'diretor',"admin"]
     if role not in roles_validas:
         return jsonify({"erro": "Papel (role) inválido."}), 400
 

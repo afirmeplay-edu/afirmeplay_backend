@@ -24,7 +24,8 @@ swaggerui_blueprint = get_swaggerui_blueprint(
 )
 
 def create_app():
-    load_dotenv()
+    # Carregar variáveis de ambiente do arquivo .env da pasta app/
+    load_dotenv('app/.env')
     
     app = Flask(__name__)
     

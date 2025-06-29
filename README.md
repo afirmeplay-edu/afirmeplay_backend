@@ -1,5 +1,56 @@
 # InnovaPlay Backend
 
+## Funcionalidades de Usuário
+
+### Redefinição de Senha
+O sistema oferece funcionalidade completa de redefinição de senha usando SendGrid para envio de emails.
+
+#### Solicitar Redefinição de Senha
+**POST** `/users/forgot-password`
+
+Solicita o envio de um email com link para redefinição de senha.
+
+```json
+{
+  "email": "usuario@exemplo.com"
+}
+```
+
+#### Redefinir Senha
+**POST** `/users/reset-password`
+
+Redefine a senha usando o token recebido por email.
+
+```json
+{
+  "token": "token_gerado_anteriormente",
+  "new_password": "nova_senha123"
+}
+```
+
+#### Alterar Senha (Usuário Logado)
+**POST** `/users/change-password`
+
+Altera a senha do usuário logado.
+
+```json
+{
+  "current_password": "senha_atual",
+  "new_password": "nova_senha123"
+}
+```
+
+#### Validar Token de Reset
+**POST** `/users/validate-reset-token`
+
+Valida se um token de reset é válido.
+
+```json
+{
+  "token": "token_para_validar"
+}
+```
+
 ## Rotas de Avaliação
 
 ### Criar Avaliação

@@ -24,6 +24,10 @@ class User(db.Model):
     role = db.Column(db.Enum(RoleEnum), nullable=False)
     created_at = db.Column(db.DateTime, server_default=db.func.now())
     updated_at = db.Column(db.DateTime, server_default=db.func.now(), onupdate=db.func.now())
+    
+    # Campos para reset de senha
+    reset_token = db.Column(db.String(255), unique=True, nullable=True)
+    reset_token_expires = db.Column(db.DateTime, nullable=True)
 
     student = db.relationship("Student", backref="users", uselist=False)
     teacher = db.relationship("Teacher", backref="users", uselist=False)

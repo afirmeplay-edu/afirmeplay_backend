@@ -1,4 +1,4 @@
-from flask import Blueprint, jsonify
+from flask import Blueprint, jsonify, request
 from app.models.grades import Grade
 from app.models.educationStage import EducationStage
 from app import db
@@ -55,3 +55,63 @@ def getGradesByEducationStage(education_stage_id):
 
     except Exception as e:
         return jsonify({"error": "Erro ao buscar grades", "details": str(e)}), 500
+
+@bp.route("/<grade_id>", methods=["DELETE"])
+@jwt_required()
+def deleteGrade(grade_id):
+    try:
+        grade = Grade.query.get(grade_id)
+        if not grade:
+            return jsonify({"error": "Grade não encontrada"}), 404
+
+        # Verifica se há classes ou estudantes associados
+        if grade.classes or grade.students:
+            return jsonify({"error": "Não é possível excluir grade que possui classes ou estudantes associados"}), 400
+
+        db.session.delete(grade)
+        db.session.commit()
+        
+        return jsonify({"message": "Grade excluída com sucesso"}), 200
+
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({"error": "Erro ao excluir grade", "details": str(e)}), 500
+
+@bp.route("/<grade_id>", methods=["PUT"])
+@jwt_required()
+def updateGrade(grade_id):
+    try:
+        grade = Grade.query.get(grade_id)
+        if not grade:
+            return jsonify({"error": "Grade não encontrada"}), 404
+
+        data = request.get_json()
+        
+        if not data:
+            return jsonify({"error": "Dados não fornecidos"}), 400
+
+        # Atualiza o nome se fornecido
+        if 'name' in data:
+            if not data['name'] or not data['name'].strip():
+                return jsonify({"error": "Nome da grade é obrigatório"}), 400
+            grade.name = data['name'].strip()
+
+        # Atualiza a etapa de ensino se fornecida
+        if 'education_stage_id' in data:
+            education_stage = EducationStage.query.get(data['education_stage_id'])
+            if not education_stage:
+                return jsonify({"error": "Etapa de ensino não encontrada"}), 404
+            grade.education_stage_id = data['education_stage_id']
+
+        db.session.commit()
+        
+        return jsonify({
+            "id": grade.id,
+            "name": grade.name,
+            "education_stage_id": grade.education_stage_id,
+            "message": "Grade atualizada com sucesso"
+        }), 200
+
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({"error": "Erro ao atualizar grade", "details": str(e)}), 500

@@ -5,6 +5,9 @@ from app.models.classTest import ClassTest
 from app.models.studentClass import Class
 from app.models.school import School
 from app.models.grades import Grade
+from app.models.student import Student
+from app.models.schoolTeacher import SchoolTeacher
+from app.models.teacher import Teacher
 from app import db
 from app.utils.auth import get_current_tenant_id
 from flask_jwt_extended import jwt_required
@@ -66,6 +69,18 @@ def criar_avaliacao():
                 logging.error("Disciplina ou disciplinas ausentes para tipo AVALIACAO")
                 return jsonify({"error": "Subject or subjects array is required for AVALIACAO type"}), 400
 
+        # Validação de escola se fornecida
+        if data.get('schools'):
+            if isinstance(data['schools'], list):
+                school_ids = data['schools']
+            else:
+                school_ids = [data['schools']]
+            
+            # Verificar se todas as escolas existem
+            existing_schools = School.query.filter(School.id.in_(school_ids)).all()
+            if len(existing_schools) != len(school_ids):
+                return jsonify({"error": "Uma ou mais escolas não foram encontradas"}), 400
+
         logging.info("Criando nova avaliação com os dados fornecidos")
         print(data)
         nova_avaliacao = Test(
@@ -82,40 +97,52 @@ def criar_avaliacao():
             schools=data.get('schools'),
             course=data.get('course'),
             model=data.get('model'),
-            subjects_info=data.get('subjects') or data.get('subjects_info')  # Aceita tanto 'subjects' quanto 'subjects_info'
+            subjects_info=data.get('subjects') or data.get('subjects_info'),  # Aceita tanto 'subjects' quanto 'subjects_info'
+            status='agendada'  # Sempre inicia como agendada
         )
 
         # Adiciona questões se fornecidas
         if 'questions' in data and isinstance(data['questions'], list):
             for question_data in data['questions']:
-                # Extrai o ID do grade se for um objeto
-                grade_level = question_data.get('grade')
-                if isinstance(grade_level, dict) and 'id' in grade_level:
-                    grade_level = grade_level['id']
-                
-                # Cria uma nova questão sem verificar se já existe
-                question = Question(
-                    number=question_data.get('number'),
-                    text=question_data.get('text'),
-                    formatted_text=question_data.get('formattedText'),
-                    subject_id=question_data.get('subjectId'),
-                    title=question_data.get('title'),
-                    description=question_data.get('description'),
-                    command=question_data.get('command'),
-                    subtitle=question_data.get('subtitle'),
-                    alternatives=question_data.get('options'),
-                    skill=question_data.get('skills'),
-                    grade_level=grade_level,
-                    difficulty_level=question_data.get('difficulty'),
-                    correct_answer=question_data.get('solution'),
-                    formatted_solution=question_data.get('formattedSolution'),
-                    question_type=question_data.get('type'),
-                    value=question_data.get('value'),
-                    topics=question_data.get('topics'),
-                    created_by=question_data.get('created_by') or data.get('created_by')  # Usa o da questão ou o da avaliação
-                )
-                db.session.add(question)
-                nova_avaliacao.questions.append(question)
+                # Se um ID for fornecido, buscar questão existente
+                if 'id' in question_data and question_data['id']:
+                    existing_question = Question.query.get(question_data['id'])
+                    if existing_question:
+                        # Associar questão existente à avaliação
+                        nova_avaliacao.questions.append(existing_question)
+                        logging.info(f"Questão existente {existing_question.id} associada à avaliação")
+                    else:
+                        logging.warning(f"Questão com ID {question_data['id']} não encontrada")
+                else:
+                    # Criar nova questão apenas se não houver ID
+                    # Extrai o ID do grade se for um objeto
+                    grade_level = question_data.get('grade')
+                    if isinstance(grade_level, dict) and 'id' in grade_level:
+                        grade_level = grade_level['id']
+                    
+                    question = Question(
+                        number=question_data.get('number'),
+                        text=question_data.get('text'),
+                        formatted_text=question_data.get('formattedText'),
+                        subject_id=question_data.get('subjectId') or question_data.get('subject_id'),
+                        title=question_data.get('title'),
+                        description=question_data.get('description'),
+                        command=question_data.get('command'),
+                        subtitle=question_data.get('subtitle'),
+                        alternatives=question_data.get('options'),
+                        skill=question_data.get('skills'),
+                        grade_level=grade_level,
+                        difficulty_level=question_data.get('difficulty'),
+                        correct_answer=question_data.get('solution'),
+                        formatted_solution=question_data.get('formattedSolution'),
+                        question_type=question_data.get('type'),
+                        value=question_data.get('value'),
+                        topics=question_data.get('topics'),
+                        created_by=question_data.get('created_by') or data.get('created_by')
+                    )
+                    db.session.add(question)
+                    nova_avaliacao.questions.append(question)
+                    logging.info(f"Nova questão criada e associada à avaliação")
 
         db.session.add(nova_avaliacao)
         db.session.commit()
@@ -157,6 +184,11 @@ def listar_avaliacoes():
         # Se o usuário for professor, filtra para ver apenas os seus testes
         if user['role'] == 'professor':
             query = query.filter(Test.created_by == user['id'])
+
+        # Filtro por status se fornecido
+        status_filter = request.args.get('status')
+        if status_filter:
+            query = query.filter(Test.status == status_filter)
 
         avaliacoes = query.all()
         
@@ -201,6 +233,182 @@ def listar_avaliacoes_por_usuario(user_id):
     except Exception as e:
         logging.error(f"Erro ao listar avaliações do usuário: {str(e)}", exc_info=True)
         return jsonify({"error": "Erro ao listar avaliações do usuário", "details": str(e)}), 500
+
+@bp.route('/school/<string:school_id>', methods=['GET'])
+@jwt_required()
+@role_required("admin", "professor", "coordenador", "diretor")
+def listar_avaliacoes_por_escola(school_id):
+    """Lista todas as avaliações agendadas para uma escola específica."""
+    try:
+        user = get_current_user_from_token()
+        if not user:
+            return jsonify({"error": "User not found or token invalid"}), 401
+
+        # Verificar se a escola existe
+        school = School.query.get(school_id)
+        if not school:
+            return jsonify({"error": "School not found"}), 404
+
+        # Verificar permissões do usuário
+        if user['role'] == 'professor':
+            # Professor só pode ver avaliações de escolas onde está alocado
+            teacher = Teacher.query.filter_by(user_id=user['id']).first()
+            if not teacher:
+                return jsonify({"error": "Teacher not found"}), 404
+            
+            teacher_school = SchoolTeacher.query.filter_by(
+                teacher_id=teacher.id,
+                school_id=school_id
+            ).first()
+            if not teacher_school:
+                return jsonify({"error": "You don't have permission to view tests for this school"}), 403
+
+        # Buscar avaliações que incluem esta escola
+        query = Test.query.options(
+            joinedload(Test.creator),
+            joinedload(Test.subject_rel),
+            joinedload(Test.grade),
+            subqueryload(Test.questions).options(
+                joinedload(Question.subject),
+                joinedload(Question.grade),
+                joinedload(Question.education_stage),
+                joinedload(Question.creator),
+                joinedload(Question.last_modifier)
+            )
+        ).filter(
+            Test.status == 'agendada'
+        )
+
+        # Filtrar por escola (pode estar em schools como lista ou string)
+        avaliacoes = []
+        all_tests = query.all()
+        
+        for test in all_tests:
+            if test.schools:
+                if isinstance(test.schools, list):
+                    if school_id in test.schools:
+                        avaliacoes.append(test)
+                elif isinstance(test.schools, str):
+                    if test.schools == school_id:
+                        avaliacoes.append(test)
+
+        return jsonify([format_test_response(a) for a in avaliacoes]), 200
+
+    except Exception as e:
+        logging.error(f"Error listing tests by school: {str(e)}", exc_info=True)
+        return jsonify({"error": "Error listing tests by school", "details": str(e)}), 500
+
+@bp.route('/student/<string:student_id>', methods=['GET'])
+@jwt_required()
+@role_required("admin", "professor", "coordenador", "diretor", "aluno")
+def listar_avaliacoes_por_aluno(student_id):
+    """Lista todas as avaliações agendadas para um aluno específico."""
+    try:
+        user = get_current_user_from_token()
+        if not user:
+            return jsonify({"error": "User not found or token invalid"}), 401
+
+        # Se o usuário for aluno, só pode ver suas próprias avaliações
+        if user['role'] == 'aluno':
+            if user['id'] != student_id:
+                return jsonify({"error": "You can only view your own tests"}), 403
+
+        # Verificar se o aluno existe
+        # Se o student_id for igual ao user_id atual, buscar por user_id
+        if student_id == user['id']:
+            student = Student.query.filter_by(user_id=user['id']).first()
+        else:
+            student = Student.query.get(student_id)
+        
+        if not student:
+            return jsonify({"error": "Student not found"}), 404
+
+        # Verificar permissões do usuário
+        if user['role'] == 'professor':
+            # Professor só pode ver alunos da escola onde está alocado
+            teacher = Teacher.query.filter_by(user_id=user['id']).first()
+            if not teacher:
+                return jsonify({"error": "Teacher not found"}), 404
+            
+            teacher_school = SchoolTeacher.query.filter_by(
+                teacher_id=teacher.id,
+                school_id=student.school_id
+            ).first()
+            if not teacher_school:
+                return jsonify({"error": "You don't have permission to view tests for this student"}), 403
+
+        # Buscar avaliações que incluem a escola do aluno
+        query = Test.query.options(
+            joinedload(Test.creator),
+            joinedload(Test.subject_rel),
+            joinedload(Test.grade),
+            subqueryload(Test.questions).options(
+                joinedload(Question.subject),
+                joinedload(Question.grade),
+                joinedload(Question.education_stage),
+                joinedload(Question.creator),
+                joinedload(Question.last_modifier)
+            )
+        ).filter(
+            Test.status == 'agendada'
+        )
+
+        # Filtrar por escola do aluno
+        avaliacoes = []
+        all_tests = query.all()
+        
+        for test in all_tests:
+            if test.schools:
+                if isinstance(test.schools, list):
+                    if student.school_id in test.schools:
+                        avaliacoes.append(test)
+                elif isinstance(test.schools, str):
+                    if test.schools == student.school_id:
+                        avaliacoes.append(test)
+
+        return jsonify([format_test_response(a) for a in avaliacoes]), 200
+
+    except Exception as e:
+        logging.error(f"Error listing tests by student: {str(e)}", exc_info=True)
+        return jsonify({"error": "Error listing tests by student", "details": str(e)}), 500
+
+@bp.route('/<string:test_id>/status', methods=['PUT'])
+@jwt_required()
+@role_required("admin", "professor", "coordenador", "diretor")
+def atualizar_status_avaliacao(test_id):
+    """Atualiza o status de uma avaliação."""
+    try:
+        test = Test.query.get(test_id)
+        if not test:
+            return jsonify({"error": "Test not found"}), 404
+
+        data = request.get_json()
+        if not data or 'status' not in data:
+            return jsonify({"error": "Status field is required"}), 400
+
+        # Validar status permitidos
+        status_permitidos = ['agendada', 'em_andamento', 'concluida', 'cancelada']
+        if data['status'] not in status_permitidos:
+            return jsonify({"error": f"Invalid status. Allowed values: {', '.join(status_permitidos)}"}), 400
+
+        # Verificar permissões do usuário
+        user = get_current_user_from_token()
+        if user['role'] == 'professor' and test.created_by != user['id']:
+            return jsonify({"error": "You can only update tests you created"}), 403
+
+        test.status = data['status']
+        db.session.commit()
+
+        return jsonify({
+            "message": "Test status updated successfully",
+            "id": test.id,
+            "status": test.status
+        }), 200
+
+    except Exception as e:
+        db.session.rollback()
+        logging.error(f"Error updating test status: {str(e)}", exc_info=True)
+        return jsonify({"error": "Error updating test status", "details": str(e)}), 500
 
 @bp.route('/<string:test_id>', methods=['GET'])
 @jwt_required()

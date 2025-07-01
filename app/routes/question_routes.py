@@ -209,9 +209,13 @@ def list_questions():
             joinedload(Question.last_modifier)
         )
         
-        if user['role'] == 'professor':
-            query = query.filter(Question.created_by == user['id'])
-        elif created_by:
+        # ALTERAÇÃO: Permitir acesso a todo o banco de questões
+        # Anteriormente professores só viam suas próprias questões
+        # Agora todos os usuários (admin, professor, coordenador, diretor) 
+        # podem acessar todo o banco de questões para criar avaliações mais ricas
+        
+        # Filtro específico por created_by apenas se solicitado explicitamente
+        if created_by:
             query = query.filter(Question.created_by == created_by)
 
         if question_type:

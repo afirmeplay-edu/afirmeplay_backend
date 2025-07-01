@@ -25,6 +25,7 @@ class Test(db.Model):
     course = db.Column(db.String(100))  # Curso (Ensino Fundamental, etc)
     model = db.Column(db.String(50))  # SAEB, PROVA, etc
     subjects_info = db.Column(JSON)  # Informações sobre as disciplinas e quantidade de questões
+    status = db.Column(db.String(20), default='agendada')  # agendada, em_andamento, concluida, cancelada
 
     # Relacionamentos
     creator = db.relationship('User', foreign_keys=[created_by])

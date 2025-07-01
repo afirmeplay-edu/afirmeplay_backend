@@ -10,27 +10,27 @@ def format_question_response(q, exclude_fields=None):
 
     response = {
         'id': q.id,
-        'number': q.number,
-        'text': q.text,
-        'formattedText': q.formatted_text,
-        'options': q.alternatives,
-        'skills': q.skill,
-        'difficulty': q.difficulty_level,
-        'solution': q.correct_answer,
-        'formattedSolution': q.formatted_solution,
-        'secondStatement': q.secondstatement,
-        'type': q.question_type,
-        'value': q.value,
-        'topics': q.topics,
-        'version': q.version,
+        'number': q.number if q.number is not None else 1,
+        'text': q.text if q.text else '',
+        'formattedText': q.formatted_text if q.formatted_text else q.text if q.text else '',
+        'options': q.alternatives if q.alternatives else [],
+        'skills': q.skill.split(',') if q.skill else [],
+        'difficulty': q.difficulty_level if q.difficulty_level else 'Médio',
+        'solution': q.correct_answer if q.correct_answer else '',
+        'formattedSolution': q.formatted_solution if q.formatted_solution else '',
+        'secondStatement': q.secondstatement if q.secondstatement else '',
+        'type': q.question_type if q.question_type else 'multipleChoice',
+        'value': q.value if q.value is not None else 1,
+        'topics': q.topics if q.topics else [],
+        'version': q.version if q.version is not None else 1,
         'updatedAt': q.updated_at.isoformat() if q.updated_at else None,
         'lastModifiedBy': {'id': q.last_modifier.id, 'name': q.last_modifier.name} if q.last_modifier else None,
     }
 
     if 'title' not in exclude_fields:
-        response['title'] = q.title
+        response['title'] = q.title if q.title else ''
     if 'description' not in exclude_fields:
-        response['description'] = q.description
+        response['description'] = q.description if q.description else ''
     if 'subject' not in exclude_fields:
         response['subject'] = {'id': q.subject.id, 'name': q.subject.name} if q.subject else None
     if 'grade' not in exclude_fields:
@@ -41,8 +41,8 @@ def format_question_response(q, exclude_fields=None):
         response['createdAt'] = q.created_at.isoformat() if q.created_at else None
         response['createdBy'] = {'id': q.creator.id, 'name': q.creator.name} if q.creator else None
     
-    # Remove chaves com valor None para uma resposta mais limpa
-    return {k: v for k, v in response.items() if v is not None}
+    # Não remover campos None - retornar todos os campos
+    return response
 
 def format_test_response(test):
     # Campos do Test que são análogos aos da Question e que serão excluídos da formatação da questão
@@ -63,6 +63,8 @@ def format_test_response(test):
 
     # Buscar informações sobre as classes onde a avaliação foi aplicada
     applied_classes_info = []
+    total_students = 0
+    
     if test.class_tests:
         for ct in test.class_tests:
             class_obj = Class.query.get(ct.class_id)
@@ -70,11 +72,16 @@ def format_test_response(test):
                 school_obj = School.query.get(class_obj.school_id)
                 grade_obj = Grade.query.get(class_obj.grade_id)
                 
+                # Contar alunos na turma
+                students_count = len(class_obj.students) if class_obj.students else 0
+                total_students += students_count
+                
                 applied_classes_info.append({
                     "class_test_id": ct.id,
                     "class": {
                         "id": class_obj.id,
                         "name": class_obj.name,
+                        "students_count": students_count,
                         "school": {
                             "id": school_obj.id,
                             "name": school_obj.name
@@ -97,14 +104,22 @@ def format_test_response(test):
         'grade': {'id': test.grade.id, 'name': test.grade.name} if test.grade else None,
         'max_score': test.max_score,
         'time_limit': test.time_limit.isoformat() if test.time_limit else None,
+        'duration': 90,  # Duração padrão em minutos - pode ser configurável no futuro
         'createdBy': {'id': test.creator.id, 'name': test.creator.name} if test.creator else None,
         'createdAt': test.created_at.isoformat() if test.created_at else None,
         'updatedAt': test.updated_at.isoformat() if test.updated_at else None,
         'course': {'id': course_obj.id, 'name': course_obj.name} if course_obj else None,
         'municipalities': municipalities_list,
+        'municipalities_count': len(municipalities_list),
         'schools': schools_list,
+        'schools_count': len(schools_list),
+        # Para compatibilidade com o front-end, adicionar também school como primeiro da lista
+        'school': schools_list[0] if schools_list else None,
         'model': test.model,
         'subjects_info': test.subjects_info,
+        'status': test.status,
         'applied_classes': applied_classes_info,
+        'applied_classes_count': len(applied_classes_info),
+        'total_students': total_students,
         'questions': [format_question_response(q, exclude_fields=exclude_from_question) for q in test.questions]
     } 

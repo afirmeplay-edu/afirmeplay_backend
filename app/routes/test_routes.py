@@ -93,6 +93,7 @@ def criar_avaliacao():
             max_score=data.get('max_score'),
             time_limit=datetime.fromisoformat(data.get('time_limit')) if data.get('time_limit') else None,
             end_time=datetime.fromisoformat(data.get('end_time')) if data.get('end_time') else None,
+            evaluation_mode=data.get('evaluation_mode', 'virtual'),
             created_by=data.get('created_by'),
             municipalities=data.get('municipalities'),
             schools=data.get('schools'),
@@ -469,7 +470,7 @@ def atualizar_avaliacao(test_id):
         # Campos que podem ser atualizados
         campos = [
             'title', 'description', 'type', 'subject', 'grade_id',
-            'max_score', 'time_limit', 'end_time', 'intructions', 'municipalities',
+            'max_score', 'time_limit', 'end_time', 'evaluation_mode', 'intructions', 'municipalities',
             'schools', 'course', 'model', 'subjects_info'
         ]
 

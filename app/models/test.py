@@ -14,6 +14,7 @@ class Test(db.Model):
     max_score = db.Column(db.Float)
     time_limit = db.Column(db.DateTime)
     end_time = db.Column(db.DateTime)
+    evaluation_mode = db.Column(db.String(20), default='virtual')  # virtual, physical
     created_by = db.Column(db.String, db.ForeignKey('users.id'))
     created_at = db.Column(db.DateTime, server_default=db.text('CURRENT_TIMESTAMP'))
     updated_at = db.Column(db.DateTime, server_default=db.text('CURRENT_TIMESTAMP'), onupdate=db.text('CURRENT_TIMESTAMP'))

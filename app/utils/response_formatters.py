@@ -104,6 +104,7 @@ def format_test_response(test):
         'grade': {'id': test.grade.id, 'name': test.grade.name} if test.grade else None,
         'max_score': test.max_score,
         'time_limit': test.time_limit.isoformat() if test.time_limit else None,
+        'end_time': test.end_time.isoformat() if test.end_time else None,
         'duration': 90,  # Duração padrão em minutos - pode ser configurável no futuro
         'createdBy': {'id': test.creator.id, 'name': test.creator.name} if test.creator else None,
         'createdAt': test.created_at.isoformat() if test.created_at else None,

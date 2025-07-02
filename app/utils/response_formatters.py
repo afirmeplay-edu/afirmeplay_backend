@@ -3,6 +3,7 @@ from app.models.city import City
 from app.models.school import School
 from app.models.studentClass import Class
 from app.models.grades import Grade
+from app.models.subject import Subject
 import uuid
 import logging
 
@@ -42,6 +43,59 @@ def _get_education_stage_safely(course_value):
     except Exception as e:
         logging.warning(f"Erro ao buscar EducationStage para valor '{course_value}': {str(e)}")
         return None
+
+
+def _get_all_subjects_from_test(test):
+    """
+    Busca todas as disciplinas de uma avaliação, tanto a única quanto as múltiplas.
+    
+    Args:
+        test: Objeto Test
+        
+    Returns:
+        Lista de dicionários com {'id': id, 'name': name} das disciplinas
+    """
+    subjects_list = []
+    
+    try:
+        # 1. Verificar se há disciplina única (campo subject)
+        if test.subject and test.subject_rel:
+            subjects_list.append({
+                'id': test.subject_rel.id,
+                'name': test.subject_rel.name
+            })
+        
+        # 2. Verificar se há múltiplas disciplinas (campo subjects_info)
+        if test.subjects_info and isinstance(test.subjects_info, list):
+            for subject_info in test.subjects_info:
+                # Verificar se subject_info é um dicionário com id
+                if isinstance(subject_info, dict) and 'id' in subject_info:
+                    subject_id = subject_info['id']
+                    
+                    # Buscar o nome da disciplina no banco
+                    subject_obj = Subject.query.get(subject_id)
+                    if subject_obj:
+                        # Verificar se já não foi adicionada (evitar duplicatas)
+                        if not any(s['id'] == subject_obj.id for s in subjects_list):
+                            subjects_list.append({
+                                'id': subject_obj.id,
+                                'name': subject_obj.name
+                            })
+                # Se subject_info é apenas um ID (string)
+                elif isinstance(subject_info, str) and _is_valid_uuid(subject_info):
+                    subject_obj = Subject.query.get(subject_info)
+                    if subject_obj:
+                        # Verificar se já não foi adicionada (evitar duplicatas)
+                        if not any(s['id'] == subject_obj.id for s in subjects_list):
+                            subjects_list.append({
+                                'id': subject_obj.id,
+                                'name': subject_obj.name
+                            })
+                            
+    except Exception as e:
+        logging.warning(f"Erro ao buscar disciplinas para teste {test.id}: {str(e)}")
+    
+    return subjects_list
 
 
 def format_question_response(q, exclude_fields=None):
@@ -91,6 +145,9 @@ def format_test_response(test):
     
     # Busca os nomes para os campos que armazenam IDs de forma segura
     course_obj = _get_education_stage_safely(test.course)
+    
+    # Buscar todas as disciplinas da avaliação (única + múltiplas)
+    all_subjects = _get_all_subjects_from_test(test)
     
     municipalities_list = []
     if test.municipalities:
@@ -167,7 +224,9 @@ def format_test_response(test):
         'title': test.title,
         'description': test.description,
         'type': test.type,
-        'subject': {'id': test.subject_rel.id, 'name': test.subject_rel.name} if test.subject_rel else None,
+        'subject': all_subjects[0] if all_subjects else None,  # Primeira disciplina para compatibilidade
+        'subjects': all_subjects,  # TODAS as disciplinas selecionadas
+        'subjects_count': len(all_subjects),  # Quantidade de disciplinas
         'grade': {'id': test.grade.id, 'name': test.grade.name} if test.grade else None,
         'max_score': test.max_score,
         'time_limit': test.time_limit.isoformat() if test.time_limit else None,
@@ -184,7 +243,7 @@ def format_test_response(test):
         # Para compatibilidade com o front-end, adicionar também school como primeiro da lista
         'school': schools_list[0] if schools_list else None,
         'model': test.model,
-        'subjects_info': test.subjects_info,
+        'subjects_info': test.subjects_info,  # Manter o campo original para compatibilidade
         'status': test.status,
         'applied_classes': applied_classes_info,
         'applied_classes_count': len(applied_classes_info),

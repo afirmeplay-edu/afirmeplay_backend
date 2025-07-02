@@ -95,6 +95,16 @@ def format_test_response(test):
                     "expiration": ct.expiration.isoformat() if ct.expiration else None
                 })
 
+    # Calcular duração dinamicamente
+    duration = 90  # Duração padrão em minutos
+    if test.time_limit and test.end_time:
+        # Calcular duração real baseada no end_time - time_limit
+        duration_delta = test.end_time - test.time_limit
+        duration = int(duration_delta.total_seconds() / 60)  # Converter para minutos
+    elif test.time_limit:
+        # Se não tiver end_time, usar duração padrão de 90 minutos
+        duration = 90
+
     return {
         'id': test.id,
         'title': test.title,
@@ -104,7 +114,9 @@ def format_test_response(test):
         'grade': {'id': test.grade.id, 'name': test.grade.name} if test.grade else None,
         'max_score': test.max_score,
         'time_limit': test.time_limit.isoformat() if test.time_limit else None,
-        'duration': 90,  # Duração padrão em minutos - pode ser configurável no futuro
+        'end_time': test.end_time.isoformat() if test.end_time else None,
+        'duration': duration,
+        'evaluation_mode': test.evaluation_mode if test.evaluation_mode else 'virtual',
         'createdBy': {'id': test.creator.id, 'name': test.creator.name} if test.creator else None,
         'createdAt': test.created_at.isoformat() if test.created_at else None,
         'updatedAt': test.updated_at.isoformat() if test.updated_at else None,

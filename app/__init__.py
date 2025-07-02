@@ -32,6 +32,17 @@ def create_app():
     # Configuração para não redirecionar requisições OPTIONS
     app.url_map.strict_slashes = False
 
+    # Configuração do CORS
+    CORS(app, resources={
+        r"/*": {
+            "origins": ["http://localhost:5173", "http://localhost:3000", "http://127.0.0.1:5173"],
+            "methods": ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+            "allow_headers": ["Content-Type", "Authorization"],
+            "expose_headers": ["Authorization"],
+            "supports_credentials": True
+        }
+    })
+
     # Configuração do JWT
     app.config['JWT_SECRET_KEY'] = os.getenv('JWT_SECRET_KEY')
     app.config['JWT_TOKEN_LOCATION'] = ['headers']

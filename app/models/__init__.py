@@ -13,6 +13,7 @@ from .grades import Grade
 from .skill import Skill
 from .question import Question
 from .studentAnswer import StudentAnswer
+from .testSession import TestSession
 from .userQuickLinks import UserQuickLinks
 from .teacherClass import TeacherClass
 from .user import User

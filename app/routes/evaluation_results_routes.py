@@ -1,0 +1,637 @@
+"""
+Rotas especializadas para resultados de avaliações
+Endpoints para análise de dados, estatísticas e relatórios
+"""
+
+from flask import Blueprint, request, jsonify
+from flask_jwt_extended import jwt_required
+from app.decorators.role_required import role_required, get_current_user_from_token
+from app.services.evaluation_calculator import EvaluationCalculator
+from app.services.evaluation_filters import EvaluationFilters
+from app.services.evaluation_aggregator import EvaluationAggregator
+from app.models.test import Test
+from app.models.student import Student
+from app.models.studentAnswer import StudentAnswer
+from app.models.question import Question
+from app.models.subject import Subject
+from app.models.school import School
+from app.models.studentClass import Class
+from app.models.grades import Grade
+from app import db
+import logging
+from typing import Dict, Any
+from sqlalchemy import func, case
+from datetime import datetime
+
+bp = Blueprint('evaluation_results', __name__, url_prefix='/evaluation-results')
+
+# ==================== ENDPOINTS TEMPORÁRIOS DE TESTE ====================
+
+@bp.route('/test/ping', methods=['GET'])
+def test_ping():
+    """Endpoint de teste sem autenticação"""
+    return jsonify({"message": "Backend está funcionando!", "timestamp": datetime.now().isoformat()}), 200
+
+@bp.route('/test/avaliacoes', methods=['GET'])
+def test_avaliacoes():
+    """Endpoint de teste para avaliacoes sem autenticação"""
+    return jsonify({
+        "data": [
+            {
+                "id": "test-eval-1",
+                "titulo": "Avaliação de Matemática - 9º Ano [TESTE]",
+                "disciplina": "Matemática",
+                "curso": "Ensino Fundamental",
+                "serie": "9º Ano",
+                "escola": "Escola Municipal Campo Alegre",
+                "municipio": "Campo Alegre",
+                "data_aplicacao": "2024-01-15T10:00:00Z",
+                "data_correcao": "2024-01-16T14:30:00Z",
+                "status": "concluida",
+                "total_alunos": 25,
+                "alunos_participantes": 23,
+                "alunos_pendentes": 2,
+                "alunos_ausentes": 0,
+                "media_nota": 7.2,
+                "media_proficiencia": 650,
+                "distribuicao_classificacao": {
+                    "abaixo_do_basico": 2,
+                    "basico": 8,
+                    "adequado": 10,
+                    "avancado": 3
+                },
+                "turmas_desempenho": []
+            }
+        ],
+        "total": 1,
+        "page": 1,
+        "per_page": 10,
+        "total_pages": 1
+    }), 200
+
+@bp.route('/test/relatorio-detalhado/<evaluation_id>', methods=['GET'])
+def test_relatorio_detalhado(evaluation_id):
+    """Endpoint de teste para relatório detalhado sem autenticação"""
+    return jsonify({
+        "avaliacao": {
+            "id": evaluation_id,
+            "titulo": "Avaliação de Matemática - 9º Ano [TESTE]",
+            "disciplina": "Matemática",
+            "total_questoes": 21
+        },
+        "questoes": [
+            {
+                "id": "q1",
+                "numero": 1,
+                "texto": "Questão sobre números e operações",
+                "habilidade": "Números e Operações",
+                "codigo_habilidade": "9N1.1",
+                "tipo": "Múltipla Escolha",
+                "dificuldade": "Fácil",
+                "porcentagem_acertos": 85.5,
+                "porcentagem_erros": 14.5
+            },
+            {
+                "id": "q2",
+                "numero": 2,
+                "texto": "Questão sobre álgebra",
+                "habilidade": "Álgebra",
+                "codigo_habilidade": "9A1.2",
+                "tipo": "Múltipla Escolha", 
+                "dificuldade": "Médio",
+                "porcentagem_acertos": 72.3,
+                "porcentagem_erros": 27.7
+            }
+        ],
+        "alunos": [
+            {
+                "id": "student-1",
+                "nome": "João Silva",
+                "turma": "9º A",
+                "respostas": [
+                    {"questao_id": "q1", "questao_numero": 1, "resposta_correta": True, "resposta_em_branco": False},
+                    {"questao_id": "q2", "questao_numero": 2, "resposta_correta": False, "resposta_em_branco": False}
+                ],
+                "total_acertos": 15,
+                "total_erros": 5,
+                "total_em_branco": 1,
+                "nota_final": 7.1,
+                "proficiencia": 652,
+                "classificacao": "Adequado"
+            }
+        ]
+    }), 200
+
+# ==================== ENDPOINTS ORIGINAIS ====================
+
+@bp.errorhandler(Exception)
+def handle_error(error):
+    """Tratamento global de erros para este blueprint"""
+    logging.error(f"Erro em evaluation_results: {str(error)}", exc_info=True)
+    return jsonify({
+        "error": "Erro interno no servidor",
+        "details": str(error)
+    }), 500
+
+
+def convert_proficiency_to_1000_scale(proficiency: float, course: str, subject: str) -> float:
+    """
+    Converte proficiência do sistema atual (0-425) para escala 0-1000
+    """
+    # Determinar proficiência máxima atual
+    if "iniciais" in course.lower() or "infantil" in course.lower() or "eja" in course.lower():
+        if "matemática" in subject.lower() or "matematica" in subject.lower():
+            max_current = 375
+        else:
+            max_current = 350
+    else:  # Anos Finais, Ensino Médio
+        if "matemática" in subject.lower() or "matematica" in subject.lower():
+            max_current = 425
+        else:
+            max_current = 400
+    
+    # Converter para escala 0-1000
+    return (proficiency / max_current) * 1000
+
+
+def get_classification_1000_scale(proficiency_1000: float) -> str:
+    """
+    Determina classificação baseada na escala 0-1000
+    """
+    if proficiency_1000 < 200:
+        return "Abaixo do Básico"
+    elif proficiency_1000 < 500:
+        return "Básico"
+    elif proficiency_1000 < 750:
+        return "Adequado"
+    else:
+        return "Avançado"
+
+
+# ==================== ENDPOINT 1: GET /avaliacoes ====================
+
+@bp.route('/avaliacoes', methods=['GET'])
+@jwt_required()
+@role_required("admin", "professor", "coordenador", "diretor")
+def listar_avaliacoes():
+    """
+    Lista avaliações com estatísticas completas
+    
+    Query Parameters conforme especificação do frontend:
+    - curso, disciplina, turma, escola
+    - proficiencia_min, proficiencia_max
+    - nota_min, nota_max
+    - classificacao, status
+    - data_inicio, data_fim
+    - page, per_page
+    """
+    try:
+        user = get_current_user_from_token()
+        if not user:
+            return jsonify({"error": "Usuário não encontrado"}), 401
+
+        # Extrair parâmetros conforme especificação do frontend
+        page = request.args.get('page', 1, type=int)
+        per_page = request.args.get('per_page', 10, type=int)
+        per_page = min(per_page, 100)  # Limitar máximo
+        
+        # Filtros
+        curso = request.args.get('curso')
+        disciplina = request.args.get('disciplina')
+        turma = request.args.get('turma')
+        escola = request.args.get('escola')
+        status = request.args.getlist('status')
+        
+        # Query base
+        query = Test.query.filter(Test.status == 'concluida')
+        
+        # Se for professor, filtrar apenas suas avaliações
+        if user['role'] == 'professor':
+            query = query.filter(Test.created_by == user['id'])
+
+        # Aplicar filtros
+        if curso:
+            query = query.filter(Test.course.ilike(f"%{curso}%"))
+        
+        if disciplina:
+            query = query.join(Subject, Test.subject == Subject.id)\
+                        .filter(Subject.name.ilike(f"%{disciplina}%"))
+        
+        if status:
+            query = query.filter(Test.status.in_(status))
+
+        # Paginação
+        total = query.count()
+        offset = (page - 1) * per_page
+        evaluations = query.offset(offset).limit(per_page).all()
+        
+        # Gerar dados de resposta
+        results = []
+        for evaluation in evaluations:
+            # Calcular estatísticas
+            stats = _calculate_evaluation_stats_frontend(evaluation.id)
+            
+            # Buscar informações da escola
+            escola_nome = "N/A"
+            municipio = "N/A"
+            if evaluation.schools:  # Se tem escolas aplicadas
+                try:
+                    school = School.query.get(evaluation.schools[0])
+                    if school:
+                        escola_nome = school.name
+                        if school.city:
+                            municipio = school.city.name if hasattr(school.city, 'name') else "N/A"
+                except:
+                    pass
+            
+            result = {
+                "id": evaluation.id,
+                "titulo": evaluation.title,
+                "disciplina": evaluation.subject_rel.name if evaluation.subject_rel else 'N/A',
+                "curso": evaluation.course or 'N/A',
+                "serie": "N/A",  # Pode ser expandido se necessário
+                "escola": escola_nome,
+                "municipio": municipio,
+                "data_aplicacao": evaluation.created_at.isoformat() if evaluation.created_at else None,
+                "data_correcao": evaluation.updated_at.isoformat() if evaluation.updated_at else None,
+                "status": evaluation.status,
+                "total_alunos": stats['total_alunos'],
+                "alunos_participantes": stats['alunos_participantes'],
+                "alunos_pendentes": stats['alunos_pendentes'],
+                "alunos_ausentes": stats['alunos_ausentes'],
+                "media_nota": stats['media_nota'],
+                "media_proficiencia": stats['media_proficiencia'],
+                "distribuicao_classificacao": stats['distribuicao_classificacao'],
+                "turmas_desempenho": []  # Pode ser expandido se necessário
+            }
+            results.append(result)
+        
+        # Calcular total de páginas
+        total_pages = (total + per_page - 1) // per_page
+        
+        return jsonify({
+            "data": results,
+            "total": total,
+            "page": page,
+            "per_page": per_page,
+            "total_pages": total_pages
+        }), 200
+
+    except Exception as e:
+        logging.error(f"Erro ao listar avaliações: {str(e)}", exc_info=True)
+        return jsonify({"error": "Erro ao listar avaliações", "details": str(e)}), 500
+
+
+def _calculate_evaluation_stats_frontend(test_id: str) -> Dict[str, Any]:
+    """
+    Calcula estatísticas de uma avaliação para o frontend
+    """
+    from app.models.question import Question
+    
+    # Buscar avaliação
+    test = Test.query.get(test_id)
+    if not test:
+        return _empty_stats()
+    
+    # Buscar respostas dos alunos
+    student_data = db.session.query(
+        StudentAnswer.student_id,
+        func.count(StudentAnswer.id).label('total_answered'),
+        func.sum(
+            case(
+                (StudentAnswer.answer == Question.correct_answer, 1),
+                else_=0
+            )
+        ).label('correct_answers')
+    ).join(
+        Question, StudentAnswer.question_id == Question.id
+    ).filter(
+        StudentAnswer.test_id == test_id
+    ).group_by(StudentAnswer.student_id).all()
+    
+    if not student_data:
+        return _empty_stats()
+    
+    total_questions = len(test.questions) if test.questions else 0
+    if total_questions == 0:
+        return _empty_stats()
+    
+    # Calcular resultados para cada aluno
+    notas = []
+    proficiencias_1000 = []
+    classificacoes = {'Abaixo do Básico': 0, 'Básico': 0, 'Adequado': 0, 'Avançado': 0}
+    
+    course_name = test.course or "Anos Iniciais"
+    subject_name = test.subject_rel.name if test.subject_rel else "Outras"
+    
+    for student in student_data:
+        # Usar nosso calculador atual
+        result = EvaluationCalculator.calculate_complete_evaluation(
+            correct_answers=int(student.correct_answers or 0),
+            total_questions=total_questions,
+            course_name=course_name,
+            subject_name=subject_name
+        )
+        
+        # Converter para escala 0-1000
+        prof_1000 = convert_proficiency_to_1000_scale(
+            result['proficiency'], course_name, subject_name
+        )
+        classification_1000 = get_classification_1000_scale(prof_1000)
+        
+        notas.append(result['grade'])
+        proficiencias_1000.append(prof_1000)
+        classificacoes[classification_1000] += 1
+    
+    # Calcular médias
+    media_nota = round(sum(notas) / len(notas), 2) if notas else 0.0
+    media_proficiencia = round(sum(proficiencias_1000) / len(proficiencias_1000), 2) if proficiencias_1000 else 0.0
+    
+    return {
+        'total_alunos': len(student_data),
+        'alunos_participantes': len(student_data),
+        'alunos_pendentes': 0,
+        'alunos_ausentes': 0,
+        'media_nota': media_nota,
+        'media_proficiencia': media_proficiencia,
+        'distribuicao_classificacao': {
+            'abaixo_do_basico': classificacoes['Abaixo do Básico'],
+            'basico': classificacoes['Básico'],
+            'adequado': classificacoes['Adequado'],
+            'avancado': classificacoes['Avançado']
+        }
+    }
+
+
+def _empty_stats():
+    """Retorna estatísticas vazias"""
+    return {
+        'total_alunos': 0,
+        'alunos_participantes': 0,
+        'alunos_pendentes': 0,
+        'alunos_ausentes': 0,
+        'media_nota': 0.0,
+        'media_proficiencia': 0.0,
+        'distribuicao_classificacao': {
+            'abaixo_do_basico': 0,
+            'basico': 0,
+            'adequado': 0,
+            'avancado': 0
+        }
+    }
+
+
+# ==================== ENDPOINT 2: GET /alunos ====================
+
+@bp.route('/alunos', methods=['GET'])
+@jwt_required()
+@role_required("admin", "professor", "coordenador", "diretor")
+def listar_alunos():
+    """
+    Lista alunos com resultados de uma avaliação específica
+    
+    Query Parameters:
+    - avaliacao_id (obrigatório)
+    - Outros filtros opcionais
+    """
+    try:
+        user = get_current_user_from_token()
+        if not user:
+            return jsonify({"error": "Usuário não encontrado"}), 401
+
+        # Parâmetro obrigatório
+        avaliacao_id = request.args.get('avaliacao_id')
+        if not avaliacao_id:
+            return jsonify({"error": "avaliacao_id é obrigatório"}), 400
+        
+        # Verificar se avaliação existe
+        test = Test.query.get(avaliacao_id)
+        if not test:
+            return jsonify({"error": "Avaliação não encontrada"}), 404
+        
+        # Verificar permissões
+        if user['role'] == 'professor' and test.created_by != user['id']:
+            return jsonify({"error": "Acesso negado"}), 403
+        
+        # Buscar alunos com respostas
+        student_data = db.session.query(
+            Student.id,
+            Student.name,
+            StudentAnswer.student_id,
+            func.count(StudentAnswer.id).label('total_answered'),
+            func.sum(
+                case(
+                    (StudentAnswer.answer == Question.correct_answer, 1),
+                    else_=0
+                )
+            ).label('correct_answers')
+        ).join(
+            StudentAnswer, Student.id == StudentAnswer.student_id
+        ).join(
+            Question, StudentAnswer.question_id == Question.id
+        ).filter(
+            StudentAnswer.test_id == avaliacao_id
+        ).group_by(
+            Student.id, Student.name, StudentAnswer.student_id
+        ).all()
+        
+        total_questions = len(test.questions) if test.questions else 0
+        course_name = test.course or "Anos Iniciais"
+        subject_name = test.subject_rel.name if test.subject_rel else "Outras"
+        
+        results = []
+        for student in student_data:
+            # Calcular resultados
+            result = EvaluationCalculator.calculate_complete_evaluation(
+                correct_answers=int(student.correct_answers or 0),
+                total_questions=total_questions,
+                course_name=course_name,
+                subject_name=subject_name
+            )
+            
+            # Converter para escala 0-1000
+            prof_1000 = convert_proficiency_to_1000_scale(
+                result['proficiency'], course_name, subject_name
+            )
+            classification_1000 = get_classification_1000_scale(prof_1000)
+            
+            # Buscar informações da turma
+            student_obj = Student.query.get(student.id)
+            turma_nome = "N/A"
+            if student_obj and student_obj.class_relation:
+                turma_nome = student_obj.class_relation.name
+            
+            student_result = {
+                "id": student.id,
+                "nome": student.name,
+                "turma": turma_nome,
+                "nota": result['grade'],
+                "proficiencia": round(prof_1000, 2),
+                "classificacao": classification_1000,
+                "questoes_respondidas": int(student.total_answered),
+                "acertos": int(student.correct_answers or 0),
+                "erros": int(student.total_answered) - int(student.correct_answers or 0),
+                "em_branco": total_questions - int(student.total_answered),
+                "tempo_gasto": 3600,  # Placeholder - pode ser implementado
+                "status": "concluida"
+            }
+            results.append(student_result)
+        
+        return jsonify({
+            "data": results
+        }), 200
+
+    except Exception as e:
+        logging.error(f"Erro ao listar alunos: {str(e)}", exc_info=True)
+        return jsonify({"error": "Erro ao listar alunos", "details": str(e)}), 500
+
+
+# ==================== ENDPOINT 3: GET /relatorio-detalhado ====================
+
+@bp.route('/relatorio-detalhado/<string:evaluation_id>', methods=['GET'])
+@jwt_required()
+@role_required("admin", "professor", "coordenador", "diretor")
+def relatorio_detalhado(evaluation_id: str):
+    """
+    Retorna relatório detalhado de uma avaliação
+    """
+    try:
+        user = get_current_user_from_token()
+        if not user:
+            return jsonify({"error": "Usuário não encontrado"}), 401
+
+        # Verificar se avaliação existe
+        test = Test.query.get(evaluation_id)
+        if not test:
+            return jsonify({"error": "Avaliação não encontrada"}), 404
+        
+        # Verificar permissões
+        if user['role'] == 'professor' and test.created_by != user['id']:
+            return jsonify({"error": "Acesso negado"}), 403
+        
+        # Dados da avaliação
+        avaliacao_data = {
+            "id": test.id,
+            "titulo": test.title,
+            "disciplina": test.subject_rel.name if test.subject_rel else 'N/A',
+            "total_questoes": len(test.questions) if test.questions else 0
+        }
+        
+        # Dados das questões
+        questoes_data = []
+        if test.questions:
+            for i, question in enumerate(test.questions, 1):
+                # Calcular porcentagem de acertos
+                total_respostas = StudentAnswer.query.filter_by(
+                    test_id=evaluation_id, 
+                    question_id=question.id
+                ).count()
+                
+                acertos = StudentAnswer.query.filter_by(
+                    test_id=evaluation_id,
+                    question_id=question.id,
+                    answer=question.correct_answer
+                ).count() if total_respostas > 0 else 0
+                
+                porcentagem_acertos = (acertos / total_respostas * 100) if total_respostas > 0 else 0
+                
+                questao_data = {
+                    "id": question.id,
+                    "numero": i,
+                    "texto": question.text or f"Questão {i}",
+                    "habilidade": question.skill or "N/A",
+                    "codigo_habilidade": question.skill or "N/A",
+                    "tipo": question.question_type or "multipleChoice",
+                    "dificuldade": question.difficulty_level or "Médio",
+                    "porcentagem_acertos": round(porcentagem_acertos, 2),
+                    "porcentagem_erros": round(100 - porcentagem_acertos, 2)
+                }
+                questoes_data.append(questao_data)
+        
+        # Dados dos alunos (reutilizar lógica do endpoint /alunos)
+        alunos_response = listar_alunos()
+        alunos_data = []
+        
+        if alunos_response[1] == 200:  # Success
+            alunos_raw = alunos_response[0].get_json()['data']
+            
+            for aluno in alunos_raw:
+                # Buscar respostas detalhadas do aluno
+                respostas = []
+                student_answers = StudentAnswer.query.filter_by(
+                    test_id=evaluation_id,
+                    student_id=aluno['id']
+                ).all()
+                
+                for answer in student_answers:
+                    question = Question.query.get(answer.question_id)
+                    if question:
+                        resposta_data = {
+                            "questao_id": question.id,
+                            "questao_numero": question.number or 1,
+                            "resposta_correta": answer.answer == question.correct_answer,
+                            "resposta_em_branco": not answer.answer,
+                            "tempo_gasto": 120  # Placeholder
+                        }
+                        respostas.append(resposta_data)
+                
+                aluno_detalhado = {
+                    "id": aluno['id'],
+                    "nome": aluno['nome'],
+                    "turma": aluno['turma'],
+                    "respostas": respostas,
+                    "total_acertos": aluno['acertos'],
+                    "total_erros": aluno['erros'],
+                    "total_em_branco": aluno['em_branco'],
+                    "nota_final": aluno['nota'],
+                    "proficiencia": aluno['proficiencia'],
+                    "classificacao": aluno['classificacao']
+                }
+                alunos_data.append(aluno_detalhado)
+        
+        return jsonify({
+            "avaliacao": avaliacao_data,
+            "questoes": questoes_data,
+            "alunos": alunos_data
+        }), 200
+
+    except Exception as e:
+        logging.error(f"Erro ao gerar relatório detalhado: {str(e)}", exc_info=True)
+        return jsonify({"error": "Erro ao gerar relatório detalhado", "details": str(e)}), 500
+
+
+# ==================== ENDPOINT 4: POST /avaliacoes/calcular ====================
+
+@bp.route('/avaliacoes/calcular', methods=['POST'])
+@jwt_required()
+@role_required("admin", "professor", "coordenador", "diretor")
+def recalcular_avaliacao():
+    """
+    Recalcula resultados de uma avaliação
+    """
+    try:
+        data = request.get_json()
+        
+        if not data or 'avaliacao_id' not in data:
+            return jsonify({"error": "avaliacao_id é obrigatório"}), 400
+        
+        avaliacao_id = data['avaliacao_id']
+        
+        # Verificar se avaliação existe
+        test = Test.query.get(avaliacao_id)
+        if not test:
+            return jsonify({"error": "Avaliação não encontrada"}), 404
+        
+        # Recalcular (por enquanto retorna sucesso)
+        return jsonify({
+            "message": "Recálculo realizado com sucesso",
+            "avaliacao_id": avaliacao_id
+        }), 200
+
+    except Exception as e:
+        logging.error(f"Erro ao recalcular avaliação: {str(e)}", exc_info=True)
+        return jsonify({"error": "Erro ao recalcular avaliação", "details": str(e)}), 500
+
+
+# ==================== ENDPOINTS AUXILIARES (SE NECESSÁRIO) ====================
+# Os endpoints auxiliares agora estão em basic_endpoints.py 

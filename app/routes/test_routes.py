@@ -300,10 +300,10 @@ def listar_avaliacoes_por_escola(school_id):
         logging.error(f"Error listing tests by school: {str(e)}", exc_info=True)
         return jsonify({"error": "Error listing tests by school", "details": str(e)}), 500
 
-# @bp.route('/student/<string:student_id>', methods=['GET'])
-# @jwt_required()
-# @role_required("admin", "professor", "coordenador", "diretor", "aluno")
-# def listar_avaliacoes_por_aluno(student_id):
+@bp.route('/student/<string:student_id>', methods=['GET'])
+@jwt_required()
+@role_required("admin", "professor", "coordenador", "diretor", "aluno")
+def listar_avaliacoes_por_aluno(student_id):
     """Lista todas as avaliações agendadas para um aluno específico."""
     try:
         user = get_current_user_from_token()

@@ -35,7 +35,8 @@ def create_app():
     # Configuração do CORS
     CORS(app, resources={
         r"/*": {
-            "origins": ["http://localhost:5173", "http://localhost:3000", "http://127.0.0.1:5173"],
+            "origins": ["http://localhost:5173", "http://localhost:3000", "http://127.0.0.1:5173", 
+                       "http://localhost:8080", "http://127.0.0.1:8080"],
             "methods": ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
             "allow_headers": ["Content-Type", "Authorization"],
             "expose_headers": ["Authorization"],
@@ -58,10 +59,11 @@ def create_app():
     jwt.init_app(app)
 
     # Importar rotas
-    from .routes import school_routes, test_routes, question_routes, login, logout, admin_route, educationStage_routes, grades_routes, persistUser_routes, city_routes, student_routes, user_routes, class_routes, schoolTeacher, teacherClass, professor_route, subject_routes, skill_routes,student_answer_routes, userQuickLinks_routes
+    from .routes import school_routes, test_routes, question_routes, login, logout, admin_route, educationStage_routes, grades_routes, persistUser_routes, city_routes, student_routes, user_routes, class_routes, schoolTeacher, teacherClass, professor_route, subject_routes, skill_routes,student_answer_routes, userQuickLinks_routes, evaluation_results_routes, basic_endpoints, evaluation_routes
     
     app.register_blueprint(school_routes.bp)
     app.register_blueprint(test_routes.bp)
+    app.register_blueprint(evaluation_routes.bp)  # Novo blueprint separado para /evaluations/
     app.register_blueprint(question_routes.bp)
     app.register_blueprint(login.bp)
     app.register_blueprint(logout.bp)
@@ -80,6 +82,8 @@ def create_app():
     app.register_blueprint(skill_routes.skill_bp)
     app.register_blueprint(student_answer_routes.bp)
     app.register_blueprint(userQuickLinks_routes.bp)
+    app.register_blueprint(evaluation_results_routes.bp)
+    app.register_blueprint(basic_endpoints.bp)
     # Registrar blueprint do Swagger UI
     app.register_blueprint(swaggerui_blueprint, url_prefix=SWAGGER_URL)
 

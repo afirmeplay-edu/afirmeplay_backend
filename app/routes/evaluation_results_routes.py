@@ -22,6 +22,7 @@ import logging
 from typing import Dict, Any
 from sqlalchemy import func, case
 from datetime import datetime
+from sqlalchemy.orm import joinedload
 
 bp = Blueprint('evaluation_results', __name__, url_prefix='/evaluation-results')
 
@@ -635,3 +636,290 @@ def recalcular_avaliacao():
 
 # ==================== ENDPOINTS AUXILIARES (SE NECESSÁRIO) ====================
 # Os endpoints auxiliares agora estão em basic_endpoints.py 
+
+@bp.route('/admin/submitted-evaluations', methods=['GET'])
+@jwt_required()
+@role_required("admin", "professor", "coordenador", "diretor")
+def get_submitted_evaluations():
+    """
+    Retorna todas as avaliações enviadas pelos alunos para correção
+    """
+    try:
+        user = get_current_user_from_token()
+        if not user:
+            return jsonify({"error": "User not found"}), 401
+
+        # Buscar sessões finalizadas que precisam de correção
+        query = db.session.query(TestSession).options(
+            joinedload(TestSession.student),
+            joinedload(TestSession.test).joinedload(Test.subject_rel),
+            joinedload(TestSession.test).joinedload(Test.grade)
+        ).filter(
+            TestSession.status.in_(['finalizada', 'corrigida', 'revisada'])
+        )
+
+        # Filtros opcionais
+        status_filter = request.args.get('status')
+        if status_filter and status_filter != 'all':
+            if status_filter == 'pending':
+                query = query.filter(TestSession.status == 'finalizada')
+            elif status_filter == 'corrected':
+                query = query.filter(TestSession.status == 'corrigida')
+            elif status_filter == 'reviewed':
+                query = query.filter(TestSession.status == 'revisada')
+
+        subject_filter = request.args.get('subject')
+        if subject_filter and subject_filter != 'all':
+            query = query.join(Test).filter(Test.subject == subject_filter)
+
+        grade_filter = request.args.get('grade')
+        if grade_filter and grade_filter != 'all':
+            query = query.join(Test).filter(Test.grade_id == grade_filter)
+
+        search_filter = request.args.get('search')
+        if search_filter:
+            query = query.join(Student).filter(
+                Student.name.ilike(f'%{search_filter}%')
+            )
+
+        sessions = query.order_by(TestSession.submitted_at.desc()).all()
+
+        results = []
+        for session in sessions:
+            # Buscar respostas do aluno
+            answers = StudentAnswer.query.filter_by(
+                student_id=session.student_id,
+                test_id=session.test_id
+            ).all()
+
+            # Buscar questões do teste
+            questions = Question.query.filter_by(test_id=session.test_id).all()
+            questions_dict = {q.id: q for q in questions}
+
+            # Preparar questões com respostas
+            questions_with_answers = []
+            for answer in answers:
+                question = questions_dict.get(answer.question_id)
+                if question:
+                    questions_with_answers.append({
+                        "id": question.id,
+                        "number": question.number or len(questions_with_answers) + 1,
+                        "type": question.question_type,
+                        "text": question.text,
+                        "options": question.alternatives if question.alternatives else None,
+                        "points": question.value or 1,
+                        "correctAnswer": question.correct_answer,
+                        "studentAnswer": answer.answer,
+                        "isCorrect": answer.answer == question.correct_answer if question.correct_answer else None,
+                        "manualPoints": answer.manual_score,
+                        "feedback": answer.feedback
+                    })
+
+            # Determinar status
+            status = "pending"
+            if session.status == 'corrigida':
+                status = "corrected"
+            elif session.status == 'revisada':
+                status = "reviewed"
+
+            result = {
+                "id": f"eval_{session.id}",
+                "sessionId": session.id,
+                "studentId": session.student_id,
+                "studentName": session.student.name if session.student else "Aluno não encontrado",
+                "testId": session.test_id,
+                "testTitle": session.test.title if session.test else "Teste não encontrado",
+                "subject": {
+                    "id": session.test.subject if session.test else "",
+                    "name": session.test.subject_rel.name if session.test and session.test.subject_rel else "Não informado"
+                },
+                "grade": {
+                    "id": str(session.test.grade_id) if session.test and session.test.grade_id else "",
+                    "name": session.test.grade.name if session.test and session.test.grade else "Não informado"
+                },
+                "submittedAt": session.submitted_at.isoformat() if session.submitted_at else "",
+                "duration": session.duration_minutes or 0,
+                "status": status,
+                "totalQuestions": session.total_questions or len(questions_with_answers),
+                "answeredQuestions": len(answers),
+                "autoScore": session.correct_answers,
+                "manualScore": sum(q.get("manualPoints", 0) for q in questions_with_answers if q.get("manualPoints")),
+                "finalScore": session.score,
+                "percentage": session.score,
+                "correctedBy": session.corrected_by,
+                "correctedAt": session.corrected_at.isoformat() if session.corrected_at else None,
+                "feedback": session.feedback,
+                "questions": questions_with_answers
+            }
+            results.append(result)
+
+        return jsonify(results), 200
+
+    except Exception as e:
+        logging.error(f"Erro ao buscar avaliações enviadas: {str(e)}", exc_info=True)
+        return jsonify({"error": "Erro ao buscar avaliações enviadas", "details": str(e)}), 500
+
+
+@bp.route('/admin/evaluations/<evaluation_id>/correct', methods=['PATCH'])
+@jwt_required()
+@role_required("admin", "professor", "coordenador", "diretor")
+def save_evaluation_correction(evaluation_id):
+    """
+    Salva a correção de uma avaliação (sem finalizar)
+    """
+    try:
+        user = get_current_user_from_token()
+        if not user:
+            return jsonify({"error": "User not found"}), 401
+
+        data = request.get_json()
+        session_id = data.get('sessionId')
+        questions_data = data.get('questions', [])
+        general_feedback = data.get('generalFeedback', '')
+
+        # Buscar sessão
+        session = TestSession.query.get(session_id)
+        if not session:
+            return jsonify({"error": "Sessão não encontrada"}), 404
+
+        # Atualizar correções das questões
+        for question_data in questions_data:
+            question_id = question_data.get('questionId')
+            manual_points = question_data.get('manualPoints')
+            feedback = question_data.get('feedback', '')
+
+            # Buscar resposta do aluno
+            answer = StudentAnswer.query.filter_by(
+                student_id=session.student_id,
+                test_id=session.test_id,
+                question_id=question_id
+            ).first()
+
+            if answer:
+                answer.manual_score = manual_points
+                answer.feedback = feedback
+                answer.corrected_by = user['id']
+                answer.corrected_at = datetime.utcnow()
+
+        # Atualizar sessão
+        session.status = 'corrigida'
+        session.feedback = general_feedback
+        session.corrected_by = user['id']
+        session.corrected_at = datetime.utcnow()
+
+        # Recalcular pontuação total
+        total_score = 0
+        answers = StudentAnswer.query.filter_by(
+            student_id=session.student_id,
+            test_id=session.test_id
+        ).all()
+
+        for answer in answers:
+            question = Question.query.get(answer.question_id)
+            if question:
+                if question.question_type == 'essay' and answer.manual_score is not None:
+                    total_score += answer.manual_score
+                elif answer.answer == question.correct_answer:
+                    total_score += question.value or 1
+
+        # Calcular percentual
+        total_possible = session.total_questions * 1  # Assumindo 1 ponto por questão
+        if total_possible > 0:
+            session.score = round((total_score / total_possible) * 100, 1)
+
+        db.session.commit()
+
+        return jsonify({
+            "message": "Correção salva com sucesso",
+            "finalScore": total_score,
+            "percentage": session.score
+        }), 200
+
+    except Exception as e:
+        logging.error(f"Erro ao salvar correção: {str(e)}", exc_info=True)
+        db.session.rollback()
+        return jsonify({"error": "Erro ao salvar correção", "details": str(e)}), 500
+
+
+@bp.route('/admin/evaluations/<evaluation_id>/finish', methods=['PATCH'])
+@jwt_required()
+@role_required("admin", "professor", "coordenador", "diretor")
+def finish_evaluation_correction(evaluation_id):
+    """
+    Finaliza a correção de uma avaliação e disponibiliza para o aluno
+    """
+    try:
+        user = get_current_user_from_token()
+        if not user:
+            return jsonify({"error": "User not found"}), 401
+
+        data = request.get_json()
+        session_id = data.get('sessionId')
+        questions_data = data.get('questions', [])
+        general_feedback = data.get('generalFeedback', '')
+
+        # Buscar sessão
+        session = TestSession.query.get(session_id)
+        if not session:
+            return jsonify({"error": "Sessão não encontrada"}), 404
+
+        # Atualizar correções das questões
+        for question_data in questions_data:
+            question_id = question_data.get('questionId')
+            manual_points = question_data.get('manualPoints')
+            feedback = question_data.get('feedback', '')
+
+            # Buscar resposta do aluno
+            answer = StudentAnswer.query.filter_by(
+                student_id=session.student_id,
+                test_id=session.test_id,
+                question_id=question_id
+            ).first()
+
+            if answer:
+                answer.manual_score = manual_points
+                answer.feedback = feedback
+                answer.corrected_by = user['id']
+                answer.corrected_at = datetime.utcnow()
+
+        # Finalizar sessão
+        session.status = 'revisada'
+        session.feedback = general_feedback
+        session.corrected_by = user['id']
+        session.corrected_at = datetime.utcnow()
+
+        # Recalcular pontuação total
+        total_score = 0
+        answers = StudentAnswer.query.filter_by(
+            student_id=session.student_id,
+            test_id=session.test_id
+        ).all()
+
+        for answer in answers:
+            question = Question.query.get(answer.question_id)
+            if question:
+                if question.question_type == 'essay' and answer.manual_score is not None:
+                    total_score += answer.manual_score
+                elif answer.answer == question.correct_answer:
+                    total_score += question.value or 1
+
+        # Calcular percentual
+        total_possible = session.total_questions * 1  # Assumindo 1 ponto por questão
+        if total_possible > 0:
+            session.score = round((total_score / total_possible) * 100, 1)
+
+        db.session.commit()
+
+        # Aqui poderia enviar notificação para o aluno
+        # notification_service.notify_student_result_ready(session.student_id, session.test_id)
+
+        return jsonify({
+            "message": "Correção finalizada com sucesso",
+            "finalScore": total_score,
+            "percentage": session.score
+        }), 200
+
+    except Exception as e:
+        logging.error(f"Erro ao finalizar correção: {str(e)}", exc_info=True)
+        db.session.rollback()
+        return jsonify({"error": "Erro ao finalizar correção", "details": str(e)}), 500 

@@ -59,10 +59,11 @@ def create_app():
     jwt.init_app(app)
 
     # Importar rotas
-    from .routes import school_routes, test_routes, question_routes, login, logout, admin_route, educationStage_routes, grades_routes, persistUser_routes, city_routes, student_routes, user_routes, class_routes, schoolTeacher, teacherClass, professor_route, subject_routes, skill_routes,student_answer_routes, userQuickLinks_routes, evaluation_results_routes, basic_endpoints
+    from .routes import school_routes, test_routes, question_routes, login, logout, admin_route, educationStage_routes, grades_routes, persistUser_routes, city_routes, student_routes, user_routes, class_routes, schoolTeacher, teacherClass, professor_route, subject_routes, skill_routes,student_answer_routes, userQuickLinks_routes, evaluation_results_routes, basic_endpoints, evaluation_routes
     
     app.register_blueprint(school_routes.bp)
     app.register_blueprint(test_routes.bp)
+    app.register_blueprint(evaluation_routes.bp)  # Novo blueprint separado para /evaluations/
     app.register_blueprint(question_routes.bp)
     app.register_blueprint(login.bp)
     app.register_blueprint(logout.bp)

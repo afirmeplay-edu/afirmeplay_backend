@@ -18,13 +18,18 @@ class TestSession(db.Model):
     time_limit_minutes = db.Column(db.Integer, nullable=True)  # tempo limite em minutos
     
     # Status da sessão
-    status = db.Column(db.String(20), default='em_andamento')  # em_andamento, finalizada, expirada
+    status = db.Column(db.String(20), default='em_andamento')  # em_andamento, finalizada, expirada, corrigida, revisada
     
     # Resultados
     total_questions = db.Column(db.Integer, nullable=True)
     correct_answers = db.Column(db.Integer, nullable=True)
     score = db.Column(db.Float, nullable=True)
     grade = db.Column(db.Float, nullable=True)  # nota final (0-10)
+    
+    # Campos para correção
+    feedback = db.Column(db.Text, nullable=True)  # Feedback geral do professor
+    corrected_by = db.Column(db.String, db.ForeignKey('users.id'), nullable=True)  # Professor que corrigiu
+    corrected_at = db.Column(db.DateTime, nullable=True)  # Data da correção
     
     # Metadados
     ip_address = db.Column(db.String(45), nullable=True)  # IP do aluno

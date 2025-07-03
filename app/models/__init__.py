@@ -17,4 +17,5 @@ from .testSession import TestSession
 from .userQuickLinks import UserQuickLinks
 from .teacherClass import TeacherClass
 from .user import User
+from .game import Game
 

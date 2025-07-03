@@ -7,6 +7,7 @@ def register_routes(app: Flask):
         city_routes,
         class_routes,
         educationStage_routes,
+        game_routes,
         grades_routes,
         login,
         logout,
@@ -23,7 +24,8 @@ def register_routes(app: Flask):
         test_routes,
         user_routes,
         userQuickLinks_routes,
-        evaluation_results_routes
+        evaluation_results_routes,
+        game_routes
     )
     
     # Register blueprints
@@ -31,6 +33,7 @@ def register_routes(app: Flask):
     app.register_blueprint(city_routes.bp)
     app.register_blueprint(class_routes.bp)
     app.register_blueprint(educationStage_routes.bp)
+    app.register_blueprint(game_routes.bp)
     app.register_blueprint(grades_routes.bp)
     app.register_blueprint(login.bp)
     app.register_blueprint(logout.bp)
@@ -48,3 +51,4 @@ def register_routes(app: Flask):
     app.register_blueprint(user_routes.bp)
     app.register_blueprint(userQuickLinks_routes.bp)
     app.register_blueprint(evaluation_results_routes.bp)
+    app.register_blueprint(game_routes.bp)

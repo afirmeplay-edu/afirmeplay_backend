@@ -157,7 +157,15 @@ class EvaluationFilters:
             
         # Filtro por escola (nas escolas aplicadas)
         if 'school' in filters:
-            query = query.filter(Test.schools.contains([filters['school']]))
+            # Verificar se schools contém a escola especificada
+            # schools pode ser uma lista ou string
+            from sqlalchemy import or_
+            query = query.filter(
+                or_(
+                    Test.schools.contains([filters['school']]),  # Se for lista
+                    Test.schools == filters['school']  # Se for string
+                )
+            )
             
         # Filtros de data
         if 'date_from' in filters:

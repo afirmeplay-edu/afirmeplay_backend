@@ -237,12 +237,21 @@ def listar_avaliacoes():
             municipio = "N/A"
             if evaluation.schools:  # Se tem escolas aplicadas
                 try:
-                    school = School.query.get(evaluation.schools[0])
-                    if school:
-                        escola_nome = school.name
-                        if school.city:
-                            municipio = school.city.name if hasattr(school.city, 'name') else "N/A"
-                except:
+                    # Verificar se schools é uma lista ou string
+                    school_id = None
+                    if isinstance(evaluation.schools, list) and len(evaluation.schools) > 0:
+                        school_id = evaluation.schools[0]
+                    elif isinstance(evaluation.schools, str):
+                        school_id = evaluation.schools
+                    
+                    if school_id:
+                        school = School.query.get(school_id)
+                        if school:
+                            escola_nome = school.name
+                            if school.city:
+                                municipio = school.city.name if hasattr(school.city, 'name') else "N/A"
+                except Exception as e:
+                    logging.warning(f"Erro ao buscar escola para avaliação {evaluation.id}: {str(e)}")
                     pass
             
             result = {

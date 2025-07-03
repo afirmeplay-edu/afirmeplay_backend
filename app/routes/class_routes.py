@@ -8,6 +8,7 @@ import logging
 from app.models.student import Student
 from app.models.school import School
 from app.models.grades import Grade
+from app.models.city import City
 
 bp = Blueprint('classes', __name__, url_prefix="/classes")
 
@@ -27,6 +28,111 @@ def handle_integrity_error(error):
 def handle_generic_error(error):
     logging.error(f"Unexpected error: {str(error)}", exc_info=True)
     return jsonify({"error": "An unexpected error occurred", "details": str(error)}), 500
+
+@bp.route('/filtered', methods=['GET'])
+@jwt_required()
+@role_required("admin", "professor", "coordenador", "diretor")
+def get_filtered_classes():
+    """
+    Busca turmas com filtros avançados
+    
+    Query Parameters:
+    - municipality_id: ID do município
+    - school_id: ID da escola
+    - grade_id: ID da série/ano
+    - education_stage_id: ID do estágio educacional
+    
+    Returns:
+        Lista de turmas filtradas com informações completas
+    """
+    try:
+        # Extrair parâmetros de filtro
+        municipality_id = request.args.get('municipality_id')
+        school_id = request.args.get('school_id')
+        grade_id = request.args.get('grade_id')
+        education_stage_id = request.args.get('education_stage_id')
+        
+        # Query base com joins
+        query = db.session.query(
+            Class,
+            School,
+            Grade,
+            City,
+            db.func.count(Student.id).label('students_count')
+        ).join(
+            School, Class.school_id == School.id
+        ).join(
+            City, School.city_id == City.id
+        ).outerjoin(
+            Grade, Class.grade_id == Grade.id
+        ).outerjoin(
+            Student, Class.id == Student.class_id
+        ).group_by(
+            Class.id, School.id, Grade.id, City.id
+        )
+        
+        # Aplicar filtros
+        if municipality_id:
+            query = query.filter(City.id == municipality_id)
+            
+        if school_id:
+            query = query.filter(School.id == school_id)
+            
+        if grade_id:
+            query = query.filter(Grade.id == grade_id)
+            
+        if education_stage_id:
+            query = query.filter(Grade.education_stage_id == education_stage_id)
+        
+        # Executar query
+        classes = query.all()
+        
+        if not classes:
+            return jsonify({
+                "data": [],
+                "total": 0,
+                "message": "Nenhuma turma encontrada com os filtros aplicados"
+            }), 200
+        
+        # Formatar resultados
+        results = []
+        for class_obj, school, grade, city, students_count in classes:
+            results.append({
+                "id": class_obj.id,
+                "name": class_obj.name,
+                "school_id": class_obj.school_id,
+                "grade_id": str(class_obj.grade_id) if class_obj.grade_id else None,
+                "students_count": students_count,
+                "school": {
+                    "id": school.id,
+                    "name": school.name,
+                    "address": school.address
+                } if school else None,
+                "grade": {
+                    "id": grade.id,
+                    "name": grade.name
+                } if grade else None,
+                "city": {
+                    "id": city.id,
+                    "name": city.name,
+                    "state": city.state
+                } if city else None
+            })
+        
+        return jsonify({
+            "data": results,
+            "total": len(results),
+            "filters_applied": {
+                "municipality_id": municipality_id,
+                "school_id": school_id,
+                "grade_id": grade_id,
+                "education_stage_id": education_stage_id
+            }
+        }), 200
+        
+    except Exception as e:
+        logging.error(f"Erro ao buscar turmas filtradas: {str(e)}", exc_info=True)
+        return jsonify({"error": "Erro ao buscar turmas", "details": str(e)}), 500
 
 @bp.route('/school/<string:school_id>', methods=['GET'])
 @jwt_required()

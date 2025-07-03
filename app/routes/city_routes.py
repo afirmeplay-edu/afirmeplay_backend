@@ -108,3 +108,65 @@ def deletar_municipio(municipio_id):
     db.session.delete(municipio)
     db.session.commit()
     return jsonify({"mensagem": "Município deletado com sucesso"})
+
+# GET - Listar estados únicos
+@bp.route("/states", methods=["GET"])
+@jwt_required()
+@role_required("admin", "diretor", "coordenador", "professor")
+def listar_estados():
+    user = get_current_user_from_token()
+    
+    if user.get("role") == "admin":
+        # Admin pode ver todos os estados
+        cities = City.query.all()
+    else:
+        # Outros usuários só podem ver o estado de sua própria cidade
+        city_id = user.get("city_id")
+        if not city_id:
+            return jsonify({"erro": "Cidade não encontrada para este usuário"}), 404
+        user_city = City.query.get(city_id)
+        if not user_city:
+            return jsonify({"erro": "Cidade do usuário não encontrada"}), 404
+        cities = [user_city]
+
+    # Extrair estados únicos
+    unique_states = list(set(city.state for city in cities))
+    
+    return jsonify([
+        {
+            "id": state,
+            "name": state,
+            "uf": state
+        }
+        for state in unique_states
+    ])
+
+# GET - Listar municípios por estado
+@bp.route("/municipalities/state/<string:state_id>", methods=["GET"])
+@jwt_required()
+@role_required("admin", "diretor", "coordenador", "professor")
+def listar_municipios_por_estado(state_id):
+    user = get_current_user_from_token()
+    
+    if user.get("role") == "admin":
+        # Admin pode ver todos os municípios do estado
+        cities = City.query.filter_by(state=state_id).all()
+    else:
+        # Outros usuários só podem ver sua própria cidade se pertencer ao estado
+        city_id = user.get("city_id")
+        if not city_id:
+            return jsonify({"erro": "Cidade não encontrada para este usuário"}), 404
+        user_city = City.query.get(city_id)
+        if not user_city or user_city.state != state_id:
+            return jsonify({"erro": "Você não tem permissão para acessar municípios deste estado"}), 403
+        cities = [user_city]
+
+    return jsonify([
+        {
+            "id": c.id,
+            "name": c.name,
+            "state_id": c.state,
+            "created_at": c.created_at.isoformat()
+        }
+        for c in cities
+    ])

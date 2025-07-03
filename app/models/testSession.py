@@ -37,6 +37,21 @@ class TestSession(db.Model):
     student = db.relationship('Student', backref='test_sessions')
     test = db.relationship('Test', backref='test_sessions')
     
+    def __init__(self, student_id, test_id, time_limit_minutes=None, ip_address=None, user_agent=None, **kwargs):
+        """
+        Construtor customizado para TestSession
+        """
+        self.student_id = student_id
+        self.test_id = test_id
+        self.time_limit_minutes = time_limit_minutes
+        self.ip_address = ip_address
+        self.user_agent = user_agent
+        
+        # Aplicar qualquer outro parâmetro
+        for key, value in kwargs.items():
+            if hasattr(self, key):
+                setattr(self, key, value)
+    
     @property
     def is_expired(self):
         """Verifica se a sessão expirou baseado no tempo limite"""

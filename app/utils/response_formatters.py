@@ -59,34 +59,34 @@ def _get_all_subjects_from_test(test):
     
     try:
         # 1. Verificar se há disciplina única (campo subject)
-        if test.subject and test.subject_rel:
+        if test.subject and test.subject_rel and hasattr(test, 'subject_rel') and test.subject_rel:
             subjects_list.append({
                 'id': test.subject_rel.id,
                 'name': test.subject_rel.name
             })
         
         # 2. Verificar se há múltiplas disciplinas (campo subjects_info)
-        if test.subjects_info and isinstance(test.subjects_info, list):
+        if test.subjects_info and isinstance(test.subjects_info, list) and hasattr(test, 'subjects_info'):
             for subject_info in test.subjects_info:
                 # Verificar se subject_info é um dicionário com id
-                if isinstance(subject_info, dict) and 'id' in subject_info:
+                if isinstance(subject_info, dict) and subject_info and 'id' in subject_info:
                     subject_id = subject_info['id']
                     
                     # Buscar o nome da disciplina no banco
                     subject_obj = Subject.query.get(subject_id)
-                    if subject_obj:
+                    if subject_obj and hasattr(subject_obj, 'id') and hasattr(subject_obj, 'name'):
                         # Verificar se já não foi adicionada (evitar duplicatas)
-                        if not any(s['id'] == subject_obj.id for s in subjects_list):
+                        if not any(s.get('id') == subject_obj.id for s in subjects_list):
                             subjects_list.append({
                                 'id': subject_obj.id,
                                 'name': subject_obj.name
                             })
                 # Se subject_info é apenas um ID (string)
-                elif isinstance(subject_info, str) and _is_valid_uuid(subject_info):
+                elif isinstance(subject_info, str) and subject_info and _is_valid_uuid(subject_info):
                     subject_obj = Subject.query.get(subject_info)
-                    if subject_obj:
+                    if subject_obj and hasattr(subject_obj, 'id') and hasattr(subject_obj, 'name'):
                         # Verificar se já não foi adicionada (evitar duplicatas)
-                        if not any(s['id'] == subject_obj.id for s in subjects_list):
+                        if not any(s.get('id') == subject_obj.id for s in subjects_list):
                             subjects_list.append({
                                 'id': subject_obj.id,
                                 'name': subject_obj.name
@@ -107,15 +107,15 @@ def format_question_response(q, exclude_fields=None):
         'number': q.number if q.number is not None else 1,
         'text': q.text if q.text else '',
         'formattedText': q.formatted_text if q.formatted_text else q.text if q.text else '',
-        'options': q.alternatives if q.alternatives else [],
-        'skills': q.skill.split(',') if q.skill else [],
+        'options': q.alternatives if q.alternatives and isinstance(q.alternatives, list) else [],
+        'skills': q.skill.split(',') if q.skill and isinstance(q.skill, str) else [],
         'difficulty': q.difficulty_level if q.difficulty_level else 'Médio',
         'solution': q.correct_answer if q.correct_answer else '',
         'formattedSolution': q.formatted_solution if q.formatted_solution else '',
         'secondStatement': q.secondstatement if q.secondstatement else '',
         'type': q.question_type if q.question_type else 'multipleChoice',
         'value': q.value if q.value is not None else 1,
-        'topics': q.topics if q.topics else [],
+        'topics': q.topics if q.topics and isinstance(q.topics, list) else [],
         'version': q.version if q.version is not None else 1,
         'updatedAt': q.updated_at.isoformat() if q.updated_at else None,
         'lastModifiedBy': {'id': q.last_modifier.id, 'name': q.last_modifier.name} if q.last_modifier else None,
@@ -152,8 +152,16 @@ def format_test_response(test):
     municipalities_list = []
     if test.municipalities:
         try:
-            municipalities_objs = City.query.filter(City.id.in_(test.municipalities)).all()
-            municipalities_list = [{'id': m.id, 'name': m.name} for m in municipalities_objs]
+            # Verificar se municipalities é uma lista ou string
+            municipality_ids = []
+            if isinstance(test.municipalities, list):
+                municipality_ids = test.municipalities
+            elif isinstance(test.municipalities, str):
+                municipality_ids = [test.municipalities]
+            
+            if municipality_ids:
+                municipalities_objs = City.query.filter(City.id.in_(municipality_ids)).all()
+                municipalities_list = [{'id': m.id, 'name': m.name} for m in municipalities_objs]
         except Exception as e:
             logging.warning(f"Erro ao buscar municípios: {str(e)}")
             municipalities_list = []
@@ -161,8 +169,16 @@ def format_test_response(test):
     schools_list = []
     if test.schools:
         try:
-            schools_objs = School.query.filter(School.id.in_(test.schools)).all()
-            schools_list = [{'id': s.id, 'name': s.name} for s in schools_objs]
+            # Verificar se schools é uma lista ou string
+            school_ids = []
+            if isinstance(test.schools, list):
+                school_ids = test.schools
+            elif isinstance(test.schools, str):
+                school_ids = [test.schools]
+            
+            if school_ids:
+                schools_objs = School.query.filter(School.id.in_(school_ids)).all()
+                schools_list = [{'id': s.id, 'name': s.name} for s in schools_objs]
         except Exception as e:
             logging.warning(f"Erro ao buscar escolas: {str(e)}")
             schools_list = []

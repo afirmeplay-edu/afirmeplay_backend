@@ -14,6 +14,7 @@ from werkzeug.security import generate_password_hash
 from marshmallow import ValidationError
 from app.models.studentClass import Class
 from app.models.grades import Grade
+from app.models.classTest import ClassTest
 from sqlalchemy.orm import joinedload
 
 bp = Blueprint('students', __name__, url_prefix="/students")
@@ -456,4 +457,98 @@ def get_students_by_school_and_class(school_id, class_id):
         return jsonify({"message": "Internal server error while querying data", "details": str(e)}), 500
     except Exception as e:
         logging.error(f"Unexpected error in get_students_by_school_and_class route: {str(e)}", exc_info=True)
+        return jsonify({"message": "An unexpected error occurred", "details": str(e)}), 500
+
+@bp.route('/<string:student_id>/class', methods=['GET'])
+@jwt_required()
+@role_required("admin", "diretor", "coordenador", "professor", "aluno")
+def get_student_class(student_id):
+    try:
+        logging.info(f"Fetching class for user_id: {student_id}")
+
+        # Buscar o aluno com suas relações
+        student = db.session.query(
+            Student,
+            User,
+            School,
+            Class,
+            Grade
+        ).join(
+            User, Student.user_id == User.id
+        ).join(
+            School, Student.school_id == School.id
+        ).join(
+            Class, Student.class_id == Class.id
+        ).join(
+            Grade, Student.grade_id == Grade.id
+        ).filter(
+            Student.user_id == student_id
+        ).first()
+
+        if not student:
+            logging.warning(f"Student not found with user_id: {student_id}")
+            return jsonify({"message": "Student not found"}), 404
+
+        student_obj, user, school, class_obj, grade = student
+
+        # Verificar permissões do usuário
+        current_user = get_current_user_from_token()
+        if not current_user:
+            return jsonify({"message": "User not found"}), 404
+
+        if current_user['role'] == "professor":
+            # Professor só pode ver alunos da escola onde está alocado
+            if current_user.get('school_id') != student_obj.school_id:
+                logging.warning(f"Professor {current_user.get('id')} tried to access student from different school")
+                return jsonify({"message": "You don't have permission to view this student's class"}), 403
+        elif current_user['role'] in ["diretor", "coordenador"]:
+            # Diretor e coordenador só podem ver alunos de escolas da sua cidade
+            city_id = get_current_tenant_id()
+            if not city_id:
+                return jsonify({"message": "City ID not available"}), 400
+            if school.city_id != city_id:
+                logging.warning(f"User {current_user.get('id')} tried to access student from different city")
+                return jsonify({"message": "You don't have permission to view this student's class"}), 403
+
+        # Buscar avaliações aplicadas à classe usando o relacionamento class_tests
+        class_tests = ClassTest.query.filter_by(class_id=class_obj.id).all()
+        applied_test_ids = [ct.test_id for ct in class_tests]
+
+        # Formatar resposta com detalhes da classe
+        class_details = {
+            "id": class_obj.id,
+            "name": class_obj.name,
+            "school_id": class_obj.school_id,
+            "grade_id": str(class_obj.grade_id) if class_obj.grade_id else None,
+            "school": {
+                "id": school.id,
+                "name": school.name,
+                "domain": school.domain,
+                "address": school.address,
+                "city_id": school.city_id
+            },
+            "grade": {
+                "id": grade.id,
+                "name": grade.name
+            } if grade else None,
+            "student": {
+                "id": student_obj.id,
+                "name": student_obj.name,
+                "registration": student_obj.registration,
+                "birth_date": student_obj.birth_date.isoformat() if student_obj.birth_date else None,
+                "user_id": student_obj.user_id
+            },
+            "applied_tests": {
+                "total": len(applied_test_ids),
+                "test_ids": applied_test_ids
+            }
+        }
+
+        return jsonify(class_details), 200
+
+    except SQLAlchemyError as e:
+        logging.error(f"Database error while fetching student class: {str(e)}")
+        return jsonify({"message": "Internal server error while querying data", "details": str(e)}), 500
+    except Exception as e:
+        logging.error(f"Unexpected error in get_student_class route: {str(e)}", exc_info=True)
         return jsonify({"message": "An unexpected error occurred", "details": str(e)}), 500

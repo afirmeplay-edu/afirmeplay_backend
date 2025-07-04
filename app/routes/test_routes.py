@@ -302,10 +302,10 @@ def listar_avaliacoes_por_escola(school_id):
         logging.error(f"Error listing tests by school: {str(e)}", exc_info=True)
         return jsonify({"error": "Error listing tests by school", "details": str(e)}), 500
 
-@bp.route('/student/<string:student_id>', methods=['GET'])
-@jwt_required()
-@role_required("admin", "professor", "coordenador", "diretor", "aluno")
-def listar_avaliacoes_por_aluno(student_id):
+# @bp.route('/student/<string:student_id>', methods=['GET'])
+# @jwt_required()
+# @role_required("admin", "professor", "coordenador", "diretor", "aluno")
+# def listar_avaliacoes_por_aluno(student_id):
     """Lista todas as avaliações agendadas para um aluno específico."""
     try:
         user = get_current_user_from_token()
@@ -696,50 +696,20 @@ def remover_aplicacao_avaliacao(test_id, class_id):
         logging.error(f"Error removing test application: {str(e)}", exc_info=True)
         return jsonify({"error": "Error removing test application", "details": str(e)}), 500
 
-@bp.route('/<string:test_id>/class/<string:class_id>/complete', methods=['GET'])
+@bp.route('/class/<string:class_id>/tests/complete', methods=['GET'])
 @jwt_required()
 @role_required("admin", "professor", "coordenador", "diretor", "aluno")
-def obter_avaliacao_completa_classe(test_id, class_id):
-    """Obtém a avaliação completa para uma determinada classe, incluindo todas as questões."""
+def obter_avaliacoes_completas_classe(class_id):
+    """Obtém todas as avaliações aplicadas a uma determinada classe, incluindo todas as questões."""
     try:
         user = get_current_user_from_token()
         if not user:
             return jsonify({"error": "User not found or token invalid"}), 401
 
-        # Verificar se a avaliação existe
-        test = Test.query.options(
-            joinedload(Test.creator),
-            joinedload(Test.subject_rel),
-            joinedload(Test.grade),
-            subqueryload(Test.questions).options(
-                joinedload(Question.subject),
-                joinedload(Question.grade),
-                joinedload(Question.education_stage),
-                joinedload(Question.creator),
-                joinedload(Question.last_modifier)
-            )
-        ).get(test_id)
-        
-        if not test:
-            return jsonify({"error": "Test not found"}), 404
-
         # Verificar se a classe existe
         class_obj = Class.query.get(class_id)
         if not class_obj:
             return jsonify({"error": "Class not found"}), 404
-
-        # Verificar se a avaliação está aplicada nesta classe
-        class_test = ClassTest.query.filter_by(
-            test_id=test_id,
-            class_id=class_id
-        ).first()
-
-        if not class_test:
-            return jsonify({"error": "Test is not applied to this class"}), 404
-
-        # Verificar se a avaliação está no status correto
-        if test.status != 'agendada' and test.status != 'em_andamento':
-            return jsonify({"error": "Test is not available for students"}), 400
 
         # Verificar permissões específicas
         if user['role'] == 'aluno':
@@ -760,78 +730,149 @@ def obter_avaliacao_completa_classe(test_id, class_id):
             if not teacher_school:
                 return jsonify({"error": "You don't have permission to view tests for this class"}), 403
 
-        # Verificar se está dentro do período de aplicação
-        current_time = datetime.utcnow()
-        if class_test.application and current_time < class_test.application:
-            return jsonify({"error": "Test is not yet available"}), 400
+        # Buscar todas as avaliações aplicadas nesta classe na tabela class_test
+        class_tests = ClassTest.query.filter_by(class_id=class_id).all()
         
-        if class_test.expiration and current_time > class_test.expiration:
-            return jsonify({"error": "Test has expired"}), 400
+        if not class_tests:
+            return jsonify({
+                "message": "No tests found for this class",
+                "class": {
+                    "id": class_obj.id,
+                    "name": class_obj.name
+                },
+                "total_tests": 0,
+                "tests": []
+            }), 200
 
         # Buscar informações da escola e série
         school_obj = School.query.get(class_obj.school_id)
         grade_obj = Grade.query.get(class_obj.grade_id)
 
-        # Preparar questões para envio (sem respostas corretas)
-        questions_for_students = []
-        for question in test.questions:
-            question_data = {
-                "id": question.id,
-                "number": question.number,
-                "text": question.text,
-                "formatted_text": question.formatted_text,
-                "title": question.title,
-                "description": question.description,
-                "command": question.command,
-                "subtitle": question.subtitle,
-                "alternatives": question.alternatives,
-                "question_type": question.question_type,
-                "value": question.value,
-                "topics": question.topics,
-                "subject": {
-                    "id": question.subject.id,
-                    "name": question.subject.name
-                } if question.subject else None,
-                "grade": {
-                    "id": question.grade.id,
-                    "name": question.grade.name
-                } if question.grade else None,
-                "education_stage": {
-                    "id": question.education_stage.id,
-                    "name": question.education_stage.name
-                } if question.education_stage else None
+        # Buscar todas as avaliações com seus dados completos
+        test_ids = [ct.test_id for ct in class_tests]
+        tests = Test.query.options(
+            joinedload(Test.creator),
+            joinedload(Test.subject_rel),
+            joinedload(Test.grade),
+            subqueryload(Test.questions).options(
+                joinedload(Question.subject),
+                joinedload(Question.grade),
+                joinedload(Question.education_stage),
+                joinedload(Question.creator),
+                joinedload(Question.last_modifier)
+            )
+        ).filter(Test.id.in_(test_ids)).all()
+
+        # Criar um dicionário para mapear test_id -> ClassTest
+        class_test_map = {ct.test_id: ct for ct in class_tests}
+
+        # Preparar lista de avaliações completas
+        tests_complete = []
+        current_time = datetime.utcnow()
+        
+        for test in tests:
+            class_test = class_test_map.get(test.id)
+            
+            # Verificar se está dentro do período de aplicação
+            is_available = False
+            availability_status = "not_available"
+            
+            if test.status == 'agendada' or test.status == 'em_andamento':
+                if class_test.application and current_time >= class_test.application:
+                    if not class_test.expiration or current_time <= class_test.expiration:
+                        is_available = True
+                        availability_status = "available"
+                    else:
+                        availability_status = "expired"
+                elif class_test.application and current_time < class_test.application:
+                    availability_status = "not_yet_available"
+                else:
+                    is_available = True
+                    availability_status = "available"
+
+            # Preparar questões para envio (sem respostas corretas para alunos)
+            questions_for_students = []
+            for question in test.questions:
+                question_data = {
+                    "id": question.id,
+                    "number": question.number,
+                    "text": question.text,
+                    "formatted_text": question.formatted_text,
+                    "title": question.title,
+                    "description": question.description,
+                    "command": question.command,
+                    "subtitle": question.subtitle,
+                    "alternatives": question.alternatives,
+                    "question_type": question.question_type,
+                    "value": question.value,
+                    "topics": question.topics,
+                    "subject": {
+                        "id": question.subject.id,
+                        "name": question.subject.name
+                    } if question.subject else None,
+                    "grade": {
+                        "id": question.grade.id,
+                        "name": question.grade.name
+                    } if question.grade else None,
+                    "education_stage": {
+                        "id": question.education_stage.id,
+                        "name": question.education_stage.name
+                    } if question.education_stage else None
+                }
+                questions_for_students.append(question_data)
+
+            # Preparar avaliação completa
+            test_complete = {
+                "test": {
+                    "id": test.id,
+                    "title": test.title,
+                    "description": test.description,
+                    "type": test.type,
+                    "subject": {
+                        "id": test.subject_rel.id,
+                        "name": test.subject_rel.name
+                    } if test.subject_rel else None,
+                    "grade": {
+                        "id": test.grade.id,
+                        "name": test.grade.name
+                    } if test.grade else None,
+                    "intructions": test.intructions,
+                    "max_score": test.max_score,
+                    "time_limit": test.time_limit.isoformat() if test.time_limit else None,
+                    "course": test.course,
+                    "model": test.model,
+                    "subjects_info": test.subjects_info,
+                    "status": test.status,
+                    "created_by": test.created_by,
+                    "creator": {
+                        "id": test.creator.id,
+                        "name": test.creator.name,
+                        "email": test.creator.email
+                    } if test.creator else None
+                },
+                "class_test_info": {
+                    "class_test_id": class_test.id,
+                    "application": class_test.application.isoformat() if class_test.application else None,
+                    "expiration": class_test.expiration.isoformat() if class_test.expiration else None,
+                    "status": class_test.status
+                },
+                "availability": {
+                    "is_available": is_available,
+                    "status": availability_status,
+                    "current_time": current_time.isoformat()
+                },
+                "questions": questions_for_students,
+                "total_questions": len(questions_for_students),
+                "total_value": sum(q.get('value', 0) for q in questions_for_students if q.get('value'))
             }
-            questions_for_students.append(question_data)
+            
+            tests_complete.append(test_complete)
+
+        # Ordenar por data de aplicação (mais recente primeiro)
+        tests_complete.sort(key=lambda x: x['class_test_info']['application'] or '', reverse=True)
 
         # Preparar resposta completa
-        test_complete = {
-            "test": {
-                "id": test.id,
-                "title": test.title,
-                "description": test.description,
-                "type": test.type,
-                "subject": {
-                    "id": test.subject_rel.id,
-                    "name": test.subject_rel.name
-                } if test.subject_rel else None,
-                "grade": {
-                    "id": test.grade.id,
-                    "name": test.grade.name
-                } if test.grade else None,
-                "intructions": test.intructions,
-                "max_score": test.max_score,
-                "time_limit": test.time_limit.isoformat() if test.time_limit else None,
-                "course": test.course,
-                "model": test.model,
-                "subjects_info": test.subjects_info,
-                "status": test.status,
-                "created_by": test.created_by,
-                "creator": {
-                    "id": test.creator.id,
-                    "name": test.creator.name,
-                    "email": test.creator.email
-                } if test.creator else None
-            },
+        response = {
             "class": {
                 "id": class_obj.id,
                 "name": class_obj.name,
@@ -844,21 +885,15 @@ def obter_avaliacao_completa_classe(test_id, class_id):
                     "name": grade_obj.name
                 } if grade_obj else None
             },
-            "application_info": {
-                "application": class_test.application.isoformat() if class_test.application else None,
-                "expiration": class_test.expiration.isoformat() if class_test.expiration else None,
-                "current_time": current_time.isoformat()
-            },
-            "questions": questions_for_students,
-            "total_questions": len(questions_for_students),
-            "total_value": sum(q.get('value', 0) for q in questions_for_students if q.get('value'))
+            "total_tests": len(tests_complete),
+            "tests": tests_complete
         }
 
-        return jsonify(test_complete), 200
+        return jsonify(response), 200
 
     except Exception as e:
-        logging.error(f"Error getting complete test for class: {str(e)}", exc_info=True)
-        return jsonify({"error": "Error getting complete test for class", "details": str(e)}), 500
+        logging.error(f"Error getting complete tests for class: {str(e)}", exc_info=True)
+        return jsonify({"error": "Error getting complete tests for class", "details": str(e)}), 500
 
 @bp.route('/class/<string:class_id>/tests', methods=['GET'])
 @jwt_required()

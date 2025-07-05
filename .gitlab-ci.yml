@@ -1,10 +1,11 @@
+variables:
+    APP: innovplay_backend
+    IMAGE_TAG: "$APP:$CI_COMMIT_REF_NAME"
+    DEPLOY_NAME: "$APP-$CI_COMMIT_REF_NAME"
+    PORT: 5002
+    RUNNER_TAG: vps
+
 workflow:
-    variables:
-        APP: innovplay_backend
-        IMAGE_TAG: "$APP:$CI_COMMIT_REF_NAME"
-        DEPLOY_NAME: "$APP-$CI_COMMIT_REF_NAME"
-        PORT: 5002
-        RUNNER_TAG: vps
     rules:
         - if: "$CI_COMMIT_BRANCH == 'main'"
           variables:
@@ -28,7 +29,8 @@ stages:
 
 image_clean:
     stage: prebuild
-    tags: $RUNNER_TAG
+    tags:
+        - $RUNNER_TAG
     variables:
         GIT_STRATEGY: none
     script:
@@ -62,7 +64,8 @@ image_clean:
 
 network_create:
     stage: predeploy
-    tags: $RUNNER_TAG
+    tags:
+        - $RUNNER_TAG
     variables:
         GIT_STRATEGY: none
     script:
@@ -78,14 +81,16 @@ network_create:
 
 image_build:
     stage: build
-    tags: $RUNNER_TAG
+    tags:
+        - $RUNNER_TAG
     script:
         - echo "PORT=$PORT" >> ./app/.env
         - docker build --no-cache -t $IMAGE_TAG .
 
 container_run:
     stage: deploy
-    tags: $RUNNER_TAG
+    tags:
+        - $RUNNER_TAG
     variables:
         GIT_STRATEGY: none
     environment:

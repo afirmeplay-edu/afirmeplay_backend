@@ -111,7 +111,10 @@ environment_clean:
     environment:
         name: $CI_COMMIT_REF_NAME
         action: stop
-    when: manual
+    rules:
+        - if: "$CI_COMMIT_BRANCH == 'main' || $CI_COMMIT_BRANCH == 'dev'"
+          when: never
+        - when: manual
     script:
         - RUNNING_CONTAINER_ID=$(docker container ls -f ancestor=$IMAGE_TAG -q)
         - >

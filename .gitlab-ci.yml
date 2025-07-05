@@ -27,6 +27,11 @@ stages:
     - deploy
     - clean
 
+before_script:
+    - echo "UID $(id -u), GID $(id -g)"
+    - ls -l /var/run/docker.sock || echo "Socket não encontrado"
+    - docker info || echo "Docker não disponível"
+
 image_clean:
     stage: prebuild
     tags:

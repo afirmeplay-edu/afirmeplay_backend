@@ -1,19 +1,19 @@
 .default_job:
     variables:
         APP: innovplay_backend
-        IMAGE_TAG: $APP:$CI_COMMIT_REF_NAME
-        DEPLOY_NAME: $APP-$CI_COMMIT_REF_NAME
+        IMAGE_TAG: "$APP:$CI_COMMIT_REF_NAME"
+        DEPLOY_NAME: "$APP-$CI_COMMIT_REF_NAME"
         PORT: 5002
     rules:
         - if: "$CI_COMMIT_BRANCH == 'main'"
           variables:
-              IMAGE_TAG: $APP:prod
-              DEPLOY_NAME: $APP-prod
+              IMAGE_TAG: "$APP"
+              DEPLOY_NAME: "$APP"
               PORT: 5000
         - if: "$CI_COMMIT_BRANCH == 'dev'"
           variables:
               PORT: 5001
-        - when: always
+        - when: never
 
 stages:
     - prebuild
@@ -23,18 +23,17 @@ stages:
     - clean
 
 image_clean:
-    extends: .default_job
     stage: prebuild
-    except:
-        - main
-        - dev
-    cache: []
+    extends: .default_job
     variables:
         GIT_STRATEGY: none
+    tags:
+        - main
+        - dev
     script:
         - RUNNING_CONTAINER_ID=$(docker container ls -f ancestor=$IMAGE_TAG -q)
         - >
-            if [ -z $RUNNING_CONTAINER_ID ]; then
+            if [ -z "$RUNNING_CONTAINER_ID" ]; then
                 echo "Sem container ativo."
             else
                 docker container stop $RUNNING_CONTAINER_ID
@@ -43,7 +42,7 @@ image_clean:
             fi
         - CONTAINER_ID=$(docker container ls -a -f ancestor=$IMAGE_TAG -q)
         - >
-            if [ -z $CONTAINER_ID ]; then
+            if [ -z "$CONTAINER_ID" ]; then
                 echo "Container não existe."
             else
                 docker container rm $CONTAINER_ID
@@ -52,7 +51,7 @@ image_clean:
             fi
         - IMAGE_ID=$(docker image ls -f reference=$IMAGE_TAG -q)
         - >
-            if [ -z $IMAGE_ID ]; then
+            if [ -z "$IMAGE_ID" ]; then
                 echo "Imagem não existe."
             else
                 docker image rm $IMAGE_ID
@@ -61,17 +60,17 @@ image_clean:
             fi
 
 network_create:
-    extends: .default_job
     stage: predeploy
-    except:
-        - main
-        - dev
+    extends: .default_job
     variables:
         GIT_STRATEGY: none
+    tags:
+        - main
+        - dev
     script:
         - NETWORK=$(docker network ls -f name=$CI_COMMIT_REF_NAME -q)
         - >
-            if [ -z $NETWORK ]; then
+            if [ -z "$NETWORK" ]; then
                 docker network create $CI_COMMIT_REF_NAME
 
                 echo "Network criada."
@@ -80,27 +79,23 @@ network_create:
             fi
 
 image_build:
-    extends: .default_job
     stage: build
-    except:
+    extends: .default_job
+    tags:
         - main
         - dev
-    cache:
-        paths:
-            - .
     script:
         - echo "PORT=$PORT" >> ./app/.env
         - docker build --no-cache -t $IMAGE_TAG .
 
 container_run:
-    extends: .default_job
     stage: deploy
-    except:
-        - main
-        - dev
-    cache: []
+    extends: .default_job
     variables:
         GIT_STRATEGY: none
+    tags:
+        - main
+        - dev
     environment:
         name: $CI_COMMIT_REF_NAME
         on_stop: environment_clean
@@ -108,23 +103,21 @@ container_run:
         - docker container run --network $CI_COMMIT_REF_NAME -p $PORT:$PORT --name $DEPLOY_NAME -d $IMAGE_TAG
 
 environment_clean:
-    extends: .default_job
     stage: clean
-    except:
-        - main
-        - dev
-    cache: []
-    dependencies: []
+    extends: .default_job
     variables:
         GIT_STRATEGY: none
+    rules:
+        - if: "$CI_COMMIT_BRANCH == 'main' || $CI_COMMIT_BRANCH == 'dev'"
+          when: never
+        - when: manual
     environment:
         name: $CI_COMMIT_REF_NAME
         action: stop
-    when: manual
     script:
         - RUNNING_CONTAINER_ID=$(docker container ls -f ancestor=$IMAGE_TAG -q)
         - >
-            if [ -z $RUNNING_CONTAINER_ID ]; then
+            if [ -z "$RUNNING_CONTAINER_ID" ]; then
                 echo "Sem container ativo."
             else
                 docker container stop $RUNNING_CONTAINER_ID
@@ -133,7 +126,7 @@ environment_clean:
             fi
         - CONTAINER_ID=$(docker container ls -a -f ancestor=$IMAGE_TAG -q)
         - >
-            if [ -z $CONTAINER_ID ]; then
+            if [ -z "$CONTAINER_ID" ]; then
                 echo "Container não existe."
             else
                 docker container rm $CONTAINER_ID
@@ -142,7 +135,7 @@ environment_clean:
             fi
         - IMAGE_ID=$(docker image ls -f reference=$IMAGE_TAG -q)
         - >
-            if [ -z $IMAGE_ID ]; then
+            if [ -z "$IMAGE_ID" ]; then
                 echo "Imagem não existe."
             else
                 docker image rm $IMAGE_ID
@@ -151,7 +144,7 @@ environment_clean:
             fi
         - NETWORK=$(docker network ls -f name=$CI_COMMIT_REF_NAME -q)
         - >
-            if [ -z $NETWORK ]; then
+            if [ -z "$NETWORK" ]; then
                 echo "Network não existe"
             else
                 docker network rm $CI_COMMIT_REF_NAME

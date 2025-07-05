@@ -9,7 +9,7 @@ workflow:
     rules:
         - if: "$CI_COMMIT_BRANCH == 'main'"
           variables:
-              IMAGE_TAG: "$APP"
+              IMAGE_TAG: "$APP:latest"
               DEPLOY_NAME: "$APP"
               PORT: 5000
         - if: "$CI_COMMIT_BRANCH == 'dev'"

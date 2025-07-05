@@ -15,7 +15,7 @@ workflow:
         - if: "$CI_COMMIT_BRANCH == 'dev'"
           variables:
               PORT: 5001
-        - if: "$CI_COMMIT_BRANCH =~ /^feature/"
+        - if: "$CI_COMMIT_BRANCH =~ /^feature_/"
           variables:
               RUNNER_TAG: local
         - when: never
@@ -26,11 +26,6 @@ stages:
     - predeploy
     - deploy
     - clean
-
-before_script:
-    - echo "UID $(id -u), GID $(id -g)"
-    - ls -l /var/run/docker.sock || echo "Socket não encontrado"
-    - docker info || echo "Docker não disponível"
 
 image_clean:
     stage: prebuild

@@ -1,4 +1,4 @@
- .default_job:
+.default_job:
     variables:
         APP: innovplay_backend
         IMAGE_TAG: $APP:$CI_COMMIT_REF_NAME
@@ -7,12 +7,12 @@
     rules:
         - if: "$CI_COMMIT_BRANCH == 'main'"
           variables:
-            IMAGE_TAG: $APP:prod
-            DEPLOY_NAME: $APP-prod
-            PORT: 5000
+              IMAGE_TAG: $APP:prod
+              DEPLOY_NAME: $APP-prod
+              PORT: 5000
         - if: "$CI_COMMIT_BRANCH == 'dev'"
           variables:
-            PORT: 5001
+              PORT: 5001
         - when: always
 
 stages:

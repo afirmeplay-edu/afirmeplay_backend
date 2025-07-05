@@ -1,9 +1,10 @@
-.default_job:
+workflow:
     variables:
         APP: innovplay_backend
         IMAGE_TAG: "$APP:$CI_COMMIT_REF_NAME"
         DEPLOY_NAME: "$APP-$CI_COMMIT_REF_NAME"
         PORT: 5002
+        RUNNER_TAG: vps
     rules:
         - if: "$CI_COMMIT_BRANCH == 'main'"
           variables:
@@ -13,7 +14,9 @@
         - if: "$CI_COMMIT_BRANCH == 'dev'"
           variables:
               PORT: 5001
-        - if: "$CI_COMMIT_BRANCH =~ /^feature_/"
+        - if: "$CI_COMMIT_BRANCH =~ /^feature/"
+          variables:
+              RUNNER_TAG: local
         - when: never
 
 stages:
@@ -25,13 +28,9 @@ stages:
 
 image_clean:
     stage: prebuild
-    extends: .default_job
+    tags: $RUNNER_TAG
     variables:
         GIT_STRATEGY: none
-    tags:
-        - main
-        - dev
-        - feature
     script:
         - RUNNING_CONTAINER_ID=$(docker container ls -f ancestor=$IMAGE_TAG -q)
         - >
@@ -63,13 +62,9 @@ image_clean:
 
 network_create:
     stage: predeploy
-    extends: .default_job
+    tags: $RUNNER_TAG
     variables:
         GIT_STRATEGY: none
-    tags:
-        - main
-        - dev
-        - feature
     script:
         - NETWORK=$(docker network ls -f name=$CI_COMMIT_REF_NAME -q)
         - >
@@ -83,24 +78,16 @@ network_create:
 
 image_build:
     stage: build
-    extends: .default_job
-    tags:
-        - main
-        - dev
-        - feature
+    tags: $RUNNER_TAG
     script:
         - echo "PORT=$PORT" >> ./app/.env
         - docker build --no-cache -t $IMAGE_TAG .
 
 container_run:
     stage: deploy
-    extends: .default_job
+    tags: $RUNNER_TAG
     variables:
         GIT_STRATEGY: none
-    tags:
-        - main
-        - dev
-        - feature
     environment:
         name: $CI_COMMIT_REF_NAME
         on_stop: environment_clean
@@ -109,11 +96,8 @@ container_run:
 
 environment_clean:
     stage: clean
-    extends: .default_job
     variables:
         GIT_STRATEGY: none
-    tags:
-        - feature
     environment:
         name: $CI_COMMIT_REF_NAME
         action: stop

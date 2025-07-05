@@ -1,20 +1,18 @@
-variables:
-    APP: innovplay_backend
-    IMAGE_TAG: $APP:$CI_COMMIT_REF_NAME
-    DEPLOY_NAME: $APP-$CI_COMMIT_REF_NAME
-    PORT: 5002
-
-workflow:
-    name: "$CI_COMMIT_REF_NAME"
+ .default_job:
+    variables:
+        APP: innovplay_backend
+        IMAGE_TAG: $APP:$CI_COMMIT_REF_NAME
+        DEPLOY_NAME: $APP-$CI_COMMIT_REF_NAME
+        PORT: 5002
     rules:
         - if: "$CI_COMMIT_BRANCH == 'main'"
-          variables:
-              IMAGE_TAG: $APP:prod
-              DEPLOY_NAME: $APP-prod
-              PORT: 5000
-        - if: "$CI_COMMIT_BRANCH == 'DEV'"
-          variables:
-              PORT: 5001
+            variables:
+                IMAGE_TAG: $APP:prod
+                DEPLOY_NAME: $APP-prod
+                PORT: 5000
+        - if: "$CI_COMMIT_BRANCH == 'dev'"
+            variables:
+                PORT: 5001
         - when: always
 
 stages:
@@ -25,6 +23,7 @@ stages:
     - clean
 
 image_clean:
+    extends: .default_job
     stage: prebuild
     except:
         - main
@@ -62,6 +61,7 @@ image_clean:
             fi
 
 network_create:
+    extends: .default_job
     stage: predeploy
     except:
         - main
@@ -80,6 +80,7 @@ network_create:
             fi
 
 image_build:
+    extends: .default_job
     stage: build
     except:
         - main
@@ -92,6 +93,7 @@ image_build:
         - docker build --no-cache -t $IMAGE_TAG .
 
 container_run:
+    extends: .default_job
     stage: deploy
     except:
         - main
@@ -106,6 +108,7 @@ container_run:
         - docker container run --network $CI_COMMIT_REF_NAME -p $PORT:$PORT --name $DEPLOY_NAME -d $IMAGE_TAG
 
 environment_clean:
+    extends: .default_job
     stage: clean
     except:
         - main

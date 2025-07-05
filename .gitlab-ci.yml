@@ -1,0 +1,154 @@
+variables:
+    APP: innovplay_backend
+    IMAGE_TAG: "$APP:$CI_COMMIT_REF_NAME"
+    DEPLOY_NAME: "$APP-$CI_COMMIT_REF_NAME"
+    PORT: 5002
+    RUNNER_TAG: vps
+
+workflow:
+    rules:
+        - if: "$CI_COMMIT_BRANCH == 'main'"
+          variables:
+              IMAGE_TAG: "$APP"
+              DEPLOY_NAME: "$APP"
+              PORT: 5000
+        - if: "$CI_COMMIT_BRANCH == 'dev'"
+          variables:
+              PORT: 5001
+        - if: "$CI_COMMIT_BRANCH =~ /^feature/"
+          variables:
+              RUNNER_TAG: local
+        - when: never
+
+stages:
+    - prebuild
+    - build
+    - predeploy
+    - deploy
+    - clean
+
+before_script:
+    - echo "UID $(id -u), GID $(id -g)"
+    - ls -l /var/run/docker.sock || echo "Socket não encontrado"
+    - docker info || echo "Docker não disponível"
+
+image_clean:
+    stage: prebuild
+    tags:
+        - $RUNNER_TAG
+    variables:
+        GIT_STRATEGY: none
+    script:
+        - RUNNING_CONTAINER_ID=$(docker container ls -f ancestor=$IMAGE_TAG -q)
+        - >
+            if [ -z "$RUNNING_CONTAINER_ID" ]; then
+                echo "Sem container ativo."
+            else
+                docker container stop $RUNNING_CONTAINER_ID
+
+                echo "Container parado."
+            fi
+        - CONTAINER_ID=$(docker container ls -a -f ancestor=$IMAGE_TAG -q)
+        - >
+            if [ -z "$CONTAINER_ID" ]; then
+                echo "Container não existe."
+            else
+                docker container rm $CONTAINER_ID
+
+                echo "Container removido."
+            fi
+        - IMAGE_ID=$(docker image ls -f reference=$IMAGE_TAG -q)
+        - >
+            if [ -z "$IMAGE_ID" ]; then
+                echo "Imagem não existe."
+            else
+                docker image rm $IMAGE_ID
+
+                echo "Imagem removida."
+            fi
+
+network_create:
+    stage: predeploy
+    tags:
+        - $RUNNER_TAG
+    variables:
+        GIT_STRATEGY: none
+    script:
+        - NETWORK=$(docker network ls -f name=$CI_COMMIT_REF_NAME -q)
+        - >
+            if [ -z "$NETWORK" ]; then
+                docker network create $CI_COMMIT_REF_NAME
+
+                echo "Network criada."
+            else
+                echo "Network já existe."
+            fi
+
+image_build:
+    stage: build
+    tags:
+        - $RUNNER_TAG
+    script:
+        - echo "PORT=$PORT" >> ./app/.env
+        - docker build --no-cache -t $IMAGE_TAG .
+
+container_run:
+    stage: deploy
+    tags:
+        - $RUNNER_TAG
+    variables:
+        GIT_STRATEGY: none
+    environment:
+        name: $CI_COMMIT_REF_NAME
+        on_stop: environment_clean
+    script:
+        - docker container run --network $CI_COMMIT_REF_NAME -p $PORT:$PORT --name $DEPLOY_NAME -d $IMAGE_TAG
+
+environment_clean:
+    stage: clean
+    variables:
+        GIT_STRATEGY: none
+    environment:
+        name: $CI_COMMIT_REF_NAME
+        action: stop
+    rules:
+        - if: "$CI_COMMIT_BRANCH == 'main' || $CI_COMMIT_BRANCH == 'dev'"
+          when: never
+        - when: manual
+    script:
+        - RUNNING_CONTAINER_ID=$(docker container ls -f ancestor=$IMAGE_TAG -q)
+        - >
+            if [ -z "$RUNNING_CONTAINER_ID" ]; then
+                echo "Sem container ativo."
+            else
+                docker container stop $RUNNING_CONTAINER_ID
+
+                echo "Container parado."
+            fi
+        - CONTAINER_ID=$(docker container ls -a -f ancestor=$IMAGE_TAG -q)
+        - >
+            if [ -z "$CONTAINER_ID" ]; then
+                echo "Container não existe."
+            else
+                docker container rm $CONTAINER_ID
+
+                echo "Container removido."
+            fi
+        - IMAGE_ID=$(docker image ls -f reference=$IMAGE_TAG -q)
+        - >
+            if [ -z "$IMAGE_ID" ]; then
+                echo "Imagem não existe."
+            else
+                docker image rm $IMAGE_ID
+
+                echo "Imagem removida."
+            fi
+        - NETWORK=$(docker network ls -f name=$CI_COMMIT_REF_NAME -q)
+        - >
+            if [ -z "$NETWORK" ]; then
+                echo "Network não existe"
+            else
+                docker network rm $CI_COMMIT_REF_NAME
+
+                echo "Network removida."
+            fi

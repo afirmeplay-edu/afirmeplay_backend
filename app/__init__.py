@@ -3,6 +3,7 @@ from flask_sqlalchemy import SQLAlchemy
 from flask_cors import CORS
 from flask_jwt_extended import JWTManager
 from flask_swagger_ui import get_swaggerui_blueprint
+from flask_migrate import Migrate
 
 from .config import Config
 from dotenv import load_dotenv
@@ -10,6 +11,7 @@ import os
 
 db = SQLAlchemy()
 jwt = JWTManager()
+migrate = Migrate()
 
 SWAGGER_URL = '/api'  # URL for Swagger UI
 API_URL = '/swagger.yaml' # URL where our Swagger spec will be served
@@ -57,7 +59,8 @@ def create_app():
     # Inicialização das extensões
     db.init_app(app)
     jwt.init_app(app)
-
+    migrate.init_app(app, db)
+    
     # Importar rotas
     from .routes import school_routes, test_routes, question_routes, login, logout, admin_route, educationStage_routes, grades_routes, persistUser_routes, city_routes, student_routes, user_routes, class_routes, schoolTeacher, teacherClass, professor_route, subject_routes, skill_routes,student_answer_routes, userQuickLinks_routes, evaluation_results_routes, basic_endpoints, evaluation_routes, game_routes
     

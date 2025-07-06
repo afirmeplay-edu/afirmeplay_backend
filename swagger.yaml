@@ -6,6 +6,7 @@ info:
 
 servers:
   - url: http://localhost:5000 # Assuming the API is served from the root
+  - url: https://api.innovplay.online/
 
 components:
   securitySchemes:

@@ -4,33 +4,45 @@ variables:
     RUNNER: vps
     IMAGE_TAG: "$APP:latest"
     CONTAINER_NAME: "$APP"
-    NETWORK_NAME: $APP-$ENVIRONMENT
     HOST_PORT: 5000
     CONTAINER_PORT: 5000
 
 workflow:
     rules:
-        - if: "$CI_COMMIT_BRANCH == 'main'"
-        - if: "$CI_COMMIT_BRANCH == 'dev'"
-          variables:
-              ENVIRONMENT: "dev"
-              IMAGE_TAG: "$APP:dev"
-              CONTAINER_NAME: "$APP-dev"
-              HOST_PORT: 5001
         - if: "$CI_PIPELINE_SOURCE == 'merge_request_event'"
           variables:
-              ENVIRONMENT: "local"
+              ENVIRONMENT: local
               RUNNER: local
               IMAGE_TAG: "$APP:local"
               CONTAINER_NAME: "$APP-local"
+        - if: "$CI_COMMIT_BRANCH == 'dev'"
+          variables:
+              ENVIRONMENT: dev
+              IMAGE_TAG: "$APP:dev"
+              CONTAINER_NAME: "$APP-dev"
+              HOST_PORT: 5001
+        - if: "$CI_COMMIT_BRANCH == 'main'"
         - when: never
 
 stages:
+    - validation
     - prebuild
     - build
     - predeploy
     - deploy
     - clean
+
+invalid_merge_request:
+    stage: validation
+    tags:
+        - $RUNNER
+    variables:
+        GIT_STRATEGY: none
+    rules:
+        - if: "$CI_PIPELINE_SOURCE == 'merge_request_event' && $CI_MERGE_REQUEST_TARGET_BRANCH_NAME == 'main' && $CI_MERGE_REQUEST_SOURCE_BRANCH_NAME != 'dev'"
+    script:
+        - echo "MR para 'main' só é permitido a partir da branch 'dev'."
+        - exit 1
 
 image_clean:
     stage: prebuild
@@ -67,6 +79,13 @@ image_clean:
                 echo "Imagem $IMAGE_ID removida."
             fi
 
+image_build:
+    stage: build
+    tags:
+        - $RUNNER
+    script:
+        - docker build --no-cache -t $IMAGE_TAG .
+
 network_create:
     stage: predeploy
     tags:
@@ -74,22 +93,15 @@ network_create:
     variables:
         GIT_STRATEGY: none
     script:
-        - NETWORK=$(docker network ls -f name=$NETWORK_NAME -q)
+        - NETWORK=$(docker network ls -f name=$ENVIRONMENT -q)
         - >
             if [ -z "$NETWORK" ]; then
-                docker network create $NETWORK_NAME
+                docker network create $ENVIRONMENT
 
-                echo "Network $NETWORK_NAME criada."
+                echo "Network $ENVIRONMENT criada."
             else
-                echo "Network $NETWORK_NAME já existe."
+                echo "Network $ENVIRONMENT já existe."
             fi
-
-image_build:
-    stage: build
-    tags:
-        - $RUNNER
-    script:
-        - docker build --no-cache -t $IMAGE_TAG .
 
 container_run:
     stage: deploy
@@ -101,7 +113,7 @@ container_run:
         name: $ENVIRONMENT
         on_stop: environment_clean
     script:
-        - docker container run --network $NETWORK_NAME -p $HOST_PORT:$CONTAINER_PORT --name $CONTAINER_NAME -d $IMAGE_TAG
+        - docker container run --network $ENVIRONMENT -p $HOST_PORT:$CONTAINER_PORT --name $CONTAINER_NAME -d $IMAGE_TAG
 
 environment_clean:
     stage: clean
@@ -111,9 +123,9 @@ environment_clean:
         name: $ENVIRONMENT
         action: stop
     rules:
-        - if: "$CI_COMMIT_BRANCH == 'main' || $CI_COMMIT_BRANCH == 'dev'"
-          when: never
-        - when: manual
+        - if: "$ENVIRONMENT == 'local'"
+          when: manual
+    allow_failure: true
     script:
         - RUNNING_CONTAINER_ID=$(docker container ls -f ancestor=$IMAGE_TAG -q)
         - >
@@ -142,12 +154,12 @@ environment_clean:
 
                 echo "Imagem $IMAGE_ID removida."
             fi
-        - NETWORK_ID=$(docker network ls -f name=$NETWORK_NAME -q)
+        - NETWORK_ID=$(docker network ls -f name=$ENVIRONMENT -q)
         - >
             if [ -z "$NETWORK_ID" ]; then
-                echo "Network $NETWORK_NAME não existe"
+                echo "Network $ENVIRONMENT não existe"
             else
                 docker network rm $NETWORK_ID
 
-                echo "Network $NETWORK_NAME removida."
+                echo "Network $ENVIRONMENT removida."
             fi

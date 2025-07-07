@@ -125,6 +125,7 @@ environment_clean:
     rules:
         - if: "$ENVIRONMENT == 'local'"
           when: manual
+    allow_failure: true
     script:
         - RUNNING_CONTAINER_ID=$(docker container ls -f ancestor=$IMAGE_TAG -q)
         - >

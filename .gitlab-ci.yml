@@ -1,23 +1,29 @@
 variables:
-    APP: innovplay_backend
-    IMAGE_TAG: "$APP:$CI_COMMIT_REF_NAME"
-    DEPLOY_NAME: "$APP-$CI_COMMIT_REF_NAME"
-    PORT: 5002
-    RUNNER_TAG: local
+    APP: innovplay_api
+    ENVIRONMENT: prod
+    RUNNER: vps
+    IMAGE_TAG: "$APP:latest"
+    CONTAINER_NAME: "$APP"
+    NETWORK_NAME: $APP-$ENVIRONMENT
+    HOST_PORT: 5000
+    CONTAINER_PORT: 5000
 
 workflow:
     rules:
         - if: "$CI_COMMIT_BRANCH == 'main'"
-          variables:
-              IMAGE_TAG: "$APP:latest"
-              DEPLOY_NAME: "$APP"
-              PORT: 5000
-              RUNNER_TAG: vps
         - if: "$CI_COMMIT_BRANCH == 'dev'"
           variables:
-              PORT: 5001
-              RUNNER_TAG: vps
-        - when: always
+              ENVIRONMENT: "dev"
+              IMAGE_TAG: "$APP:dev"
+              CONTAINER_NAME: "$APP-dev"
+              HOST_PORT: 5001
+        - if: "$CI_PIPELINE_SOURCE == 'merge_request_event'"
+          variable:
+              ENVIRONMENT: "local"
+              RUNNER: local
+              IMAGE_TAG: "$APP:local"
+              CONTAINER_NAME: "$APP-local"
+        - when: never
 
 stages:
     - prebuild
@@ -29,7 +35,7 @@ stages:
 image_clean:
     stage: prebuild
     tags:
-        - $RUNNER_TAG
+        - $RUNNER
     variables:
         GIT_STRATEGY: none
     script:
@@ -40,7 +46,7 @@ image_clean:
             else
                 docker container stop $RUNNING_CONTAINER_ID
 
-                echo "Container parado."
+                echo "Container $RUNNING_CONTAINER_ID parado."
             fi
         - CONTAINER_ID=$(docker container ls -a -f ancestor=$IMAGE_TAG -q)
         - >
@@ -49,7 +55,7 @@ image_clean:
             else
                 docker container rm $CONTAINER_ID
 
-                echo "Container removido."
+                echo "Container $CONTAINER_ID removido."
             fi
         - IMAGE_ID=$(docker image ls -f reference=$IMAGE_TAG -q)
         - >
@@ -58,51 +64,51 @@ image_clean:
             else
                 docker image rm $IMAGE_ID
 
-                echo "Imagem removida."
+                echo "Imagem $IMAGE_ID removida."
             fi
 
 network_create:
     stage: predeploy
     tags:
-        - $RUNNER_TAG
+        - $RUNNER
     variables:
         GIT_STRATEGY: none
     script:
-        - NETWORK=$(docker network ls -f name=$CI_COMMIT_REF_NAME -q)
+        - NETWORK=$(docker network ls -f name=$NETWORK_NAME -q)
         - >
             if [ -z "$NETWORK" ]; then
-                docker network create $CI_COMMIT_REF_NAME
+                docker network create $NETWORK_NAME
 
-                echo "Network criada."
+                echo "Network $NETWORK_NAME criada."
             else
-                echo "Network já existe."
+                echo "Network $NETWORK_NAME já existe."
             fi
 
 image_build:
     stage: build
     tags:
-        - $RUNNER_TAG
+        - $RUNNER
     script:
         - docker build --no-cache -t $IMAGE_TAG .
 
 container_run:
     stage: deploy
     tags:
-        - $RUNNER_TAG
+        - $RUNNER
     variables:
         GIT_STRATEGY: none
     environment:
-        name: $CI_COMMIT_REF_NAME
+        name: $ENVIRONMENT
         on_stop: environment_clean
     script:
-        - docker container run --network $CI_COMMIT_REF_NAME -p $PORT:5000 --name $DEPLOY_NAME -d $IMAGE_TAG
+        - docker container run --network $NETWORK_NAME -p $HOST_PORT:$CONTAINER_PORT --name $CONTAINER_NAME -d $IMAGE_TAG
 
 environment_clean:
     stage: clean
     variables:
         GIT_STRATEGY: none
     environment:
-        name: $CI_COMMIT_REF_NAME
+        name: $ENVIRONMENT
         action: stop
     rules:
         - if: "$CI_COMMIT_BRANCH == 'main' || $CI_COMMIT_BRANCH == 'dev'"
@@ -116,7 +122,7 @@ environment_clean:
             else
                 docker container stop $RUNNING_CONTAINER_ID
 
-                echo "Container parado."
+                echo "Container $RUNNING_CONTAINER_ID parado."
             fi
         - CONTAINER_ID=$(docker container ls -a -f ancestor=$IMAGE_TAG -q)
         - >
@@ -125,7 +131,7 @@ environment_clean:
             else
                 docker container rm $CONTAINER_ID
 
-                echo "Container removido."
+                echo "Container $CONTAINER_ID removido."
             fi
         - IMAGE_ID=$(docker image ls -f reference=$IMAGE_TAG -q)
         - >
@@ -134,14 +140,14 @@ environment_clean:
             else
                 docker image rm $IMAGE_ID
 
-                echo "Imagem removida."
+                echo "Imagem $IMAGE_ID removida."
             fi
-        - NETWORK=$(docker network ls -f name=$CI_COMMIT_REF_NAME -q)
+        - NETWORK_ID=$(docker network ls -f name=$NETWORK_NAME -q)
         - >
-            if [ -z "$NETWORK" ]; then
-                echo "Network não existe"
+            if [ -z "$NETWORK_ID" ]; then
+                echo "Network $NETWORK_NAME não existe"
             else
-                docker network rm $CI_COMMIT_REF_NAME
+                docker network rm $NETWORK_ID
 
-                echo "Network removida."
+                echo "Network $NETWORK_NAME removida."
             fi

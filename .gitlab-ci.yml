@@ -9,7 +9,7 @@ variables:
 
 workflow:
     rules:
-        - if: "$CI_PIPELINE_SOURCE == 'merge_request_event'"
+        - if: "$CI_PIPELINE_SOURCE == 'merge_request_event' && $CI_MERGE_REQUEST_SOURCE_BRANCH_NAME != 'dev'"
           variables:
               ENVIRONMENT: local
               RUNNER: local
@@ -39,7 +39,7 @@ invalid_merge_request:
     variables:
         GIT_STRATEGY: none
     rules:
-        - if: "$CI_PIPELINE_SOURCE == 'merge_request_event' && $CI_MERGE_REQUEST_TARGET_BRANCH_NAME == 'main' && $CI_MERGE_REQUEST_SOURCE_BRANCH_NAME != 'dev'"
+        - if: "$CI_PIPELINE_SOURCE == 'merge_request_event' && $CI_MERGE_REQUEST_TARGET_BRANCH_NAME == 'main'"
     script:
         - echo "MR para 'main' só é permitido a partir da branch 'dev'."
         - exit 1

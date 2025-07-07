@@ -18,7 +18,7 @@ workflow:
               CONTAINER_NAME: "$APP-dev"
               HOST_PORT: 5001
         - if: "$CI_PIPELINE_SOURCE == 'merge_request_event'"
-          variable:
+          variables:
               ENVIRONMENT: "local"
               RUNNER: local
               IMAGE_TAG: "$APP:local"

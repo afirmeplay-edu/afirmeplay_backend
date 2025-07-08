@@ -15,8 +15,6 @@ workflow:
               RUNNER: local
               IMAGE_TAG: "$APP:local"
               CONTAINER_NAME: "$APP-local"
-              DATABASE_URL: postgresql://postgres_user:postgres_password@postgres_container:5432/postgres_db
-              FRONTEND_URL: http://localhost:8000
         - if: "$CI_COMMIT_BRANCH == 'dev'"
           variables:
               ENVIRONMENT: dev
@@ -27,7 +25,7 @@ workflow:
         - when: never
 
 stages:
-    - validate_pipeline
+    - validation
     - prebuild
     - build
     - predeploy
@@ -35,7 +33,7 @@ stages:
     - clean
 
 invalid_merge_request:
-    stage: validate_pipeline
+    stage: validation
     tags:
         - $RUNNER
     variables:
@@ -86,11 +84,6 @@ image_build:
     tags:
         - $RUNNER
     script:
-        - echo "DATABASE_URL=$DATABASE_URL" > app/.env
-        - echo "FRONTEND_URL=$FRONTEND_URL" >> app/.env
-        - echo "JWT_SECRET_KEY=$JWT_SECRET_KEY" >> app/.env
-        - echo "SENDGRID_API_KEY=$SENDGRID_API_KEY" >> app/.env
-        - echo "SENDGRID_FROM_EMAIL=$SENDGRID_FROM_EMAIL" >> app/.env
         - docker build --no-cache -t $IMAGE_TAG .
 
 network_create:
@@ -109,18 +102,6 @@ network_create:
             else
                 echo "Network $ENVIRONMENT já existe."
             fi
-
-mock_database:
-    stage: predeploy
-    tags:
-        - $RUNNER
-    variables:
-        GIT_STRATEGY: none
-    rules:
-        - if: "$ENVIRONMENT == 'local'"
-    script:
-        - docker container run --network $ENVIRONMENT --name postgres_container -p 5432:5432 -e POSTGRES_USER=postgres_user -e POSTGRES_PASSWORD=postgres_password -e POSTGRES_DB=postgres_db -d postgres
-        - until docker exec postgres_container pg_isready; do sleep 1; done
 
 container_run:
     stage: deploy
@@ -146,15 +127,6 @@ environment_clean:
           when: manual
     allow_failure: true
     script:
-        - POSTGRES_CONTAINER_ID=$(docker container ls -f name=postgres_container -q)
-        - >
-            if [ -z "$POSTGRES_CONTAINER_ID" ]; then
-                echo "Sem container ativo."
-            else
-                docker container stop $POSTGRES_CONTAINER_ID
-
-                echo "Container $POSTGRES_CONTAINER_ID parado."
-            fi
         - RUNNING_CONTAINER_ID=$(docker container ls -f ancestor=$IMAGE_TAG -q)
         - >
             if [ -z "$RUNNING_CONTAINER_ID" ]; then

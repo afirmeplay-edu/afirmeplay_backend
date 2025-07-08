@@ -120,6 +120,7 @@ mock_database:
         - if: "$ENVIRONMENT == 'local'"
     script:
         - docker container run --network $ENVIRONMENT --name postgres_container -p 5432:5432 -e POSTGRES_USER=postgres_user -e POSTGRES_PASSWORD=postgres_password -e POSTGRES_DB=postgres_db -d postgres
+        - until docker exec postgres_container pg_isready; do sleep 1; done
 
 container_run:
     stage: deploy

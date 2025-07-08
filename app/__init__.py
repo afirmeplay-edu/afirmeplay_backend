@@ -2,7 +2,6 @@ from flask import Flask, send_from_directory
 from flask_sqlalchemy import SQLAlchemy
 from flask_cors import CORS
 from flask_jwt_extended import JWTManager
-from flask_swagger_ui import get_swaggerui_blueprint
 from flask_migrate import Migrate
 
 from .config import Config
@@ -13,17 +12,8 @@ db = SQLAlchemy()
 jwt = JWTManager()
 migrate = Migrate()
 
-SWAGGER_URL = '/api'  # URL for Swagger UI
+# Configuração do Swagger
 API_URL = '/swagger.yaml' # URL where our Swagger spec will be served
-
-# Call factory function to create our blueprint
-swaggerui_blueprint = get_swaggerui_blueprint(
-    SWAGGER_URL,
-    API_URL,
-    config={
-        'app_name': "InvaPlay Backend API Documentation"
-    }
-)
 
 def create_app():
     # Carregar variáveis de ambiente do arquivo .env da pasta app/
@@ -88,8 +78,6 @@ def create_app():
     app.register_blueprint(evaluation_results_routes.bp)
     app.register_blueprint(basic_endpoints.bp)
     app.register_blueprint(game_routes.bp)
-    # Registrar blueprint do Swagger UI
-    app.register_blueprint(swaggerui_blueprint, url_prefix=SWAGGER_URL)
 
     # Importar modelos para garantir que as tabelas sejam criadas
     from .models import City, School, SchoolTeacher, Teacher, Student, Subject, Class, ClassSubject, ClassTest, Test, EducationStage, Grade, Skill, Question, StudentAnswer, UserQuickLinks, TeacherClass, User
@@ -98,5 +86,45 @@ def create_app():
     @app.route('/swagger.yaml')
     def serve_swagger_yaml():
         return send_from_directory(os.path.dirname(app.root_path), 'swagger.yaml')
+    
+    # Rota para redirecionar a raiz para o Swagger
+    @app.route('/')
+    def root():
+        return '''
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <title>InvaPlay Backend API Documentation</title>
+            <link rel="stylesheet" type="text/css" href="https://unpkg.com/swagger-ui-dist@5.9.0/swagger-ui.css" />
+            <style>
+                html { box-sizing: border-box; overflow: -moz-scrollbars-vertical; overflow-y: scroll; }
+                *, *:before, *:after { box-sizing: inherit; }
+                body { margin:0; background: #fafafa; }
+            </style>
+        </head>
+        <body>
+            <div id="swagger-ui"></div>
+            <script src="https://unpkg.com/swagger-ui-dist@5.9.0/swagger-ui-bundle.js"></script>
+            <script src="https://unpkg.com/swagger-ui-dist@5.9.0/swagger-ui-standalone-preset.js"></script>
+            <script>
+                window.onload = function() {
+                    const ui = SwaggerUIBundle({
+                        url: '/swagger.yaml',
+                        dom_id: '#swagger-ui',
+                        deepLinking: true,
+                        presets: [
+                            SwaggerUIBundle.presets.apis,
+                            SwaggerUIStandalonePreset
+                        ],
+                        plugins: [
+                            SwaggerUIBundle.plugins.DownloadUrl
+                        ],
+                        layout: "BaseLayout"
+                    });
+                };
+            </script>
+        </body>
+        </html>
+        '''
 
     return app

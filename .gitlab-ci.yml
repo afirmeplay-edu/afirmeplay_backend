@@ -84,6 +84,11 @@ image_build:
     tags:
         - $RUNNER
     script:
+        - echo "DATABASE_URL=$DATABASE_URL" > app/.env
+        - echo "FRONTEND_URL=$FRONTEND_URL" >> app/.env
+        - echo "JWT_SECRET_KEY=$JWT_SECRET_KEY" >> app/.env
+        - echo "SENDGRID_API_KEY=$SENDGRID_API_KEY" >> app/.env
+        - echo "SENDGRID_FROM_EMAIL=$SENDGRID_FROM_EMAIL" >> app/.env
         - docker build --no-cache -t $IMAGE_TAG .
 
 network_create:

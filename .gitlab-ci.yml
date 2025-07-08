@@ -117,7 +117,7 @@ mock_database:
     variables:
         GIT_STRATEGY: none
     rules:
-        - if: "$ENVIRONMENT == local"
+        - if: "$ENVIRONMENT == 'local'"
     script:
         - docker container run --network $ENVIRONMENT -p 5432:5432 --name postgres_container \
           -e POSTGRES_USER=postgres_user \

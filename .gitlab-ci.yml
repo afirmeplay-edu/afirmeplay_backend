@@ -25,15 +25,18 @@ workflow:
         - when: never
 
 stages:
-    - validation
+    - validate_pipeline
     - prebuild
     - build
+    - validate_build
     - predeploy
+    - validate_predeploy
     - deploy
+    - validate_deploy
     - clean
 
 invalid_merge_request:
-    stage: validation
+    stage: validate_pipeline
     tags:
         - $RUNNER
     variables:
@@ -90,6 +93,14 @@ image_build:
         - echo "SENDGRID_API_KEY=$SENDGRID_API_KEY" >> app/.env
         - echo "SENDGRID_FROM_EMAIL=$SENDGRID_FROM_EMAIL" >> app/.env
         - docker build --no-cache -t $IMAGE_TAG .
+
+image_build_validate:
+    stage: validate_build
+    tags:
+        - $RUNNER
+    variables:
+        GIT_STRATEGY: none
+    script:
         - IMAGE_ID=$(docker image ls -f reference=$IMAGE_TAG -q)
         - >
             if [ -z "$IMAGE_ID" ]; then
@@ -113,6 +124,14 @@ network_create:
             else
                 echo "Network $ENVIRONMENT já existe."
             fi
+
+network_create_validate:
+    stage: validate_predeploy
+    tags:
+        - $RUNNER
+    variables:
+        GIT_STRATEGY: none
+    script:
         - NETWORK=$(docker network ls -f name=$ENVIRONMENT -q)
         - >
             if [ -z "$NETWORK" ]; then
@@ -131,6 +150,14 @@ container_run:
         on_stop: environment_clean
     script:
         - docker container run --network $ENVIRONMENT -p $HOST_PORT:$CONTAINER_PORT --name $CONTAINER_NAME -d $IMAGE_TAG
+
+container_run_validate:
+    stage: validate_deploy
+    tags:
+        - $RUNNER
+    variables:
+        GIT_STRATEGY: none
+    script:
         - RUNNING_CONTAINER_ID=$(docker container ls -f ancestor=$IMAGE_TAG -q)
         - >
             if [ -z "$RUNNING_CONTAINER_ID" ]; then

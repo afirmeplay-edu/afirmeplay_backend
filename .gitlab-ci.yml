@@ -90,6 +90,12 @@ image_build:
         - echo "SENDGRID_API_KEY=$SENDGRID_API_KEY" >> app/.env
         - echo "SENDGRID_FROM_EMAIL=$SENDGRID_FROM_EMAIL" >> app/.env
         - docker build --no-cache -t $IMAGE_TAG .
+        - IMAGE_ID=$(docker image ls -f reference=$IMAGE_TAG -q)
+        - >
+            if [ -z "$IMAGE_ID" ]; then
+                echo "Não foi possível buildar a imagem."
+                exit 1
+            fi
 
 network_create:
     stage: predeploy
@@ -107,6 +113,12 @@ network_create:
             else
                 echo "Network $ENVIRONMENT já existe."
             fi
+        - NETWORK=$(docker network ls -f name=$ENVIRONMENT -q)
+        - >
+            if [ -z "$NETWORK" ]; then
+                echo "Não foi possível criar a network."
+                exit 1
+            fi
 
 container_run:
     stage: deploy
@@ -119,6 +131,11 @@ container_run:
         on_stop: environment_clean
     script:
         - docker container run --network $ENVIRONMENT -p $HOST_PORT:$CONTAINER_PORT --name $CONTAINER_NAME -d $IMAGE_TAG
+        - RUNNING_CONTAINER_ID=$(docker container ls -f ancestor=$IMAGE_TAG -q)
+        - >
+            if [ -z "$RUNNING_CONTAINER_ID" ]; then
+                echo "Não foi possível iniciar o container."
+            fi
 
 environment_clean:
     stage: clean

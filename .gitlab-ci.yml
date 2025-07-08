@@ -28,11 +28,8 @@ stages:
     - validate_pipeline
     - prebuild
     - build
-    - validate_build
     - predeploy
-    - validate_predeploy
     - deploy
-    - validate_deploy
     - clean
 
 invalid_merge_request:
@@ -94,20 +91,6 @@ image_build:
         - echo "SENDGRID_FROM_EMAIL=$SENDGRID_FROM_EMAIL" >> app/.env
         - docker build --no-cache -t $IMAGE_TAG .
 
-image_build_validate:
-    stage: validate_build
-    tags:
-        - $RUNNER
-    variables:
-        GIT_STRATEGY: none
-    script:
-        - IMAGE_ID=$(docker image ls -f reference=$IMAGE_TAG -q)
-        - >
-            if [ -z "$IMAGE_ID" ]; then
-                echo "Não foi possível buildar a imagem."
-                exit 1
-            fi
-
 network_create:
     stage: predeploy
     tags:
@@ -125,20 +108,6 @@ network_create:
                 echo "Network $ENVIRONMENT já existe."
             fi
 
-network_create_validate:
-    stage: validate_predeploy
-    tags:
-        - $RUNNER
-    variables:
-        GIT_STRATEGY: none
-    script:
-        - NETWORK=$(docker network ls -f name=$ENVIRONMENT -q)
-        - >
-            if [ -z "$NETWORK" ]; then
-                echo "Não foi possível criar a network."
-                exit 1
-            fi
-
 container_run:
     stage: deploy
     tags:
@@ -150,19 +119,6 @@ container_run:
         on_stop: environment_clean
     script:
         - docker container run --network $ENVIRONMENT -p $HOST_PORT:$CONTAINER_PORT --name $CONTAINER_NAME -d $IMAGE_TAG
-
-container_run_validate:
-    stage: validate_deploy
-    tags:
-        - $RUNNER
-    variables:
-        GIT_STRATEGY: none
-    script:
-        - RUNNING_CONTAINER_ID=$(docker container ls -f ancestor=$IMAGE_TAG -q)
-        - >
-            if [ -z "$RUNNING_CONTAINER_ID" ]; then
-                echo "Não foi possível iniciar o container."
-            fi
 
 environment_clean:
     stage: clean

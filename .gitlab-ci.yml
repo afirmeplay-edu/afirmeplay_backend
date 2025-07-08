@@ -15,6 +15,8 @@ workflow:
               RUNNER: local
               IMAGE_TAG: "$APP:local"
               CONTAINER_NAME: "$APP-local"
+              DATABASE_URL: postgresql://postgres_user:postgres_password@postgres_container:5432/postgres_db
+              FRONTEND_URL: http://localhost:8000
         - if: "$CI_COMMIT_BRANCH == 'dev'"
           variables:
               ENVIRONMENT: dev
@@ -108,6 +110,21 @@ network_create:
                 echo "Network $ENVIRONMENT já existe."
             fi
 
+mock_database:
+    stage: predeploy
+    tags:
+        - $RUNNER
+    variables:
+        GIT_STRATEGY: none
+    rules:
+        - if: "$ENVIRONMENT == local"
+    script:
+        - docker container run --network $ENVIRONMENT -p 5432:5432 --name postgres_container \
+          -e POSTGRES_USER=postgres_user \
+          -e POSTGRES_PASSWORD=postgres_password \
+          -e POSTGRES_DB=postgres_db \
+          -d postgres
+
 container_run:
     stage: deploy
     tags:
@@ -132,6 +149,15 @@ environment_clean:
           when: manual
     allow_failure: true
     script:
+        - POSTGRES_CONTAINER_ID=$(docker container ls -f name=postgres_container -q)
+        - >
+            if [ -z "$POSTGRES_CONTAINER_ID" ]; then
+                echo "Sem container ativo."
+            else
+                docker container stop $POSTGRES_CONTAINER_ID
+
+                echo "Container $POSTGRES_CONTAINER_ID parado."
+            fi
         - RUNNING_CONTAINER_ID=$(docker container ls -f ancestor=$IMAGE_TAG -q)
         - >
             if [ -z "$RUNNING_CONTAINER_ID" ]; then

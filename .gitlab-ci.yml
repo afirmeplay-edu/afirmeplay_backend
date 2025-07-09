@@ -45,7 +45,7 @@ stages:
 
 .clean_job:
     script:
-        - >
+        - |
             CONTAINER_IDS=$(docker container ls -a -f ancestor=$IMAGE_TAG -q)
 
             if [ -z "$CONTAINER_IDS" ]; then
@@ -67,7 +67,7 @@ stages:
                     echo "$(date '+[%Y-%m-%d %H:%M:%S]') - Container do app com id '$ID' foi removido."
                 done
             fi
-        - >
+        - |
             IMAGE_ID=$(docker image ls -f reference="$IMAGE_TAG" -q)
 
             if [ -z "$IMAGE_ID" ]; then
@@ -86,7 +86,7 @@ invalid_merge_request:
     rules:
         - if: "$CI_PIPELINE_SOURCE == 'merge_request_event' && $CI_MERGE_REQUEST_TARGET_BRANCH_NAME == 'main'"
     script:
-        - >
+        - |
             echo "$(date '+[%Y-%m-%d %H:%M:%S]') - MR para 'main' só é permitido a partir da branch 'dev'."
             exit 1
 
@@ -97,7 +97,7 @@ image_clean:
         - .set_none_git_strategy
         - .clean_job
     before_script:
-        - >
+        - |
             command -v docker >/dev/null || { echo "$(date '+[%Y-%m-%d %H:%M:%S]') - Docker não disponível"; exit 1; }
 
 image_build:
@@ -107,7 +107,7 @@ image_build:
     environment:
         name: $ENVIRONMENT
     script:
-        - >
+        - |
             set -e
 
             echo "DATABASE_URL=$DATABASE_URL" > app/.env
@@ -133,7 +133,7 @@ network_create:
         - .set_runner_tag
         - .set_none_git_strategy
     script:
-        - >
+        - |
             set -e
 
             NETWORK=$(docker network ls -f name="^${ENVIRONMENT}$" -q)
@@ -161,7 +161,7 @@ mock_database:
     rules:
         - if: "$ENVIRONMENT == 'local'"
     script:
-        - >
+        - |
             CONTAINER_ID=$(docker container ls -a -f name=^postgres_container$ -q)
 
             if [ -z "$CONTAINER_ID" ]; then
@@ -213,7 +213,7 @@ container_run:
         name: $ENVIRONMENT
         on_stop: environment_clean
     script:
-        - >
+        - |
             set -e
 
             docker container run --network "$ENVIRONMENT" -p "$HOST_PORT:$CONTAINER_PORT" --name "$CONTAINER_NAME" -d "$IMAGE_TAG"
@@ -249,7 +249,7 @@ environment_clean:
           when: manual
     allow_failure: true
     after_script:
-        - >
+        - |
             CONTAINER_IDS=$(docker container ls -a -f name=^postgres_container$ -q)
 
             if [ -z "$CONTAINER_IDS" ]; then
@@ -271,7 +271,7 @@ environment_clean:
                     echo "$(date '+[%Y-%m-%d %H:%M:%S]') - Container 'postgres_container' com id '$ID' foi removido."
                 done
             fi
-        - >
+        - |
             NETWORK=$(docker network ls -f name="^${ENVIRONMENT}$" -q)
 
             if [ -z "$NETWORK" ]; then

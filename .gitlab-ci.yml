@@ -15,6 +15,8 @@ workflow:
               RUNNER: local
               IMAGE_TAG: "$APP:local"
               CONTAINER_NAME: "$APP-local"
+              DATABASE_URL: postgresql://postgres_user:postgres_password@postgres_container:5432/postgres_db
+              FRONTEND_URL: http://localhost:8000
         - if: "$CI_COMMIT_BRANCH == 'dev'"
           variables:
               ENVIRONMENT: dev
@@ -25,7 +27,7 @@ workflow:
         - when: never
 
 stages:
-    - validation
+    - validate_pipeline
     - prebuild
     - build
     - predeploy

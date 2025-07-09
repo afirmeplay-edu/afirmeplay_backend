@@ -46,7 +46,7 @@ stages:
 .clean_job:
     script:
         - |
-            CONTAINER_IDS=$(docker container ls -a -f ancestor=$IMAGE_TAG -q)
+            CONTAINER_IDS=$(docker container ls -a -f ancestor="$IMAGE_TAG" -q)
 
             if [ -z "$CONTAINER_IDS" ]; then
                 echo "$(date '+[%Y-%m-%d %H:%M:%S]') - Container do app não existe."
@@ -218,7 +218,7 @@ container_run:
 
             docker container run --network "$ENVIRONMENT" -p "$HOST_PORT:$CONTAINER_PORT" --name "$CONTAINER_NAME" -d "$IMAGE_TAG"
 
-            CONTAINER_ID=$(docker container ls -a -f name="$CONTAINER_NAME" -q)
+            CONTAINER_ID=$(docker container ls -a -f ancestor="$IMAGE_TAG" -q)
 
             if [ -z "$CONTAINER_ID" ]; then
                 echo "$(date '+[%Y-%m-%d %H:%M:%S]') - Falha ao criar o container '$CONTAINER_NAME'."
@@ -229,7 +229,7 @@ container_run:
                 IS_RUNNING=$(docker inspect -f "{{.State.Running}}" "$CONTAINER_ID")
 
                 if [ "$IS_RUNNING" = "true" ]; then
-                    echo "$(date '+[%Y-%m-%d %H:%M:%S]') - Container '$CONTAINER_NAME' criado com sucesso."
+                    echo "$(date '+[%Y-%m-%d %H:%M:%S]') - Container '$CONTAINER_NAME' criado com id '$CONTAINER_ID'."
                 else
                     echo "$(date '+[%Y-%m-%d %H:%M:%S]') - Falha ao criar o container '$CONTAINER_NAME'."
                     exit 1

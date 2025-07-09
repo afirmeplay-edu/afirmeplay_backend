@@ -303,9 +303,9 @@ def listar_avaliacoes_por_escola(school_id):
         return jsonify({"error": "Error listing tests by school", "details": str(e)}), 500
 
 # @bp.route('/student/<string:student_id>', methods=['GET'])
-# @jwt_required()
-# @role_required("admin", "professor", "coordenador", "diretor", "aluno")
-# def listar_avaliacoes_por_aluno(student_id):
+@jwt_required()
+@role_required("admin", "professor", "coordenador", "diretor", "aluno")
+def listar_avaliacoes_por_aluno(student_id):
     """Lista todas as avaliações agendadas para um aluno específico."""
     try:
         user = get_current_user_from_token()
@@ -440,6 +440,15 @@ def obter_avaliacao(test_id):
     except Exception as e:
         logging.error(f"Error getting test: {str(e)}", exc_info=True)
         return jsonify({"error": "Error getting test", "details": str(e)}), 500
+
+@bp.route('/<string:test_id>/details', methods=['GET'])
+@jwt_required()
+@role_required("admin", "professor", "coordenador", "diretor", "aluno")
+def get_test_details(test_id):
+    """
+    Alias para /test/<test_id> - Detalhes completos da avaliação
+    """
+    return obter_avaliacao(test_id)
 
 @bp.route('/<string:test_id>', methods=['PUT'])
 @jwt_required()
@@ -1180,3 +1189,235 @@ def listar_avaliacoes_minha_classe():
     except Exception as e:
         logging.error(f"Error listing tests for student's class: {str(e)}", exc_info=True)
         return jsonify({"error": "Error listing tests for student's class", "details": str(e)}), 500
+
+@bp.route('/<string:test_id>/start-session', methods=['POST'])
+@jwt_required()
+@role_required("aluno")
+def start_test_session(test_id):
+    """
+    Inicia uma nova sessão de teste para um aluno
+    """
+    try:
+        from app.models.testSession import TestSession
+        from app.models.student import Student
+        
+        user = get_current_user_from_token()
+        if not user:
+            return jsonify({"error": "Usuário não encontrado"}), 404
+        
+        # Buscar aluno pelo user_id
+        student = Student.query.filter_by(user_id=user['id']).first()
+        if not student:
+            return jsonify({"error": "Dados do aluno não encontrados"}), 404
+        
+        # Verificar se o teste existe
+        test = Test.query.get(test_id)
+        if not test:
+            return jsonify({"error": "Teste não encontrado"}), 404
+        
+        # Verificar se já existe sessão ativa para este aluno/teste
+        existing_session = TestSession.query.filter_by(
+            student_id=student.id,
+            test_id=test_id,
+            status='em_andamento'
+        ).first()
+        
+        if existing_session:
+            return jsonify({
+                "message": "Sessão já iniciada",
+                "session_id": existing_session.id,
+                "started_at": existing_session.started_at.isoformat(),
+                "remaining_time_minutes": existing_session.remaining_time_minutes,
+                "time_limit_minutes": existing_session.time_limit_minutes
+            }), 200
+        
+        # Determinar tempo limite baseado no teste
+        time_limit_minutes = None
+        if test.time_limit:
+            # Assumindo que time_limit é um timedelta ou datetime
+            if hasattr(test.time_limit, 'total_seconds'):
+                time_limit_minutes = int(test.time_limit.total_seconds() / 60)
+            elif hasattr(test.time_limit, 'minute'):
+                time_limit_minutes = test.time_limit.minute
+        
+        # Criar nova sessão
+        session = TestSession(
+            student_id=student.id,
+            test_id=test_id,
+            time_limit_minutes=time_limit_minutes,
+            ip_address=request.remote_addr,
+            user_agent=request.headers.get('User-Agent')
+        )
+        
+        db.session.add(session)
+        db.session.commit()
+        
+        return jsonify({
+            "message": "Sessão iniciada com sucesso",
+            "session_id": session.id,
+            "started_at": session.started_at.isoformat(),
+            "time_limit_minutes": session.time_limit_minutes,
+            "remaining_time_minutes": session.time_limit_minutes  # Tempo restante inicial = tempo limite
+        }), 201
+        
+    except Exception as e:
+        logging.error(f"Erro ao iniciar sessão do teste: {str(e)}", exc_info=True)
+        db.session.rollback()
+        return jsonify({"error": "Erro ao iniciar sessão", "details": str(e)}), 500
+
+@bp.route('/<string:test_id>/submit', methods=['POST'])
+@jwt_required()
+@role_required("aluno")
+def submit_test_answers(test_id):
+    """
+    Submete as respostas de um teste
+    
+    Body:
+    {
+        "session_id": "uuid",
+        "answers": [
+            {
+                "question_id": "uuid",
+                "answer": "resposta_do_aluno"
+            }
+        ]
+    }
+    """
+    try:
+        from app.models.testSession import TestSession
+        from app.models.student import Student
+        from app.models.studentAnswer import StudentAnswer
+        from datetime import datetime
+        
+        user = get_current_user_from_token()
+        if not user:
+            return jsonify({"error": "Usuário não encontrado"}), 404
+        
+        # Buscar aluno pelo user_id
+        student = Student.query.filter_by(user_id=user['id']).first()
+        if not student:
+            return jsonify({"error": "Dados do aluno não encontrados"}), 404
+        
+        data = request.get_json()
+        session_id = data.get('session_id')
+        answers = data.get('answers', [])
+        
+        if not session_id:
+            return jsonify({"error": "session_id é obrigatório"}), 400
+        
+        if not answers:
+            return jsonify({"error": "Lista de respostas é obrigatória"}), 400
+        
+        # Buscar sessão
+        session = TestSession.query.filter_by(
+            id=session_id,
+            test_id=test_id,
+            student_id=student.id
+        ).first()
+        
+        if not session:
+            return jsonify({"error": "Sessão não encontrada"}), 404
+        
+        # Validar se sessão ainda está ativa
+        if session.status != 'em_andamento':
+            return jsonify({
+                "error": f"Sessão não está ativa. Status atual: {session.status}"
+            }), 400
+        
+        # Validar tempo limite
+        if session.is_expired:
+            session.status = 'expirada'
+            db.session.commit()
+            return jsonify({
+                "error": "Tempo limite excedido. Sessão expirada."
+            }), 410  # 410 Gone
+        
+        # Buscar questões do teste para validação e correção
+        test_questions = Question.query.filter(
+            Question.test_id == test_id
+        ).all()
+        
+        # Se não há questões vinculadas diretamente ao teste, buscar pela relação many-to-many
+        if not test_questions:
+            test = Test.query.get(test_id)
+            if test and test.questions:
+                test_questions = test.questions
+        
+        questions_dict = {q.id: q for q in test_questions}
+        
+        correct_count = 0
+        saved_answers = []
+        
+        # Processar cada resposta
+        for ans_data in answers:
+            question_id = ans_data.get('question_id')
+            answer = ans_data.get('answer')
+            
+            if not question_id or answer is None:
+                continue
+            
+            # Verificar se a questão existe e pertence ao teste
+            if question_id not in questions_dict:
+                logging.warning(f"Questão {question_id} não encontrada no teste {test_id}")
+                continue
+            
+            # Verificar se já existe resposta para esta questão nesta sessão
+            existing_answer = StudentAnswer.query.filter_by(
+                student_id=student.id,
+                test_id=test_id,
+                question_id=question_id
+            ).first()
+            
+            if existing_answer:
+                # Atualizar resposta existente
+                existing_answer.answer = str(answer)
+                existing_answer.answered_at = datetime.utcnow()
+                student_answer = existing_answer
+            else:
+                # Criar nova resposta
+                student_answer = StudentAnswer(
+                    student_id=student.id,
+                    test_id=test_id,
+                    question_id=question_id,
+                    answer=str(answer)
+                )
+                db.session.add(student_answer)
+            
+            saved_answers.append({
+                'question_id': question_id,
+                'answer': str(answer),
+                'answered_at': student_answer.answered_at.isoformat()
+            })
+            
+            # Verificar se a resposta está correta (correção automática)
+            question = questions_dict[question_id]
+            if question.correct_answer and str(answer).strip().lower() == str(question.correct_answer).strip().lower():
+                correct_count += 1
+        
+        # Finalizar sessão e calcular nota
+        total_questions = len(test_questions)
+        session.finalize_session(
+            correct_answers=correct_count,
+            total_questions=total_questions
+        )
+        
+        db.session.commit()
+        
+        return jsonify({
+            "message": "Respostas submetidas com sucesso",
+            "session_id": session.id,
+            "submitted_at": session.submitted_at.isoformat(),
+            "duration_minutes": session.duration_minutes,
+            "results": {
+                "total_questions": session.total_questions,
+                "correct_answers": session.correct_answers,
+                "score_percentage": session.score,
+                "grade": session.grade,
+                "answers_saved": len(saved_answers)
+            }
+        }), 200
+        
+    except Exception as e:
+        logging.error(f"Erro ao submeter respostas do teste: {str(e)}", exc_info=True)
+        db.session.rollback()
+        return jsonify({"error": "Erro ao submeter respostas", "details": str(e)}), 500

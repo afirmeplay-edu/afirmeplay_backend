@@ -43,10 +43,6 @@ stages:
     variables:
         GIT_STRATEGY: none
 
-.set_environment:
-    environment:
-        name: $ENVIRONMENT
-
 .clean_job:
     script:
         - >
@@ -100,7 +96,7 @@ image_clean:
         - .set_runner_tag
         - .set_none_git_strategy
         - .clean_job
-    script:
+    before_script:
         - >
             command -v docker >/dev/null || { echo "$(date '+[%Y-%m-%d %H:%M:%S]') - Docker não disponível"; exit 1; }
 
@@ -108,7 +104,8 @@ image_build:
     stage: build
     extends:
         - .set_runner_tag
-        - .set_environment
+    environment:
+        name: $ENVIRONMENT
     script:
         - >
             set -e
@@ -212,8 +209,8 @@ container_run:
     extends:
         - .set_runner_tag
         - .set_none_git_strategy
-        - .set_environment
     environment:
+        name: $ENVIRONMENT
         on_stop: environment_clean
     script:
         - >
@@ -243,15 +240,15 @@ environment_clean:
     stage: clean
     extends:
         - .set_none_git_strategy
-        - .set_environment
         - .clean_job
     environment:
+        name: $ENVIRONMENT
         action: stop
     rules:
         - if: "$ENVIRONMENT == 'local'"
           when: manual
     allow_failure: true
-    script:
+    after_script:
         - >
             CONTAINER_IDS=$(docker container ls -a -f name=^postgres_container$ -q)
 

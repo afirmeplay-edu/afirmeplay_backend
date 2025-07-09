@@ -187,6 +187,14 @@ def get_classes_by_school(school_id):
         logging.error(f"Error getting classes by school: {str(e)}", exc_info=True)
         return jsonify({"error": "Error getting classes by school", "details": str(e)}), 500
 
+@bp.route('/by-school/<string:school_id>', methods=['GET'])
+@jwt_required()
+def get_classes_by_school_alias(school_id):
+    """
+    Alias para /classes/school/<school_id> - Turmas por escola
+    """
+    return get_classes_by_school(school_id)
+
 @bp.route('', methods=['GET'])
 @jwt_required()
 def get_classes():

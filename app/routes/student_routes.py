@@ -552,3 +552,45 @@ def get_student_class(student_id):
     except Exception as e:
         logging.error(f"Unexpected error in get_student_class route: {str(e)}", exc_info=True)
         return jsonify({"message": "An unexpected error occurred", "details": str(e)}), 500
+
+@bp.route('/me', methods=['GET'])
+@jwt_required()
+@role_required("aluno")
+def get_current_student():
+    """
+    Retorna os dados do aluno atual baseado no token JWT
+    """
+    try:
+        user = get_current_user_from_token()
+        if not user:
+            return jsonify({"error": "Usuário não encontrado"}), 404
+
+        # Buscar aluno pelo user_id
+        student = db.session.query(
+            Student,
+            User,
+            School,
+            Class,
+            Grade
+        ).join(
+            User, Student.user_id == User.id
+        ).join(
+            School, Student.school_id == School.id
+        ).join(
+            Class, Student.class_id == Class.id
+        ).outerjoin(
+            Grade, Student.grade_id == Grade.id
+        ).filter(
+            Student.user_id == user['id']
+        ).first()
+
+        if not student:
+            return jsonify({"error": "Dados do aluno não encontrados"}), 404
+
+        student_obj, user_obj, school, class_obj, grade = student
+
+        return jsonify(format_student_details(student_obj, user_obj, school, class_obj, grade)), 200
+
+    except Exception as e:
+        logging.error(f"Erro ao obter dados do aluno atual: {str(e)}", exc_info=True)
+        return jsonify({"error": "Erro ao obter dados do aluno", "details": str(e)}), 500

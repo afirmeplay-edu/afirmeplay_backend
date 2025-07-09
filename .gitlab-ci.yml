@@ -132,7 +132,7 @@ mock_database:
         - POSTGRES_CONTAINER_ID=$(docker container ls -f name=postgres_container -q -a)
         - >
             if [ -z "$POSTGRES_CONTAINER_ID" ]; then
-                ocker container run --network $ENVIRONMENT --name postgres_container -p 5432:5432 -e POSTGRES_USER=postgres_user -e POSTGRES_PASSWORD=postgres_password -e POSTGRES_DB=postgres_db -d postgres
+                docker container run --network $ENVIRONMENT --name postgres_container -p 5432:5432 -e POSTGRES_USER=postgres_user -e POSTGRES_PASSWORD=postgres_password -e POSTGRES_DB=postgres_db -d postgres
 
                 echo "Container $POSTGRES_CONTAINER_ID criado."
             elif [ -z "$POSTGRES_RUNNING_CONTAINER_ID" ]; then
@@ -165,19 +165,6 @@ environment_clean:
           when: manual
     allow_failure: true
     script:
-        - POSTGRES_CONTAINER_ID=$(docker container ls -f name=postgres_container -q)
-        - >
-            if [ -z "$POSTGRES_CONTAINER_ID" ]; then
-                echo "Sem container ativo."
-            else
-                docker container stop $POSTGRES_CONTAINER_ID
-
-                echo "Container $POSTGRES_CONTAINER_ID parado."
-
-                docker container rm $POSTGRES_CONTAINER_ID
-
-                echo "Container $POSTGRES_CONTAINER_ID removido."
-            fi
         - RUNNING_CONTAINER_ID=$(docker container ls -f ancestor=$IMAGE_TAG -q)
         - >
             if [ -z "$RUNNING_CONTAINER_ID" ]; then
@@ -213,4 +200,17 @@ environment_clean:
                 docker network rm $NETWORK_ID
 
                 echo "Network $ENVIRONMENT removida."
+            fi
+        - POSTGRES_CONTAINER_ID=$(docker container ls -f name=postgres_container -q)
+        - >
+            if [ -z "$POSTGRES_CONTAINER_ID" ]; then
+                echo "Sem container ativo."
+            else
+                docker container stop $POSTGRES_CONTAINER_ID
+
+                echo "Container $POSTGRES_CONTAINER_ID parado."
+
+                docker container rm $POSTGRES_CONTAINER_ID
+
+                echo "Container $POSTGRES_CONTAINER_ID removido."
             fi

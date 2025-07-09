@@ -416,7 +416,7 @@ def atualizar_status_avaliacao(test_id):
 
 @bp.route('/<string:test_id>', methods=['GET'])
 @jwt_required()
-@role_required("admin", "professor", "coordenador", "diretor")
+@role_required("admin", "professor", "coordenador", "diretor", "aluno")
 def obter_avaliacao(test_id):
     try:
         test = Test.query.options(

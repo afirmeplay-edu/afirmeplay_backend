@@ -26,6 +26,18 @@ workflow:
         - if: "$CI_COMMIT_BRANCH == 'main'"
         - when: never
 
+.set_runner_tag:
+    tags:
+        - $RUNNER
+
+.set_none_git_strategy:
+    variables:
+        GIT_STRATEGY: none
+
+.set_environment:
+    environment:
+        name: $ENVIRONMENT
+
 stages:
     - validate_pipeline
     - prebuild
@@ -36,10 +48,9 @@ stages:
 
 invalid_merge_request:
     stage: validate_pipeline
-    tags:
-        - $RUNNER
-    variables:
-        GIT_STRATEGY: none
+    extends:
+        - .set_runner_tag
+        - .set_none_git_strategy
     rules:
         - if: "$CI_PIPELINE_SOURCE == 'merge_request_event' && $CI_MERGE_REQUEST_TARGET_BRANCH_NAME == 'main'"
     script:
@@ -48,10 +59,9 @@ invalid_merge_request:
 
 image_clean:
     stage: prebuild
-    tags:
-        - $RUNNER
-    variables:
-        GIT_STRATEGY: none
+    extends:
+        - .set_runner_tag
+        - .set_none_git_strategy
     script:
         - RUNNING_CONTAINER_ID=$(docker container ls -f ancestor=$IMAGE_TAG -q)
         - >
@@ -83,8 +93,9 @@ image_clean:
 
 image_build:
     stage: build
-    tags:
-        - $RUNNER
+    extends:
+        - .set_runner_tag
+        - .set_environment
     script:
         - echo "DATABASE_URL=$DATABASE_URL" > app/.env
         - echo "FRONTEND_URL=$FRONTEND_URL" >> app/.env
@@ -95,10 +106,9 @@ image_build:
 
 network_create:
     stage: predeploy
-    tags:
-        - $RUNNER
-    variables:
-        GIT_STRATEGY: none
+    extends:
+        - .set_runner_tag
+        - .set_none_git_strategy
     script:
         - NETWORK=$(docker network ls -f name=$ENVIRONMENT -q)
         - >
@@ -112,34 +122,43 @@ network_create:
 
 mock_database:
     stage: predeploy
-    tags:
-        - $RUNNER
-    variables:
-        GIT_STRATEGY: none
+    extends:
+        - .set_runner_tag
+        - .set_none_git_strategy
     rules:
         - if: "$ENVIRONMENT == 'local'"
     script:
-        - docker container run --network $ENVIRONMENT --name postgres_container -p 5432:5432 -e POSTGRES_USER=postgres_user -e POSTGRES_PASSWORD=postgres_password -e POSTGRES_DB=postgres_db -d postgres
+        - POSTGRES_RUNNING_CONTAINER_ID=$(docker container ls -f name=postgres_container -q)
+        - POSTGRES_CONTAINER_ID=$(docker container ls -f name=postgres_container -q -a)
+        - >
+            if [ -z "$POSTGRES_CONTAINER_ID" ]; then
+                ocker container run --network $ENVIRONMENT --name postgres_container -p 5432:5432 -e POSTGRES_USER=postgres_user -e POSTGRES_PASSWORD=postgres_password -e POSTGRES_DB=postgres_db -d postgres
+
+                echo "Container $POSTGRES_CONTAINER_ID criado."
+            elif [ -z "$POSTGRES_RUNNING_CONTAINER_ID" ]; then
+                docker container start $POSTGRES_CONTAINER_ID
+
+                echo "Container $POSTGRES_CONTAINER_ID iniciado."
+            fi
         - until docker exec postgres_container pg_isready; do sleep 1; done
 
 container_run:
     stage: deploy
-    tags:
-        - $RUNNER
-    variables:
-        GIT_STRATEGY: none
+    extends:
+        - .set_runner_tag
+        - .set_none_git_strategy
+        - .set_environment
     environment:
-        name: $ENVIRONMENT
         on_stop: environment_clean
     script:
         - docker container run --network $ENVIRONMENT -p $HOST_PORT:$CONTAINER_PORT --name $CONTAINER_NAME -d $IMAGE_TAG
 
 environment_clean:
     stage: clean
-    variables:
-        GIT_STRATEGY: none
+    extends:
+        - .set_none_git_strategy
+        - .set_environment
     environment:
-        name: $ENVIRONMENT
         action: stop
     rules:
         - if: "$ENVIRONMENT == 'local'"
@@ -154,6 +173,10 @@ environment_clean:
                 docker container stop $POSTGRES_CONTAINER_ID
 
                 echo "Container $POSTGRES_CONTAINER_ID parado."
+
+                docker container rm $POSTGRES_CONTAINER_ID
+
+                echo "Container $POSTGRES_CONTAINER_ID removido."
             fi
         - RUNNING_CONTAINER_ID=$(docker container ls -f ancestor=$IMAGE_TAG -q)
         - >

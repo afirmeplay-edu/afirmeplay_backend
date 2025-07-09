@@ -17,7 +17,7 @@ CORS(
     app,
     resources={
         r"/*": {
-            "origins": ["http://localhost:8080", "https://innovplay.vercel.app"],
+            "origins": ["http://localhost:8080", os.getenv("FRONTEND_URL")],
             "methods": ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
             "allow_headers": ["Content-Type", "Authorization", "Accept"],
             "expose_headers": ["Content-Type", "Authorization"],

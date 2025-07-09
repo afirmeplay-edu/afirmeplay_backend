@@ -9,6 +9,7 @@ from app.models.student import Student
 from app.models.school import School
 from app.models.grades import Grade
 from app.models.city import City
+from app.models.educationStage import EducationStage
 
 bp = Blueprint('classes', __name__, url_prefix="/classes")
 
@@ -138,22 +139,25 @@ def get_filtered_classes():
 @jwt_required()
 def get_classes_by_school(school_id):
     try:
-        # Query with explicit joins
+        # Query with explicit joins including EducationStage
         classes = db.session.query(
             Class,
             School,
             Grade,
+            EducationStage,
             db.func.count(Student.id).label('students_count')
         ).join(
             School, Class.school_id == School.id
         ).outerjoin(
             Grade, Class.grade_id == Grade.id
         ).outerjoin(
+            EducationStage, Grade.education_stage_id == EducationStage.id
+        ).outerjoin(
             Student, Class.id == Student.class_id
         ).filter(
             Class.school_id == school_id
         ).group_by(
-            Class.id, School.id, Grade.id
+            Class.id, School.id, Grade.id, EducationStage.id
         ).all()
         
         if not classes:
@@ -171,13 +175,25 @@ def get_classes_by_school(school_id):
             } if school else None,
             "grade": {
                 "id": grade.id,
-                "name": grade.name
+                "name": grade.name,
+                "education_stage": {
+                    "id": education_stage.id,
+                    "name": education_stage.name
+                } if education_stage else None
             } if grade else None
-        } for c, school, grade, students_count in classes]), 200
+        } for c, school, grade, education_stage, students_count in classes]), 200
 
     except Exception as e:
         logging.error(f"Error getting classes by school: {str(e)}", exc_info=True)
         return jsonify({"error": "Error getting classes by school", "details": str(e)}), 500
+
+@bp.route('/by-school/<string:school_id>', methods=['GET'])
+@jwt_required()
+def get_classes_by_school_alias(school_id):
+    """
+    Alias para /classes/school/<school_id> - Turmas por escola
+    """
+    return get_classes_by_school(school_id)
 
 @bp.route('', methods=['GET'])
 @jwt_required()

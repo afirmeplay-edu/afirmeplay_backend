@@ -15,6 +15,8 @@ workflow:
               RUNNER: local
               IMAGE_TAG: "$APP:local"
               CONTAINER_NAME: "$APP-local"
+              DATABASE_URL: postgresql://postgres_user:postgres_password@postgres_container:5432/postgres_db
+              FRONTEND_URL: http://localhost:8000
         - if: "$CI_COMMIT_BRANCH == 'dev'"
           variables:
               ENVIRONMENT: dev
@@ -25,100 +27,220 @@ workflow:
         - when: never
 
 stages:
-    - validation
+    - validate_pipeline
     - prebuild
     - build
     - predeploy
+    - mock
     - deploy
     - clean
 
-invalid_merge_request:
-    stage: validation
+.set_runner_tag:
     tags:
         - $RUNNER
+
+.set_none_git_strategy:
     variables:
         GIT_STRATEGY: none
+
+.clean_job:
+    script:
+        - |
+            CONTAINER_IDS=$(docker container ls -a -f ancestor="$IMAGE_TAG" -q)
+
+            if [ -z "$CONTAINER_IDS" ]; then
+                echo "$(date '+[%Y-%m-%d %H:%M:%S]') - Container do app não existe."
+            else
+                for ID in $CONTAINER_IDS; do
+                    IS_RUNNING=$(docker inspect -f "{{.State.Running}}" "$ID")
+
+                    if [ "$IS_RUNNING" = "true" ]; then
+                        docker container stop "$ID"
+
+                        echo "$(date '+[%Y-%m-%d %H:%M:%S]') - Container do app com id '$ID' foi parado."
+                    else
+                        echo "$(date '+[%Y-%m-%d %H:%M:%S]') - Container do app com id '$ID' já está parado."
+                    fi
+
+                    docker container rm "$ID"
+
+                    echo "$(date '+[%Y-%m-%d %H:%M:%S]') - Container do app com id '$ID' foi removido."
+                done
+            fi
+        - |
+            IMAGE_ID=$(docker image ls -f reference="$IMAGE_TAG" -q)
+
+            if [ -z "$IMAGE_ID" ]; then
+                echo "$(date '+[%Y-%m-%d %H:%M:%S]') - Imagem '$IMAGE_TAG' não existe."
+            else
+                docker image rm "$IMAGE_ID"
+
+                echo "$(date '+[%Y-%m-%d %H:%M:%S]') - Imagem '$IMAGE_TAG' com id '$IMAGE_ID' foi removida."
+            fi
+
+invalid_merge_request:
+    stage: validate_pipeline
+    extends:
+        - .set_runner_tag
+        - .set_none_git_strategy
     rules:
         - if: "$CI_PIPELINE_SOURCE == 'merge_request_event' && $CI_MERGE_REQUEST_TARGET_BRANCH_NAME == 'main'"
     script:
-        - echo "MR para 'main' só é permitido a partir da branch 'dev'."
-        - exit 1
+        - |
+            echo "$(date '+[%Y-%m-%d %H:%M:%S]') - MR para 'main' só é permitido a partir da branch 'dev'."
+            exit 1
 
 image_clean:
     stage: prebuild
-    tags:
-        - $RUNNER
-    variables:
-        GIT_STRATEGY: none
-    script:
-        - RUNNING_CONTAINER_ID=$(docker container ls -f ancestor=$IMAGE_TAG -q)
-        - >
-            if [ -z "$RUNNING_CONTAINER_ID" ]; then
-                echo "Sem container ativo."
-            else
-                docker container stop $RUNNING_CONTAINER_ID
-
-                echo "Container $RUNNING_CONTAINER_ID parado."
-            fi
-        - CONTAINER_ID=$(docker container ls -a -f ancestor=$IMAGE_TAG -q)
-        - >
-            if [ -z "$CONTAINER_ID" ]; then
-                echo "Container não existe."
-            else
-                docker container rm $CONTAINER_ID
-
-                echo "Container $CONTAINER_ID removido."
-            fi
-        - IMAGE_ID=$(docker image ls -f reference=$IMAGE_TAG -q)
-        - >
-            if [ -z "$IMAGE_ID" ]; then
-                echo "Imagem não existe."
-            else
-                docker image rm $IMAGE_ID
-
-                echo "Imagem $IMAGE_ID removida."
-            fi
+    extends:
+        - .set_runner_tag
+        - .set_none_git_strategy
+        - .clean_job
+    before_script:
+        - |
+            command -v docker >/dev/null || { echo "$(date '+[%Y-%m-%d %H:%M:%S]') - Docker não disponível"; exit 1; }
 
 image_build:
     stage: build
-    tags:
-        - $RUNNER
+    extends:
+        - .set_runner_tag
+    environment:
+        name: $ENVIRONMENT
     script:
-        - docker build --no-cache -t $IMAGE_TAG .
+        - |
+            set -e
+
+            echo "DATABASE_URL=$DATABASE_URL" > app/.env
+            echo "FRONTEND_URL=$FRONTEND_URL" >> app/.env
+            echo "JWT_SECRET_KEY=$JWT_SECRET_KEY" >> app/.env
+            echo "SENDGRID_API_KEY=$SENDGRID_API_KEY" >> app/.env
+            echo "SENDGRID_FROM_EMAIL=$SENDGRID_FROM_EMAIL" >> app/.env
+
+            docker build --no-cache -t "$IMAGE_TAG" .
+
+            IMAGE_ID=$(docker image ls -f reference="$IMAGE_TAG" -q)
+
+            if [ -z "$IMAGE_ID" ]; then
+                echo "$(date '+[%Y-%m-%d %H:%M:%S]') - Imagem '$IMAGE_TAG' não foi encontrada após o build."
+                exit 1
+            else
+                echo "$(date '+[%Y-%m-%d %H:%M:%S]') - Imagem '$IMAGE_TAG' criada com id '$IMAGE_ID'."
+            fi
 
 network_create:
     stage: predeploy
-    tags:
-        - $RUNNER
-    variables:
-        GIT_STRATEGY: none
+    extends:
+        - .set_runner_tag
+        - .set_none_git_strategy
     script:
-        - NETWORK=$(docker network ls -f name=$ENVIRONMENT -q)
-        - >
-            if [ -z "$NETWORK" ]; then
-                docker network create $ENVIRONMENT
+        - |
+            set -e
 
-                echo "Network $ENVIRONMENT criada."
+            NETWORK=$(docker network ls -f name="^${ENVIRONMENT}$" -q)
+
+            if [ -z "$NETWORK" ]; then
+                docker network create "$ENVIRONMENT"
+
+                NETWORK=$(docker network ls -f name="^${ENVIRONMENT}$" -q)
+
+                if [ -z "$NETWORK" ]; then
+                    echo "$(date '+[%Y-%m-%d %H:%M:%S]') - Falha ao criar a network '$ENVIRONMENT'."
+                    exit 1
+                else
+                    echo "$(date '+[%Y-%m-%d %H:%M:%S]') - Network '$ENVIRONMENT' criada com sucesso."
+                fi
             else
-                echo "Network $ENVIRONMENT já existe."
+                echo "$(date '+[%Y-%m-%d %H:%M:%S]') - Network '$ENVIRONMENT' já existe."
             fi
+
+mock_database:
+    stage: mock
+    extends:
+        - .set_runner_tag
+        - .set_none_git_strategy
+    rules:
+        - if: "$ENVIRONMENT == 'local'"
+    script:
+        - |
+            CONTAINER_ID=$(docker container ls -a -f name=^postgres_container$ -q)
+
+            if [ -z "$CONTAINER_ID" ]; then
+                docker container run -d --name postgres_container --network "$ENVIRONMENT" -p 5432:5432 -e POSTGRES_USER=postgres_user -e POSTGRES_PASSWORD=postgres_password -e POSTGRES_DB=postgres_db postgres
+                
+                CONTAINER_ID=$(docker container ls -a -f name=^postgres_container$ -q)
+
+                if [ -z "$CONTAINER_ID" ]; then
+                    echo "$(date '+[%Y-%m-%d %H:%M:%S]') - Falha ao criar a container 'postgres_container'."
+                    exit 1
+                else
+                    echo "$(date '+[%Y-%m-%d %H:%M:%S]') - Container postgres_container criado com sucesso."
+                fi
+            else
+                IS_RUNNING=$(docker inspect -f "{{.State.Running}}" "$CONTAINER_ID")
+
+                if [ "$IS_RUNNING" = "true" ]; then
+                    echo "$(date '+[%Y-%m-%d %H:%M:%S]') - Container 'postgres_container' já está ativo."
+                else
+                    docker container start postgres_container
+
+                    echo "$(date '+[%Y-%m-%d %H:%M:%S]') - Container 'postgres_container' iniciado."
+                fi
+            fi
+
+            TIMEOUT=60
+            ELAPSED=0
+
+            until docker exec postgres_container pg_isready; do
+                sleep 1
+
+                ELAPSED=$((ELAPSED + 1))
+
+                if [ $ELAPSED -ge $TIMEOUT ]; then
+                    echo "$(date '+[%Y-%m-%d %H:%M:%S]') - Timeout esperando o banco ficar pronto."
+
+                    docker logs postgres_container
+
+                    exit 1
+                fi
+            done
 
 container_run:
     stage: deploy
-    tags:
-        - $RUNNER
-    variables:
-        GIT_STRATEGY: none
+    extends:
+        - .set_runner_tag
+        - .set_none_git_strategy
     environment:
         name: $ENVIRONMENT
         on_stop: environment_clean
     script:
-        - docker container run --network $ENVIRONMENT -p $HOST_PORT:$CONTAINER_PORT --name $CONTAINER_NAME -d $IMAGE_TAG
+        - |
+            set -e
+
+            docker container run --network "$ENVIRONMENT" -p "$HOST_PORT:$CONTAINER_PORT" --name "$CONTAINER_NAME" -d "$IMAGE_TAG"
+
+            CONTAINER_ID=$(docker container ls -a -f ancestor="$IMAGE_TAG" -q)
+
+            if [ -z "$CONTAINER_ID" ]; then
+                echo "$(date '+[%Y-%m-%d %H:%M:%S]') - Falha ao criar o container '$CONTAINER_NAME'."
+                exit 1
+            else
+                sleep 30
+
+                IS_RUNNING=$(docker inspect -f "{{.State.Running}}" "$CONTAINER_ID")
+
+                if [ "$IS_RUNNING" = "true" ]; then
+                    echo "$(date '+[%Y-%m-%d %H:%M:%S]') - Container '$CONTAINER_NAME' criado com id '$CONTAINER_ID'."
+                else
+                    echo "$(date '+[%Y-%m-%d %H:%M:%S]') - Falha ao criar o container '$CONTAINER_NAME'."
+                    exit 1
+                fi
+            fi
 
 environment_clean:
     stage: clean
-    variables:
-        GIT_STRATEGY: none
+    extends:
+        - .set_none_git_strategy
+        - .clean_job
     environment:
         name: $ENVIRONMENT
         action: stop
@@ -126,40 +248,36 @@ environment_clean:
         - if: "$ENVIRONMENT == 'local'"
           when: manual
     allow_failure: true
-    script:
-        - RUNNING_CONTAINER_ID=$(docker container ls -f ancestor=$IMAGE_TAG -q)
-        - >
-            if [ -z "$RUNNING_CONTAINER_ID" ]; then
-                echo "Sem container ativo."
-            else
-                docker container stop $RUNNING_CONTAINER_ID
+    after_script:
+        - |
+            CONTAINER_IDS=$(docker container ls -a -f name=^postgres_container$ -q)
 
-                echo "Container $RUNNING_CONTAINER_ID parado."
+            if [ -z "$CONTAINER_IDS" ]; then
+                echo "$(date '+[%Y-%m-%d %H:%M:%S]') - Container 'postgres_container' não existe."
+            else
+                for ID in $CONTAINER_IDS; do
+                    IS_RUNNING=$(docker inspect -f "{{.State.Running}}" "$ID")
+
+                    if [ "$IS_RUNNING" = "true" ]; then
+                        docker container stop "$ID"
+
+                        echo "$(date '+[%Y-%m-%d %H:%M:%S]') - Container 'postgres_container' com id '$ID' foi parado."
+                    else
+                        echo "$(date '+[%Y-%m-%d %H:%M:%S]') - Container 'postgres_container' com id '$ID' já está parado."
+                    fi
+
+                    docker container rm "$ID"
+
+                    echo "$(date '+[%Y-%m-%d %H:%M:%S]') - Container 'postgres_container' com id '$ID' foi removido."
+                done
             fi
-        - CONTAINER_ID=$(docker container ls -a -f ancestor=$IMAGE_TAG -q)
-        - >
-            if [ -z "$CONTAINER_ID" ]; then
-                echo "Container não existe."
-            else
-                docker container rm $CONTAINER_ID
+        - |
+            NETWORK=$(docker network ls -f name="^${ENVIRONMENT}$" -q)
 
-                echo "Container $CONTAINER_ID removido."
-            fi
-        - IMAGE_ID=$(docker image ls -f reference=$IMAGE_TAG -q)
-        - >
-            if [ -z "$IMAGE_ID" ]; then
-                echo "Imagem não existe."
+            if [ -z "$NETWORK" ]; then
+                echo "$(date '+[%Y-%m-%d %H:%M:%S]') - Network '$ENVIRONMENT' não existe."
             else
-                docker image rm $IMAGE_ID
+                docker network rm "$NETWORK"
 
-                echo "Imagem $IMAGE_ID removida."
-            fi
-        - NETWORK_ID=$(docker network ls -f name=$ENVIRONMENT -q)
-        - >
-            if [ -z "$NETWORK_ID" ]; then
-                echo "Network $ENVIRONMENT não existe"
-            else
-                docker network rm $NETWORK_ID
-
-                echo "Network $ENVIRONMENT removida."
+                echo "$(date '+[%Y-%m-%d %H:%M:%S]') - Network '$ENVIRONMENT' foi removida."
             fi

@@ -562,6 +562,8 @@ def deletar_avaliacao(test_id):
 @role_required("admin", "professor", "coordenador", "diretor")
 def aplicar_avaliacao_classe(test_id):
     """Aplica uma avaliação a uma ou múltiplas classes."""
+    print(test_id)
+    print(request.get_json())
     try:
         data = request.get_json()
         if not data:
@@ -587,6 +589,7 @@ def aplicar_avaliacao_classe(test_id):
             application = class_data.get('application')
             expiration = class_data.get('expiration')
 
+
             if not class_id:
                 errors.append("class_id is required for each class")
                 continue
@@ -597,12 +600,27 @@ def aplicar_avaliacao_classe(test_id):
                 test_id=test_id
             ).first()
 
+            print(f"Existing application found: {existing_application is not None}")
+
             if existing_application:
-                errors.append(f"Test is already applied to class {class_id}")
+                # Atualizar aplicação existente com novas datas
+                try:
+                    print(f"Updating existing application for class_id: {class_id}")
+                    existing_application.application = datetime.fromisoformat(application) if application else None
+                    existing_application.expiration = datetime.fromisoformat(expiration) if expiration else None
+                    applied_classes.append(class_id)
+                    print(f"Existing application updated successfully for class_id: {class_id}")
+                except ValueError as e:
+                    print(f"ValueError updating class {class_id}: {str(e)}")
+                    errors.append(f"Invalid date format for class {class_id}: {str(e)}")
+                except Exception as e:
+                    print(f"Unexpected error updating class {class_id}: {str(e)}")
+                    errors.append(f"Error updating application for class {class_id}: {str(e)}")
                 continue
 
             # Criar nova aplicação
             try:
+                print(f"Creating ClassTest with class_id: {class_id}, test_id: {test_id}")
                 class_test = ClassTest(
                     class_id=class_id,
                     test_id=test_id,
@@ -611,14 +629,22 @@ def aplicar_avaliacao_classe(test_id):
                 )
                 db.session.add(class_test)
                 applied_classes.append(class_id)
+                print(f"ClassTest created successfully for class_id: {class_id}")
             except ValueError as e:
+                print(f"ValueError for class {class_id}: {str(e)}")
                 errors.append(f"Invalid date format for class {class_id}: {str(e)}")
+            except Exception as e:
+                print(f"Unexpected error for class {class_id}: {str(e)}")
+                errors.append(f"Error creating application for class {class_id}: {str(e)}")
 
         if applied_classes:
+            # Atualizar o status da avaliação para "agendada" para permitir que alunos realizem
+            test.status = 'agendada'
+            
             db.session.commit()
             
             response = {
-                "message": f"Test applied to {len(applied_classes)} classes successfully",
+                "message": f"Test applied/updated to {len(applied_classes)} classes successfully",
                 "applied_classes": applied_classes
             }
             
@@ -704,6 +730,81 @@ def remover_aplicacao_avaliacao(test_id, class_id):
         db.session.rollback()
         logging.error(f"Error removing test application: {str(e)}", exc_info=True)
         return jsonify({"error": "Error removing test application", "details": str(e)}), 500
+
+
+@bp.route('/<string:test_id>/classes/remove', methods=['POST'])
+@jwt_required()
+@role_required("admin", "professor", "coordenador", "diretor")
+def remover_aplicacoes_avaliacao_multiplas(test_id):
+    """Remove a aplicação de uma avaliação de múltiplas classes."""
+    try:
+        data = request.get_json()
+        if not data:
+            return jsonify({"error": "No data provided"}), 400
+
+        # Validar campos obrigatórios
+        if 'class_ids' not in data or not isinstance(data['class_ids'], list):
+            return jsonify({"error": "class_ids list is required"}), 400
+
+        if not data['class_ids']:
+            return jsonify({"error": "At least one class_id must be provided"}), 400
+
+        # Verificar se a avaliação existe
+        test = Test.query.get(test_id)
+        if not test:
+            return jsonify({"error": "Test not found"}), 404
+
+        removed_classes = []
+        not_found_classes = []
+        errors = []
+
+        for class_id in data['class_ids']:
+            if not class_id:
+                errors.append("class_id cannot be empty")
+                continue
+
+            # Verificar se a aplicação existe
+            class_test = ClassTest.query.filter_by(
+                test_id=test_id,
+                class_id=class_id
+            ).first()
+
+            if not class_test:
+                not_found_classes.append(class_id)
+                continue
+
+            try:
+                db.session.delete(class_test)
+                removed_classes.append(class_id)
+            except Exception as e:
+                errors.append(f"Error removing class {class_id}: {str(e)}")
+
+        if removed_classes:
+            db.session.commit()
+            
+            response = {
+                "message": f"Test applications removed from {len(removed_classes)} classes successfully",
+                "removed_classes": removed_classes
+            }
+            
+            if not_found_classes:
+                response["not_found_classes"] = not_found_classes
+                
+            if errors:
+                response["warnings"] = errors
+                
+            return jsonify(response), 200
+        else:
+            return jsonify({
+                "error": "No classes were removed", 
+                "not_found_classes": not_found_classes,
+                "details": errors
+            }), 400
+
+    except Exception as e:
+        db.session.rollback()
+        logging.error(f"Error removing test applications: {str(e)}", exc_info=True)
+        return jsonify({"error": "Error removing test applications", "details": str(e)}), 500
 
 @bp.route('/class/<string:class_id>/tests/complete', methods=['GET'])
 @jwt_required()

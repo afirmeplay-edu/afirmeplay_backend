@@ -20,6 +20,8 @@ import logging
 bp = Blueprint('student_answer', __name__, url_prefix='/student-answers')
 
 
+
+
 @bp.errorhandler(Exception)
 def handle_error(error):
     """Tratamento global de erros"""
@@ -199,11 +201,6 @@ def end_test_session(session_id):
         if session.grade is None:
             session.grade = 0.0
         
-        # Atualizar status da avaliação para concluida
-        test = Test.query.get(session.test_id)
-        if test:
-            test.status = 'concluida'
-        
         db.session.commit()
         
         return jsonify({
@@ -247,14 +244,24 @@ def submit_answers():
     """
     try:
         data = request.get_json()
+        
+        # Validação básica dos dados JSON
+        if not data:
+            return jsonify({'error': 'Dados JSON são obrigatórios'}), 400
+        
         session_id = data.get('session_id')
-        answers = data.get('answers', [])
+        answers = data.get('answers')
         
         if not session_id:
             return jsonify({'error': 'session_id é obrigatório'}), 400
         
-        if not answers:
-            return jsonify({'error': 'Lista de respostas é obrigatória'}), 400
+        # Verificar se answers está presente no JSON (pode ser lista vazia)
+        if 'answers' not in data:
+            return jsonify({'error': 'Campo answers é obrigatório'}), 400
+        
+        # Garantir que answers seja uma lista (pode ser vazia)
+        if not isinstance(answers, list):
+            return jsonify({'error': 'Lista de respostas deve ser um array'}), 400
         
         # Buscar sessão
         session = TestSession.query.get(session_id)
@@ -334,11 +341,6 @@ def submit_answers():
             correct_answers=correct_count,
             total_questions=total_questions
         )
-        
-        # Atualizar status da avaliação para concluida
-        test = Test.query.get(session.test_id)
-        if test:
-            test.status = 'concluida'
         
         db.session.commit()
         
@@ -683,11 +685,6 @@ def submit_answers_legacy():
             correct_answers=correct_count,
             total_questions=len(test_questions)
         )
-        
-        # Atualizar status da avaliação para concluida
-        test = Test.query.get(session.test_id)
-        if test:
-            test.status = 'concluida'
         
         db.session.commit()
         

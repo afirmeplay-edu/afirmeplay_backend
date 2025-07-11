@@ -194,6 +194,35 @@ def listar_avaliacoes():
         if status_filter:
             query = query.filter(Test.status == status_filter)
 
+        # Parâmetros de ordenação
+        sort_by = request.args.get('sort', 'created_at')
+        order = request.args.get('order', 'desc')
+        
+        # Aplicar ordenação
+        if sort_by == 'created_at':
+            if order.lower() == 'desc':
+                query = query.order_by(Test.created_at.desc())
+            else:
+                query = query.order_by(Test.created_at.asc())
+        elif sort_by == 'title':
+            if order.lower() == 'desc':
+                query = query.order_by(Test.title.desc())
+            else:
+                query = query.order_by(Test.title.asc())
+        elif sort_by == 'status':
+            if order.lower() == 'desc':
+                query = query.order_by(Test.status.desc())
+            else:
+                query = query.order_by(Test.status.asc())
+        else:
+            # Padrão: ordenar por data de criação descendente
+            query = query.order_by(Test.created_at.desc())
+
+        # Parâmetro de limite
+        limit = request.args.get('limit', type=int)
+        if limit:
+            query = query.limit(limit)
+
         avaliacoes = query.all()
         
         return jsonify([format_test_response(a) for a in avaliacoes]), 200

@@ -82,6 +82,25 @@ def criar_avaliacao():
             existing_schools = School.query.filter(School.id.in_(school_ids)).all()
             if len(existing_schools) != len(school_ids):
                 return jsonify({"error": "Uma ou mais escolas não foram encontradas"}), 400
+        
+        # Validação de turmas se fornecidas
+        classes_to_apply = []
+        if data.get('classes'):
+            if isinstance(data['classes'], list):
+                class_ids = [c.get('id') if isinstance(c, dict) else c for c in data['classes']]
+            else:
+                class_ids = [data['classes']]
+            
+            # Verificar se todas as turmas existem
+            existing_classes = Class.query.filter(Class.id.in_(class_ids)).all()
+            if len(existing_classes) != len(class_ids):
+                return jsonify({"error": "Uma ou mais turmas não foram encontradas"}), 400
+            
+            classes_to_apply = class_ids
+            
+            # Se turmas foram especificadas, extrair as escolas das turmas
+            school_ids_from_classes = list(set([c.school_id for c in existing_classes]))
+            data['schools'] = school_ids_from_classes
 
         logging.info("Criando nova avaliação com os dados fornecidos")
         print(data)
@@ -149,11 +168,25 @@ def criar_avaliacao():
                     logging.info(f"Nova questão criada e associada à avaliação")
 
         db.session.add(nova_avaliacao)
+        db.session.flush()  # Para obter o ID da avaliação antes do commit
+        
+        # Se turmas específicas foram fornecidas, criar registros em ClassTest
+        if classes_to_apply:
+            for class_id in classes_to_apply:
+                class_test = ClassTest(
+                    class_id=class_id,
+                    test_id=nova_avaliacao.id,
+                    status='pendente'  # Status inicial
+                )
+                db.session.add(class_test)
+            logging.info(f"Criados registros ClassTest para {len(classes_to_apply)} turmas")
+
         db.session.commit()
 
         return jsonify({
             "message": "Test created successfully",
-            "id": nova_avaliacao.id
+            "id": nova_avaliacao.id,
+            "classes_applied": len(classes_to_apply) if classes_to_apply else 0
         }), 201
 
     except ValueError as e:
@@ -172,31 +205,106 @@ def listar_avaliacoes():
         if not user:
             return jsonify({"error": "User not found or token invalid"}), 401
 
-        query = Test.query.options(
-            joinedload(Test.creator),
-            joinedload(Test.subject_rel),
-            joinedload(Test.grade),
-            subqueryload(Test.questions).options(
-                joinedload(Question.subject),
-                joinedload(Question.grade),
-                joinedload(Question.education_stage),
-                joinedload(Question.creator),
-                joinedload(Question.last_modifier)
+        # Parâmetros de paginação
+        page = request.args.get('page', 1, type=int)
+        per_page = request.args.get('per_page', 10, type=int)
+        per_page = min(per_page, 100)  # Máximo 100 itens por página
+        
+        # Verificar se é uma requisição apenas para contagem
+        only_count = request.args.get('only_count', 'false').lower() == 'true'
+        
+        # Otimizar consulta baseada no tipo de requisição
+        if only_count:
+            # Para contagem, não carregar relacionamentos
+            query = Test.query
+        else:
+            # Para dados completos, carregar apenas relacionamentos essenciais
+            query = Test.query.options(
+                joinedload(Test.creator),
+                joinedload(Test.subject_rel),
+                joinedload(Test.grade)
+                # Remover subqueryload de questions para melhor performance
             )
-        )
 
         # Se o usuário for professor, filtra para ver apenas os seus testes
         if user['role'] == 'professor':
             query = query.filter(Test.created_by == user['id'])
 
-        # Filtro por status se fornecido
+        # Filtros
         status_filter = request.args.get('status')
         if status_filter:
             query = query.filter(Test.status == status_filter)
+            
+        subject_filter = request.args.get('subject_id')
+        if subject_filter:
+            query = query.filter(Test.subject == subject_filter)
+            
+        type_filter = request.args.get('type')
+        if type_filter:
+            query = query.filter(Test.type == type_filter)
+            
+        model_filter = request.args.get('model')
+        if model_filter:
+            query = query.filter(Test.model == model_filter)
+            
+        grade_filter = request.args.get('grade_id')
+        if grade_filter:
+            query = query.filter(Test.grade_id == grade_filter)
 
-        avaliacoes = query.all()
+        # Se é apenas contagem, retornar rapidamente
+        if only_count:
+            total = query.count()
+            return jsonify({"total": total}), 200
+
+        # Parâmetros de ordenação
+        sort_by = request.args.get('sort', 'created_at')
+        order = request.args.get('order', 'desc')
         
-        return jsonify([format_test_response(a) for a in avaliacoes]), 200
+        # Aplicar ordenação
+        if sort_by == 'created_at':
+            if order.lower() == 'desc':
+                query = query.order_by(Test.created_at.desc())
+            else:
+                query = query.order_by(Test.created_at.asc())
+        elif sort_by == 'title':
+            if order.lower() == 'desc':
+                query = query.order_by(Test.title.desc())
+            else:
+                query = query.order_by(Test.title.asc())
+        elif sort_by == 'status':
+            if order.lower() == 'desc':
+                query = query.order_by(Test.status.desc())
+            else:
+                query = query.order_by(Test.status.asc())
+        else:
+            # Padrão: ordenar por data de criação descendente
+            query = query.order_by(Test.created_at.desc())
+
+        # Aplicar paginação
+        paginated_query = query.paginate(
+            page=page,
+            per_page=per_page,
+            error_out=False
+        )
+        
+        avaliacoes = paginated_query.items
+        
+        # Resposta com metadados de paginação
+        response_data = {
+            "data": [format_test_response(a) for a in avaliacoes],
+            "pagination": {
+                "page": page,
+                "per_page": per_page,
+                "total": paginated_query.total,
+                "pages": paginated_query.pages,
+                "has_next": paginated_query.has_next,
+                "has_prev": paginated_query.has_prev,
+                "next_num": paginated_query.next_num,
+                "prev_num": paginated_query.prev_num
+            }
+        }
+        
+        return jsonify(response_data), 200
 
     except Exception as e:
         logging.error(f"Error listing tests: {str(e)}", exc_info=True)
@@ -514,29 +622,104 @@ def atualizar_avaliacao(test_id):
 def bulk_delete_tests():
     """ Rota para deletar múltiplos testes em massa. """
     try:
+        logging.info("🗑️ Tentativa de deletar avaliações em massa")
+        
+        # Verificar permissões do usuário
+        user = get_current_user_from_token()
+        if not user:
+            logging.error("❌ Usuário não encontrado no token")
+            return jsonify({"error": "User not found or token invalid"}), 401
+        
+        logging.info(f"👤 Usuário fazendo bulk delete: {user['email']} (role: {user['role']})")
+        
         data = request.get_json()
         if not data or 'ids' not in data or not isinstance(data['ids'], list):
+            logging.error("❌ Lista de IDs não fornecida ou inválida")
             return jsonify({"error": "A list of 'ids' is required in the request body"}), 400
 
         test_ids = data['ids']
+        logging.info(f"📋 IDs recebidos para exclusão: {test_ids}")
+        
         if not test_ids:
+            logging.info("⚠️ Nenhum ID fornecido para exclusão")
             return jsonify({"message": "No test IDs provided to delete"}), 200
 
         tests_to_delete = Test.query.filter(Test.id.in_(test_ids)).all()
+        logging.info(f"🔍 Avaliações encontradas no banco: {[t.id for t in tests_to_delete]}")
 
         if not tests_to_delete:
+            logging.error("❌ Nenhuma das avaliações foi encontrada no banco")
             return jsonify({"error": "None of the provided test IDs were found"}), 404
 
+        # Verificar permissões para cada avaliação
+        permission_errors = []
+        valid_tests = []
+        
         for test in tests_to_delete:
+            if user['role'] == 'professor' and test.created_by != user['id']:
+                permission_errors.append(f"Test {test.id} (created by {test.created_by})")
+            else:
+                valid_tests.append(test)
+        
+        if permission_errors:
+            logging.error(f"❌ Erros de permissão: {permission_errors}")
+            return jsonify({
+                "error": "You can only delete tests you created",
+                "details": f"Permission denied for: {', '.join(permission_errors)}"
+            }), 403
+
+        logging.info(f"✅ Deletando {len(valid_tests)} avaliações...")
+        
+        # EXCLUIR REGISTROS RELACIONADOS PARA CADA TESTE
+        from app.models.studentAnswer import StudentAnswer
+        from app.models.testSession import TestSession
+        from app.models.question import Question
+        
+        for test in valid_tests:
+            logging.info(f"🗑️ Iniciando exclusão em cascata para teste: {test.id}")
+            
+            # 1. Excluir respostas dos alunos
+            student_answers = StudentAnswer.query.filter_by(test_id=test.id).all()
+            for answer in student_answers:
+                db.session.delete(answer)
+            logging.info(f"🗑️ Excluídas {len(student_answers)} respostas de alunos para teste {test.id}")
+            
+            # 2. Excluir sessões de teste
+            test_sessions = TestSession.query.filter_by(test_id=test.id).all()
+            for session in test_sessions:
+                db.session.delete(session)
+            logging.info(f"🗑️ Excluídas {len(test_sessions)} sessões de teste para teste {test.id}")
+            
+            # 3. Excluir aplicações de classe
+            class_tests = ClassTest.query.filter_by(test_id=test.id).all()
+            for class_test in class_tests:
+                db.session.delete(class_test)
+            logging.info(f"🗑️ Excluídas {len(class_tests)} aplicações de classe para teste {test.id}")
+            
+            # 4. Excluir questões associadas (se existirem)
+            questions = Question.query.filter_by(test_id=test.id).all()
+            for question in questions:
+                # Se a questão foi criada especificamente para este teste, deletar
+                # Se foi criada por outro usuário ou é reutilizada, apenas remover a associação
+                if question.created_by == test.created_by:
+                    db.session.delete(question)
+                else:
+                    # Apenas remover a associação com o teste
+                    question.test_id = None
+            logging.info(f"🗑️ Processadas {len(questions)} questões para teste {test.id}")
+            
+            # 5. Finalmente, excluir o teste
             db.session.delete(test)
+            logging.info(f"🗑️ Teste {test.id} marcado para exclusão")
         
         db.session.commit()
+        logging.info(f"🎉 {len(valid_tests)} avaliações deletadas com sucesso!")
 
-        return jsonify({'message': f'{len(tests_to_delete)} tests deleted successfully'}), 200
+        return jsonify({'message': f'{len(valid_tests)} tests deleted successfully'}), 200
 
     except Exception as e:
         db.session.rollback()
-        logging.error(f"Error bulk deleting tests: {str(e)}", exc_info=True)
+        logging.error(f"❌ Erro ao deletar avaliações em massa: {str(e)}", exc_info=True)
         return jsonify({"error": "Error bulk deleting tests", "details": str(e)}), 500
 
 @bp.route('/<string:test_id>', methods=['DELETE'])
@@ -544,17 +727,78 @@ def bulk_delete_tests():
 @role_required("admin", "professor", "coordenador", "diretor")
 def deletar_avaliacao(test_id):
     try:
+        logging.info(f"🗑️ Tentativa de deletar avaliação: {test_id}")
+        
+        # Verificar permissões do usuário
+        user = get_current_user_from_token()
+        if not user:
+            logging.error("❌ Usuário não encontrado no token")
+            return jsonify({"error": "User not found or token invalid"}), 401
+        
+        logging.info(f"👤 Usuário fazendo delete: {user['email']} (role: {user['role']})")
+        
         test = Test.query.get(test_id)
         if not test:
+            logging.error(f"❌ Avaliação não encontrada: {test_id}")
             return jsonify({"error": "Test not found"}), 404
 
+        logging.info(f"📋 Avaliação encontrada: {test.title} (criada por: {test.created_by})")
+        
+        # Verificar se o professor só pode deletar suas próprias avaliações
+        if user['role'] == 'professor' and test.created_by != user['id']:
+            logging.error(f"❌ Professor tentando deletar avaliação de outro usuário. User: {user['id']}, Creator: {test.created_by}")
+            return jsonify({"error": "You can only delete tests you created"}), 403
+
+        logging.info("✅ Permissões validadas, iniciando exclusão em cascata...")
+
+        # EXCLUIR REGISTROS RELACIONADOS EM ORDEM CORRETA
+        
+        # 1. Excluir respostas dos alunos
+        from app.models.studentAnswer import StudentAnswer
+        student_answers = StudentAnswer.query.filter_by(test_id=test_id).all()
+        for answer in student_answers:
+            db.session.delete(answer)
+        logging.info(f"🗑️ Excluídas {len(student_answers)} respostas de alunos")
+        
+        # 2. Excluir sessões de teste
+        from app.models.testSession import TestSession
+        test_sessions = TestSession.query.filter_by(test_id=test_id).all()
+        for session in test_sessions:
+            db.session.delete(session)
+        logging.info(f"🗑️ Excluídas {len(test_sessions)} sessões de teste")
+        
+        # 3. Excluir aplicações de classe
+        class_tests = ClassTest.query.filter_by(test_id=test_id).all()
+        for class_test in class_tests:
+            db.session.delete(class_test)
+        logging.info(f"🗑️ Excluídas {len(class_tests)} aplicações de classe")
+        
+        # 4. Tratar questões associadas
+        from app.models.question import Question
+        questions = Question.query.filter_by(test_id=test_id).all()
+        for question in questions:
+            # Se a questão foi criada especificamente para este teste, deletar
+            # Se foi criada por outro usuário ou é reutilizada, apenas remover a associação
+            if question.created_by == test.created_by:
+                db.session.delete(question)
+            else:
+                # Apenas remover a associação com o teste
+                question.test_id = None
+        logging.info(f"🗑️ Processadas {len(questions)} questões")
+        
+        # 5. Finalmente, excluir o teste
         db.session.delete(test)
+        logging.info("🗑️ Excluindo a avaliação principal...")
+        
+        # Commit de todas as operações
         db.session.commit()
-        return jsonify({'message': 'Test deleted successfully'}), 200
+        
+        logging.info(f"🎉 Avaliação {test_id} e todos os registros relacionados deletados com sucesso!")
+        return jsonify({'message': 'Test and all related records deleted successfully'}), 200
 
     except Exception as e:
         db.session.rollback()
-        logging.error(f"Error deleting test: {str(e)}", exc_info=True)
+        logging.error(f"❌ Erro ao deletar avaliação {test_id}: {str(e)}", exc_info=True)
         return jsonify({"error": "Error deleting test", "details": str(e)}), 500
 
 @bp.route('/<string:test_id>/apply', methods=['POST'])
@@ -664,7 +908,7 @@ def aplicar_avaliacao_classe(test_id):
 @jwt_required()
 @role_required("admin", "professor", "coordenador", "diretor")
 def listar_classes_avaliacao(test_id):
-    """Lista todas as classes onde uma avaliação foi aplicada."""
+    """Lista todas as classes onde uma avaliação foi aplicada ou está configurada para aplicação."""
     try:
         # Verificar se a avaliação existe
         test = Test.query.get(test_id)
@@ -675,31 +919,92 @@ def listar_classes_avaliacao(test_id):
         class_tests = ClassTest.query.filter_by(test_id=test_id).all()
         
         classes_info = []
-        for ct in class_tests:
-            # Buscar informações da classe
-            class_obj = Class.query.get(ct.class_id)
-            if class_obj:
-                school_obj = School.query.get(class_obj.school_id)
-                grade_obj = Grade.query.get(class_obj.grade_id)
+        
+        # Primeira prioridade: usar class_tests (quando a avaliação foi aplicada)
+        if class_tests:
+            for ct in class_tests:
+                # Buscar informações da classe
+                class_obj = Class.query.get(ct.class_id)
+                if class_obj:
+                    school_obj = School.query.get(class_obj.school_id)
+                    grade_obj = Grade.query.get(class_obj.grade_id)
+                    
+                    # Contar alunos na turma
+                    students_count = len(class_obj.students) if class_obj.students else 0
+                    
+                    classes_info.append({
+                        "class_test_id": ct.id,
+                        "class": {
+                            "id": class_obj.id,
+                            "name": class_obj.name,
+                            "school": {
+                                "id": school_obj.id,
+                                "name": school_obj.name
+                            } if school_obj else None,
+                            "grade": {
+                                "id": grade_obj.id,
+                                "name": grade_obj.name
+                            } if grade_obj else None
+                        },
+                        "students_count": students_count,
+                        "application": ct.application.isoformat() if ct.application else None,
+                        "expiration": ct.expiration.isoformat() if ct.expiration else None,
+                        "status": "applied"  # Indica que foi aplicada
+                    })
+        
+        # Segunda prioridade: usar schools (quando a avaliação foi criada mas não aplicada)
+        elif test.schools:
+            logging.info(f"Nenhuma aplicação encontrada, buscando turmas do campo schools: {test.schools}")
+            
+            # Converter schools para lista se for string
+            if isinstance(test.schools, str):
+                import json
+                try:
+                    school_ids = json.loads(test.schools)
+                    if not isinstance(school_ids, list):
+                        school_ids = [school_ids]
+                except:
+                    school_ids = [test.schools]
+            elif isinstance(test.schools, list):
+                school_ids = test.schools
+            else:
+                school_ids = []
+            
+            logging.info(f"School IDs para buscar: {school_ids}")
+            
+            # Buscar todas as turmas das escolas especificadas
+            if school_ids:
+                all_classes = Class.query.filter(Class.school_id.in_(school_ids)).all()
+                logging.info(f"Encontradas {len(all_classes)} turmas nas escolas")
                 
-                classes_info.append({
-                    "class_test_id": ct.id,
-                    "class": {
-                        "id": class_obj.id,
-                        "name": class_obj.name,
-                        "school": {
-                            "id": school_obj.id,
-                            "name": school_obj.name
-                        } if school_obj else None,
-                        "grade": {
-                            "id": grade_obj.id,
-                            "name": grade_obj.name
-                        } if grade_obj else None
-                    },
-                    "application": ct.application.isoformat() if ct.application else None,
-                    "expiration": ct.expiration.isoformat() if ct.expiration else None
-                })
-
+                for class_obj in all_classes:
+                    school_obj = School.query.get(class_obj.school_id)
+                    grade_obj = Grade.query.get(class_obj.grade_id)
+                    
+                    # Contar alunos na turma
+                    students_count = len(class_obj.students) if class_obj.students else 0
+                    
+                    classes_info.append({
+                        "class_test_id": None,  # Não há registro em ClassTest ainda
+                        "class": {
+                            "id": class_obj.id,
+                            "name": class_obj.name,
+                            "school": {
+                                "id": school_obj.id,
+                                "name": school_obj.name
+                            } if school_obj else None,
+                            "grade": {
+                                "id": grade_obj.id,
+                                "name": grade_obj.name
+                            } if grade_obj else None
+                        },
+                        "students_count": students_count,
+                        "application": None,  # Não foi aplicada ainda
+                        "expiration": None,   # Não foi aplicada ainda
+                        "status": "configured"  # Indica que foi configurada mas não aplicada
+                    })
+        
+        logging.info(f"Retornando {len(classes_info)} turmas para avaliação {test_id}")
         return jsonify(classes_info), 200
 
     except Exception as e:

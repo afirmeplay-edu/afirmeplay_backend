@@ -187,6 +187,7 @@ def format_test_response(test):
     applied_classes_info = []
     total_students = 0
     
+    # Primeira prioridade: usar class_tests (quando a avaliação foi aplicada)
     if test.class_tests:
         for ct in test.class_tests:
             try:
@@ -220,6 +221,53 @@ def format_test_response(test):
             except Exception as e:
                 logging.warning(f"Erro ao processar class_test {ct.id}: {str(e)}")
                 continue
+    
+    # Fallback: usar schools quando não há class_tests (avaliação ainda não aplicada)
+    elif test.schools:
+        try:
+            school_ids = []
+            if isinstance(test.schools, list):
+                school_ids = test.schools
+            elif isinstance(test.schools, str):
+                school_ids = [test.schools]
+            
+            # Buscar todas as turmas das escolas selecionadas
+            if school_ids:
+                classes_objs = Class.query.filter(Class.school_id.in_(school_ids)).all()
+                
+                for class_obj in classes_objs:
+                    try:
+                        school_obj = School.query.get(class_obj.school_id)
+                        grade_obj = Grade.query.get(class_obj.grade_id)
+                        
+                        # Contar alunos na turma
+                        students_count = len(class_obj.students) if class_obj.students else 0
+                        total_students += students_count
+                        
+                        applied_classes_info.append({
+                            "class_test_id": None,  # Não há class_test ainda
+                            "class": {
+                                "id": class_obj.id,
+                                "name": class_obj.name,
+                                "students_count": students_count,
+                                "school": {
+                                    "id": school_obj.id,
+                                    "name": school_obj.name
+                                } if school_obj else None,
+                                "grade": {
+                                    "id": grade_obj.id,
+                                    "name": grade_obj.name
+                                } if grade_obj else None
+                            },
+                            "application": None,  # Ainda não aplicada
+                            "expiration": None    # Ainda não aplicada
+                        })
+                    except Exception as e:
+                        logging.warning(f"Erro ao processar classe {class_obj.id}: {str(e)}")
+                        continue
+        except Exception as e:
+            logging.warning(f"Erro ao buscar turmas das escolas: {str(e)}")
+            applied_classes_info = []
 
     # Calcular duração dinamicamente
     duration = 90  # Duração padrão em minutos

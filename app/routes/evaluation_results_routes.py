@@ -12,6 +12,7 @@ from app.services.evaluation_aggregator import EvaluationAggregator
 from app.models.test import Test
 from app.models.student import Student
 from app.models.studentAnswer import StudentAnswer
+from app.models.testSession import TestSession
 from app.models.question import Question
 from app.models.subject import Subject
 from app.models.school import School

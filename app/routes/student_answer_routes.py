@@ -530,6 +530,76 @@ def save_partial_answers():
 
 # ==================== CONSULTAS E RELATÓRIOS ====================
 
+@bp.route('/test/<string:test_id>/session', methods=['GET'])
+@jwt_required()
+@role_required("student", "admin", "professor", "aluno")
+def get_test_session(test_id):
+    """
+    Retorna a sessão de teste ativa para o usuário logado e teste específico
+    """
+    try:
+        from app.models.student import Student
+        
+        # Obter user_id do JWT token
+        current_user_id = get_jwt_identity()
+        
+        # Buscar estudante pelo user_id
+        student = Student.query.filter_by(user_id=current_user_id).first()
+        if not student:
+            return jsonify({'error': 'Estudante não encontrado para este usuário'}), 404
+        
+        # Buscar sessão ativa para este aluno/teste
+        session = TestSession.query.filter_by(
+            student_id=student.id,
+            test_id=test_id,
+            status='em_andamento'
+        ).first()
+        
+        if not session:
+            return jsonify({
+                'message': 'Nenhuma sessão ativa encontrada para este teste',
+                'test_id': test_id,
+                'student_id': student.id,
+                'session_exists': False
+            }), 404
+        
+        # Verificar se expirou e atualizar status se necessário
+        if session.is_expired and session.status == 'em_andamento':
+            session.status = 'expirada'
+            db.session.commit()
+            return jsonify({
+                'message': 'Sessão expirada',
+                'test_id': test_id,
+                'session_id': session.id,
+                'status': session.status,
+                'is_expired': True
+            }), 410
+        
+        return jsonify({
+            'session_id': session.id,
+            'test_id': session.test_id,
+            'student_id': session.student_id,
+            'status': session.status,
+            'started_at': session.started_at.isoformat() if session.started_at else None,
+            'actual_start_time': session.actual_start_time.isoformat() if session.actual_start_time else None,
+            'submitted_at': session.submitted_at.isoformat() if session.submitted_at else None,
+            'time_limit_minutes': session.time_limit_minutes,
+            'remaining_time_minutes': session.remaining_time_minutes,
+            'duration_minutes': session.duration_minutes,
+            'is_expired': session.is_expired,
+            'timer_started': session.actual_start_time is not None,
+            'total_questions': session.total_questions,
+            'correct_answers': session.correct_answers,
+            'score': session.score,
+            'grade': session.grade,
+            'session_exists': True
+        }), 200
+        
+    except Exception as e:
+        logging.error(f"Erro ao buscar sessão do teste: {str(e)}", exc_info=True)
+        return jsonify({"error": "Erro ao buscar sessão", "details": str(e)}), 500
+
+
 @bp.route('/sessions/<session_id>/answers', methods=['GET'])
 @jwt_required()
 @role_required("student", "admin", "professor", "aluno")

@@ -1629,6 +1629,11 @@ def start_test_session(test_id):
         ).first()
         
         if existing_session:
+            # Se a sessão existente não tem started_at, definir agora
+            if not existing_session.started_at:
+                existing_session.started_at = datetime.utcnow()
+                db.session.commit()
+            
             return jsonify({
                 "message": "Sessão já iniciada",
                 "session_id": existing_session.id,
@@ -1655,13 +1660,16 @@ def start_test_session(test_id):
             user_agent=request.headers.get('User-Agent')
         )
         
+        # Iniciar o cronômetro da sessão
+        session.start_timer()
+        
         db.session.add(session)
         db.session.commit()
         
         return jsonify({
             "message": "Sessão iniciada com sucesso",
             "session_id": session.id,
-            "started_at": session.started_at.isoformat(),
+            "started_at": session.started_at.isoformat() if session.started_at else None,
             "time_limit_minutes": session.time_limit_minutes,
             "remaining_time_minutes": session.time_limit_minutes  # Tempo restante inicial = tempo limite
         }), 201

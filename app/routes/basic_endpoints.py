@@ -2,7 +2,7 @@
 Endpoints básicos para filtros e dropdowns do frontend
 """
 
-from flask import Blueprint, jsonify
+from flask import Blueprint, jsonify, request
 from flask_jwt_extended import jwt_required
 from app.decorators.role_required import role_required
 from app.models.educationStage import EducationStage
@@ -31,6 +31,34 @@ def handle_error(error):
         "error": "Erro interno no servidor",
         "details": str(error)
     }), 500
+
+
+@bp.route('/health', methods=['GET'])
+def health_check():
+    """
+    Endpoint de health check para verificar se o servidor está funcionando
+    
+    Returns:
+        {
+            "status": "healthy",
+            "timestamp": "2024-01-01T00:00:00",
+            "version": "1.0.0",
+            "database": "connected"
+        }
+    """
+    try:
+        # Testar conexão com banco de dados
+        db.session.execute('SELECT 1')
+        database_status = "connected"
+    except Exception as e:
+        database_status = f"error: {str(e)}"
+    
+    return jsonify({
+        "status": "healthy",
+        "timestamp": datetime.now().isoformat(),
+        "version": "1.0.0",
+        "database": database_status
+    }), 200
 
 
 @bp.route('/dashboard/stats', methods=['GET'])
@@ -86,6 +114,56 @@ def dashboard_stats():
         logging.error(f"Erro ao buscar estatísticas do dashboard: {str(e)}", exc_info=True)
         return jsonify({
             "error": "Erro ao buscar estatísticas do dashboard",
+            "details": str(e)
+        }), 500
+
+
+@bp.route('/dashboard/comprehensive-stats', methods=['GET'])
+@jwt_required()
+@role_required("admin", "professor", "coordenador", "diretor")
+def comprehensive_dashboard_stats():
+    """
+    Retorna estatísticas mais completas do dashboard
+    
+    Returns:
+        {
+            "students": int,
+            "schools": int,
+            "evaluations": int,
+            "games": int,
+            "users": int,
+            "questions": int,
+            "classes": int,
+            "teachers": int,
+            "last_sync": string
+        }
+    """
+    try:
+        from app.models.user import User
+        from app.models.game import Game
+        from app.models.question import Question
+        from app.models.studentClass import Class
+        from app.models.teacher import Teacher
+        
+        # Buscar todas as estatísticas em paralelo
+        stats = {
+            "students": Student.query.count(),
+            "schools": School.query.count(),
+            "evaluations": Test.query.count(),
+            "games": Game.query.count(),
+            "users": User.query.count(),
+            "questions": Question.query.count(),
+            "classes": Class.query.count(),
+            "teachers": Teacher.query.count(),
+            "last_sync": datetime.now().isoformat()
+        }
+        
+        return jsonify(stats), 200
+        
+    except Exception as e:
+        logging.error(f"Erro ao buscar estatísticas completas do dashboard: {str(e)}", exc_info=True)
+        return jsonify({
+            "error": "Erro ao buscar estatísticas completas do dashboard",
             "details": str(e)
         }), 500
 
@@ -252,6 +330,344 @@ def evaluations_stats():
         }), 200  # Retorna 200 mesmo com erro para não quebrar o frontend
 
 
+@bp.route('/test-sessions/submitted', methods=['GET'])
+@jwt_required()
+@role_required("admin", "professor", "coordenador", "diretor")
+def get_submitted_evaluations():
+    """
+    Retorna avaliações enviadas pelos alunos para correção
+    
+    Query Parameters:
+        - status: pending, correcting, corrected, reviewed
+        - subject: ID da disciplina
+        - grade: ID da série
+        - search: busca por nome do aluno ou título da avaliação
+        - page: número da página (padrão: 1)
+        - per_page: itens por página (padrão: 20)
+    
+    Returns:
+        Lista de sessões de teste enviadas com dados do aluno e avaliação
+    """
+    try:
+        from app.models.testSession import TestSession
+        from app.models.student import Student
+        from app.models.test import Test
+        from app.models.subject import Subject
+        from app.models.grades import Grade
+        from app.models.user import User
+        from app.models.studentAnswer import StudentAnswer
+        from sqlalchemy.orm import joinedload
+        
+        # Parâmetros de busca
+        status_filter = request.args.get('status', '').strip()
+        subject_filter = request.args.get('subject', '').strip()
+        grade_filter = request.args.get('grade', '').strip()
+        search_filter = request.args.get('search', '').strip()
+        page = request.args.get('page', 1, type=int)
+        per_page = min(request.args.get('per_page', 20, type=int), 100)
+        
+        # Base query - buscar sessões enviadas
+        query = TestSession.query.options(
+            joinedload(TestSession.student).joinedload(Student.user),
+            joinedload(TestSession.test).joinedload(Test.subject_rel),
+            joinedload(TestSession.test).joinedload(Test.grade)
+        ).filter(
+            TestSession.submitted_at.isnot(None)  # Apenas sessões enviadas
+        )
+        
+        # Aplicar filtros
+        if status_filter and status_filter != 'all':
+            if status_filter == 'pending':
+                query = query.filter(TestSession.status.in_(['finalizada', 'completed', 'submitted']))
+            elif status_filter == 'correcting':
+                query = query.filter(TestSession.status == 'correcting')
+            elif status_filter == 'corrected':
+                query = query.filter(TestSession.status == 'corrected')
+            elif status_filter == 'reviewed':
+                query = query.filter(TestSession.status.in_(['reviewed', 'finalized']))
+        
+        # Filtro por disciplina
+        if subject_filter and subject_filter != 'all':
+            query = query.join(Test).filter(Test.subject == subject_filter)
+        
+        # Filtro por série
+        if grade_filter and grade_filter != 'all':
+            query = query.join(Test).filter(Test.grade_id == grade_filter)
+        
+        # Filtro de busca por nome do aluno ou título da avaliação
+        if search_filter:
+            query = query.join(Student).join(Test).filter(
+                db.or_(
+                    Student.name.ilike(f'%{search_filter}%'),
+                    Test.title.ilike(f'%{search_filter}%')
+                )
+            )
+        
+        # Ordenar por data de envio (mais recentes primeiro)
+        query = query.order_by(TestSession.submitted_at.desc())
+        
+        # Aplicar paginação
+        paginated_sessions = query.paginate(
+            page=page,
+            per_page=per_page,
+            error_out=False
+        )
+        
+        sessions = paginated_sessions.items
+        
+        # Transformar dados para o formato esperado pelo frontend
+        result = []
+        for session in sessions:
+            # Buscar respostas do aluno
+            answers = StudentAnswer.query.filter_by(
+                student_id=session.student_id,
+                test_id=session.test_id
+            ).all()
+            
+            session_data = {
+                "id": session.id,
+                "student_id": session.student_id,
+                "student_name": session.student.name if session.student else 'Aluno não encontrado',
+                "test_id": session.test_id,
+                "test_title": session.test.title if session.test else 'Avaliação não encontrada',
+                "subject_id": session.test.subject if session.test else None,
+                "subject_name": session.test.subject_rel.name if session.test and session.test.subject_rel else 'Sem disciplina',
+                "grade_id": session.test.grade_id if session.test else None,
+                "grade_name": session.test.grade.name if session.test and session.test.grade else 'Sem série',
+                "submitted_at": session.submitted_at.isoformat() if session.submitted_at else None,
+                "time_spent": session.time_spent or 0,
+                "status": session.status,
+                "total_questions": len(session.test.questions) if session.test and session.test.questions else 0,
+                "blank_answers": len([a for a in answers if not a.student_answer]),
+                "auto_score": session.auto_score,
+                "manual_score": session.manual_score,
+                "final_score": session.final_score,
+                "percentage": session.percentage,
+                "corrected_by": session.corrected_by,
+                "corrected_at": session.corrected_at.isoformat() if session.corrected_at else None,
+                "feedback": session.feedback,
+                "answers": [
+                    {
+                        "question_id": answer.question_id,
+                        "question_text": answer.question.text if answer.question else 'Questão não encontrada',
+                        "question_type": answer.question.question_type if answer.question else 'multiple_choice',
+                        "options": answer.question.alternatives if answer.question and answer.question.alternatives else [],
+                        "correct_answer": answer.question.correct_answer if answer.question else None,
+                        "student_answer": answer.answer,
+                        "is_correct": answer.is_correct,
+                        "manual_points": answer.manual_points,
+                        "feedback": answer.feedback
+                    }
+                    for answer in answers
+                ]
+            }
+            result.append(session_data)
+        
+        return jsonify(result), 200
+        
+    except Exception as e:
+        logging.error(f"Erro ao buscar avaliações enviadas: {str(e)}", exc_info=True)
+        return jsonify({
+            "error": "Erro ao buscar avaliações enviadas",
+            "details": str(e)
+        }), 500
+
+
+@bp.route('/test-session/<string:session_id>/correct', methods=['POST'])
+@jwt_required()
+@role_required("admin", "professor", "coordenador", "diretor")
+def correct_evaluation():
+    """
+    Salva a correção de uma avaliação (sem finalizar)
+    
+    Body:
+        {
+            "questions": [
+                {
+                    "question_id": "string",
+                    "is_correct": boolean,
+                    "manual_points": number (0 ou 1),
+                    "feedback": "string"
+                }
+            ],
+            "final_score": number,
+            "percentage": number,
+            "general_feedback": "string",
+            "status": "corrected"
+        }
+    """
+    try:
+        from app.models.testSession import TestSession
+        from app.models.studentAnswer import StudentAnswer
+        from app.decorators.role_required import get_current_user_from_token
+        
+        session_id = request.view_args['session_id']
+        data = request.get_json()
+        
+        if not data:
+            return jsonify({"error": "Dados não fornecidos"}), 400
+        
+        # Buscar sessão
+        session = TestSession.query.get(session_id)
+        if not session:
+            return jsonify({"error": "Sessão não encontrada"}), 404
+        
+        # Verificar se a sessão foi enviada
+        if not session.submitted_at:
+            return jsonify({"error": "Sessão ainda não foi enviada pelo aluno"}), 400
+        
+        # Obter usuário atual
+        current_user = get_current_user_from_token()
+        if not current_user:
+            return jsonify({"error": "Usuário não encontrado"}), 401
+        
+        # Atualizar respostas das questões
+        questions_data = data.get('questions', [])
+        for question_data in questions_data:
+            question_id = question_data.get('question_id')
+            is_correct = question_data.get('is_correct', False)
+            manual_points = question_data.get('manual_points', 0)
+            feedback = question_data.get('feedback', '')
+            
+            # Buscar resposta do aluno
+            answer = StudentAnswer.query.filter_by(
+                test_session_id=session_id,
+                question_id=question_id
+            ).first()
+            
+            if answer:
+                answer.is_correct = is_correct
+                answer.manual_points = manual_points if manual_points is not None else (1 if is_correct else 0)
+                answer.feedback = feedback
+        
+        # Atualizar dados da sessão
+        session.manual_score = data.get('final_score', 0)
+        session.final_score = data.get('final_score', 0)
+        session.percentage = data.get('percentage', 0)
+        session.feedback = data.get('general_feedback', '')
+        session.status = 'corrected'
+        session.corrected_by = current_user['id']
+        session.corrected_at = datetime.now()
+        
+        db.session.commit()
+        
+        return jsonify({
+            "message": "Correção salva com sucesso",
+            "session_id": session_id,
+            "final_score": session.final_score,
+            "percentage": session.percentage
+        }), 200
+        
+    except Exception as e:
+        db.session.rollback()
+        logging.error(f"Erro ao salvar correção: {str(e)}", exc_info=True)
+        return jsonify({
+            "error": "Erro ao salvar correção",
+            "details": str(e)
+        }), 500
+
+
+@bp.route('/test-session/<string:session_id>/finalize', methods=['POST'])
+@jwt_required()
+@role_required("admin", "professor", "coordenador", "diretor")
+def finalize_evaluation():
+    """
+    Finaliza a correção de uma avaliação (não pode mais ser editada)
+    
+    Body: Mesmo formato do endpoint /correct
+    """
+    try:
+        from app.models.testSession import TestSession
+        from app.models.studentAnswer import StudentAnswer
+        from app.decorators.role_required import get_current_user_from_token
+        
+        session_id = request.view_args['session_id']
+        data = request.get_json()
+        
+        if not data:
+            return jsonify({"error": "Dados não fornecidos"}), 400
+        
+        # Buscar sessão
+        session = TestSession.query.get(session_id)
+        if not session:
+            return jsonify({"error": "Sessão não encontrada"}), 404
+        
+        # Verificar se a sessão foi enviada
+        if not session.submitted_at:
+            return jsonify({"error": "Sessão ainda não foi enviada pelo aluno"}), 400
+        
+        # Obter usuário atual
+        current_user = get_current_user_from_token()
+        if not current_user:
+            return jsonify({"error": "Usuário não encontrado"}), 401
+        
+        # Atualizar respostas das questões
+        questions_data = data.get('questions', [])
+        for question_data in questions_data:
+            question_id = question_data.get('question_id')
+            is_correct = question_data.get('is_correct', False)
+            manual_points = question_data.get('manual_points', 0)
+            feedback = question_data.get('feedback', '')
+            
+            # Buscar resposta do aluno
+            answer = StudentAnswer.query.filter_by(
+                test_session_id=session_id,
+                question_id=question_id
+            ).first()
+            
+            if answer:
+                answer.is_correct = is_correct
+                answer.manual_points = manual_points if manual_points is not None else (1 if is_correct else 0)
+                answer.feedback = feedback
+        
+        # Atualizar dados da sessão
+        session.manual_score = data.get('final_score', 0)
+        session.final_score = data.get('final_score', 0)
+        session.percentage = data.get('percentage', 0)
+        session.feedback = data.get('general_feedback', '')
+        session.status = 'finalized'  # Status final
+        session.corrected_by = current_user['id']
+        session.corrected_at = datetime.now()
+        
+        # Calcular proficiência baseada na nota final
+        proficiency_level = calculate_proficiency(session.percentage)
+        session.proficiency_level = proficiency_level
+        
+        db.session.commit()
+        
+        return jsonify({
+            "message": "Correção finalizada com sucesso",
+            "session_id": session_id,
+            "final_score": session.final_score,
+            "percentage": session.percentage,
+            "proficiency_level": proficiency_level,
+            "status": "finalized"
+        }), 200
+        
+    except Exception as e:
+        db.session.rollback()
+        logging.error(f"Erro ao finalizar correção: {str(e)}", exc_info=True)
+        return jsonify({
+            "error": "Erro ao finalizar correção",
+            "details": str(e)
+        }), 500
+
+
+def calculate_proficiency(percentage):
+    """
+    Calcula nível de proficiência baseado na porcentagem
+    Baseado na equação da página de resultados
+    """
+    if percentage >= 80:
+        return 'Avançado'
+    elif percentage >= 65:
+        return 'Adequado'
+    elif percentage >= 50:
+        return 'Básico'
+    else:
+        return 'Abaixo do Básico'
+
+
 @bp.route('/courses', methods=['GET'])
 @jwt_required()
 @role_required("admin", "professor", "coordenador", "diretor")
@@ -405,3 +821,473 @@ def list_schools():
     except Exception as e:
         logging.error(f"Erro ao listar escolas: {str(e)}", exc_info=True)
         return jsonify({"error": "Erro ao listar escolas", "details": str(e)}), 500 
+
+
+@bp.route('/schools/recent', methods=['GET'])
+@jwt_required()
+@role_required("admin", "professor", "coordenador", "diretor")
+def recent_schools():
+    """
+    Retorna as escolas mais recentes com detalhes completos
+    
+    Returns:
+        Lista de escolas com informações de cidade e estatísticas
+    """
+    try:
+        from sqlalchemy.orm import joinedload
+        from sqlalchemy import func
+        
+        # Buscar as 5 escolas mais recentes com relacionamentos
+        recent_schools = School.query.options(
+            joinedload(School.city)
+        ).order_by(
+            School.created_at.desc()
+        ).limit(5).all()
+        
+        schools_data = []
+        for school in recent_schools:
+            # Contar alunos e turmas desta escola
+            students_count = Student.query.filter_by(school_id=school.id).count()
+            classes_count = Class.query.filter_by(school_id=school.id).count()
+            
+            school_data = {
+                "id": school.id,
+                "name": school.name,
+                "domain": school.domain,
+                "address": school.address,
+                "created_at": school.created_at.isoformat() if school.created_at else None,
+                "students_count": students_count,
+                "classes_count": classes_count,
+                "city": {
+                    "id": school.city.id,
+                    "name": school.city.name,
+                    "state": school.city.state
+                } if school.city else None
+            }
+            schools_data.append(school_data)
+        
+        return jsonify(schools_data), 200
+        
+    except Exception as e:
+        logging.error(f"Erro ao buscar escolas recentes: {str(e)}", exc_info=True)
+        return jsonify({
+            "error": "Erro ao buscar escolas recentes",
+            "details": str(e)
+        }), 500
+
+
+@bp.route('/students/recent', methods=['GET'])
+@jwt_required()
+@role_required("admin", "professor", "coordenador", "diretor")
+def recent_students():
+    """
+    Retorna os alunos mais recentes com detalhes completos
+    
+    Returns:
+        Lista de alunos com informações de escola, turma e série
+    """
+    try:
+        from sqlalchemy.orm import joinedload
+        
+        # Buscar os 5 alunos mais recentes com relacionamentos (versão mais segura)
+        recent_students = Student.query.options(
+            joinedload(Student.school),
+            joinedload(Student.class_),
+            joinedload(Student.grade)
+        ).order_by(
+            Student.created_at.desc()
+        ).limit(5).all()
+        
+        students_data = []
+        for student in recent_students:
+            # Buscar dados do usuário separadamente para evitar erros
+            user_data = None
+            try:
+                if hasattr(student, 'user_id') and student.user_id:
+                    from app.models.user import User
+                    user = User.query.get(student.user_id)
+                    if user:
+                        user_data = {
+                            "id": user.id,
+                            "email": user.email,
+                            "role": user.role.value
+                        }
+            except Exception as user_error:
+                logging.warning(f"Erro ao buscar dados do usuário para aluno {student.id}: {user_error}")
+            
+            student_data = {
+                "id": student.id,
+                "name": student.name,
+                "registration": student.registration,
+                "created_at": student.created_at.isoformat() if student.created_at else None,
+                "school": {
+                    "id": student.school.id,
+                    "name": student.school.name
+                } if student.school else None,
+                "class": {
+                    "id": student.class_.id,
+                    "name": student.class_.name
+                } if student.class_ else None,
+                "grade": {
+                    "id": student.grade.id,
+                    "name": student.grade.name
+                } if student.grade else None,
+                "user": user_data
+            }
+            students_data.append(student_data)
+        
+        return jsonify(students_data), 200
+        
+    except Exception as e:
+        logging.error(f"Erro ao buscar alunos recentes: {str(e)}", exc_info=True)
+        return jsonify({
+            "error": "Erro ao buscar alunos recentes",
+            "details": str(e)
+        }), 500 
+
+
+@bp.route('/questions/recent', methods=['GET'])
+@jwt_required()
+@role_required("admin", "professor", "coordenador", "diretor")
+def recent_questions():
+    """
+    Retorna as questões mais recentes com detalhes completos
+    
+    Returns:
+        Lista de questões com informações de disciplina, série e criador
+    """
+    try:
+        from sqlalchemy.orm import joinedload
+        
+        # Buscar as 5 questões mais recentes com relacionamentos
+        recent_questions = Question.query.options(
+            joinedload(Question.subject),
+            joinedload(Question.grade),
+            joinedload(Question.creator)
+        ).order_by(
+            Question.created_at.desc()
+        ).limit(5).all()
+        
+        questions_data = []
+        for question in recent_questions:
+            question_data = {
+                "id": question.id,
+                "title": question.title,
+                "text": question.text,
+                "formatted_text": question.formatted_text,
+                "question_type": question.question_type,
+                "difficulty_level": question.difficulty_level,
+                "value": question.value,
+                "created_at": question.created_at.isoformat() if question.created_at else None,
+                "subject": {
+                    "id": question.subject.id,
+                    "name": question.subject.name
+                } if question.subject else None,
+                "grade": {
+                    "id": question.grade.id,
+                    "name": question.grade.name
+                } if question.grade else None,
+                "creator": {
+                    "id": question.creator.id,
+                    "name": question.creator.name
+                } if question.creator else None
+            }
+            questions_data.append(question_data)
+        
+        return jsonify(questions_data), 200
+        
+    except Exception as e:
+        logging.error(f"Erro ao buscar questões recentes: {str(e)}", exc_info=True)
+        return jsonify({
+            "error": "Erro ao buscar questões recentes",
+            "details": str(e)
+        }), 500 
+
+
+@bp.route('/evaluation-results/stats', methods=['GET'])
+@jwt_required()
+@role_required("admin", "professor", "coordenador", "diretor")
+def get_evaluation_results_stats():
+    """
+    Retorna estatísticas gerais dos resultados de avaliações
+    
+    Returns:
+        {
+            "completed_evaluations": int,
+            "pending_results": int,
+            "total_evaluations": int,
+            "average_score": float,
+            "total_students": int,
+            "average_completion_time": int,
+            "top_performance_subject": string
+        }
+    """
+    try:
+        from app.models.testSession import TestSession
+        from app.models.test import Test
+        from app.models.student import Student
+        from app.models.subject import Subject
+        from sqlalchemy import func
+        
+        # Avaliações concluídas (finalizadas)
+        completed_evaluations = TestSession.query.filter(
+            TestSession.status.in_(['finalized', 'reviewed']),
+            TestSession.submitted_at.isnot(None)
+        ).count()
+        
+        # Avaliações pendentes de correção
+        pending_results = TestSession.query.filter(
+            TestSession.status.in_(['completed', 'submitted', 'corrected']),
+            TestSession.submitted_at.isnot(None)
+        ).count()
+        
+        # Total de avaliações no sistema
+        total_evaluations = Test.query.count()
+        
+        # Média de pontuação das avaliações finalizadas
+        avg_score_result = db.session.query(func.avg(TestSession.score)).filter(
+            TestSession.status.in_(['finalized', 'reviewed']),
+            TestSession.score.isnot(None)
+        ).scalar()
+        average_score = round(avg_score_result or 0, 1)
+        
+        # Total de estudantes que participaram
+        total_students = TestSession.query.filter(
+            TestSession.submitted_at.isnot(None)
+        ).distinct(TestSession.student_id).count()
+        
+        # Tempo médio de conclusão (em minutos)
+        # Como time_spent não existe no modelo, calcular baseado em submitted_at - started_at
+        sessions_with_time = TestSession.query.filter(
+            TestSession.submitted_at.isnot(None),
+            TestSession.started_at.isnot(None)
+        ).all()
+        
+        if sessions_with_time:
+            total_minutes = sum([
+                (session.submitted_at - session.started_at).total_seconds() / 60
+                for session in sessions_with_time
+            ])
+            average_completion_time = round(total_minutes / len(sessions_with_time), 0)
+        else:
+            average_completion_time = 0
+        
+        # Disciplina com melhor desempenho
+        subject_performance = db.session.query(
+            Test.subject,
+            func.avg(TestSession.score).label('avg_score')
+        ).join(
+            TestSession, Test.id == TestSession.test_id
+        ).filter(
+            TestSession.status.in_(['finalized', 'reviewed']),
+            TestSession.score.isnot(None),
+            Test.subject.isnot(None)
+        ).group_by(Test.subject).order_by(
+            func.avg(TestSession.score).desc()
+        ).first()
+        
+        top_performance_subject = 'Não disponível'
+        if subject_performance:
+            subject = Subject.query.get(subject_performance[0])
+            top_performance_subject = subject.name if subject else 'Não disponível'
+        
+        return jsonify({
+            "completed_evaluations": completed_evaluations,
+            "pending_results": pending_results,
+            "total_evaluations": total_evaluations,
+            "average_score": average_score,
+            "total_students": total_students,
+            "average_completion_time": int(average_completion_time),
+            "top_performance_subject": top_performance_subject
+        }), 200
+        
+    except Exception as e:
+        logging.error(f"Erro ao buscar estatísticas de resultados: {str(e)}", exc_info=True)
+        return jsonify({
+            "error": "Erro ao buscar estatísticas de resultados",
+            "details": str(e)
+        }), 500
+
+
+@bp.route('/evaluation-results/list', methods=['GET'])
+@jwt_required()
+@role_required("admin", "professor", "coordenador", "diretor")
+def get_evaluation_results_list():
+    """
+    Retorna lista de avaliações com seus resultados agregados
+    
+    Returns:
+        Lista de avaliações com estatísticas de desempenho
+    """
+    try:
+        from app.models.test import Test
+        from app.models.testSession import TestSession
+        from app.models.subject import Subject
+        from app.models.grades import Grade
+        from sqlalchemy import func
+        from sqlalchemy.orm import joinedload
+        
+        # Buscar avaliações que têm sessões enviadas
+        evaluations_with_sessions = db.session.query(
+            Test.id,
+            Test.title,
+            Test.created_at,
+            Test.subject,
+            Test.grade_id,
+            func.count(TestSession.id).label('total_students'),
+            func.count(TestSession.id).filter(
+                TestSession.status.in_(['finalized', 'reviewed'])
+            ).label('completed_students'),
+            func.avg(TestSession.score).filter(
+                TestSession.status.in_(['finalized', 'reviewed'])
+            ).label('average_score'),
+            func.max(TestSession.corrected_at).label('last_updated')
+        ).outerjoin(
+            TestSession, Test.id == TestSession.test_id
+        ).filter(
+            TestSession.submitted_at.isnot(None)
+        ).group_by(
+            Test.id, Test.title, Test.created_at, Test.subject, Test.grade_id
+        ).all()
+        
+        result = []
+        for eval_data in evaluations_with_sessions:
+            # Buscar nome da disciplina
+            subject_name = 'Sem disciplina'
+            if eval_data.subject:
+                subject = Subject.query.get(eval_data.subject)
+                subject_name = subject.name if subject else 'Sem disciplina'
+            
+            # Buscar nome da série
+            grade_name = 'Sem série'
+            if eval_data.grade_id:
+                grade = Grade.query.get(eval_data.grade_id)
+                grade_name = grade.name if grade else 'Sem série'
+            
+            # Determinar status baseado no progresso
+            completed_students = eval_data.completed_students or 0
+            total_students = eval_data.total_students or 0
+            
+            if completed_students == total_students and total_students > 0:
+                status = 'completed'
+            elif completed_students > 0:
+                status = 'correcting'
+            else:
+                status = 'pending'
+            
+            evaluation_result = {
+                "id": eval_data.id,
+                "title": eval_data.title,
+                "subject_name": subject_name,
+                "grade_name": grade_name,
+                "total_students": total_students,
+                "completed_students": completed_students,
+                "average_score": round(eval_data.average_score or 0, 1),
+                "status": status,
+                "created_at": eval_data.created_at.isoformat() if eval_data.created_at else None,
+                "last_updated": eval_data.last_updated.isoformat() if eval_data.last_updated else eval_data.created_at.isoformat() if eval_data.created_at else None
+            }
+            result.append(evaluation_result)
+        
+        # Ordenar por última atualização (mais recentes primeiro)
+        result.sort(key=lambda x: x['last_updated'] or '', reverse=True)
+        
+        return jsonify(result), 200
+        
+    except Exception as e:
+        logging.error(f"Erro ao buscar lista de resultados: {str(e)}", exc_info=True)
+        return jsonify({
+            "error": "Erro ao buscar lista de resultados",
+            "details": str(e)
+        }), 500
+
+
+@bp.route('/evaluation-results/<string:evaluation_id>/export', methods=['GET'])
+@jwt_required()
+@role_required("admin", "professor", "coordenador", "diretor")
+def export_evaluation_results(evaluation_id):
+    """
+    Exporta resultados de uma avaliação específica
+    """
+    try:
+        # Por enquanto retorna um JSON com os dados
+        # Futuramente pode ser implementado para gerar Excel/PDF
+        from app.models.test import Test
+        from app.models.testSession import TestSession
+        
+        evaluation = Test.query.get(evaluation_id)
+        if not evaluation:
+            return jsonify({"error": "Avaliação não encontrada"}), 404
+        
+        sessions = TestSession.query.filter_by(test_id=evaluation_id).filter(
+            TestSession.submitted_at.isnot(None)
+        ).all()
+        
+        export_data = {
+            "evaluation": {
+                "id": evaluation.id,
+                "title": evaluation.title,
+                "created_at": evaluation.created_at.isoformat() if evaluation.created_at else None
+            },
+            "sessions": [
+                {
+                    "student_name": session.student.name if session.student else 'N/A',
+                    "submitted_at": session.submitted_at.isoformat() if session.submitted_at else None,
+                    "score": session.score,
+                    "grade": session.grade,
+                    "status": session.status
+                }
+                for session in sessions
+            ]
+        }
+        
+        return jsonify(export_data), 200
+        
+    except Exception as e:
+        logging.error(f"Erro ao exportar resultados: {str(e)}", exc_info=True)
+        return jsonify({
+            "error": "Erro ao exportar resultados",
+            "details": str(e)
+        }), 500
+
+
+@bp.route('/evaluation-results/export-all', methods=['GET'])
+@jwt_required()
+@role_required("admin", "professor", "coordenador", "diretor")
+def export_all_results():
+    """
+    Exporta todos os resultados de avaliações
+    """
+    try:
+        # Por enquanto retorna um JSON com todos os dados
+        # Futuramente pode ser implementado para gerar Excel/PDF
+        from app.models.testSession import TestSession
+        
+        sessions = TestSession.query.filter(
+            TestSession.submitted_at.isnot(None)
+        ).all()
+        
+        export_data = {
+            "export_date": datetime.now().isoformat(),
+            "total_sessions": len(sessions),
+            "sessions": [
+                {
+                    "evaluation_title": session.test.title if session.test else 'N/A',
+                    "student_name": session.student.name if session.student else 'N/A',
+                    "submitted_at": session.submitted_at.isoformat() if session.submitted_at else None,
+                    "score": session.score,
+                    "grade": session.grade,
+                    "status": session.status
+                }
+                for session in sessions
+            ]
+        }
+        
+        return jsonify(export_data), 200
+        
+    except Exception as e:
+        logging.error(f"Erro ao exportar todos os resultados: {str(e)}", exc_info=True)
+        return jsonify({
+            "error": "Erro ao exportar todos os resultados",
+            "details": str(e)
+        }), 500 

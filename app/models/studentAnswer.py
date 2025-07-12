@@ -12,10 +12,16 @@ class StudentAnswer(db.Model):
     answered_at = db.Column(db.DateTime, default=datetime.utcnow)
     
     # Campos para correção manual
+    is_correct = db.Column(db.Boolean, nullable=True)  # Se a resposta está correta
     manual_score = db.Column(db.Float, nullable=True)  # Pontuação manual atribuída pelo professor
     feedback = db.Column(db.Text, nullable=True)  # Feedback específico da questão
     corrected_by = db.Column(db.String, db.ForeignKey('users.id'), nullable=True)  # Professor que corrigiu
     corrected_at = db.Column(db.DateTime, nullable=True)  # Data da correção
+    
+    # Relacionamentos
+    student = db.relationship('Student', backref='student_answers')
+    test = db.relationship('Test', backref='student_answers')
+    question = db.relationship('Question', backref='student_answers')
     
     def __init__(self, student_id, test_id, question_id, answer, **kwargs):
         """

@@ -13,9 +13,10 @@ class TestSession(db.Model):
     test_id = db.Column(db.String, db.ForeignKey('test.id'), nullable=False)
     
     # Controle de tempo
-    started_at = db.Column(db.DateTime, nullable=False, default=datetime.utcnow)
+    started_at = db.Column(db.DateTime, nullable=True)  # Só definido quando efetivamente iniciar
     submitted_at = db.Column(db.DateTime, nullable=True)
     time_limit_minutes = db.Column(db.Integer, nullable=True)  # tempo limite em minutos
+    actual_start_time = db.Column(db.DateTime, nullable=True)  # Momento real que o aluno iniciou
     
     # Status da sessão
     status = db.Column(db.String(20), default='em_andamento')  # em_andamento, finalizada, expirada, corrigida, revisada
@@ -52,6 +53,9 @@ class TestSession(db.Model):
         self.ip_address = ip_address
         self.user_agent = user_agent
         
+        # Definir started_at automaticamente quando a sessão é criada
+        self.started_at = datetime.utcnow()
+        
         # Aplicar qualquer outro parâmetro
         for key, value in kwargs.items():
             if hasattr(self, key):
@@ -60,21 +64,21 @@ class TestSession(db.Model):
     @property
     def is_expired(self):
         """Verifica se a sessão expirou baseado no tempo limite"""
-        if not self.time_limit_minutes or self.status != 'em_andamento':
+        if not self.time_limit_minutes or self.status != 'em_andamento' or not self.actual_start_time:
             return False
         
         from datetime import timedelta
-        limit = self.started_at + timedelta(minutes=self.time_limit_minutes)
+        limit = self.actual_start_time + timedelta(minutes=self.time_limit_minutes)
         return datetime.utcnow() > limit
     
     @property
     def remaining_time_minutes(self):
         """Retorna o tempo restante em minutos"""
-        if not self.time_limit_minutes or self.status != 'em_andamento':
-            return None
+        if not self.time_limit_minutes or self.status != 'em_andamento' or not self.actual_start_time:
+            return self.time_limit_minutes  # Retorna tempo total se ainda não iniciou
         
         from datetime import timedelta
-        limit = self.started_at + timedelta(minutes=self.time_limit_minutes)
+        limit = self.actual_start_time + timedelta(minutes=self.time_limit_minutes)
         remaining = limit - datetime.utcnow()
         
         if remaining.total_seconds() <= 0:
@@ -85,8 +89,11 @@ class TestSession(db.Model):
     @property
     def duration_minutes(self):
         """Retorna a duração da sessão em minutos"""
+        if not self.actual_start_time:
+            return 0  # Se não iniciou efetivamente, duração é 0
+        
         end_time = self.submitted_at or datetime.utcnow()
-        duration = end_time - self.started_at
+        duration = end_time - self.actual_start_time
         return int(duration.total_seconds() / 60)
     
     def calculate_grade(self):
@@ -97,6 +104,13 @@ class TestSession(db.Model):
         percentage = (self.correct_answers / self.total_questions) * 100
         grade = (percentage / 100) * 10  # nota de 0 a 10
         return round(grade, 2)
+    
+    def start_timer(self):
+        """Inicia efetivamente o cronômetro da avaliação"""
+        if not self.actual_start_time:
+            self.actual_start_time = datetime.utcnow()
+            if not self.started_at:  # Para compatibilidade
+                self.started_at = self.actual_start_time
     
     def finalize_session(self, correct_answers=None, total_questions=None):
         """Finaliza a sessão e calcula a nota"""

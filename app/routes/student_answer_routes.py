@@ -84,7 +84,7 @@ def start_test_session():
                 'remaining_time_minutes': existing_session.remaining_time_minutes
             }), 200
         
-        # Criar nova sessão
+        # Criar nova sessão (sem iniciar cronômetro ainda)
         session = TestSession(
             student_id=student.id,
             test_id=test_id,
@@ -97,11 +97,13 @@ def start_test_session():
         db.session.commit()
         
         return jsonify({
-            'message': 'Sessão iniciada com sucesso',
+            'message': 'Sessão criada com sucesso. Use /start-timer para iniciar o cronômetro.',
             'session_id': session.id,
             'started_at': session.started_at.isoformat() if session.started_at else None,
+            'actual_start_time': session.actual_start_time.isoformat() if session.actual_start_time else None,
             'time_limit_minutes': session.time_limit_minutes,
-            'remaining_time_minutes': session.remaining_time_minutes
+            'remaining_time_minutes': session.remaining_time_minutes,
+            'timer_started': session.actual_start_time is not None
         }), 201
         
     except Exception as e:
@@ -130,11 +132,13 @@ def get_session_status(session_id):
             'session_id': session.id,
             'status': session.status,
             'started_at': session.started_at.isoformat() if session.started_at else None,
+            'actual_start_time': session.actual_start_time.isoformat() if session.actual_start_time else None,
             'submitted_at': session.submitted_at.isoformat() if session.submitted_at else None,
             'time_limit_minutes': session.time_limit_minutes,
             'remaining_time_minutes': session.remaining_time_minutes,
             'duration_minutes': session.duration_minutes,
             'is_expired': session.is_expired,
+            'timer_started': session.actual_start_time is not None,
             'total_questions': session.total_questions,
             'correct_answers': session.correct_answers,
             'score': session.score,
@@ -144,6 +148,56 @@ def get_session_status(session_id):
     except Exception as e:
         logging.error(f"Erro ao obter status da sessão: {str(e)}", exc_info=True)
         return jsonify({"error": "Erro ao obter status", "details": str(e)}), 500
+
+
+@bp.route('/sessions/<session_id>/start-timer', methods=['POST'])
+@jwt_required()
+@role_required("student", "admin", "professor", "aluno")
+def start_session_timer(session_id):
+    """
+    Inicia efetivamente o cronômetro de uma sessão de prova
+    
+    Este endpoint deve ser chamado quando o aluno efetivamente começar a responder
+    a avaliação, não apenas quando acessar a página.
+    """
+    try:
+        # Buscar sessão
+        session = TestSession.query.get(session_id)
+        if not session:
+            return jsonify({'error': 'Sessão não encontrada'}), 404
+        
+        # Verificar se a sessão está ativa
+        if session.status != 'em_andamento':
+            return jsonify({
+                'error': f'Sessão não está ativa. Status atual: {session.status}'
+            }), 400
+        
+        # Verificar se o cronômetro já foi iniciado
+        if session.actual_start_time:
+            return jsonify({
+                'message': 'Cronômetro já foi iniciado',
+                'session_id': session.id,
+                'actual_start_time': session.actual_start_time.isoformat(),
+                'remaining_time_minutes': session.remaining_time_minutes,
+                'timer_started': True
+            }), 200
+        
+        # Iniciar cronômetro
+        session.start_timer()
+        db.session.commit()
+        
+        return jsonify({
+            'message': 'Cronômetro iniciado com sucesso',
+            'session_id': session.id,
+            'actual_start_time': session.actual_start_time.isoformat(),
+            'remaining_time_minutes': session.remaining_time_minutes,
+            'timer_started': True,
+            'time_limit_minutes': session.time_limit_minutes
+        }), 200
+        
+    except Exception as e:
+        logging.error(f"Erro ao iniciar cronômetro: {str(e)}", exc_info=True)
+        return jsonify({"error": "Erro ao iniciar cronômetro", "details": str(e)}), 500
 
 
 @bp.route('/sessions/<session_id>/end', methods=['POST'])

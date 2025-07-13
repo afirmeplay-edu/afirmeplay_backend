@@ -269,19 +269,20 @@ def format_test_response(test):
             logging.warning(f"Erro ao buscar turmas das escolas: {str(e)}")
             applied_classes_info = []
 
-    # Calcular duração dinamicamente
-    duration = 90  # Duração padrão em minutos
-    try:
-        if test.time_limit and test.end_time:
-            # Calcular duração real baseada no end_time - time_limit
-            duration_delta = test.end_time - test.time_limit
-            duration = int(duration_delta.total_seconds() / 60)  # Converter para minutos
-        elif test.time_limit:
-            # Se não tiver end_time, usar duração padrão de 90 minutos
+    # Usar duração do modelo ou calcular dinamicamente como fallback
+    duration = test.duration if test.duration is not None else 90  # Duração padrão em minutos
+    if duration is None:
+        try:
+            if test.time_limit and test.end_time:
+                # Calcular duração real baseada no end_time - time_limit
+                duration_delta = test.end_time - test.time_limit
+                duration = int(duration_delta.total_seconds() / 60)  # Converter para minutos
+            elif test.time_limit:
+                # Se não tiver end_time, usar duração padrão de 90 minutos
+                duration = 90
+        except Exception as e:
+            logging.warning(f"Erro ao calcular duração: {str(e)}")
             duration = 90
-    except Exception as e:
-        logging.warning(f"Erro ao calcular duração: {str(e)}")
-        duration = 90
 
     return {
         'id': test.id,

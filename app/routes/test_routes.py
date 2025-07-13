@@ -57,6 +57,17 @@ def criar_avaliacao():
                 logging.error(f"Campo obrigatório ausente: {field}")
                 return jsonify({"error": f"Missing required field: {field}"}), 400
 
+        # Validação do campo duration se fornecido
+        if 'duration' in data and data['duration'] is not None:
+            try:
+                duration = int(data['duration'])
+                if duration <= 0:
+                    logging.error("Duração deve ser maior que zero")
+                    return jsonify({"error": "Duration must be greater than zero"}), 400
+            except (ValueError, TypeError):
+                logging.error("Duração deve ser um número inteiro")
+                return jsonify({"error": "Duration must be an integer"}), 400
+
         # Validação específica para cada tipo de avaliação
         if data['type'] == 'SIMULADO':
             if not data.get('subjects_info'):
@@ -114,6 +125,7 @@ def criar_avaliacao():
             max_score=data.get('max_score'),
             time_limit=datetime.fromisoformat(data.get('time_limit')) if data.get('time_limit') else None,
             end_time=datetime.fromisoformat(data.get('end_time')) if data.get('end_time') else None,
+            duration=data.get('duration'),  # Duração em minutos
             evaluation_mode=data.get('evaluation_mode', 'virtual'),
             created_by=data.get('created_by'),
             municipalities=data.get('municipalities'),
@@ -589,7 +601,7 @@ def atualizar_avaliacao(test_id):
         # Campos que podem ser atualizados
         campos = [
             'title', 'description', 'type', 'subject', 'grade_id',
-            'max_score', 'time_limit', 'end_time', 'evaluation_mode', 'intructions', 'municipalities',
+            'max_score', 'time_limit', 'end_time', 'duration', 'evaluation_mode', 'intructions', 'municipalities',
             'schools', 'course', 'model', 'subjects_info'
         ]
 
@@ -1629,16 +1641,10 @@ def start_test_session(test_id):
         ).first()
         
         if existing_session:
-            # Se a sessão existente não tem started_at, definir agora
-            if not existing_session.started_at:
-                existing_session.started_at = datetime.utcnow()
-                db.session.commit()
-            
             return jsonify({
                 "message": "Sessão já iniciada",
                 "session_id": existing_session.id,
-                "started_at": existing_session.started_at.isoformat(),
-                "remaining_time_minutes": existing_session.remaining_time_minutes,
+                "started_at": existing_session.started_at.isoformat() if existing_session.started_at else None,
                 "time_limit_minutes": existing_session.time_limit_minutes
             }), 200
         
@@ -1650,6 +1656,9 @@ def start_test_session(test_id):
                 time_limit_minutes = int(test.time_limit.total_seconds() / 60)
             elif hasattr(test.time_limit, 'minute'):
                 time_limit_minutes = test.time_limit.minute
+        elif test.duration:
+            # Usar o campo duration se time_limit não estiver disponível
+            time_limit_minutes = test.duration
         
         # Criar nova sessão
         session = TestSession(
@@ -1660,9 +1669,16 @@ def start_test_session(test_id):
             user_agent=request.headers.get('User-Agent')
         )
         
-        # Iniciar o cronômetro da sessão
-        session.start_timer()
+        # Iniciar a sessão (definir started_at)
+        session.start_session()
         
+        # Se for a primeira sessão iniciada para esta avaliação, mudar status para 'em_andamento' se estiver 'agendada'
+        if test.status == 'agendada':
+            from app.models.testSession import TestSession
+            active_sessions = TestSession.query.filter_by(test_id=test_id).count()
+            if active_sessions == 0:
+                test.status = 'em_andamento'
+
         db.session.add(session)
         db.session.commit()
         
@@ -1670,8 +1686,7 @@ def start_test_session(test_id):
             "message": "Sessão iniciada com sucesso",
             "session_id": session.id,
             "started_at": session.started_at.isoformat() if session.started_at else None,
-            "time_limit_minutes": session.time_limit_minutes,
-            "remaining_time_minutes": session.time_limit_minutes  # Tempo restante inicial = tempo limite
+            "time_limit_minutes": session.time_limit_minutes
         }), 201
         
     except Exception as e:
@@ -1738,14 +1753,6 @@ def submit_test_answers(test_id):
                 "error": f"Sessão não está ativa. Status atual: {session.status}"
             }), 400
         
-        # Validar tempo limite
-        if session.is_expired:
-            session.status = 'expirada'
-            db.session.commit()
-            return jsonify({
-                "error": "Tempo limite excedido. Sessão expirada."
-            }), 410  # 410 Gone
-        
         # Buscar questões do teste para validação e correção
         test_questions = Question.query.filter(
             Question.test_id == test_id
@@ -1800,7 +1807,7 @@ def submit_test_answers(test_id):
             saved_answers.append({
                 'question_id': question_id,
                 'answer': str(answer),
-                'answered_at': student_answer.answered_at.isoformat()
+                'answered_at': student_answer.answered_at.isoformat() if student_answer.answered_at else None
             })
             
             # Verificar se a resposta está correta (correção automática)
@@ -1814,6 +1821,11 @@ def submit_test_answers(test_id):
             correct_answers=correct_count,
             total_questions=total_questions
         )
+        
+        # Alterar status da avaliação para "concluida"
+        test = Test.query.get(test_id)
+        if test:
+            test.status = 'concluida'
         
         db.session.commit()
         
@@ -1835,3 +1847,60 @@ def submit_test_answers(test_id):
         logging.error(f"Erro ao submeter respostas do teste: {str(e)}", exc_info=True)
         db.session.rollback()
         return jsonify({"error": "Erro ao submeter respostas", "details": str(e)}), 500
+
+@bp.route('/<string:test_id>/session-info', methods=['GET'])
+@jwt_required()
+@role_required("aluno")
+def get_session_info(test_id):
+    """
+    Retorna informações da sessão para o frontend calcular o tempo
+    """
+    try:
+        from app.models.testSession import TestSession
+        from app.models.student import Student
+        
+        user = get_current_user_from_token()
+        if not user:
+            return jsonify({"error": "Usuário não encontrado"}), 404
+        
+        # Buscar aluno pelo user_id
+        student = Student.query.filter_by(user_id=user['id']).first()
+        if not student:
+            return jsonify({"error": "Dados do aluno não encontrados"}), 404
+        
+        # Buscar sessão ativa
+        session = TestSession.query.filter_by(
+            student_id=student.id,
+            test_id=test_id,
+            status='em_andamento'
+        ).first()
+        
+        if not session:
+            return jsonify({
+                "message": "Nenhuma sessão ativa encontrada",
+                "session_exists": False
+            }), 404
+        
+        # Calcular tempo decorrido e restante
+        elapsed_minutes = 0
+        remaining_minutes = session.time_limit_minutes
+        
+        if session.started_at:
+            from datetime import datetime
+            elapsed_minutes = int((datetime.utcnow() - session.started_at).total_seconds() / 60)
+            if session.time_limit_minutes:
+                remaining_minutes = max(0, session.time_limit_minutes - elapsed_minutes)
+        
+        return jsonify({
+            "session_id": session.id,
+            "started_at": session.started_at.isoformat() if session.started_at else None,
+            "time_limit_minutes": session.time_limit_minutes,
+            "elapsed_minutes": elapsed_minutes,
+            "remaining_minutes": remaining_minutes,
+            "is_expired": remaining_minutes <= 0,
+            "session_exists": True
+        }), 200
+        
+    except Exception as e:
+        logging.error(f"Erro ao obter informações da sessão: {str(e)}", exc_info=True)
+        return jsonify({"error": "Erro ao obter informações da sessão", "details": str(e)}), 500

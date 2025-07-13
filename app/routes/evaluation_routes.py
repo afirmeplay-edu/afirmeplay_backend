@@ -35,8 +35,7 @@ def ping_evaluations():
 @role_required("student", "admin", "professor", "aluno")
 def submit_evaluation_answers(test_id):
     """
-    Submete respostas para uma avaliação específica
-    Funciona como proxy para o sistema de sessões de student_answer_routes
+    Submete as respostas de uma avaliação
     
     Body:
     {
@@ -45,39 +44,31 @@ def submit_evaluation_answers(test_id):
                 "question_id": "uuid",
                 "answer": "resposta_do_aluno"
             }
-        ],
-        "student_id": "uuid" (opcional, será inferido do token se não fornecido)
+        ]
     }
     """
     try:
         data = request.get_json()
+        
+        if not data:
+            return jsonify({'error': 'Dados JSON são obrigatórios'}), 400
+        
         answers = data.get('answers', [])
-        student_id = data.get('student_id')
         
         if not answers:
             return jsonify({'error': 'Lista de respostas é obrigatória'}), 400
         
-        # Verificar se o teste existe
-        test = Test.query.get(test_id)
-        if not test:
-            return jsonify({'error': 'Teste/Avaliação não encontrado'}), 404
+        # Obter user_id do JWT token
+        current_user_id = get_jwt_identity()
         
-        # Obter student_id do token se não fornecido
-        if not student_id:
-            user = get_current_user_from_token()
-            if not user:
-                return jsonify({'error': 'Usuário não encontrado'}), 401
-            
-            # Se for um aluno, buscar o student_id
-            if user['role'] == 'aluno':
-                student = Student.query.filter_by(user_id=user['id']).first()
-                if not student:
-                    return jsonify({'error': 'Registro de estudante não encontrado'}), 404
-                student_id = student.id
-            else:
-                return jsonify({'error': 'student_id é obrigatório para usuários não-alunos'}), 400
+        # Buscar estudante pelo user_id
+        student = Student.query.filter_by(user_id=current_user_id).first()
+        if not student:
+            return jsonify({'error': 'Estudante não encontrado para este usuário'}), 404
         
-        # Verificar se já existe uma sessão ativa para este aluno/teste
+        student_id = student.id
+        
+        # Verificar se já existe sessão ativa para este aluno/teste
         existing_session = TestSession.query.filter_by(
             student_id=student_id,
             test_id=test_id,
@@ -98,13 +89,16 @@ def submit_evaluation_answers(test_id):
         else:
             session = existing_session
         
-        # Validar se a sessão não expirou
-        if session.is_expired:
-            session.status = 'expirada'
-            db.session.commit()
-            return jsonify({
-                'error': 'Tempo limite excedido. Sessão expirada.'
-            }), 410
+        # Validar tempo limite (cálculo no frontend, mas validação adicional aqui)
+        if session.started_at and session.time_limit_minutes:
+            from datetime import datetime
+            elapsed_minutes = int((datetime.utcnow() - session.started_at).total_seconds() / 60)
+            if elapsed_minutes > session.time_limit_minutes:
+                session.status = 'expirada'
+                db.session.commit()
+                return jsonify({
+                    'error': 'Tempo limite excedido. Sessão expirada.'
+                }), 410
         
         # Buscar questões do teste para validação e correção
         test_questions = Question.query.filter_by(test_id=test_id).all()
@@ -126,7 +120,7 @@ def submit_evaluation_answers(test_id):
                 logging.warning(f"Questão {question_id} não encontrada no teste {test_id}")
                 continue
             
-            # Verificar se já existe resposta para esta questão
+            # Verificar se já existe resposta para esta questão nesta sessão
             existing_answer = StudentAnswer.query.filter_by(
                 student_id=student_id,
                 test_id=test_id,
@@ -151,10 +145,10 @@ def submit_evaluation_answers(test_id):
             saved_answers.append({
                 'question_id': question_id,
                 'answer': str(answer),
-                'answered_at': student_answer.answered_at.isoformat()
+                'answered_at': student_answer.answered_at.isoformat() if student_answer.answered_at else None
             })
             
-            # Verificar se a resposta está correta
+            # Verificar se a resposta está correta (correção automática)
             question = questions_dict[question_id]
             if question.correct_answer and str(answer).strip().lower() == str(question.correct_answer).strip().lower():
                 correct_count += 1
@@ -171,15 +165,16 @@ def submit_evaluation_answers(test_id):
         return jsonify({
             'message': 'Respostas enviadas com sucesso',
             'session_id': session.id,
-            'test_id': test_id,
-            'submitted_at': session.submitted_at.isoformat(),
+            'submitted_at': session.submitted_at.isoformat() if session.submitted_at else None,
+            'duration_minutes': session.duration_minutes,
             'results': {
                 'total_questions': session.total_questions,
                 'correct_answers': session.correct_answers,
                 'score_percentage': session.score,
                 'grade': session.grade,
                 'answers_saved': len(saved_answers)
-            }
+            },
+            'answers': saved_answers
         }), 201
         
     except Exception as e:

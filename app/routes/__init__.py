@@ -4,6 +4,7 @@ def register_routes(app: Flask):
     # Imports
     from . import (
         admin_route,
+        basic_endpoints,
         city_routes,
         class_routes,
         educationStage_routes,
@@ -30,6 +31,7 @@ def register_routes(app: Flask):
     
     # Register blueprints
     app.register_blueprint(admin_route.bp)
+    app.register_blueprint(basic_endpoints.bp)
     app.register_blueprint(city_routes.bp)
     app.register_blueprint(class_routes.bp)
     app.register_blueprint(educationStage_routes.bp)

@@ -20,6 +20,7 @@ def get_current_user_from_token():
             
         return {
             "id": user.id,
+            "email": user.email,
             "role": user.role.value
         }
     

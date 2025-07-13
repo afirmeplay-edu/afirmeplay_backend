@@ -303,12 +303,38 @@ def update_class(class_id):
 @jwt_required()
 def delete_class(class_id):
     try:
+        import logging
         class_obj = Class.query.get(class_id)
         if not class_obj:
+            logging.error(f"Turma {class_id} não encontrada.")
             return jsonify({"error": "Class not found"}), 404
 
+        # 1. Desvincular alunos
+        from app.models.student import Student
+        students = Student.query.filter_by(class_id=class_id).all()
+        logging.info(f"Desvinculando {len(students)} alunos da turma {class_id}")
+        for student in students:
+            student.class_id = None
+        
+        # 2. Excluir registros em ClassTest
+        from app.models.classTest import ClassTest
+        class_tests = ClassTest.query.filter_by(class_id=class_id).all()
+        logging.info(f"Excluindo {len(class_tests)} registros em ClassTest para turma {class_id}")
+        for ct in class_tests:
+            db.session.delete(ct)
+        
+        # 3. Excluir registros em ClassSubject
+        from app.models.classSubject import ClassSubject
+        class_subjects = ClassSubject.query.filter_by(class_id=class_id).all()
+        logging.info(f"Excluindo {len(class_subjects)} registros em ClassSubject para turma {class_id}")
+        for cs in class_subjects:
+            db.session.delete(cs)
+        
+        # 4. Excluir a turma
+        logging.info(f"Excluindo turma {class_id}")
         db.session.delete(class_obj)
         db.session.commit()
+        logging.info(f"Turma {class_id} excluída com sucesso.")
         return jsonify({"message": "Class deleted successfully"}), 200
     except Exception as e:
         db.session.rollback()

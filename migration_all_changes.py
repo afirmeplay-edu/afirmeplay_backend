@@ -18,11 +18,11 @@ logger = logging.getLogger(__name__)
 
 # Configurações do banco de dados
 DB_CONFIG = {
-    'host': 'localhost',
-    'database': 'innovaplay_db',
-    'user': 'postgres',
-    'password': 'sua_senha_aqui',
-    'port': 5432
+    'host': 'aws-0-us-east-2.pooler.supabase.com',
+    'database': 'innovdatabase',
+    'user': 'postgres.qtipomtmxkdlhaxltosg',
+    'password': 'XbeNANqRMDZxLnUtKwCxErScBU4Ka2su',
+    'port': 6543
 }
 
 def connect_db():

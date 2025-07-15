@@ -1618,6 +1618,9 @@ paths:
                 time_limit:
                   type: string
                   format: date-time
+                duration:
+                  type: integer
+                  description: Duration in minutes
                 municipalities:
                   type: array
                 schools:
@@ -2833,6 +2836,9 @@ schemas:
         time_limit:
           type: string
           format: date-time
+        duration:
+          type: integer
+          description: Duration in minutes
         created_by:
           type: string
         municipalities:

@@ -34,80 +34,6 @@ def handle_error(error):
 
 # ==================== CONTROLE DE SESSÕES ====================
 
-@bp.route('/sessions/start', methods=['POST'])
-@jwt_required()
-@role_required("student", "admin", "professor", "aluno")
-def start_test_session():
-    """
-    Inicia uma nova sessão de prova para o aluno logado
-    
-    Body:
-    {
-        "test_id": "uuid",
-        "time_limit_minutes": 60
-    }
-    
-    O student_id é obtido automaticamente do JWT token do usuário logado.
-    """
-    try:
-        data = request.get_json()
-        test_id = data.get('test_id')
-        time_limit_minutes = data.get('time_limit_minutes')
-        
-        # Obter user_id do JWT token
-        current_user_id = get_jwt_identity()
-        
-        if not test_id:
-            return jsonify({'error': 'test_id é obrigatório'}), 400
-        
-        # Buscar estudante pelo user_id
-        student = Student.query.filter_by(user_id=current_user_id).first()
-        if not student:
-            return jsonify({'error': 'Estudante não encontrado para este usuário'}), 404
-            
-        test = Test.query.get(test_id)
-        if not test:
-            return jsonify({'error': 'Teste não encontrado'}), 404
-        
-        # Verificar se já existe sessão ativa para este aluno/teste
-        existing_session = TestSession.query.filter_by(
-            student_id=student.id,
-            test_id=test_id,
-            status='em_andamento'
-        ).first()
-        
-        if existing_session:
-            return jsonify({
-                'message': 'Sessão já iniciada',
-                'session_id': existing_session.id,
-                'started_at': existing_session.started_at.isoformat() if existing_session.started_at else None,
-                'time_limit_minutes': existing_session.time_limit_minutes
-            }), 200
-        
-        # Criar nova sessão (sem iniciar cronômetro ainda)
-        session = TestSession(
-            student_id=student.id,
-            test_id=test_id,
-            time_limit_minutes=time_limit_minutes,
-            ip_address=request.remote_addr,
-            user_agent=request.headers.get('User-Agent')
-        )
-        
-        db.session.add(session)
-        db.session.commit()
-        
-        return jsonify({
-            'message': 'Sessão criada com sucesso. Use /start-timer para iniciar o cronômetro.',
-            'session_id': session.id,
-            'started_at': session.started_at.isoformat() if session.started_at else None,
-            'time_limit_minutes': session.time_limit_minutes
-        }), 201
-        
-    except Exception as e:
-        logging.error(f"Erro ao iniciar sessão: {str(e)}", exc_info=True)
-        return jsonify({"error": "Erro ao iniciar sessão", "details": str(e)}), 500
-
-
 @bp.route('/sessions/<session_id>/status', methods=['GET'])
 @jwt_required()
 @role_required("student", "admin", "professor", "aluno")
@@ -130,6 +56,9 @@ def get_session_status(session_id):
             elapsed_minutes = int((datetime.utcnow() - session.started_at).total_seconds() / 60)
             remaining_minutes = max(0, session.time_limit_minutes - elapsed_minutes)
             is_expired = remaining_minutes <= 0
+        elif session.time_limit_minutes is None:
+            # Se não há limite de tempo, não está expirada
+            is_expired = False
         
         return jsonify({
             'session_id': session.id,
@@ -149,53 +78,6 @@ def get_session_status(session_id):
     except Exception as e:
         logging.error(f"Erro ao obter status da sessão: {str(e)}", exc_info=True)
         return jsonify({"error": "Erro ao obter status", "details": str(e)}), 500
-
-
-@bp.route('/sessions/<session_id>/start-timer', methods=['POST'])
-@jwt_required()
-@role_required("student", "admin", "professor", "aluno")
-def start_session_timer(session_id):
-    """
-    Inicia efetivamente o cronômetro de uma sessão de prova
-    
-    Este endpoint deve ser chamado quando o aluno efetivamente começar a responder
-    a avaliação, não apenas quando acessar a página.
-    """
-    try:
-        # Buscar sessão
-        session = TestSession.query.get(session_id)
-        if not session:
-            return jsonify({'error': 'Sessão não encontrada'}), 404
-        
-        # Verificar se a sessão está ativa
-        if session.status != 'em_andamento':
-            return jsonify({
-                'error': f'Sessão não está ativa. Status atual: {session.status}'
-            }), 400
-        
-        # Verificar se o cronômetro já foi iniciado
-        if session.started_at:
-            return jsonify({
-                'message': 'Cronômetro já foi iniciado',
-                'session_id': session.id,
-                'started_at': session.started_at.isoformat() if session.started_at else None,
-                'time_limit_minutes': session.time_limit_minutes
-            }), 200
-        
-        # Iniciar cronômetro
-        session.start_session()
-        db.session.commit()
-        
-        return jsonify({
-            'message': 'Cronômetro iniciado com sucesso',
-            'session_id': session.id,
-            'started_at': session.started_at.isoformat() if session.started_at else None,
-            'time_limit_minutes': session.time_limit_minutes
-        }), 200
-        
-    except Exception as e:
-        logging.error(f"Erro ao iniciar cronômetro: {str(e)}", exc_info=True)
-        return jsonify({"error": "Erro ao iniciar cronômetro", "details": str(e)}), 500
 
 
 @bp.route('/sessions/<session_id>/end', methods=['POST'])
@@ -270,6 +152,46 @@ def end_test_session(session_id):
         return jsonify({"error": "Erro ao encerrar sessão", "details": str(e)}), 500
 
 
+@bp.route('/sessions/<session_id>/timer', methods=['PATCH'])
+@jwt_required()
+@role_required("student", "admin", "professor", "aluno")
+def update_session_timer(session_id):
+    """
+    Atualiza o tempo decorrido e o tempo restante da sessão de prova.
+    Body:
+    {
+        "elapsed_minutes": 10,
+        "remaining_minutes": 50
+    }
+    """
+    try:
+        data = request.get_json()
+        elapsed_minutes = data.get('elapsed_minutes')
+        remaining_minutes = data.get('remaining_minutes')
+        
+        session = TestSession.query.get(session_id)
+        if not session:
+            return jsonify({'error': 'Sessão não encontrada'}), 404
+        
+        # Atualizar campos na sessão
+        if elapsed_minutes is not None:
+            session.elapsed_minutes = elapsed_minutes
+        if remaining_minutes is not None:
+            session.remaining_minutes = remaining_minutes
+        db.session.commit()
+        
+        return jsonify({
+            'message': 'Tempo da sessão atualizado com sucesso',
+            'session_id': session.id,
+            'elapsed_minutes': session.elapsed_minutes,
+            'remaining_minutes': session.remaining_minutes
+        }), 200
+    except Exception as e:
+        logging.error(f"Erro ao atualizar timer da sessão: {str(e)}", exc_info=True)
+        db.session.rollback()
+        return jsonify({"error": "Erro ao atualizar timer da sessão", "details": str(e)}), 500
+
+
 # ==================== SUBMISSÃO DE RESPOSTAS ====================
 
 @bp.route('/submit', methods=['POST'])
@@ -324,7 +246,6 @@ def submit_answers():
         
         # Validar tempo limite (cálculo no frontend, mas validação adicional aqui)
         if session.started_at and session.time_limit_minutes:
-            from datetime import datetime
             elapsed_minutes = int((datetime.utcnow() - session.started_at).total_seconds() / 60)
             if elapsed_minutes > session.time_limit_minutes:
                 session.status = 'expirada'
@@ -393,11 +314,20 @@ def submit_answers():
             total_questions=total_questions
         )
         
-        # Alterar status da avaliação para "concluida"
+        # Verificar se há outras sessões ativas para este teste
+        remaining_sessions = TestSession.query.filter_by(
+            test_id=session.test_id,
+            status='em_andamento'
+        ).count()
+        
+        # Alterar status da avaliação baseado nas sessões restantes
         from app.models.test import Test
         test = Test.query.get(session.test_id)
         if test:
-            test.status = 'concluida'
+            if remaining_sessions == 0:
+                test.status = 'concluida'  # Nenhuma sessão ativa
+            else:
+                test.status = 'em_andamento'  # Ainda há sessões ativas
         
         db.session.commit()
         
@@ -465,7 +395,6 @@ def save_partial_answers():
         
         # Validar tempo limite (cálculo no frontend, mas validação adicional aqui)
         if session.started_at and session.time_limit_minutes:
-            from datetime import datetime
             elapsed_minutes = int((datetime.utcnow() - session.started_at).total_seconds() / 60)
             if elapsed_minutes > session.time_limit_minutes:
                 session.status = 'expirada'
@@ -536,14 +465,12 @@ def save_partial_answers():
         return jsonify({"error": "Erro ao salvar respostas parciais", "details": str(e)}), 500
 
 
-# ==================== CONSULTAS E RELATÓRIOS ====================
-
-@bp.route('/test/<string:test_id>/session', methods=['GET'])
+@bp.route('/active-session/<string:test_id>', methods=['GET'])
 @jwt_required()
 @role_required("student", "admin", "professor", "aluno")
-def get_test_session(test_id):
+def get_active_session(test_id):
     """
-    Retorna a sessão de teste ativa para o usuário logado e teste específico
+    Retorna a sessão ativa para um teste específico
     """
     try:
         from app.models.student import Student
@@ -581,6 +508,9 @@ def get_test_session(test_id):
             elapsed_minutes = int((datetime.utcnow() - session.started_at).total_seconds() / 60)
             remaining_minutes = max(0, session.time_limit_minutes - elapsed_minutes)
             is_expired = remaining_minutes <= 0
+        elif session.time_limit_minutes is None:
+            # Se não há limite de tempo, não está expirada
+            is_expired = False
         
         # Se expirou, atualizar status
         if is_expired and session.status == 'em_andamento':
@@ -613,9 +543,11 @@ def get_test_session(test_id):
         }), 200
         
     except Exception as e:
-        logging.error(f"Erro ao buscar sessão do teste: {str(e)}", exc_info=True)
-        return jsonify({"error": "Erro ao buscar sessão", "details": str(e)}), 500
+        logging.error(f"Erro ao buscar sessão ativa: {str(e)}", exc_info=True)
+        return jsonify({"error": "Erro ao buscar sessão ativa", "details": str(e)}), 500
 
+
+# ==================== CONSULTAS E RELATÓRIOS ====================
 
 @bp.route('/session/<session_id>/answers', methods=['GET'])
 @jwt_required()
@@ -691,6 +623,9 @@ def get_student_sessions():
                 elapsed_minutes = int((datetime.utcnow() - session.started_at).total_seconds() / 60)
                 remaining_minutes = max(0, session.time_limit_minutes - elapsed_minutes)
                 is_expired = remaining_minutes <= 0
+            elif session.time_limit_minutes is None:
+                # Se não há limite de tempo, não está expirada
+                is_expired = False
             
             sessions_data.append({
                 'session_id': session.id,
@@ -722,135 +657,4 @@ def get_student_sessions():
 
 # ==================== ENDPOINT LEGADO (COMPATIBILIDADE) ====================
 
-@bp.route('', methods=['POST'])
-@jwt_required()
-@role_required("student", "admin", "professor", "aluno")
-def submit_answers_legacy():
-    """
-    Endpoint legado para compatibilidade - redireciona para o sistema de sessões
-    """
-    try:
-        data = request.get_json()
-        test_id = data.get('test_id')
-        answers = data.get('answers', [])
-        time_limit_minutes = data.get('time_limit_minutes', 60)  # padrão 60 minutos
-        
-        # Obter user_id do JWT token
-        current_user_id = get_jwt_identity()
-        
-        if not test_id or not answers:
-            return jsonify({'error': 'test_id e answers são obrigatórios'}), 400
-        
-        # Buscar estudante pelo user_id
-        student = Student.query.filter_by(user_id=current_user_id).first()
-        if not student:
-            return jsonify({'error': 'Estudante não encontrado para este usuário'}), 404
-        
-        # Verificar se já existe sessão ativa
-        existing_session = TestSession.query.filter_by(
-            student_id=student.id,
-            test_id=test_id,
-            status='em_andamento'
-        ).first()
-        
-        if not existing_session:
-            # Criar nova sessão
-            session = TestSession(
-                student_id=student.id,
-                test_id=test_id,
-                time_limit_minutes=time_limit_minutes,
-                ip_address=request.remote_addr,
-                user_agent=request.headers.get('User-Agent')
-            )
-            db.session.add(session)
-            db.session.flush()  # Para obter o ID
-        else:
-            session = existing_session
-        
-        # Processar respostas e finalizar sessão
-        test_questions = Question.query.filter_by(test_id=test_id).all()
-        questions_dict = {q.id: q for q in test_questions}
-        
-        correct_count = 0
-        saved_answers = []
-        
-        # Processar cada resposta
-        for ans_data in answers:
-            question_id = ans_data.get('question_id')
-            answer = ans_data.get('answer')
-            
-            if not question_id or answer is None:
-                continue
-            
-            # Verificar se a questão existe e pertence ao teste
-            if question_id not in questions_dict:
-                logging.warning(f"Questão {question_id} não encontrada no teste {test_id}")
-                continue
-            
-            # Verificar se já existe resposta para esta questão nesta sessão
-            existing_answer = StudentAnswer.query.filter_by(
-                student_id=student.id,
-                test_id=test_id,
-                question_id=question_id
-            ).first()
-            
-            if existing_answer:
-                # Atualizar resposta existente
-                existing_answer.answer = str(answer)
-                existing_answer.answered_at = datetime.utcnow()
-                student_answer = existing_answer
-            else:
-                # Criar nova resposta
-                student_answer = StudentAnswer(
-                    student_id=student.id,
-                    test_id=test_id,
-                    question_id=question_id,
-                    answer=str(answer)
-                )
-                db.session.add(student_answer)
-            
-            saved_answers.append({
-                'question_id': question_id,
-                'answer': str(answer),
-                'answered_at': student_answer.answered_at.isoformat() if student_answer.answered_at else None
-            })
-            
-            # Verificar se a resposta está correta (correção automática)
-            question = questions_dict[question_id]
-            if question.correct_answer and str(answer).strip().lower() == str(question.correct_answer).strip().lower():
-                correct_count += 1
-        
-        # Finalizar sessão e calcular nota
-        total_questions = len(test_questions)
-        session.finalize_session(
-            correct_answers=correct_count,
-            total_questions=total_questions
-        )
-        
-        # Alterar status da avaliação para "concluida"
-        from app.models.test import Test
-        test = Test.query.get(session.test_id)
-        if test:
-            test.status = 'concluida'
-        
-        db.session.commit()
-        
-        return jsonify({
-            'message': 'Respostas enviadas com sucesso (modo legado)',
-            'session_id': session.id,
-            'submitted_at': session.submitted_at.isoformat() if session.submitted_at else None,
-            'duration_minutes': session.duration_minutes,
-            'results': {
-                'total_questions': session.total_questions,
-                'correct_answers': session.correct_answers,
-                'score_percentage': session.score,
-                'grade': session.grade,
-                'answers_saved': len(saved_answers)
-            },
-            'answers': saved_answers
-        }), 201
-        
-    except Exception as e:
-        logging.error(f"Erro ao submeter respostas (legado): {str(e)}", exc_info=True)
-        db.session.rollback()
-        return jsonify({"error": "Erro ao submeter respostas", "details": str(e)}), 500 
+# Endpoint legado removido - usar /submit em vez de POST raiz 

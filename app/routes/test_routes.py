@@ -1266,6 +1266,7 @@ def obter_avaliacoes_completas_classe(class_id):
                     "intructions": test.intructions,
                     "max_score": test.max_score,
                     "time_limit": test.time_limit.isoformat() if test.time_limit else None,
+                    "duration": test.duration,
                     "course": test.course,
                     "model": test.model,
                     "subjects_info": test.subjects_info,

@@ -69,7 +69,7 @@ class TestSession(db.Model):
     
     def calculate_grade(self):
         """Calcula a nota final baseada nos acertos"""
-        if not self.total_questions or not self.correct_answers:
+        if not self.total_questions or self.total_questions <= 0 or self.correct_answers is None:
             return None
         
         percentage = (self.correct_answers / self.total_questions) * 100
@@ -91,7 +91,7 @@ class TestSession(db.Model):
         if total_questions is not None:
             self.total_questions = total_questions
             
-        if self.correct_answers and self.total_questions:
+        if self.correct_answers is not None and self.total_questions and self.total_questions > 0:
             self.score = (self.correct_answers / self.total_questions) * 100
             self.grade = self.calculate_grade()
     

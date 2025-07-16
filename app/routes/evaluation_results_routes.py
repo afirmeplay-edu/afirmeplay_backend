@@ -933,3 +933,605 @@ def finish_evaluation_correction(evaluation_id):
         logging.error(f"Erro ao finalizar correção: {str(e)}", exc_info=True)
         db.session.rollback()
         return jsonify({"error": "Erro ao finalizar correção", "details": str(e)}), 500 
+
+# ==================== CÁLCULO DE NOTAS E CORREÇÃO ====================
+
+@bp.route('/<string:test_id>/calculate-scores', methods=['POST'])
+@jwt_required()
+@role_required("admin", "professor", "coordenador", "diretor")
+def calculate_test_scores(test_id):
+    """
+    Calcula as notas de todos os alunos para uma avaliação específica
+    
+    Body: (opcional)
+    {
+        "student_ids": ["uuid1", "uuid2"] // Se fornecido, calcula apenas para estes alunos
+    }
+    """
+    try:
+        user = get_current_user_from_token()
+        if not user:
+            return jsonify({"error": "Usuário não encontrado"}), 401
+
+        # Buscar o teste e suas questões
+        test = Test.query.get(test_id)
+        if not test:
+            return jsonify({"error": "Teste não encontrado"}), 404
+            
+        # Verificar permissões
+        if user['role'] == 'professor' and test.created_by != user['id']:
+            return jsonify({"error": "Você só pode calcular notas de testes que criou"}), 403
+            
+        questions = Question.query.filter_by(test_id=test_id).all()
+        if not questions:
+            return jsonify({"error": "Nenhuma questão encontrada para este teste"}), 404
+            
+        # Filtrar por alunos específicos se fornecido
+        data = request.get_json() or {}
+        student_ids_filter = data.get('student_ids')
+        
+        if student_ids_filter:
+            student_answers = StudentAnswer.query.filter(
+                StudentAnswer.test_id == test_id,
+                StudentAnswer.student_id.in_(student_ids_filter)
+            ).all()
+        else:
+            student_answers = StudentAnswer.query.filter_by(test_id=test_id).all()
+        
+        if not student_answers:
+            return jsonify({
+                "test_id": test_id,
+                "message": "Nenhuma resposta encontrada para este teste",
+                "total_students": 0,
+                "results": {}
+            }), 200
+        
+        # Agrupar respostas por aluno
+        student_responses = {}
+        for answer in student_answers:
+            if answer.student_id not in student_responses:
+                student_responses[answer.student_id] = []
+            student_responses[answer.student_id].append(answer)
+        
+        results = {}
+        
+        for student_id, answers in student_responses.items():
+            results[student_id] = {
+                "total_questions": len(questions),
+                "answered_questions": len(answers),
+                "correct_answers": 0,
+                "multiple_choice_questions": 0,
+                "essay_questions": 0,
+                "pending_corrections": 0,
+                "corrected_essays": 0,
+                "score_percentage": 0.0,
+                "total_score": 0.0,
+                "max_possible_score": 0.0
+            }
+            
+            for answer in answers:
+                # Encontrar a questão correspondente
+                question = next((q for q in questions if q.id == answer.question_id), None)
+                if not question:
+                    continue
+                
+                # Adicionar valor da questão ao máximo possível
+                question_value = question.value or 1.0
+                results[student_id]["max_possible_score"] += question_value
+                
+                # Verificar tipo de questão
+                if question.question_type == 'multipleChoice':
+                    results[student_id]["multiple_choice_questions"] += 1
+                    # Questão de múltipla escolha - correção automática
+                    is_correct = check_multiple_choice_answer(answer.answer, question.alternatives)
+                    if is_correct:
+                        results[student_id]["correct_answers"] += 1
+                        results[student_id]["total_score"] += question_value
+                        
+                elif question.question_type == 'essay':
+                    results[student_id]["essay_questions"] += 1
+                    # Questão dissertativa - verificar se já foi corrigida
+                    if answer.manual_score is not None:
+                        results[student_id]["corrected_essays"] += 1
+                        # Calcular pontuação baseada no manual_score
+                        essay_score = (answer.manual_score / 100.0) * question_value
+                        results[student_id]["total_score"] += essay_score
+                        if answer.manual_score > 0:
+                            results[student_id]["correct_answers"] += 1
+                    else:
+                        results[student_id]["pending_corrections"] += 1
+                else:
+                    # Outros tipos de questão - usar correção automática se houver correct_answer
+                    if question.correct_answer:
+                        is_correct = str(answer.answer).strip().lower() == str(question.correct_answer).strip().lower()
+                        if is_correct:
+                            results[student_id]["correct_answers"] += 1
+                            results[student_id]["total_score"] += question_value
+            
+            # Calcular percentual de acertos (apenas questões corrigidas automaticamente)
+            auto_corrected_questions = results[student_id]["multiple_choice_questions"]
+            if auto_corrected_questions > 0:
+                results[student_id]["score_percentage"] = (results[student_id]["correct_answers"] / auto_corrected_questions) * 100
+            else:
+                results[student_id]["score_percentage"] = 0.0
+                
+        return jsonify({
+            "test_id": test_id,
+            "test_title": test.title,
+            "total_students": len(results),
+            "total_questions": len(questions),
+            "calculation_timestamp": datetime.utcnow().isoformat(),
+            "results": results
+        }), 200
+        
+    except Exception as e:
+        logging.error(f"Erro ao calcular notas: {str(e)}", exc_info=True)
+        return jsonify({"error": "Erro ao calcular notas", "details": str(e)}), 500
+
+
+@bp.route('/<string:test_id>/manual-correction', methods=['POST'])
+@jwt_required()
+@role_required("admin", "professor", "coordenador", "diretor")
+def manual_correction(test_id):
+    """
+    Permite ao professor corrigir questões dissertativas
+    
+    Body:
+    {
+        "student_id": "uuid",
+        "question_id": "uuid", 
+        "score": 85.5,  // Pontuação de 0 a 100
+        "feedback": "Boa resposta, mas poderia ser mais detalhada",
+        "is_correct": true  // opcional: true/false baseado na pontuação
+    }
+    """
+    try:
+        user = get_current_user_from_token()
+        if not user:
+            return jsonify({"error": "Usuário não encontrado"}), 401
+
+        data = request.get_json()
+        if not data:
+            return jsonify({"error": "Dados são obrigatórios"}), 400
+            
+        student_id = data.get('student_id')
+        question_id = data.get('question_id')
+        score = data.get('score')
+        feedback = data.get('feedback')
+        is_correct = data.get('is_correct')
+        
+        if not student_id or not question_id or score is None:
+            return jsonify({"error": "student_id, question_id e score são obrigatórios"}), 400
+            
+        # Validar score
+        if not isinstance(score, (int, float)) or score < 0 or score > 100:
+            return jsonify({"error": "Score deve ser um número entre 0 e 100"}), 400
+        
+        # Verificar se o teste existe e se o usuário tem permissão
+        test = Test.query.get(test_id)
+        if not test:
+            return jsonify({"error": "Teste não encontrado"}), 404
+            
+        if user['role'] == 'professor' and test.created_by != user['id']:
+            return jsonify({"error": "Você só pode corrigir testes que criou"}), 403
+        
+        # Buscar resposta do aluno
+        # O student_id pode ser user_id ou student_id real
+        # Primeiro tentar como user_id
+        student = Student.query.filter_by(user_id=student_id).first()
+        if student:
+            # É um user_id, usar o student.id
+            actual_student_id = student.id
+        else:
+            # Pode ser um student_id real, verificar se existe
+            student = Student.query.get(student_id)
+            if not student:
+                return jsonify({"error": "Aluno não encontrado"}), 404
+            actual_student_id = student_id
+            
+        answer = StudentAnswer.query.filter_by(
+            test_id=test_id,
+            student_id=actual_student_id,
+            question_id=question_id
+        ).first()
+        
+        if not answer:
+            return jsonify({"error": "Resposta não encontrada"}), 404
+            
+        # Verificar se a questão é dissertativa
+        question = Question.query.get(question_id)
+        if not question or question.question_type != 'essay':
+            return jsonify({"error": "Apenas questões dissertativas podem ser corrigidas manualmente"}), 400
+        
+        # Atualizar com correção manual
+        answer.manual_score = float(score)
+        answer.feedback = feedback
+        answer.corrected_by = user['id']
+        answer.corrected_at = datetime.utcnow()
+        
+        # Definir is_correct baseado na pontuação se não fornecido
+        if is_correct is None:
+            answer.is_correct = score > 50  # Considera correto se score > 50%
+        else:
+            answer.is_correct = bool(is_correct)
+        
+        db.session.commit()
+        
+        return jsonify({
+            "message": "Correção salva com sucesso",
+            "student_id": student_id,
+            "question_id": question_id,
+            "score": score,
+            "corrected_at": answer.corrected_at.isoformat()
+        }), 200
+        
+    except Exception as e:
+        db.session.rollback()
+        logging.error(f"Erro ao salvar correção: {str(e)}", exc_info=True)
+        return jsonify({"error": "Erro ao salvar correção", "details": str(e)}), 500
+
+
+@bp.route('/<string:test_id>/student/<string:student_id>/results', methods=['GET'])
+@jwt_required()
+@role_required("admin", "professor", "coordenador", "diretor", "aluno")
+def get_student_test_results(test_id, student_id):
+    """
+    Retorna os resultados detalhados de um aluno específico em um teste
+    
+    Query Parameters:
+    - include_answers: true/false (incluir respostas detalhadas)
+    """
+    try:
+        user = get_current_user_from_token()
+        if not user:
+            return jsonify({"error": "Usuário não encontrado"}), 401
+
+        # Verificar permissões
+        if user['role'] == 'aluno':
+            # Aluno só pode ver seus próprios resultados
+            # O student_id enviado é o user_id, não o id da tabela Student
+            if user['id'] != student_id:
+                return jsonify({"error": "Você só pode ver seus próprios resultados"}), 403
+        elif user['role'] == 'professor':
+            # Professor só pode ver resultados de testes que criou
+            test = Test.query.get(test_id)
+            if not test or test.created_by != user['id']:
+                return jsonify({"error": "Você só pode ver resultados de testes que criou"}), 403
+        
+        # Buscar respostas do aluno
+        # O student_id é na verdade o user_id, precisamos buscar o student_id real
+        student = Student.query.filter_by(user_id=student_id).first()
+        if not student:
+            return jsonify({"error": "Aluno não encontrado"}), 404
+            
+        answers = StudentAnswer.query.filter_by(
+            test_id=test_id,
+            student_id=student.id
+        ).all()
+        
+        if not answers:
+            return jsonify({"error": "Nenhuma resposta encontrada para este aluno"}), 404
+        
+        # Buscar informações do teste e questões
+        test = Test.query.get(test_id)
+        questions = Question.query.filter_by(test_id=test_id).all()
+        questions_dict = {q.id: q for q in questions}
+        
+        # Calcular resultados
+        total_questions = len(questions)
+        correct_answers = 0
+        total_score = 0.0
+        max_possible_score = 0.0
+        detailed_answers = []
+        
+        for answer in answers:
+            question = questions_dict.get(answer.question_id)
+            if not question:
+                continue
+                
+            question_value = question.value or 1.0
+            max_possible_score += question_value
+            
+            answer_detail = {
+                "question_id": answer.question_id,
+                "question_number": question.number,
+                "question_text": question.text,
+                "question_type": question.question_type,
+                "question_value": question_value,
+                "student_answer": answer.answer,
+                "answered_at": answer.answered_at.isoformat() if answer.answered_at else None,
+                "is_correct": None,
+                "score": None,
+                "feedback": answer.feedback,
+                "corrected_by": answer.corrected_by,
+                "corrected_at": answer.corrected_at.isoformat() if answer.corrected_at else None
+            }
+            
+            if question.question_type == 'multipleChoice':
+                is_correct = check_multiple_choice_answer(answer.answer, question.alternatives)
+                answer_detail["is_correct"] = is_correct
+                answer_detail["score"] = question_value if is_correct else 0
+                if is_correct:
+                    correct_answers += 1
+                    total_score += question_value
+                    
+            elif question.question_type == 'essay':
+                if answer.manual_score is not None:
+                    essay_score = (answer.manual_score / 100.0) * question_value
+                    answer_detail["score"] = essay_score
+                    answer_detail["manual_score"] = answer.manual_score
+                    answer_detail["is_correct"] = answer.is_correct
+                    total_score += essay_score
+                    if answer.is_correct:
+                        correct_answers += 1
+                else:
+                    answer_detail["status"] = "pending_correction"
+                    
+            else:
+                # Outros tipos
+                if question.correct_answer:
+                    is_correct = str(answer.answer).strip().lower() == str(question.correct_answer).strip().lower()
+                    answer_detail["is_correct"] = is_correct
+                    answer_detail["score"] = question_value if is_correct else 0
+                    if is_correct:
+                        correct_answers += 1
+                        total_score += question_value
+            
+            detailed_answers.append(answer_detail)
+        
+        # Calcular percentual
+        score_percentage = (correct_answers / total_questions * 100) if total_questions > 0 else 0
+        
+        result = {
+            "test_id": test_id,
+            "student_id": student_id,  # user_id
+            "student_db_id": student.id,  # id real da tabela Student
+            "total_questions": total_questions,
+            "answered_questions": len(answers),
+            "correct_answers": correct_answers,
+            "score_percentage": round(score_percentage, 2),
+            "total_score": round(total_score, 2),
+            "max_possible_score": max_possible_score,
+            "answers": detailed_answers if request.args.get('include_answers', 'false').lower() == 'true' else None
+        }
+        
+        return jsonify(result), 200
+        
+    except Exception as e:
+        logging.error(f"Erro ao buscar resultados do aluno: {str(e)}", exc_info=True)
+        return jsonify({"error": "Erro ao buscar resultados", "details": str(e)}), 500
+
+
+@bp.route('/<string:test_id>/batch-correction', methods=['POST'])
+@jwt_required()
+@role_required("admin", "professor", "coordenador", "diretor")
+def batch_correction(test_id):
+    """
+    Permite ao professor corrigir múltiplas questões dissertativas de uma vez
+    
+    Body:
+    {
+        "corrections": [
+            {
+                "student_id": "uuid",
+                "question_id": "uuid",
+                "score": 85.5,
+                "feedback": "Boa resposta",
+                "is_correct": true
+            },
+            {
+                "student_id": "uuid2",
+                "question_id": "uuid",
+                "score": 70.0,
+                "feedback": "Resposta parcialmente correta"
+            }
+        ]
+    }
+    """
+    try:
+        user = get_current_user_from_token()
+        if not user:
+            return jsonify({"error": "Usuário não encontrado"}), 401
+
+        data = request.get_json()
+        if not data or 'corrections' not in data:
+            return jsonify({"error": "Campo 'corrections' é obrigatório"}), 400
+            
+        corrections = data['corrections']
+        if not isinstance(corrections, list) or len(corrections) == 0:
+            return jsonify({"error": "Lista de correções deve ser um array não vazio"}), 400
+        
+        # Verificar se o teste existe e se o usuário tem permissão
+        test = Test.query.get(test_id)
+        if not test:
+            return jsonify({"error": "Teste não encontrado"}), 404
+            
+        if user['role'] == 'professor' and test.created_by != user['id']:
+            return jsonify({"error": "Você só pode corrigir testes que criou"}), 403
+        
+        processed = 0
+        errors = []
+        
+        for correction in corrections:
+            try:
+                student_id = correction.get('student_id')
+                question_id = correction.get('question_id')
+                score = correction.get('score')
+                feedback = correction.get('feedback')
+                is_correct = correction.get('is_correct')
+                
+                if not student_id or not question_id or score is None:
+                    errors.append(f"Correção inválida: student_id, question_id e score são obrigatórios")
+                    continue
+                    
+                # Validar score
+                if not isinstance(score, (int, float)) or score < 0 or score > 100:
+                    errors.append(f"Score inválido para aluno {student_id}, questão {question_id}: deve ser entre 0 e 100")
+                    continue
+                
+                # Buscar resposta do aluno
+                # O student_id pode ser user_id ou student_id real
+                student = Student.query.filter_by(user_id=student_id).first()
+                if student:
+                    # É um user_id, usar o student.id
+                    actual_student_id = student.id
+                else:
+                    # Pode ser um student_id real, verificar se existe
+                    student = Student.query.get(student_id)
+                    if not student:
+                        errors.append(f"Aluno {student_id} não encontrado")
+                        continue
+                    actual_student_id = student_id
+                    
+                answer = StudentAnswer.query.filter_by(
+                    test_id=test_id,
+                    student_id=actual_student_id,
+                    question_id=question_id
+                ).first()
+                
+                if not answer:
+                    errors.append(f"Resposta não encontrada para aluno {student_id}, questão {question_id}")
+                    continue
+                    
+                # Verificar se a questão é dissertativa
+                question = Question.query.get(question_id)
+                if not question or question.question_type != 'essay':
+                    errors.append(f"Questão {question_id} não é dissertativa")
+                    continue
+                
+                # Atualizar com correção manual
+                answer.manual_score = float(score)
+                answer.feedback = feedback
+                answer.corrected_by = user['id']
+                answer.corrected_at = datetime.utcnow()
+                
+                # Definir is_correct baseado na pontuação se não fornecido
+                if is_correct is None:
+                    answer.is_correct = score > 50
+                else:
+                    answer.is_correct = bool(is_correct)
+                
+                processed += 1
+                
+            except Exception as e:
+                errors.append(f"Erro ao processar correção: {str(e)}")
+        
+        if processed > 0:
+            db.session.commit()
+            
+        return jsonify({
+            "message": f"Processadas {processed} correções com sucesso",
+            "processed": processed,
+            "errors": errors if errors else None
+        }), 200 if not errors else 207  # 207 Multi-Status se houver erros
+        
+    except Exception as e:
+        db.session.rollback()
+        logging.error(f"Erro ao processar correções em lote: {str(e)}", exc_info=True)
+        return jsonify({"error": "Erro ao processar correções", "details": str(e)}), 500
+
+
+@bp.route('/<string:test_id>/pending-corrections', methods=['GET'])
+@jwt_required()
+@role_required("admin", "professor", "coordenador", "diretor")
+def get_pending_corrections(test_id):
+    """
+    Lista todas as questões dissertativas que ainda precisam de correção manual
+    
+    Query Parameters:
+    - student_id: uuid (opcional, filtrar por aluno específico)
+    - question_id: uuid (opcional, filtrar por questão específica)
+    """
+    try:
+        user = get_current_user_from_token()
+        if not user:
+            return jsonify({"error": "Usuário não encontrado"}), 401
+
+        # Verificar se o teste existe e se o usuário tem permissão
+        test = Test.query.get(test_id)
+        if not test:
+            return jsonify({"error": "Teste não encontrado"}), 404
+            
+        if user['role'] == 'professor' and test.created_by != user['id']:
+            return jsonify({"error": "Você só pode ver correções de testes que criou"}), 403
+        
+        # Parâmetros de filtro
+        student_id_filter = request.args.get('student_id')
+        question_id_filter = request.args.get('question_id')
+        
+        # Query base
+        query = db.session.query(
+            StudentAnswer,
+            Question,
+            Student
+        ).join(
+            Question, StudentAnswer.question_id == Question.id
+        ).join(
+            Student, StudentAnswer.student_id == Student.id
+        ).filter(
+            StudentAnswer.test_id == test_id,
+            Question.question_type == 'essay',
+            StudentAnswer.manual_score.is_(None)
+        )
+        
+        # Aplicar filtros
+        if student_id_filter:
+            query = query.filter(StudentAnswer.student_id == student_id_filter)
+        if question_id_filter:
+            query = query.filter(StudentAnswer.question_id == question_id_filter)
+        
+        pending_corrections = query.all()
+        
+        corrections_data = []
+        for answer, question, student in pending_corrections:
+            corrections_data.append({
+                "student_answer_id": answer.id,
+                "student_id": student.id,
+                "student_name": student.name,
+                "question_id": question.id,
+                "question_number": question.number,
+                "question_text": question.text,
+                "question_value": question.value or 1.0,
+                "student_answer": answer.answer,
+                "answered_at": answer.answered_at.isoformat() if answer.answered_at else None
+            })
+        
+        return jsonify({
+            "test_id": test_id,
+            "test_title": test.title,
+            "total_pending": len(corrections_data),
+            "pending_corrections": corrections_data
+        }), 200
+        
+    except Exception as e:
+        logging.error(f"Erro ao buscar correções pendentes: {str(e)}", exc_info=True)
+        return jsonify({"error": "Erro ao buscar correções pendentes", "details": str(e)}), 500
+
+
+def check_multiple_choice_answer(student_answer, alternatives):
+    """
+    Verifica se a resposta do aluno está correta para questão de múltipla escolha
+    Compara por ID da alternativa (recomendado) ou por texto (fallback)
+    """
+    if not alternatives or not student_answer:
+        return False
+        
+    student_answer = str(student_answer).strip()
+    
+    # Opção 1: Comparar por ID da alternativa (recomendado)
+    for alt in alternatives:
+        if isinstance(alt, dict) and alt.get('isCorrect') and alt.get('id'):
+            if student_answer == str(alt['id']):
+                return True
+    
+    # Opção 2: Comparar por texto (fallback)
+    for alt in alternatives:
+        if isinstance(alt, dict) and alt.get('isCorrect'):
+            alt_text = alt.get('text', '').strip()
+            if student_answer.lower() == alt_text.lower():
+                return True
+        elif isinstance(alt, str):
+            if student_answer.lower() == alt.strip().lower():
+                return True
+                
+    return False 

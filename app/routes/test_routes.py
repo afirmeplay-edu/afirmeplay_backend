@@ -20,6 +20,13 @@ from sqlalchemy.orm import joinedload, subqueryload
 
 bp = Blueprint('tests', __name__, url_prefix="/test")
 
+def process_subjects_for_test(test):
+    """
+    Processa os subjects de um teste, retornando uma lista de subjects com nomes
+    """
+    from app.utils.response_formatters import _get_all_subjects_from_test
+    return _get_all_subjects_from_test(test)
+
 
 
 @bp.errorhandler(SQLAlchemyError)
@@ -1269,7 +1276,7 @@ def obter_avaliacoes_completas_classe(class_id):
                     "duration": test.duration,
                     "course": test.course,
                     "model": test.model,
-                    "subjects_info": test.subjects_info,
+                    "subjects_info": process_subjects_for_test(test),  # Retornar subjects com nomes
                     "status": test.status,
                     "created_by": test.created_by,
                     "creator": {
@@ -1405,7 +1412,7 @@ def listar_avaliacoes_por_classe(class_id):
                 "time_limit": test.time_limit.isoformat() if test.time_limit else None,
                 "course": test.course,
                 "model": test.model,
-                "subjects_info": test.subjects_info,
+                "subjects_info": process_subjects_for_test(test),  # Retornar subjects com nomes
                 "status": test.status,
                 "created_by": test.created_by,
                 "creator": {
@@ -1517,37 +1524,96 @@ def listar_avaliacoes_minha_classe():
 
         # Preparar lista de avaliações com informações para o aluno
         tests_info = []
-        current_time = datetime.utcnow()
+        
+        # Usar fuso horário do Brasil
+        from app.utils.timezone_utils import get_brazil_time
+        current_time = get_brazil_time()
+        
+        # Buscar todas as sessões do aluno para estas avaliações
+        from app.models.testSession import TestSession
+        from app.models.studentAnswer import StudentAnswer
+        
+        test_ids = [ct.test_id for ct in class_tests]
+        sessions = TestSession.query.filter_by(student_id=student.id).filter(
+            TestSession.test_id.in_(test_ids)
+        ).all()
+        sessions_dict = {session.test_id: session for session in sessions}
         
         for test in tests:
             class_test = class_test_map.get(test.id)
+            session = sessions_dict.get(test.id)
             
             # Verificar se a avaliação está disponível para o aluno
             is_available = False
             availability_status = "not_available"
             
+            # Verificar se o aluno já completou esta avaliação
+            has_completed = False
+            student_status = "nao_iniciada"
+            completed_at = None
+            score = None
+            grade = None
+            can_start = True
+            
+            if session:
+                has_completed = session.status in ['finalizada', 'expirada', 'corrigida', 'revisada']
+                student_status = session.status
+                completed_at = session.submitted_at.isoformat() if session.submitted_at else None
+                score = session.score
+                grade = session.grade
+                
+                # Verificar se há respostas salvas
+                has_answers = StudentAnswer.query.filter_by(
+                    student_id=student.id,
+                    test_id=test.id
+                ).first() is not None
+                
+                can_start = session.status == 'nao_iniciada' or (session.status == 'em_andamento' and not has_answers)
+            
+            # Determinar disponibilidade baseada no status global E individual
             if test.status == 'agendada' or test.status == 'em_andamento':
-                if class_test.application and current_time >= class_test.application:
-                    if not class_test.expiration or current_time <= class_test.expiration:
+                # Se não há data de aplicação definida, considerar disponível
+                if not class_test.application:
+                    if not has_completed:
                         is_available = True
                         availability_status = "available"
                     else:
-                        availability_status = "expired"
-                elif class_test.application and current_time < class_test.application:
-                    availability_status = "not_yet_available"
+                        availability_status = "completed"
                 else:
-                    is_available = True
-                    availability_status = "available"
+                    # Verificar se já passou da data de aplicação
+                    # Converter application para fuso horário do Brasil
+                    from app.utils.timezone_utils import convert_to_brazil_time
+                    
+                    application_time = convert_to_brazil_time(class_test.application)
+                    expiration_time = convert_to_brazil_time(class_test.expiration)
+                    
+                    if current_time >= application_time:
+                        # Verificar se não expirou
+                        if not expiration_time or current_time <= expiration_time:
+                            if not has_completed:
+                                is_available = True
+                                availability_status = "available"
+                            else:
+                                availability_status = "completed"
+                        else:
+                            availability_status = "expired"
+                    else:
+                        # Ainda não chegou a data de aplicação
+                        availability_status = "not_yet_available"
+            else:
+                # Status global não permite disponibilidade
+                availability_status = "not_available"
+            
+            # Preparar subjects usando a função auxiliar
+            subjects = process_subjects_for_test(test)
             
             test_info = {
                 "test_id": test.id,
                 "title": test.title,
                 "description": test.description,
                 "type": test.type,
-                "subject": {
-                    "id": test.subject_rel.id,
-                    "name": test.subject_rel.name
-                } if test.subject_rel else None,
+                "subject": subjects[0] if subjects else None,  # Subject principal para compatibilidade
+                "subjects": subjects,  # Lista completa de subjects
                 "grade": {
                     "id": test.grade.id,
                     "name": test.grade.name
@@ -1555,9 +1621,10 @@ def listar_avaliacoes_minha_classe():
                 "intructions": test.intructions,
                 "max_score": test.max_score,
                 "time_limit": test.time_limit.isoformat() if test.time_limit else None,
+                "duration": test.duration,  # Duração em minutos
                 "course": test.course,
                 "model": test.model,
-                "subjects_info": test.subjects_info,
+                "subjects_info": subjects,  # Retornar a lista de subjects com nomes
                 "status": test.status,
                 "creator": {
                     "id": test.creator.id,
@@ -1573,6 +1640,14 @@ def listar_avaliacoes_minha_classe():
                 "availability": {
                     "is_available": is_available,
                     "status": availability_status
+                },
+                "student_status": {
+                    "has_completed": has_completed,
+                    "status": student_status,
+                    "completed_at": completed_at,
+                    "score": score,
+                    "grade": grade,
+                    "can_start": can_start
                 }
             }
             tests_info.append(test_info)
@@ -1761,3 +1836,153 @@ def get_session_info(test_id):
     except Exception as e:
         logging.error(f"Erro ao obter informações da sessão: {str(e)}", exc_info=True)
         return jsonify({"error": "Erro ao obter informações da sessão", "details": str(e)}), 500
+
+@bp.route('/debug/dates/<string:test_id>', methods=['GET'])
+@jwt_required()
+@role_required("admin", "professor", "coordenador", "diretor", "aluno")
+def debug_test_dates(test_id):
+    """
+    Endpoint de debug para verificar as datas de uma avaliação
+    """
+    try:
+        from app.models.classTest import ClassTest
+        from datetime import datetime, timezone
+        
+        # Buscar o teste
+        test = Test.query.get(test_id)
+        if not test:
+            return jsonify({'error': 'Teste não encontrado'}), 404
+        
+        # Buscar aplicações do teste
+        class_tests = ClassTest.query.filter_by(test_id=test_id).all()
+        
+        # Usar fuso horário do Brasil
+        from app.utils.timezone_utils import get_brazil_time
+        current_time = get_brazil_time()
+        
+        debug_info = {
+            'test_id': test_id,
+            'test_title': test.title,
+            'test_status': test.status,
+            'current_time': current_time.isoformat(),
+            'current_time_utc': current_time.utctimetuple(),
+            'class_tests': []
+        }
+        
+        for class_test in class_tests:
+            # Converter para fuso horário do Brasil
+            from app.utils.timezone_utils import convert_to_brazil_time
+            
+            application_time = convert_to_brazil_time(class_test.application)
+            expiration_time = convert_to_brazil_time(class_test.expiration)
+            
+            debug_class_test = {
+                'class_test_id': class_test.id,
+                'class_id': class_test.class_id,
+                'application_original': class_test.application.isoformat() if class_test.application else None,
+                'application_timezone_aware': application_time.isoformat() if application_time else None,
+                'expiration_original': class_test.expiration.isoformat() if class_test.expiration else None,
+                'expiration_timezone_aware': expiration_time.isoformat() if expiration_time else None,
+                'current_time': current_time.isoformat(),
+                'is_application_passed': current_time >= application_time if application_time else None,
+                'is_expired': current_time > expiration_time if expiration_time else None,
+                'time_until_application': None,
+                'time_until_expiration': None
+            }
+            
+            if application_time:
+                time_diff = application_time - current_time
+                debug_class_test['time_until_application'] = str(time_diff)
+            
+            if expiration_time:
+                time_diff = expiration_time - current_time
+                debug_class_test['time_until_expiration'] = str(time_diff)
+            
+            debug_info['class_tests'].append(debug_class_test)
+        
+        return jsonify(debug_info), 200
+        
+    except Exception as e:
+        logging.error(f"Erro no debug de datas: {str(e)}", exc_info=True)
+        return jsonify({"error": "Erro no debug", "details": str(e)}), 500
+
+@bp.route('/debug/subjects/<string:test_id>', methods=['GET'])
+@jwt_required()
+@role_required("admin", "professor", "coordenador", "diretor", "aluno")
+def debug_test_subjects(test_id):
+    """
+    Endpoint de debug para verificar os subjects de uma avaliação
+    """
+    try:
+        from app.models.subject import Subject
+        
+        # Buscar o teste
+        test = Test.query.get(test_id)
+        if not test:
+            return jsonify({'error': 'Teste não encontrado'}), 404
+        
+        debug_info = {
+            'test_id': test_id,
+            'test_title': test.title,
+            'subject_field': test.subject,  # Campo único
+            'subject_rel': {
+                'id': test.subject_rel.id,
+                'name': test.subject_rel.name
+            } if test.subject_rel else None,
+            'subjects_info': test.subjects_info,  # Campo JSON
+            'subjects_info_type': type(test.subjects_info).__name__,
+            'parsed_subjects': []
+        }
+        
+        # Tentar parsear subjects do subjects_info
+        if test.subjects_info:
+            if isinstance(test.subjects_info, list):
+                for i, subject_info in enumerate(test.subjects_info):
+                    if isinstance(subject_info, dict):
+                        subject_id = subject_info.get('id')
+                        subject_name = subject_info.get('name')
+                        
+                        # Buscar subject no banco se tiver ID
+                        if subject_id:
+                            subject = Subject.query.get(subject_id)
+                            if subject:
+                                debug_info['parsed_subjects'].append({
+                                    'index': i,
+                                    'from_db': True,
+                                    'id': subject.id,
+                                    'name': subject.name,
+                                    'original_data': subject_info
+                                })
+                            else:
+                                debug_info['parsed_subjects'].append({
+                                    'index': i,
+                                    'from_db': False,
+                                    'id': subject_id,
+                                    'name': subject_name,
+                                    'original_data': subject_info,
+                                    'error': 'Subject não encontrado no banco'
+                                })
+                        else:
+                            debug_info['parsed_subjects'].append({
+                                'index': i,
+                                'from_db': False,
+                                'original_data': subject_info,
+                                'error': 'Sem ID no subject_info'
+                            })
+                    else:
+                        debug_info['parsed_subjects'].append({
+                            'index': i,
+                            'from_db': False,
+                            'original_data': subject_info,
+                            'error': 'Não é um dicionário'
+                        })
+            else:
+                debug_info['parsed_subjects'].append({
+                    'error': f'subjects_info não é uma lista, é {type(test.subjects_info).__name__}'
+                })
+        
+        return jsonify(debug_info), 200
+        
+    except Exception as e:
+        logging.error(f"Erro no debug de subjects: {str(e)}", exc_info=True)
+        return jsonify({"error": "Erro no debug", "details": str(e)}), 500

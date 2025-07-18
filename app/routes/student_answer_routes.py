@@ -246,7 +246,9 @@ def submit_answers():
         
         # Validar tempo limite (cálculo no frontend, mas validação adicional aqui)
         if session.started_at and session.time_limit_minutes:
-            elapsed_minutes = int((datetime.utcnow() - session.started_at).total_seconds() / 60)
+            from app.utils.timezone_utils import get_brazil_time
+            current_time = get_brazil_time()
+            elapsed_minutes = int((current_time - session.started_at).total_seconds() / 60)
             if elapsed_minutes > session.time_limit_minutes:
                 session.status = 'expirada'
                 db.session.commit()
@@ -314,21 +316,8 @@ def submit_answers():
             total_questions=total_questions
         )
         
-        # Verificar se há outras sessões ativas para este teste
-        remaining_sessions = TestSession.query.filter_by(
-            test_id=session.test_id,
-            status='em_andamento'
-        ).count()
-        
-        # Alterar status da avaliação baseado nas sessões restantes
-        from app.models.test import Test
-        test = Test.query.get(session.test_id)
-        if test:
-            if remaining_sessions == 0:
-                test.status = 'concluida'  # Nenhuma sessão ativa
-            else:
-                test.status = 'em_andamento'  # Ainda há sessões ativas
-        
+        # Não alterar o status global da avaliação
+        # Cada aluno tem seu próprio status individual
         db.session.commit()
         
         return jsonify({
@@ -395,7 +384,9 @@ def save_partial_answers():
         
         # Validar tempo limite (cálculo no frontend, mas validação adicional aqui)
         if session.started_at and session.time_limit_minutes:
-            elapsed_minutes = int((datetime.utcnow() - session.started_at).total_seconds() / 60)
+            from app.utils.timezone_utils import get_brazil_time
+            current_time = get_brazil_time()
+            elapsed_minutes = int((current_time - session.started_at).total_seconds() / 60)
             if elapsed_minutes > session.time_limit_minutes:
                 session.status = 'expirada'
                 db.session.commit()
@@ -547,6 +538,205 @@ def get_active_session(test_id):
         return jsonify({"error": "Erro ao buscar sessão ativa", "details": str(e)}), 500
 
 
+# ==================== VERIFICAÇÃO DE STATUS POR ALUNO ====================
+
+@bp.route('/student/<string:test_id>/status', methods=['GET'])
+@jwt_required()
+@role_required("student", "admin", "professor", "aluno")
+def get_student_test_status(test_id):
+    """
+    Verifica o status de uma avaliação específica para o aluno autenticado
+    
+    Returns:
+    {
+        "test_id": "uuid",
+        "student_id": "uuid", 
+        "has_completed": true/false,
+        "session_status": "em_andamento/finalizada/expirada/nao_iniciada",
+        "completed_at": "2024-01-01T10:00:00Z",
+        "score": 85.5,
+        "grade": 8.5,
+        "total_questions": 20,
+        "correct_answers": 17
+    }
+    """
+    try:
+        from app.models.student import Student
+        
+        # Obter user_id do JWT token
+        current_user_id = get_jwt_identity()
+        
+        # Buscar estudante pelo user_id
+        student = Student.query.filter_by(user_id=current_user_id).first()
+        if not student:
+            return jsonify({'error': 'Estudante não encontrado para este usuário'}), 404
+        
+        # Verificar se o teste existe
+        test = Test.query.get(test_id)
+        if not test:
+            return jsonify({'error': 'Teste não encontrado'}), 404
+        
+        # Buscar sessão do aluno para este teste
+        session = TestSession.query.filter_by(
+            student_id=student.id,
+            test_id=test_id
+        ).first()
+        
+        if not session:
+            return jsonify({
+                'test_id': test_id,
+                'student_id': student.id,
+                'has_completed': False,
+                'session_status': 'nao_iniciada',
+                'completed_at': None,
+                'score': None,
+                'grade': None,
+                'total_questions': None,
+                'correct_answers': None,
+                'can_start': True
+            }), 200
+        
+        # Verificar se há respostas salvas
+        has_answers = StudentAnswer.query.filter_by(
+            student_id=student.id,
+            test_id=test_id
+        ).first() is not None
+        
+        response = {
+            'test_id': test_id,
+            'student_id': student.id,
+            'has_completed': session.status in ['finalizada', 'expirada', 'corrigida', 'revisada'],
+            'session_status': session.status,
+            'completed_at': session.submitted_at.isoformat() if session.submitted_at else None,
+            'score': session.score,
+            'grade': session.grade,
+            'total_questions': session.total_questions,
+            'correct_answers': session.correct_answers,
+            'has_answers': has_answers,
+            'can_start': session.status == 'nao_iniciada' or (session.status == 'em_andamento' and not has_answers)
+        }
+        
+        return jsonify(response), 200
+        
+    except Exception as e:
+        logging.error(f"Erro ao verificar status do teste para aluno: {str(e)}", exc_info=True)
+        return jsonify({"error": "Erro ao verificar status do teste", "details": str(e)}), 500
+
+
+@bp.route('/student/tests/status', methods=['GET'])
+@jwt_required()
+@role_required("student", "admin", "professor", "aluno")
+def get_student_all_tests_status():
+    """
+    Verifica o status de todas as avaliações disponíveis para o aluno autenticado
+    
+    Query Parameters:
+    - class_id: ID da classe (opcional, se não fornecido usa a classe do aluno)
+    
+    Returns:
+    {
+        "student_id": "uuid",
+        "tests_status": [
+            {
+                "test_id": "uuid",
+                "has_completed": true/false,
+                "session_status": "em_andamento/finalizada/expirada/nao_iniciada",
+                "completed_at": "2024-01-01T10:00:00Z",
+                "score": 85.5,
+                "grade": 8.5,
+                "can_start": true/false
+            }
+        ]
+    }
+    """
+    try:
+        from app.models.student import Student
+        from app.models.classTest import ClassTest
+        
+        # Obter user_id do JWT token
+        current_user_id = get_jwt_identity()
+        
+        # Buscar estudante pelo user_id
+        student = Student.query.filter_by(user_id=current_user_id).first()
+        if not student:
+            return jsonify({'error': 'Estudante não encontrado para este usuário'}), 404
+        
+        # Determinar classe (parâmetro ou classe do aluno)
+        class_id = request.args.get('class_id', student.class_id)
+        if not class_id:
+            return jsonify({'error': 'Aluno não está matriculado em nenhuma classe'}), 400
+        
+        # Buscar todas as avaliações aplicadas na classe
+        class_tests = ClassTest.query.filter_by(class_id=class_id).all()
+        if not class_tests:
+            return jsonify({
+                'student_id': student.id,
+                'class_id': class_id,
+                'tests_status': []
+            }), 200
+        
+        # Buscar todas as sessões do aluno para estas avaliações
+        test_ids = [ct.test_id for ct in class_tests]
+        sessions = TestSession.query.filter_by(student_id=student.id).filter(
+            TestSession.test_id.in_(test_ids)
+        ).all()
+        
+        # Criar dicionário de sessões por test_id
+        sessions_dict = {session.test_id: session for session in sessions}
+        
+        # Preparar resposta
+        tests_status = []
+        for class_test in class_tests:
+            session = sessions_dict.get(class_test.test_id)
+            
+            if session:
+                # Verificar se há respostas salvas
+                has_answers = StudentAnswer.query.filter_by(
+                    student_id=student.id,
+                    test_id=class_test.test_id
+                ).first() is not None
+                
+                test_status = {
+                    'test_id': class_test.test_id,
+                    'class_test_id': class_test.id,
+                    'has_completed': session.status in ['finalizada', 'expirada', 'corrigida', 'revisada'],
+                    'session_status': session.status,
+                    'completed_at': session.submitted_at.isoformat() if session.submitted_at else None,
+                    'score': session.score,
+                    'grade': session.grade,
+                    'total_questions': session.total_questions,
+                    'correct_answers': session.correct_answers,
+                    'has_answers': has_answers,
+                    'can_start': session.status == 'nao_iniciada' or (session.status == 'em_andamento' and not has_answers)
+                }
+            else:
+                test_status = {
+                    'test_id': class_test.test_id,
+                    'class_test_id': class_test.id,
+                    'has_completed': False,
+                    'session_status': 'nao_iniciada',
+                    'completed_at': None,
+                    'score': None,
+                    'grade': None,
+                    'total_questions': None,
+                    'correct_answers': None,
+                    'has_answers': False,
+                    'can_start': True
+                }
+            
+            tests_status.append(test_status)
+        
+        return jsonify({
+            'student_id': student.id,
+            'class_id': class_id,
+            'tests_status': tests_status
+        }), 200
+        
+    except Exception as e:
+        logging.error(f"Erro ao verificar status dos testes para aluno: {str(e)}", exc_info=True)
+        return jsonify({"error": "Erro ao verificar status dos testes", "details": str(e)}), 500
+
+
 # ==================== CONSULTAS E RELATÓRIOS ====================
 
 @bp.route('/session/<session_id>/answers', methods=['GET'])
@@ -653,6 +843,124 @@ def get_student_sessions():
     except Exception as e:
         logging.error(f"Erro ao buscar sessões do aluno: {str(e)}", exc_info=True)
         return jsonify({"error": "Erro ao buscar sessões", "details": str(e)}), 500
+
+
+@bp.route('/student/<string:test_id>/can-start', methods=['GET'])
+@jwt_required()
+@role_required("student", "admin", "professor", "aluno")
+def can_student_start_test(test_id):
+    """
+    Verifica se um aluno pode iniciar uma avaliação específica
+    
+    Returns:
+    {
+        "can_start": true/false,
+        "reason": "string explicando o motivo",
+        "test_info": {
+            "id": "uuid",
+            "title": "string",
+            "status": "string"
+        },
+        "student_info": {
+            "id": "uuid",
+            "session_status": "string",
+            "has_completed": true/false
+        }
+    }
+    """
+    try:
+        from app.models.student import Student
+        from app.models.classTest import ClassTest
+        from datetime import datetime
+        
+        # Obter user_id do JWT token
+        current_user_id = get_jwt_identity()
+        
+        # Buscar estudante pelo user_id
+        student = Student.query.filter_by(user_id=current_user_id).first()
+        if not student:
+            return jsonify({'error': 'Estudante não encontrado para este usuário'}), 404
+        
+        # Verificar se o teste existe
+        test = Test.query.get(test_id)
+        if not test:
+            return jsonify({'error': 'Teste não encontrado'}), 404
+        
+        # Verificar se o teste está aplicado na classe do aluno
+        class_test = ClassTest.query.filter_by(
+            class_id=student.class_id,
+            test_id=test_id
+        ).first()
+        
+        if not class_test:
+            return jsonify({
+                'can_start': False,
+                'reason': 'Avaliação não está aplicada na sua classe',
+                'test_info': {
+                    'id': test_id,
+                    'title': test.title,
+                    'status': test.status
+                },
+                'student_info': {
+                    'id': student.id,
+                    'session_status': 'nao_aplicada',
+                    'has_completed': False
+                }
+            }), 200
+        
+        # Verificar horário de aplicação
+        current_time = datetime.utcnow()
+        can_start = True
+        reason = "Avaliação disponível"
+        
+        if class_test.application and current_time < class_test.application:
+            can_start = False
+            reason = "Avaliação ainda não está disponível"
+        elif class_test.expiration and current_time > class_test.expiration:
+            can_start = False
+            reason = "Avaliação expirou"
+        
+        # Verificar se o aluno já completou
+        session = TestSession.query.filter_by(
+            student_id=student.id,
+            test_id=test_id
+        ).first()
+        
+        if session:
+            if session.status in ['finalizada', 'expirada', 'corrigida', 'revisada']:
+                can_start = False
+                reason = "Você já completou esta avaliação"
+            elif session.status == 'em_andamento':
+                # Verificar se há respostas salvas
+                has_answers = StudentAnswer.query.filter_by(
+                    student_id=student.id,
+                    test_id=test_id
+                ).first() is not None
+                
+                if has_answers:
+                    can_start = False
+                    reason = "Você já iniciou esta avaliação"
+        
+        return jsonify({
+            'can_start': can_start,
+            'reason': reason,
+            'test_info': {
+                'id': test_id,
+                'title': test.title,
+                'status': test.status,
+                'application': class_test.application.isoformat() if class_test.application else None,
+                'expiration': class_test.expiration.isoformat() if class_test.expiration else None
+            },
+            'student_info': {
+                'id': student.id,
+                'session_status': session.status if session else 'nao_iniciada',
+                'has_completed': session.status in ['finalizada', 'expirada', 'corrigida', 'revisada'] if session else False
+            }
+        }), 200
+        
+    except Exception as e:
+        logging.error(f"Erro ao verificar se aluno pode iniciar teste: {str(e)}", exc_info=True)
+        return jsonify({"error": "Erro ao verificar permissão", "details": str(e)}), 500
 
 
 # ==================== ENDPOINT LEGADO (COMPATIBILIDADE) ====================

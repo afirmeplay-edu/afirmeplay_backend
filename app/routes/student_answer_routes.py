@@ -320,20 +320,20 @@ def submit_answers():
         # Cada aluno tem seu próprio status individual
         db.session.commit()
         
-        return jsonify({
-            'message': 'Respostas salvas e sessão finalizada com sucesso',
+        # ✅ NOVO: Calcular resultados imediatos para retornar ao aluno
+        results = {
             'session_id': session.id,
             'submitted_at': session.submitted_at.isoformat() if session.submitted_at else None,
+            'status': 'finalizada',
+            'total_questions': total_questions,
+            'correct_answers': correct_count,
+            'score_percentage': round((correct_count / total_questions) * 100, 2) if total_questions > 0 else 0,
+            'grade': session.grade,
             'duration_minutes': session.duration_minutes,
-            'results': {
-                'total_questions': session.total_questions,
-                'correct_answers': session.correct_answers,
-                'score_percentage': session.score,
-                'grade': session.grade,
-                'answers_saved': len(saved_answers)
-            },
-            'answers': saved_answers
-        }), 201
+            'message': 'Avaliação enviada com sucesso!'
+        }
+        
+        return jsonify(results), 201
         
     except Exception as e:
         logging.error(f"Erro ao submeter respostas: {str(e)}", exc_info=True)
@@ -908,17 +908,9 @@ def can_student_start_test(test_id):
                 }
             }), 200
         
-        # Verificar horário de aplicação
-        current_time = datetime.utcnow()
+        # ✅ MODIFICADO: Verificar apenas se já completou (removida verificação de tempo)
         can_start = True
         reason = "Avaliação disponível"
-        
-        if class_test.application and current_time < class_test.application:
-            can_start = False
-            reason = "Avaliação ainda não está disponível"
-        elif class_test.expiration and current_time > class_test.expiration:
-            can_start = False
-            reason = "Avaliação expirou"
         
         # Verificar se o aluno já completou
         session = TestSession.query.filter_by(
@@ -966,3 +958,65 @@ def can_student_start_test(test_id):
 # ==================== ENDPOINT LEGADO (COMPATIBILIDADE) ====================
 
 # Endpoint legado removido - usar /submit em vez de POST raiz 
+
+@bp.route('/student/<string:test_id>/submission-status', methods=['GET'])
+@jwt_required()
+@role_required("student", "admin", "professor", "aluno")
+def get_student_submission_status(test_id):
+    """
+    Retorna apenas se a avaliação foi enviada (sem mostrar resultados)
+    
+    Returns:
+    {
+        "test_id": "uuid",
+        "student_id": "uuid",
+        "is_submitted": true/false,
+        "submitted_at": "2024-01-01T10:00:00Z" ou null,
+        "session_status": "finalizada/expirada/em_andamento/nao_iniciada"
+    }
+    """
+    try:
+        from app.models.student import Student
+        
+        # Obter user_id do JWT token
+        current_user_id = get_jwt_identity()
+        
+        # Buscar estudante pelo user_id
+        student = Student.query.filter_by(user_id=current_user_id).first()
+        if not student:
+            return jsonify({'error': 'Estudante não encontrado para este usuário'}), 404
+        
+        # Verificar se o teste existe
+        test = Test.query.get(test_id)
+        if not test:
+            return jsonify({'error': 'Teste não encontrado'}), 404
+        
+        # Buscar sessão do aluno para este teste
+        session = TestSession.query.filter_by(
+            student_id=student.id,
+            test_id=test_id
+        ).first()
+        
+        if not session:
+            return jsonify({
+                'test_id': test_id,
+                'student_id': student.id,
+                'is_submitted': False,
+                'submitted_at': None,
+                'session_status': 'nao_iniciada'
+            }), 200
+        
+        # Verificar se foi enviada (status finalizada, expirada, corrigida, revisada)
+        is_submitted = session.status in ['finalizada', 'expirada', 'corrigida', 'revisada']
+        
+        return jsonify({
+            'test_id': test_id,
+            'student_id': student.id,
+            'is_submitted': is_submitted,
+            'submitted_at': session.submitted_at.isoformat() if session.submitted_at else None,
+            'session_status': session.status
+        }), 200
+        
+    except Exception as e:
+        logging.error(f"Erro ao verificar status de submissão do teste para aluno: {str(e)}", exc_info=True)
+        return jsonify({"error": "Erro ao verificar status de submissão", "details": str(e)}), 500 

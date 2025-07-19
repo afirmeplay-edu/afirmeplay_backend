@@ -1207,22 +1207,13 @@ def obter_avaliacoes_completas_classe(class_id):
         for test in tests:
             class_test = class_test_map.get(test.id)
             
-            # Verificar se está dentro do período de aplicação
+            # ✅ MODIFICADO: Verificar apenas se o status permite disponibilidade
             is_available = False
             availability_status = "not_available"
             
             if test.status == 'agendada' or test.status == 'em_andamento':
-                if class_test.application and current_time >= class_test.application:
-                    if not class_test.expiration or current_time <= class_test.expiration:
-                        is_available = True
-                        availability_status = "available"
-                    else:
-                        availability_status = "expired"
-                elif class_test.application and current_time < class_test.application:
-                    availability_status = "not_yet_available"
-                else:
-                    is_available = True
-                    availability_status = "available"
+                is_available = True
+                availability_status = "available"
 
             # Preparar questões para envio (sem respostas corretas para alunos)
             questions_for_students = []
@@ -1570,38 +1561,13 @@ def listar_avaliacoes_minha_classe():
                 
                 can_start = session.status == 'nao_iniciada' or (session.status == 'em_andamento' and not has_answers)
             
-            # Determinar disponibilidade baseada no status global E individual
+            # ✅ MODIFICADO: Determinar disponibilidade baseada apenas no status global e se já completou
             if test.status == 'agendada' or test.status == 'em_andamento':
-                # Se não há data de aplicação definida, considerar disponível
-                if not class_test.application:
-                    if not has_completed:
-                        is_available = True
-                        availability_status = "available"
-                    else:
-                        availability_status = "completed"
+                if not has_completed:
+                    is_available = True
+                    availability_status = "available"
                 else:
-                    # Verificar se já passou da data de aplicação
-                    # Converter application para fuso horário do Brasil
-                    from app.utils.timezone_utils import convert_to_brazil_time
-                    
-                    application_time = convert_to_brazil_time(class_test.application)
-                    expiration_time = convert_to_brazil_time(class_test.expiration)
-                    
-                    if current_time >= application_time:
-                        # Verificar se não expirou
-                        if not expiration_time or current_time <= expiration_time:
-                            if not has_completed:
-                                is_available = True
-                                availability_status = "available"
-                            else:
-                                availability_status = "completed"
-                        else:
-                            availability_status = "expired"
-                            can_start = False  # Não pode iniciar se expirou
-                    else:
-                        # Ainda não chegou a data de aplicação
-                        availability_status = "not_yet_available"
-                        can_start = False  # Não pode iniciar se ainda não está disponível
+                    availability_status = "completed"
             else:
                 # Status global não permite disponibilidade
                 availability_status = "not_available"

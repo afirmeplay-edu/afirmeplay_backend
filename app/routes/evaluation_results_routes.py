@@ -256,11 +256,26 @@ def listar_avaliacoes():
                     logging.warning(f"Erro ao buscar escola para avaliação {evaluation.id}: {str(e)}")
                     pass
             
+            # ✅ NOVO: Buscar nome do curso baseado no ID
+            curso_nome = "N/A"
+            if evaluation.course:
+                try:
+                    from app.models.educationStage import EducationStage
+                    course_obj = EducationStage.query.get(evaluation.course)
+                    if course_obj:
+                        curso_nome = course_obj.name
+                    else:
+                        logging.warning(f"Curso não encontrado: {evaluation.course}. Usando Anos Iniciais como padrão.")
+                        curso_nome = "Anos Iniciais"
+                except Exception as e:
+                    logging.warning(f"Erro ao buscar curso {evaluation.course}: {str(e)}. Usando Anos Iniciais como padrão.")
+                    curso_nome = "Anos Iniciais"
+            
             result = {
                 "id": evaluation.id,
                 "titulo": evaluation.title,
                 "disciplina": evaluation.subject_rel.name if evaluation.subject_rel else 'N/A',
-                "curso": evaluation.course or 'N/A',
+                "curso": curso_nome,
                 "serie": "N/A",  # Pode ser expandido se necessário
                 "escola": escola_nome,
                 "municipio": municipio,

@@ -1597,12 +1597,15 @@ def listar_avaliacoes_minha_classe():
                                 availability_status = "completed"
                         else:
                             availability_status = "expired"
+                            can_start = False  # Não pode iniciar se expirou
                     else:
                         # Ainda não chegou a data de aplicação
                         availability_status = "not_yet_available"
+                        can_start = False  # Não pode iniciar se ainda não está disponível
             else:
                 # Status global não permite disponibilidade
                 availability_status = "not_available"
+                can_start = False  # Não pode iniciar se status global não permite
             
             # Preparar subjects usando a função auxiliar
             subjects = process_subjects_for_test(test)

@@ -312,8 +312,10 @@ def _calculate_evaluation_stats_frontend(test_id: str) -> Dict[str, Any]:
     if not class_ids:
         return _empty_stats()
     
-    # Buscar todos os alunos dessas turmas
-    all_students = Student.query.filter(Student.class_id.in_(class_ids)).all()
+    # Buscar todos os alunos dessas turmas com relacionamentos carregados
+    all_students = Student.query.options(
+        joinedload(Student.class_).joinedload(Class.grade)
+    ).filter(Student.class_id.in_(class_ids)).all()
     total_alunos = len(all_students)
     
     if total_alunos == 0:
@@ -461,8 +463,10 @@ def listar_alunos():
                 "message": "Avaliação não foi aplicada em nenhuma turma"
             }), 200
         
-        # Buscar todos os alunos dessas turmas
-        all_students = Student.query.filter(Student.class_id.in_(class_ids)).all()
+        # Buscar todos os alunos dessas turmas com relacionamentos carregados
+        all_students = Student.query.options(
+            joinedload(Student.class_).joinedload(Class.grade)
+        ).filter(Student.class_id.in_(class_ids)).all()
         
         # Buscar respostas dos alunos que responderam
         student_answers_data = db.session.query(
@@ -524,15 +528,19 @@ def listar_alunos():
                 classification_1000 = 'Abaixo do Básico'
                 status = "nao_respondida"
             
-            # Buscar informações da turma
+            # Buscar informações da turma e grade
             turma_nome = "N/A"
-            if student.class_relation:
-                turma_nome = student.class_relation.name
+            grade_nome = "N/A"
+            if student.class_:
+                turma_nome = student.class_.name
+                if student.class_.grade:
+                    grade_nome = student.class_.grade.name
             
             student_result = {
                 "id": student.id,
                 "nome": student.name,
                 "turma": turma_nome,
+                "grade": grade_nome,
                 "nota": result['grade'],
                 "proficiencia": round(prof_1000, 2),
                 "classificacao": classification_1000,

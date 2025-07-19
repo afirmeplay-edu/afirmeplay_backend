@@ -18,6 +18,7 @@ from app.models.subject import Subject
 from app.models.school import School
 from app.models.studentClass import Class
 from app.models.grades import Grade
+from app.models.classTest import ClassTest
 from app import db
 import logging
 from typing import Dict, Any
@@ -304,8 +305,22 @@ def _calculate_evaluation_stats_frontend(test_id: str) -> Dict[str, Any]:
     if not test:
         return _empty_stats()
     
-    # Buscar respostas dos alunos
-    student_data = db.session.query(
+    # Buscar TODOS os alunos das turmas onde a avaliação foi aplicada
+    class_tests = ClassTest.query.filter_by(test_id=test_id).all()
+    class_ids = [ct.class_id for ct in class_tests]
+    
+    if not class_ids:
+        return _empty_stats()
+    
+    # Buscar todos os alunos dessas turmas
+    all_students = Student.query.filter(Student.class_id.in_(class_ids)).all()
+    total_alunos = len(all_students)
+    
+    if total_alunos == 0:
+        return _empty_stats()
+    
+    # Buscar respostas dos alunos que responderam
+    student_answers_data = db.session.query(
         StudentAnswer.student_id,
         func.count(StudentAnswer.id).label('total_answered'),
         func.sum(
@@ -320,8 +335,8 @@ def _calculate_evaluation_stats_frontend(test_id: str) -> Dict[str, Any]:
         StudentAnswer.test_id == test_id
     ).group_by(StudentAnswer.student_id).all()
     
-    if not student_data:
-        return _empty_stats()
+    # Criar dicionário para mapear student_id -> dados de resposta
+    answers_dict = {sa.student_id: {'total_answered': sa.total_answered, 'correct_answers': sa.correct_answers} for sa in student_answers_data}
     
     total_questions = len(test.questions) if test.questions else 0
     if total_questions == 0:
@@ -331,38 +346,49 @@ def _calculate_evaluation_stats_frontend(test_id: str) -> Dict[str, Any]:
     notas = []
     proficiencias_1000 = []
     classificacoes = {'Abaixo do Básico': 0, 'Básico': 0, 'Adequado': 0, 'Avançado': 0}
+    alunos_participantes = 0
     
     course_name = test.course or "Anos Iniciais"
     subject_name = test.subject_rel.name if test.subject_rel else "Outras"
     
-    for student in student_data:
-        # Usar nosso calculador atual
-        result = EvaluationCalculator.calculate_complete_evaluation(
-            correct_answers=int(student.correct_answers or 0),
-            total_questions=total_questions,
-            course_name=course_name,
-            subject_name=subject_name
-        )
+    for student in all_students:
+        # Verificar se o aluno respondeu
+        student_answers = answers_dict.get(student.id)
         
-        # Converter para escala 0-1000
-        prof_1000 = convert_proficiency_to_1000_scale(
-            result['proficiency'], course_name, subject_name
-        )
-        classification_1000 = get_classification_1000_scale(prof_1000)
-        
-        notas.append(result['grade'])
-        proficiencias_1000.append(prof_1000)
-        classificacoes[classification_1000] += 1
+        if student_answers:
+            # Aluno respondeu - calcular resultados normalmente
+            alunos_participantes += 1
+            correct_answers = int(student_answers['correct_answers'] or 0)
+            
+            result = EvaluationCalculator.calculate_complete_evaluation(
+                correct_answers=correct_answers,
+                total_questions=total_questions,
+                course_name=course_name,
+                subject_name=subject_name
+            )
+            
+            # Converter para escala 0-1000
+            prof_1000 = convert_proficiency_to_1000_scale(
+                result['proficiency'], course_name, subject_name
+            )
+            classification_1000 = get_classification_1000_scale(prof_1000)
+            
+            notas.append(result['grade'])
+            proficiencias_1000.append(prof_1000)
+            classificacoes[classification_1000] += 1
+        else:
+            # Aluno NÃO respondeu - contar como "Abaixo do Básico"
+            classificacoes['Abaixo do Básico'] += 1
     
-    # Calcular médias
+    # Calcular médias apenas dos alunos que participaram
     media_nota = round(sum(notas) / len(notas), 2) if notas else 0.0
     media_proficiencia = round(sum(proficiencias_1000) / len(proficiencias_1000), 2) if proficiencias_1000 else 0.0
     
     return {
-        'total_alunos': len(student_data),
-        'alunos_participantes': len(student_data),
+        'total_alunos': total_alunos,
+        'alunos_participantes': alunos_participantes,
         'alunos_pendentes': 0,
-        'alunos_ausentes': 0,
+        'alunos_ausentes': total_alunos - alunos_participantes,
         'media_nota': media_nota,
         'media_proficiencia': media_proficiencia,
         'distribuicao_classificacao': {
@@ -424,10 +450,22 @@ def listar_alunos():
         if user['role'] == 'professor' and test.created_by != user['id']:
             return jsonify({"error": "Acesso negado"}), 403
         
-        # Buscar alunos com respostas
-        student_data = db.session.query(
-            Student.id,
-            Student.name,
+        # Buscar TODOS os alunos das turmas onde a avaliação foi aplicada
+        # Primeiro, buscar as turmas onde a avaliação foi aplicada
+        class_tests = ClassTest.query.filter_by(test_id=avaliacao_id).all()
+        class_ids = [ct.class_id for ct in class_tests]
+        
+        if not class_ids:
+            return jsonify({
+                "data": [],
+                "message": "Avaliação não foi aplicada em nenhuma turma"
+            }), 200
+        
+        # Buscar todos os alunos dessas turmas
+        all_students = Student.query.filter(Student.class_id.in_(class_ids)).all()
+        
+        # Buscar respostas dos alunos que responderam
+        student_answers_data = db.session.query(
             StudentAnswer.student_id,
             func.count(StudentAnswer.id).label('total_answered'),
             func.sum(
@@ -437,40 +475,59 @@ def listar_alunos():
                 )
             ).label('correct_answers')
         ).join(
-            StudentAnswer, Student.id == StudentAnswer.student_id
-        ).join(
             Question, StudentAnswer.question_id == Question.id
         ).filter(
             StudentAnswer.test_id == avaliacao_id
-        ).group_by(
-            Student.id, Student.name, StudentAnswer.student_id
-        ).all()
+        ).group_by(StudentAnswer.student_id).all()
+        
+        # Criar dicionário para mapear student_id -> dados de resposta
+        answers_dict = {sa.student_id: {'total_answered': sa.total_answered, 'correct_answers': sa.correct_answers} for sa in student_answers_data}
         
         total_questions = len(test.questions) if test.questions else 0
         course_name = test.course or "Anos Iniciais"
         subject_name = test.subject_rel.name if test.subject_rel else "Outras"
         
         results = []
-        for student in student_data:
-            # Calcular resultados
-            result = EvaluationCalculator.calculate_complete_evaluation(
-                correct_answers=int(student.correct_answers or 0),
-                total_questions=total_questions,
-                course_name=course_name,
-                subject_name=subject_name
-            )
+        for student in all_students:
+            # Verificar se o aluno respondeu a avaliação
+            student_answers = answers_dict.get(student.id)
             
-            # Converter para escala 0-1000
-            prof_1000 = convert_proficiency_to_1000_scale(
-                result['proficiency'], course_name, subject_name
-            )
-            classification_1000 = get_classification_1000_scale(prof_1000)
+            if student_answers:
+                # Aluno respondeu - calcular resultados normalmente
+                total_answered = int(student_answers['total_answered'])
+                correct_answers = int(student_answers['correct_answers'] or 0)
+                
+                result = EvaluationCalculator.calculate_complete_evaluation(
+                    correct_answers=correct_answers,
+                    total_questions=total_questions,
+                    course_name=course_name,
+                    subject_name=subject_name
+                )
+                
+                # Converter para escala 0-1000
+                prof_1000 = convert_proficiency_to_1000_scale(
+                    result['proficiency'], course_name, subject_name
+                )
+                classification_1000 = get_classification_1000_scale(prof_1000)
+                
+                status = "concluida"
+            else:
+                # Aluno NÃO respondeu - retornar zeros
+                total_answered = 0
+                correct_answers = 0
+                result = {
+                    'grade': 0.0,
+                    'proficiency': 0.0,
+                    'classification': 'Abaixo do Básico'
+                }
+                prof_1000 = 0.0
+                classification_1000 = 'Abaixo do Básico'
+                status = "nao_respondida"
             
             # Buscar informações da turma
-            student_obj = Student.query.get(student.id)
             turma_nome = "N/A"
-            if student_obj and student_obj.class_relation:
-                turma_nome = student_obj.class_relation.name
+            if student.class_relation:
+                turma_nome = student.class_relation.name
             
             student_result = {
                 "id": student.id,
@@ -479,12 +536,12 @@ def listar_alunos():
                 "nota": result['grade'],
                 "proficiencia": round(prof_1000, 2),
                 "classificacao": classification_1000,
-                "questoes_respondidas": int(student.total_answered),
-                "acertos": int(student.correct_answers or 0),
-                "erros": int(student.total_answered) - int(student.correct_answers or 0),
-                "em_branco": total_questions - int(student.total_answered),
+                "questoes_respondidas": total_answered,
+                "acertos": correct_answers,
+                "erros": total_answered - correct_answers,
+                "em_branco": total_questions - total_answered,
                 "tempo_gasto": 3600,  # Placeholder - pode ser implementado
-                "status": "concluida"
+                "status": status
             }
             results.append(student_result)
         
@@ -733,7 +790,7 @@ def get_submitted_evaluations():
                 status = "reviewed"
 
             result = {
-                "id": f"eval_{session.id}",
+                "id": session.id,
                 "sessionId": session.id,
                 "studentId": session.student_id,
                 "studentName": session.student.name if session.student else "Aluno não encontrado",
@@ -1210,7 +1267,20 @@ def get_student_test_results(test_id, student_id):
         ).all()
         
         if not answers:
-            return jsonify({"error": "Nenhuma resposta encontrada para este aluno"}), 404
+            return jsonify({
+                "error": "Aluno não respondeu esta avaliação",
+                "message": "O aluno não possui respostas registradas para esta avaliação",
+                "test_id": test_id,
+                "student_id": student_id,
+                "student_db_id": student.id,
+                "total_questions": len(test.questions) if test.questions else 0,
+                "answered_questions": 0,
+                "correct_answers": 0,
+                "score_percentage": 0.0,
+                "total_score": 0.0,
+                "max_possible_score": 0.0,
+                "status": "nao_respondida"
+            }), 200
         
         # Buscar informações do teste e questões
         test = Test.query.get(test_id)

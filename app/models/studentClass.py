@@ -12,4 +12,4 @@ class Class(db.Model):
 
     students = db.relationship("Student", backref="class_")
     class_subjects = db.relationship("ClassSubject", backref="class_")
-    class_tests = db.relationship("ClassTest", backref="class_")
+    class_tests = db.relationship("ClassTest", backref="class_") 

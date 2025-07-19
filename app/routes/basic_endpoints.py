@@ -369,6 +369,10 @@ def get_submitted_evaluations():
         per_page = min(request.args.get('per_page', 20, type=int), 100)
         
         print("Criando query base...")
+        # Obter usuário logado
+        from app.decorators.role_required import get_current_user_from_token
+        user = get_current_user_from_token()
+        
         # Base query - buscar sessões enviadas
         query = TestSession.query.options(
             joinedload(TestSession.student).joinedload(Student.user),
@@ -377,6 +381,12 @@ def get_submitted_evaluations():
         ).filter(
             TestSession.submitted_at.isnot(None)  # Apenas sessões enviadas
         )
+        
+        # Filtrar apenas avaliações criadas pelo usuário logado
+        if user:
+            query = query.join(Test).filter(Test.created_by == user['id'])
+            print(f"Filtro aplicado: apenas avaliações criadas pelo usuário {user['id']} (role: {user.get('role')})")
+        
         print("Query base criada com sucesso")
         
         # Aplicar filtros
@@ -432,7 +442,7 @@ def get_submitted_evaluations():
             
             # Calcular tempo gasto
             from datetime import datetime
-            start_time = session.actual_start_time or session.started_at or session.created_at
+            start_time = session.started_at or session.created_at
             end_time = session.submitted_at or datetime.utcnow()
             time_spent = int((end_time - start_time).total_seconds() // 60) if start_time and end_time else 0
             

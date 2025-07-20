@@ -13,7 +13,6 @@ def check_and_init_database():
     """
     try:
         print("🔍 Verificando estado do banco de dados...")
-        
         # Verificar se já existe alguma tabela
         inspector = db.inspect(db.engine)
         existing_tables = inspector.get_table_names()

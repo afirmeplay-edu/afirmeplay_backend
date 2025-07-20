@@ -1207,13 +1207,39 @@ def obter_avaliacoes_completas_classe(class_id):
         for test in tests:
             class_test = class_test_map.get(test.id)
             
-            # ✅ MODIFICADO: Verificar apenas se o status permite disponibilidade
+            # ✅ CORRIGIDO: Verificar disponibilidade considerando status global, data de aplicação E data de expiração
             is_available = False
             availability_status = "not_available"
             
             if test.status == 'agendada' or test.status == 'em_andamento':
-                is_available = True
-                availability_status = "available"
+                # Verificar se a avaliação já está disponível (data de aplicação)
+                is_available_now = True
+                if class_test.application:
+                    # Converter data de aplicação para fuso horário do Brasil
+                    from app.utils.timezone_utils import get_brazil_time
+                    current_time = get_brazil_time()
+                    application_brazil = class_test.application.replace(tzinfo=None) if class_test.application.tzinfo else class_test.application
+                    current_brazil = current_time.replace(tzinfo=None) if current_time.tzinfo else current_time
+                    is_available_now = current_brazil >= application_brazil
+                
+                # Verificar se a avaliação não expirou (data de expiração)
+                is_expired = False
+                if class_test.expiration:
+                    # Converter data de expiração para fuso horário do Brasil
+                    from app.utils.timezone_utils import get_brazil_time
+                    current_time = get_brazil_time()
+                    expiration_brazil = class_test.expiration.replace(tzinfo=None) if class_test.expiration.tzinfo else class_test.expiration
+                    current_brazil = current_time.replace(tzinfo=None) if current_time.tzinfo else current_time
+                    is_expired = current_brazil > expiration_brazil
+                
+                # Avaliação disponível apenas se já passou da data de aplicação E não expirou
+                if is_available_now and not is_expired:
+                    is_available = True
+                    availability_status = "available"
+                elif not is_available_now:
+                    availability_status = "not_started"
+                else:
+                    availability_status = "expired"
 
             # Preparar questões para envio (sem respostas corretas para alunos)
             questions_for_students = []
@@ -1561,11 +1587,39 @@ def listar_avaliacoes_minha_classe():
                 
                 can_start = session.status == 'nao_iniciada' or (session.status == 'em_andamento' and not has_answers)
             
-            # ✅ MODIFICADO: Determinar disponibilidade baseada apenas no status global e se já completou
+            # ✅ CORRIGIDO: Verificar disponibilidade considerando status global, se já completou, data de aplicação E data de expiração
             if test.status == 'agendada' or test.status == 'em_andamento':
                 if not has_completed:
-                    is_available = True
-                    availability_status = "available"
+                    # Verificar se a avaliação já está disponível (data de aplicação)
+                    is_available_now = True
+                    if class_test.application:
+                        # Converter data de aplicação para fuso horário do Brasil
+                        from app.utils.timezone_utils import get_brazil_time
+                        current_time = get_brazil_time()
+                        application_brazil = class_test.application.replace(tzinfo=None) if class_test.application.tzinfo else class_test.application
+                        current_brazil = current_time.replace(tzinfo=None) if current_time.tzinfo else current_time
+                        is_available_now = current_brazil >= application_brazil
+                    
+                    # Verificar se a avaliação não expirou (data de expiração)
+                    is_expired = False
+                    if class_test.expiration:
+                        # Converter data de expiração para fuso horário do Brasil
+                        from app.utils.timezone_utils import get_brazil_time
+                        current_time = get_brazil_time()
+                        expiration_brazil = class_test.expiration.replace(tzinfo=None) if class_test.expiration.tzinfo else class_test.expiration
+                        current_brazil = current_time.replace(tzinfo=None) if current_time.tzinfo else current_time
+                        is_expired = current_brazil > expiration_brazil
+                    
+                    # Avaliação disponível apenas se já passou da data de aplicação E não expirou
+                    if is_available_now and not is_expired:
+                        is_available = True
+                        availability_status = "available"
+                    elif not is_available_now:
+                        availability_status = "not_started"
+                        can_start = False
+                    else:
+                        availability_status = "expired"
+                        can_start = False
                 else:
                     availability_status = "completed"
             else:
@@ -1677,6 +1731,36 @@ def start_test_session(test_id):
         test = Test.query.get(test_id)
         if not test:
             return jsonify({"error": "Teste não encontrado"}), 404
+        
+        # Verificar se o teste está aplicado na classe do aluno e não expirou
+        from app.models.classTest import ClassTest
+        class_test = ClassTest.query.filter_by(
+            class_id=student.class_id,
+            test_id=test_id
+        ).first()
+        
+        if not class_test:
+            return jsonify({"error": "Avaliação não está aplicada na sua classe"}), 404
+        
+        # Verificar se a avaliação está disponível (data de aplicação) e não expirou (data de expiração)
+        from app.utils.timezone_utils import get_brazil_time
+        current_time = get_brazil_time()
+        
+        # Verificar se já passou da data de aplicação
+        if class_test.application:
+            # Converter data de aplicação para fuso horário do Brasil
+            application_brazil = class_test.application.replace(tzinfo=None) if class_test.application.tzinfo else class_test.application
+            current_brazil = current_time.replace(tzinfo=None) if current_time.tzinfo else current_time
+            if current_brazil < application_brazil:
+                return jsonify({"error": "Avaliação ainda não está disponível"}), 410
+        
+        # Verificar se a avaliação não expirou
+        if class_test.expiration:
+            # Converter data de expiração para fuso horário do Brasil
+            expiration_brazil = class_test.expiration.replace(tzinfo=None) if class_test.expiration.tzinfo else class_test.expiration
+            current_brazil = current_time.replace(tzinfo=None) if current_time.tzinfo else current_time
+            if current_brazil > expiration_brazil:
+                return jsonify({"error": "Avaliação expirada"}), 410
         
         # Verificar se já existe sessão ativa para este aluno/teste
         existing_session = TestSession.query.filter_by(

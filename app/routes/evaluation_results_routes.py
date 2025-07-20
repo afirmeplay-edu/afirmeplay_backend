@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 """
 Rotas especializadas para resultados de avaliações
 Endpoints para análise de dados, estatísticas e relatórios
@@ -9,6 +10,7 @@ from app.decorators.role_required import role_required, get_current_user_from_to
 from app.services.evaluation_calculator import EvaluationCalculator
 from app.services.evaluation_filters import EvaluationFilters
 from app.services.evaluation_aggregator import EvaluationAggregator
+from app.services.evaluation_result_service import EvaluationResultService
 from app.models.test import Test
 from app.models.student import Student
 from app.models.studentAnswer import StudentAnswer
@@ -71,6 +73,8 @@ def test_avaliacoes():
         "per_page": 10,
         "total_pages": 1
     }), 200
+
+
 
 @bp.route('/test/relatorio-detalhado/<evaluation_id>', methods=['GET'])
 def test_relatorio_detalhado(evaluation_id):
@@ -178,7 +182,7 @@ def get_classification_1000_scale(proficiency_1000: float) -> str:
 @role_required("admin", "professor", "coordenador", "diretor")
 def listar_avaliacoes():
     """
-    Lista avaliações com estatísticas completas
+    Lista avaliações aplicadas com estatísticas completas
     
     Query Parameters conforme especificação do frontend:
     - curso, disciplina, turma, escola
@@ -205,34 +209,38 @@ def listar_avaliacoes():
         escola = request.args.get('escola')
         status = request.args.getlist('status')
         
-        # Query base
-        query = Test.query.filter(Test.status == 'concluida')
+        # Query base - INVERTIDA: começar por ClassTest (aplicações)
+        query = ClassTest.query.join(Test, ClassTest.test_id == Test.id)
         
         # Se for professor, filtrar apenas suas avaliações
         if user['role'] == 'professor':
             query = query.filter(Test.created_by == user['id'])
 
-        # Aplicar filtros
+        # Aplicar filtros de status na ClassTest (se especificado)
+        if status:
+            query = query.filter(ClassTest.status.in_(status))
+        # Se não especificar status, incluir todos os status (incluindo pendente)
+
+        # Aplicar filtros na tabela Test
         if curso:
             query = query.filter(Test.course.ilike(f"%{curso}%"))
         
         if disciplina:
             query = query.join(Subject, Test.subject == Subject.id)\
                         .filter(Subject.name.ilike(f"%{disciplina}%"))
-        
-        if status:
-            query = query.filter(Test.status.in_(status))
 
-        # Paginação
+        # Paginação baseada no número de aplicações
         total = query.count()
         offset = (page - 1) * per_page
-        evaluations = query.offset(offset).limit(per_page).all()
+        class_tests = query.offset(offset).limit(per_page).all()
         
         # Gerar dados de resposta
         results = []
-        for evaluation in evaluations:
-            # Calcular estatísticas
-            stats = _calculate_evaluation_stats_frontend(evaluation.id)
+        for class_test in class_tests:
+            evaluation = class_test.test  # Acesso à avaliação através do relacionamento
+            
+            # ✅ NOVO: Buscar estatísticas da tabela de resultados calculados
+            stats = EvaluationResultService.get_evaluation_results(evaluation.id)
             
             # Buscar informações da escola
             escola_nome = "N/A"
@@ -261,18 +269,25 @@ def listar_avaliacoes():
             if evaluation.course:
                 try:
                     from app.models.educationStage import EducationStage
-                    course_obj = EducationStage.query.get(evaluation.course)
+                    import uuid
+                    # Converter string para UUID
+                    course_uuid = uuid.UUID(evaluation.course)
+                    course_obj = EducationStage.query.get(course_uuid)
                     if course_obj:
                         curso_nome = course_obj.name
                     else:
                         logging.warning(f"Curso não encontrado: {evaluation.course}. Usando Anos Iniciais como padrão.")
                         curso_nome = "Anos Iniciais"
+                except (ValueError, TypeError) as e:
+                    logging.warning(f"Erro ao converter UUID do curso {evaluation.course}: {str(e)}. Usando Anos Iniciais como padrão.")
+                    curso_nome = "Anos Iniciais"
                 except Exception as e:
                     logging.warning(f"Erro ao buscar curso {evaluation.course}: {str(e)}. Usando Anos Iniciais como padrão.")
                     curso_nome = "Anos Iniciais"
             
             result = {
                 "id": evaluation.id,
+                "class_test_id": class_test.id,  # ID da aplicação
                 "titulo": evaluation.title,
                 "disciplina": evaluation.subject_rel.name if evaluation.subject_rel else 'N/A',
                 "curso": curso_nome,
@@ -281,7 +296,7 @@ def listar_avaliacoes():
                 "municipio": municipio,
                 "data_aplicacao": evaluation.created_at.isoformat() if evaluation.created_at else None,
                 "data_correcao": evaluation.updated_at.isoformat() if evaluation.updated_at else None,
-                "status": evaluation.status,
+                "status": class_test.status,  # Status da aplicação (ClassTest)
                 "total_alunos": stats['total_alunos'],
                 "alunos_participantes": stats['alunos_participantes'],
                 "alunos_pendentes": stats['alunos_pendentes'],
@@ -365,7 +380,21 @@ def _calculate_evaluation_stats_frontend(test_id: str) -> Dict[str, Any]:
     classificacoes = {'Abaixo do Básico': 0, 'Básico': 0, 'Adequado': 0, 'Avançado': 0}
     alunos_participantes = 0
     
-    course_name = test.course or "Anos Iniciais"
+    # Buscar nome do curso baseado no ID
+    course_name = "Anos Iniciais"  # Padrão
+    if test.course:
+        try:
+            from app.models.educationStage import EducationStage
+            import uuid
+            # Converter string para UUID
+            course_uuid = uuid.UUID(test.course)
+            course_obj = EducationStage.query.get(course_uuid)
+            if course_obj:
+                course_name = course_obj.name
+        except (ValueError, TypeError, Exception):
+            # Se houver erro, manter o padrão
+            pass
+    
     subject_name = test.subject_rel.name if test.subject_rel else "Outras"
     
     for student in all_students:
@@ -483,49 +512,27 @@ def listar_alunos():
             joinedload(Student.class_).joinedload(Class.grade)
         ).filter(Student.class_id.in_(class_ids)).all()
         
-        # Buscar respostas dos alunos que responderam
-        student_answers_data = db.session.query(
-            StudentAnswer.student_id,
-            func.count(StudentAnswer.id).label('total_answered'),
-            func.sum(
-                case(
-                    (StudentAnswer.answer == Question.correct_answer, 1),
-                    else_=0
-                )
-            ).label('correct_answers')
-        ).join(
-            Question, StudentAnswer.question_id == Question.id
-        ).filter(
-            StudentAnswer.test_id == avaliacao_id
-        ).group_by(StudentAnswer.student_id).all()
+        # ✅ NOVO: Buscar resultados pré-calculados da tabela evaluation_results
+        from app.models.evaluationResult import EvaluationResult
         
-        # Criar dicionário para mapear student_id -> dados de resposta
-        answers_dict = {sa.student_id: {'total_answered': sa.total_answered, 'correct_answers': sa.correct_answers} for sa in student_answers_data}
+        evaluation_results = EvaluationResult.query.filter_by(test_id=avaliacao_id).all()
+        results_dict = {er.student_id: er for er in evaluation_results}
         
         total_questions = len(test.questions) if test.questions else 0
-        course_name = test.course or "Anos Iniciais"
-        subject_name = test.subject_rel.name if test.subject_rel else "Outras"
         
         results = []
         for student in all_students:
-            # Verificar se o aluno respondeu a avaliação
-            student_answers = answers_dict.get(student.id)
+            # Verificar se o aluno tem resultado calculado
+            evaluation_result = results_dict.get(student.id)
             
-            if student_answers:
-                # Aluno respondeu - calcular resultados normalmente
-                total_answered = int(student_answers['total_answered'])
-                correct_answers = int(student_answers['correct_answers'] or 0)
-                
-                result = EvaluationCalculator.calculate_complete_evaluation(
-                    correct_answers=correct_answers,
-                    total_questions=total_questions,
-                    course_name=course_name,
-                    subject_name=subject_name
-                )
+            if evaluation_result:
+                # Aluno respondeu - usar resultados pré-calculados
+                total_answered = evaluation_result.correct_answers  # Simplificado
+                correct_answers = evaluation_result.correct_answers
                 
                 # Converter para escala 0-1000
                 prof_1000 = convert_proficiency_to_1000_scale(
-                    result['proficiency'], course_name, subject_name
+                    evaluation_result.proficiency, "Anos Iniciais", test.subject_rel.name if test.subject_rel else "Outras"
                 )
                 classification_1000 = get_classification_1000_scale(prof_1000)
                 
@@ -534,11 +541,6 @@ def listar_alunos():
                 # Aluno NÃO respondeu - retornar zeros
                 total_answered = 0
                 correct_answers = 0
-                result = {
-                    'grade': 0.0,
-                    'proficiency': 0.0,
-                    'classification': 'Abaixo do Básico'
-                }
                 prof_1000 = 0.0
                 classification_1000 = 'Abaixo do Básico'
                 status = "nao_respondida"
@@ -556,7 +558,7 @@ def listar_alunos():
                 "nome": student.name,
                 "turma": turma_nome,
                 "grade": grade_nome,
-                "nota": result['grade'],
+                "nota": evaluation_result.grade if evaluation_result else 0.0,
                 "proficiencia": round(prof_1000, 2),
                 "classificacao": classification_1000,
                 "questoes_respondidas": total_answered,
@@ -618,11 +620,23 @@ def relatorio_detalhado(evaluation_id: str):
                     question_id=question.id
                 ).count()
                 
-                acertos = StudentAnswer.query.filter_by(
-                    test_id=evaluation_id,
-                    question_id=question.id,
-                    answer=question.correct_answer
-                ).count() if total_respostas > 0 else 0
+                # Calcular acertos corretamente baseado no tipo de questão
+                acertos = 0
+                if question.question_type == 'multipleChoice':
+                    # Para questões de múltipla escolha, verificar alternatives
+                    for answer in StudentAnswer.query.filter_by(
+                        test_id=evaluation_id,
+                        question_id=question.id
+                    ).all():
+                        if EvaluationResultService.check_multiple_choice_answer(answer.answer, question.alternatives):
+                            acertos += 1
+                else:
+                    # Para outros tipos, usar correct_answer
+                    acertos = StudentAnswer.query.filter_by(
+                        test_id=evaluation_id,
+                        question_id=question.id,
+                        answer=question.correct_answer
+                    ).count() if total_respostas > 0 else 0
                 
                 porcentagem_acertos = (acertos / total_respostas * 100) if total_respostas > 0 else 0
                 
@@ -639,46 +653,99 @@ def relatorio_detalhado(evaluation_id: str):
                 }
                 questoes_data.append(questao_data)
         
-        # Dados dos alunos (reutilizar lógica do endpoint /alunos)
-        alunos_response = listar_alunos()
-        alunos_data = []
+        # Dados dos alunos (buscar diretamente)
+        from app.models.evaluationResult import EvaluationResult
         
-        if alunos_response[1] == 200:  # Success
-            alunos_raw = alunos_response[0].get_json()['data']
+        # Buscar TODOS os alunos das turmas onde a avaliação foi aplicada
+        class_tests = ClassTest.query.filter_by(test_id=evaluation_id).all()
+        class_ids = [ct.class_id for ct in class_tests]
+        
+        if not class_ids:
+            return jsonify({
+                "avaliacao": avaliacao_data,
+                "questoes": questoes_data,
+                "alunos": []
+            }), 200
+        
+        # Buscar todos os alunos dessas turmas
+        all_students = Student.query.options(
+            joinedload(Student.class_).joinedload(Class.grade)
+        ).filter(Student.class_id.in_(class_ids)).all()
+        
+        # Buscar resultados pré-calculados
+        evaluation_results = EvaluationResult.query.filter_by(test_id=evaluation_id).all()
+        results_dict = {er.student_id: er for er in evaluation_results}
+        
+        alunos_data = []
+        for student in all_students:
+            # Verificar se o aluno tem resultado calculado
+            evaluation_result = results_dict.get(student.id)
             
-            for aluno in alunos_raw:
-                # Buscar respostas detalhadas do aluno
-                respostas = []
-                student_answers = StudentAnswer.query.filter_by(
-                    test_id=evaluation_id,
-                    student_id=aluno['id']
-                ).all()
+            if evaluation_result:
+                # Aluno respondeu - usar resultados pré-calculados
+                total_answered = evaluation_result.correct_answers  # Simplificado
+                correct_answers = evaluation_result.correct_answers
                 
-                for answer in student_answers:
-                    question = Question.query.get(answer.question_id)
-                    if question:
-                        resposta_data = {
-                            "questao_id": question.id,
-                            "questao_numero": question.number or 1,
-                            "resposta_correta": answer.answer == question.correct_answer,
-                            "resposta_em_branco": not answer.answer,
-                            "tempo_gasto": 120  # Placeholder
-                        }
-                        respostas.append(resposta_data)
+                # Converter para escala 0-1000
+                prof_1000 = convert_proficiency_to_1000_scale(
+                    evaluation_result.proficiency, "Anos Iniciais", test.subject_rel.name if test.subject_rel else "Outras"
+                )
+                classification_1000 = get_classification_1000_scale(prof_1000)
                 
-                aluno_detalhado = {
-                    "id": aluno['id'],
-                    "nome": aluno['nome'],
-                    "turma": aluno['turma'],
-                    "respostas": respostas,
-                    "total_acertos": aluno['acertos'],
-                    "total_erros": aluno['erros'],
-                    "total_em_branco": aluno['em_branco'],
-                    "nota_final": aluno['nota'],
-                    "proficiencia": aluno['proficiencia'],
-                    "classificacao": aluno['classificacao']
-                }
-                alunos_data.append(aluno_detalhado)
+                status = "concluida"
+            else:
+                # Aluno NÃO respondeu - retornar zeros
+                total_answered = 0
+                correct_answers = 0
+                prof_1000 = 0.0
+                classification_1000 = 'Abaixo do Básico'
+                status = "nao_respondida"
+            
+            # Buscar informações da turma
+            turma_nome = "N/A"
+            if student.class_:
+                turma_nome = student.class_.name
+            
+            # Buscar respostas detalhadas do aluno
+            respostas = []
+            student_answers = StudentAnswer.query.filter_by(
+                test_id=evaluation_id,
+                student_id=student.id
+            ).all()
+            
+            for answer in student_answers:
+                question = Question.query.get(answer.question_id)
+                if question:
+                    # Verificar se a resposta está correta
+                    is_correct = False
+                    if question.question_type == 'multipleChoice':
+                        is_correct = EvaluationResultService.check_multiple_choice_answer(answer.answer, question.alternatives)
+                    else:
+                        is_correct = str(answer.answer).strip().lower() == str(question.correct_answer).strip().lower()
+                    
+                    resposta_data = {
+                        "questao_id": question.id,
+                        "questao_numero": question.number or 1,
+                        "resposta_correta": is_correct,
+                        "resposta_em_branco": not answer.answer,
+                        "tempo_gasto": 120  # Placeholder
+                    }
+                    respostas.append(resposta_data)
+            
+            aluno_detalhado = {
+                "id": student.id,
+                "nome": student.name,
+                "turma": turma_nome,
+                "respostas": respostas,
+                "total_acertos": correct_answers,
+                "total_erros": total_answered - correct_answers,
+                "total_em_branco": len(test.questions) - total_answered if test.questions else 0,
+                "nota_final": evaluation_result.grade if evaluation_result else 0.0,
+                "proficiencia": round(prof_1000, 2),
+                "classificacao": classification_1000,
+                "status": status
+            }
+            alunos_data.append(aluno_detalhado)
         
         return jsonify({
             "avaliacao": avaliacao_data,
@@ -722,6 +789,55 @@ def recalcular_avaliacao():
     except Exception as e:
         logging.error(f"Erro ao recalcular avaliação: {str(e)}", exc_info=True)
         return jsonify({"error": "Erro ao recalcular avaliação", "details": str(e)}), 500
+
+
+# ==================== ENDPOINT 5: PATCH /avaliacoes/<test_id>/finalizar ====================
+
+@bp.route('/avaliacoes/<string:test_id>/finalizar', methods=['PATCH'])
+@jwt_required()
+@role_required("admin", "professor", "coordenador", "diretor")
+def finalizar_avaliacao(test_id):
+    """
+    Finaliza uma avaliação manualmente (marca como concluída)
+    """
+    try:
+        user = get_current_user_from_token()
+        if not user:
+            return jsonify({"error": "Usuário não encontrado"}), 401
+
+        # Verificar se avaliação existe
+        test = Test.query.get(test_id)
+        if not test:
+            return jsonify({"error": "Avaliação não encontrada"}), 404
+        
+        # Verificar permissões
+        if user['role'] == 'professor' and test.created_by != user['id']:
+            return jsonify({"error": "Você só pode finalizar avaliações que criou"}), 403
+        
+        # Buscar ClassTest para esta avaliação
+        class_tests = ClassTest.query.filter_by(test_id=test_id).all()
+        
+        if not class_tests:
+            return jsonify({"error": "Avaliação não foi aplicada em nenhuma turma"}), 404
+        
+        # Marcar todas as aplicações como concluídas
+        for class_test in class_tests:
+            class_test.status = "concluida"
+            class_test.updated_at = datetime.utcnow()
+        
+        db.session.commit()
+        
+        return jsonify({
+            "message": "Avaliação finalizada com sucesso",
+            "test_id": test_id,
+            "class_tests_updated": len(class_tests),
+            "finalized_at": datetime.utcnow().isoformat()
+        }), 200
+
+    except Exception as e:
+        logging.error(f"Erro ao finalizar avaliação: {str(e)}", exc_info=True)
+        db.session.rollback()
+        return jsonify({"error": "Erro ao finalizar avaliação", "details": str(e)}), 500
 
 
 # ==================== ENDPOINTS AUXILIARES (SE NECESSÁRIO) ====================
@@ -1278,21 +1394,32 @@ def get_student_test_results(test_id, student_id):
             if not test or test.created_by != user['id']:
                 return jsonify({"error": "Você só pode ver resultados de testes que criou"}), 403
         
-        # Buscar respostas do aluno
-        # O student_id é na verdade o user_id, precisamos buscar o student_id real
-        student = Student.query.filter_by(user_id=student_id).first()
-        if not student:
-            return jsonify({"error": "Aluno não encontrado"}), 404
-            
-        answers = StudentAnswer.query.filter_by(
-            test_id=test_id,
-            student_id=student.id
-        ).all()
+        # ✅ NOVO: Buscar resultado pré-calculado da tabela evaluation_results
+        from app.models.evaluationResult import EvaluationResult
         
-        if not answers:
+        # O student_id na URL pode ser user_id ou student_id real
+        # Primeiro, tentar buscar como user_id
+        student = Student.query.filter_by(user_id=student_id).first()
+        if student:
+            # É um user_id, usar o student.id
+            actual_student_id = student.id
+        else:
+            # Pode ser um student_id real, verificar se existe
+            student = Student.query.get(student_id)
+            if not student:
+                return jsonify({"error": "Aluno não encontrado"}), 404
+            actual_student_id = student_id
+        
+        # Buscar resultado pré-calculado
+        evaluation_result = EvaluationResult.query.filter_by(
+            test_id=test_id,
+            student_id=actual_student_id
+        ).first()
+        
+        if not evaluation_result:
             return jsonify({
                 "error": "Aluno não respondeu esta avaliação",
-                "message": "O aluno não possui respostas registradas para esta avaliação",
+                "message": "O aluno não possui resultados calculados para esta avaliação",
                 "test_id": test_id,
                 "student_id": student_id,
                 "student_db_id": student.id,
@@ -1305,86 +1432,92 @@ def get_student_test_results(test_id, student_id):
                 "status": "nao_respondida"
             }), 200
         
-        # Buscar informações do teste e questões
+        # ✅ NOVO: Usar dados pré-calculados da tabela evaluation_results
         test = Test.query.get(test_id)
         questions = Question.query.filter_by(test_id=test_id).all()
-        questions_dict = {q.id: q for q in questions}
         
-        # Calcular resultados
-        total_questions = len(questions)
-        correct_answers = 0
-        total_score = 0.0
-        max_possible_score = 0.0
+        # Usar dados pré-calculados
+        total_questions = evaluation_result.total_questions
+        correct_answers = evaluation_result.correct_answers
+        score_percentage = evaluation_result.score_percentage
+        grade = evaluation_result.grade
+        proficiency = evaluation_result.proficiency
+        classification = evaluation_result.classification
+        
+        # Converter proficiência para escala 0-1000
+        prof_1000 = convert_proficiency_to_1000_scale(
+            proficiency, "Anos Iniciais", test.subject_rel.name if test.subject_rel else "Outras"
+        )
+        
+        # Buscar respostas detalhadas se solicitado
         detailed_answers = []
-        
-        for answer in answers:
-            question = questions_dict.get(answer.question_id)
-            if not question:
-                continue
+        if request.args.get('include_answers', 'false').lower() == 'true':
+            answers = StudentAnswer.query.filter_by(
+                test_id=test_id,
+                student_id=student.id
+            ).all()
+            
+            questions_dict = {q.id: q for q in questions}
+            
+            for answer in answers:
+                question = questions_dict.get(answer.question_id)
+                if not question:
+                    continue
+                    
+                question_value = question.value or 1.0
                 
-            question_value = question.value or 1.0
-            max_possible_score += question_value
-            
-            answer_detail = {
-                "question_id": answer.question_id,
-                "question_number": question.number,
-                "question_text": question.text,
-                "question_type": question.question_type,
-                "question_value": question_value,
-                "student_answer": answer.answer,
-                "answered_at": answer.answered_at.isoformat() if answer.answered_at else None,
-                "is_correct": None,
-                "score": None,
-                "feedback": answer.feedback,
-                "corrected_by": answer.corrected_by,
-                "corrected_at": answer.corrected_at.isoformat() if answer.corrected_at else None
-            }
-            
-            if question.question_type == 'multipleChoice':
-                is_correct = check_multiple_choice_answer(answer.answer, question.alternatives)
-                answer_detail["is_correct"] = is_correct
-                answer_detail["score"] = question_value if is_correct else 0
-                if is_correct:
-                    correct_answers += 1
-                    total_score += question_value
-                    
-            elif question.question_type == 'essay':
-                if answer.manual_score is not None:
-                    essay_score = (answer.manual_score / 100.0) * question_value
-                    answer_detail["score"] = essay_score
-                    answer_detail["manual_score"] = answer.manual_score
-                    answer_detail["is_correct"] = answer.is_correct
-                    total_score += essay_score
-                    if answer.is_correct:
-                        correct_answers += 1
-                else:
-                    answer_detail["status"] = "pending_correction"
-                    
-            else:
-                # Outros tipos
-                if question.correct_answer:
-                    is_correct = str(answer.answer).strip().lower() == str(question.correct_answer).strip().lower()
+                answer_detail = {
+                    "question_id": answer.question_id,
+                    "question_number": question.number,
+                    "question_text": question.text,
+                    "question_type": question.question_type,
+                    "question_value": question_value,
+                    "student_answer": answer.answer,
+                    "answered_at": answer.answered_at.isoformat() if answer.answered_at else None,
+                    "is_correct": None,
+                    "score": None,
+                    "feedback": answer.feedback,
+                    "corrected_by": answer.corrected_by,
+                    "corrected_at": answer.corrected_at.isoformat() if answer.corrected_at else None
+                }
+                
+                if question.question_type == 'multipleChoice':
+                    is_correct = EvaluationResultService.check_multiple_choice_answer(answer.answer, question.alternatives)
                     answer_detail["is_correct"] = is_correct
                     answer_detail["score"] = question_value if is_correct else 0
-                    if is_correct:
-                        correct_answers += 1
-                        total_score += question_value
-            
-            detailed_answers.append(answer_detail)
-        
-        # Calcular percentual
-        score_percentage = (correct_answers / total_questions * 100) if total_questions > 0 else 0
+                    
+                elif question.question_type == 'essay':
+                    if answer.manual_score is not None:
+                        essay_score = (answer.manual_score / 100.0) * question_value
+                        answer_detail["score"] = essay_score
+                        answer_detail["manual_score"] = answer.manual_score
+                        answer_detail["is_correct"] = answer.is_correct
+                    else:
+                        answer_detail["status"] = "pending_correction"
+                        
+                else:
+                    # Outros tipos
+                    if question.correct_answer:
+                        is_correct = str(answer.answer).strip().lower() == str(question.correct_answer).strip().lower()
+                        answer_detail["is_correct"] = is_correct
+                        answer_detail["score"] = question_value if is_correct else 0
+                
+                detailed_answers.append(answer_detail)
         
         result = {
             "test_id": test_id,
             "student_id": student_id,  # user_id
             "student_db_id": student.id,  # id real da tabela Student
             "total_questions": total_questions,
-            "answered_questions": len(answers),
+            "answered_questions": correct_answers,  # Simplificado - usar acertos como questões respondidas
             "correct_answers": correct_answers,
             "score_percentage": round(score_percentage, 2),
-            "total_score": round(total_score, 2),
-            "max_possible_score": max_possible_score,
+            "total_score": round(grade, 2),  # Usar nota como total_score
+            "max_possible_score": total_questions,  # Simplificado
+            "grade": round(grade, 2),
+            "proficiencia": round(prof_1000, 2),
+            "classificacao": classification,
+            "calculated_at": evaluation_result.calculated_at.isoformat() if evaluation_result.calculated_at else None,
             "answers": detailed_answers if request.args.get('include_answers', 'false').lower() == 'true' else None
         }
         

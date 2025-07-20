@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 """
 Sistema completo de submissão de respostas de alunos
 - Controle de sessões de prova
@@ -238,6 +239,24 @@ def submit_answers():
         if not session:
             return jsonify({'error': 'Sessão não encontrada'}), 404
         
+        # Verificar se a avaliação não expirou
+        from app.models.classTest import ClassTest
+        class_test = ClassTest.query.filter_by(
+            test_id=session.test_id
+        ).first()
+        
+        if class_test and class_test.expiration:
+            current_time = datetime.utcnow()
+            # Garantir que ambas as datas estejam em UTC para comparação
+            expiration_utc = class_test.expiration.replace(tzinfo=None) if class_test.expiration.tzinfo else class_test.expiration
+            current_utc = current_time.replace(tzinfo=None) if current_time.tzinfo else current_time
+            if current_utc > expiration_utc:
+                session.status = 'expirada'
+                db.session.commit()
+                return jsonify({
+                    'error': 'Avaliação expirada. Não é possível submeter respostas.'
+                }), 410
+        
         # Validar se sessão ainda está ativa
         if session.status != 'em_andamento':
             return jsonify({
@@ -306,8 +325,16 @@ def submit_answers():
             
             # Verificar se a resposta está correta (correção automática)
             question = questions_dict[question_id]
-            if question.correct_answer and str(answer).strip().lower() == str(question.correct_answer).strip().lower():
-                correct_count += 1
+            if question.question_type == 'multipleChoice':
+                # Verificar usando alternatives para questões de múltipla escolha
+                from app.services.evaluation_result_service import EvaluationResultService
+                is_correct = EvaluationResultService.check_multiple_choice_answer(answer, question.alternatives)
+                if is_correct:
+                    correct_count += 1
+            elif question.correct_answer:
+                # Para outros tipos de questão que usam correct_answer
+                if str(answer).strip().lower() == str(question.correct_answer).strip().lower():
+                    correct_count += 1
         
         # Finalizar sessão e calcular nota
         total_questions = len(test_questions)
@@ -316,22 +343,47 @@ def submit_answers():
             total_questions=total_questions
         )
         
+        # ✅ NOVO: Calcular resultado completo e salvar
+        from app.services.evaluation_result_service import EvaluationResultService
+        
+        evaluation_result = EvaluationResultService.calculate_and_save_result(
+            test_id=session.test_id,
+            student_id=session.student_id,
+            session_id=session.id
+        )
+        
         # Não alterar o status global da avaliação
         # Cada aluno tem seu próprio status individual
         db.session.commit()
         
-        # ✅ NOVO: Calcular resultados imediatos para retornar ao aluno
-        results = {
-            'session_id': session.id,
-            'submitted_at': session.submitted_at.isoformat() if session.submitted_at else None,
-            'status': 'finalizada',
-            'total_questions': total_questions,
-            'correct_answers': correct_count,
-            'score_percentage': round((correct_count / total_questions) * 100, 2) if total_questions > 0 else 0,
-            'grade': session.grade,
-            'duration_minutes': session.duration_minutes,
-            'message': 'Avaliação enviada com sucesso!'
-        }
+        # ✅ NOVO: Retornar resultados completos calculados
+        if evaluation_result:
+            results = {
+                'session_id': session.id,
+                'submitted_at': session.submitted_at.isoformat() if session.submitted_at else None,
+                'status': 'finalizada',
+                'total_questions': total_questions,
+                'correct_answers': correct_count,
+                'score_percentage': evaluation_result['score_percentage'],
+                'grade': evaluation_result['grade'],
+                'proficiency': evaluation_result['proficiency'],
+                'classification': evaluation_result['classification'],
+                'duration_minutes': session.duration_minutes,
+                'message': 'Avaliação enviada com sucesso!'
+            }
+        else:
+            # Fallback para cálculo básico se houver erro no cálculo completo
+            results = {
+                'session_id': session.id,
+                'submitted_at': session.submitted_at.isoformat() if session.submitted_at else None,
+                'status': 'finalizada',
+                'total_questions': total_questions,
+                'correct_answers': correct_count,
+                'score_percentage': round((correct_count / total_questions) * 100, 2) if total_questions > 0 else 0,
+                'grade': session.grade,
+                'duration_minutes': session.duration_minutes,
+                'message': 'Avaliação enviada com sucesso! (Cálculo básico)'
+            }
         
         return jsonify(results), 201
         
@@ -375,6 +427,24 @@ def save_partial_answers():
         session = TestSession.query.get(session_id)
         if not session:
             return jsonify({'error': 'Sessão não encontrada'}), 404
+        
+        # Verificar se a avaliação não expirou
+        from app.models.classTest import ClassTest
+        class_test = ClassTest.query.filter_by(
+            test_id=session.test_id
+        ).first()
+        
+        if class_test and class_test.expiration:
+            current_time = datetime.utcnow()
+            # Garantir que ambas as datas estejam em UTC para comparação
+            expiration_utc = class_test.expiration.replace(tzinfo=None) if class_test.expiration.tzinfo else class_test.expiration
+            current_utc = current_time.replace(tzinfo=None) if current_time.tzinfo else current_time
+            if current_utc > expiration_utc:
+                session.status = 'expirada'
+                db.session.commit()
+                return jsonify({
+                    'error': 'Avaliação expirada. Não é possível salvar respostas.'
+                }), 410
         
         # Validar se sessão ainda está ativa
         if session.status != 'em_andamento':
@@ -908,30 +978,110 @@ def can_student_start_test(test_id):
                 }
             }), 200
         
-        # ✅ MODIFICADO: Verificar apenas se já completou (removida verificação de tempo)
+        # ✅ CORRIGIDO: Verificar se já completou, se a avaliação está disponível E se não expirou
         can_start = True
         reason = "Avaliação disponível"
         
-        # Verificar se o aluno já completou
+        # Buscar sessão do aluno (sempre buscar, independente da expiração)
         session = TestSession.query.filter_by(
             student_id=student.id,
             test_id=test_id
         ).first()
         
-        if session:
-            if session.status in ['finalizada', 'expirada', 'corrigida', 'revisada']:
+        # Verificar se a avaliação está disponível (data de aplicação) e não expirou (data de expiração)
+        from app.utils.timezone_utils import get_brazil_time
+        current_time = get_brazil_time()
+        
+        # Verificar se já passou da data de aplicação
+        if class_test.application:
+            # Converter data de aplicação para fuso horário do Brasil
+            application_brazil = class_test.application.replace(tzinfo=None) if class_test.application.tzinfo else class_test.application
+            current_brazil = current_time.replace(tzinfo=None) if current_time.tzinfo else current_time
+            if current_brazil < application_brazil:
                 can_start = False
-                reason = "Você já completou esta avaliação"
-            elif session.status == 'em_andamento':
-                # Verificar se há respostas salvas
-                has_answers = StudentAnswer.query.filter_by(
-                    student_id=student.id,
-                    test_id=test_id
-                ).first() is not None
-                
-                if has_answers:
+                reason = "Avaliação ainda não está disponível"
+            else:
+                # Verificar se a avaliação não expirou
+                if class_test.expiration:
+                    # Converter data de expiração para fuso horário do Brasil
+                    expiration_brazil = class_test.expiration.replace(tzinfo=None) if class_test.expiration.tzinfo else class_test.expiration
+                    current_brazil = current_time.replace(tzinfo=None) if current_time.tzinfo else current_time
+                    if current_brazil > expiration_brazil:
+                        can_start = False
+                        reason = "Avaliação expirada"
+                    else:
+                        # Verificar se o aluno já completou
+                        if session:
+                            if session.status in ['finalizada', 'expirada', 'corrigida', 'revisada']:
+                                can_start = False
+                                reason = "Você já completou esta avaliação"
+                            elif session.status == 'em_andamento':
+                                # Verificar se há respostas salvas
+                                has_answers = StudentAnswer.query.filter_by(
+                                    student_id=student.id,
+                                    test_id=test_id
+                                ).first() is not None
+                                
+                                if has_answers:
+                                    can_start = False
+                                    reason = "Você já iniciou esta avaliação"
+                else:
+                    # Verificar se o aluno já completou (quando não há data de expiração)
+                    if session:
+                        if session.status in ['finalizada', 'expirada', 'corrigida', 'revisada']:
+                            can_start = False
+                            reason = "Você já completou esta avaliação"
+                        elif session.status == 'em_andamento':
+                            # Verificar se há respostas salvas
+                            has_answers = StudentAnswer.query.filter_by(
+                                student_id=student.id,
+                                test_id=test_id
+                            ).first() is not None
+                            
+                            if has_answers:
+                                can_start = False
+                                reason = "Você já iniciou esta avaliação"
+        else:
+            # Quando não há data de aplicação, verificar apenas expiração e se já completou
+            if class_test.expiration:
+                # Converter data de expiração para fuso horário do Brasil
+                expiration_brazil = class_test.expiration.replace(tzinfo=None) if class_test.expiration.tzinfo else class_test.expiration
+                current_brazil = current_time.replace(tzinfo=None) if current_time.tzinfo else current_time
+                if current_brazil > expiration_brazil:
                     can_start = False
-                    reason = "Você já iniciou esta avaliação"
+                    reason = "Avaliação expirada"
+                else:
+                    # Verificar se o aluno já completou
+                    if session:
+                        if session.status in ['finalizada', 'expirada', 'corrigida', 'revisada']:
+                            can_start = False
+                            reason = "Você já completou esta avaliação"
+                        elif session.status == 'em_andamento':
+                            # Verificar se há respostas salvas
+                            has_answers = StudentAnswer.query.filter_by(
+                                student_id=student.id,
+                                test_id=test_id
+                            ).first() is not None
+                            
+                            if has_answers:
+                                can_start = False
+                                reason = "Você já iniciou esta avaliação"
+            else:
+                # Verificar se o aluno já completou (quando não há data de aplicação nem expiração)
+                if session:
+                    if session.status in ['finalizada', 'expirada', 'corrigida', 'revisada']:
+                        can_start = False
+                        reason = "Você já completou esta avaliação"
+                    elif session.status == 'em_andamento':
+                        # Verificar se há respostas salvas
+                        has_answers = StudentAnswer.query.filter_by(
+                            student_id=student.id,
+                            test_id=test_id
+                        ).first() is not None
+                        
+                        if has_answers:
+                            can_start = False
+                            reason = "Você já iniciou esta avaliação"
         
         return jsonify({
             'can_start': can_start,

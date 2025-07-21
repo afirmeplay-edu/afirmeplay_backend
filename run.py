@@ -1,7 +1,6 @@
 from app import create_app, db
 
 # from . import create_app, db
-from flask_cors import CORS
 import requests
 import os
 import threading
@@ -10,23 +9,6 @@ import threading
 from init_db import check_and_init_database
 
 app = create_app()
-
-
-# Configuração do CORS
-CORS(
-    app,
-    resources={
-        r"/*": {
-            "origins": ["http://localhost:8080", os.getenv("FRONTEND_URL")],
-            "methods": ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-            "allow_headers": ["Content-Type", "Authorization", "Accept"],
-            "expose_headers": ["Content-Type", "Authorization"],
-            "supports_credentials": False,
-            "max_age": 3600,
-        }
-    },
-    supports_credentials=False,
-)
 
 # print("Tentando criar tabelas do banco de dados...")
 # with app.app_context():

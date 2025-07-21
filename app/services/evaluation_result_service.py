@@ -192,9 +192,14 @@ class EvaluationResultService:
             Dicionário com estatísticas agregadas
         """
         try:
-            results = EvaluationResult.query.filter_by(test_id=test_id).all()
+            from app.models.classTest import ClassTest
+            from app.models.student import Student
             
-            if not results:
+            # Buscar todas as turmas onde a avaliação foi aplicada
+            class_tests = ClassTest.query.filter_by(test_id=test_id).all()
+            class_ids = [ct.class_id for ct in class_tests]
+            
+            if not class_ids:
                 return {
                     'total_alunos': 0,
                     'alunos_participantes': 0,
@@ -210,21 +215,45 @@ class EvaluationResultService:
                     }
                 }
             
-            # Calcular estatísticas
-            total_alunos = len(results)
+            # Buscar TODOS os alunos das turmas onde a avaliação foi aplicada
+            all_students = Student.query.filter(Student.class_id.in_(class_ids)).all()
+            total_alunos = len(all_students)
+            
+            # Buscar resultados calculados (apenas alunos que responderam)
+            results = EvaluationResult.query.filter_by(test_id=test_id).all()
+            alunos_participantes = len(results)
+            alunos_ausentes = total_alunos - alunos_participantes
+            
+            if not results:
+                return {
+                    'total_alunos': total_alunos,
+                    'alunos_participantes': 0,
+                    'alunos_pendentes': 0,
+                    'alunos_ausentes': total_alunos,
+                    'media_nota': 0.0,
+                    'media_proficiencia': 0.0,
+                    'distribuicao_classificacao': {
+                        'abaixo_do_basico': total_alunos,  # Todos os ausentes são "Abaixo do Básico"
+                        'basico': 0,
+                        'adequado': 0,
+                        'avancado': 0
+                    }
+                }
+            
+            # Calcular estatísticas dos alunos que participaram
             notas = [r.grade for r in results]
             proficiencias = [r.proficiency for r in results]
             
             # Distribuição de classificação
-            classificacoes = {'Abaixo do Básico': 0, 'Básico': 0, 'Adequado': 0, 'Avançado': 0}
+            classificacoes = {'Abaixo do Básico': alunos_ausentes, 'Básico': 0, 'Adequado': 0, 'Avançado': 0}
             for result in results:
                 classificacoes[result.classification] += 1
             
             return {
                 'total_alunos': total_alunos,
-                'alunos_participantes': total_alunos,
+                'alunos_participantes': alunos_participantes,
                 'alunos_pendentes': 0,
-                'alunos_ausentes': 0,
+                'alunos_ausentes': alunos_ausentes,
                 'media_nota': round(sum(notas) / len(notas), 2) if notas else 0.0,
                 'media_proficiencia': round(sum(proficiencias) / len(proficiencias), 2) if proficiencias else 0.0,
                 'distribuicao_classificacao': {

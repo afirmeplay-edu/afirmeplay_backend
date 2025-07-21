@@ -40,21 +40,23 @@ class EvaluationCalculator:
     
     # Configurações de proficiência máxima
     MAX_PROFICIENCY_CONFIG = {
-        # Educação Infantil, Anos Iniciais, Educação Especial, EJA
+        # Educação Infantil, Anos Iniciais, Educação Especial, EJA - Outras matérias
         (CourseLevel.EDUCACAO_INFANTIL, Subject.OUTRAS): 350,
         (CourseLevel.ANOS_INICIAIS, Subject.OUTRAS): 350,
         (CourseLevel.EDUCACAO_ESPECIAL, Subject.OUTRAS): 350,
         (CourseLevel.EJA, Subject.OUTRAS): 350,
         
+        # Educação Infantil, Anos Iniciais, Educação Especial, EJA - Matemática
         (CourseLevel.EDUCACAO_INFANTIL, Subject.MATEMATICA): 375,
         (CourseLevel.ANOS_INICIAIS, Subject.MATEMATICA): 375,
         (CourseLevel.EDUCACAO_ESPECIAL, Subject.MATEMATICA): 375,
         (CourseLevel.EJA, Subject.MATEMATICA): 375,
         
-        # Anos Finais e Ensino Médio
+        # Anos Finais e Ensino Médio - Outras matérias
         (CourseLevel.ANOS_FINAIS, Subject.OUTRAS): 400,
         (CourseLevel.ENSINO_MEDIO, Subject.OUTRAS): 400,
         
+        # Anos Finais e Ensino Médio - Matemática
         (CourseLevel.ANOS_FINAIS, Subject.MATEMATICA): 425,
         (CourseLevel.ENSINO_MEDIO, Subject.MATEMATICA): 425,
     }

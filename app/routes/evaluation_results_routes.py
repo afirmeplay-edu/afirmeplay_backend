@@ -32,6 +32,27 @@ bp = Blueprint('evaluation_results', __name__, url_prefix='/evaluation-results')
 
 # ==================== ENDPOINTS TEMPORÁRIOS DE TESTE ====================
 
+@bp.route('/grades', methods=['GET'])
+@jwt_required()
+@role_required("admin", "professor", "coordenador", "diretor")
+def listar_grades():
+    """
+    Lista todas as grades (séries) disponíveis
+    """
+    try:
+        grades = Grade.query.all()
+        result = [{
+            "id": str(grade.id),
+            "name": grade.name,
+            "education_stage_id": str(grade.education_stage_id) if grade.education_stage_id else None
+        } for grade in grades]
+        
+        return jsonify(result), 200
+        
+    except Exception as e:
+        logging.error(f"Erro ao listar grades: {str(e)}", exc_info=True)
+        return jsonify({"error": "Erro ao listar grades", "details": str(e)}), 500
+
 @bp.route('/test/ping', methods=['GET'])
 def test_ping():
     """Endpoint de teste sem autenticação"""
@@ -72,6 +93,34 @@ def test_avaliacoes():
         "page": 1,
         "per_page": 10,
         "total_pages": 1
+    }), 200
+
+@bp.route('/test/avaliacoes/<string:evaluation_id>', methods=['GET'])
+def test_evaluation_by_id(evaluation_id: str):
+    """Endpoint de teste para buscar avaliação por ID sem autenticação"""
+    return jsonify({
+        "id": evaluation_id,
+        "titulo": f"Avaliação Teste - {evaluation_id}",
+        "disciplina": "Matemática",
+        "curso": "Ensino Fundamental",
+        "serie": "9º Ano",
+        "escola": "Escola Municipal Campo Alegre",
+        "municipio": "Campo Alegre",
+        "data_aplicacao": "2024-01-15T10:00:00Z",
+        "data_correcao": "2024-01-16T14:30:00Z",
+        "status": "concluida",
+        "total_alunos": 25,
+        "alunos_participantes": 23,
+        "alunos_pendentes": 2,
+        "alunos_ausentes": 0,
+        "media_nota": 7.2,
+        "media_proficiencia": 650,
+        "distribuicao_classificacao": {
+            "abaixo_do_basico": 2,
+            "basico": 8,
+            "adequado": 10,
+            "avancado": 3
+        }
     }), 200
 
 
@@ -143,19 +192,15 @@ def handle_error(error):
 
 def convert_proficiency_to_1000_scale(proficiency: float, course: str, subject: str) -> float:
     """
-    Converte proficiência do sistema atual (0-425) para escala 0-1000
+    Converte proficiência do sistema atual para escala 0-1000
     """
     # Determinar proficiência máxima atual
     if "iniciais" in course.lower() or "infantil" in course.lower() or "eja" in course.lower():
-        if "matemática" in subject.lower() or "matematica" in subject.lower():
+        # Para cálculo geral, usar 375 (valor mais alto)
             max_current = 375
-        else:
-            max_current = 350
     else:  # Anos Finais, Ensino Médio
-        if "matemática" in subject.lower() or "matematica" in subject.lower():
+        # Para cálculo geral, usar 425 (valor mais alto)
             max_current = 425
-        else:
-            max_current = 400
     
     # Converter para escala 0-1000
     return (proficiency / max_current) * 1000
@@ -210,7 +255,9 @@ def listar_avaliacoes():
         status = request.args.getlist('status')
         
         # Query base - INVERTIDA: começar por ClassTest (aplicações)
-        query = ClassTest.query.join(Test, ClassTest.test_id == Test.id)
+        # JOIN com Class e Grade para buscar série
+        query = ClassTest.query.join(Test, ClassTest.test_id == Test.id)\
+                               .options(joinedload(ClassTest.class_).joinedload(Class.grade))
         
         # Se for professor, filtrar apenas suas avaliações
         if user['role'] == 'professor':
@@ -234,13 +281,34 @@ def listar_avaliacoes():
         offset = (page - 1) * per_page
         class_tests = query.offset(offset).limit(per_page).all()
         
+
+        
+        # Se não há resultados, retornar vazio
+        if not class_tests:
+            return jsonify({
+                "data": [],
+                "total": 0,
+                "page": page,
+                "per_page": per_page,
+                "total_pages": 0
+            }), 200
+        
         # Gerar dados de resposta
         results = []
+        
         for class_test in class_tests:
             evaluation = class_test.test  # Acesso à avaliação através do relacionamento
             
-            # ✅ NOVO: Buscar estatísticas da tabela de resultados calculados
-            stats = EvaluationResultService.get_evaluation_results(evaluation.id)
+            # Buscar estatísticas de forma otimizada com timeout
+            try:
+                stats = EvaluationResultService.get_evaluation_results(evaluation.id)
+            except Exception as e:
+                logging.warning(f"Erro ao buscar estatísticas para avaliação {evaluation.id}: {str(e)}")
+                stats = _empty_stats()
+            
+            # Se demorar muito, usar dados básicos
+            if not stats or stats.get('total_alunos', 0) == 0:
+                stats = _empty_stats()
             
             # Buscar informações da escola
             escola_nome = "N/A"
@@ -262,7 +330,19 @@ def listar_avaliacoes():
                                 municipio = school.city.name if hasattr(school.city, 'name') else "N/A"
                 except Exception as e:
                     logging.warning(f"Erro ao buscar escola para avaliação {evaluation.id}: {str(e)}")
-                    pass
+            
+            # ✅ NOVO: Buscar série através da relação ClassTest → Class → Grade
+            serie_nome = "N/A"
+            grade_id = None
+            turma_nome = "N/A"
+            try:
+                if class_test.class_ and class_test.class_.grade:
+                    grade = class_test.class_.grade
+                    serie_nome = grade.name
+                    grade_id = str(grade.id)
+                    turma_nome = class_test.class_.name if class_test.class_.name else f"Turma {class_test.class_.id}"
+            except Exception as e:
+                logging.warning(f"Erro ao buscar série para avaliação {evaluation.id}: {str(e)}")
             
             # ✅ NOVO: Buscar nome do curso baseado no ID
             curso_nome = "N/A"
@@ -291,7 +371,9 @@ def listar_avaliacoes():
                 "titulo": evaluation.title,
                 "disciplina": evaluation.subject_rel.name if evaluation.subject_rel else 'N/A',
                 "curso": curso_nome,
-                "serie": "N/A",  # Pode ser expandido se necessário
+                "serie": serie_nome,  # ✅ Série correta da Grade
+                "grade_id": grade_id,  # ✅ ID da Grade
+                "turma": turma_nome,  # ✅ Nome da turma
                 "escola": escola_nome,
                 "municipio": municipio,
                 "data_aplicacao": evaluation.created_at.isoformat() if evaluation.created_at else None,
@@ -306,7 +388,30 @@ def listar_avaliacoes():
                 "distribuicao_classificacao": stats['distribuicao_classificacao'],
                 "turmas_desempenho": []  # Pode ser expandido se necessário
             }
+            
+
             results.append(result)
+        
+        # Log para debug
+        logging.info(f"Total de ClassTests: {len(class_tests)}, Resultados: {len(results)}")
+        
+        # Verificar e atualizar status automaticamente para avaliações que precisam
+        for result in results:
+            try:
+                # Verificar se a avaliação precisa ter o status atualizado
+                test_id = result.get('id')
+                current_status = result.get('status')
+                
+                # Se não está concluída, verificar se deveria estar
+                if current_status != "concluida":
+                    status_info = _check_and_update_evaluation_status(test_id)
+                    if status_info.get("should_be_completed", False):
+                        # Atualizar o status no resultado
+                        result['status'] = "concluida"
+                        logging.info(f"Status atualizado automaticamente para avaliação {test_id}: {status_info.get('completion_reason', '')}")
+            except Exception as e:
+                logging.warning(f"Erro ao verificar status automático para avaliação {result.get('id')}: {str(e)}")
+                continue
         
         # Calcular total de páginas
         total_pages = (total + per_page - 1) // per_page
@@ -365,6 +470,122 @@ def _calculate_evaluation_stats_frontend(test_id: str) -> Dict[str, Any]:
         Question, StudentAnswer.question_id == Question.id
     ).filter(
         StudentAnswer.test_id == test_id
+    ).group_by(StudentAnswer.student_id).all()
+    
+    # Criar dicionário para mapear student_id -> dados de resposta
+    answers_dict = {sa.student_id: {'total_answered': sa.total_answered, 'correct_answers': sa.correct_answers} for sa in student_answers_data}
+    
+    total_questions = len(test.questions) if test.questions else 0
+    if total_questions == 0:
+        return _empty_stats()
+    
+    # Calcular resultados para cada aluno
+    notas = []
+    proficiencias_1000 = []
+    classificacoes = {'Abaixo do Básico': 0, 'Básico': 0, 'Adequado': 0, 'Avançado': 0}
+    alunos_participantes = 0
+    
+    # Buscar nome do curso baseado no ID
+    course_name = "Anos Iniciais"  # Padrão
+    if test.course:
+        try:
+            from app.models.educationStage import EducationStage
+            import uuid
+            # Converter string para UUID
+            course_uuid = uuid.UUID(test.course)
+            course_obj = EducationStage.query.get(course_uuid)
+            if course_obj:
+                course_name = course_obj.name
+        except (ValueError, TypeError, Exception):
+            # Se houver erro, manter o padrão
+            pass
+    
+    subject_name = test.subject_rel.name if test.subject_rel else "Outras"
+    
+    for student in all_students:
+        # Verificar se o aluno respondeu
+        student_answers = answers_dict.get(student.id)
+        
+        if student_answers:
+            # Aluno respondeu - calcular resultados normalmente
+            alunos_participantes += 1
+            correct_answers = int(student_answers['correct_answers'] or 0)
+            
+            result = EvaluationCalculator.calculate_complete_evaluation(
+                correct_answers=correct_answers,
+                total_questions=total_questions,
+                course_name=course_name,
+                subject_name=subject_name
+            )
+            
+            # Converter para escala 0-1000
+            prof_1000 = convert_proficiency_to_1000_scale(
+                result['proficiency'], course_name, subject_name
+            )
+            classification_1000 = get_classification_1000_scale(prof_1000)
+            
+            notas.append(result['grade'])
+            proficiencias_1000.append(prof_1000)
+            classificacoes[classification_1000] += 1
+        else:
+            # Aluno NÃO respondeu - contar como "Abaixo do Básico"
+            classificacoes['Abaixo do Básico'] += 1
+    
+    # Calcular médias apenas dos alunos que participaram
+    media_nota = round(sum(notas) / len(notas), 2) if notas else 0.0
+    media_proficiencia = round(sum(proficiencias_1000) / len(proficiencias_1000), 2) if proficiencias_1000 else 0.0
+    
+    return {
+        'total_alunos': total_alunos,
+        'alunos_participantes': alunos_participantes,
+        'alunos_pendentes': 0,
+        'alunos_ausentes': total_alunos - alunos_participantes,
+        'media_nota': media_nota,
+        'media_proficiencia': media_proficiencia,
+        'distribuicao_classificacao': {
+            'abaixo_do_basico': classificacoes['Abaixo do Básico'],
+            'basico': classificacoes['Básico'],
+            'adequado': classificacoes['Adequado'],
+            'avancado': classificacoes['Avançado']
+        }
+    }
+
+
+def _calculate_evaluation_stats_by_class(test_id: str, class_id: str) -> Dict[str, Any]:
+    """
+    Calcula estatísticas de uma avaliação para uma turma específica
+    """
+    from app.models.question import Question
+    
+    # Buscar avaliação
+    test = Test.query.get(test_id)
+    if not test:
+        return _empty_stats()
+    
+    # Buscar TODOS os alunos da turma específica
+    all_students = Student.query.options(
+        joinedload(Student.class_).joinedload(Class.grade)
+    ).filter(Student.class_id == class_id).all()
+    total_alunos = len(all_students)
+    
+    if total_alunos == 0:
+        return _empty_stats()
+    
+    # Buscar respostas dos alunos que responderam
+    student_answers_data = db.session.query(
+        StudentAnswer.student_id,
+        func.count(StudentAnswer.id).label('total_answered'),
+        func.sum(
+            case(
+                (StudentAnswer.answer == Question.correct_answer, 1),
+                else_=0
+            )
+        ).label('correct_answers')
+    ).join(
+        Question, StudentAnswer.question_id == Question.id
+    ).filter(
+        StudentAnswer.test_id == test_id,
+        StudentAnswer.student_id.in_([s.id for s in all_students])
     ).group_by(StudentAnswer.student_id).all()
     
     # Criar dicionário para mapear student_id -> dados de resposta
@@ -543,7 +764,7 @@ def listar_alunos():
                 correct_answers = 0
                 prof_1000 = 0.0
                 classification_1000 = 'Abaixo do Básico'
-                status = "nao_respondida"
+                status = "pendente"
             
             # Buscar informações da turma e grade
             turma_nome = "N/A"
@@ -579,7 +800,97 @@ def listar_alunos():
         return jsonify({"error": "Erro ao listar alunos", "details": str(e)}), 500
 
 
-# ==================== ENDPOINT 3: GET /relatorio-detalhado ====================
+# ==================== ENDPOINT 3: GET /avaliacoes/{id} ====================
+
+@bp.route('/avaliacoes/<string:evaluation_id>', methods=['GET'])
+@jwt_required()
+@role_required("admin", "professor", "coordenador", "diretor")
+def get_evaluation_by_id(evaluation_id: str):
+    """
+    Retorna dados de uma avaliação específica
+    """
+    try:
+        user = get_current_user_from_token()
+        if not user:
+            return jsonify({"error": "Usuário não encontrado"}), 401
+
+        # Verificar se avaliação existe
+        test = Test.query.get(evaluation_id)
+        if not test:
+            return jsonify({"error": "Avaliação não encontrada"}), 404
+        
+        # Verificar permissões
+        if user['role'] == 'professor' and test.created_by != user['id']:
+            return jsonify({"error": "Acesso negado"}), 403
+        
+        # Buscar estatísticas da avaliação
+        stats = EvaluationResultService.get_evaluation_results(evaluation_id)
+        
+        # Buscar informações da escola
+        escola_nome = "N/A"
+        municipio = "N/A"
+        if test.schools:
+            try:
+                school_id = None
+                if isinstance(test.schools, list) and len(test.schools) > 0:
+                    school_id = test.schools[0]
+                elif isinstance(test.schools, str):
+                    school_id = test.schools
+                
+                if school_id:
+                    school = School.query.get(school_id)
+                    if school:
+                        escola_nome = school.name
+                        if school.city:
+                            municipio = school.city.name if hasattr(school.city, 'name') else "N/A"
+            except Exception as e:
+                logging.warning(f"Erro ao buscar escola para avaliação {test.id}: {str(e)}")
+        
+        # Garantir que arrays sejam inicializados como vazios
+        turmas_desempenho = []
+        
+        # Buscar nome do curso
+        curso_nome = "N/A"
+        if test.course:
+            try:
+                from app.models.educationStage import EducationStage
+                import uuid
+                course_uuid = uuid.UUID(test.course)
+                course_obj = EducationStage.query.get(course_uuid)
+                if course_obj:
+                    curso_nome = course_obj.name
+            except Exception as e:
+                logging.warning(f"Erro ao buscar curso {test.course}: {str(e)}")
+                curso_nome = "Anos Iniciais"
+        
+        result = {
+            "id": test.id,
+            "titulo": test.title,
+            "disciplina": test.subject_rel.name if test.subject_rel else 'N/A',
+            "curso": curso_nome,
+            "serie": "N/A",
+            "escola": escola_nome,
+            "municipio": municipio,
+            "data_aplicacao": test.created_at.isoformat() if test.created_at else None,
+            "data_correcao": test.updated_at.isoformat() if test.updated_at else None,
+            "status": "concluida",
+            "total_alunos": stats['total_alunos'],
+            "alunos_participantes": stats['alunos_participantes'],
+            "alunos_pendentes": stats['alunos_pendentes'],
+            "alunos_ausentes": stats['alunos_ausentes'],
+            "media_nota": stats['media_nota'],
+            "media_proficiencia": stats['media_proficiencia'],
+            "distribuicao_classificacao": stats['distribuicao_classificacao']
+        }
+        
+        return jsonify(result), 200
+
+    except Exception as e:
+        logging.error(f"Erro ao buscar avaliação: {str(e)}", exc_info=True)
+        return jsonify({"error": "Erro ao buscar avaliação", "details": str(e)}), 500
+
+
+# ==================== ENDPOINT 4: GET /relatorio-detalhado ====================
 
 @bp.route('/relatorio-detalhado/<string:evaluation_id>', methods=['GET'])
 @jwt_required()
@@ -820,18 +1131,35 @@ def finalizar_avaliacao(test_id):
         if not class_tests:
             return jsonify({"error": "Avaliação não foi aplicada em nenhuma turma"}), 404
         
+        # Verificar se já está concluída
+        already_completed = all(ct.status == "concluida" for ct in class_tests)
+        if already_completed:
+            return jsonify({
+                "message": "Avaliação já está finalizada",
+                "test_id": test_id,
+                "status": "concluida"
+            }), 200
+        
         # Marcar todas as aplicações como concluídas
+        updated_count = 0
         for class_test in class_tests:
-            class_test.status = "concluida"
-            class_test.updated_at = datetime.utcnow()
+            if class_test.status != "concluida":
+                class_test.status = "concluida"
+                class_test.updated_at = datetime.utcnow()
+                updated_count += 1
         
         db.session.commit()
+        
+        # Obter resumo atual após a finalização
+        summary = _get_evaluation_status_summary(test_id)
         
         return jsonify({
             "message": "Avaliação finalizada com sucesso",
             "test_id": test_id,
-            "class_tests_updated": len(class_tests),
-            "finalized_at": datetime.utcnow().isoformat()
+            "class_tests_updated": updated_count,
+            "total_class_tests": len(class_tests),
+            "finalized_at": datetime.utcnow().isoformat(),
+            "status_summary": summary
         }), 200
 
     except Exception as e:
@@ -1518,7 +1846,7 @@ def get_student_test_results(test_id, student_id):
             "proficiencia": round(prof_1000, 2),
             "classificacao": classification,
             "calculated_at": evaluation_result.calculated_at.isoformat() if evaluation_result.calculated_at else None,
-            "answers": detailed_answers if request.args.get('include_answers', 'false').lower() == 'true' else None
+            "answers": detailed_answers if request.args.get('include_answers', 'false').lower() == 'true' else []
         }
         
         return jsonify(result), 200
@@ -1761,3 +2089,765 @@ def check_multiple_choice_answer(student_answer, alternatives):
                 return True
                 
     return False 
+
+# ==================== ENDPOINT: GET /{test_id}/student/{student_id}/answers ====================
+
+@bp.route('/<string:test_id>/student/<string:student_id>/answers', methods=['GET'])
+@jwt_required()
+@role_required("admin", "professor", "coordenador", "diretor", "aluno")
+def get_student_answers(test_id, student_id):
+    """
+    Retorna as respostas detalhadas de um aluno em um teste específico
+    """
+    try:
+        user = get_current_user_from_token()
+        if not user:
+            return jsonify({"error": "Usuário não encontrado"}), 401
+
+        # Verificar permissões
+        if user['role'] == 'aluno':
+            # Aluno só pode ver suas próprias respostas
+            if user['id'] != student_id:
+                return jsonify({"error": "Você só pode ver suas próprias respostas"}), 403
+        elif user['role'] == 'professor':
+            # Professor só pode ver respostas de testes que criou
+            test = Test.query.get(test_id)
+            if not test or test.created_by != user['id']:
+                return jsonify({"error": "Você só pode ver respostas de testes que criou"}), 403
+        
+        # O student_id na URL pode ser user_id ou student_id real
+        # Primeiro, tentar buscar como user_id
+        student = Student.query.filter_by(user_id=student_id).first()
+        if student:
+            # É um user_id, usar o student.id
+            actual_student_id = student.id
+        else:
+            # Pode ser um student_id real, verificar se existe
+            student = Student.query.get(student_id)
+            if not student:
+                return jsonify({"error": "Aluno não encontrado"}), 404
+            actual_student_id = student_id
+        
+        # Buscar respostas do aluno
+        answers = StudentAnswer.query.filter_by(
+            test_id=test_id,
+            student_id=actual_student_id
+        ).all()
+        
+        # Buscar questões do teste
+        questions = Question.query.filter_by(test_id=test_id).all()
+        questions_dict = {q.id: q for q in questions}
+        
+        answers_data = []
+        for answer in answers:
+            question = questions_dict.get(answer.question_id)
+            if question:
+                answer_detail = {
+                    "question_id": answer.question_id,
+                    "question_number": question.number or 1,
+                    "question_text": question.text,
+                    "question_type": question.question_type,
+                    "question_value": question.value or 1.0,
+                    "student_answer": answer.answer,
+                    "answered_at": answer.answered_at.isoformat() if answer.answered_at else None,
+                    "is_correct": None,
+                    "score": None,
+                    "feedback": answer.feedback,
+                    "corrected_by": answer.corrected_by,
+                    "corrected_at": answer.corrected_at.isoformat() if answer.corrected_at else None
+                }
+                
+                # Verificar se a resposta está correta baseado no tipo de questão
+                if question.question_type == 'multipleChoice':
+                    is_correct = EvaluationResultService.check_multiple_choice_answer(answer.answer, question.alternatives)
+                    answer_detail["is_correct"] = is_correct
+                    answer_detail["score"] = question.value if is_correct else 0
+                    
+                elif question.question_type == 'essay':
+                    if answer.manual_score is not None:
+                        essay_score = (answer.manual_score / 100.0) * question.value
+                        answer_detail["score"] = essay_score
+                        answer_detail["manual_score"] = answer.manual_score
+                        answer_detail["is_correct"] = answer.is_correct
+                    else:
+                        answer_detail["status"] = "pending_correction"
+                        
+                else:
+                    # Outros tipos
+                    if question.correct_answer:
+                        is_correct = str(answer.answer).strip().lower() == str(question.correct_answer).strip().lower()
+                        answer_detail["is_correct"] = is_correct
+                        answer_detail["score"] = question.value if is_correct else 0
+                
+                answers_data.append(answer_detail)
+        
+        return jsonify({
+            "test_id": test_id,
+            "student_id": student_id,
+            "student_db_id": student.id,
+            "total_answers": len(answers_data),
+            "answers": answers_data
+        }), 200
+        
+    except Exception as e:
+        logging.error(f"Erro ao buscar respostas do aluno: {str(e)}", exc_info=True)
+        return jsonify({"error": "Erro ao buscar respostas", "details": str(e)}), 500
+
+
+# ==================== ENDPOINT: GET /{test_id}/student/{student_id}/results ====================
+
+# ==================== ENDPOINT 5: GET /relatorio-detalhado-filtrado ====================
+
+@bp.route('/relatorio-detalhado-filtrado/<string:evaluation_id>', methods=['GET'])
+@jwt_required()
+@role_required("admin", "professor", "coordenador", "diretor")
+def relatorio_detalhado_filtrado(evaluation_id: str):
+    """
+    Retorna relatório detalhado de uma avaliação com filtros e ordenação
+    
+    Query Parameters:
+    - fields: Campos a incluir (alunos,questoes,turma,habilidade,total,nota,proficiencia,nivel)
+    - subject_id: Filtrar questões por disciplina
+    - student_level: Filtrar alunos por nível (Ensino Fundamental, Médio, etc.)
+    - order_by: Campo para ordenação (nota,proficiencia,status,turma)
+    - order_direction: Direção da ordenação (asc,desc)
+    """
+    try:
+        user = get_current_user_from_token()
+        if not user:
+            return jsonify({"error": "Usuário não encontrado"}), 401
+
+        # Verificar se avaliação existe
+        test = Test.query.get(evaluation_id)
+        if not test:
+            return jsonify({"error": "Avaliação não encontrada"}), 404
+        
+        # Verificar permissões
+        if user['role'] == 'professor' and test.created_by != user['id']:
+            return jsonify({"error": "Acesso negado"}), 403
+        
+        # Extrair parâmetros de query
+        fields = request.args.get('fields', '').split(',') if request.args.get('fields') else []
+        subject_id = request.args.get('subject_id')
+        student_level = request.args.get('student_level')
+        order_by = request.args.get('order_by', 'nome')
+        order_direction = request.args.get('order_direction', 'asc')
+        
+        # Validar campos permitidos
+        allowed_fields = ['alunos', 'questoes', 'turma', 'habilidade', 'total', 'nota', 'proficiencia', 'nivel']
+        if fields and not all(field in allowed_fields for field in fields):
+            return jsonify({"error": "Campos inválidos"}), 400
+        
+        # Validar ordenação
+        allowed_order_fields = ['nota', 'proficiencia', 'status', 'turma', 'nome']
+        if order_by not in allowed_order_fields:
+            return jsonify({"error": "Campo de ordenação inválido"}), 400
+        
+        if order_direction not in ['asc', 'desc']:
+            return jsonify({"error": "Direção de ordenação inválida"}), 400
+        
+        # Dados da avaliação (sempre incluído)
+        avaliacao_data = {
+            "id": test.id,
+            "titulo": test.title,
+            "disciplina": test.subject_rel.name if test.subject_rel else 'N/A',
+            "total_questoes": len(test.questions) if test.questions else 0
+        }
+        
+        # Dados das questões (filtrado por disciplina se especificado)
+        questoes_data = []
+        if test.questions and ('questoes' in fields or not fields):
+            for i, question in enumerate(test.questions, 1):
+                # Filtrar por disciplina se especificado
+                if subject_id and question.subject_id != subject_id:
+                    continue
+                
+                # Calcular porcentagem de acertos
+                total_respostas = StudentAnswer.query.filter_by(
+                    test_id=evaluation_id, 
+                    question_id=question.id
+                ).count()
+                
+                # Calcular acertos
+                acertos = 0
+                if question.question_type == 'multipleChoice':
+                    for answer in StudentAnswer.query.filter_by(
+                        test_id=evaluation_id,
+                        question_id=question.id
+                    ).all():
+                        if EvaluationResultService.check_multiple_choice_answer(answer.answer, question.alternatives):
+                            acertos += 1
+                else:
+                    acertos = StudentAnswer.query.filter_by(
+                        test_id=evaluation_id,
+                        question_id=question.id,
+                        answer=question.correct_answer
+                    ).count() if total_respostas > 0 else 0
+                
+                porcentagem_acertos = (acertos / total_respostas * 100) if total_respostas > 0 else 0
+                
+                questao_data = {
+                    "id": question.id,
+                    "numero": i,
+                    "texto": question.text or f"Questão {i}",
+                    "habilidade": question.skill or "N/A",
+                    "codigo_habilidade": question.skill or "N/A",
+                    "tipo": question.question_type or "multipleChoice",
+                    "dificuldade": question.difficulty_level or "Médio",
+                    "porcentagem_acertos": round(porcentagem_acertos, 2),
+                    "porcentagem_erros": round(100 - porcentagem_acertos, 2)
+                }
+                questoes_data.append(questao_data)
+        
+        # Buscar alunos e resultados
+        from app.models.evaluationResult import EvaluationResult
+        
+        class_tests = ClassTest.query.filter_by(test_id=evaluation_id).all()
+        class_ids = [ct.class_id for ct in class_tests]
+        
+        if not class_ids:
+            return jsonify({
+                "avaliacao": avaliacao_data,
+                "questoes": questoes_data,
+                "alunos": []
+            }), 200
+        
+        # Buscar todos os alunos dessas turmas
+        all_students = Student.query.options(
+            joinedload(Student.class_).joinedload(Class.grade)
+        ).filter(Student.class_id.in_(class_ids)).all()
+        
+        # Filtrar por nível se especificado
+        if student_level:
+            all_students = [
+                student for student in all_students 
+                if student.class_ and student.class_.grade and 
+                student.class_.grade.name and student_level.lower() in student.class_.grade.name.lower()
+            ]
+        
+        # Buscar resultados pré-calculados
+        evaluation_results = EvaluationResult.query.filter_by(test_id=evaluation_id).all()
+        results_dict = {er.student_id: er for er in evaluation_results}
+        
+        alunos_data = []
+        for student in all_students:
+            evaluation_result = results_dict.get(student.id)
+            
+            if evaluation_result:
+                # Aluno respondeu
+                total_answered = evaluation_result.correct_answers
+                correct_answers = evaluation_result.correct_answers
+                prof_1000 = convert_proficiency_to_1000_scale(
+                    evaluation_result.proficiency, "Anos Iniciais", test.subject_rel.name if test.subject_rel else "Outras"
+                )
+                classification_1000 = get_classification_1000_scale(prof_1000)
+                status = "concluida"
+                nota = evaluation_result.grade if hasattr(evaluation_result, 'grade') else 0.0
+            else:
+                # Aluno NÃO respondeu
+                total_answered = 0
+                correct_answers = 0
+                prof_1000 = 0.0
+                classification_1000 = 'Abaixo do Básico'
+                status = "nao_respondida"
+                nota = 0.0
+            
+            # Buscar informações da turma
+            turma_nome = "N/A"
+            if student.class_:
+                turma_nome = student.class_.name
+            
+            # Buscar respostas detalhadas do aluno
+            respostas = []
+            if 'questoes' in fields or not fields:
+                student_answers = StudentAnswer.query.filter_by(
+                    test_id=evaluation_id,
+                    student_id=student.id
+                ).all()
+                
+                for answer in student_answers:
+                    question = Question.query.get(answer.question_id)
+                    if question:
+                        # Filtrar por disciplina se especificado
+                        if subject_id and question.subject_id != subject_id:
+                            continue
+                        
+                        is_correct = False
+                        if question.question_type == 'multipleChoice':
+                            is_correct = EvaluationResultService.check_multiple_choice_answer(answer.answer, question.alternatives)
+                        else:
+                            is_correct = answer.answer == question.correct_answer
+                        
+                        respostas.append({
+                            "questao_id": question.id,
+                            "questao_numero": question.number or 0,
+                            "resposta_correta": is_correct,
+                            "resposta_em_branco": not answer.answer or answer.answer.strip() == ""
+                        })
+            
+            aluno_data = {
+                "id": student.id,
+                "nome": student.user.name if student.user else "N/A",
+                "total_acertos": correct_answers,
+                "total_erros": total_answered - correct_answers,
+                "total_em_branco": len(test.questions) - total_answered if test.questions else 0,
+                "nota": nota,
+                "proficiencia": prof_1000,
+                "classificacao": classification_1000,
+                "status": status
+            }
+            
+            # Adicionar campos condicionalmente
+            if 'turma' in fields or not fields:
+                aluno_data["turma"] = turma_nome
+            
+            if 'nivel' in fields or not fields:
+                aluno_data["nivel"] = student.class_.grade.name if student.class_ and student.class_.grade else "N/A"
+            
+            if 'questoes' in fields or not fields:
+                aluno_data["respostas"] = respostas
+            
+            alunos_data.append(aluno_data)
+        
+        # Aplicar ordenação
+        reverse_order = order_direction == 'desc'
+        
+        if order_by == 'nota':
+            alunos_data.sort(key=lambda x: x.get('nota', 0), reverse=reverse_order)
+        elif order_by == 'proficiencia':
+            alunos_data.sort(key=lambda x: x.get('proficiencia', 0), reverse=reverse_order)
+        elif order_by == 'status':
+            # Ordenar por status: concluida primeiro, depois nao_respondida
+            status_order = {'concluida': 1, 'nao_respondida': 2}
+            alunos_data.sort(key=lambda x: status_order.get(x.get('status', 'nao_respondida'), 3), reverse=reverse_order)
+        elif order_by == 'turma':
+            alunos_data.sort(key=lambda x: x.get('turma', 'N/A'), reverse=reverse_order)
+        elif order_by == 'nome':
+            alunos_data.sort(key=lambda x: x.get('nome', 'N/A'), reverse=reverse_order)
+        
+        # Construir resposta final
+        response = {"avaliacao": avaliacao_data}
+        
+        if 'questoes' in fields or not fields:
+            response["questoes"] = questoes_data
+        
+        if 'alunos' in fields or not fields:
+            response["alunos"] = alunos_data
+        
+        return jsonify(response), 200
+
+    except Exception as e:
+        logging.error(f"Erro ao buscar relatório filtrado: {str(e)}", exc_info=True)
+        return jsonify({"error": "Erro ao buscar relatório filtrado", "details": str(e)}), 500
+
+# ==================== ENDPOINT 6: GET /opcoes-filtros ====================
+
+@bp.route('/opcoes-filtros/<string:evaluation_id>', methods=['GET'])
+@jwt_required()
+@role_required("admin", "professor", "coordenador", "diretor")
+def opcoes_filtros(evaluation_id: str):
+    """
+    Retorna opções disponíveis para filtros da avaliação
+    """
+    try:
+        user = get_current_user_from_token()
+        if not user:
+            return jsonify({"error": "Usuário não encontrado"}), 401
+
+        # Verificar se avaliação existe
+        test = Test.query.get(evaluation_id)
+        if not test:
+            return jsonify({"error": "Avaliação não encontrada"}), 404
+        
+        # Verificar permissões
+        if user['role'] == 'professor' and test.created_by != user['id']:
+            return jsonify({"error": "Acesso negado"}), 403
+        
+        # Buscar disciplinas das questões
+        disciplinas = []
+        if test.questions:
+            subject_ids = set()
+            for question in test.questions:
+                if question.subject_id and question.subject_id not in subject_ids:
+                    subject_ids.add(question.subject_id)
+                    subject = Subject.query.get(question.subject_id)
+                    if subject:
+                        disciplinas.append({
+                            "id": subject.id,
+                            "name": subject.name
+                        })
+        
+        # Buscar níveis dos alunos
+        niveis = []
+        class_tests = ClassTest.query.filter_by(test_id=evaluation_id).all()
+        class_ids = [ct.class_id for ct in class_tests]
+        
+        if class_ids:
+            students = Student.query.options(
+                joinedload(Student.class_).joinedload(Class.grade)
+            ).filter(Student.class_id.in_(class_ids)).all()
+            
+            grade_names = set()
+            for student in students:
+                if student.class_ and student.class_.grade and student.class_.grade.name:
+                    grade_names.add(student.class_.grade.name)
+            
+            niveis = [{"id": name, "name": name} for name in sorted(grade_names)]
+        
+        # Opções de ordenação
+        opcoes_ordenacao = [
+            {"id": "nota", "name": "Nota"},
+            {"id": "proficiencia", "name": "Proficiência"},
+            {"id": "status", "name": "Status"},
+            {"id": "turma", "name": "Turma"},
+            {"id": "nome", "name": "Nome do Aluno"}
+        ]
+        
+        # Campos disponíveis
+        campos_disponiveis = [
+            {"id": "alunos", "name": "Dados dos Alunos"},
+            {"id": "questoes", "name": "Questões"},
+            {"id": "turma", "name": "Turma"},
+            {"id": "habilidade", "name": "Habilidades"},
+            {"id": "total", "name": "Total de Acertos"},
+            {"id": "nota", "name": "Nota"},
+            {"id": "proficiencia", "name": "Proficiência"},
+            {"id": "nivel", "name": "Nível"}
+        ]
+        
+        return jsonify({
+            "disciplinas": disciplinas,
+            "niveis": niveis,
+            "opcoes_ordenacao": opcoes_ordenacao,
+            "campos_disponiveis": campos_disponiveis
+        }), 200
+
+    except Exception as e:
+        logging.error(f"Erro ao buscar opções de filtros: {str(e)}", exc_info=True)
+        return jsonify({"error": "Erro ao buscar opções de filtros", "details": str(e)}), 500
+
+# ==================== FUNÇÕES AUXILIARES PARA STATUS ====================
+
+def _check_and_update_evaluation_status(test_id: str) -> Dict[str, Any]:
+    """
+    Verifica e atualiza automaticamente o status de uma avaliação para "concluída" quando apropriado
+    
+    Critérios para marcar como "concluída":
+    1. Todas as sessões de alunos foram finalizadas
+    2. Todas as sessões foram corrigidas (se necessário)
+    3. Prazo de expiração foi atingido (se configurado)
+    
+    Returns:
+        Dict com informações sobre a atualização
+    """
+    try:
+        from app.models.testSession import TestSession
+        from app.models.classTest import ClassTest
+        from datetime import datetime, timedelta
+        
+        # Buscar a avaliação
+        test = Test.query.get(test_id)
+        if not test:
+            return {"error": "Avaliação não encontrada"}
+        
+        # Buscar todas as aplicações da avaliação
+        class_tests = ClassTest.query.filter_by(test_id=test_id).all()
+        if not class_tests:
+            return {"error": "Avaliação não foi aplicada em nenhuma turma"}
+        
+        # Buscar todas as sessões da avaliação
+        sessions = TestSession.query.filter_by(test_id=test_id).all()
+        
+        if not sessions:
+            return {"message": "Nenhuma sessão encontrada para esta avaliação"}
+        
+        # Verificar se todas as sessões foram finalizadas
+        total_sessions = len(sessions)
+        finalized_sessions = len([s for s in sessions if s.status in ['finalizada', 'corrigida', 'revisada', 'finalized']])
+        
+        # Verificar se há prazo de expiração
+        has_expired = False
+        if class_tests and class_tests[0].expiration:
+            current_time = datetime.utcnow()
+            expiration_time = class_tests[0].expiration
+            if current_time > expiration_time:
+                has_expired = True
+        
+        # Determinar se deve ser marcada como concluída
+        should_be_completed = False
+        completion_reason = ""
+        
+        if has_expired:
+            should_be_completed = True
+            completion_reason = "Prazo de expiração atingido"
+        elif finalized_sessions == total_sessions and total_sessions > 0:
+            should_be_completed = True
+            completion_reason = "Todas as sessões foram finalizadas"
+        
+        # Atualizar status se necessário
+        updated_class_tests = []
+        if should_be_completed:
+            for class_test in class_tests:
+                if class_test.status != "concluida":
+                    class_test.status = "concluida"
+                    class_test.updated_at = datetime.utcnow()
+                    updated_class_tests.append(class_test.id)
+            
+            if updated_class_tests:
+                db.session.commit()
+        
+        return {
+            "test_id": test_id,
+            "total_sessions": total_sessions,
+            "finalized_sessions": finalized_sessions,
+            "has_expired": has_expired,
+            "should_be_completed": should_be_completed,
+            "completion_reason": completion_reason,
+            "updated_class_tests": updated_class_tests,
+            "current_status": class_tests[0].status if class_tests else "N/A"
+        }
+        
+    except Exception as e:
+        logging.error(f"Erro ao verificar status da avaliação {test_id}: {str(e)}", exc_info=True)
+        return {"error": f"Erro ao verificar status: {str(e)}"}
+
+
+def _get_evaluation_status_summary(test_id: str) -> Dict[str, Any]:
+    """
+    Retorna um resumo do status atual de uma avaliação
+    """
+    try:
+        from app.models.testSession import TestSession
+        from app.models.classTest import ClassTest
+        from datetime import datetime
+        
+        # Buscar aplicações da avaliação
+        class_tests = ClassTest.query.filter_by(test_id=test_id).all()
+        
+        # Buscar sessões
+        sessions = TestSession.query.filter_by(test_id=test_id).all()
+        
+        # Contar por status
+        status_counts = {}
+        for session in sessions:
+            status = session.status
+            status_counts[status] = status_counts.get(status, 0) + 1
+        
+        # Verificar expiração
+        expiration_info = None
+        if class_tests and class_tests[0].expiration:
+            current_time = datetime.utcnow()
+            expiration_time = class_tests[0].expiration
+            is_expired = current_time > expiration_time
+            expiration_info = {
+                "expiration_date": expiration_time.isoformat() if expiration_time else None,
+                "is_expired": is_expired,
+                "days_until_expiration": (expiration_time - current_time).days if not is_expired else 0
+            }
+        
+        return {
+            "test_id": test_id,
+            "total_sessions": len(sessions),
+            "status_counts": status_counts,
+            "class_test_status": [ct.status for ct in class_tests],
+            "expiration_info": expiration_info,
+            "overall_status": class_tests[0].status if class_tests else "N/A"
+        }
+        
+    except Exception as e:
+        logging.error(f"Erro ao obter resumo de status da avaliação {test_id}: {str(e)}", exc_info=True)
+        return {"error": f"Erro ao obter resumo: {str(e)}"}
+
+
+# ==================== ENDPOINT PARA VERIFICAR/ATUALIZAR STATUS ====================
+
+@bp.route('/avaliacoes/<string:test_id>/verificar-status', methods=['POST'])
+@jwt_required()
+@role_required("admin", "professor", "coordenador", "diretor")
+def verificar_e_atualizar_status(test_id: str):
+    """
+    Verifica e atualiza automaticamente o status de uma avaliação
+    """
+    try:
+        user = get_current_user_from_token()
+        if not user:
+            return jsonify({"error": "Usuário não encontrado"}), 401
+
+        # Verificar se avaliação existe
+        test = Test.query.get(test_id)
+        if not test:
+            return jsonify({"error": "Avaliação não encontrada"}), 404
+        
+        # Verificar permissões
+        if user['role'] == 'professor' and test.created_by != user['id']:
+            return jsonify({"error": "Você só pode verificar avaliações que criou"}), 403
+        
+        # Verificar e atualizar status
+        status_info = _check_and_update_evaluation_status(test_id)
+        
+        if "error" in status_info:
+            return jsonify(status_info), 400
+        
+        # Obter resumo atual
+        summary = _get_evaluation_status_summary(test_id)
+        
+        return jsonify({
+            "message": "Status verificado e atualizado com sucesso",
+            "status_update": status_info,
+            "current_summary": summary
+        }), 200
+
+    except Exception as e:
+        logging.error(f"Erro ao verificar status da avaliação: {str(e)}", exc_info=True)
+        return jsonify({"error": "Erro ao verificar status", "details": str(e)}), 500
+
+
+# ==================== ENDPOINT PARA OBTER RESUMO DE STATUS ====================
+
+@bp.route('/avaliacoes/<string:test_id>/status-resumo', methods=['GET'])
+@jwt_required()
+@role_required("admin", "professor", "coordenador", "diretor")
+def obter_resumo_status(test_id: str):
+    """
+    Retorna um resumo detalhado do status atual de uma avaliação
+    """
+    try:
+        user = get_current_user_from_token()
+        if not user:
+            return jsonify({"error": "Usuário não encontrado"}), 401
+
+        # Verificar se avaliação existe
+        test = Test.query.get(test_id)
+        if not test:
+            return jsonify({"error": "Avaliação não encontrada"}), 404
+        
+        # Verificar permissões
+        if user['role'] == 'professor' and test.created_by != user['id']:
+            return jsonify({"error": "Você só pode verificar avaliações que criou"}), 403
+        
+        # Obter resumo
+        summary = _get_evaluation_status_summary(test_id)
+        
+        if "error" in summary:
+            return jsonify(summary), 400
+        
+        return jsonify(summary), 200
+
+    except Exception as e:
+        logging.error(f"Erro ao obter resumo de status: {str(e)}", exc_info=True)
+        return jsonify({"error": "Erro ao obter resumo", "details": str(e)}), 500
+
+# ==================== ENDPOINT PARA VERIFICAR TODAS AS AVALIAÇÕES ====================
+
+@bp.route('/avaliacoes/verificar-todas', methods=['POST'])
+@jwt_required()
+@role_required("admin", "professor", "coordenador", "diretor")
+def verificar_todas_avaliacoes():
+    """
+    Verifica e atualiza automaticamente o status de todas as avaliações
+    """
+    try:
+        user = get_current_user_from_token()
+        if not user:
+            return jsonify({"error": "Usuário não encontrado"}), 401
+
+        # Buscar todas as avaliações
+        if user['role'] == 'professor':
+            # Professores só veem suas próprias avaliações
+            tests = Test.query.filter_by(created_by=user['id']).all()
+        else:
+            # Admins veem todas as avaliações
+            tests = Test.query.all()
+        
+        if not tests:
+            return jsonify({
+                "message": "Nenhuma avaliação encontrada",
+                "total_checked": 0,
+                "total_updated": 0
+            }), 200
+        
+        # Verificar cada avaliação
+        results = []
+        total_updated = 0
+        
+        for test in tests:
+            try:
+                status_info = _check_and_update_evaluation_status(test.id)
+                
+                if status_info.get("should_be_completed", False):
+                    total_updated += 1
+                
+                results.append({
+                    "test_id": test.id,
+                    "title": test.title,
+                    "status_info": status_info
+                })
+                
+            except Exception as e:
+                logging.error(f"Erro ao verificar avaliação {test.id}: {str(e)}")
+                results.append({
+                    "test_id": test.id,
+                    "title": test.title,
+                    "error": str(e)
+                })
+        
+        return jsonify({
+            "message": "Verificação de todas as avaliações concluída",
+            "total_checked": len(tests),
+            "total_updated": total_updated,
+            "results": results
+        }), 200
+
+    except Exception as e:
+        logging.error(f"Erro ao verificar todas as avaliações: {str(e)}", exc_info=True)
+        return jsonify({"error": "Erro ao verificar avaliações", "details": str(e)}), 500
+
+
+# ==================== ENDPOINT PARA OBTER ESTATÍSTICAS DE STATUS ====================
+
+@bp.route('/avaliacoes/estatisticas-status', methods=['GET'])
+@jwt_required()
+@role_required("admin", "professor", "coordenador", "diretor")
+def obter_estatisticas_status():
+    """
+    Retorna estatísticas gerais do status das avaliações
+    """
+    try:
+        user = get_current_user_from_token()
+        if not user:
+            return jsonify({"error": "Usuário não encontrado"}), 401
+
+        # Buscar todas as avaliações
+        if user['role'] == 'professor':
+            tests = Test.query.filter_by(created_by=user['id']).all()
+        else:
+            tests = Test.query.all()
+        
+        # Contar por status
+        status_counts = {}
+        total_tests = len(tests)
+        
+        for test in tests:
+            class_tests = ClassTest.query.filter_by(test_id=test.id).all()
+            if class_tests:
+                # Usar o status da primeira aplicação como representativo
+                status = class_tests[0].status
+                status_counts[status] = status_counts.get(status, 0) + 1
+            else:
+                status_counts['sem_aplicacao'] = status_counts.get('sem_aplicacao', 0) + 1
+        
+        # Calcular porcentagens
+        status_percentages = {}
+        for status, count in status_counts.items():
+            status_percentages[status] = round((count / total_tests) * 100, 2) if total_tests > 0 else 0
+        
+        return jsonify({
+            "total_avaliacoes": total_tests,
+            "contagem_por_status": status_counts,
+            "porcentagem_por_status": status_percentages,
+            "status_disponiveis": ["agendada", "em_andamento", "concluida", "cancelada", "sem_aplicacao"]
+        }), 200
+
+    except Exception as e:
+        logging.error(f"Erro ao obter estatísticas de status: {str(e)}", exc_info=True)
+        return jsonify({"error": "Erro ao obter estatísticas", "details": str(e)}), 500

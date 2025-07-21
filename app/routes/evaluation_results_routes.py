@@ -230,8 +230,11 @@ def listar_avaliacoes():
     """
     Lista avaliações aplicadas com estatísticas completas
     
+    Nota: Retorna apenas avaliações que foram efetivamente aplicadas (estão na tabela class_test)
+    de acordo com os filtros selecionados.
+    
     Query Parameters:
-    - estado, municipio, escola, serie, turma (mínimo 2 filtros obrigatórios)
+    - estado, municipio, escola, serie, turma, avaliacao (mínimo 2 filtros obrigatórios)
     - page, per_page
     """
     try:
@@ -245,6 +248,7 @@ def listar_avaliacoes():
         escola = request.args.get('escola')
         serie = request.args.get('serie')
         turma = request.args.get('turma')
+        avaliacao = request.args.get('avaliacao')
         page = request.args.get('page', 1, type=int)
         per_page = request.args.get('per_page', 10, type=int)
         per_page = min(per_page, 100)  # Limitar máximo
@@ -255,16 +259,17 @@ def listar_avaliacoes():
             bool(municipio),
             bool(escola),
             bool(serie),
-            bool(turma)
+            bool(turma),
+            bool(avaliacao)
         ])
         
         if filtros_aplicados < 2:
             return jsonify({
-                "error": "É necessário aplicar pelo menos 2 filtros (estado, municipio, escola, serie, turma)"
+                "error": "É necessário aplicar pelo menos 2 filtros (estado, municipio, escola, serie, turma, avaliacao)"
             }), 400
         
         # Identificar escopo de busca baseado nos filtros aplicados
-        scope_info = _determinar_escopo_busca(estado, municipio, escola, serie, turma)
+        scope_info = _determinar_escopo_busca(estado, municipio, escola, serie, turma, avaliacao)
         
         if not scope_info:
             return jsonify({"error": "Não foi possível determinar o escopo de busca"}), 400
@@ -305,12 +310,14 @@ def listar_avaliacoes():
                 }
             }), 200
         
-        # Buscar todas as avaliações aplicadas nas escolas do município
+        # Buscar apenas avaliações que foram aplicadas (estão na tabela class_test)
+        # Filtradas pelas escolas do escopo selecionado
         query_base = ClassTest.query.join(Test, ClassTest.test_id == Test.id)\
                                    .join(Class, ClassTest.class_id == Class.id)\
                                    .join(Grade, Class.grade_id == Grade.id)\
                                    .join(School, Class.school_id == School.id)\
                                    .join(City, School.city_id == City.id)\
+                                   .filter(School.id.in_(escola_ids))\
                                    .options(
                                        joinedload(ClassTest.test).joinedload(Test.subject_rel),
                                        joinedload(ClassTest.class_).joinedload(Class.grade),
@@ -338,6 +345,7 @@ def listar_avaliacoes():
                 query_base = query_base.filter(School.id == escola)
             else:
                 query_base = query_base.filter(School.name.ilike(f"%{escola}%"))
+        # Se escola não enviada, não aplicar filtro (retorna todas as escolas do escopo)
         # Se serie não enviada, não aplicar filtro (retorna todas as séries)
         
         if serie:
@@ -356,6 +364,16 @@ def listar_avaliacoes():
                 query_base = query_base.filter(Class.id == turma)
             else:
                 query_base = query_base.filter(Class.name.ilike(f"%{turma}%"))
+        # Se turma não enviada, não aplicar filtro (retorna todas as turmas)
+        
+        if avaliacao:
+            # Tentar filtrar por ID primeiro, depois por título
+            test_filter = Test.query.get(avaliacao)
+            if test_filter:
+                query_base = query_base.filter(Test.id == avaliacao)
+            else:
+                query_base = query_base.filter(Test.title.ilike(f"%{avaliacao}%"))
+        # Se avaliacao não enviada, não aplicar filtro (retorna todas as avaliações)
         
         # Se for professor, filtrar apenas suas avaliações
         if user['role'] == 'professor':
@@ -841,7 +859,7 @@ def _calcular_estatisticas_municipio(class_tests: list, scope_info) -> Dict[str,
         }
 
 
-def _determinar_escopo_busca(estado, municipio, escola, serie, turma):
+def _determinar_escopo_busca(estado, municipio, escola, serie, turma, avaliacao):
     """
     Determina o escopo de busca baseado nos filtros aplicados
     Filtros omitidos são tratados como "todos"
@@ -877,7 +895,9 @@ def _determinar_escopo_busca(estado, municipio, escola, serie, turma):
             if not school:
                 school = School.query.filter(School.name.ilike(f"%{escola}%")).first()
             if school:
-                escolas = [school]
+                # Verificar se a escola pertence ao município
+                if not municipio_id or school.city_id == municipio_id:
+                    escolas = [school]
         else:
             # Todas as escolas do município
             escolas = School.query.filter_by(city_id=municipio_id).all()
@@ -890,7 +910,8 @@ def _determinar_escopo_busca(estado, municipio, escola, serie, turma):
             'municipio': municipio,
             'escola': escola,
             'serie': serie,
-            'turma': turma
+            'turma': turma,
+            'avaliacao': avaliacao
         }
         
     except Exception as e:

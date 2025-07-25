@@ -13,8 +13,12 @@ SECRET_KEY = os.getenv("JWT_SECRET_KEY")
 
 bp = Blueprint('login', __name__, url_prefix='/login')
 
-@bp.route('/', methods=['POST'])
+@bp.route('/', methods=['POST', 'OPTIONS'])
 def login():
+    # Tratar requisições OPTIONS (preflight)
+    if request.method == 'OPTIONS':
+        return jsonify({}), 200
+    
     data = request.get_json()
     identificador = data.get('registration')
     password = data.get('password')
@@ -72,11 +76,26 @@ def login():
         }
 
         logging.info(f"Login bem-sucedido para usuário: {usuario.email} com papel: {usuario.role} e tenant_id: {tenant_id}")
-        return jsonify({
+        response = jsonify({
             "mensagem": "Login bem-sucedido.",
             "user": usuario_data,
             "token": token
         })
+        
+        # Não adicionar headers CORS explicitamente aqui - deixar o Flask-CORS gerenciar
+        
+        return response
     except Exception as e:
         logging.error(f"Erro inesperado durante o login para identificador {identificador}: {e}", exc_info=True)
         return jsonify({"erro": "Ocorreu um erro interno no servidor."}), 500
+
+@bp.route('/test', methods=['GET', 'OPTIONS'])
+def test_cors():
+    """Endpoint de teste para verificar se o CORS está funcionando"""
+    if request.method == 'OPTIONS':
+        return jsonify({"message": "CORS preflight OK"}), 200
+    
+    return jsonify({
+        "message": "CORS está funcionando!",
+        "timestamp": datetime.datetime.utcnow().isoformat()
+    }), 200

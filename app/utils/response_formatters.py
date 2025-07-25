@@ -6,6 +6,7 @@ from app.models.grades import Grade
 from app.models.subject import Subject
 import uuid
 import logging
+from sqlalchemy.exc import SQLAlchemyError
 
 
 def _is_valid_uuid(uuid_string):
@@ -98,19 +99,105 @@ def _get_all_subjects_from_test(test):
     return subjects_list
 
 
+def normalize_alternatives_with_correct(alternatives, correct_answer=None):
+    """
+    Garante que todas as alternativas tenham id, text e isCorrect
+    """
+    if not alternatives:
+        return []
+    
+    normalized = []
+    for i, alt in enumerate(alternatives):
+        # Determinar o ID da alternativa
+        if isinstance(alt, dict) and alt.get('id') and alt.get('id') != 'None':
+            option_id = alt.get('id')
+        else:
+            option_id = f"option-{i}"
+        
+        # Determinar o texto da alternativa
+        if isinstance(alt, dict):
+            text = alt.get('text') or alt.get('answer') or ''
+        elif isinstance(alt, str):
+            text = alt
+        else:
+            text = str(alt) if alt else ''
+        
+        # Determinar se está correto
+        is_correct = False
+        if isinstance(alt, dict):
+            is_correct = alt.get('isCorrect') or alt.get('is_correct') or False
+        
+        # Se temos correct_answer, usar para determinar isCorrect
+        if correct_answer and not is_correct:
+            # Comparar por ID se correct_answer é um ID
+            if option_id == correct_answer:
+                is_correct = True
+            # Comparar por texto se correct_answer é um texto
+            elif text.strip().lower() == correct_answer.strip().lower():
+                is_correct = True
+            # Comparar por letra (A, B, C, D...)
+            elif correct_answer.strip().upper() in ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H']:
+                letters = ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H']
+                if i < len(letters) and letters[i] == correct_answer.strip().upper():
+                    is_correct = True
+        
+        normalized_alt = {
+            "id": option_id,
+            "text": text,
+            "isCorrect": is_correct
+        }
+        normalized.append(normalized_alt)
+    
+    return normalized
+
+
+def validate_question_data(question_data):
+    """
+    Valida se a questão tem dados coerentes
+    """
+    alternatives = question_data.get('alternatives', [])
+    
+    # Verificar se tem alternativas
+    if not alternatives:
+        return True  # Pode ser questão discursiva
+    
+    # Se tem alternativas, verificar se pelo menos uma está correta
+    correct_count = sum(1 for alt in alternatives if alt.get('isCorrect'))
+    if correct_count == 0:
+        # Tentar determinar pela correct_answer
+        correct_answer = question_data.get('correct_answer')
+        if correct_answer:
+            # Há um gabarito definido, isso é válido
+            return True
+        else:
+            logging.warning(f"Questão {question_data.get('id')} não tem alternativa correta definida")
+    
+    # Verificar se todos os IDs são únicos
+    ids = [alt.get('id') for alt in alternatives if isinstance(alt, dict)]
+    if len(ids) != len(set(ids)):
+        logging.warning(f"Questão {question_data.get('id')} tem IDs de alternativas duplicados")
+    
+    return True
+
+
 def format_question_response(q, exclude_fields=None):
     if exclude_fields is None:
         exclude_fields = []
 
+    # Normalizar alternativas com isCorrect
+    normalized_alternatives = normalize_alternatives_with_correct(q.alternatives, q.correct_answer)
+    
     response = {
         'id': q.id,
         'number': q.number if q.number is not None else 1,
         'text': q.text if q.text else '',
         'formattedText': q.formatted_text if q.formatted_text else q.text if q.text else '',
-        'options': q.alternatives if q.alternatives and isinstance(q.alternatives, list) else [],
+        'alternatives': normalized_alternatives,  # Campo obrigatório com estrutura correta
+        'options': normalized_alternatives,  # Alias para compatibilidade
         'skills': q.skill.split(',') if q.skill and isinstance(q.skill, str) else [],
         'difficulty': q.difficulty_level if q.difficulty_level else 'Médio',
         'solution': q.correct_answer if q.correct_answer else '',
+        'correct_answer': q.correct_answer if q.correct_answer else '',  # Campo obrigatório
         'formattedSolution': q.formatted_solution if q.formatted_solution else '',
         'secondStatement': q.secondstatement if q.secondstatement else '',
         'type': q.question_type if q.question_type else 'multipleChoice',
@@ -269,19 +356,20 @@ def format_test_response(test):
             logging.warning(f"Erro ao buscar turmas das escolas: {str(e)}")
             applied_classes_info = []
 
-    # Calcular duração dinamicamente
-    duration = 90  # Duração padrão em minutos
-    try:
-        if test.time_limit and test.end_time:
-            # Calcular duração real baseada no end_time - time_limit
-            duration_delta = test.end_time - test.time_limit
-            duration = int(duration_delta.total_seconds() / 60)  # Converter para minutos
-        elif test.time_limit:
-            # Se não tiver end_time, usar duração padrão de 90 minutos
+    # Usar duração do modelo ou calcular dinamicamente como fallback
+    duration = test.duration if test.duration is not None else 90  # Duração padrão em minutos
+    if duration is None:
+        try:
+            if test.time_limit and test.end_time:
+                # Calcular duração real baseada no end_time - time_limit
+                duration_delta = test.end_time - test.time_limit
+                duration = int(duration_delta.total_seconds() / 60)  # Converter para minutos
+            elif test.time_limit:
+                # Se não tiver end_time, usar duração padrão de 90 minutos
+                duration = 90
+        except Exception as e:
+            logging.warning(f"Erro ao calcular duração: {str(e)}")
             duration = 90
-    except Exception as e:
-        logging.warning(f"Erro ao calcular duração: {str(e)}")
-        duration = 90
 
     return {
         'id': test.id,

@@ -349,6 +349,7 @@ def get_submitted_evaluations():
         Lista de sessões de teste enviadas com dados do aluno e avaliação
     """
     try:
+        print("Iniciando busca de avaliações enviadas...")
         from app.models.testSession import TestSession
         from app.models.student import Student
         from app.models.test import Test
@@ -357,6 +358,7 @@ def get_submitted_evaluations():
         from app.models.user import User
         from app.models.studentAnswer import StudentAnswer
         from sqlalchemy.orm import joinedload
+        print("Modelos importados com sucesso")
         
         # Parâmetros de busca
         status_filter = request.args.get('status', '').strip()
@@ -366,6 +368,11 @@ def get_submitted_evaluations():
         page = request.args.get('page', 1, type=int)
         per_page = min(request.args.get('per_page', 20, type=int), 100)
         
+        print("Criando query base...")
+        # Obter usuário logado
+        from app.decorators.role_required import get_current_user_from_token
+        user = get_current_user_from_token()
+        
         # Base query - buscar sessões enviadas
         query = TestSession.query.options(
             joinedload(TestSession.student).joinedload(Student.user),
@@ -374,6 +381,13 @@ def get_submitted_evaluations():
         ).filter(
             TestSession.submitted_at.isnot(None)  # Apenas sessões enviadas
         )
+        
+        # Filtrar apenas avaliações criadas pelo usuário logado
+        if user:
+            query = query.join(Test).filter(Test.created_by == user['id'])
+            print(f"Filtro aplicado: apenas avaliações criadas pelo usuário {user['id']} (role: {user.get('role')})")
+        
+        print("Query base criada com sucesso")
         
         # Aplicar filtros
         if status_filter and status_filter != 'all':
@@ -406,6 +420,7 @@ def get_submitted_evaluations():
         # Ordenar por data de envio (mais recentes primeiro)
         query = query.order_by(TestSession.submitted_at.desc())
         
+        print("Aplicando paginação...")
         # Aplicar paginação
         paginated_sessions = query.paginate(
             page=page,
@@ -414,6 +429,7 @@ def get_submitted_evaluations():
         )
         
         sessions = paginated_sessions.items
+        print(f"Paginação aplicada. {len(sessions)} sessões encontradas")
         
         # Transformar dados para o formato esperado pelo frontend
         result = []
@@ -423,6 +439,18 @@ def get_submitted_evaluations():
                 student_id=session.student_id,
                 test_id=session.test_id
             ).all()
+            
+            # Calcular tempo gasto
+            from datetime import datetime
+            start_time = session.started_at or session.created_at
+            end_time = session.submitted_at or datetime.utcnow()
+            time_spent = int((end_time - start_time).total_seconds() // 60) if start_time and end_time else 0
+            
+            # Calcular scores baseados nos campos existentes
+            auto_score = session.score or 0
+            manual_score = session.grade or 0  # grade é a nota final (0-10)
+            final_score = session.grade or 0   # grade é a nota final
+            percentage = session.score or 0    # score é a porcentagem
             
             session_data = {
                 "id": session.id,
@@ -435,27 +463,27 @@ def get_submitted_evaluations():
                 "grade_id": session.test.grade_id if session.test else None,
                 "grade_name": session.test.grade.name if session.test and session.test.grade else 'Sem série',
                 "submitted_at": session.submitted_at.isoformat() if session.submitted_at else None,
-                "time_spent": session.time_spent or 0,
+                "time_spent": time_spent,
                 "status": session.status,
                 "total_questions": len(session.test.questions) if session.test and session.test.questions else 0,
-                "blank_answers": len([a for a in answers if not a.student_answer]),
-                "auto_score": session.auto_score,
-                "manual_score": session.manual_score,
-                "final_score": session.final_score,
-                "percentage": session.percentage,
+                "blank_answers": len([a for a in answers if not a.answer]),
+                "auto_score": auto_score,
+                "manual_score": manual_score,
+                "final_score": final_score,
+                "percentage": percentage,
                 "corrected_by": session.corrected_by,
                 "corrected_at": session.corrected_at.isoformat() if session.corrected_at else None,
                 "feedback": session.feedback,
                 "answers": [
-                    {
+                    enrich_answer_data(answer, answer.question) if answer.question else {
                         "question_id": answer.question_id,
-                        "question_text": answer.question.text if answer.question else 'Questão não encontrada',
-                        "question_type": answer.question.question_type if answer.question else 'multiple_choice',
-                        "options": answer.question.alternatives if answer.question and answer.question.alternatives else [],
-                        "correct_answer": answer.question.correct_answer if answer.question else None,
+                        "question_text": "Questão não encontrada",
+                        "question_type": "multiple_choice",
+                        "correct_answer": None,
                         "student_answer": answer.answer,
-                        "is_correct": answer.is_correct,
-                        "manual_points": answer.manual_points,
+                        "options": [],
+                        "is_correct": False,
+                        "manual_points": answer.manual_score,
                         "feedback": answer.feedback
                     }
                     for answer in answers
@@ -466,6 +494,10 @@ def get_submitted_evaluations():
         return jsonify(result), 200
         
     except Exception as e:
+        print(f"ERRO DETALHADO: {str(e)}")
+        print(f"Tipo do erro: {type(e)}")
+        import traceback
+        print(f"Stack trace: {traceback.format_exc()}")
         logging.error(f"Erro ao buscar avaliações enviadas: {str(e)}", exc_info=True)
         return jsonify({
             "error": "Erro ao buscar avaliações enviadas",
@@ -476,7 +508,7 @@ def get_submitted_evaluations():
 @bp.route('/test-session/<string:session_id>/correct', methods=['POST'])
 @jwt_required()
 @role_required("admin", "professor", "coordenador", "diretor")
-def correct_evaluation():
+def correct_evaluation(session_id):
     """
     Salva a correção de uma avaliação (sem finalizar)
     
@@ -501,7 +533,6 @@ def correct_evaluation():
         from app.models.studentAnswer import StudentAnswer
         from app.decorators.role_required import get_current_user_from_token
         
-        session_id = request.view_args['session_id']
         data = request.get_json()
         
         if not data:
@@ -531,19 +562,23 @@ def correct_evaluation():
             
             # Buscar resposta do aluno
             answer = StudentAnswer.query.filter_by(
-                test_session_id=session_id,
+                student_id=session.student_id,
+                test_id=session.test_id,
                 question_id=question_id
             ).first()
             
             if answer:
                 answer.is_correct = is_correct
-                answer.manual_points = manual_points if manual_points is not None else (1 if is_correct else 0)
+                answer.manual_score = manual_points if manual_points is not None else (1 if is_correct else 0)
                 answer.feedback = feedback
         
         # Atualizar dados da sessão
-        session.manual_score = data.get('final_score', 0)
-        session.final_score = data.get('final_score', 0)
-        session.percentage = data.get('percentage', 0)
+        # Converter nota final (0-10) para grade e score (porcentagem)
+        final_score = data.get('final_score', 0)
+        percentage = data.get('percentage', 0)
+        
+        session.grade = final_score  # grade é a nota final (0-10)
+        session.score = percentage   # score é a porcentagem
         session.feedback = data.get('general_feedback', '')
         session.status = 'corrected'
         session.corrected_by = current_user['id']
@@ -554,8 +589,8 @@ def correct_evaluation():
         return jsonify({
             "message": "Correção salva com sucesso",
             "session_id": session_id,
-            "final_score": session.final_score,
-            "percentage": session.percentage
+            "final_score": session.grade,
+            "percentage": session.score
         }), 200
         
     except Exception as e:
@@ -570,7 +605,7 @@ def correct_evaluation():
 @bp.route('/test-session/<string:session_id>/finalize', methods=['POST'])
 @jwt_required()
 @role_required("admin", "professor", "coordenador", "diretor")
-def finalize_evaluation():
+def finalize_evaluation(session_id):
     """
     Finaliza a correção de uma avaliação (não pode mais ser editada)
     
@@ -581,7 +616,6 @@ def finalize_evaluation():
         from app.models.studentAnswer import StudentAnswer
         from app.decorators.role_required import get_current_user_from_token
         
-        session_id = request.view_args['session_id']
         data = request.get_json()
         
         if not data:
@@ -611,35 +645,38 @@ def finalize_evaluation():
             
             # Buscar resposta do aluno
             answer = StudentAnswer.query.filter_by(
-                test_session_id=session_id,
+                student_id=session.student_id,
+                test_id=session.test_id,
                 question_id=question_id
             ).first()
             
             if answer:
                 answer.is_correct = is_correct
-                answer.manual_points = manual_points if manual_points is not None else (1 if is_correct else 0)
+                answer.manual_score = manual_points if manual_points is not None else (1 if is_correct else 0)
                 answer.feedback = feedback
         
         # Atualizar dados da sessão
-        session.manual_score = data.get('final_score', 0)
-        session.final_score = data.get('final_score', 0)
-        session.percentage = data.get('percentage', 0)
+        # Converter nota final (0-10) para grade e score (porcentagem)
+        final_score = data.get('final_score', 0)
+        percentage = data.get('percentage', 0)
+        
+        session.grade = final_score  # grade é a nota final (0-10)
+        session.score = percentage   # score é a porcentagem
         session.feedback = data.get('general_feedback', '')
         session.status = 'finalized'  # Status final
         session.corrected_by = current_user['id']
         session.corrected_at = datetime.now()
         
         # Calcular proficiência baseada na nota final
-        proficiency_level = calculate_proficiency(session.percentage)
-        session.proficiency_level = proficiency_level
+        proficiency_level = calculate_proficiency(percentage)
         
         db.session.commit()
         
         return jsonify({
             "message": "Correção finalizada com sucesso",
             "session_id": session_id,
-            "final_score": session.final_score,
-            "percentage": session.percentage,
+            "final_score": session.grade,
+            "percentage": session.score,
             "proficiency_level": proficiency_level,
             "status": "finalized"
         }), 200
@@ -651,6 +688,330 @@ def finalize_evaluation():
             "error": "Erro ao finalizar correção",
             "details": str(e)
         }), 500
+
+
+def normalize_options(alternatives):
+    """
+    Garante que cada alternativa é um dict com id e text
+    """
+    options = []
+    for idx, alt in enumerate(alternatives or []):
+        # Se já for dict com id/text, mantém
+        if isinstance(alt, dict) and 'id' in alt and 'text' in alt:
+            options.append(alt)
+        # Se for só texto, cria id padrão
+        elif isinstance(alt, str):
+            options.append({"id": f"option-{idx+1}", "text": alt})
+        # Se for dict só com texto
+        elif isinstance(alt, dict) and 'text' in alt:
+            options.append({"id": alt.get("id", f"option-{idx+1}"), "text": alt["text"]})
+    return options
+
+
+def normalize_options_with_correct(alternatives, correct_answer=None):
+    """
+    Garante que cada alternativa tenha id, text e isCorrect
+    Com validação para múltiplas alternativas corretas
+    """
+    if not alternatives:
+        return []
+    
+    # ✅ CORREÇÃO: Se alternatives já é uma lista, usar diretamente
+    if isinstance(alternatives, list):
+        parsed_alternatives = alternatives
+    elif isinstance(alternatives, str):
+        try:
+            import json
+            parsed_alternatives = json.loads(alternatives)
+        except json.JSONDecodeError:
+            logging.warning(f"NORMALIZE: Erro ao fazer parse do JSON: {alternatives[:100]}...")
+            return []
+    else:
+        logging.warning(f"NORMALIZE: Tipo inesperado para alternatives: {type(alternatives)}")
+        return []
+    
+    if not isinstance(parsed_alternatives, list):
+        logging.warning(f"NORMALIZE: alternatives não é uma lista após parse: {type(parsed_alternatives)}")
+        return []
+    
+    options = []
+    for idx, alt in enumerate(parsed_alternatives):
+        # Determinar ID e texto
+        if isinstance(alt, dict):
+            if alt.get('id') and alt.get('id') != 'None':
+                option_id = alt.get('id')
+            else:
+                option_id = f"option-{idx}"
+            text = alt.get('text', alt.get('answer', ''))
+            is_correct = alt.get('isCorrect', alt.get('is_correct', False))
+        elif isinstance(alt, str):
+            option_id = f"option-{idx}"
+            text = alt
+            is_correct = False
+        else:
+            continue
+        
+        # Determinar se está correto baseado no correct_answer
+        if correct_answer and not is_correct:
+            # Comparar por ID
+            if option_id == correct_answer:
+                is_correct = True
+            # Comparar por texto
+            elif text.strip().lower() == correct_answer.strip().lower():
+                is_correct = True
+            # Comparar por letra (A, B, C, D...)
+            elif correct_answer.strip().upper() in ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H']:
+                letters = ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H']
+                if idx < len(letters) and letters[idx] == correct_answer.strip().upper():
+                    is_correct = True
+        
+        options.append({
+            "id": option_id,
+            "text": text,
+            "isCorrect": is_correct
+        })
+    
+    # ✅ VALIDAÇÃO: Verificar se há múltiplas alternativas corretas
+    correct_count = sum(1 for opt in options if opt.get('isCorrect'))
+    if correct_count > 1:
+        logging.warning(f"VALIDAÇÃO: Questão tem {correct_count} alternativas corretas. Mantendo apenas a primeira.")
+        # Manter apenas a primeira alternativa correta
+        first_correct_found = False
+        for opt in options:
+            if opt.get('isCorrect') and not first_correct_found:
+                first_correct_found = True
+            elif opt.get('isCorrect') and first_correct_found:
+                opt['isCorrect'] = False
+    elif correct_count == 0 and correct_answer:
+        logging.warning(f"VALIDAÇÃO: Nenhuma alternativa correta encontrada. Tentando inferir baseado em correct_answer: {correct_answer}")
+    
+    return options
+
+
+def validate_question_data(question):
+    """
+    Valida se a questão tem dados coerentes
+    """
+    if not question or not question.alternatives:
+        return True  # Pode ser questão discursiva
+    
+    try:
+        # ✅ CORREÇÃO: Parse das alternativas
+        if isinstance(question.alternatives, list):
+            alternatives = question.alternatives
+        elif isinstance(question.alternatives, str):
+            import json
+            alternatives = json.loads(question.alternatives)
+        else:
+            logging.warning(f"VALIDAÇÃO: Questão {question.id} - alternatives não é lista nem string")
+            return False
+        
+        if not isinstance(alternatives, list):
+            logging.warning(f"VALIDAÇÃO: Questão {question.id} - alternatives não é uma lista após parse")
+            return False
+        
+        # Verificar se tem alternativas
+        if not alternatives:
+            return True  # Pode ser questão discursiva
+        
+        # Contar alternativas corretas
+        correct_count = 0
+        for alt in alternatives:
+            if isinstance(alt, dict):
+                is_correct = alt.get('isCorrect', False) or alt.get('is_correct', False)
+                if is_correct:
+                    correct_count += 1
+        
+        # Validar quantidade de alternativas corretas
+        if correct_count > 1:
+            logging.warning(f"VALIDAÇÃO: Questão {question.id} tem {correct_count} alternativas corretas (deveria ter apenas 1)")
+            return False
+        elif correct_count == 0:
+            # Verificar se há correct_answer definido
+            if question.correct_answer:
+                logging.info(f"VALIDAÇÃO: Questão {question.id} tem correct_answer mas nenhuma alternativa marcada como correta")
+                return True  # Pode ser válido se o gabarito estiver no campo correct_answer
+            else:
+                logging.warning(f"VALIDAÇÃO: Questão {question.id} não tem alternativa correta nem correct_answer definido")
+                return False
+        
+        # Verificar se todos os IDs são únicos
+        ids = [alt.get('id') for alt in alternatives if isinstance(alt, dict) and alt.get('id')]
+        if len(ids) != len(set(ids)):
+            logging.warning(f"VALIDAÇÃO: Questão {question.id} tem IDs de alternativas duplicados")
+            return False
+        
+        return True
+        
+    except Exception as e:
+        logging.error(f"VALIDAÇÃO: Erro ao validar questão {question.id}: {e}")
+        return False
+
+
+def is_answer_correct(student_answer, correct_answer, alternatives=None):
+    """
+    Verifica se a resposta do aluno está correta
+    """
+    if not student_answer or not correct_answer:
+        return False
+    
+    # Normalizar strings
+    student_answer = str(student_answer).strip()
+    correct_answer = str(correct_answer).strip()
+    
+    # Comparação direta
+    if student_answer.lower() == correct_answer.lower():
+        return True
+    
+    # Se temos alternativas, fazer verificação mais robusta
+    if alternatives:
+        # Normalizar alternativas primeiro
+        normalized_alternatives = normalize_options_with_correct(alternatives, correct_answer)
+        
+        # Encontrar qual alternativa é a correta
+        correct_option_id = None
+        for alt in normalized_alternatives:
+            if alt.get('isCorrect'):
+                correct_option_id = alt.get('id')
+                break
+        
+        # Se encontramos a alternativa correta, verificar se o aluno escolheu ela
+        if correct_option_id:
+            return student_answer == correct_option_id
+        
+        # Fallback: verificar por texto
+        for idx, alt in enumerate(alternatives):
+            if isinstance(alt, dict):
+                alt_text = alt.get('text', '')
+                alt_id = alt.get('id', f"option-{idx}")
+                
+                # Se o correct_answer é um texto, verificar se corresponde a esta alternativa
+                if correct_answer.lower() == alt_text.strip().lower():
+                    # Verificar se o aluno escolheu esta alternativa (por ID ou texto)
+                    return (student_answer == alt_id or 
+                           student_answer.lower() == alt_text.strip().lower())
+            elif isinstance(alt, str):
+                if correct_answer.lower() == alt.strip().lower():
+                    return student_answer.lower() == alt.strip().lower()
+    
+    # Verificar se é uma letra (A, B, C, D...)
+    if correct_answer.upper() in ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H']:
+        letters = ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H']
+        if student_answer.upper() in letters:
+            return student_answer.upper() == correct_answer.upper()
+        
+        # Verificar se o aluno respondeu com o ID da opção correspondente à letra
+        if alternatives and correct_answer.upper() in letters:
+            letter_index = letters.index(correct_answer.upper())
+            if letter_index < len(alternatives):
+                return student_answer == f"option-{letter_index}"
+    
+    return False
+
+
+def calculate_session_score(answers, questions_dict):
+    """
+    Calcular nota final automaticamente baseado nas respostas
+    """
+    total_score = 0
+    total_questions = len(answers)
+    correct_answers = 0
+    
+    for answer in answers:
+        question = questions_dict.get(answer.question_id)
+        if not question:
+            continue
+            
+        if question.question_type == "essay" or question.question_type == "discursive":
+            # Questões dissertativas: usar pontuação manual se disponível
+            manual_points = getattr(answer, 'manual_score', None) or 0
+            total_score += manual_points
+            if manual_points > 0:
+                correct_answers += 1
+        else:
+            # Questões objetivas: verificar se resposta está correta
+            if is_answer_correct(answer.answer, question.correct_answer, question.alternatives):
+                total_score += 1
+                correct_answers += 1
+    
+    percentage = (total_score / total_questions * 100) if total_questions > 0 else 0
+    
+    return {
+        "final_score": total_score,
+        "percentage": round(percentage, 1),
+        "correct_answers": correct_answers,
+        "total_questions": total_questions
+    }
+
+
+def enrich_answer_data(answer, question):
+    """
+    Enriquecer dados da resposta com informações completas da questão
+    Com validação robusta
+    """
+    if not question:
+        return {
+            "question_id": answer.question_id,
+            "question_text": "Questão não encontrada",
+            "question_type": "multiple_choice",
+            "correct_answer": None,
+            "student_answer": answer.answer,
+            "options": [],
+            "is_correct": False,
+            "manual_points": getattr(answer, 'manual_score', None),
+            "feedback": getattr(answer, 'feedback', None)
+        }
+    
+    # ✅ VALIDAR questão antes de processar
+    if not validate_question_data(question):
+        logging.warning(f"ENRICH: Questão {question.id} falhou na validação. Processando com cuidado...")
+    
+    # Normalizar alternativas
+    options = normalize_options_with_correct(question.alternatives, question.correct_answer)
+    
+    # Verificar se a resposta está correta
+    is_correct = is_answer_correct(answer.answer, question.correct_answer, question.alternatives)
+    
+    # Determinar o correct_answer para retornar (ID da opção correta)
+    correct_answer_id = None
+    for option in options:
+        if option.get('isCorrect'):
+            correct_answer_id = option.get('id')
+            break
+    
+    # Se não encontrou ID da opção correta, usar o campo correct_answer da questão
+    if not correct_answer_id and question.correct_answer:
+        correct_answer_id = question.correct_answer
+    
+    return {
+        "question_id": answer.question_id,
+        "question_text": question.text or "Texto não disponível",
+        "question_type": question.question_type or "multiple_choice",
+        "correct_answer": correct_answer_id,  # ✅ Retorna o ID da opção correta
+        "student_answer": answer.answer,
+        "options": options,                   # ✅ Sempre presente com isCorrect validado
+        "is_correct": is_correct,             # ✅ Calculado automaticamente
+        "manual_points": getattr(answer, 'manual_score', None),
+        "feedback": getattr(answer, 'feedback', None)
+    }
+
+
+def get_correct_option_id(alternatives, correct_answer):
+    """
+    Retorna o id da alternativa correta baseado no texto
+    """
+    if not alternatives or not correct_answer:
+        return None
+    
+    normalized_options = normalize_options(alternatives)
+    
+    for alt in normalized_options:
+        if isinstance(alt, dict) and alt.get('text'):
+            # Comparar textos ignorando espaços extras
+            if alt.get('text').strip() == correct_answer.strip():
+                return alt.get('id')
+    
+    return None
 
 
 def calculate_proficiency(percentage):

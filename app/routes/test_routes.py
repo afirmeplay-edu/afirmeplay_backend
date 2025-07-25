@@ -20,6 +20,13 @@ from sqlalchemy.orm import joinedload, subqueryload
 
 bp = Blueprint('tests', __name__, url_prefix="/test")
 
+def process_subjects_for_test(test):
+    """
+    Processa os subjects de um teste, retornando uma lista de subjects com nomes
+    """
+    from app.utils.response_formatters import _get_all_subjects_from_test
+    return _get_all_subjects_from_test(test)
+
 
 
 @bp.errorhandler(SQLAlchemyError)
@@ -56,6 +63,17 @@ def criar_avaliacao():
             if field not in data:
                 logging.error(f"Campo obrigatório ausente: {field}")
                 return jsonify({"error": f"Missing required field: {field}"}), 400
+
+        # Validação do campo duration se fornecido
+        if 'duration' in data and data['duration'] is not None:
+            try:
+                duration = int(data['duration'])
+                if duration <= 0:
+                    logging.error("Duração deve ser maior que zero")
+                    return jsonify({"error": "Duration must be greater than zero"}), 400
+            except (ValueError, TypeError):
+                logging.error("Duração deve ser um número inteiro")
+                return jsonify({"error": "Duration must be an integer"}), 400
 
         # Validação específica para cada tipo de avaliação
         if data['type'] == 'SIMULADO':
@@ -114,6 +132,7 @@ def criar_avaliacao():
             max_score=data.get('max_score'),
             time_limit=datetime.fromisoformat(data.get('time_limit')) if data.get('time_limit') else None,
             end_time=datetime.fromisoformat(data.get('end_time')) if data.get('end_time') else None,
+            duration=data.get('duration'),  # Duração em minutos
             evaluation_mode=data.get('evaluation_mode', 'virtual'),
             created_by=data.get('created_by'),
             municipalities=data.get('municipalities'),
@@ -589,7 +608,7 @@ def atualizar_avaliacao(test_id):
         # Campos que podem ser atualizados
         campos = [
             'title', 'description', 'type', 'subject', 'grade_id',
-            'max_score', 'time_limit', 'end_time', 'evaluation_mode', 'intructions', 'municipalities',
+            'max_score', 'time_limit', 'end_time', 'duration', 'evaluation_mode', 'intructions', 'municipalities',
             'schools', 'course', 'model', 'subjects_info'
         ]
 
@@ -1188,22 +1207,39 @@ def obter_avaliacoes_completas_classe(class_id):
         for test in tests:
             class_test = class_test_map.get(test.id)
             
-            # Verificar se está dentro do período de aplicação
+            # ✅ CORRIGIDO: Verificar disponibilidade considerando status global, data de aplicação E data de expiração
             is_available = False
             availability_status = "not_available"
             
             if test.status == 'agendada' or test.status == 'em_andamento':
-                if class_test.application and current_time >= class_test.application:
-                    if not class_test.expiration or current_time <= class_test.expiration:
-                        is_available = True
-                        availability_status = "available"
-                    else:
-                        availability_status = "expired"
-                elif class_test.application and current_time < class_test.application:
-                    availability_status = "not_yet_available"
-                else:
+                # Verificar se a avaliação já está disponível (data de aplicação)
+                is_available_now = True
+                if class_test.application:
+                    # Converter data de aplicação para fuso horário do Brasil
+                    from app.utils.timezone_utils import get_brazil_time
+                    current_time = get_brazil_time()
+                    application_brazil = class_test.application.replace(tzinfo=None) if class_test.application.tzinfo else class_test.application
+                    current_brazil = current_time.replace(tzinfo=None) if current_time.tzinfo else current_time
+                    is_available_now = current_brazil >= application_brazil
+                
+                # Verificar se a avaliação não expirou (data de expiração)
+                is_expired = False
+                if class_test.expiration:
+                    # Converter data de expiração para fuso horário do Brasil
+                    from app.utils.timezone_utils import get_brazil_time
+                    current_time = get_brazil_time()
+                    expiration_brazil = class_test.expiration.replace(tzinfo=None) if class_test.expiration.tzinfo else class_test.expiration
+                    current_brazil = current_time.replace(tzinfo=None) if current_time.tzinfo else current_time
+                    is_expired = current_brazil > expiration_brazil
+                
+                # Avaliação disponível apenas se já passou da data de aplicação E não expirou
+                if is_available_now and not is_expired:
                     is_available = True
                     availability_status = "available"
+                elif not is_available_now:
+                    availability_status = "not_started"
+                else:
+                    availability_status = "expired"
 
             # Preparar questões para envio (sem respostas corretas para alunos)
             questions_for_students = []
@@ -1254,9 +1290,10 @@ def obter_avaliacoes_completas_classe(class_id):
                     "intructions": test.intructions,
                     "max_score": test.max_score,
                     "time_limit": test.time_limit.isoformat() if test.time_limit else None,
+                    "duration": test.duration,
                     "course": test.course,
                     "model": test.model,
-                    "subjects_info": test.subjects_info,
+                    "subjects_info": process_subjects_for_test(test),  # Retornar subjects com nomes
                     "status": test.status,
                     "created_by": test.created_by,
                     "creator": {
@@ -1392,7 +1429,7 @@ def listar_avaliacoes_por_classe(class_id):
                 "time_limit": test.time_limit.isoformat() if test.time_limit else None,
                 "course": test.course,
                 "model": test.model,
-                "subjects_info": test.subjects_info,
+                "subjects_info": process_subjects_for_test(test),  # Retornar subjects com nomes
                 "status": test.status,
                 "created_by": test.created_by,
                 "creator": {
@@ -1504,37 +1541,102 @@ def listar_avaliacoes_minha_classe():
 
         # Preparar lista de avaliações com informações para o aluno
         tests_info = []
-        current_time = datetime.utcnow()
+        
+        # Usar fuso horário do Brasil
+        from app.utils.timezone_utils import get_brazil_time
+        current_time = get_brazil_time()
+        
+        # Buscar todas as sessões do aluno para estas avaliações
+        from app.models.testSession import TestSession
+        from app.models.studentAnswer import StudentAnswer
+        
+        test_ids = [ct.test_id for ct in class_tests]
+        sessions = TestSession.query.filter_by(student_id=student.id).filter(
+            TestSession.test_id.in_(test_ids)
+        ).all()
+        sessions_dict = {session.test_id: session for session in sessions}
         
         for test in tests:
             class_test = class_test_map.get(test.id)
+            session = sessions_dict.get(test.id)
             
             # Verificar se a avaliação está disponível para o aluno
             is_available = False
             availability_status = "not_available"
             
+            # Verificar se o aluno já completou esta avaliação
+            has_completed = False
+            student_status = "nao_iniciada"
+            completed_at = None
+            score = None
+            grade = None
+            can_start = True
+            
+            if session:
+                has_completed = session.status in ['finalizada', 'expirada', 'corrigida', 'revisada']
+                student_status = session.status
+                completed_at = session.submitted_at.isoformat() if session.submitted_at else None
+                score = session.score
+                grade = session.grade
+                
+                # Verificar se há respostas salvas
+                has_answers = StudentAnswer.query.filter_by(
+                    student_id=student.id,
+                    test_id=test.id
+                ).first() is not None
+                
+                can_start = session.status == 'nao_iniciada' or (session.status == 'em_andamento' and not has_answers)
+            
+            # ✅ CORRIGIDO: Verificar disponibilidade considerando status global, se já completou, data de aplicação E data de expiração
             if test.status == 'agendada' or test.status == 'em_andamento':
-                if class_test.application and current_time >= class_test.application:
-                    if not class_test.expiration or current_time <= class_test.expiration:
+                if not has_completed:
+                    # Verificar se a avaliação já está disponível (data de aplicação)
+                    is_available_now = True
+                    if class_test.application:
+                        # Converter data de aplicação para fuso horário do Brasil
+                        from app.utils.timezone_utils import get_brazil_time
+                        current_time = get_brazil_time()
+                        application_brazil = class_test.application.replace(tzinfo=None) if class_test.application.tzinfo else class_test.application
+                        current_brazil = current_time.replace(tzinfo=None) if current_time.tzinfo else current_time
+                        is_available_now = current_brazil >= application_brazil
+                    
+                    # Verificar se a avaliação não expirou (data de expiração)
+                    is_expired = False
+                    if class_test.expiration:
+                        # Converter data de expiração para fuso horário do Brasil
+                        from app.utils.timezone_utils import get_brazil_time
+                        current_time = get_brazil_time()
+                        expiration_brazil = class_test.expiration.replace(tzinfo=None) if class_test.expiration.tzinfo else class_test.expiration
+                        current_brazil = current_time.replace(tzinfo=None) if current_time.tzinfo else current_time
+                        is_expired = current_brazil > expiration_brazil
+                    
+                    # Avaliação disponível apenas se já passou da data de aplicação E não expirou
+                    if is_available_now and not is_expired:
                         is_available = True
                         availability_status = "available"
+                    elif not is_available_now:
+                        availability_status = "not_started"
+                        can_start = False
                     else:
                         availability_status = "expired"
-                elif class_test.application and current_time < class_test.application:
-                    availability_status = "not_yet_available"
+                        can_start = False
                 else:
-                    is_available = True
-                    availability_status = "available"
+                    availability_status = "completed"
+            else:
+                # Status global não permite disponibilidade
+                availability_status = "not_available"
+                can_start = False  # Não pode iniciar se status global não permite
+            
+            # Preparar subjects usando a função auxiliar
+            subjects = process_subjects_for_test(test)
             
             test_info = {
                 "test_id": test.id,
                 "title": test.title,
                 "description": test.description,
                 "type": test.type,
-                "subject": {
-                    "id": test.subject_rel.id,
-                    "name": test.subject_rel.name
-                } if test.subject_rel else None,
+                "subject": subjects[0] if subjects else None,  # Subject principal para compatibilidade
+                "subjects": subjects,  # Lista completa de subjects
                 "grade": {
                     "id": test.grade.id,
                     "name": test.grade.name
@@ -1542,9 +1644,10 @@ def listar_avaliacoes_minha_classe():
                 "intructions": test.intructions,
                 "max_score": test.max_score,
                 "time_limit": test.time_limit.isoformat() if test.time_limit else None,
+                "duration": test.duration,  # Duração em minutos
                 "course": test.course,
                 "model": test.model,
-                "subjects_info": test.subjects_info,
+                "subjects_info": subjects,  # Retornar a lista de subjects com nomes
                 "status": test.status,
                 "creator": {
                     "id": test.creator.id,
@@ -1560,6 +1663,14 @@ def listar_avaliacoes_minha_classe():
                 "availability": {
                     "is_available": is_available,
                     "status": availability_status
+                },
+                "student_status": {
+                    "has_completed": has_completed,
+                    "status": student_status,
+                    "completed_at": completed_at,
+                    "score": score,
+                    "grade": grade,
+                    "can_start": can_start
                 }
             }
             tests_info.append(test_info)
@@ -1621,6 +1732,36 @@ def start_test_session(test_id):
         if not test:
             return jsonify({"error": "Teste não encontrado"}), 404
         
+        # Verificar se o teste está aplicado na classe do aluno e não expirou
+        from app.models.classTest import ClassTest
+        class_test = ClassTest.query.filter_by(
+            class_id=student.class_id,
+            test_id=test_id
+        ).first()
+        
+        if not class_test:
+            return jsonify({"error": "Avaliação não está aplicada na sua classe"}), 404
+        
+        # Verificar se a avaliação está disponível (data de aplicação) e não expirou (data de expiração)
+        from app.utils.timezone_utils import get_brazil_time
+        current_time = get_brazil_time()
+        
+        # Verificar se já passou da data de aplicação
+        if class_test.application:
+            # Converter data de aplicação para fuso horário do Brasil
+            application_brazil = class_test.application.replace(tzinfo=None) if class_test.application.tzinfo else class_test.application
+            current_brazil = current_time.replace(tzinfo=None) if current_time.tzinfo else current_time
+            if current_brazil < application_brazil:
+                return jsonify({"error": "Avaliação ainda não está disponível"}), 410
+        
+        # Verificar se a avaliação não expirou
+        if class_test.expiration:
+            # Converter data de expiração para fuso horário do Brasil
+            expiration_brazil = class_test.expiration.replace(tzinfo=None) if class_test.expiration.tzinfo else class_test.expiration
+            current_brazil = current_time.replace(tzinfo=None) if current_time.tzinfo else current_time
+            if current_brazil > expiration_brazil:
+                return jsonify({"error": "Avaliação expirada"}), 410
+        
         # Verificar se já existe sessão ativa para este aluno/teste
         existing_session = TestSession.query.filter_by(
             student_id=student.id,
@@ -1629,40 +1770,49 @@ def start_test_session(test_id):
         ).first()
         
         if existing_session:
-            # Se a sessão existente não tem started_at, definir agora
-            if not existing_session.started_at:
-                existing_session.started_at = datetime.utcnow()
-                db.session.commit()
-            
             return jsonify({
                 "message": "Sessão já iniciada",
                 "session_id": existing_session.id,
-                "started_at": existing_session.started_at.isoformat(),
-                "remaining_time_minutes": existing_session.remaining_time_minutes,
+                "started_at": existing_session.started_at.isoformat() if existing_session.started_at else None,
                 "time_limit_minutes": existing_session.time_limit_minutes
             }), 200
         
-        # Determinar tempo limite baseado no teste
-        time_limit_minutes = None
-        if test.time_limit:
-            # Assumindo que time_limit é um timedelta ou datetime
-            if hasattr(test.time_limit, 'total_seconds'):
-                time_limit_minutes = int(test.time_limit.total_seconds() / 60)
-            elif hasattr(test.time_limit, 'minute'):
-                time_limit_minutes = test.time_limit.minute
+        # Verificar se há sessão ativa em qualquer teste para este aluno
+        active_session_any_test = TestSession.query.filter_by(
+            student_id=student.id,
+            status='em_andamento'
+        ).first()
         
-        # Criar nova sessão
+        if active_session_any_test:
+            return jsonify({
+                "message": "Sessão já iniciada",
+                "session_id": active_session_any_test.id,
+                "test_id": active_session_any_test.test_id,
+                "started_at": active_session_any_test.started_at.isoformat() if active_session_any_test.started_at else None,
+                "time_limit_minutes": active_session_any_test.time_limit_minutes
+            }), 200
+        
+        # Criar nova sessão (sem calcular time_limit automaticamente)
         session = TestSession(
             student_id=student.id,
             test_id=test_id,
-            time_limit_minutes=time_limit_minutes,
+            time_limit_minutes=None,  # Frontend gerencia o timer
             ip_address=request.remote_addr,
             user_agent=request.headers.get('User-Agent')
         )
         
-        # Iniciar o cronômetro da sessão
-        session.start_timer()
+        # Iniciar a sessão (definir started_at)
+        session.start_session()
         
+        # Se for a primeira sessão iniciada para esta avaliação, mudar status para 'em_andamento' se estiver 'agendada'
+        if test.status == 'agendada':
+            active_sessions = TestSession.query.filter_by(
+                test_id=test_id,
+                status='em_andamento'
+            ).count()
+            if active_sessions == 0:
+                test.status = 'em_andamento'
+
         db.session.add(session)
         db.session.commit()
         
@@ -1670,8 +1820,7 @@ def start_test_session(test_id):
             "message": "Sessão iniciada com sucesso",
             "session_id": session.id,
             "started_at": session.started_at.isoformat() if session.started_at else None,
-            "time_limit_minutes": session.time_limit_minutes,
-            "remaining_time_minutes": session.time_limit_minutes  # Tempo restante inicial = tempo limite
+            "time_limit_minutes": session.time_limit_minutes
         }), 201
         
     except Exception as e:
@@ -1679,29 +1828,16 @@ def start_test_session(test_id):
         db.session.rollback()
         return jsonify({"error": "Erro ao iniciar sessão", "details": str(e)}), 500
 
-@bp.route('/<string:test_id>/submit', methods=['POST'])
+@bp.route('/<string:test_id>/session-info', methods=['GET'])
 @jwt_required()
 @role_required("aluno")
-def submit_test_answers(test_id):
+def get_session_info(test_id):
     """
-    Submete as respostas de um teste
-    
-    Body:
-    {
-        "session_id": "uuid",
-        "answers": [
-            {
-                "question_id": "uuid",
-                "answer": "resposta_do_aluno"
-            }
-        ]
-    }
+    Retorna informações da sessão para o frontend calcular o tempo
     """
     try:
         from app.models.testSession import TestSession
         from app.models.student import Student
-        from app.models.studentAnswer import StudentAnswer
-        from datetime import datetime
         
         user = get_current_user_from_token()
         if not user:
@@ -1712,126 +1848,194 @@ def submit_test_answers(test_id):
         if not student:
             return jsonify({"error": "Dados do aluno não encontrados"}), 404
         
-        data = request.get_json()
-        session_id = data.get('session_id')
-        answers = data.get('answers', [])
-        
-        if not session_id:
-            return jsonify({"error": "session_id é obrigatório"}), 400
-        
-        if not answers:
-            return jsonify({"error": "Lista de respostas é obrigatória"}), 400
-        
-        # Buscar sessão
+        # Buscar sessão ativa
         session = TestSession.query.filter_by(
-            id=session_id,
+            student_id=student.id,
             test_id=test_id,
-            student_id=student.id
+            status='em_andamento'
         ).first()
         
         if not session:
-            return jsonify({"error": "Sessão não encontrada"}), 404
-        
-        # Validar se sessão ainda está ativa
-        if session.status != 'em_andamento':
             return jsonify({
-                "error": f"Sessão não está ativa. Status atual: {session.status}"
-            }), 400
+                "message": "Nenhuma sessão ativa encontrada",
+                "session_exists": False
+            }), 404
         
-        # Validar tempo limite
-        if session.is_expired:
-            session.status = 'expirada'
-            db.session.commit()
-            return jsonify({
-                "error": "Tempo limite excedido. Sessão expirada."
-            }), 410  # 410 Gone
+        # Calcular tempo decorrido e restante
+        elapsed_minutes = 0
+        remaining_minutes = session.time_limit_minutes
         
-        # Buscar questões do teste para validação e correção
-        test_questions = Question.query.filter(
-            Question.test_id == test_id
-        ).all()
+        if session.started_at:
+            from datetime import datetime
+            elapsed_minutes = int((datetime.utcnow() - session.started_at).total_seconds() / 60)
+            if session.time_limit_minutes:
+                remaining_minutes = max(0, session.time_limit_minutes - elapsed_minutes)
         
-        # Se não há questões vinculadas diretamente ao teste, buscar pela relação many-to-many
-        if not test_questions:
-            test = Test.query.get(test_id)
-            if test and test.questions:
-                test_questions = test.questions
-        
-        questions_dict = {q.id: q for q in test_questions}
-        
-        correct_count = 0
-        saved_answers = []
-        
-        # Processar cada resposta
-        for ans_data in answers:
-            question_id = ans_data.get('question_id')
-            answer = ans_data.get('answer')
-            
-            if not question_id or answer is None:
-                continue
-            
-            # Verificar se a questão existe e pertence ao teste
-            if question_id not in questions_dict:
-                logging.warning(f"Questão {question_id} não encontrada no teste {test_id}")
-                continue
-            
-            # Verificar se já existe resposta para esta questão nesta sessão
-            existing_answer = StudentAnswer.query.filter_by(
-                student_id=student.id,
-                test_id=test_id,
-                question_id=question_id
-            ).first()
-            
-            if existing_answer:
-                # Atualizar resposta existente
-                existing_answer.answer = str(answer)
-                existing_answer.answered_at = datetime.utcnow()
-                student_answer = existing_answer
-            else:
-                # Criar nova resposta
-                student_answer = StudentAnswer(
-                    student_id=student.id,
-                    test_id=test_id,
-                    question_id=question_id,
-                    answer=str(answer)
-                )
-                db.session.add(student_answer)
-            
-            saved_answers.append({
-                'question_id': question_id,
-                'answer': str(answer),
-                'answered_at': student_answer.answered_at.isoformat()
-            })
-            
-            # Verificar se a resposta está correta (correção automática)
-            question = questions_dict[question_id]
-            if question.correct_answer and str(answer).strip().lower() == str(question.correct_answer).strip().lower():
-                correct_count += 1
-        
-        # Finalizar sessão e calcular nota
-        total_questions = len(test_questions)
-        session.finalize_session(
-            correct_answers=correct_count,
-            total_questions=total_questions
-        )
-        
-        db.session.commit()
+        # Verificar se expirou (apenas se time_limit_minutes não for None)
+        is_expired = False
+        if session.time_limit_minutes is not None and remaining_minutes is not None:
+            is_expired = remaining_minutes <= 0
         
         return jsonify({
-            "message": "Respostas submetidas com sucesso",
             "session_id": session.id,
-            "submitted_at": session.submitted_at.isoformat(),
-            "duration_minutes": session.duration_minutes,
-            "results": {
-                "total_questions": session.total_questions,
-                "correct_answers": session.correct_answers,
-                "score_percentage": session.score,
-                "grade": session.grade,
-                "answers_saved": len(saved_answers)
-            }
+            "started_at": session.started_at.isoformat() if session.started_at else None,
+            "time_limit_minutes": session.time_limit_minutes,
+            "elapsed_minutes": elapsed_minutes,
+            "remaining_minutes": remaining_minutes,
+            "is_expired": is_expired,
+            "session_exists": True
         }), 200
         
     except Exception as e:
-        logging.error(f"Erro ao submeter respostas do teste: {str(e)}", exc_info=True)
-        db.session.rollback()
-        return jsonify({"error": "Erro ao submeter respostas", "details": str(e)}), 500
+        logging.error(f"Erro ao obter informações da sessão: {str(e)}", exc_info=True)
+        return jsonify({"error": "Erro ao obter informações da sessão", "details": str(e)}), 500
+
+@bp.route('/debug/dates/<string:test_id>', methods=['GET'])
+@jwt_required()
+@role_required("admin", "professor", "coordenador", "diretor", "aluno")
+def debug_test_dates(test_id):
+    """
+    Endpoint de debug para verificar as datas de uma avaliação
+    """
+    try:
+        from app.models.classTest import ClassTest
+        from datetime import datetime, timezone
+        
+        # Buscar o teste
+        test = Test.query.get(test_id)
+        if not test:
+            return jsonify({'error': 'Teste não encontrado'}), 404
+        
+        # Buscar aplicações do teste
+        class_tests = ClassTest.query.filter_by(test_id=test_id).all()
+        
+        # Usar fuso horário do Brasil
+        from app.utils.timezone_utils import get_brazil_time
+        current_time = get_brazil_time()
+        
+        debug_info = {
+            'test_id': test_id,
+            'test_title': test.title,
+            'test_status': test.status,
+            'current_time': current_time.isoformat(),
+            'current_time_utc': current_time.utctimetuple(),
+            'class_tests': []
+        }
+        
+        for class_test in class_tests:
+            # Converter para fuso horário do Brasil
+            from app.utils.timezone_utils import convert_to_brazil_time
+            
+            application_time = convert_to_brazil_time(class_test.application)
+            expiration_time = convert_to_brazil_time(class_test.expiration)
+            
+            debug_class_test = {
+                'class_test_id': class_test.id,
+                'class_id': class_test.class_id,
+                'application_original': class_test.application.isoformat() if class_test.application else None,
+                'application_timezone_aware': application_time.isoformat() if application_time else None,
+                'expiration_original': class_test.expiration.isoformat() if class_test.expiration else None,
+                'expiration_timezone_aware': expiration_time.isoformat() if expiration_time else None,
+                'current_time': current_time.isoformat(),
+                'is_application_passed': current_time >= application_time if application_time else None,
+                'is_expired': current_time > expiration_time if expiration_time else None,
+                'time_until_application': None,
+                'time_until_expiration': None
+            }
+            
+            if application_time:
+                time_diff = application_time - current_time
+                debug_class_test['time_until_application'] = str(time_diff)
+            
+            if expiration_time:
+                time_diff = expiration_time - current_time
+                debug_class_test['time_until_expiration'] = str(time_diff)
+            
+            debug_info['class_tests'].append(debug_class_test)
+        
+        return jsonify(debug_info), 200
+        
+    except Exception as e:
+        logging.error(f"Erro no debug de datas: {str(e)}", exc_info=True)
+        return jsonify({"error": "Erro no debug", "details": str(e)}), 500
+
+@bp.route('/debug/subjects/<string:test_id>', methods=['GET'])
+@jwt_required()
+@role_required("admin", "professor", "coordenador", "diretor", "aluno")
+def debug_test_subjects(test_id):
+    """
+    Endpoint de debug para verificar os subjects de uma avaliação
+    """
+    try:
+        from app.models.subject import Subject
+        
+        # Buscar o teste
+        test = Test.query.get(test_id)
+        if not test:
+            return jsonify({'error': 'Teste não encontrado'}), 404
+        
+        debug_info = {
+            'test_id': test_id,
+            'test_title': test.title,
+            'subject_field': test.subject,  # Campo único
+            'subject_rel': {
+                'id': test.subject_rel.id,
+                'name': test.subject_rel.name
+            } if test.subject_rel else None,
+            'subjects_info': test.subjects_info,  # Campo JSON
+            'subjects_info_type': type(test.subjects_info).__name__,
+            'parsed_subjects': []
+        }
+        
+        # Tentar parsear subjects do subjects_info
+        if test.subjects_info:
+            if isinstance(test.subjects_info, list):
+                for i, subject_info in enumerate(test.subjects_info):
+                    if isinstance(subject_info, dict):
+                        subject_id = subject_info.get('id')
+                        subject_name = subject_info.get('name')
+                        
+                        # Buscar subject no banco se tiver ID
+                        if subject_id:
+                            subject = Subject.query.get(subject_id)
+                            if subject:
+                                debug_info['parsed_subjects'].append({
+                                    'index': i,
+                                    'from_db': True,
+                                    'id': subject.id,
+                                    'name': subject.name,
+                                    'original_data': subject_info
+                                })
+                            else:
+                                debug_info['parsed_subjects'].append({
+                                    'index': i,
+                                    'from_db': False,
+                                    'id': subject_id,
+                                    'name': subject_name,
+                                    'original_data': subject_info,
+                                    'error': 'Subject não encontrado no banco'
+                                })
+                        else:
+                            debug_info['parsed_subjects'].append({
+                                'index': i,
+                                'from_db': False,
+                                'original_data': subject_info,
+                                'error': 'Sem ID no subject_info'
+                            })
+                    else:
+                        debug_info['parsed_subjects'].append({
+                            'index': i,
+                            'from_db': False,
+                            'original_data': subject_info,
+                            'error': 'Não é um dicionário'
+                        })
+            else:
+                debug_info['parsed_subjects'].append({
+                    'error': f'subjects_info não é uma lista, é {type(test.subjects_info).__name__}'
+                })
+        
+        return jsonify(debug_info), 200
+        
+    except Exception as e:
+        logging.error(f"Erro no debug de subjects: {str(e)}", exc_info=True)
+        return jsonify({"error": "Erro no debug", "details": str(e)}), 500

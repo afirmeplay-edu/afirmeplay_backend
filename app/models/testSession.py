@@ -12,11 +12,10 @@ class TestSession(db.Model):
     student_id = db.Column(db.String, db.ForeignKey('student.id'), nullable=False)
     test_id = db.Column(db.String, db.ForeignKey('test.id'), nullable=False)
     
-    # Controle de tempo
-    started_at = db.Column(db.DateTime, nullable=True)  # Só definido quando efetivamente iniciar
-    submitted_at = db.Column(db.DateTime, nullable=True)
-    time_limit_minutes = db.Column(db.Integer, nullable=True)  # tempo limite em minutos
-    actual_start_time = db.Column(db.DateTime, nullable=True)  # Momento real que o aluno iniciou
+    # Controle de tempo simplificado
+    started_at = db.Column(db.DateTime, nullable=True)  # Quando o aluno iniciou
+    submitted_at = db.Column(db.DateTime, nullable=True)  # Quando o aluno finalizou
+    time_limit_minutes = db.Column(db.Integer, nullable=True)  # Tempo limite em minutos
     
     # Status da sessão
     status = db.Column(db.String(20), default='em_andamento')  # em_andamento, finalizada, expirada, corrigida, revisada
@@ -53,64 +52,34 @@ class TestSession(db.Model):
         self.ip_address = ip_address
         self.user_agent = user_agent
         
-        # Definir started_at automaticamente quando a sessão é criada
-        self.started_at = datetime.utcnow()
-        
         # Aplicar qualquer outro parâmetro
         for key, value in kwargs.items():
             if hasattr(self, key):
                 setattr(self, key, value)
     
     @property
-    def is_expired(self):
-        """Verifica se a sessão expirou baseado no tempo limite"""
-        if not self.time_limit_minutes or self.status != 'em_andamento' or not self.actual_start_time:
-            return False
-        
-        from datetime import timedelta
-        limit = self.actual_start_time + timedelta(minutes=self.time_limit_minutes)
-        return datetime.utcnow() > limit
-    
-    @property
-    def remaining_time_minutes(self):
-        """Retorna o tempo restante em minutos"""
-        if not self.time_limit_minutes or self.status != 'em_andamento' or not self.actual_start_time:
-            return self.time_limit_minutes  # Retorna tempo total se ainda não iniciou
-        
-        from datetime import timedelta
-        limit = self.actual_start_time + timedelta(minutes=self.time_limit_minutes)
-        remaining = limit - datetime.utcnow()
-        
-        if remaining.total_seconds() <= 0:
-            return 0
-        
-        return int(remaining.total_seconds() / 60)
-    
-    @property
     def duration_minutes(self):
         """Retorna a duração da sessão em minutos"""
-        if not self.actual_start_time:
-            return 0  # Se não iniciou efetivamente, duração é 0
+        if not self.started_at:
+            return 0
         
         end_time = self.submitted_at or datetime.utcnow()
-        duration = end_time - self.actual_start_time
+        duration = end_time - self.started_at
         return int(duration.total_seconds() / 60)
     
     def calculate_grade(self):
         """Calcula a nota final baseada nos acertos"""
-        if not self.total_questions or not self.correct_answers:
+        if not self.total_questions or self.total_questions <= 0 or self.correct_answers is None:
             return None
         
         percentage = (self.correct_answers / self.total_questions) * 100
         grade = (percentage / 100) * 10  # nota de 0 a 10
         return round(grade, 2)
     
-    def start_timer(self):
-        """Inicia efetivamente o cronômetro da avaliação"""
-        if not self.actual_start_time:
-            self.actual_start_time = datetime.utcnow()
-            if not self.started_at:  # Para compatibilidade
-                self.started_at = self.actual_start_time
+    def start_session(self):
+        """Inicia a sessão (define started_at)"""
+        if not self.started_at:
+            self.started_at = datetime.utcnow()
     
     def finalize_session(self, correct_answers=None, total_questions=None):
         """Finaliza a sessão e calcula a nota"""
@@ -122,7 +91,7 @@ class TestSession(db.Model):
         if total_questions is not None:
             self.total_questions = total_questions
             
-        if self.correct_answers and self.total_questions:
+        if self.correct_answers is not None and self.total_questions and self.total_questions > 0:
             self.score = (self.correct_answers / self.total_questions) * 100
             self.grade = self.calculate_grade()
     

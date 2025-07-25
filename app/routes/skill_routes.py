@@ -1,6 +1,11 @@
 from flask import Blueprint, jsonify, request
 from app.models.skill import Skill
+from app.models.question import Question
+from app.models.test import Test
 from app import db
+from flask_jwt_extended import jwt_required
+from app.decorators.role_required import role_required, get_current_user_from_token
+import logging
 
 skill_bp = Blueprint('skill_bp', __name__)
 
@@ -109,4 +114,114 @@ def get_skills_by_grade(grade_id):
             "grade_id": skill.grade_id
         } for skill in skills]), 200
     except Exception as e:
-        return jsonify({"error": str(e)}), 500 
+        return jsonify({"error": str(e)}), 500
+
+@skill_bp.route('/skills/evaluation/<test_id>', methods=['GET'])
+@jwt_required()
+@role_required("admin", "professor", "coordenador", "diretor")
+def get_skills_by_evaluation(test_id):
+    """
+    Busca skills utilizadas em uma avaliação específica.
+    Extrai as skills das questões da avaliação.
+    ---
+    tags:
+      - Skills
+    parameters:
+      - name: test_id
+        in: path
+        type: string
+        required: true
+        description: ID da avaliação para buscar as skills.
+    responses:
+      200:
+        description: Lista de skills utilizadas na avaliação.
+        schema:
+          type: array
+          items:
+            $ref: '#/definitions/Skill'
+      404:
+        description: Avaliação não encontrada ou sem skills.
+      500:
+        description: Erro interno no servidor.
+    """
+    try:
+        user = get_current_user_from_token()
+        if not user:
+            return jsonify({"error": "Usuário não encontrado"}), 401
+
+        # Verificar se a avaliação existe
+        test = Test.query.get(test_id)
+        if not test:
+            return jsonify({"error": "Avaliação não encontrada"}), 404
+        
+        # Verificar permissões
+        if user['role'] == 'professor' and test.created_by != user['id']:
+            return jsonify({"error": "Acesso negado"}), 403
+
+        # Buscar questões da avaliação
+        questions = Question.query.filter_by(test_id=test_id).all()
+        
+        if not questions:
+            return jsonify({"message": "Avaliação não possui questões."}), 404
+
+        # Extrair skills únicas das questões
+        skills_set = set()
+        skills_data = []
+        
+        for question in questions:
+            if question.skill:
+                # O campo skill pode conter múltiplas skills separadas por vírgula
+                question_skills = [s.strip() for s in question.skill.split(',') if s.strip()]
+                
+                for skill_code in question_skills:
+                    if skill_code not in skills_set:
+                        skills_set.add(skill_code)
+                        
+                        # Buscar informações da skill no banco
+                        # Primeiro tentar buscar por ID (UUID)
+                        skill_obj = None
+                        try:
+                            import uuid
+                            # Remover chaves se existirem
+                            skill_id_clean = skill_code.strip('{}')
+                            uuid_obj = uuid.UUID(skill_id_clean)
+                            skill_obj = Skill.query.filter_by(id=str(uuid_obj)).first()
+                        except (ValueError, AttributeError):
+                            pass
+                        
+                        # Se não encontrou por ID, tentar por código
+                        if not skill_obj:
+                            skill_obj = Skill.query.filter_by(code=skill_code).first()
+                        
+                        if skill_obj:
+                            # Skill encontrada no banco
+                            skills_data.append({
+                                "id": skill_obj.id,
+                                "code": skill_obj.code,
+                                "description": skill_obj.description,
+                                "subject_id": skill_obj.subject_id,
+                                "grade_id": skill_obj.grade_id,
+                                "source": "database"
+                            })
+                        else:
+                            # Skill não encontrada no banco, criar entrada básica
+                            skills_data.append({
+                                "id": None,
+                                "code": skill_code,
+                                "description": f"Skill {skill_code} (não cadastrada)",
+                                "subject_id": question.subject_id,
+                                "grade_id": question.grade_level,
+                                "source": "question"
+                            })
+
+        if not skills_data:
+            return jsonify({"message": "Nenhuma skill encontrada na avaliação."}), 404
+
+        # Ordenar por código da skill
+        skills_data.sort(key=lambda x: x['code'])
+
+        return jsonify(skills_data), 200
+
+    except Exception as e:
+        logging.error(f"Erro ao buscar skills da avaliação {test_id}: {str(e)}", exc_info=True)
+        return jsonify({"error": "Erro interno no servidor", "details": str(e)}), 500 

@@ -231,7 +231,7 @@ container_run:
                 if [ "$IS_RUNNING" = "true" ]; then
                     echo "$(date '+[%Y-%m-%d %H:%M:%S]') - Container '$CONTAINER_NAME' criado com id '$CONTAINER_ID'."
                 else
-                    echo "$(date '+[%Y-%m-%d %H:%M:%S]') - Falha ao criar o container '$CONTAINER_NAME'."
+                    echo "$(date '+[%Y-%m-%d %H:%M:%S]') - O container '$CONTAINER_NAME' foi criado mas parou."
                     exit 1
                 fi
             fi

@@ -4567,7 +4567,78 @@ paths:
         '500':
           $ref: '#/responses/InternalServerError'
 
+  /subjects:
+    get:
+      summary: Get list of subjects
+      responses:
+        '200':
+          description: A list of subjects
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    id:
+                      type: string
+                    name:
+                      type: string
+        '401':
+          $ref: '#/responses/UnauthorizedError'
+        '500':
+          $ref: '#/responses/InternalServerError'
 
+  /classes:
+    get:
+      summary: Get list of classes
+      responses:
+        '200':
+          description: A list of classes
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    id:
+                      type: string
+                    name:
+                      type: string
+                    school_id:
+                      type: string
+                    grade_id:
+                      type: string
+                      nullable: true
+        '401':
+          $ref: '#/responses/UnauthorizedError'
+        '500':
+          $ref: '#/responses/InternalServerError'
+
+  /schools:
+    get:
+      summary: Get list of schools
+      responses:
+        '200':
+          description: A list of schools
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    id:
+                      type: string
+                    name:
+                      type: string
+                    city_id:
+                      type: string
+        '401':
+          $ref: '#/responses/UnauthorizedError'
+        '500':
+          $ref: '#/responses/InternalServerError'
 
   /schools/recent:
     get:

@@ -29,6 +29,7 @@ class Test(db.Model):
     model = db.Column(db.String(50))  # SAEB, PROVA, etc
     subjects_info = db.Column(JSON)  # Informações sobre as disciplinas e quantidade de questões
     status = db.Column(db.String(20), default='pendente')  # agendada, em_andamento, concluida, cancelada
+    grade_calculation_type = db.Column(db.String(20), default='complex')  # complex, simple
 
     # Relacionamentos
     creator = db.relationship('User', foreign_keys=[created_by])

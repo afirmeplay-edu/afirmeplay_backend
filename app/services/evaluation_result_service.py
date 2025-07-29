@@ -115,12 +115,16 @@ class EvaluationResultService:
             
             subject_name = test.subject_rel.name if test.subject_rel else "Outras"
             
+            # Determinar tipo de cálculo baseado na configuração do teste
+            use_simple_calculation = test.grade_calculation_type == 'simple'
+            
             # Calcular resultado completo
             result = EvaluationCalculator.calculate_complete_evaluation(
                 correct_answers=correct_answers,
                 total_questions=total_questions,
                 course_name=course_name,
-                subject_name=subject_name
+                subject_name=subject_name,
+                use_simple_calculation=use_simple_calculation
             )
             
             # Calcular percentual de acertos

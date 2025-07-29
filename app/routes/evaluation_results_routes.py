@@ -571,11 +571,15 @@ def _calculate_evaluation_stats_frontend(test_id: str) -> Dict[str, Any]:
             alunos_participantes += 1
             correct_answers = int(student_answers['correct_answers'] or 0)
             
+            # Determinar tipo de cálculo baseado na configuração do teste
+            use_simple_calculation = test.grade_calculation_type == 'simple'
+            
             result = EvaluationCalculator.calculate_complete_evaluation(
                 correct_answers=correct_answers,
                 total_questions=total_questions,
                 course_name=course_name,
-                subject_name=subject_name
+                subject_name=subject_name,
+                use_simple_calculation=use_simple_calculation
             )
             
             # Converter para escala 0-1000
@@ -687,11 +691,15 @@ def _calculate_evaluation_stats_by_class(test_id: str, class_id: str) -> Dict[st
             alunos_participantes += 1
             correct_answers = int(student_answers['correct_answers'] or 0)
             
+            # Determinar tipo de cálculo baseado na configuração do teste
+            use_simple_calculation = test.grade_calculation_type == 'simple'
+            
             result = EvaluationCalculator.calculate_complete_evaluation(
                 correct_answers=correct_answers,
                 total_questions=total_questions,
                 course_name=course_name,
-                subject_name=subject_name
+                subject_name=subject_name,
+                use_simple_calculation=use_simple_calculation
             )
             
             # Converter para escala 0-1000
@@ -2451,21 +2459,44 @@ def get_student_answers(test_id, student_id):
             student_id=actual_student_id
         ).all()
         
+        if not answers:
+            return jsonify({
+                "test_id": test_id,
+                "student_id": student_id,
+                "student_db_id": student.id,
+                "total_answers": 0,
+                "answers": [],
+                "message": "Aluno não respondeu este teste"
+            }), 200
+        
         # Buscar questões do teste
         questions = Question.query.filter_by(test_id=test_id).all()
         questions_dict = {q.id: q for q in questions}
         
+        # Buscar resultado de avaliação para dados agregados
+        from app.models.evaluationResult import EvaluationResult
+        evaluation_result = EvaluationResult.query.filter_by(
+            test_id=test_id,
+            student_id=actual_student_id
+        ).first()
+        
         answers_data = []
+        correct_count = 0
+        total_questions = len(questions)
+        
         for answer in answers:
             question = questions_dict.get(answer.question_id)
             if question:
+                # Garantir que question_number não seja None
+                question_number = question.number if question.number is not None else 1
+                
                 answer_detail = {
                     "question_id": answer.question_id,
-                    "question_number": question.number or 1,
-                    "question_text": question.text,
-                    "question_type": question.question_type,
+                    "question_number": question_number,
+                    "question_text": question.text or "",
+                    "question_type": question.question_type or "multipleChoice",
                     "question_value": question.value or 1.0,
-                    "student_answer": answer.answer,
+                    "student_answer": answer.answer or "",
                     "answered_at": answer.answered_at.isoformat() if answer.answered_at else None,
                     "is_correct": None,
                     "score": None,
@@ -2479,6 +2510,8 @@ def get_student_answers(test_id, student_id):
                     is_correct = EvaluationResultService.check_multiple_choice_answer(answer.answer, question.alternatives)
                     answer_detail["is_correct"] = is_correct
                     answer_detail["score"] = question.value if is_correct else 0
+                    if is_correct:
+                        correct_count += 1
                     
                 elif question.question_type == 'essay':
                     if answer.manual_score is not None:
@@ -2486,8 +2519,11 @@ def get_student_answers(test_id, student_id):
                         answer_detail["score"] = essay_score
                         answer_detail["manual_score"] = answer.manual_score
                         answer_detail["is_correct"] = answer.is_correct
+                        if answer.is_correct:
+                            correct_count += 1
                     else:
                         answer_detail["status"] = "pending_correction"
+                        answer_detail["is_correct"] = None
                         
                 else:
                     # Outros tipos
@@ -2495,16 +2531,36 @@ def get_student_answers(test_id, student_id):
                         is_correct = str(answer.answer).strip().lower() == str(question.correct_answer).strip().lower()
                         answer_detail["is_correct"] = is_correct
                         answer_detail["score"] = question.value if is_correct else 0
+                        if is_correct:
+                            correct_count += 1
                 
                 answers_data.append(answer_detail)
         
-        return jsonify({
+        # Ordenar respostas por número da questão
+        answers_data.sort(key=lambda x: x['question_number'])
+        
+        # Preparar resposta com dados agregados
+        response_data = {
             "test_id": test_id,
             "student_id": student_id,
             "student_db_id": student.id,
             "total_answers": len(answers_data),
+            "total_questions": total_questions,
+            "correct_answers": correct_count,
+            "score_percentage": round((correct_count / total_questions * 100), 2) if total_questions > 0 else 0,
             "answers": answers_data
-        }), 200
+        }
+        
+        # Adicionar dados do resultado de avaliação se disponível
+        if evaluation_result:
+            response_data.update({
+                "grade": evaluation_result.grade,
+                "proficiency": evaluation_result.proficiency,
+                "classification": evaluation_result.classification,
+                "calculated_at": evaluation_result.calculated_at.isoformat() if evaluation_result.calculated_at else None
+            })
+        
+        return jsonify(response_data), 200
         
     except Exception as e:
         logging.error(f"Erro ao buscar respostas do aluno: {str(e)}", exc_info=True)

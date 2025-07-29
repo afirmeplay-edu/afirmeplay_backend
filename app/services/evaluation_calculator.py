@@ -229,18 +229,31 @@ class EvaluationCalculator:
         return round(proficiency, 2)
 
     @classmethod
-    def calculate_grade(cls, proficiency: float, course_name: str, subject_name: str) -> float:
+    def calculate_grade(cls, proficiency: float, course_name: str, subject_name: str, 
+                       use_simple_calculation: bool = False, correct_answers: int = None, 
+                       total_questions: int = None) -> float:
         """
-        Calcula a nota baseada na proficiência usando fórmulas específicas
+        Calcula a nota baseada na proficiência usando fórmulas específicas ou cálculo simples
         
         Args:
             proficiency: Proficiência calculada
             course_name: Nome do curso
             subject_name: Nome da disciplina
+            use_simple_calculation: Se True, usa cálculo simples (acertos/total × 10)
+            correct_answers: Número de acertos (necessário para cálculo simples)
+            total_questions: Total de questões (necessário para cálculo simples)
             
         Returns:
             Nota calculada (0-10)
         """
+        # Cálculo simples: acertos/total × 10
+        if use_simple_calculation and correct_answers is not None and total_questions is not None:
+            if total_questions == 0:
+                return 0.0
+            simple_grade = (correct_answers / total_questions) * 10
+            return round(simple_grade, 2)
+        
+        # Cálculo complexo baseado na proficiência (método original)
         course_level = cls._determine_course_level(course_name)
         subject_type = cls._determine_subject_type(subject_name)
         
@@ -293,7 +306,8 @@ class EvaluationCalculator:
 
     @classmethod
     def calculate_complete_evaluation(cls, correct_answers: int, total_questions: int,
-                                    course_name: str, subject_name: str) -> Dict:
+                                    course_name: str, subject_name: str, 
+                                    use_simple_calculation: bool = False) -> Dict:
         """
         Calcula proficiência, nota e classificação de uma vez
         
@@ -302,12 +316,18 @@ class EvaluationCalculator:
             total_questions: Total de questões
             course_name: Nome do curso
             subject_name: Nome da disciplina
+            use_simple_calculation: Se True, usa cálculo simples de nota
             
         Returns:
             Dicionário com proficiência, nota e classificação
         """
         proficiency = cls.calculate_proficiency(correct_answers, total_questions, course_name, subject_name)
-        grade = cls.calculate_grade(proficiency, course_name, subject_name)
+        grade = cls.calculate_grade(
+            proficiency, course_name, subject_name, 
+            use_simple_calculation=use_simple_calculation,
+            correct_answers=correct_answers,
+            total_questions=total_questions
+        )
         classification = cls.determine_classification(proficiency, course_name, subject_name)
         
         return {

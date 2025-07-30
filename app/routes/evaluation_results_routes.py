@@ -712,8 +712,9 @@ def _calculate_evaluation_stats_by_class(test_id: str, class_id: str) -> Dict[st
             proficiencias_1000.append(prof_1000)
             classificacoes[classification_1000] += 1
         else:
-            # Aluno NÃO respondeu - contar como "Abaixo do Básico"
-            classificacoes['Abaixo do Básico'] += 1
+            # Aluno NÃO respondeu - não incluir na distribuição de classificação
+            # Alunos ausentes não são classificados
+            pass
     
     # Calcular médias apenas dos alunos que participaram
     media_nota = round(sum(notas) / len(notas), 2) if notas else 0.0
@@ -770,6 +771,8 @@ def _calcular_estatisticas_municipio(class_tests: list, scope_info) -> Dict[str,
                 "total_avaliacoes": 0,
                 "total_alunos": 0,
                 "alunos_participantes": 0,
+                "alunos_pendentes": 0,
+                "alunos_ausentes": 0,
                 "media_nota_geral": 0.0,
                 "media_proficiencia_geral": 0.0,
                 "distribuicao_classificacao_geral": {
@@ -838,7 +841,7 @@ def _calcular_estatisticas_municipio(class_tests: list, scope_info) -> Dict[str,
             "total_alunos": total_alunos,
             "alunos_participantes": alunos_participantes,
             "alunos_pendentes": total_alunos - alunos_participantes,
-            "alunos_ausentes": 0,  # Pode ser calculado se necessário
+            "alunos_ausentes": total_alunos - alunos_participantes,  # Calculado corretamente
             "media_nota_geral": round(media_nota_geral, 2),
             "media_proficiencia_geral": round(media_proficiencia_geral, 2),
             "distribuicao_classificacao_geral": distribuicao_geral
@@ -995,7 +998,7 @@ def _calcular_estatisticas_por_disciplina(class_tests: list):
                 "total_alunos": total_alunos,
                 "alunos_participantes": alunos_participantes,
                 "alunos_pendentes": total_alunos - alunos_participantes,
-                "alunos_ausentes": 0,
+                "alunos_ausentes": total_alunos - alunos_participantes,
                 "media_nota": round(media_nota, 2),
                 "media_proficiencia": round(media_proficiencia, 2),
                 "distribuicao_classificacao": distribuicao_disciplina

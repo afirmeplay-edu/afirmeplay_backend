@@ -228,14 +228,20 @@ def get_classification_1000_scale(proficiency_1000: float) -> str:
 @role_required("admin", "professor", "coordenador", "diretor")
 def listar_avaliacoes():
     """
-    Lista avaliações aplicadas com estatísticas completas
+    Lista avaliações aplicadas com estatísticas completas e filtros em cascata
     
     Nota: Retorna apenas avaliações que foram efetivamente aplicadas (estão na tabela class_test)
     de acordo com os filtros selecionados.
     
     Query Parameters:
-    - estado, municipio, escola, serie, turma, avaliacao (mínimo 2 filtros obrigatórios)
+    - estado, municipio, escola, serie, turma, avaliacao (mínimo 3 filtros obrigatórios)
     - page, per_page
+    
+    Lógica de filtros em cascata:
+    - Estado + Município + Avaliação: Resultados consolidados do município
+    - Estado + Município + Avaliação + Escola: Resultados da escola
+    - Estado + Município + Avaliação + Escola + Série: Resultados da série
+    - Estado + Município + Avaliação + Escola + Série + Turma: Resultados da turma
     """
     try:
         user = get_current_user_from_token()
@@ -253,7 +259,7 @@ def listar_avaliacoes():
         per_page = request.args.get('per_page', 10, type=int)
         per_page = min(per_page, 100)  # Limitar máximo
         
-        # Validar mínimo de 2 filtros
+        # Validar mínimo de 3 filtros
         filtros_aplicados = sum([
             bool(estado),
             bool(municipio),
@@ -263,9 +269,25 @@ def listar_avaliacoes():
             bool(avaliacao)
         ])
         
-        if filtros_aplicados < 2:
+        if filtros_aplicados < 3:
             return jsonify({
-                "error": "É necessário aplicar pelo menos 2 filtros (estado, municipio, escola, serie, turma, avaliacao)"
+                "error": "É necessário aplicar pelo menos 3 filtros (estado, municipio, escola, serie, turma, avaliacao)"
+            }), 400
+        
+        # Validar sequência correta de filtros
+        if not estado:
+            return jsonify({
+                "error": "Estado é obrigatório como primeiro filtro"
+            }), 400
+        
+        if not municipio:
+            return jsonify({
+                "error": "Município é obrigatório como segundo filtro"
+            }), 400
+        
+        if not avaliacao:
+            return jsonify({
+                "error": "Avaliação é obrigatória como terceiro filtro"
             }), 400
         
         # Identificar escopo de busca baseado nos filtros aplicados
@@ -379,14 +401,28 @@ def listar_avaliacoes():
         if user['role'] == 'professor':
             query_base = query_base.filter(Test.created_by == user['id'])
         
-        # Buscar todas as avaliações do município para cálculos gerais
-        todas_avaliacoes_municipio = query_base.all()
+        # Buscar todas as avaliações do escopo para cálculos
+        todas_avaliacoes_escopo = query_base.all()
         
-        # Calcular estatísticas gerais do município
-        municipio_geral = _calcular_estatisticas_municipio(todas_avaliacoes_municipio, scope_info)
+        # Determinar nível de granularidade baseado nos filtros aplicados
+        nivel_granularidade = _determinar_nivel_granularidade(estado, municipio, escola, serie, turma, avaliacao)
         
-        # Calcular estatísticas por disciplina
-        resultados_por_disciplina = _calcular_estatisticas_por_disciplina(todas_avaliacoes_municipio)
+        # Calcular estatísticas baseadas no nível de granularidade
+        if nivel_granularidade == 'municipio':
+            estatisticas_gerais = _calcular_estatisticas_municipio(todas_avaliacoes_escopo, scope_info)
+            resultados_por_disciplina = _calcular_estatisticas_por_disciplina(todas_avaliacoes_escopo)
+        elif nivel_granularidade == 'escola':
+            estatisticas_gerais = _calcular_estatisticas_escola(todas_avaliacoes_escopo, escola, scope_info)
+            resultados_por_disciplina = _calcular_estatisticas_por_disciplina_escola(todas_avaliacoes_escopo, escola)
+        elif nivel_granularidade == 'serie':
+            estatisticas_gerais = _calcular_estatisticas_serie(todas_avaliacoes_escopo, escola, serie, scope_info)
+            resultados_por_disciplina = _calcular_estatisticas_por_disciplina_serie(todas_avaliacoes_escopo, escola, serie)
+        elif nivel_granularidade == 'turma':
+            estatisticas_gerais = _calcular_estatisticas_turma(todas_avaliacoes_escopo, escola, serie, turma, scope_info)
+            resultados_por_disciplina = _calcular_estatisticas_por_disciplina_turma(todas_avaliacoes_escopo, escola, serie, turma)
+        else:
+            estatisticas_gerais = _calcular_estatisticas_municipio(todas_avaliacoes_escopo, scope_info)
+            resultados_por_disciplina = _calcular_estatisticas_por_disciplina(todas_avaliacoes_escopo)
         
         # Aplicar paginação para resultados detalhados
         total = query_base.count()
@@ -472,8 +508,20 @@ def listar_avaliacoes():
         # Calcular total de páginas
         total_pages = (total + per_page - 1) // per_page
         
+        # Gerar opções para próximos filtros
+        opcoes_proximos_filtros = _gerar_opcoes_proximos_filtros(nivel_granularidade, estado, municipio, escola, serie, avaliacao)
+        
         return jsonify({
-            "municipio_geral": municipio_geral,
+            "nivel_granularidade": nivel_granularidade,
+            "filtros_aplicados": {
+                "estado": estado,
+                "municipio": municipio,
+                "escola": escola,
+                "serie": serie,
+                "turma": turma,
+                "avaliacao": avaliacao
+            },
+            "estatisticas_gerais": estatisticas_gerais,
             "resultados_por_disciplina": resultados_por_disciplina,
             "resultados_detalhados": {
                 "data": resultados_detalhados,
@@ -481,7 +529,8 @@ def listar_avaliacoes():
                 "page": page,
                 "per_page": per_page,
                 "total_pages": total_pages
-            }
+            },
+            "opcoes_proximos_filtros": opcoes_proximos_filtros
         }), 200
 
     except Exception as e:
@@ -1010,6 +1059,679 @@ def _calcular_estatisticas_por_disciplina(class_tests: list):
         
     except Exception as e:
         logging.error(f"Erro ao calcular estatísticas por disciplina: {str(e)}")
+        return []
+
+
+# ==================== FUNÇÕES AUXILIARES PARA FILTROS EM CASCATA ====================
+
+def _determinar_nivel_granularidade(estado, municipio, escola, serie, turma, avaliacao):
+    """
+    Determina o nível de granularidade baseado nos filtros aplicados
+    """
+    if estado and municipio and avaliacao and not escola and not serie and not turma:
+        return 'municipio'
+    elif estado and municipio and avaliacao and escola and not serie and not turma:
+        return 'escola'
+    elif estado and municipio and avaliacao and escola and serie and not turma:
+        return 'serie'
+    elif estado and municipio and avaliacao and escola and serie and turma:
+        return 'turma'
+    else:
+        return 'municipio'  # Padrão
+
+
+def _calcular_estatisticas_escola(class_tests: list, escola_id: str, scope_info) -> Dict[str, Any]:
+    """
+    Calcula estatísticas consolidadas da escola
+    """
+    try:
+        from app.models.evaluationResult import EvaluationResult
+        from app.models.student import Student
+        
+        if not class_tests:
+            return _empty_stats_escola(escola_id, scope_info)
+        
+        # Filtrar apenas avaliações da escola específica
+        escola_class_tests = [ct for ct in class_tests if ct.class_ and ct.class_.school_id == escola_id]
+        
+        if not escola_class_tests:
+            return _empty_stats_escola(escola_id, scope_info)
+        
+        # Coletar dados da escola
+        test_ids = [ct.test_id for ct in escola_class_tests]
+        class_ids = [ct.class_id for ct in escola_class_tests]
+        
+        # Buscar todos os alunos das turmas da escola
+        todos_alunos = Student.query.filter(Student.class_id.in_(class_ids)).all()
+        total_alunos = len(todos_alunos)
+        
+        # Buscar todos os resultados das avaliações da escola
+        todos_resultados = EvaluationResult.query.filter(EvaluationResult.test_id.in_(test_ids)).all()
+        alunos_participantes = len(todos_resultados)
+        
+        # Calcular médias consolidadas
+        if todos_resultados:
+            media_nota_geral = sum(r.grade for r in todos_resultados) / len(todos_resultados)
+            media_proficiencia_geral = sum(r.proficiency for r in todos_resultados) / len(todos_resultados)
+        else:
+            media_nota_geral = 0.0
+            media_proficiencia_geral = 0.0
+        
+        # Calcular distribuição de classificação consolidada
+        distribuicao_geral = {
+            'abaixo_do_basico': 0,
+            'basico': 0,
+            'adequado': 0,
+            'avancado': 0
+        }
+        
+        for resultado in todos_resultados:
+            classificacao = resultado.classification.lower()
+            if 'abaixo' in classificacao or 'básico' in classificacao:
+                distribuicao_geral['abaixo_do_basico'] += 1
+            elif 'básico' in classificacao or 'basico' in classificacao:
+                distribuicao_geral['basico'] += 1
+            elif 'adequado' in classificacao:
+                distribuicao_geral['adequado'] += 1
+            elif 'avançado' in classificacao or 'avancado' in classificacao:
+                distribuicao_geral['avancado'] += 1
+        
+        # Buscar informações da escola
+        escola = School.query.get(escola_id)
+        escola_nome = escola.name if escola else "Escola não encontrada"
+        
+        return {
+            "tipo": "escola",
+            "nome": escola_nome,
+            "estado": scope_info.get('estado', 'N/A'),
+            "municipio": scope_info.get('municipio', 'N/A'),
+            "total_series": len(set(ct.class_.grade_id for ct in escola_class_tests if ct.class_ and ct.class_.grade_id)),
+            "total_turmas": len(set(ct.class_id for ct in escola_class_tests)),
+            "total_avaliacoes": len(test_ids),
+            "total_alunos": total_alunos,
+            "alunos_participantes": alunos_participantes,
+            "alunos_pendentes": total_alunos - alunos_participantes,
+            "alunos_ausentes": total_alunos - alunos_participantes,
+            "media_nota_geral": round(media_nota_geral, 2),
+            "media_proficiencia_geral": round(media_proficiencia_geral, 2),
+            "distribuicao_classificacao_geral": distribuicao_geral
+        }
+        
+    except Exception as e:
+        logging.error(f"Erro ao calcular estatísticas da escola: {str(e)}")
+        return _empty_stats_escola(escola_id, scope_info)
+
+
+def _calcular_estatisticas_serie(class_tests: list, escola_id: str, serie_id: str, scope_info) -> Dict[str, Any]:
+    """
+    Calcula estatísticas consolidadas da série
+    """
+    try:
+        from app.models.evaluationResult import EvaluationResult
+        from app.models.student import Student
+        
+        if not class_tests:
+            return _empty_stats_serie(escola_id, serie_id, scope_info)
+        
+        # Filtrar apenas avaliações da série específica
+        serie_class_tests = [ct for ct in class_tests 
+                           if ct.class_ and ct.class_.school_id == escola_id and ct.class_.grade_id == serie_id]
+        
+        if not serie_class_tests:
+            return _empty_stats_serie(escola_id, serie_id, scope_info)
+        
+        # Coletar dados da série
+        test_ids = [ct.test_id for ct in serie_class_tests]
+        class_ids = [ct.class_id for ct in serie_class_tests]
+        
+        # Buscar todos os alunos das turmas da série
+        todos_alunos = Student.query.filter(Student.class_id.in_(class_ids)).all()
+        total_alunos = len(todos_alunos)
+        
+        # Buscar todos os resultados das avaliações da série
+        todos_resultados = EvaluationResult.query.filter(EvaluationResult.test_id.in_(test_ids)).all()
+        alunos_participantes = len(todos_resultados)
+        
+        # Calcular médias consolidadas
+        if todos_resultados:
+            media_nota_geral = sum(r.grade for r in todos_resultados) / len(todos_resultados)
+            media_proficiencia_geral = sum(r.proficiency for r in todos_resultados) / len(todos_resultados)
+        else:
+            media_nota_geral = 0.0
+            media_proficiencia_geral = 0.0
+        
+        # Calcular distribuição de classificação consolidada
+        distribuicao_geral = {
+            'abaixo_do_basico': 0,
+            'basico': 0,
+            'adequado': 0,
+            'avancado': 0
+        }
+        
+        for resultado in todos_resultados:
+            classificacao = resultado.classification.lower()
+            if 'abaixo' in classificacao or 'básico' in classificacao:
+                distribuicao_geral['abaixo_do_basico'] += 1
+            elif 'básico' in classificacao or 'basico' in classificacao:
+                distribuicao_geral['basico'] += 1
+            elif 'adequado' in classificacao:
+                distribuicao_geral['adequado'] += 1
+            elif 'avançado' in classificacao or 'avancado' in classificacao:
+                distribuicao_geral['avancado'] += 1
+        
+        # Buscar informações da escola e série
+        escola = School.query.get(escola_id)
+        serie = Grade.query.get(serie_id)
+        escola_nome = escola.name if escola else "Escola não encontrada"
+        serie_nome = serie.name if serie else "Série não encontrada"
+        
+        return {
+            "tipo": "serie",
+            "nome": serie_nome,
+            "escola": escola_nome,
+            "estado": scope_info.get('estado', 'N/A'),
+            "municipio": scope_info.get('municipio', 'N/A'),
+            "total_turmas": len(set(ct.class_id for ct in serie_class_tests)),
+            "total_avaliacoes": len(test_ids),
+            "total_alunos": total_alunos,
+            "alunos_participantes": alunos_participantes,
+            "alunos_pendentes": total_alunos - alunos_participantes,
+            "alunos_ausentes": total_alunos - alunos_participantes,
+            "media_nota_geral": round(media_nota_geral, 2),
+            "media_proficiencia_geral": round(media_proficiencia_geral, 2),
+            "distribuicao_classificacao_geral": distribuicao_geral
+        }
+        
+    except Exception as e:
+        logging.error(f"Erro ao calcular estatísticas da série: {str(e)}")
+        return _empty_stats_serie(escola_id, serie_id, scope_info)
+
+
+def _calcular_estatisticas_turma(class_tests: list, escola_id: str, serie_id: str, turma_id: str, scope_info) -> Dict[str, Any]:
+    """
+    Calcula estatísticas consolidadas da turma
+    """
+    try:
+        from app.models.evaluationResult import EvaluationResult
+        from app.models.student import Student
+        
+        if not class_tests:
+            return _empty_stats_turma(escola_id, serie_id, turma_id, scope_info)
+        
+        # Filtrar apenas avaliações da turma específica
+        turma_class_tests = [ct for ct in class_tests 
+                           if ct.class_id == turma_id]
+        
+        if not turma_class_tests:
+            return _empty_stats_turma(escola_id, serie_id, turma_id, scope_info)
+        
+        # Coletar dados da turma
+        test_ids = [ct.test_id for ct in turma_class_tests]
+        
+        # Buscar todos os alunos da turma
+        todos_alunos = Student.query.filter(Student.class_id == turma_id).all()
+        total_alunos = len(todos_alunos)
+        
+        # Buscar todos os resultados das avaliações da turma
+        todos_resultados = EvaluationResult.query.filter(EvaluationResult.test_id.in_(test_ids)).all()
+        alunos_participantes = len(todos_resultados)
+        
+        # Calcular médias consolidadas
+        if todos_resultados:
+            media_nota_geral = sum(r.grade for r in todos_resultados) / len(todos_resultados)
+            media_proficiencia_geral = sum(r.proficiency for r in todos_resultados) / len(todos_resultados)
+        else:
+            media_nota_geral = 0.0
+            media_proficiencia_geral = 0.0
+        
+        # Calcular distribuição de classificação consolidada
+        distribuicao_geral = {
+            'abaixo_do_basico': 0,
+            'basico': 0,
+            'adequado': 0,
+            'avancado': 0
+        }
+        
+        for resultado in todos_resultados:
+            classificacao = resultado.classification.lower()
+            if 'abaixo' in classificacao or 'básico' in classificacao:
+                distribuicao_geral['abaixo_do_basico'] += 1
+            elif 'básico' in classificacao or 'basico' in classificacao:
+                distribuicao_geral['basico'] += 1
+            elif 'adequado' in classificacao:
+                distribuicao_geral['adequado'] += 1
+            elif 'avançado' in classificacao or 'avancado' in classificacao:
+                distribuicao_geral['avancado'] += 1
+        
+        # Buscar informações da escola, série e turma
+        escola = School.query.get(escola_id)
+        serie = Grade.query.get(serie_id)
+        turma = Class.query.get(turma_id)
+        escola_nome = escola.name if escola else "Escola não encontrada"
+        serie_nome = serie.name if serie else "Série não encontrada"
+        turma_nome = turma.name if turma else "Turma não encontrada"
+        
+        return {
+            "tipo": "turma",
+            "nome": turma_nome,
+            "serie": serie_nome,
+            "escola": escola_nome,
+            "estado": scope_info.get('estado', 'N/A'),
+            "municipio": scope_info.get('municipio', 'N/A'),
+            "total_avaliacoes": len(test_ids),
+            "total_alunos": total_alunos,
+            "alunos_participantes": alunos_participantes,
+            "alunos_pendentes": total_alunos - alunos_participantes,
+            "alunos_ausentes": total_alunos - alunos_participantes,
+            "media_nota_geral": round(media_nota_geral, 2),
+            "media_proficiencia_geral": round(media_proficiencia_geral, 2),
+            "distribuicao_classificacao_geral": distribuicao_geral
+        }
+        
+    except Exception as e:
+        logging.error(f"Erro ao calcular estatísticas da turma: {str(e)}")
+        return _empty_stats_turma(escola_id, serie_id, turma_id, scope_info)
+
+
+def _gerar_opcoes_proximos_filtros(nivel_granularidade: str, estado: str, municipio: str, escola: str, serie: str, avaliacao: str) -> Dict[str, Any]:
+    """
+    Gera opções para próximos filtros baseado no nível atual
+    """
+    try:
+        opcoes = {}
+        
+        if nivel_granularidade == 'municipio':
+            # Próximo nível: escola
+            escolas = School.query.join(City).filter(
+                City.state.ilike(f"%{estado}%"),
+                City.name.ilike(f"%{municipio}%")
+            ).all()
+            
+            opcoes['escolas'] = [
+                {"id": escola.id, "name": escola.name}
+                for escola in escolas
+            ]
+            
+        elif nivel_granularidade == 'escola':
+            # Próximo nível: série
+            series = Grade.query.join(Class).join(School).filter(
+                School.id == escola
+            ).distinct().all()
+            
+            opcoes['series'] = [
+                {"id": serie.id, "name": serie.name}
+                for serie in series
+            ]
+            
+        elif nivel_granularidade == 'serie':
+            # Próximo nível: turma
+            turmas = Class.query.join(School).join(Grade).filter(
+                School.id == escola,
+                Grade.id == serie
+            ).all()
+            
+            opcoes['turmas'] = [
+                {"id": turma.id, "name": turma.name}
+                for turma in turmas
+            ]
+            
+        elif nivel_granularidade == 'turma':
+            # Nível máximo alcançado
+            opcoes['maximo_alcancado'] = True
+            
+        return opcoes
+        
+    except Exception as e:
+        logging.error(f"Erro ao gerar opções de próximos filtros: {str(e)}")
+        return {}
+
+
+def _empty_stats_escola(escola_id: str, scope_info) -> Dict[str, Any]:
+    """Retorna estatísticas vazias para escola"""
+    escola = School.query.get(escola_id)
+    return {
+        "tipo": "escola",
+        "nome": escola.name if escola else "Escola não encontrada",
+        "estado": scope_info.get('estado', 'N/A'),
+        "municipio": scope_info.get('municipio', 'N/A'),
+        "total_series": 0,
+        "total_turmas": 0,
+        "total_avaliacoes": 0,
+        "total_alunos": 0,
+        "alunos_participantes": 0,
+        "alunos_pendentes": 0,
+        "alunos_ausentes": 0,
+        "media_nota_geral": 0.0,
+        "media_proficiencia_geral": 0.0,
+        "distribuicao_classificacao_geral": {
+            "abaixo_do_basico": 0,
+            "basico": 0,
+            "adequado": 0,
+            "avancado": 0
+        }
+    }
+
+
+def _empty_stats_serie(escola_id: str, serie_id: str, scope_info) -> Dict[str, Any]:
+    """Retorna estatísticas vazias para série"""
+    escola = School.query.get(escola_id)
+    serie = Grade.query.get(serie_id)
+    return {
+        "tipo": "serie",
+        "nome": serie.name if serie else "Série não encontrada",
+        "escola": escola.name if escola else "Escola não encontrada",
+        "estado": scope_info.get('estado', 'N/A'),
+        "municipio": scope_info.get('municipio', 'N/A'),
+        "total_turmas": 0,
+        "total_avaliacoes": 0,
+        "total_alunos": 0,
+        "alunos_participantes": 0,
+        "alunos_pendentes": 0,
+        "alunos_ausentes": 0,
+        "media_nota_geral": 0.0,
+        "media_proficiencia_geral": 0.0,
+        "distribuicao_classificacao_geral": {
+            "abaixo_do_basico": 0,
+            "basico": 0,
+            "adequado": 0,
+            "avancado": 0
+        }
+    }
+
+
+def _empty_stats_turma(escola_id: str, serie_id: str, turma_id: str, scope_info) -> Dict[str, Any]:
+    """Retorna estatísticas vazias para turma"""
+    escola = School.query.get(escola_id)
+    serie = Grade.query.get(serie_id)
+    turma = Class.query.get(turma_id)
+    return {
+        "tipo": "turma",
+        "nome": turma.name if turma else "Turma não encontrada",
+        "serie": serie.name if serie else "Série não encontrada",
+        "escola": escola.name if escola else "Escola não encontrada",
+        "estado": scope_info.get('estado', 'N/A'),
+        "municipio": scope_info.get('municipio', 'N/A'),
+        "total_avaliacoes": 0,
+        "total_alunos": 0,
+        "alunos_participantes": 0,
+        "alunos_pendentes": 0,
+        "alunos_ausentes": 0,
+        "media_nota_geral": 0.0,
+        "media_proficiencia_geral": 0.0,
+        "distribuicao_classificacao_geral": {
+            "abaixo_do_basico": 0,
+            "basico": 0,
+            "adequado": 0,
+            "avancado": 0
+        }
+    }
+
+
+def _calcular_estatisticas_por_disciplina_escola(class_tests: list, escola_id: str):
+    """
+    Calcula estatísticas agrupadas por disciplina para uma escola específica
+    """
+    try:
+        from app.models.evaluationResult import EvaluationResult
+        from app.models.student import Student
+        
+        if not class_tests:
+            return []
+        
+        # Filtrar apenas avaliações da escola específica
+        escola_class_tests = [ct for ct in class_tests if ct.class_ and ct.class_.school_id == escola_id]
+        
+        if not escola_class_tests:
+            return []
+        
+        # Agrupar avaliações por disciplina
+        disciplinas = {}
+        for ct in escola_class_tests:
+            if ct.test and ct.test.subject_rel:
+                disciplina_nome = ct.test.subject_rel.name
+                if disciplina_nome not in disciplinas:
+                    disciplinas[disciplina_nome] = []
+                disciplinas[disciplina_nome].append(ct)
+        
+        resultados_disciplina = []
+        
+        for disciplina_nome, avaliacoes_disciplina in disciplinas.items():
+            # Coletar dados da disciplina
+            test_ids = [ct.test_id for ct in avaliacoes_disciplina]
+            class_ids = [ct.class_id for ct in avaliacoes_disciplina]
+            
+            # Buscar todos os alunos das turmas envolvidas
+            todos_alunos = Student.query.filter(Student.class_id.in_(class_ids)).all()
+            total_alunos = len(todos_alunos)
+            
+            # Buscar todos os resultados das avaliações da disciplina
+            todos_resultados = EvaluationResult.query.filter(EvaluationResult.test_id.in_(test_ids)).all()
+            alunos_participantes = len(todos_resultados)
+            
+            # Calcular médias da disciplina
+            if todos_resultados:
+                media_nota = sum(r.grade for r in todos_resultados) / len(todos_resultados)
+                media_proficiencia = sum(r.proficiency for r in todos_resultados) / len(todos_resultados)
+            else:
+                media_nota = 0.0
+                media_proficiencia = 0.0
+            
+            # Calcular distribuição de classificação da disciplina
+            distribuicao_disciplina = {
+                'abaixo_do_basico': 0,
+                'basico': 0,
+                'adequado': 0,
+                'avancado': 0
+            }
+            
+            for resultado in todos_resultados:
+                classificacao = resultado.classification.lower()
+                if 'abaixo' in classificacao or 'básico' in classificacao:
+                    distribuicao_disciplina['abaixo_do_basico'] += 1
+                elif 'básico' in classificacao or 'basico' in classificacao:
+                    distribuicao_disciplina['basico'] += 1
+                elif 'adequado' in classificacao:
+                    distribuicao_disciplina['adequado'] += 1
+                elif 'avançado' in classificacao or 'avancado' in classificacao:
+                    distribuicao_disciplina['avancado'] += 1
+            
+            resultado_disciplina = {
+                "disciplina": disciplina_nome,
+                "total_avaliacoes": len(test_ids),
+                "total_alunos": total_alunos,
+                "alunos_participantes": alunos_participantes,
+                "alunos_pendentes": total_alunos - alunos_participantes,
+                "alunos_ausentes": total_alunos - alunos_participantes,
+                "media_nota": round(media_nota, 2),
+                "media_proficiencia": round(media_proficiencia, 2),
+                "distribuicao_classificacao": distribuicao_disciplina
+            }
+            
+            resultados_disciplina.append(resultado_disciplina)
+        
+        return resultados_disciplina
+        
+    except Exception as e:
+        logging.error(f"Erro ao calcular estatísticas por disciplina da escola: {str(e)}")
+        return []
+
+
+def _calcular_estatisticas_por_disciplina_serie(class_tests: list, escola_id: str, serie_id: str):
+    """
+    Calcula estatísticas agrupadas por disciplina para uma série específica
+    """
+    try:
+        from app.models.evaluationResult import EvaluationResult
+        from app.models.student import Student
+        
+        if not class_tests:
+            return []
+        
+        # Filtrar apenas avaliações da série específica
+        serie_class_tests = [ct for ct in class_tests 
+                           if ct.class_ and ct.class_.school_id == escola_id and ct.class_.grade_id == serie_id]
+        
+        if not serie_class_tests:
+            return []
+        
+        # Agrupar avaliações por disciplina
+        disciplinas = {}
+        for ct in serie_class_tests:
+            if ct.test and ct.test.subject_rel:
+                disciplina_nome = ct.test.subject_rel.name
+                if disciplina_nome not in disciplinas:
+                    disciplinas[disciplina_nome] = []
+                disciplinas[disciplina_nome].append(ct)
+        
+        resultados_disciplina = []
+        
+        for disciplina_nome, avaliacoes_disciplina in disciplinas.items():
+            # Coletar dados da disciplina
+            test_ids = [ct.test_id for ct in avaliacoes_disciplina]
+            class_ids = [ct.class_id for ct in avaliacoes_disciplina]
+            
+            # Buscar todos os alunos das turmas envolvidas
+            todos_alunos = Student.query.filter(Student.class_id.in_(class_ids)).all()
+            total_alunos = len(todos_alunos)
+            
+            # Buscar todos os resultados das avaliações da disciplina
+            todos_resultados = EvaluationResult.query.filter(EvaluationResult.test_id.in_(test_ids)).all()
+            alunos_participantes = len(todos_resultados)
+            
+            # Calcular médias da disciplina
+            if todos_resultados:
+                media_nota = sum(r.grade for r in todos_resultados) / len(todos_resultados)
+                media_proficiencia = sum(r.proficiency for r in todos_resultados) / len(todos_resultados)
+            else:
+                media_nota = 0.0
+                media_proficiencia = 0.0
+            
+            # Calcular distribuição de classificação da disciplina
+            distribuicao_disciplina = {
+                'abaixo_do_basico': 0,
+                'basico': 0,
+                'adequado': 0,
+                'avancado': 0
+            }
+            
+            for resultado in todos_resultados:
+                classificacao = resultado.classification.lower()
+                if 'abaixo' in classificacao or 'básico' in classificacao:
+                    distribuicao_disciplina['abaixo_do_basico'] += 1
+                elif 'básico' in classificacao or 'basico' in classificacao:
+                    distribuicao_disciplina['basico'] += 1
+                elif 'adequado' in classificacao:
+                    distribuicao_disciplina['adequado'] += 1
+                elif 'avançado' in classificacao or 'avancado' in classificacao:
+                    distribuicao_disciplina['avancado'] += 1
+            
+            resultado_disciplina = {
+                "disciplina": disciplina_nome,
+                "total_avaliacoes": len(test_ids),
+                "total_alunos": total_alunos,
+                "alunos_participantes": alunos_participantes,
+                "alunos_pendentes": total_alunos - alunos_participantes,
+                "alunos_ausentes": total_alunos - alunos_participantes,
+                "media_nota": round(media_nota, 2),
+                "media_proficiencia": round(media_proficiencia, 2),
+                "distribuicao_classificacao": distribuicao_disciplina
+            }
+            
+            resultados_disciplina.append(resultado_disciplina)
+        
+        return resultados_disciplina
+        
+    except Exception as e:
+        logging.error(f"Erro ao calcular estatísticas por disciplina da série: {str(e)}")
+        return []
+
+
+def _calcular_estatisticas_por_disciplina_turma(class_tests: list, escola_id: str, serie_id: str, turma_id: str):
+    """
+    Calcula estatísticas agrupadas por disciplina para uma turma específica
+    """
+    try:
+        from app.models.evaluationResult import EvaluationResult
+        from app.models.student import Student
+        
+        if not class_tests:
+            return []
+        
+        # Filtrar apenas avaliações da turma específica
+        turma_class_tests = [ct for ct in class_tests if ct.class_id == turma_id]
+        
+        if not turma_class_tests:
+            return []
+        
+        # Agrupar avaliações por disciplina
+        disciplinas = {}
+        for ct in turma_class_tests:
+            if ct.test and ct.test.subject_rel:
+                disciplina_nome = ct.test.subject_rel.name
+                if disciplina_nome not in disciplinas:
+                    disciplinas[disciplina_nome] = []
+                disciplinas[disciplina_nome].append(ct)
+        
+        resultados_disciplina = []
+        
+        for disciplina_nome, avaliacoes_disciplina in disciplinas.items():
+            # Coletar dados da disciplina
+            test_ids = [ct.test_id for ct in avaliacoes_disciplina]
+            class_ids = [ct.class_id for ct in avaliacoes_disciplina]
+            
+            # Buscar todos os alunos das turmas envolvidas
+            todos_alunos = Student.query.filter(Student.class_id.in_(class_ids)).all()
+            total_alunos = len(todos_alunos)
+            
+            # Buscar todos os resultados das avaliações da disciplina
+            todos_resultados = EvaluationResult.query.filter(EvaluationResult.test_id.in_(test_ids)).all()
+            alunos_participantes = len(todos_resultados)
+            
+            # Calcular médias da disciplina
+            if todos_resultados:
+                media_nota = sum(r.grade for r in todos_resultados) / len(todos_resultados)
+                media_proficiencia = sum(r.proficiency for r in todos_resultados) / len(todos_resultados)
+            else:
+                media_nota = 0.0
+                media_proficiencia = 0.0
+            
+            # Calcular distribuição de classificação da disciplina
+            distribuicao_disciplina = {
+                'abaixo_do_basico': 0,
+                'basico': 0,
+                'adequado': 0,
+                'avancado': 0
+            }
+            
+            for resultado in todos_resultados:
+                classificacao = resultado.classification.lower()
+                if 'abaixo' in classificacao or 'básico' in classificacao:
+                    distribuicao_disciplina['abaixo_do_basico'] += 1
+                elif 'básico' in classificacao or 'basico' in classificacao:
+                    distribuicao_disciplina['basico'] += 1
+                elif 'adequado' in classificacao:
+                    distribuicao_disciplina['adequado'] += 1
+                elif 'avançado' in classificacao or 'avancado' in classificacao:
+                    distribuicao_disciplina['avancado'] += 1
+            
+            resultado_disciplina = {
+                "disciplina": disciplina_nome,
+                "total_avaliacoes": len(test_ids),
+                "total_alunos": total_alunos,
+                "alunos_participantes": alunos_participantes,
+                "alunos_pendentes": total_alunos - alunos_participantes,
+                "alunos_ausentes": total_alunos - alunos_participantes,
+                "media_nota": round(media_nota, 2),
+                "media_proficiencia": round(media_proficiencia, 2),
+                "distribuicao_classificacao": distribuicao_disciplina
+            }
+            
+            resultados_disciplina.append(resultado_disciplina)
+        
+        return resultados_disciplina
+        
+    except Exception as e:
+        logging.error(f"Erro ao calcular estatísticas por disciplina da turma: {str(e)}")
         return []
 
 

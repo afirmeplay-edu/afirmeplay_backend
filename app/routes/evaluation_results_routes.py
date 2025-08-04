@@ -185,6 +185,15 @@ def test_relatorio_detalhado(evaluation_id):
 def handle_error(error):
     """Tratamento global de erros para este blueprint"""
     logging.error(f"Erro em evaluation_results: {str(error)}", exc_info=True)
+    
+    # Verificar se é um erro de transação falhada
+    if "InFailedSqlTransaction" in str(error):
+        try:
+            db.session.rollback()
+            logging.info("Rollback da transação realizado no error handler")
+        except Exception as rollback_error:
+            logging.error(f"Erro ao fazer rollback no error handler: {str(rollback_error)}")
+    
     return jsonify({
         "error": "Erro interno no servidor",
         "details": str(error)
@@ -258,6 +267,14 @@ def listar_avaliacoes():
     Filtros com valor "all" retornam todos os registros daquele nível dentro do contexto dos filtros anteriores.
     """
     try:
+        # Garantir que não há transação pendente e limpar a sessão
+        try:
+            db.session.rollback()
+            db.session.close()
+            db.session.remove()
+        except Exception:
+            pass  # Ignorar erros de rollback no início
+        
         user = get_current_user_from_token()
         if not user:
             return jsonify({"error": "Usuário não encontrado"}), 401
@@ -314,7 +331,15 @@ def listar_avaliacoes():
         escolas_escopo = scope_info.get('escolas', [])
         escola_ids = [escola.id for escola in escolas_escopo]
         
-        if not escola_ids:
+        # Log para debug
+        logging.info(f"Escolas encontradas no escopo: {len(escolas_escopo)}")
+        if avaliacao and avaliacao.lower() != 'all':
+            logging.info(f"Avaliação específica selecionada: {avaliacao}")
+            logging.info(f"Escolas onde a avaliação foi aplicada: {[escola.name for escola in escolas_escopo]}")
+        
+        # Se não há escolas no escopo mas há uma avaliação específica, 
+        # isso significa que a avaliação não foi aplicada em nenhuma escola do município
+        if not escola_ids and avaliacao and avaliacao.lower() != 'all':
             return jsonify({
                 "nivel_granularidade": "municipio",
                 "filtros_aplicados": {
@@ -369,82 +394,195 @@ def listar_avaliacoes():
         
         # Buscar apenas avaliações que foram aplicadas (estão na tabela class_test)
         # Filtradas pelas escolas do escopo selecionado
-        query_base = ClassTest.query.join(Test, ClassTest.test_id == Test.id)\
-                                   .join(Class, ClassTest.class_id == Class.id)\
-                                   .join(Grade, Class.grade_id == Grade.id)\
-                                   .join(School, Class.school_id == School.id)\
-                                   .join(City, School.city_id == City.id)\
-                                   .filter(School.id.in_(escola_ids))\
-                                   .options(
-                                       joinedload(ClassTest.test).joinedload(Test.subject_rel),
-                                       joinedload(ClassTest.class_).joinedload(Class.grade),
-                                       joinedload(ClassTest.class_).joinedload(Class.school).joinedload(School.city)
-                                   )
+        try:
+            # Garantir que a sessão está limpa antes de construir a query
+            db.session.rollback()
+            
+            query_base = ClassTest.query.join(Test, ClassTest.test_id == Test.id)\
+                                       .join(Class, ClassTest.class_id == Class.id)\
+                                       .join(Grade, Class.grade_id == Grade.id)\
+                                       .join(School, Class.school_id == School.id)\
+                                       .join(City, School.city_id == City.id)\
+                                       .filter(School.id.in_(escola_ids))\
+                                       .options(
+                                           joinedload(ClassTest.test).joinedload(Test.subject_rel),
+                                           joinedload(ClassTest.class_).joinedload(Class.grade),
+                                           joinedload(ClassTest.class_).joinedload(Class.school).joinedload(School.city)
+                                       )
+            
+            # Log da query para debug
+            logging.info(f"Query base construída com {len(escola_ids)} escolas")
+            
+        except Exception as e:
+            logging.error(f"Erro ao construir query base: {str(e)}")
+            db.session.rollback()
+            return jsonify({"error": "Erro ao construir query", "details": str(e)}), 500
         
         # Aplicar filtros na ordem especificada (filtros com "all" são ignorados)
-        if estado and estado.lower() != 'all':
-            query_base = query_base.filter(City.state.ilike(f"%{estado}%"))
-        
-        if municipio and municipio.lower() != 'all':
-            # Tentar filtrar por ID primeiro, depois por nome
-            city_filter = City.query.get(municipio)
-            if city_filter:
-                query_base = query_base.filter(City.id == municipio)
-            else:
-                query_base = query_base.filter(City.name.ilike(f"%{municipio}%"))
-        
-        if avaliacao and avaliacao.lower() != 'all':
-            # Tentar filtrar por ID primeiro, depois por título
-            test_filter = Test.query.get(avaliacao)
-            if test_filter:
-                query_base = query_base.filter(Test.id == avaliacao)
-            else:
-                query_base = query_base.filter(Test.title.ilike(f"%{avaliacao}%"))
-        
-        if escola and escola.lower() != 'all':
-            # Tentar filtrar por ID primeiro, depois por nome
-            school_filter = School.query.get(escola)
-            if school_filter:
-                query_base = query_base.filter(School.id == escola)
-            else:
-                query_base = query_base.filter(School.name.ilike(f"%{escola}%"))
-        
-        if serie and serie.lower() != 'all':
-            # Tentar filtrar por ID primeiro, depois por nome
-            grade_filter = Grade.query.get(serie)
-            if grade_filter:
-                query_base = query_base.filter(Grade.id == serie)
-            else:
-                query_base = query_base.filter(Grade.name.ilike(f"%{serie}%"))
-        
-        if turma and turma.lower() != 'all':
-            # Tentar filtrar por ID primeiro, depois por nome
-            class_filter = Class.query.get(turma)
-            if class_filter:
-                query_base = query_base.filter(Class.id == turma)
-            else:
-                query_base = query_base.filter(Class.name.ilike(f"%{turma}%"))
-        
-        # Se for professor, filtrar apenas suas avaliações
-        if user['role'] == 'professor':
-            query_base = query_base.filter(Test.created_by == user['id'])
+        try:
+            # Garantir que a sessão está limpa antes de aplicar filtros
+            db.session.rollback()
+            
+            if estado and estado.lower() != 'all':
+                query_base = query_base.filter(City.state.ilike(f"%{estado}%"))
+            
+            if municipio and municipio.lower() != 'all':
+                # Tentar filtrar por ID primeiro, depois por nome
+                city_filter = City.query.get(municipio)
+                if city_filter:
+                    query_base = query_base.filter(City.id == municipio)
+                else:
+                    query_base = query_base.filter(City.name.ilike(f"%{municipio}%"))
+            
+            if avaliacao and avaliacao.lower() != 'all':
+                # Tentar filtrar por ID primeiro, depois por título
+                test_filter = Test.query.get(avaliacao)
+                if test_filter:
+                    query_base = query_base.filter(Test.id == avaliacao)
+                else:
+                    query_base = query_base.filter(Test.title.ilike(f"%{avaliacao}%"))
+            
+            if escola and escola.lower() != 'all':
+                # Tentar filtrar por ID primeiro, depois por nome
+                school_filter = School.query.get(escola)
+                if school_filter:
+                    query_base = query_base.filter(School.id == escola)
+                else:
+                    query_base = query_base.filter(School.name.ilike(f"%{escola}%"))
+            
+            if serie and serie.lower() != 'all':
+                # Tentar filtrar por ID primeiro, depois por nome
+                grade_filter = Grade.query.get(serie)
+                if grade_filter:
+                    query_base = query_base.filter(Grade.id == serie)
+                else:
+                    query_base = query_base.filter(Grade.name.ilike(f"%{serie}%"))
+            
+            if turma and turma.lower() != 'all':
+                # Tentar filtrar por ID primeiro, depois por nome
+                class_filter = Class.query.get(turma)
+                if class_filter:
+                    query_base = query_base.filter(Class.id == turma)
+                else:
+                    query_base = query_base.filter(Class.name.ilike(f"%{turma}%"))
+            
+            # Se for professor, filtrar apenas suas avaliações
+            if user['role'] == 'professor':
+                query_base = query_base.filter(Test.created_by == user['id'])
+                
+        except Exception as e:
+            logging.error(f"Erro ao aplicar filtros: {str(e)}")
+            db.session.rollback()
+            return jsonify({"error": "Erro ao aplicar filtros", "details": str(e)}), 500
         
         # Buscar todas as avaliações do escopo para cálculos
-        todas_avaliacoes_escopo = query_base.all()
+        try:
+            # Garantir que a sessão está limpa antes de executar a query
+            db.session.rollback()
+            
+            # Se ainda houver erro, tentar com uma nova sessão
+            try:
+                todas_avaliacoes_escopo = query_base.all()
+            except Exception as inner_e:
+                if "InFailedSqlTransaction" in str(inner_e):
+                    logging.warning("Tentando com nova sessão devido a transação falhada")
+                    db.session.rollback()
+                    db.session.close()
+                    # Recriar a query com nova sessão
+                    query_base = ClassTest.query.join(Test, ClassTest.test_id == Test.id)\
+                                               .join(Class, ClassTest.class_id == Class.id)\
+                                               .join(Grade, Class.grade_id == Grade.id)\
+                                               .join(School, Class.school_id == School.id)\
+                                               .join(City, School.city_id == City.id)\
+                                               .filter(School.id.in_(escola_ids))\
+                                               .options(
+                                                   joinedload(ClassTest.test).joinedload(Test.subject_rel),
+                                                   joinedload(ClassTest.class_).joinedload(Class.grade),
+                                                   joinedload(ClassTest.class_).joinedload(Class.school).joinedload(School.city)
+                                               )
+                    # Reaplicar filtros
+                    if estado and estado.lower() != 'all':
+                        query_base = query_base.filter(City.state.ilike(f"%{estado}%"))
+                    if municipio and municipio.lower() != 'all':
+                        city_filter = City.query.get(municipio)
+                        if city_filter:
+                            query_base = query_base.filter(City.id == municipio)
+                    if avaliacao and avaliacao.lower() != 'all':
+                        test_filter = Test.query.get(avaliacao)
+                        if test_filter:
+                            query_base = query_base.filter(Test.id == avaliacao)
+                    if user['role'] == 'professor':
+                        query_base = query_base.filter(Test.created_by == user['id'])
+                    
+                    todas_avaliacoes_escopo = query_base.all()
+                else:
+                    raise inner_e
+                    
+        except Exception as e:
+            logging.error(f"Erro ao buscar avaliações do escopo: {str(e)}")
+            db.session.rollback()
+            return jsonify({"error": "Erro ao buscar avaliações", "details": str(e)}), 500
         
         # Determinar nível de granularidade
         nivel_granularidade = _determinar_nivel_granularidade(estado, municipio, escola, serie, turma, avaliacao)
         
         # Calcular estatísticas gerais baseadas no nível de granularidade
-        estatisticas_gerais = _calcular_estatisticas_gerais(todas_avaliacoes_municipio, scope_info, nivel_granularidade)
+        estatisticas_gerais = _calcular_estatisticas_gerais(todas_avaliacoes_escopo, scope_info, nivel_granularidade)
         
         # Calcular estatísticas por disciplina
-        resultados_por_disciplina = _calcular_estatisticas_por_disciplina(todas_avaliacoes_municipio)
+        resultados_por_disciplina = _calcular_estatisticas_por_disciplina(todas_avaliacoes_escopo)
         
         # Aplicar paginação para resultados detalhados
-        total = query_base.count()
-        offset = (page - 1) * per_page
-        class_tests_paginados = query_base.offset(offset).limit(per_page).all()
+        try:
+            # Garantir que a sessão está limpa antes de executar as queries de paginação
+            db.session.rollback()
+            
+            # Se ainda houver erro, tentar com uma nova sessão
+            try:
+                total = query_base.count()
+                offset = (page - 1) * per_page
+                class_tests_paginados = query_base.offset(offset).limit(per_page).all()
+            except Exception as inner_e:
+                if "InFailedSqlTransaction" in str(inner_e):
+                    logging.warning("Tentando paginação com nova sessão devido a transação falhada")
+                    db.session.rollback()
+                    db.session.close()
+                    # Recriar a query com nova sessão
+                    query_base = ClassTest.query.join(Test, ClassTest.test_id == Test.id)\
+                                               .join(Class, ClassTest.class_id == Class.id)\
+                                               .join(Grade, Class.grade_id == Grade.id)\
+                                               .join(School, Class.school_id == School.id)\
+                                               .join(City, School.city_id == City.id)\
+                                               .filter(School.id.in_(escola_ids))\
+                                               .options(
+                                                   joinedload(ClassTest.test).joinedload(Test.subject_rel),
+                                                   joinedload(ClassTest.class_).joinedload(Class.grade),
+                                                   joinedload(ClassTest.class_).joinedload(Class.school).joinedload(School.city)
+                                               )
+                    # Reaplicar filtros
+                    if estado and estado.lower() != 'all':
+                        query_base = query_base.filter(City.state.ilike(f"%{estado}%"))
+                    if municipio and municipio.lower() != 'all':
+                        city_filter = City.query.get(municipio)
+                        if city_filter:
+                            query_base = query_base.filter(City.id == municipio)
+                    if avaliacao and avaliacao.lower() != 'all':
+                        test_filter = Test.query.get(avaliacao)
+                        if test_filter:
+                            query_base = query_base.filter(Test.id == avaliacao)
+                    if user['role'] == 'professor':
+                        query_base = query_base.filter(Test.created_by == user['id'])
+                    
+                    total = query_base.count()
+                    offset = (page - 1) * per_page
+                    class_tests_paginados = query_base.offset(offset).limit(per_page).all()
+                else:
+                    raise inner_e
+                    
+        except Exception as e:
+            logging.error(f"Erro ao aplicar paginação: {str(e)}")
+            db.session.rollback()
+            return jsonify({"error": "Erro ao aplicar paginação", "details": str(e)}), 500
         
         # Gerar resultados detalhados
         resultados_detalhados = []
@@ -551,6 +689,16 @@ def listar_avaliacoes():
 
     except Exception as e:
         logging.error(f"Erro ao listar avaliações: {str(e)}", exc_info=True)
+        
+        # Verificar se é um erro de transação falhada
+        if "InFailedSqlTransaction" in str(e):
+            try:
+                # Tentar fazer rollback da transação
+                db.session.rollback()
+                logging.info("Rollback da transação realizado com sucesso")
+            except Exception as rollback_error:
+                logging.error(f"Erro ao fazer rollback: {str(rollback_error)}")
+        
         return jsonify({"error": "Erro ao listar avaliações", "details": str(e)}), 500
 
 
@@ -973,18 +1121,50 @@ def _determinar_escopo_busca(estado, municipio, escola, serie, turma, avaliacao)
         
         # Buscar escolas do escopo
         escolas = []
-        if is_valid_filter(escola):
-            # Escola específica
-            school = School.query.get(escola)
-            if not school:
-                school = School.query.filter(School.name.ilike(f"%{escola}%")).first()
-            if school:
-                # Verificar se a escola pertence ao município
-                if not municipio_id or school.city_id == municipio_id:
-                    escolas = [school]
+        
+        # Se uma avaliação específica foi selecionada, buscar as escolas onde ela foi aplicada
+        if is_valid_filter(avaliacao):
+            # Buscar na tabela class_test todas as entradas para esta avaliação
+            class_tests_avaliacao = ClassTest.query.filter_by(test_id=avaliacao).all()
+            
+            if class_tests_avaliacao:
+                # Extrair os class_ids únicos
+                class_ids = list(set([ct.class_id for ct in class_tests_avaliacao]))
+                
+                # Buscar as classes e suas escolas
+                classes_avaliacao = Class.query.filter(Class.id.in_(class_ids)).all()
+                
+                # Extrair as escolas únicas onde a avaliação foi aplicada
+                escolas_avaliacao = []
+                for classe in classes_avaliacao:
+                    if classe.school and classe.school not in escolas_avaliacao:
+                        # Verificar se a escola pertence ao município do escopo
+                        if not municipio_id or classe.school.city_id == municipio_id:
+                            escolas_avaliacao.append(classe.school)
+                
+                escolas = escolas_avaliacao
+                
+                # Se não encontrou escolas ou se escola específica foi selecionada, filtrar
+                if is_valid_filter(escola):
+                    escola_filtrada = [e for e in escolas if e.id == escola]
+                    escolas = escola_filtrada
+            else:
+                # Se não há class_tests para esta avaliação, retornar lista vazia
+                escolas = []
         else:
-            # Todas as escolas do município
-            escolas = School.query.filter_by(city_id=municipio_id).all()
+            # Se não há avaliação específica, usar a lógica original
+            if is_valid_filter(escola):
+                # Escola específica
+                school = School.query.get(escola)
+                if not school:
+                    school = School.query.filter(School.name.ilike(f"%{escola}%")).first()
+                if school:
+                    # Verificar se a escola pertence ao município
+                    if not municipio_id or school.city_id == municipio_id:
+                        escolas = [school]
+            else:
+                # Todas as escolas do município
+                escolas = School.query.filter_by(city_id=municipio_id).all()
         
         return {
             'municipio_id': municipio_id,
@@ -1126,6 +1306,11 @@ def _calcular_estatisticas_gerais(class_tests: list, scope_info, nivel_granulari
         series_unicas = set()
         turmas_unicas = set()
         
+        # Se há escolas no scope_info (determinadas pela avaliação), usar essas
+        if scope_info.get('escolas'):
+            escolas_unicas = {escola.id for escola in scope_info.get('escolas')}
+        
+        # Também coletar escolas dos class_tests para garantir consistência
         for ct in class_tests:
             if ct.class_ and ct.class_.school:
                 escolas_unicas.add(ct.class_.school.id)
@@ -1133,10 +1318,6 @@ def _calcular_estatisticas_gerais(class_tests: list, scope_info, nivel_granulari
                 series_unicas.add(ct.class_.grade.id)
             if ct.class_:
                 turmas_unicas.add(ct.class_.id)
-        
-        # Se não há escolas nas avaliações, usar as do escopo
-        if not escolas_unicas and scope_info.get('escolas'):
-            escolas_unicas = {escola.id for escola in scope_info.get('escolas')}
         
         # Buscar todos os alunos das turmas envolvidas
         todos_alunos = Student.query.filter(Student.class_id.in_(class_ids)).all()
@@ -1178,12 +1359,12 @@ def _calcular_estatisticas_gerais(class_tests: list, scope_info, nivel_granulari
         escola_info = None
         serie_info = None
         
-        if scope_info.get('escola'):
+        if scope_info.get('escola') and scope_info.get('escola') != 'all':
             escola_obj = School.query.get(scope_info.get('escola'))
             if escola_obj:
                 escola_info = escola_obj.name
         
-        if scope_info.get('serie'):
+        if scope_info.get('serie') and scope_info.get('serie') != 'all':
             serie_obj = Grade.query.get(scope_info.get('serie'))
             if serie_obj:
                 serie_info = serie_obj.name
@@ -1277,8 +1458,8 @@ def _gerar_opcoes_proximos_filtros(scope_info, nivel_granularidade):
             "avaliacoes": []
         }
         
-        # Se estamos no nível de município, mostrar escolas
-        if nivel_granularidade in ["estado", "municipio"]:
+        # Se estamos no nível de município ou avaliação, mostrar escolas
+        if nivel_granularidade in ["estado", "municipio", "avaliacao"]:
             escolas = scope_info.get('escolas', [])
             opcoes["escolas"] = [{"id": str(escola.id), "name": escola.name} for escola in escolas]
         
@@ -1293,7 +1474,7 @@ def _gerar_opcoes_proximos_filtros(scope_info, nivel_granularidade):
                                    .filter(School.id.in_(escola_ids))
                 
                 # Se escola específica foi selecionada, filtrar por ela
-                if scope_info.get('escola'):
+                if scope_info.get('escola') and scope_info.get('escola') != 'all':
                     query_series = query_series.filter(School.id == scope_info.get('escola'))
                 
                 series = query_series.distinct().all()
@@ -1309,11 +1490,11 @@ def _gerar_opcoes_proximos_filtros(scope_info, nivel_granularidade):
                                    .filter(School.id.in_(escola_ids))
                 
                 # Se escola específica foi selecionada, filtrar por ela
-                if scope_info.get('escola'):
+                if scope_info.get('escola') and scope_info.get('escola') != 'all':
                     query_turmas = query_turmas.filter(School.id == scope_info.get('escola'))
                 
                 # Se série específica foi selecionada, filtrar por ela
-                if scope_info.get('serie'):
+                if scope_info.get('serie') and scope_info.get('serie') != 'all':
                     query_turmas = query_turmas.join(Grade, Class.grade_id == Grade.id)\
                                        .filter(Grade.id == scope_info.get('serie'))
                 
@@ -1332,16 +1513,16 @@ def _gerar_opcoes_proximos_filtros(scope_info, nivel_granularidade):
                                        .filter(School.id.in_(escola_ids))
                 
                 # Se escola específica foi selecionada, filtrar por ela
-                if scope_info.get('escola'):
+                if scope_info.get('escola') and scope_info.get('escola') != 'all':
                     query_avaliacoes = query_avaliacoes.filter(School.id == scope_info.get('escola'))
                 
                 # Se série específica foi selecionada, filtrar por ela
-                if scope_info.get('serie'):
+                if scope_info.get('serie') and scope_info.get('serie') != 'all':
                     query_avaliacoes = query_avaliacoes.join(Grade, Class.grade_id == Grade.id)\
                                            .filter(Grade.id == scope_info.get('serie'))
                 
                 # Se turma específica foi selecionada, filtrar por ela
-                if scope_info.get('turma'):
+                if scope_info.get('turma') and scope_info.get('turma') != 'all':
                     query_avaliacoes = query_avaliacoes.filter(Class.id == scope_info.get('turma'))
                 
                 avaliacoes = query_avaliacoes.distinct().all()

@@ -194,14 +194,21 @@ def handle_error(error):
 def convert_proficiency_to_1000_scale(proficiency: float, course: str, subject: str) -> float:
     """
     Converte proficiência do sistema atual para escala 0-1000
+    Usa a proficiência máxima correta por curso e disciplina
     """
-    # Determinar proficiência máxima atual
-    if "iniciais" in course.lower() or "infantil" in course.lower() or "eja" in course.lower():
-        # Para cálculo geral, usar 375 (valor mais alto)
-            max_current = 375
-    else:  # Anos Finais, Ensino Médio
-        # Para cálculo geral, usar 425 (valor mais alto)
-            max_current = 425
+    from app.services.evaluation_calculator import EvaluationCalculator
+    
+    # Determinar nível do curso e tipo de disciplina
+    course_level = EvaluationCalculator._determine_course_level(course)
+    subject_type = EvaluationCalculator._determine_subject_type(subject)
+    
+    # Obter proficiência máxima específica para curso/disciplina
+    max_current = EvaluationCalculator.MAX_PROFICIENCY_CONFIG.get(
+        (course_level, subject_type), 350  # Valor padrão
+    )
+    
+    # Garantir que a proficiência não exceda o máximo permitido
+    proficiency = min(proficiency, max_current)
     
     # Converter para escala 0-1000
     return (proficiency / max_current) * 1000
@@ -590,7 +597,7 @@ def _calculate_evaluation_stats_frontend(test_id: str) -> Dict[str, Any]:
     
     # Calcular resultados para cada aluno
     notas = []
-    proficiencias_1000 = []
+    proficiencias = []  # CORREÇÃO: valores originais, não escala 1000
     classificacoes = {'Abaixo do Básico': 0, 'Básico': 0, 'Adequado': 0, 'Avançado': 0}
     alunos_participantes = 0
     
@@ -623,30 +630,32 @@ def _calculate_evaluation_stats_frontend(test_id: str) -> Dict[str, Any]:
             # Determinar tipo de cálculo baseado na configuração do teste
             use_simple_calculation = test.grade_calculation_type == 'simple'
             
+            # CORREÇÃO: Usar questões respondidas pelo aluno, não total da avaliação
+            answered_questions = int(student_answers['total_answered'] or 0)
+            
             result = EvaluationCalculator.calculate_complete_evaluation(
                 correct_answers=correct_answers,
-                total_questions=total_questions,
+                total_questions=answered_questions,  # CORREÇÃO: usar questões respondidas
                 course_name=course_name,
                 subject_name=subject_name,
                 use_simple_calculation=use_simple_calculation
             )
             
-            # Converter para escala 0-1000
-            prof_1000 = convert_proficiency_to_1000_scale(
-                result['proficiency'], course_name, subject_name
-            )
-            classification_1000 = get_classification_1000_scale(prof_1000)
+            # CORREÇÃO: Usar valores originais da proficiência em vez de converter para escala 1000
+            # Isso evita distorções nos cálculos e mantém os limites corretos
+            proficiency_original = result['proficiency']
+            classification_original = result['classification']
             
             notas.append(result['grade'])
-            proficiencias_1000.append(prof_1000)
-            classificacoes[classification_1000] += 1
+            proficiencias.append(proficiency_original)  # CORREÇÃO: usar valor original
+            classificacoes[classification_original] += 1
         else:
             # Aluno NÃO respondeu - contar como "Abaixo do Básico"
             classificacoes['Abaixo do Básico'] += 1
     
     # Calcular médias apenas dos alunos que participaram
     media_nota = round(sum(notas) / len(notas), 2) if notas else 0.0
-    media_proficiencia = round(sum(proficiencias_1000) / len(proficiencias_1000), 2) if proficiencias_1000 else 0.0
+    media_proficiencia = round(sum(proficiencias) / len(proficiencias), 2) if proficiencias else 0.0
     
     return {
         'total_alunos': total_alunos,
@@ -710,7 +719,7 @@ def _calculate_evaluation_stats_by_class(test_id: str, class_id: str) -> Dict[st
     
     # Calcular resultados para cada aluno
     notas = []
-    proficiencias_1000 = []
+    proficiencias = []  # CORREÇÃO: valores originais, não escala 1000
     classificacoes = {'Abaixo do Básico': 0, 'Básico': 0, 'Adequado': 0, 'Avançado': 0}
     alunos_participantes = 0
     
@@ -743,23 +752,25 @@ def _calculate_evaluation_stats_by_class(test_id: str, class_id: str) -> Dict[st
             # Determinar tipo de cálculo baseado na configuração do teste
             use_simple_calculation = test.grade_calculation_type == 'simple'
             
+            # CORREÇÃO: Usar questões respondidas pelo aluno, não total da avaliação
+            answered_questions = int(student_answers['total_answered'] or 0)
+            
             result = EvaluationCalculator.calculate_complete_evaluation(
                 correct_answers=correct_answers,
-                total_questions=total_questions,
+                total_questions=answered_questions,  # CORREÇÃO: usar questões respondidas
                 course_name=course_name,
                 subject_name=subject_name,
                 use_simple_calculation=use_simple_calculation
             )
             
-            # Converter para escala 0-1000
-            prof_1000 = convert_proficiency_to_1000_scale(
-                result['proficiency'], course_name, subject_name
-            )
-            classification_1000 = get_classification_1000_scale(prof_1000)
+            # CORREÇÃO: Usar valores originais da proficiência em vez de converter para escala 1000
+            # Isso evita distorções nos cálculos e mantém os limites corretos
+            proficiency_original = result['proficiency']
+            classification_original = result['classification']
             
             notas.append(result['grade'])
-            proficiencias_1000.append(prof_1000)
-            classificacoes[classification_1000] += 1
+            proficiencias.append(proficiency_original)  # CORREÇÃO: usar valor original
+            classificacoes[classification_original] += 1
         else:
             # Aluno NÃO respondeu - não incluir na distribuição de classificação
             # Alunos ausentes não são classificados
@@ -767,7 +778,7 @@ def _calculate_evaluation_stats_by_class(test_id: str, class_id: str) -> Dict[st
     
     # Calcular médias apenas dos alunos que participaram
     media_nota = round(sum(notas) / len(notas), 2) if notas else 0.0
-    media_proficiencia = round(sum(proficiencias_1000) / len(proficiencias_1000), 2) if proficiencias_1000 else 0.0
+    media_proficiencia = round(sum(proficiencias) / len(proficiencias), 2) if proficiencias else 0.0
     
     return {
         'total_alunos': total_alunos,
@@ -1801,19 +1812,17 @@ def listar_alunos():
                 total_answered = evaluation_result.correct_answers  # Simplificado
                 correct_answers = evaluation_result.correct_answers
                 
-                # Converter para escala 0-1000
-                prof_1000 = convert_proficiency_to_1000_scale(
-                    evaluation_result.proficiency, "Anos Iniciais", test.subject_rel.name if test.subject_rel else "Outras"
-                )
-                classification_1000 = get_classification_1000_scale(prof_1000)
+                # CORREÇÃO: Usar valores originais da proficiência
+                proficiency_original = evaluation_result.proficiency
+                classification_original = evaluation_result.classification
                 
                 status = "concluida"
             else:
                 # Aluno NÃO respondeu - retornar zeros
                 total_answered = 0
                 correct_answers = 0
-                prof_1000 = 0.0
-                classification_1000 = 'Abaixo do Básico'
+                proficiency_original = 0.0
+                classification_original = 'Abaixo do Básico'
                 status = "pendente"
             
             # Buscar informações da turma e grade
@@ -1830,8 +1839,8 @@ def listar_alunos():
                 "turma": turma_nome,
                 "grade": grade_nome,
                 "nota": evaluation_result.grade if evaluation_result else 0.0,
-                "proficiencia": round(prof_1000, 2),
-                "classificacao": classification_1000,
+                "proficiencia": round(proficiency_original, 2),
+                "classificacao": classification_original,
                 "questoes_respondidas": total_answered,
                 "acertos": correct_answers,
                 "erros": total_answered - correct_answers,
@@ -2047,19 +2056,17 @@ def relatorio_detalhado(evaluation_id: str):
                 total_answered = evaluation_result.correct_answers  # Simplificado
                 correct_answers = evaluation_result.correct_answers
                 
-                # Converter para escala 0-1000
-                prof_1000 = convert_proficiency_to_1000_scale(
-                    evaluation_result.proficiency, "Anos Iniciais", test.subject_rel.name if test.subject_rel else "Outras"
-                )
-                classification_1000 = get_classification_1000_scale(prof_1000)
+                # CORREÇÃO: Usar valores originais da proficiência
+                proficiency_original = evaluation_result.proficiency
+                classification_original = evaluation_result.classification
                 
                 status = "concluida"
             else:
                 # Aluno NÃO respondeu - retornar zeros
                 total_answered = 0
                 correct_answers = 0
-                prof_1000 = 0.0
-                classification_1000 = 'Abaixo do Básico'
+                proficiency_original = 0.0
+                classification_original = 'Abaixo do Básico'
                 status = "nao_respondida"
             
             # Buscar informações da turma
@@ -2102,8 +2109,8 @@ def relatorio_detalhado(evaluation_id: str):
                 "total_erros": total_answered - correct_answers,
                 "total_em_branco": len(test.questions) - total_answered if test.questions else 0,
                 "nota_final": evaluation_result.grade if evaluation_result else 0.0,
-                "proficiencia": round(prof_1000, 2),
-                "classificacao": classification_1000,
+                "proficiencia": round(proficiency_original, 2),
+                "classificacao": classification_original,
                 "status": status
             }
             alunos_data.append(aluno_detalhado)
@@ -2822,10 +2829,8 @@ def get_student_test_results(test_id, student_id):
         proficiency = evaluation_result.proficiency
         classification = evaluation_result.classification
         
-        # Converter proficiência para escala 0-1000
-        prof_1000 = convert_proficiency_to_1000_scale(
-            proficiency, "Anos Iniciais", test.subject_rel.name if test.subject_rel else "Outras"
-        )
+        # CORREÇÃO: Usar valor original da proficiência
+        proficiency_original = proficiency
         
         # Buscar respostas detalhadas se solicitado
         detailed_answers = []
@@ -2893,7 +2898,7 @@ def get_student_test_results(test_id, student_id):
             "total_score": round(grade, 2),  # Usar nota como total_score
             "max_possible_score": total_questions,  # Simplificado
             "grade": round(grade, 2),
-            "proficiencia": round(prof_1000, 2),
+            "proficiencia": round(proficiency_original, 2),
             "classificacao": classification,
             "calculated_at": evaluation_result.calculated_at.isoformat() if evaluation_result.calculated_at else None,
             "answers": detailed_answers if request.args.get('include_answers', 'false').lower() == 'true' else []
@@ -3435,18 +3440,16 @@ def relatorio_detalhado_filtrado(evaluation_id: str):
                 # Aluno respondeu
                 total_answered = evaluation_result.correct_answers
                 correct_answers = evaluation_result.correct_answers
-                prof_1000 = convert_proficiency_to_1000_scale(
-                    evaluation_result.proficiency, "Anos Iniciais", test.subject_rel.name if test.subject_rel else "Outras"
-                )
-                classification_1000 = get_classification_1000_scale(prof_1000)
+                proficiency_original = evaluation_result.proficiency
+                classification_original = evaluation_result.classification
                 status = "concluida"
                 nota = evaluation_result.grade if hasattr(evaluation_result, 'grade') else 0.0
             else:
                 # Aluno NÃO respondeu
                 total_answered = 0
                 correct_answers = 0
-                prof_1000 = 0.0
-                classification_1000 = 'Abaixo do Básico'
+                proficiency_original = 0.0
+                classification_original = 'Abaixo do Básico'
                 status = "nao_respondida"
                 nota = 0.0
             
@@ -3490,8 +3493,8 @@ def relatorio_detalhado_filtrado(evaluation_id: str):
                 "total_erros": total_answered - correct_answers,
                 "total_em_branco": len(test.questions) - total_answered if test.questions else 0,
                 "nota": nota,
-                "proficiencia": prof_1000,
-                "classificacao": classification_1000,
+                "proficiencia": proficiency_original,
+                "classificacao": classification_original,
                 "status": status
             }
             

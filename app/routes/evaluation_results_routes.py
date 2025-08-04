@@ -235,20 +235,27 @@ def get_classification_1000_scale(proficiency_1000: float) -> str:
 @role_required("admin", "professor", "coordenador", "diretor")
 def listar_avaliacoes():
     """
-    Lista avaliações aplicadas com estatísticas completas e filtros em cascata
+    Lista avaliações aplicadas com estatísticas completas e filtros hierárquicos
     
     Nota: Retorna apenas avaliações que foram efetivamente aplicadas (estão na tabela class_test)
     de acordo com os filtros selecionados.
     
     Query Parameters:
-    - estado, municipio, escola, serie, turma, avaliacao (mínimo 3 filtros obrigatórios)
-    - page, per_page
+    - estado (obrigatório): Estado geográfico (não pode ser 'all')
+    - municipio (obrigatório): Município do estado
+    - avaliacao (opcional): ID da avaliação específica ou 'all' para todas as avaliações
+    - escola (opcional): ID da escola ou 'all' para todas as escolas
+    - serie (opcional): ID da série ou 'all' para todas as séries
+    - turma (opcional): ID da turma ou 'all' para todas as turmas
+    - page, per_page: Parâmetros de paginação
     
-    Lógica de filtros em cascata:
-    - Estado + Município + Avaliação: Resultados consolidados do município
-    - Estado + Município + Avaliação + Escola: Resultados da escola
-    - Estado + Município + Avaliação + Escola + Série: Resultados da série
-    - Estado + Município + Avaliação + Escola + Série + Turma: Resultados da turma
+    Lógica hierárquica com "all":
+    - Estado + Município + Avaliação "all": Todas as avaliações do município
+    - Estado + Município + Avaliação + Escola "all": Todas as escolas que aplicaram a avaliação
+    - Estado + Município + Avaliação + Escola + Série "all": Todas as séries da escola
+    - Estado + Município + Avaliação + Escola + Série + Turma "all": Todas as turmas da série
+    
+    Filtros com valor "all" retornam todos os registros daquele nível dentro do contexto dos filtros anteriores.
     """
     try:
         user = get_current_user_from_token()
@@ -266,35 +273,31 @@ def listar_avaliacoes():
         per_page = request.args.get('per_page', 10, type=int)
         per_page = min(per_page, 100)  # Limitar máximo
         
-        # Validar mínimo de 3 filtros
-        filtros_aplicados = sum([
-            bool(estado),
-            bool(municipio),
-            bool(escola),
-            bool(serie),
-            bool(turma),
-            bool(avaliacao)
-        ])
-        
-        if filtros_aplicados < 3:
+        # Validar filtros obrigatórios (estado e município são sempre obrigatórios)
+        if not estado or estado.lower() == 'all':
             return jsonify({
-                "error": "É necessário aplicar pelo menos 3 filtros (estado, municipio, escola, serie, turma, avaliacao)"
-            }), 400
-        
-        # Validar sequência correta de filtros
-        if not estado:
-            return jsonify({
-                "error": "Estado é obrigatório como primeiro filtro"
+                "error": "Estado é obrigatório e não pode ser 'all'"
             }), 400
         
         if not municipio:
             return jsonify({
-                "error": "Município é obrigatório como segundo filtro"
+                "error": "Município é obrigatório"
             }), 400
         
-        if not avaliacao:
+        # Contar filtros aplicados (excluindo 'all')
+        filtros_aplicados = sum([
+            bool(estado and estado.lower() != 'all'),
+            bool(municipio and municipio.lower() != 'all'),
+            bool(escola and escola.lower() != 'all'),
+            bool(serie and serie.lower() != 'all'),
+            bool(turma and turma.lower() != 'all'),
+            bool(avaliacao and avaliacao.lower() != 'all')
+        ])
+        
+        # Mínimo de 2 filtros (estado e município sempre contam)
+        if filtros_aplicados < 2:
             return jsonify({
-                "error": "Avaliação é obrigatória como terceiro filtro"
+                "error": "É necessário aplicar pelo menos 2 filtros válidos (excluindo 'all')"
             }), 400
         
         # Identificar escopo de busca baseado nos filtros aplicados
@@ -313,13 +316,30 @@ def listar_avaliacoes():
         
         if not escola_ids:
             return jsonify({
-                "municipio_geral": {
+                "nivel_granularidade": "municipio",
+                "filtros_aplicados": {
+                    "estado": estado,
+                    "municipio": municipio,
+                    "escola": escola,
+                    "serie": serie,
+                    "turma": turma,
+                    "avaliacao": avaliacao
+                },
+                "estatisticas_gerais": {
+                    "tipo": "municipio",
                     "nome": city_data.name if city_data else "Todos os municípios",
                     "estado": scope_info.get('estado', 'Todos os estados'),
+                    "municipio": city_data.name if city_data else "Todos os municípios",
+                    "escola": None,
+                    "serie": None,
                     "total_escolas": 0,
+                    "total_series": 0,
+                    "total_turmas": 0,
                     "total_avaliacoes": 0,
                     "total_alunos": 0,
                     "alunos_participantes": 0,
+                    "alunos_pendentes": 0,
+                    "alunos_ausentes": 0,
                     "media_nota_geral": 0.0,
                     "media_proficiencia_geral": 0.0,
                     "distribuicao_classificacao_geral": {
@@ -331,11 +351,19 @@ def listar_avaliacoes():
                 },
                 "resultados_por_disciplina": [],
                 "resultados_detalhados": {
-                    "data": [],
-                    "total": 0,
-                    "page": page,
-                    "per_page": per_page,
-                    "total_pages": 0
+                    "avaliacoes": [],
+                    "paginacao": {
+                        "page": page,
+                        "per_page": per_page,
+                        "total": 0,
+                        "total_pages": 0
+                    }
+                },
+                "opcoes_proximos_filtros": {
+                    "escolas": [],
+                    "series": [],
+                    "turmas": [],
+                    "avaliacoes": []
                 }
             }), 200
         
@@ -353,56 +381,49 @@ def listar_avaliacoes():
                                        joinedload(ClassTest.class_).joinedload(Class.school).joinedload(School.city)
                                    )
         
-        # Aplicar filtros na ordem especificada (filtros omitidos são tratados como "todos")
-        if estado:
+        # Aplicar filtros na ordem especificada (filtros com "all" são ignorados)
+        if estado and estado.lower() != 'all':
             query_base = query_base.filter(City.state.ilike(f"%{estado}%"))
-        # Se municipio não enviado, não aplicar filtro (retorna todos os municípios do estado)
         
-        if municipio:
+        if municipio and municipio.lower() != 'all':
             # Tentar filtrar por ID primeiro, depois por nome
             city_filter = City.query.get(municipio)
             if city_filter:
                 query_base = query_base.filter(City.id == municipio)
             else:
                 query_base = query_base.filter(City.name.ilike(f"%{municipio}%"))
-        # Se escola não enviada, não aplicar filtro (retorna todas as escolas)
         
-        if escola:
-            # Tentar filtrar por ID primeiro, depois por nome
-            school_filter = School.query.get(escola)
-            if school_filter:
-                query_base = query_base.filter(School.id == escola)
-            else:
-                query_base = query_base.filter(School.name.ilike(f"%{escola}%"))
-        # Se escola não enviada, não aplicar filtro (retorna todas as escolas do escopo)
-        # Se serie não enviada, não aplicar filtro (retorna todas as séries)
-        
-        if serie:
-            # Tentar filtrar por ID primeiro, depois por nome
-            grade_filter = Grade.query.get(serie)
-            if grade_filter:
-                query_base = query_base.filter(Grade.id == serie)
-            else:
-                query_base = query_base.filter(Grade.name.ilike(f"%{serie}%"))
-        # Se turma não enviada, não aplicar filtro (retorna todas as turmas)
-        
-        if turma:
-            # Tentar filtrar por ID primeiro, depois por nome
-            class_filter = Class.query.get(turma)
-            if class_filter:
-                query_base = query_base.filter(Class.id == turma)
-            else:
-                query_base = query_base.filter(Class.name.ilike(f"%{turma}%"))
-        # Se turma não enviada, não aplicar filtro (retorna todas as turmas)
-        
-        if avaliacao:
+        if avaliacao and avaliacao.lower() != 'all':
             # Tentar filtrar por ID primeiro, depois por título
             test_filter = Test.query.get(avaliacao)
             if test_filter:
                 query_base = query_base.filter(Test.id == avaliacao)
             else:
                 query_base = query_base.filter(Test.title.ilike(f"%{avaliacao}%"))
-        # Se avaliacao não enviada, não aplicar filtro (retorna todas as avaliações)
+        
+        if escola and escola.lower() != 'all':
+            # Tentar filtrar por ID primeiro, depois por nome
+            school_filter = School.query.get(escola)
+            if school_filter:
+                query_base = query_base.filter(School.id == escola)
+            else:
+                query_base = query_base.filter(School.name.ilike(f"%{escola}%"))
+        
+        if serie and serie.lower() != 'all':
+            # Tentar filtrar por ID primeiro, depois por nome
+            grade_filter = Grade.query.get(serie)
+            if grade_filter:
+                query_base = query_base.filter(Grade.id == serie)
+            else:
+                query_base = query_base.filter(Grade.name.ilike(f"%{serie}%"))
+        
+        if turma and turma.lower() != 'all':
+            # Tentar filtrar por ID primeiro, depois por nome
+            class_filter = Class.query.get(turma)
+            if class_filter:
+                query_base = query_base.filter(Class.id == turma)
+            else:
+                query_base = query_base.filter(Class.name.ilike(f"%{turma}%"))
         
         # Se for professor, filtrar apenas suas avaliações
         if user['role'] == 'professor':
@@ -411,25 +432,14 @@ def listar_avaliacoes():
         # Buscar todas as avaliações do escopo para cálculos
         todas_avaliacoes_escopo = query_base.all()
         
-        # Determinar nível de granularidade baseado nos filtros aplicados
+        # Determinar nível de granularidade
         nivel_granularidade = _determinar_nivel_granularidade(estado, municipio, escola, serie, turma, avaliacao)
         
-        # Calcular estatísticas baseadas no nível de granularidade
-        if nivel_granularidade == 'municipio':
-            estatisticas_gerais = _calcular_estatisticas_municipio(todas_avaliacoes_escopo, scope_info)
-            resultados_por_disciplina = _calcular_estatisticas_por_disciplina(todas_avaliacoes_escopo)
-        elif nivel_granularidade == 'escola':
-            estatisticas_gerais = _calcular_estatisticas_escola(todas_avaliacoes_escopo, escola, scope_info)
-            resultados_por_disciplina = _calcular_estatisticas_por_disciplina_escola(todas_avaliacoes_escopo, escola)
-        elif nivel_granularidade == 'serie':
-            estatisticas_gerais = _calcular_estatisticas_serie(todas_avaliacoes_escopo, escola, serie, scope_info)
-            resultados_por_disciplina = _calcular_estatisticas_por_disciplina_serie(todas_avaliacoes_escopo, escola, serie)
-        elif nivel_granularidade == 'turma':
-            estatisticas_gerais = _calcular_estatisticas_turma(todas_avaliacoes_escopo, escola, serie, turma, scope_info)
-            resultados_por_disciplina = _calcular_estatisticas_por_disciplina_turma(todas_avaliacoes_escopo, escola, serie, turma)
-        else:
-            estatisticas_gerais = _calcular_estatisticas_municipio(todas_avaliacoes_escopo, scope_info)
-            resultados_por_disciplina = _calcular_estatisticas_por_disciplina(todas_avaliacoes_escopo)
+        # Calcular estatísticas gerais baseadas no nível de granularidade
+        estatisticas_gerais = _calcular_estatisticas_gerais(todas_avaliacoes_municipio, scope_info, nivel_granularidade)
+        
+        # Calcular estatísticas por disciplina
+        resultados_por_disciplina = _calcular_estatisticas_por_disciplina(todas_avaliacoes_municipio)
         
         # Aplicar paginação para resultados detalhados
         total = query_base.count()
@@ -488,18 +498,15 @@ def listar_avaliacoes():
             
             result = {
                 "id": evaluation.id,
-                "class_test_id": class_test.id,
                 "titulo": evaluation.title,
                 "disciplina": evaluation.subject_rel.name if evaluation.subject_rel else 'N/A',
                 "curso": curso_nome,
                 "serie": serie_nome,
-                "grade_id": grade_id,
                 "turma": turma_nome,
                 "escola": escola_nome,
                 "municipio": municipio_nome,
                 "estado": estado_nome,
                 "data_aplicacao": evaluation.created_at.isoformat() if evaluation.created_at else None,
-                "data_correcao": evaluation.updated_at.isoformat() if evaluation.updated_at else None,
                 "status": class_test.status,
                 "total_alunos": stats['total_alunos'],
                 "alunos_participantes": stats['alunos_participantes'],
@@ -515,8 +522,8 @@ def listar_avaliacoes():
         # Calcular total de páginas
         total_pages = (total + per_page - 1) // per_page
         
-        # Gerar opções para próximos filtros
-        opcoes_proximos_filtros = _gerar_opcoes_proximos_filtros(nivel_granularidade, estado, municipio, escola, serie, avaliacao)
+        # Gerar opções dos próximos filtros
+        opcoes_proximos_filtros = _gerar_opcoes_proximos_filtros(scope_info, nivel_granularidade)
         
         return jsonify({
             "nivel_granularidade": nivel_granularidade,
@@ -531,11 +538,13 @@ def listar_avaliacoes():
             "estatisticas_gerais": estatisticas_gerais,
             "resultados_por_disciplina": resultados_por_disciplina,
             "resultados_detalhados": {
-                "data": resultados_detalhados,
-                "total": total,
-                "page": page,
-                "per_page": per_page,
-                "total_pages": total_pages
+                "avaliacoes": resultados_detalhados,
+                "paginacao": {
+                    "page": page,
+                    "per_page": per_page,
+                    "total": total,
+                    "total_pages": total_pages
+                }
             },
             "opcoes_proximos_filtros": opcoes_proximos_filtros
         }), 200
@@ -933,14 +942,18 @@ def _calcular_estatisticas_municipio(class_tests: list, scope_info) -> Dict[str,
 def _determinar_escopo_busca(estado, municipio, escola, serie, turma, avaliacao):
     """
     Determina o escopo de busca baseado nos filtros aplicados
-    Filtros omitidos são tratados como "todos"
+    Filtros com valor "all" são tratados como "todos"
     """
     try:
+        # Função auxiliar para verificar se um filtro é válido (não é "all")
+        def is_valid_filter(value):
+            return value and value.lower() != 'all'
+        
         # Determinar município base para cálculos
         municipio_id = None
         city_data = None
         
-        if municipio:
+        if is_valid_filter(municipio):
             # Buscar município específico
             city = City.query.get(municipio)
             if not city:
@@ -948,7 +961,7 @@ def _determinar_escopo_busca(estado, municipio, escola, serie, turma, avaliacao)
             if city:
                 municipio_id = city.id
                 city_data = city
-        elif estado:
+        elif is_valid_filter(estado):
             # Se não tem município específico, pegar o primeiro do estado
             city = City.query.filter(City.state.ilike(f"%{estado}%")).first()
             if city:
@@ -960,7 +973,7 @@ def _determinar_escopo_busca(estado, municipio, escola, serie, turma, avaliacao)
         
         # Buscar escolas do escopo
         escolas = []
-        if escola:
+        if is_valid_filter(escola):
             # Escola específica
             school = School.query.get(escola)
             if not school:
@@ -1058,7 +1071,7 @@ def _calcular_estatisticas_por_disciplina(class_tests: list):
                 "total_alunos": total_alunos,
                 "alunos_participantes": alunos_participantes,
                 "alunos_pendentes": total_alunos - alunos_participantes,
-                "alunos_ausentes": total_alunos - alunos_participantes,
+                "alunos_ausentes": 0,  # Pode ser calculado se necessário
                 "media_nota": round(media_nota, 2),
                 "media_proficiencia": round(media_proficiencia, 2),
                 "distribuicao_classificacao": distribuicao_disciplina
@@ -1073,50 +1086,63 @@ def _calcular_estatisticas_por_disciplina(class_tests: list):
         return []
 
 
-# ==================== FUNÇÕES AUXILIARES PARA FILTROS EM CASCATA ====================
-
 def _determinar_nivel_granularidade(estado, municipio, escola, serie, turma, avaliacao):
     """
     Determina o nível de granularidade baseado nos filtros aplicados
     """
-    if estado and municipio and avaliacao and not escola and not serie and not turma:
-        return 'municipio'
-    elif estado and municipio and avaliacao and escola and not serie and not turma:
-        return 'escola'
-    elif estado and municipio and avaliacao and escola and serie and not turma:
-        return 'serie'
-    elif estado and municipio and avaliacao and escola and serie and turma:
-        return 'turma'
+    if avaliacao:
+        return "avaliacao"
+    elif turma:
+        return "turma"
+    elif serie:
+        return "serie"
+    elif escola:
+        return "escola"
+    elif municipio:
+        return "municipio"
+    elif estado:
+        return "estado"
     else:
-        return 'municipio'  # Padrão
+        return "geral"
 
 
-def _calcular_estatisticas_escola(class_tests: list, escola_id: str, scope_info) -> Dict[str, Any]:
+def _calcular_estatisticas_gerais(class_tests: list, scope_info, nivel_granularidade):
     """
-    Calcula estatísticas consolidadas da escola
+    Calcula estatísticas gerais baseadas no nível de granularidade
     """
     try:
         from app.models.evaluationResult import EvaluationResult
         from app.models.student import Student
         
         if not class_tests:
-            return _empty_stats_escola(escola_id, scope_info)
+            return _get_empty_statistics_gerais(scope_info, nivel_granularidade)
         
-        # Filtrar apenas avaliações da escola específica
-        escola_class_tests = [ct for ct in class_tests if ct.class_ and ct.class_.school_id == escola_id]
+        # Coletar dados de todas as avaliações
+        test_ids = [ct.test_id for ct in class_tests]
+        class_ids = [ct.class_id for ct in class_tests]
         
-        if not escola_class_tests:
-            return _empty_stats_escola(escola_id, scope_info)
+        # Buscar todas as escolas envolvidas
+        escolas_unicas = set()
+        series_unicas = set()
+        turmas_unicas = set()
         
-        # Coletar dados da escola
-        test_ids = [ct.test_id for ct in escola_class_tests]
-        class_ids = [ct.class_id for ct in escola_class_tests]
+        for ct in class_tests:
+            if ct.class_ and ct.class_.school:
+                escolas_unicas.add(ct.class_.school.id)
+            if ct.class_ and ct.class_.grade:
+                series_unicas.add(ct.class_.grade.id)
+            if ct.class_:
+                turmas_unicas.add(ct.class_.id)
         
-        # Buscar todos os alunos das turmas da escola
+        # Se não há escolas nas avaliações, usar as do escopo
+        if not escolas_unicas and scope_info.get('escolas'):
+            escolas_unicas = {escola.id for escola in scope_info.get('escolas')}
+        
+        # Buscar todos os alunos das turmas envolvidas
         todos_alunos = Student.query.filter(Student.class_id.in_(class_ids)).all()
         total_alunos = len(todos_alunos)
         
-        # Buscar todos os resultados das avaliações da escola
+        # Buscar todos os resultados das avaliações
         todos_resultados = EvaluationResult.query.filter(EvaluationResult.test_id.in_(test_ids)).all()
         alunos_participantes = len(todos_resultados)
         
@@ -1147,264 +1173,59 @@ def _calcular_estatisticas_escola(class_tests: list, escola_id: str, scope_info)
             elif 'avançado' in classificacao or 'avancado' in classificacao:
                 distribuicao_geral['avancado'] += 1
         
-        # Buscar informações da escola
-        escola = School.query.get(escola_id)
-        escola_nome = escola.name if escola else "Escola não encontrada"
+        # Determinar informações específicas baseadas no nível de granularidade
+        city_data = scope_info.get('city_data')
+        escola_info = None
+        serie_info = None
+        
+        if scope_info.get('escola'):
+            escola_obj = School.query.get(scope_info.get('escola'))
+            if escola_obj:
+                escola_info = escola_obj.name
+        
+        if scope_info.get('serie'):
+            serie_obj = Grade.query.get(scope_info.get('serie'))
+            if serie_obj:
+                serie_info = serie_obj.name
         
         return {
-            "tipo": "escola",
-            "nome": escola_nome,
-            "estado": scope_info.get('estado', 'N/A'),
-            "municipio": scope_info.get('municipio', 'N/A'),
-            "total_series": len(set(ct.class_.grade_id for ct in escola_class_tests if ct.class_ and ct.class_.grade_id)),
-            "total_turmas": len(set(ct.class_id for ct in escola_class_tests)),
+            "tipo": nivel_granularidade,
+            "nome": _get_nome_granularidade(nivel_granularidade, scope_info, escola_info, serie_info),
+            "estado": scope_info.get('estado', 'Todos os estados'),
+            "municipio": city_data.name if city_data else "Todos os municípios",
+            "escola": escola_info,
+            "serie": serie_info,
+            "total_escolas": len(escolas_unicas),
+            "total_series": len(series_unicas),
+            "total_turmas": len(turmas_unicas),
             "total_avaliacoes": len(test_ids),
             "total_alunos": total_alunos,
             "alunos_participantes": alunos_participantes,
             "alunos_pendentes": total_alunos - alunos_participantes,
-            "alunos_ausentes": total_alunos - alunos_participantes,
+            "alunos_ausentes": 0,  # Pode ser calculado se necessário
             "media_nota_geral": round(media_nota_geral, 2),
             "media_proficiencia_geral": round(media_proficiencia_geral, 2),
             "distribuicao_classificacao_geral": distribuicao_geral
         }
         
     except Exception as e:
-        logging.error(f"Erro ao calcular estatísticas da escola: {str(e)}")
-        return _empty_stats_escola(escola_id, scope_info)
+        logging.error(f"Erro ao calcular estatísticas gerais: {str(e)}")
+        return _get_empty_statistics_gerais(scope_info, nivel_granularidade)
 
 
-def _calcular_estatisticas_serie(class_tests: list, escola_id: str, serie_id: str, scope_info) -> Dict[str, Any]:
+def _get_empty_statistics_gerais(scope_info, nivel_granularidade):
     """
-    Calcula estatísticas consolidadas da série
+    Retorna estatísticas vazias para o nível de granularidade
     """
-    try:
-        from app.models.evaluationResult import EvaluationResult
-        from app.models.student import Student
-        
-        if not class_tests:
-            return _empty_stats_serie(escola_id, serie_id, scope_info)
-        
-        # Filtrar apenas avaliações da série específica
-        serie_class_tests = [ct for ct in class_tests 
-                           if ct.class_ and ct.class_.school_id == escola_id and ct.class_.grade_id == serie_id]
-        
-        if not serie_class_tests:
-            return _empty_stats_serie(escola_id, serie_id, scope_info)
-        
-        # Coletar dados da série
-        test_ids = [ct.test_id for ct in serie_class_tests]
-        class_ids = [ct.class_id for ct in serie_class_tests]
-        
-        # Buscar todos os alunos das turmas da série
-        todos_alunos = Student.query.filter(Student.class_id.in_(class_ids)).all()
-        total_alunos = len(todos_alunos)
-        
-        # Buscar todos os resultados das avaliações da série
-        todos_resultados = EvaluationResult.query.filter(EvaluationResult.test_id.in_(test_ids)).all()
-        alunos_participantes = len(todos_resultados)
-        
-        # Calcular médias consolidadas
-        if todos_resultados:
-            media_nota_geral = sum(r.grade for r in todos_resultados) / len(todos_resultados)
-            media_proficiencia_geral = sum(r.proficiency for r in todos_resultados) / len(todos_resultados)
-        else:
-            media_nota_geral = 0.0
-            media_proficiencia_geral = 0.0
-        
-        # Calcular distribuição de classificação consolidada
-        distribuicao_geral = {
-            'abaixo_do_basico': 0,
-            'basico': 0,
-            'adequado': 0,
-            'avancado': 0
-        }
-        
-        for resultado in todos_resultados:
-            classificacao = resultado.classification.lower()
-            if 'abaixo' in classificacao or 'básico' in classificacao:
-                distribuicao_geral['abaixo_do_basico'] += 1
-            elif 'básico' in classificacao or 'basico' in classificacao:
-                distribuicao_geral['basico'] += 1
-            elif 'adequado' in classificacao:
-                distribuicao_geral['adequado'] += 1
-            elif 'avançado' in classificacao or 'avancado' in classificacao:
-                distribuicao_geral['avancado'] += 1
-        
-        # Buscar informações da escola e série
-        escola = School.query.get(escola_id)
-        serie = Grade.query.get(serie_id)
-        escola_nome = escola.name if escola else "Escola não encontrada"
-        serie_nome = serie.name if serie else "Série não encontrada"
-        
-        return {
-            "tipo": "serie",
-            "nome": serie_nome,
-            "escola": escola_nome,
-            "estado": scope_info.get('estado', 'N/A'),
-            "municipio": scope_info.get('municipio', 'N/A'),
-            "total_turmas": len(set(ct.class_id for ct in serie_class_tests)),
-            "total_avaliacoes": len(test_ids),
-            "total_alunos": total_alunos,
-            "alunos_participantes": alunos_participantes,
-            "alunos_pendentes": total_alunos - alunos_participantes,
-            "alunos_ausentes": total_alunos - alunos_participantes,
-            "media_nota_geral": round(media_nota_geral, 2),
-            "media_proficiencia_geral": round(media_proficiencia_geral, 2),
-            "distribuicao_classificacao_geral": distribuicao_geral
-        }
-        
-    except Exception as e:
-        logging.error(f"Erro ao calcular estatísticas da série: {str(e)}")
-        return _empty_stats_serie(escola_id, serie_id, scope_info)
-
-
-def _calcular_estatisticas_turma(class_tests: list, escola_id: str, serie_id: str, turma_id: str, scope_info) -> Dict[str, Any]:
-    """
-    Calcula estatísticas consolidadas da turma
-    """
-    try:
-        from app.models.evaluationResult import EvaluationResult
-        from app.models.student import Student
-        
-        if not class_tests:
-            return _empty_stats_turma(escola_id, serie_id, turma_id, scope_info)
-        
-        # Filtrar apenas avaliações da turma específica
-        turma_class_tests = [ct for ct in class_tests 
-                           if ct.class_id == turma_id]
-        
-        if not turma_class_tests:
-            return _empty_stats_turma(escola_id, serie_id, turma_id, scope_info)
-        
-        # Coletar dados da turma
-        test_ids = [ct.test_id for ct in turma_class_tests]
-        
-        # Buscar todos os alunos da turma
-        todos_alunos = Student.query.filter(Student.class_id == turma_id).all()
-        total_alunos = len(todos_alunos)
-        
-        # Buscar todos os resultados das avaliações da turma
-        todos_resultados = EvaluationResult.query.filter(EvaluationResult.test_id.in_(test_ids)).all()
-        alunos_participantes = len(todos_resultados)
-        
-        # Calcular médias consolidadas
-        if todos_resultados:
-            media_nota_geral = sum(r.grade for r in todos_resultados) / len(todos_resultados)
-            media_proficiencia_geral = sum(r.proficiency for r in todos_resultados) / len(todos_resultados)
-        else:
-            media_nota_geral = 0.0
-            media_proficiencia_geral = 0.0
-        
-        # Calcular distribuição de classificação consolidada
-        distribuicao_geral = {
-            'abaixo_do_basico': 0,
-            'basico': 0,
-            'adequado': 0,
-            'avancado': 0
-        }
-        
-        for resultado in todos_resultados:
-            classificacao = resultado.classification.lower()
-            if 'abaixo' in classificacao or 'básico' in classificacao:
-                distribuicao_geral['abaixo_do_basico'] += 1
-            elif 'básico' in classificacao or 'basico' in classificacao:
-                distribuicao_geral['basico'] += 1
-            elif 'adequado' in classificacao:
-                distribuicao_geral['adequado'] += 1
-            elif 'avançado' in classificacao or 'avancado' in classificacao:
-                distribuicao_geral['avancado'] += 1
-        
-        # Buscar informações da escola, série e turma
-        escola = School.query.get(escola_id)
-        serie = Grade.query.get(serie_id)
-        turma = Class.query.get(turma_id)
-        escola_nome = escola.name if escola else "Escola não encontrada"
-        serie_nome = serie.name if serie else "Série não encontrada"
-        turma_nome = turma.name if turma else "Turma não encontrada"
-        
-        return {
-            "tipo": "turma",
-            "nome": turma_nome,
-            "serie": serie_nome,
-            "escola": escola_nome,
-            "estado": scope_info.get('estado', 'N/A'),
-            "municipio": scope_info.get('municipio', 'N/A'),
-            "total_avaliacoes": len(test_ids),
-            "total_alunos": total_alunos,
-            "alunos_participantes": alunos_participantes,
-            "alunos_pendentes": total_alunos - alunos_participantes,
-            "alunos_ausentes": total_alunos - alunos_participantes,
-            "media_nota_geral": round(media_nota_geral, 2),
-            "media_proficiencia_geral": round(media_proficiencia_geral, 2),
-            "distribuicao_classificacao_geral": distribuicao_geral
-        }
-        
-    except Exception as e:
-        logging.error(f"Erro ao calcular estatísticas da turma: {str(e)}")
-        return _empty_stats_turma(escola_id, serie_id, turma_id, scope_info)
-
-
-def _gerar_opcoes_proximos_filtros(nivel_granularidade: str, estado: str, municipio: str, escola: str, serie: str, avaliacao: str) -> Dict[str, Any]:
-    """
-    Gera opções para próximos filtros baseado no nível atual
-    """
-    try:
-        opcoes = {}
-        
-        if nivel_granularidade == 'municipio':
-            # Próximo nível: escola
-            escolas = School.query.join(City).filter(
-                City.state.ilike(f"%{estado}%"),
-                City.name.ilike(f"%{municipio}%")
-            ).all()
-            
-            opcoes['escolas'] = [
-                {"id": escola.id, "name": escola.name}
-                for escola in escolas
-            ]
-            
-        elif nivel_granularidade == 'escola':
-            # Próximo nível: série
-            series = Grade.query.join(Class).join(School).filter(
-                School.id == escola
-            ).distinct().all()
-            
-            opcoes['series'] = [
-                {"id": serie.id, "name": serie.name}
-                for serie in series
-            ]
-            
-        elif nivel_granularidade == 'serie':
-            # Próximo nível: turma
-            turmas = Class.query.join(School).join(Grade).filter(
-                School.id == escola,
-                Grade.id == serie
-            ).all()
-            
-            opcoes['turmas'] = [
-                {"id": turma.id, "name": turma.name}
-                for turma in turmas
-            ]
-            
-        elif nivel_granularidade == 'turma':
-            # Nível máximo alcançado
-            opcoes['maximo_alcancado'] = True
-            
-        return opcoes
-        
-    except Exception as e:
-        logging.error(f"Erro ao gerar opções de próximos filtros: {str(e)}")
-        return {}
-
-
-def _empty_stats_escola(escola_id: str, scope_info) -> Dict[str, Any]:
-    """Retorna estatísticas vazias para escola"""
-    escola = School.query.get(escola_id)
+    city_data = scope_info.get('city_data')
     return {
-        "tipo": "escola",
-        "nome": escola.name if escola else "Escola não encontrada",
-        "estado": scope_info.get('estado', 'N/A'),
-        "municipio": scope_info.get('municipio', 'N/A'),
+        "tipo": nivel_granularidade,
+        "nome": _get_nome_granularidade(nivel_granularidade, scope_info, None, None),
+        "estado": scope_info.get('estado', 'Todos os estados'),
+        "municipio": city_data.name if city_data else "Todos os municípios",
+        "escola": None,
+        "serie": None,
+        "total_escolas": 0,
         "total_series": 0,
         "total_turmas": 0,
         "total_avaliacoes": 0,
@@ -1423,327 +1244,119 @@ def _empty_stats_escola(escola_id: str, scope_info) -> Dict[str, Any]:
     }
 
 
-def _empty_stats_serie(escola_id: str, serie_id: str, scope_info) -> Dict[str, Any]:
-    """Retorna estatísticas vazias para série"""
-    escola = School.query.get(escola_id)
-    serie = Grade.query.get(serie_id)
-    return {
-        "tipo": "serie",
-        "nome": serie.name if serie else "Série não encontrada",
-        "escola": escola.name if escola else "Escola não encontrada",
-        "estado": scope_info.get('estado', 'N/A'),
-        "municipio": scope_info.get('municipio', 'N/A'),
-        "total_turmas": 0,
-        "total_avaliacoes": 0,
-        "total_alunos": 0,
-        "alunos_participantes": 0,
-        "alunos_pendentes": 0,
-        "alunos_ausentes": 0,
-        "media_nota_geral": 0.0,
-        "media_proficiencia_geral": 0.0,
-        "distribuicao_classificacao_geral": {
-            "abaixo_do_basico": 0,
-            "basico": 0,
-            "adequado": 0,
-            "avancado": 0
+def _get_nome_granularidade(nivel_granularidade, scope_info, escola_info, serie_info):
+    """
+    Retorna o nome apropriado baseado no nível de granularidade
+    """
+    if nivel_granularidade == "avaliacao":
+        return "Avaliação Específica"
+    elif nivel_granularidade == "turma":
+        return f"Turma - {serie_info}" if serie_info else "Turma"
+    elif nivel_granularidade == "serie":
+        return serie_info if serie_info else "Série"
+    elif nivel_granularidade == "escola":
+        return escola_info if escola_info else "Escola"
+    elif nivel_granularidade == "municipio":
+        city_data = scope_info.get('city_data')
+        return city_data.name if city_data else "Município"
+    elif nivel_granularidade == "estado":
+        return scope_info.get('estado', 'Estado')
+    else:
+        return "Geral"
+
+
+def _gerar_opcoes_proximos_filtros(scope_info, nivel_granularidade):
+    """
+    Gera as opções dos próximos filtros baseado no nível de granularidade atual
+    """
+    try:
+        opcoes = {
+            "escolas": [],
+            "series": [],
+            "turmas": [],
+            "avaliacoes": []
         }
-    }
-
-
-def _empty_stats_turma(escola_id: str, serie_id: str, turma_id: str, scope_info) -> Dict[str, Any]:
-    """Retorna estatísticas vazias para turma"""
-    escola = School.query.get(escola_id)
-    serie = Grade.query.get(serie_id)
-    turma = Class.query.get(turma_id)
-    return {
-        "tipo": "turma",
-        "nome": turma.name if turma else "Turma não encontrada",
-        "serie": serie.name if serie else "Série não encontrada",
-        "escola": escola.name if escola else "Escola não encontrada",
-        "estado": scope_info.get('estado', 'N/A'),
-        "municipio": scope_info.get('municipio', 'N/A'),
-        "total_avaliacoes": 0,
-        "total_alunos": 0,
-        "alunos_participantes": 0,
-        "alunos_pendentes": 0,
-        "alunos_ausentes": 0,
-        "media_nota_geral": 0.0,
-        "media_proficiencia_geral": 0.0,
-        "distribuicao_classificacao_geral": {
-            "abaixo_do_basico": 0,
-            "basico": 0,
-            "adequado": 0,
-            "avancado": 0
+        
+        # Se estamos no nível de município, mostrar escolas
+        if nivel_granularidade in ["estado", "municipio"]:
+            escolas = scope_info.get('escolas', [])
+            opcoes["escolas"] = [{"id": str(escola.id), "name": escola.name} for escola in escolas]
+        
+        # Se estamos no nível de escola, mostrar séries
+        if nivel_granularidade in ["estado", "municipio", "escola"]:
+            # Buscar séries das escolas do escopo
+            escola_ids = [escola.id for escola in scope_info.get('escolas', [])]
+            if escola_ids:
+                # Aplicar filtros adicionais se necessário
+                query_series = db.session.query(Grade).join(Class, Grade.id == Class.grade_id)\
+                                   .join(School, Class.school_id == School.id)\
+                                   .filter(School.id.in_(escola_ids))
+                
+                # Se escola específica foi selecionada, filtrar por ela
+                if scope_info.get('escola'):
+                    query_series = query_series.filter(School.id == scope_info.get('escola'))
+                
+                series = query_series.distinct().all()
+                opcoes["series"] = [{"id": str(serie.id), "name": serie.name} for serie in series]
+        
+        # Se estamos no nível de série, mostrar turmas
+        if nivel_granularidade in ["estado", "municipio", "escola", "serie"]:
+            # Buscar turmas das escolas do escopo
+            escola_ids = [escola.id for escola in scope_info.get('escolas', [])]
+            if escola_ids:
+                # Aplicar filtros adicionais se necessário
+                query_turmas = db.session.query(Class).join(School, Class.school_id == School.id)\
+                                   .filter(School.id.in_(escola_ids))
+                
+                # Se escola específica foi selecionada, filtrar por ela
+                if scope_info.get('escola'):
+                    query_turmas = query_turmas.filter(School.id == scope_info.get('escola'))
+                
+                # Se série específica foi selecionada, filtrar por ela
+                if scope_info.get('serie'):
+                    query_turmas = query_turmas.join(Grade, Class.grade_id == Grade.id)\
+                                       .filter(Grade.id == scope_info.get('serie'))
+                
+                turmas = query_turmas.distinct().all()
+                opcoes["turmas"] = [{"id": str(turma.id), "name": turma.name or f"Turma {turma.id}"} for turma in turmas]
+        
+        # Se estamos no nível de turma, mostrar avaliações
+        if nivel_granularidade in ["estado", "municipio", "escola", "serie", "turma"]:
+            # Buscar avaliações das escolas do escopo
+            escola_ids = [escola.id for escola in scope_info.get('escolas', [])]
+            if escola_ids:
+                # Aplicar filtros adicionais se necessário
+                query_avaliacoes = db.session.query(Test).join(ClassTest, Test.id == ClassTest.test_id)\
+                                       .join(Class, ClassTest.class_id == Class.id)\
+                                       .join(School, Class.school_id == School.id)\
+                                       .filter(School.id.in_(escola_ids))
+                
+                # Se escola específica foi selecionada, filtrar por ela
+                if scope_info.get('escola'):
+                    query_avaliacoes = query_avaliacoes.filter(School.id == scope_info.get('escola'))
+                
+                # Se série específica foi selecionada, filtrar por ela
+                if scope_info.get('serie'):
+                    query_avaliacoes = query_avaliacoes.join(Grade, Class.grade_id == Grade.id)\
+                                           .filter(Grade.id == scope_info.get('serie'))
+                
+                # Se turma específica foi selecionada, filtrar por ela
+                if scope_info.get('turma'):
+                    query_avaliacoes = query_avaliacoes.filter(Class.id == scope_info.get('turma'))
+                
+                avaliacoes = query_avaliacoes.distinct().all()
+                opcoes["avaliacoes"] = [{"id": str(avaliacao.id), "titulo": avaliacao.title} for avaliacao in avaliacoes]
+        
+        return opcoes
+        
+    except Exception as e:
+        logging.error(f"Erro ao gerar opções dos próximos filtros: {str(e)}")
+        return {
+            "escolas": [],
+            "series": [],
+            "turmas": [],
+            "avaliacoes": []
         }
-    }
-
-
-def _calcular_estatisticas_por_disciplina_escola(class_tests: list, escola_id: str):
-    """
-    Calcula estatísticas agrupadas por disciplina para uma escola específica
-    """
-    try:
-        from app.models.evaluationResult import EvaluationResult
-        from app.models.student import Student
-        
-        if not class_tests:
-            return []
-        
-        # Filtrar apenas avaliações da escola específica
-        escola_class_tests = [ct for ct in class_tests if ct.class_ and ct.class_.school_id == escola_id]
-        
-        if not escola_class_tests:
-            return []
-        
-        # Agrupar avaliações por disciplina
-        disciplinas = {}
-        for ct in escola_class_tests:
-            if ct.test and ct.test.subject_rel:
-                disciplina_nome = ct.test.subject_rel.name
-                if disciplina_nome not in disciplinas:
-                    disciplinas[disciplina_nome] = []
-                disciplinas[disciplina_nome].append(ct)
-        
-        resultados_disciplina = []
-        
-        for disciplina_nome, avaliacoes_disciplina in disciplinas.items():
-            # Coletar dados da disciplina
-            test_ids = [ct.test_id for ct in avaliacoes_disciplina]
-            class_ids = [ct.class_id for ct in avaliacoes_disciplina]
-            
-            # Buscar todos os alunos das turmas envolvidas
-            todos_alunos = Student.query.filter(Student.class_id.in_(class_ids)).all()
-            total_alunos = len(todos_alunos)
-            
-            # Buscar todos os resultados das avaliações da disciplina
-            todos_resultados = EvaluationResult.query.filter(EvaluationResult.test_id.in_(test_ids)).all()
-            alunos_participantes = len(todos_resultados)
-            
-            # Calcular médias da disciplina
-            if todos_resultados:
-                media_nota = sum(r.grade for r in todos_resultados) / len(todos_resultados)
-                media_proficiencia = sum(r.proficiency for r in todos_resultados) / len(todos_resultados)
-            else:
-                media_nota = 0.0
-                media_proficiencia = 0.0
-            
-            # Calcular distribuição de classificação da disciplina
-            distribuicao_disciplina = {
-                'abaixo_do_basico': 0,
-                'basico': 0,
-                'adequado': 0,
-                'avancado': 0
-            }
-            
-            for resultado in todos_resultados:
-                classificacao = resultado.classification.lower()
-                if 'abaixo' in classificacao or 'básico' in classificacao:
-                    distribuicao_disciplina['abaixo_do_basico'] += 1
-                elif 'básico' in classificacao or 'basico' in classificacao:
-                    distribuicao_disciplina['basico'] += 1
-                elif 'adequado' in classificacao:
-                    distribuicao_disciplina['adequado'] += 1
-                elif 'avançado' in classificacao or 'avancado' in classificacao:
-                    distribuicao_disciplina['avancado'] += 1
-            
-            resultado_disciplina = {
-                "disciplina": disciplina_nome,
-                "total_avaliacoes": len(test_ids),
-                "total_alunos": total_alunos,
-                "alunos_participantes": alunos_participantes,
-                "alunos_pendentes": total_alunos - alunos_participantes,
-                "alunos_ausentes": total_alunos - alunos_participantes,
-                "media_nota": round(media_nota, 2),
-                "media_proficiencia": round(media_proficiencia, 2),
-                "distribuicao_classificacao": distribuicao_disciplina
-            }
-            
-            resultados_disciplina.append(resultado_disciplina)
-        
-        return resultados_disciplina
-        
-    except Exception as e:
-        logging.error(f"Erro ao calcular estatísticas por disciplina da escola: {str(e)}")
-        return []
-
-
-def _calcular_estatisticas_por_disciplina_serie(class_tests: list, escola_id: str, serie_id: str):
-    """
-    Calcula estatísticas agrupadas por disciplina para uma série específica
-    """
-    try:
-        from app.models.evaluationResult import EvaluationResult
-        from app.models.student import Student
-        
-        if not class_tests:
-            return []
-        
-        # Filtrar apenas avaliações da série específica
-        serie_class_tests = [ct for ct in class_tests 
-                           if ct.class_ and ct.class_.school_id == escola_id and ct.class_.grade_id == serie_id]
-        
-        if not serie_class_tests:
-            return []
-        
-        # Agrupar avaliações por disciplina
-        disciplinas = {}
-        for ct in serie_class_tests:
-            if ct.test and ct.test.subject_rel:
-                disciplina_nome = ct.test.subject_rel.name
-                if disciplina_nome not in disciplinas:
-                    disciplinas[disciplina_nome] = []
-                disciplinas[disciplina_nome].append(ct)
-        
-        resultados_disciplina = []
-        
-        for disciplina_nome, avaliacoes_disciplina in disciplinas.items():
-            # Coletar dados da disciplina
-            test_ids = [ct.test_id for ct in avaliacoes_disciplina]
-            class_ids = [ct.class_id for ct in avaliacoes_disciplina]
-            
-            # Buscar todos os alunos das turmas envolvidas
-            todos_alunos = Student.query.filter(Student.class_id.in_(class_ids)).all()
-            total_alunos = len(todos_alunos)
-            
-            # Buscar todos os resultados das avaliações da disciplina
-            todos_resultados = EvaluationResult.query.filter(EvaluationResult.test_id.in_(test_ids)).all()
-            alunos_participantes = len(todos_resultados)
-            
-            # Calcular médias da disciplina
-            if todos_resultados:
-                media_nota = sum(r.grade for r in todos_resultados) / len(todos_resultados)
-                media_proficiencia = sum(r.proficiency for r in todos_resultados) / len(todos_resultados)
-            else:
-                media_nota = 0.0
-                media_proficiencia = 0.0
-            
-            # Calcular distribuição de classificação da disciplina
-            distribuicao_disciplina = {
-                'abaixo_do_basico': 0,
-                'basico': 0,
-                'adequado': 0,
-                'avancado': 0
-            }
-            
-            for resultado in todos_resultados:
-                classificacao = resultado.classification.lower()
-                if 'abaixo' in classificacao or 'básico' in classificacao:
-                    distribuicao_disciplina['abaixo_do_basico'] += 1
-                elif 'básico' in classificacao or 'basico' in classificacao:
-                    distribuicao_disciplina['basico'] += 1
-                elif 'adequado' in classificacao:
-                    distribuicao_disciplina['adequado'] += 1
-                elif 'avançado' in classificacao or 'avancado' in classificacao:
-                    distribuicao_disciplina['avancado'] += 1
-            
-            resultado_disciplina = {
-                "disciplina": disciplina_nome,
-                "total_avaliacoes": len(test_ids),
-                "total_alunos": total_alunos,
-                "alunos_participantes": alunos_participantes,
-                "alunos_pendentes": total_alunos - alunos_participantes,
-                "alunos_ausentes": total_alunos - alunos_participantes,
-                "media_nota": round(media_nota, 2),
-                "media_proficiencia": round(media_proficiencia, 2),
-                "distribuicao_classificacao": distribuicao_disciplina
-            }
-            
-            resultados_disciplina.append(resultado_disciplina)
-        
-        return resultados_disciplina
-        
-    except Exception as e:
-        logging.error(f"Erro ao calcular estatísticas por disciplina da série: {str(e)}")
-        return []
-
-
-def _calcular_estatisticas_por_disciplina_turma(class_tests: list, escola_id: str, serie_id: str, turma_id: str):
-    """
-    Calcula estatísticas agrupadas por disciplina para uma turma específica
-    """
-    try:
-        from app.models.evaluationResult import EvaluationResult
-        from app.models.student import Student
-        
-        if not class_tests:
-            return []
-        
-        # Filtrar apenas avaliações da turma específica
-        turma_class_tests = [ct for ct in class_tests if ct.class_id == turma_id]
-        
-        if not turma_class_tests:
-            return []
-        
-        # Agrupar avaliações por disciplina
-        disciplinas = {}
-        for ct in turma_class_tests:
-            if ct.test and ct.test.subject_rel:
-                disciplina_nome = ct.test.subject_rel.name
-                if disciplina_nome not in disciplinas:
-                    disciplinas[disciplina_nome] = []
-                disciplinas[disciplina_nome].append(ct)
-        
-        resultados_disciplina = []
-        
-        for disciplina_nome, avaliacoes_disciplina in disciplinas.items():
-            # Coletar dados da disciplina
-            test_ids = [ct.test_id for ct in avaliacoes_disciplina]
-            class_ids = [ct.class_id for ct in avaliacoes_disciplina]
-            
-            # Buscar todos os alunos das turmas envolvidas
-            todos_alunos = Student.query.filter(Student.class_id.in_(class_ids)).all()
-            total_alunos = len(todos_alunos)
-            
-            # Buscar todos os resultados das avaliações da disciplina
-            todos_resultados = EvaluationResult.query.filter(EvaluationResult.test_id.in_(test_ids)).all()
-            alunos_participantes = len(todos_resultados)
-            
-            # Calcular médias da disciplina
-            if todos_resultados:
-                media_nota = sum(r.grade for r in todos_resultados) / len(todos_resultados)
-                media_proficiencia = sum(r.proficiency for r in todos_resultados) / len(todos_resultados)
-            else:
-                media_nota = 0.0
-                media_proficiencia = 0.0
-            
-            # Calcular distribuição de classificação da disciplina
-            distribuicao_disciplina = {
-                'abaixo_do_basico': 0,
-                'basico': 0,
-                'adequado': 0,
-                'avancado': 0
-            }
-            
-            for resultado in todos_resultados:
-                classificacao = resultado.classification.lower()
-                if 'abaixo' in classificacao or 'básico' in classificacao:
-                    distribuicao_disciplina['abaixo_do_basico'] += 1
-                elif 'básico' in classificacao or 'basico' in classificacao:
-                    distribuicao_disciplina['basico'] += 1
-                elif 'adequado' in classificacao:
-                    distribuicao_disciplina['adequado'] += 1
-                elif 'avançado' in classificacao or 'avancado' in classificacao:
-                    distribuicao_disciplina['avancado'] += 1
-            
-            resultado_disciplina = {
-                "disciplina": disciplina_nome,
-                "total_avaliacoes": len(test_ids),
-                "total_alunos": total_alunos,
-                "alunos_participantes": alunos_participantes,
-                "alunos_pendentes": total_alunos - alunos_participantes,
-                "alunos_ausentes": total_alunos - alunos_participantes,
-                "media_nota": round(media_nota, 2),
-                "media_proficiencia": round(media_proficiencia, 2),
-                "distribuicao_classificacao": distribuicao_disciplina
-            }
-            
-            resultados_disciplina.append(resultado_disciplina)
-        
-        return resultados_disciplina
-        
-    except Exception as e:
-        logging.error(f"Erro ao calcular estatísticas por disciplina da turma: {str(e)}")
-        return []
 
 
 # ==================== ENDPOINT 2: GET /alunos ====================
@@ -3952,3 +3565,406 @@ def obter_estatisticas_status():
     except Exception as e:
         logging.error(f"Erro ao obter estatísticas de status: {str(e)}", exc_info=True)
         return jsonify({"error": "Erro ao obter estatísticas", "details": str(e)}), 500
+
+# ==================== ENDPOINTS PARA OPÇÕES DE FILTROS ====================
+
+@bp.route('/opcoes-filtros', methods=['GET'])
+@jwt_required()
+@role_required("admin", "professor", "coordenador", "diretor")
+def obter_opcoes_filtros():
+    """
+    Retorna as opções disponíveis para os filtros de avaliações
+    Baseado nos filtros já aplicados (estado, municipio, escola, serie, turma)
+    
+    Query Parameters:
+    - estado (obrigatório): Estado selecionado
+    - municipio (opcional): Município selecionado
+    - escola (opcional): Escola selecionada
+    - serie (opcional): Série selecionada
+    - turma (opcional): Turma selecionada
+    """
+    try:
+        user = get_current_user_from_token()
+        if not user:
+            return jsonify({"error": "Usuário não encontrado"}), 401
+
+        # Extrair parâmetros de filtro
+        estado = request.args.get('estado')
+        municipio = request.args.get('municipio')
+        escola = request.args.get('escola')
+        serie = request.args.get('serie')
+        turma = request.args.get('turma')
+        
+        if not estado:
+            return jsonify({"error": "Parâmetro 'estado' é obrigatório"}), 400
+        
+        # Determinar escopo baseado nos filtros aplicados
+        scope_info = _determinar_escopo_busca(estado, municipio, escola, serie, turma, None)
+        
+        if not scope_info:
+            return jsonify({"error": "Não foi possível determinar o escopo de busca"}), 400
+        
+        # Buscar opções disponíveis
+        opcoes = {
+            "estados": [],
+            "municipios": [],
+            "escolas": [],
+            "series": [],
+            "turmas": [],
+            "avaliacoes": []
+        }
+        
+        # 1. Estados disponíveis (baseado no papel do usuário)
+        if user['role'] == 'admin':
+            # Admin vê todos os estados
+            estados = db.session.query(City.state).distinct().filter(City.state.isnot(None)).all()
+            opcoes["estados"] = [{"id": estado[0], "nome": estado[0]} for estado in estados]
+        else:
+            # Outros usuários veem apenas estados das suas cidades
+            estados = db.session.query(City.state).distinct().filter(
+                City.state.isnot(None),
+                City.id.in_([user.get('city_id')] if user.get('city_id') else [])
+            ).all()
+            opcoes["estados"] = [{"id": estado[0], "nome": estado[0]} for estado in estados]
+        
+        # 2. Municípios do estado selecionado
+        if estado:
+            municipios = City.query.filter(City.state.ilike(f"%{estado}%")).all()
+            opcoes["municipios"] = [{"id": str(m.id), "nome": m.name} for m in municipios]
+        
+        # 3. Escolas do município selecionado
+        if municipio:
+            city_filter = City.query.get(municipio)
+            if city_filter:
+                escolas = School.query.filter_by(city_id=municipio).all()
+                opcoes["escolas"] = [{"id": str(e.id), "nome": e.name} for e in escolas]
+        
+        # 4. Séries disponíveis (baseado no escopo atual)
+        escolas_escopo = scope_info.get('escolas', [])
+        if escolas_escopo:
+            escola_ids = [e.id for e in escolas_escopo]
+            series = db.session.query(Grade).join(Class, Grade.id == Class.grade_id)\
+                               .join(School, Class.school_id == School.id)\
+                               .filter(School.id.in_(escola_ids))\
+                               .distinct().all()
+            opcoes["series"] = [{"id": str(s.id), "nome": s.name} for s in series]
+        
+        # 5. Turmas disponíveis (baseado no escopo atual)
+        if escolas_escopo:
+            escola_ids = [e.id for e in escolas_escopo]
+            query_turmas = Class.query.join(School, Class.school_id == School.id)\
+                                     .filter(School.id.in_(escola_ids))
+            
+            if serie:
+                query_turmas = query_turmas.filter(Class.grade_id == serie)
+            
+            turmas = query_turmas.all()
+            opcoes["turmas"] = [{"id": str(t.id), "nome": t.name or f"Turma {t.id}"} for t in turmas]
+        
+        # 6. Avaliações disponíveis (baseado no escopo atual)
+        if escolas_escopo:
+            escola_ids = [e.id for e in escolas_escopo]
+            query_avaliacoes = Test.query.join(ClassTest, Test.id == ClassTest.test_id)\
+                                        .join(Class, ClassTest.class_id == Class.id)\
+                                        .join(School, Class.school_id == School.id)\
+                                        .filter(School.id.in_(escola_ids))\
+                                        .distinct()
+            
+            # Aplicar filtros adicionais se fornecidos
+            if serie:
+                query_avaliacoes = query_avaliacoes.join(Grade, Class.grade_id == Grade.id)\
+                                                  .filter(Grade.id == serie)
+            
+            if turma:
+                query_avaliacoes = query_avaliacoes.filter(Class.id == turma)
+            
+            # Filtrar por papel do usuário
+            if user['role'] == 'professor':
+                query_avaliacoes = query_avaliacoes.filter(Test.created_by == user['id'])
+            
+            avaliacoes = query_avaliacoes.all()
+            opcoes["avaliacoes"] = [{"id": str(a.id), "titulo": a.title} for a in avaliacoes]
+        
+        return jsonify({
+            "opcoes": opcoes,
+            "filtros_aplicados": {
+                "estado": estado,
+                "municipio": municipio,
+                "escola": escola,
+                "serie": serie,
+                "turma": turma
+            }
+        }), 200
+
+    except Exception as e:
+        logging.error(f"Erro ao obter opções de filtros: {str(e)}", exc_info=True)
+        return jsonify({"error": "Erro ao obter opções de filtros", "details": str(e)}), 500
+
+
+@bp.route('/opcoes-filtros/estados', methods=['GET'])
+@jwt_required()
+@role_required("admin", "professor", "coordenador", "diretor")
+def obter_estados():
+    """
+    Retorna todos os estados disponíveis
+    """
+    try:
+        user = get_current_user_from_token()
+        if not user:
+            return jsonify({"error": "Usuário não encontrado"}), 401
+
+        if user['role'] == 'admin':
+            # Admin vê todos os estados
+            estados = db.session.query(City.state).distinct().filter(City.state.isnot(None)).all()
+        else:
+            # Outros usuários veem apenas estados das suas cidades
+            estados = db.session.query(City.state).distinct().filter(
+                City.state.isnot(None),
+                City.id.in_([user.get('city_id')] if user.get('city_id') else [])
+            ).all()
+        
+        estados_list = [{"id": estado[0], "nome": estado[0]} for estado in estados]
+        
+        return jsonify({
+            "estados": estados_list,
+            "total": len(estados_list)
+        }), 200
+
+    except Exception as e:
+        logging.error(f"Erro ao obter estados: {str(e)}", exc_info=True)
+        return jsonify({"error": "Erro ao obter estados", "details": str(e)}), 500
+
+
+@bp.route('/opcoes-filtros/municipios/<string:estado>', methods=['GET'])
+@jwt_required()
+@role_required("admin", "professor", "coordenador", "diretor")
+def obter_municipios_estado(estado: str):
+    """
+    Retorna municípios de um estado específico
+    """
+    try:
+        user = get_current_user_from_token()
+        if not user:
+            return jsonify({"error": "Usuário não encontrado"}), 401
+
+        municipios = City.query.filter(City.state.ilike(f"%{estado}%")).all()
+        municipios_list = [{"id": str(m.id), "nome": m.name} for m in municipios]
+        
+        return jsonify({
+            "municipios": municipios_list,
+            "estado": estado,
+            "total": len(municipios_list)
+        }), 200
+
+    except Exception as e:
+        logging.error(f"Erro ao obter municípios do estado {estado}: {str(e)}", exc_info=True)
+        return jsonify({"error": "Erro ao obter municípios", "details": str(e)}), 500
+
+
+@bp.route('/opcoes-filtros/escolas/<string:municipio_id>', methods=['GET'])
+@jwt_required()
+@role_required("admin", "professor", "coordenador", "diretor")
+def obter_escolas_municipio(municipio_id: str):
+    """
+    Retorna escolas de um município específico
+    """
+    try:
+        user = get_current_user_from_token()
+        if not user:
+            return jsonify({"error": "Usuário não encontrado"}), 401
+
+        escolas = School.query.filter_by(city_id=municipio_id).all()
+        escolas_list = [{"id": str(e.id), "nome": e.name} for e in escolas]
+        
+        return jsonify({
+            "escolas": escolas_list,
+            "municipio_id": municipio_id,
+            "total": len(escolas_list)
+        }), 200
+
+    except Exception as e:
+        logging.error(f"Erro ao obter escolas do município {municipio_id}: {str(e)}", exc_info=True)
+        return jsonify({"error": "Erro ao obter escolas", "details": str(e)}), 500
+
+
+@bp.route('/opcoes-filtros/series', methods=['GET'])
+@jwt_required()
+@role_required("admin", "professor", "coordenador", "diretor")
+def obter_series():
+    """
+    Retorna séries disponíveis baseado nos filtros aplicados
+    """
+    try:
+        user = get_current_user_from_token()
+        if not user:
+            return jsonify({"error": "Usuário não encontrado"}), 401
+
+        # Extrair parâmetros de filtro
+        estado = request.args.get('estado')
+        municipio = request.args.get('municipio')
+        escola = request.args.get('escola')
+        
+        if not estado:
+            return jsonify({"error": "Parâmetro 'estado' é obrigatório"}), 400
+        
+        # Determinar escopo
+        scope_info = _determinar_escopo_busca(estado, municipio, escola, None, None, None)
+        
+        if not scope_info:
+            return jsonify({"error": "Não foi possível determinar o escopo de busca"}), 400
+        
+        escolas_escopo = scope_info.get('escolas', [])
+        if not escolas_escopo:
+            return jsonify({"series": [], "total": 0}), 200
+        
+        escola_ids = [e.id for e in escolas_escopo]
+        series = db.session.query(Grade).join(Class, Grade.id == Class.grade_id)\
+                           .join(School, Class.school_id == School.id)\
+                           .filter(School.id.in_(escola_ids))\
+                           .distinct().all()
+        
+        series_list = [{"id": str(s.id), "nome": s.name} for s in series]
+        
+        return jsonify({
+            "series": series_list,
+            "total": len(series_list)
+        }), 200
+
+    except Exception as e:
+        logging.error(f"Erro ao obter séries: {str(e)}", exc_info=True)
+        return jsonify({"error": "Erro ao obter séries", "details": str(e)}), 500
+
+
+@bp.route('/opcoes-filtros/turmas', methods=['GET'])
+@jwt_required()
+@role_required("admin", "professor", "coordenador", "diretor")
+def obter_turmas():
+    """
+    Retorna turmas disponíveis baseado nos filtros aplicados
+    """
+    try:
+        user = get_current_user_from_token()
+        if not user:
+            return jsonify({"error": "Usuário não encontrado"}), 401
+
+        # Extrair parâmetros de filtro
+        estado = request.args.get('estado')
+        municipio = request.args.get('municipio')
+        escola = request.args.get('escola')
+        serie = request.args.get('serie')
+        
+        if not estado:
+            return jsonify({"error": "Parâmetro 'estado' é obrigatório"}), 400
+        
+        # Determinar escopo
+        scope_info = _determinar_escopo_busca(estado, municipio, escola, serie, None, None)
+        
+        if not scope_info:
+            return jsonify({"error": "Não foi possível determinar o escopo de busca"}), 400
+        
+        escolas_escopo = scope_info.get('escolas', [])
+        if not escolas_escopo:
+            return jsonify({"turmas": [], "total": 0}), 200
+        
+        escola_ids = [e.id for e in escolas_escopo]
+        query_turmas = Class.query.join(School, Class.school_id == School.id)\
+                                 .filter(School.id.in_(escola_ids))
+        
+        if serie:
+            query_turmas = query_turmas.filter(Class.grade_id == serie)
+        
+        turmas = query_turmas.all()
+        turmas_list = [{"id": str(t.id), "nome": t.name or f"Turma {t.id}"} for t in turmas]
+        
+        return jsonify({
+            "turmas": turmas_list,
+            "total": len(turmas_list)
+        }), 200
+
+    except Exception as e:
+        logging.error(f"Erro ao obter turmas: {str(e)}", exc_info=True)
+        return jsonify({"error": "Erro ao obter turmas", "details": str(e)}), 500
+
+
+@bp.route('/opcoes-filtros/avaliacoes', methods=['GET'])
+@jwt_required()
+@role_required("admin", "professor", "coordenador", "diretor")
+def obter_avaliacoes():
+    """
+    Retorna avaliações disponíveis baseado nos filtros aplicados
+    """
+    try:
+        user = get_current_user_from_token()
+        if not user:
+            return jsonify({"error": "Usuário não encontrado"}), 401
+
+        # Extrair parâmetros de filtro
+        estado = request.args.get('estado')
+        municipio = request.args.get('municipio')
+        escola = request.args.get('escola')
+        serie = request.args.get('serie')
+        turma = request.args.get('turma')
+        
+        if not estado:
+            return jsonify({"error": "Parâmetro 'estado' é obrigatório"}), 400
+        
+        # Determinar escopo
+        scope_info = _determinar_escopo_busca(estado, municipio, escola, serie, turma, None)
+        
+        if not scope_info:
+            logging.error(f"Escopo não determinado para: estado={estado}, municipio={municipio}, escola={escola}, serie={serie}, turma={turma}")
+            return jsonify({"error": "Não foi possível determinar o escopo de busca"}), 400
+        
+        escolas_escopo = scope_info.get('escolas', [])
+        logging.info(f"Escolas encontradas no escopo: {len(escolas_escopo)}")
+        
+        if not escolas_escopo:
+            logging.warning("Nenhuma escola encontrada no escopo")
+            return jsonify({"avaliacoes": [], "total": 0}), 200
+        
+        escola_ids = [e.id for e in escolas_escopo]
+        logging.info(f"IDs das escolas: {escola_ids[:5]}...")  # Primeiros 5 IDs
+        
+        # Query mais robusta que evita problemas com dados inconsistentes
+        # Selecionar apenas campos específicos para evitar problemas com campos JSON
+        query_avaliacoes = Test.query.with_entities(Test.id, Test.title)\
+                                    .join(ClassTest, Test.id == ClassTest.test_id)\
+                                    .join(Class, ClassTest.class_id == Class.id)\
+                                    .join(School, Class.school_id == School.id)\
+                                    .filter(School.id.in_(escola_ids))\
+                                    .distinct()
+        
+        # Aplicar filtros adicionais se fornecidos
+        if serie:
+            # Adicionar join com Grade apenas quando necessário
+            query_avaliacoes = query_avaliacoes.join(Grade, Class.grade_id == Grade.id)\
+                                              .filter(Grade.id == serie)
+            logging.info(f"Aplicando filtro de série: {serie}")
+        
+        if turma:
+            query_avaliacoes = query_avaliacoes.filter(Class.id == turma)
+            logging.info(f"Aplicando filtro de turma: {turma}")
+        
+        # Filtrar por papel do usuário
+        if user['role'] == 'professor':
+            query_avaliacoes = query_avaliacoes.filter(Test.created_by == user['id'])
+            logging.info(f"Aplicando filtro de professor: {user['id']}")
+        
+        # Log da query SQL para debug
+        logging.info(f"Query SQL: {query_avaliacoes}")
+        
+        avaliacoes = query_avaliacoes.all()
+        logging.info(f"Avaliações encontradas: {len(avaliacoes)}")
+        
+        # Como estamos usando with_entities, os resultados são tuplas (id, title)
+        avaliacoes_list = [{"id": str(a[0]), "titulo": a[1]} for a in avaliacoes]
+        
+        return jsonify({
+            "avaliacoes": avaliacoes_list,
+            "total": len(avaliacoes_list)
+        }), 200
+
+    except Exception as e:
+        logging.error(f"Erro ao obter avaliações: {str(e)}", exc_info=True)
+        logging.error(f"Parâmetros recebidos: estado={estado}, municipio={municipio}, escola={escola}, serie={serie}, turma={turma}")
+        return jsonify({"error": "Erro ao obter avaliações", "details": str(e)}), 500

@@ -235,20 +235,27 @@ def get_classification_1000_scale(proficiency_1000: float) -> str:
 @role_required("admin", "professor", "coordenador", "diretor")
 def listar_avaliacoes():
     """
-    Lista avaliações aplicadas com estatísticas completas e filtros em cascata
+    Lista avaliações aplicadas com estatísticas completas e filtros hierárquicos
     
     Nota: Retorna apenas avaliações que foram efetivamente aplicadas (estão na tabela class_test)
     de acordo com os filtros selecionados.
     
     Query Parameters:
-    - estado, municipio, escola, serie, turma, avaliacao (mínimo 3 filtros obrigatórios)
-    - page, per_page
+    - estado (obrigatório): Estado geográfico (não pode ser 'all')
+    - municipio (obrigatório): Município do estado
+    - avaliacao (opcional): ID da avaliação específica ou 'all' para todas as avaliações
+    - escola (opcional): ID da escola ou 'all' para todas as escolas
+    - serie (opcional): ID da série ou 'all' para todas as séries
+    - turma (opcional): ID da turma ou 'all' para todas as turmas
+    - page, per_page: Parâmetros de paginação
     
-    Lógica de filtros em cascata:
-    - Estado + Município + Avaliação: Resultados consolidados do município
-    - Estado + Município + Avaliação + Escola: Resultados da escola
-    - Estado + Município + Avaliação + Escola + Série: Resultados da série
-    - Estado + Município + Avaliação + Escola + Série + Turma: Resultados da turma
+    Lógica hierárquica com "all":
+    - Estado + Município + Avaliação "all": Todas as avaliações do município
+    - Estado + Município + Avaliação + Escola "all": Todas as escolas que aplicaram a avaliação
+    - Estado + Município + Avaliação + Escola + Série "all": Todas as séries da escola
+    - Estado + Município + Avaliação + Escola + Série + Turma "all": Todas as turmas da série
+    
+    Filtros com valor "all" retornam todos os registros daquele nível dentro do contexto dos filtros anteriores.
     """
     try:
         user = get_current_user_from_token()
@@ -266,35 +273,31 @@ def listar_avaliacoes():
         per_page = request.args.get('per_page', 10, type=int)
         per_page = min(per_page, 100)  # Limitar máximo
         
-        # Validar mínimo de 3 filtros
-        filtros_aplicados = sum([
-            bool(estado),
-            bool(municipio),
-            bool(escola),
-            bool(serie),
-            bool(turma),
-            bool(avaliacao)
-        ])
-        
-        if filtros_aplicados < 3:
+        # Validar filtros obrigatórios (estado e município são sempre obrigatórios)
+        if not estado or estado.lower() == 'all':
             return jsonify({
-                "error": "É necessário aplicar pelo menos 3 filtros (estado, municipio, escola, serie, turma, avaliacao)"
-            }), 400
-        
-        # Validar sequência correta de filtros
-        if not estado:
-            return jsonify({
-                "error": "Estado é obrigatório como primeiro filtro"
+                "error": "Estado é obrigatório e não pode ser 'all'"
             }), 400
         
         if not municipio:
             return jsonify({
-                "error": "Município é obrigatório como segundo filtro"
+                "error": "Município é obrigatório"
             }), 400
         
-        if not avaliacao:
+        # Contar filtros aplicados (excluindo 'all')
+        filtros_aplicados = sum([
+            bool(estado and estado.lower() != 'all'),
+            bool(municipio and municipio.lower() != 'all'),
+            bool(escola and escola.lower() != 'all'),
+            bool(serie and serie.lower() != 'all'),
+            bool(turma and turma.lower() != 'all'),
+            bool(avaliacao and avaliacao.lower() != 'all')
+        ])
+        
+        # Mínimo de 2 filtros (estado e município sempre contam)
+        if filtros_aplicados < 2:
             return jsonify({
-                "error": "Avaliação é obrigatória como terceiro filtro"
+                "error": "É necessário aplicar pelo menos 2 filtros válidos (excluindo 'all')"
             }), 400
         
         # Identificar escopo de busca baseado nos filtros aplicados
@@ -353,56 +356,49 @@ def listar_avaliacoes():
                                        joinedload(ClassTest.class_).joinedload(Class.school).joinedload(School.city)
                                    )
         
-        # Aplicar filtros na ordem especificada (filtros omitidos são tratados como "todos")
-        if estado:
+        # Aplicar filtros na ordem especificada (filtros com "all" são ignorados)
+        if estado and estado.lower() != 'all':
             query_base = query_base.filter(City.state.ilike(f"%{estado}%"))
-        # Se municipio não enviado, não aplicar filtro (retorna todos os municípios do estado)
         
-        if municipio:
+        if municipio and municipio.lower() != 'all':
             # Tentar filtrar por ID primeiro, depois por nome
             city_filter = City.query.get(municipio)
             if city_filter:
                 query_base = query_base.filter(City.id == municipio)
             else:
                 query_base = query_base.filter(City.name.ilike(f"%{municipio}%"))
-        # Se escola não enviada, não aplicar filtro (retorna todas as escolas)
         
-        if escola:
-            # Tentar filtrar por ID primeiro, depois por nome
-            school_filter = School.query.get(escola)
-            if school_filter:
-                query_base = query_base.filter(School.id == escola)
-            else:
-                query_base = query_base.filter(School.name.ilike(f"%{escola}%"))
-        # Se escola não enviada, não aplicar filtro (retorna todas as escolas do escopo)
-        # Se serie não enviada, não aplicar filtro (retorna todas as séries)
-        
-        if serie:
-            # Tentar filtrar por ID primeiro, depois por nome
-            grade_filter = Grade.query.get(serie)
-            if grade_filter:
-                query_base = query_base.filter(Grade.id == serie)
-            else:
-                query_base = query_base.filter(Grade.name.ilike(f"%{serie}%"))
-        # Se turma não enviada, não aplicar filtro (retorna todas as turmas)
-        
-        if turma:
-            # Tentar filtrar por ID primeiro, depois por nome
-            class_filter = Class.query.get(turma)
-            if class_filter:
-                query_base = query_base.filter(Class.id == turma)
-            else:
-                query_base = query_base.filter(Class.name.ilike(f"%{turma}%"))
-        # Se turma não enviada, não aplicar filtro (retorna todas as turmas)
-        
-        if avaliacao:
+        if avaliacao and avaliacao.lower() != 'all':
             # Tentar filtrar por ID primeiro, depois por título
             test_filter = Test.query.get(avaliacao)
             if test_filter:
                 query_base = query_base.filter(Test.id == avaliacao)
             else:
                 query_base = query_base.filter(Test.title.ilike(f"%{avaliacao}%"))
-        # Se avaliacao não enviada, não aplicar filtro (retorna todas as avaliações)
+        
+        if escola and escola.lower() != 'all':
+            # Tentar filtrar por ID primeiro, depois por nome
+            school_filter = School.query.get(escola)
+            if school_filter:
+                query_base = query_base.filter(School.id == escola)
+            else:
+                query_base = query_base.filter(School.name.ilike(f"%{escola}%"))
+        
+        if serie and serie.lower() != 'all':
+            # Tentar filtrar por ID primeiro, depois por nome
+            grade_filter = Grade.query.get(serie)
+            if grade_filter:
+                query_base = query_base.filter(Grade.id == serie)
+            else:
+                query_base = query_base.filter(Grade.name.ilike(f"%{serie}%"))
+        
+        if turma and turma.lower() != 'all':
+            # Tentar filtrar por ID primeiro, depois por nome
+            class_filter = Class.query.get(turma)
+            if class_filter:
+                query_base = query_base.filter(Class.id == turma)
+            else:
+                query_base = query_base.filter(Class.name.ilike(f"%{turma}%"))
         
         # Se for professor, filtrar apenas suas avaliações
         if user['role'] == 'professor':
@@ -933,14 +929,18 @@ def _calcular_estatisticas_municipio(class_tests: list, scope_info) -> Dict[str,
 def _determinar_escopo_busca(estado, municipio, escola, serie, turma, avaliacao):
     """
     Determina o escopo de busca baseado nos filtros aplicados
-    Filtros omitidos são tratados como "todos"
+    Filtros com valor "all" são tratados como "todos"
     """
     try:
+        # Função auxiliar para verificar se um filtro é válido (não é "all")
+        def is_valid_filter(value):
+            return value and value.lower() != 'all'
+        
         # Determinar município base para cálculos
         municipio_id = None
         city_data = None
         
-        if municipio:
+        if is_valid_filter(municipio):
             # Buscar município específico
             city = City.query.get(municipio)
             if not city:
@@ -948,7 +948,7 @@ def _determinar_escopo_busca(estado, municipio, escola, serie, turma, avaliacao)
             if city:
                 municipio_id = city.id
                 city_data = city
-        elif estado:
+        elif is_valid_filter(estado):
             # Se não tem município específico, pegar o primeiro do estado
             city = City.query.filter(City.state.ilike(f"%{estado}%")).first()
             if city:
@@ -960,7 +960,7 @@ def _determinar_escopo_busca(estado, municipio, escola, serie, turma, avaliacao)
         
         # Buscar escolas do escopo
         escolas = []
-        if escola:
+        if is_valid_filter(escola):
             # Escola específica
             school = School.query.get(escola)
             if not school:
@@ -1078,14 +1078,19 @@ def _calcular_estatisticas_por_disciplina(class_tests: list):
 def _determinar_nivel_granularidade(estado, municipio, escola, serie, turma, avaliacao):
     """
     Determina o nível de granularidade baseado nos filtros aplicados
+    Considera "all" como valor válido (não aplica o filtro)
     """
-    if estado and municipio and avaliacao and not escola and not serie and not turma:
+    # Função auxiliar para verificar se um filtro é válido (não é "all")
+    def is_valid_filter(value):
+        return value and value.lower() != 'all'
+    
+    if is_valid_filter(estado) and is_valid_filter(municipio) and not is_valid_filter(escola) and not is_valid_filter(serie) and not is_valid_filter(turma):
         return 'municipio'
-    elif estado and municipio and avaliacao and escola and not serie and not turma:
+    elif is_valid_filter(estado) and is_valid_filter(municipio) and is_valid_filter(escola) and not is_valid_filter(serie) and not is_valid_filter(turma):
         return 'escola'
-    elif estado and municipio and avaliacao and escola and serie and not turma:
+    elif is_valid_filter(estado) and is_valid_filter(municipio) and is_valid_filter(escola) and is_valid_filter(serie) and not is_valid_filter(turma):
         return 'serie'
-    elif estado and municipio and avaliacao and escola and serie and turma:
+    elif is_valid_filter(estado) and is_valid_filter(municipio) and is_valid_filter(escola) and is_valid_filter(serie) and is_valid_filter(turma):
         return 'turma'
     else:
         return 'municipio'  # Padrão

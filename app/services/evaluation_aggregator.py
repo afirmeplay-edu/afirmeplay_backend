@@ -81,7 +81,9 @@ class EvaluationAggregator:
         total_questions = len(test.questions) if test.questions else 0
         
         for student_answer in student_answers:
-            if total_questions == 0:
+            # CORREÇÃO: Usar questões respondidas pelo aluno, não total da avaliação
+            answered_questions = int(student_answer.total_answered or 0)
+            if answered_questions == 0:
                 continue
                 
             # Obter informações do curso e disciplina
@@ -91,7 +93,7 @@ class EvaluationAggregator:
             # Calcular resultados usando o EvaluationCalculator
             result = EvaluationCalculator.calculate_complete_evaluation(
                 correct_answers=int(student_answer.correct_answers or 0),
-                total_questions=total_questions,
+                total_questions=answered_questions,  # CORREÇÃO: usar questões respondidas
                 course_name=course_name,
                 subject_name=subject_name
             )

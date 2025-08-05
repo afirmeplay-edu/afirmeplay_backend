@@ -2,7 +2,7 @@ from flask import Blueprint, request, jsonify
 from app.models.studentClass import Class
 from app import db
 from flask_jwt_extended import jwt_required
-from app.decorators.role_required import role_required
+from app.decorators.role_required import role_required, get_current_user_from_token
 from sqlalchemy.exc import SQLAlchemyError, IntegrityError
 import logging
 from app.models.student import Student
@@ -10,6 +10,7 @@ from app.models.school import School
 from app.models.grades import Grade
 from app.models.city import City
 from app.models.educationStage import EducationStage
+from app.utils.auth import get_current_tenant_id
 
 bp = Blueprint('classes', __name__, url_prefix="/classes")
 
@@ -197,10 +198,15 @@ def get_classes_by_school_alias(school_id):
 
 @bp.route('', methods=['GET'])
 @jwt_required()
+@role_required("admin", "professor", "coordenador", "diretor", "tecadm")
 def get_classes():
     try:
-        # Query with explicit joins
-        classes = db.session.query(
+        user = get_current_user_from_token()
+        if not user:
+            return jsonify({"error": "Usuário não encontrado"}), 404
+
+        # Query base com joins
+        query = db.session.query(
             Class,
             School,
             Grade
@@ -208,7 +214,49 @@ def get_classes():
             School, Class.school_id == School.id
         ).outerjoin(
             Grade, Class.grade_id == Grade.id
-        ).all()
+        )
+
+        # Aplicar filtros baseado na role
+        if user['role'] == "admin":
+            # Admin vê todas as turmas
+            classes = query.all()
+        elif user['role'] == "professor":
+            # Professor vê turmas das escolas onde está vinculado
+            from app.models.teacher import Teacher
+            from app.models.schoolTeacher import SchoolTeacher
+            
+            teacher = Teacher.query.filter_by(user_id=user['id']).first()
+            if not teacher:
+                return jsonify({"error": "Professor não encontrado"}), 404
+            
+            teacher_schools = SchoolTeacher.query.filter_by(teacher_id=teacher.id).all()
+            school_ids = [ts.school_id for ts in teacher_schools]
+            
+            if school_ids:
+                classes = query.filter(Class.school_id.in_(school_ids)).all()
+            else:
+                return jsonify({"error": "Professor não está alocado em nenhuma escola"}), 400
+        elif user['role'] in ["diretor", "coordenador"]:
+            # Diretor e coordenador veem turmas apenas de sua escola
+            from app.models.teacher import Teacher
+            from app.models.schoolTeacher import SchoolTeacher
+            
+            teacher = Teacher.query.filter_by(user_id=user['id']).first()
+            if not teacher:
+                return jsonify({"error": "Diretor/Coordenador não encontrado"}), 404
+            
+            teacher_school = SchoolTeacher.query.filter_by(teacher_id=teacher.id).first()
+            if not teacher_school:
+                return jsonify({"error": "Diretor/Coordenador não está vinculado a nenhuma escola"}), 400
+            
+            classes = query.filter(Class.school_id == teacher_school.school_id).all()
+        else:
+            # TecAdmin vê turmas de todas as escolas do município
+            city_id = get_current_tenant_id()
+            if not city_id:
+                return jsonify({"error": "ID da cidade não disponível"}), 400
+            
+            classes = query.join(School).filter(School.city_id == city_id).all()
 
         return jsonify([{
             "id": c.id,

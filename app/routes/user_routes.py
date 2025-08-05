@@ -116,6 +116,11 @@ def create_user():
             if field not in data:
                 return jsonify({"error": f"Missing required field: {field}"}), 400
 
+        # Obter usuário atual
+        current_user = get_current_user_from_token()
+        if not current_user:
+            return jsonify({"error": "User not found"}), 404
+
         # Check if email already exists
         existing_user = User.query.filter_by(email=data["email"]).first()
         if existing_user:
@@ -134,13 +139,31 @@ def create_user():
         if data.get("registration") and User.query.filter_by(registration=data["registration"]).first():
             return jsonify({"error": "Registration number already exists"}), 400
 
+        # Determinar city_id baseado na role do usuário atual
+        city_id = None
+        if current_user['role'] == "admin":
+            # Admin pode escolher qualquer city_id
+            city_id = data.get("city_id")
+            if not city_id:
+                return jsonify({"error": "city_id is required for admin creating users"}), 400
+        else:
+            # TecAdmin, Diretor, Coordenador, Professor usam seu próprio city_id
+            city_id = current_user.get("city_id")
+            if not city_id:
+                return jsonify({"error": "User does not have a city_id assigned"}), 400
+
+        # Para alunos, não definir city_id diretamente (será herdado da escola)
+        if data.get("role") == "aluno":
+            city_id = None
+
         # Create user
         novo_usuario = User(
             name=data["name"],
             email=data["email"],
             password_hash=generate_password_hash(data["password"]),
             registration=data.get("registration"),
-            role=RoleEnum(data.get("role"))
+            role=RoleEnum(data.get("role")),
+            city_id=city_id  # Adicionando city_id
         )
         db.session.add(novo_usuario)
         db.session.commit()
@@ -152,7 +175,8 @@ def create_user():
                 "name": novo_usuario.name,
                 "email": novo_usuario.email,
                 "registration": novo_usuario.registration,
-                "role": novo_usuario.role.value
+                "role": novo_usuario.role.value,
+                "city_id": novo_usuario.city_id
             }
         }), 201
 

@@ -121,8 +121,22 @@ def listar_escolas():
                 schools = query.filter(School.id.in_(school_ids)).all()
             else:
                 return jsonify({"message": "Professor não está alocado em nenhuma escola"}), 404
+        elif user['role'] in ["diretor", "coordenador"]:
+            # Diretor e coordenador veem apenas sua escola
+            from app.models.teacher import Teacher
+            teacher = Teacher.query.filter_by(user_id=user['id']).first()
+            
+            if not teacher:
+                return jsonify({"error": "Diretor/Coordenador não encontrado na tabela teacher"}), 404
+            
+            # Buscar a escola do diretor/coordenador
+            teacher_school = SchoolTeacher.query.filter_by(teacher_id=teacher.id).first()
+            if not teacher_school:
+                return jsonify({"error": "Diretor/Coordenador não está vinculado a nenhuma escola"}), 400
+            
+            schools = query.filter(School.id == teacher_school.school_id).all()
         else:
-            # Diretor e coordenador veem escolas da mesma cidade
+            # TecAdmin vê escolas do município
             city_id = get_current_tenant_id()
             if not city_id:
                 return jsonify({"error": "City ID not available for this user"}), 400
@@ -299,9 +313,21 @@ def buscar_escola(escola_id):
             ).first()
             if not teacher_school:
                 return jsonify({"error": "You don't have permission to view this school"}), 403
+        elif user['role'] in ["diretor", "coordenador"]:
+            # Diretor e coordenador só podem ver sua escola
+            from app.models.teacher import Teacher
+            teacher = Teacher.query.filter_by(user_id=user['id']).first()
+            
+            if not teacher:
+                return jsonify({"error": "Diretor/Coordenador não encontrado na tabela teacher"}), 404
+            
+            teacher_school = SchoolTeacher.query.filter_by(teacher_id=teacher.id).first()
+            if not teacher_school or teacher_school.school_id != school.id:
+                return jsonify({"error": "You don't have permission to view this school"}), 403
         else:
-            # Diretor e coordenador só podem ver escolas da mesma cidade
-            if school.city_id != get_current_tenant_id():
+            # TecAdmin só pode ver escolas do seu município
+            city_id = get_current_tenant_id()
+            if not city_id or school.city_id != city_id:
                 return jsonify({"error": "You don't have permission to view this school"}), 403
 
         return jsonify({

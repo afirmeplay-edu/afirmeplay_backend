@@ -21,7 +21,8 @@ def get_current_user_from_token():
         return {
             "id": user.id,
             "email": user.email,
-            "role": user.role.value
+            "role": user.role.value,
+            "city_id": user.city_id  # Adicionando city_id
         }
     
     except jwt.ExpiredSignatureError:

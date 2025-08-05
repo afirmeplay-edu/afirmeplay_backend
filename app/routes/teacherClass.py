@@ -9,7 +9,7 @@ teacher_class_bp = Blueprint('teacher_class', __name__)
 
 @teacher_class_bp.route('/teacher-class', methods=['POST'])
 @jwt_required()
-@role_required(['admin', 'tecadmin'])
+@role_required('admin', 'tecadm')
 def create_teacher_class():
     data = request.get_json()
     
@@ -37,7 +37,7 @@ def create_teacher_class():
 
 @teacher_class_bp.route('/teacher-class/<string:id>', methods=['DELETE'])
 @jwt_required()
-@role_required(['admin', 'tecadmin'])
+@role_required('admin', 'tecadm')
 def delete_teacher_class(id):
     try:
         teacher_class = TeacherClass.query.get(id)

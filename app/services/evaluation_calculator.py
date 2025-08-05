@@ -226,6 +226,9 @@ class EvaluationCalculator:
         accuracy_rate = correct_answers / total_questions
         proficiency = accuracy_rate * max_proficiency
         
+        # CORREÇÃO: Garantir que a proficiência não exceda o máximo permitido
+        proficiency = min(proficiency, max_proficiency)
+        
         return round(proficiency, 2)
 
     @classmethod

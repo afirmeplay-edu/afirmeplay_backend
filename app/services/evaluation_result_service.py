@@ -115,12 +115,16 @@ class EvaluationResultService:
             
             subject_name = test.subject_rel.name if test.subject_rel else "Outras"
             
+            # Determinar tipo de cálculo baseado na configuração do teste
+            use_simple_calculation = test.grade_calculation_type == 'simple'
+            
             # Calcular resultado completo
             result = EvaluationCalculator.calculate_complete_evaluation(
                 correct_answers=correct_answers,
                 total_questions=total_questions,
                 course_name=course_name,
-                subject_name=subject_name
+                subject_name=subject_name,
+                use_simple_calculation=use_simple_calculation
             )
             
             # Calcular percentual de acertos
@@ -233,7 +237,7 @@ class EvaluationResultService:
                     'media_nota': 0.0,
                     'media_proficiencia': 0.0,
                     'distribuicao_classificacao': {
-                        'abaixo_do_basico': total_alunos,  # Todos os ausentes são "Abaixo do Básico"
+                        'abaixo_do_basico': 0,  # Alunos ausentes não são incluídos na distribuição
                         'basico': 0,
                         'adequado': 0,
                         'avancado': 0
@@ -244,8 +248,8 @@ class EvaluationResultService:
             notas = [r.grade for r in results]
             proficiencias = [r.proficiency for r in results]
             
-            # Distribuição de classificação
-            classificacoes = {'Abaixo do Básico': alunos_ausentes, 'Básico': 0, 'Adequado': 0, 'Avançado': 0}
+            # Distribuição de classificação (apenas alunos que participaram)
+            classificacoes = {'Abaixo do Básico': 0, 'Básico': 0, 'Adequado': 0, 'Avançado': 0}
             for result in results:
                 classificacoes[result.classification] += 1
             

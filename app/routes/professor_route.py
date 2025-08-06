@@ -47,6 +47,25 @@ def criar_professor():
             if campo not in dados:
                 return jsonify({"erro": f"Campo obrigatório ausente: {campo}"}), 400
 
+        # Obter usuário atual para determinar city_id
+        from app.decorators.role_required import get_current_user_from_token
+        current_user = get_current_user_from_token()
+        if not current_user:
+            return jsonify({"erro": "Usuário não encontrado"}), 404
+
+        # Determinar city_id baseado na role do usuário atual
+        city_id = None
+        if current_user['role'] == "admin":
+            # Admin pode escolher qualquer city_id
+            city_id = dados.get("city_id")
+            if not city_id:
+                return jsonify({"erro": "city_id é obrigatório para admin criando professores"}), 400
+        else:
+            # Diretor usa seu próprio city_id
+            city_id = current_user.get("city_id")
+            if not city_id:
+                return jsonify({"erro": "Usuário não tem city_id atribuído"}), 400
+
         # Verificar se usuário já existe
         usuario = User.query.filter_by(email=dados["email"]).first()
 
@@ -59,16 +78,17 @@ def criar_professor():
         else:
             logging.info("Usuário não encontrado, criando novo usuário.")
             # Verificar se matrícula já existe
-            if User.query.filter_by(matricula=dados["matricula"]).first():
+            if User.query.filter_by(registration=dados["matricula"]).first():
                 return jsonify({"erro": "Matrícula já cadastrada"}), 400
 
             # Criar usuário (role: professor)
             usuario = User(
-                nome=dados["nome"],
+                name=dados["nome"],  # Corrigido: nome -> name
                 email=dados["email"],
-                senha_hash=generate_password_hash(dados["senha"]),
-                matricula=dados["matricula"],
-                role=RoleEnum("professor")
+                password_hash=generate_password_hash(dados["senha"]),  # Corrigido: senha -> password
+                registration=dados["matricula"],  # Corrigido: matricula -> registration
+                role=RoleEnum("professor"),
+                city_id=city_id  # Adicionando city_id
             )
             db.session.add(usuario)
             db.session.flush()
@@ -84,18 +104,12 @@ def criar_professor():
                     db.session.rollback()
                 return jsonify({"erro": "Formato de data inválido. Use YYYY-MM-DD"}), 400
 
-        # Obter tenant_id (município) do contexto do token
-        tenant_id = get_current_tenant_id()
-
         # Criar professor
         professor = Teacher(
-            nome=usuario.nome,
-            email=usuario.email,
-            senha_hash=usuario.senha_hash,
-            usuario_id=usuario.id,
+            name=usuario.name,  # Corrigido: nome -> name
+            registration=usuario.registration,  # Corrigido: matricula -> registration
             birth_date=data_nascimento,
-            matricula=usuario.matricula,
-            tenant_id=tenant_id
+            user_id=usuario.id  # Corrigido: usuario_id -> user_id
         )
         db.session.add(professor)
         db.session.flush()
@@ -103,7 +117,7 @@ def criar_professor():
         # Vincular professor às escolas
         escolas_ids = dados.get("escolas_ids", [])
         if escolas_ids:
-            escolas = School.query.filter(School.id.in_(escolas_ids), School.city_id == tenant_id).all()
+            escolas = School.query.filter(School.id.in_(escolas_ids), School.city_id == city_id).all()
             if len(escolas) != len(escolas_ids):
                 db.session.rollback()
                 return jsonify({"erro": "Uma ou mais escolas não encontradas ou não pertencem ao município"}), 400
@@ -111,7 +125,7 @@ def criar_professor():
             # Criar vínculos com as escolas
             for escola in escolas:
                 school_teacher = SchoolTeacher(
-                    registration=professor.matricula,
+                    registration=professor.registration,  # Corrigido: matricula -> registration
                     school_id=escola.id,
                     teacher_id=professor.id
                 )
@@ -124,18 +138,18 @@ def criar_professor():
             "mensagem": "Professor criado com sucesso",
             "usuario": {
                 "id": usuario.id,
-                "nome": usuario.nome,
+                "name": usuario.name,  # Corrigido: nome -> name
                 "email": usuario.email,
-                "matricula": usuario.matricula,
-                "role": usuario.role.value
+                "registration": usuario.registration,  # Corrigido: matricula -> registration
+                "role": usuario.role.value,
+                "city_id": usuario.city_id
             },
             "professor": {
                 "id": professor.id,
-                "nome": professor.nome,
-                "email": professor.email,
-                "matricula": professor.matricula,
+                "name": professor.name,  # Corrigido: nome -> name
+                "registration": professor.registration,  # Corrigido: matricula -> registration
                 "birth_date": str(professor.birth_date) if professor.birth_date else None,
-                "tenant_id": professor.tenant_id,
+                "user_id": professor.user_id,
                 "escolas_ids": escolas_ids
             }
         }), 201
@@ -252,8 +266,33 @@ def listar_professores():
             SchoolTeacher, Teacher.id == SchoolTeacher.teacher_id
         )
 
-        # Filtrar por município se não for admin
-        if user['role'] != "admin":
+        # Filtrar por município ou escola baseado na role
+        if user['role'] == "admin":
+            # Admin vê todos os professores
+            pass
+        elif user['role'] in ["diretor", "coordenador"]:
+            # Diretor e coordenador veem apenas professores de sua escola
+            from app.models.schoolTeacher import SchoolTeacher
+            
+            # Buscar a escola do diretor/coordenador
+            teacher = Teacher.query.filter_by(user_id=user['id']).first()
+            if not teacher:
+                return jsonify({"erro": "Diretor/Coordenador não encontrado"}), 404
+            
+            teacher_school = SchoolTeacher.query.filter_by(teacher_id=teacher.id).first()
+            if not teacher_school:
+                return jsonify({"erro": "Diretor/Coordenador não está vinculado a nenhuma escola"}), 400
+            
+            # Buscar professores da mesma escola
+            school_teachers = SchoolTeacher.query.filter_by(school_id=teacher_school.school_id).all()
+            teacher_ids = [st.teacher_id for st in school_teachers]
+            
+            if teacher_ids:
+                query = query.filter(Teacher.id.in_(teacher_ids))
+            else:
+                return jsonify({"erro": "Nenhum professor encontrado nesta escola"}), 404
+        else:
+            # TecAdmin vê professores do município
             query = query.filter(Teacher.tenant_id == tenant_id)
 
         # Executar query

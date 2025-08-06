@@ -68,13 +68,14 @@ def criar_usuario_e_aluno():
             if data.get("registration") and User.query.filter_by(registration=data["registration"]).first():
                 return jsonify({"error": "Registration number already exists"}), 400
 
-            # Criar usuário (role padrão: aluno)
+            # Criar usuário (role padrão: aluno) - sem city_id (herdará da escola)
             usuario = User(
                 name=data["name"],
                 email=data["email"],
                 password_hash=generate_password_hash(data["password"]),
                 registration=data.get("registration"),
                 role=RoleEnum("aluno"),
+                city_id=None  # Alunos não têm city_id direto, herdam da escola
             )
             db.session.add(usuario)
             db.session.flush() 
@@ -98,7 +99,7 @@ def criar_usuario_e_aluno():
                 # Se o usuário foi criado neste request, precisamos desfazê-lo
                 if not usuario.id:
                     db.session.rollback()
-                    return jsonify({"error": "Invalid birth date format. Use YYYY-MM-DD"}), 400
+                return jsonify({"error": "Invalid birth date format. Use YYYY-MM-DD"}), 400
 
         # Criar aluno
         novo_aluno = Student(
@@ -122,7 +123,8 @@ def criar_usuario_e_aluno():
                 "name": usuario.name,
                 "email": usuario.email,
                 "registration": usuario.registration,
-                "role": usuario.role.value
+                "role": usuario.role.value,
+                "city_id": usuario.city_id
             },
             "student": {
                 "id": novo_aluno.id,
@@ -235,13 +237,40 @@ def listar_alunos():
             # Admin pode ver todos os alunos
             students = query.all()
         elif user['role'] == "professor":
-            # Professor só vê alunos da escola onde está alocado
-            school_id = user.get('school_id')
-            if not school_id:
+            # Professor só vê alunos das escolas onde está vinculado
+            from app.models.teacher import Teacher
+            from app.models.schoolTeacher import SchoolTeacher
+            
+            teacher = Teacher.query.filter_by(user_id=user['id']).first()
+            if not teacher:
+                return jsonify({"message": "Professor não encontrado"}), 404
+            
+            # Buscar escolas onde o professor está vinculado
+            teacher_schools = SchoolTeacher.query.filter_by(teacher_id=teacher.id).all()
+            school_ids = [ts.school_id for ts in teacher_schools]
+            
+            if school_ids:
+                students = query.filter(Student.school_id.in_(school_ids)).all()
+            else:
                 return jsonify({"message": "Professor não está alocado em nenhuma escola"}), 400
-            students = query.filter(Student.school_id == school_id).all()
+        elif user['role'] in ["diretor", "coordenador"]:
+            # Diretor e coordenador veem alunos apenas de sua escola
+            # Precisamos buscar a escola do usuário
+            from app.models.teacher import Teacher
+            from app.models.schoolTeacher import SchoolTeacher
+            
+            teacher = Teacher.query.filter_by(user_id=user['id']).first()
+            if not teacher:
+                return jsonify({"message": "Usuário não encontrado como professor/diretor/coordenador"}), 404
+            
+            # Buscar a escola do diretor/coordenador
+            teacher_school = SchoolTeacher.query.filter_by(teacher_id=teacher.id).first()
+            if not teacher_school:
+                return jsonify({"message": "Diretor/Coordenador não está vinculado a nenhuma escola"}), 400
+            
+            students = query.filter(Student.school_id == teacher_school.school_id).all()
         else:
-            # Diretor e coordenador veem alunos de todas as escolas da cidade
+            # TecAdmin vê alunos de todas as escolas do município
             city_id = get_current_tenant_id()
             if not city_id:
                 return jsonify({"message": "ID da cidade não disponível para este usuário"}), 400
@@ -356,18 +385,41 @@ def get_students_by_school(school_id):
             return jsonify({"message": "School not found"}), 404
 
         # Check user permissions
-        if user['role'] == "professor":
-            # Professor can only see students from their assigned school
-            if user.get('school_id') != school_id:
+        if user['role'] == "admin":
+            # Admin can access any school
+            pass
+        elif user['role'] == "professor":
+            # Professor can only see students from their assigned schools
+            from app.models.teacher import Teacher
+            from app.models.schoolTeacher import SchoolTeacher
+            
+            teacher = Teacher.query.filter_by(user_id=user['id']).first()
+            if not teacher:
+                return jsonify({"message": "Professor não encontrado"}), 404
+            
+            teacher_schools = SchoolTeacher.query.filter_by(teacher_id=teacher.id).all()
+            teacher_school_ids = [ts.school_id for ts in teacher_schools]
+            
+            if school_id not in teacher_school_ids:
                 logging.warning(f"Professor {user.get('id')} tried to access students from school {school_id}")
                 return jsonify({"message": "You don't have permission to view students from this school"}), 403
         elif user['role'] in ["diretor", "coordenador"]:
-            # Director and coordinator can only see students from schools in their city
+            # Director and coordinator can only see students from their school
+            from app.models.teacher import Teacher
+            from app.models.schoolTeacher import SchoolTeacher
+            
+            teacher = Teacher.query.filter_by(user_id=user['id']).first()
+            if not teacher:
+                return jsonify({"message": "Diretor/Coordenador não encontrado"}), 404
+            
+            teacher_school = SchoolTeacher.query.filter_by(teacher_id=teacher.id).first()
+            if not teacher_school or teacher_school.school_id != school_id:
+                logging.warning(f"User {user.get('id')} tried to access students from school {school_id}")
+                return jsonify({"message": "You don't have permission to view students from this school"}), 403
+        else:
+            # TecAdmin can access schools in their municipality
             city_id = get_current_tenant_id()
-            if not city_id:
-                logging.error(f"City ID not found for user {user.get('id')}")
-                return jsonify({"message": "City ID not available"}), 400
-            if school.city_id != city_id:
+            if not city_id or school.city_id != city_id:
                 logging.warning(f"User {user.get('id')} tried to access students from school in different city")
                 return jsonify({"message": "You don't have permission to view students from this school"}), 403
 

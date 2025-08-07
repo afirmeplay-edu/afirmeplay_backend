@@ -156,6 +156,12 @@ def create_user():
         if data.get("role") == "aluno":
             city_id = None
 
+        # Para tecadm, city_id é obrigatório
+        if data.get("role") == "tecadm":
+            city_id = data.get("city_id")
+            if not city_id:
+                return jsonify({"error": "city_id is required for tecadm"}), 400
+
         # Create user
         novo_usuario = User(
             name=data["name"],

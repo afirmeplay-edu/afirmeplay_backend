@@ -472,9 +472,25 @@ def adicionar_professor_escola():
 
         # Verificar se o professor existe
         from app.models.teacher import Teacher
-        teacher = Teacher.query.get(data['teacher_id'])
-        if not teacher:
-            return jsonify({"erro": "Professor não encontrado"}), 404
+        from app.models.user import User
+        
+        # Primeiro, verificar se é um user_id ou teacher_id
+        teacher = None
+        user = User.query.get(data['teacher_id'])
+        
+        if user:
+            # Se encontrou um usuário, buscar o professor correspondente
+            teacher = Teacher.query.filter_by(user_id=user.id).first()
+            if not teacher:
+                return jsonify({"erro": "Usuário encontrado, mas não é um professor"}), 404
+        else:
+            # Se não encontrou usuário, tentar buscar diretamente como teacher_id
+            teacher = Teacher.query.get(data['teacher_id'])
+            if not teacher:
+                return jsonify({"erro": "Professor não encontrado"}), 404
+
+        # Usar o teacher.id correto para as operações
+        teacher_id = teacher.id
 
         # Verificar se as escolas existem
         schools = School.query.filter(School.id.in_(data['school_ids'])).all()
@@ -501,7 +517,7 @@ def adicionar_professor_escola():
                     }), 403
 
         # Verificar se já existem associações
-        existing_associations = SchoolTeacher.query.filter_by(teacher_id=data['teacher_id']).all()
+        existing_associations = SchoolTeacher.query.filter_by(teacher_id=teacher_id).all()
         existing_school_ids = [assoc.school_id for assoc in existing_associations]
         
         # Filtrar apenas escolas que ainda não estão associadas
@@ -517,7 +533,7 @@ def adicionar_professor_escola():
         novas_associacoes = []
         for school_id in new_school_ids:
             nova_associacao = SchoolTeacher(
-                teacher_id=data['teacher_id'],
+                teacher_id=teacher_id,  # Usar o teacher_id correto
                 school_id=school_id
             )
             novas_associacoes.append(nova_associacao)
@@ -535,7 +551,7 @@ def adicionar_professor_escola():
 
         return jsonify({
             "mensagem": "Professor adicionado às escolas com sucesso!",
-            "professor_id": data['teacher_id'],
+            "professor_id": teacher_id,  # Usar o teacher_id correto
             "escolas_adicionadas": new_school_ids,
             "associacoes_existentes": existing_school_ids if existing_school_ids else None
         }), 201

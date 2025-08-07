@@ -454,7 +454,24 @@ def get_students_by_class(class_id):
             logging.warning(f"Class not found with ID: {class_id}")
             return jsonify({"message": "Class not found"}), 404
 
-        students = Student.query.filter_by(class_id=class_id).all()
+        # Query with explicit joins to get all related data
+        students = db.session.query(
+            Student,
+            User,
+            School,
+            Class,
+            Grade
+        ).join(
+            User, Student.user_id == User.id
+        ).join(
+            School, Student.school_id == School.id
+        ).join(
+            Class, Student.class_id == Class.id
+        ).outerjoin(
+            Grade, Student.grade_id == Grade.id
+        ).filter(
+            Student.class_id == class_id
+        ).all()
 
         if not students:
             logging.info(f"No students found for class_id: {class_id}")

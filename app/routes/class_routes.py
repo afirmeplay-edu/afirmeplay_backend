@@ -521,3 +521,73 @@ def remove_student_from_class(class_id):
         db.session.rollback()
         logging.error(f"Unexpected error in remove_student_from_class route: {str(e)}", exc_info=True)
         return jsonify({"message": "An unexpected error occurred", "details": str(e)}), 500 
+
+@bp.route('/<string:class_id>/teachers', methods=['GET'])
+@jwt_required()
+@role_required("admin", "diretor", "coordenador", "professor")
+def get_class_teachers(class_id):
+    try:
+        # Verificar se a turma existe
+        class_obj = Class.query.get(class_id)
+        if not class_obj:
+            return jsonify({"erro": "Turma não encontrada"}), 404
+
+        # Buscar professores da turma
+        from app.models.teacherClass import TeacherClass
+        from app.models.teacher import Teacher
+        from app.models.user import User
+        
+        professores = db.session.query(
+            Teacher,
+            User,
+            TeacherClass
+        ).join(
+            User, Teacher.user_id == User.id
+        ).join(
+            TeacherClass, Teacher.id == TeacherClass.teacher_id
+        ).filter(
+            TeacherClass.class_id == class_id
+        ).all()
+
+        resultado = []
+        for professor, usuario, vinculo in professores:
+            resultado.append({
+                "professor": {
+                    "id": professor.id,
+                    "name": professor.name,
+                    "email": usuario.email,
+                    "registration": professor.registration,
+                    "birth_date": str(professor.birth_date) if professor.birth_date else None,
+                    "city_id": usuario.city_id
+                },
+                "usuario": {
+                    "id": usuario.id,
+                    "name": usuario.name,
+                    "email": usuario.email,
+                    "registration": usuario.registration,
+                    "role": usuario.role.value
+                },
+                "vinculo_turma": {
+                    "teacher_class_id": vinculo.id,
+                    "class_id": vinculo.class_id
+                }
+            })
+
+        return jsonify({
+            "mensagem": "Professores da turma encontrados com sucesso",
+            "turma": {
+                "id": class_obj.id,
+                "name": class_obj.name,
+                "school_id": class_obj.school_id
+            },
+            "professores": resultado
+        }), 200
+
+    except SQLAlchemyError as e:
+        db.session.rollback()
+        logging.error(f"Erro no banco de dados ao buscar professores da turma: {str(e)}")
+        return jsonify({"erro": "Ocorreu um erro no banco de dados", "detalhes": str(e)}), 500
+    except Exception as e:
+        db.session.rollback()
+        logging.error(f"Erro inesperado ao buscar professores da turma: {str(e)}", exc_info=True)
+        return jsonify({"erro": "Ocorreu um erro inesperado", "detalhes": str(e)}), 500 

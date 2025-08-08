@@ -4,6 +4,7 @@ from app.models.subject import Subject
 from app.models.grades import Grade
 from app.models.educationStage import EducationStage
 from app.models.test import Test
+from app.models.testQuestion import TestQuestion
 from app.models.user import User
 from app import db
 from app.utils.auth import get_current_tenant_id
@@ -138,7 +139,7 @@ def create_question():
             difficulty_level=data.get('difficulty'),
             correct_answer=data.get('solution'),
             formatted_solution=data.get('formattedSolution'),
-            test_id=data.get('test_id'),
+            # test_id=data.get('test_id'),  # REMOVIDO - agora usamos tabela de associação
             question_type=data.get('type'),
             value=data.get('value'),
             topics=data.get('topics'),
@@ -181,7 +182,7 @@ def list_questions():
                 joinedload(Test.creator),
                 joinedload(Test.subject_rel),
                 joinedload(Test.grade),
-                subqueryload(Test.questions).options(
+                subqueryload(Test.test_questions).subqueryload(TestQuestion.question).options(
                     joinedload(Question.subject),
                     joinedload(Question.grade),
                     joinedload(Question.education_stage),
@@ -204,7 +205,6 @@ def list_questions():
             joinedload(Question.subject),
             joinedload(Question.grade),
             joinedload(Question.education_stage),
-            joinedload(Question.test),
             joinedload(Question.creator),
             joinedload(Question.last_modifier)
         )
@@ -240,7 +240,6 @@ def get_question(question_id):
             joinedload(Question.subject),
             joinedload(Question.grade),
             joinedload(Question.education_stage),
-            joinedload(Question.test),
             joinedload(Question.creator),
             joinedload(Question.last_modifier)
         ).get(question_id)
@@ -284,7 +283,7 @@ def update_question(question_id):
             'difficulty': 'difficulty_level',
             'solution': 'correct_answer',
             'formattedSolution': 'formatted_solution',
-            'test_id': 'test_id',
+            # 'test_id': 'test_id',  # REMOVIDO - agora usamos tabela de associação
             'type': 'question_type',
             'value': 'value',
             'topics': 'topics',

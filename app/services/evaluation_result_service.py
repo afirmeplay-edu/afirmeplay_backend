@@ -72,7 +72,10 @@ class EvaluationResultService:
                 return None
             
             # Buscar todas as questões do teste
-            questions = Question.query.filter_by(test_id=test_id).all()
+            # Buscar questões do teste através da tabela de associação
+            from app.models.testQuestion import TestQuestion
+            test_question_ids = [tq.question_id for tq in TestQuestion.query.filter_by(test_id=test_id).order_by(TestQuestion.order).all()]
+            questions = Question.query.filter(Question.id.in_(test_question_ids)).all() if test_question_ids else []
             total_questions = len(questions)
             
             if total_questions == 0:

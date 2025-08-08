@@ -464,8 +464,10 @@ def save_partial_answers():
                     'error': 'Tempo limite excedido. Sessão expirada.'
                 }), 410  # 410 Gone
         
-        # Buscar questões do teste
-        test_questions = Question.query.filter_by(test_id=session.test_id).all()
+        # Buscar questões do teste através da tabela de associação
+        from app.models.testQuestion import TestQuestion
+        test_question_ids = [tq.question_id for tq in TestQuestion.query.filter_by(test_id=session.test_id).order_by(TestQuestion.order).all()]
+        test_questions = Question.query.filter(Question.id.in_(test_question_ids)).all() if test_question_ids else []
         questions_dict = {q.id: q for q in test_questions}
         
         saved_answers = []

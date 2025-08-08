@@ -35,7 +35,7 @@ class Question(db.Model):
     difficulty_level = db.Column(db.String)
     correct_answer = db.Column(db.String)
     formatted_solution = db.Column(db.Text)  # Solução formatada em HTML
-    test_id = db.Column(db.String, db.ForeignKey('test.id'))
+    # test_id = db.Column(db.String, db.ForeignKey('test.id'))  # REMOVIDO - agora usamos tabela de associação
     question_type = db.Column(db.String)  # multipleChoice, essay, etc
     value = db.Column(db.Float)  # Valor da questão
     topics = db.Column(db.JSON)  # Array de tópicos
@@ -49,7 +49,16 @@ class Question(db.Model):
     subject = db.relationship('Subject', backref='questions')
     grade = db.relationship('Grade', backref='questions')
     education_stage = db.relationship('EducationStage', backref='questions')
-    test = db.relationship('Test', backref='questions')
+    # test = db.relationship('Test', backref='questions')  # REMOVIDO - agora usamos tabela de associação
+    
+    # Relacionamento many-to-many com Test através da tabela de associação
+    test_questions = db.relationship('TestQuestion', back_populates='question', cascade='all, delete-orphan')
+    
+    @property
+    def tests(self):
+        """Retorna os testes que usam esta questão"""
+        return [tq.test for tq in self.test_questions]
+    
     creator = db.relationship('User', foreign_keys=[created_by])
     last_modifier = db.relationship('User', foreign_keys=[last_modified_by])
     

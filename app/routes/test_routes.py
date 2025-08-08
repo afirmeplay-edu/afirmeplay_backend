@@ -1,6 +1,7 @@
 from flask import Blueprint, request, jsonify, abort
 from app.models.test import Test
 from app.models.question import Question
+from app.models.testQuestion import TestQuestion
 from app.models.classTest import ClassTest
 from app.models.studentClass import Class
 from app.models.school import School
@@ -143,15 +144,24 @@ def criar_avaliacao():
             status='pendente'  # Sempre inicia como pendente, passa para agendada quando for aplicada
         )
 
+        db.session.add(nova_avaliacao)
+        db.session.flush()  # Para obter o ID da avaliação antes de criar as associações
+        
         # Adiciona questões se fornecidas
         if 'questions' in data and isinstance(data['questions'], list):
-            for question_data in data['questions']:
+            for index, question_data in enumerate(data['questions']):
                 # Se um ID for fornecido, buscar questão existente
                 if 'id' in question_data and question_data['id']:
                     existing_question = Question.query.get(question_data['id'])
                     if existing_question:
-                        # Associar questão existente à avaliação
-                        nova_avaliacao.questions.append(existing_question)
+                        # Criar associação na tabela test_questions
+                        from app.models.testQuestion import TestQuestion
+                        test_question = TestQuestion(
+                            test_id=nova_avaliacao.id,
+                            question_id=existing_question.id,
+                            order=index + 1
+                        )
+                        db.session.add(test_question)
                         logging.info(f"Questão existente {existing_question.id} associada à avaliação")
                     else:
                         logging.warning(f"Questão com ID {question_data['id']} não encontrada")
@@ -183,11 +193,17 @@ def criar_avaliacao():
                         created_by=question_data.get('created_by') or data.get('created_by')
                     )
                     db.session.add(question)
-                    nova_avaliacao.questions.append(question)
+                    db.session.flush()  # Para obter o ID da questão
+                    
+                    # Criar associação na tabela test_questions
+                    from app.models.testQuestion import TestQuestion
+                    test_question = TestQuestion(
+                        test_id=nova_avaliacao.id,
+                        question_id=question.id,
+                        order=index + 1
+                    )
+                    db.session.add(test_question)
                     logging.info(f"Nova questão criada e associada à avaliação")
-
-        db.session.add(nova_avaliacao)
-        db.session.flush()  # Para obter o ID da avaliação antes do commit
         
         # Se turmas específicas foram fornecidas, criar registros em ClassTest
         if classes_to_apply:
@@ -550,7 +566,7 @@ def obter_avaliacao(test_id):
             joinedload(Test.creator),
             joinedload(Test.subject_rel),
             joinedload(Test.grade),
-            subqueryload(Test.questions).options(
+            subqueryload(Test.test_questions).subqueryload(TestQuestion.question).options(
                 joinedload(Question.subject),
                 joinedload(Question.grade),
                 joinedload(Question.education_stage),
@@ -715,17 +731,16 @@ def bulk_delete_tests():
                 db.session.delete(class_test)
             logging.info(f"🗑️ Excluídas {len(class_tests)} aplicações de classe para teste {test.id}")
             
-            # 4. Excluir questões associadas (se existirem)
-            questions = Question.query.filter_by(test_id=test.id).all()
-            for question in questions:
-                # Se a questão foi criada especificamente para este teste, deletar
-                # Se foi criada por outro usuário ou é reutilizada, apenas remover a associação
-                if question.created_by == test.created_by:
+            # 4. Excluir associações de questões (test_questions)
+            from app.models.testQuestion import TestQuestion
+            test_questions = TestQuestion.query.filter_by(test_id=test.id).all()
+            for test_question in test_questions:
+                # Se a questão foi criada especificamente para este teste, deletar a questão
+                question = Question.query.get(test_question.question_id)
+                if question and question.created_by == test.created_by:
                     db.session.delete(question)
-                else:
-                    # Apenas remover a associação com o teste
-                    question.test_id = None
-            logging.info(f"🗑️ Processadas {len(questions)} questões para teste {test.id}")
+                # A associação (test_question) será removida automaticamente pelo cascade
+            logging.info(f"🗑️ Processadas {len(test_questions)} associações de questões para teste {test.id}")
             
             # 5. Finalmente, excluir o teste
             db.session.delete(test)
@@ -792,18 +807,16 @@ def deletar_avaliacao(test_id):
             db.session.delete(class_test)
         logging.info(f"🗑️ Excluídas {len(class_tests)} aplicações de classe")
         
-        # 4. Tratar questões associadas
-        from app.models.question import Question
-        questions = Question.query.filter_by(test_id=test_id).all()
-        for question in questions:
-            # Se a questão foi criada especificamente para este teste, deletar
-            # Se foi criada por outro usuário ou é reutilizada, apenas remover a associação
-            if question.created_by == test.created_by:
+        # 4. Tratar associações de questões (test_questions)
+        from app.models.testQuestion import TestQuestion
+        test_questions = TestQuestion.query.filter_by(test_id=test_id).all()
+        for test_question in test_questions:
+            # Se a questão foi criada especificamente para este teste, deletar a questão
+            question = Question.query.get(test_question.question_id)
+            if question and question.created_by == test.created_by:
                 db.session.delete(question)
-            else:
-                # Apenas remover a associação com o teste
-                question.test_id = None
-        logging.info(f"🗑️ Processadas {len(questions)} questões")
+            # A associação (test_question) será removida automaticamente pelo cascade
+        logging.info(f"🗑️ Processadas {len(test_questions)} associações de questões")
         
         # 5. Finalmente, excluir o teste
         db.session.delete(test)

@@ -2084,7 +2084,10 @@ def get_submitted_evaluations():
             ).all()
 
             # Buscar questões do teste
-            questions = Question.query.filter_by(test_id=session.test_id).all()
+            # Buscar questões do teste através da tabela de associação
+            from app.models.testQuestion import TestQuestion
+            test_question_ids = [tq.question_id for tq in TestQuestion.query.filter_by(test_id=session.test_id).order_by(TestQuestion.order).all()]
+            questions = Question.query.filter(Question.id.in_(test_question_ids)).all() if test_question_ids else []
             questions_dict = {q.id: q for q in questions}
 
             # Preparar questões com respostas
@@ -2343,7 +2346,10 @@ def calculate_test_scores(test_id):
         if user['role'] == 'professor' and test.created_by != user['id']:
             return jsonify({"error": "Você só pode calcular notas de testes que criou"}), 403
             
-        questions = Question.query.filter_by(test_id=test_id).all()
+        # Buscar questões do teste através da tabela de associação
+        from app.models.testQuestion import TestQuestion
+        test_question_ids = [tq.question_id for tq in TestQuestion.query.filter_by(test_id=test_id).order_by(TestQuestion.order).all()]
+        questions = Question.query.filter(Question.id.in_(test_question_ids)).all() if test_question_ids else []
         if not questions:
             return jsonify({"error": "Nenhuma questão encontrada para este teste"}), 404
             
@@ -2619,7 +2625,10 @@ def get_student_test_results(test_id, student_id):
         
         # ✅ NOVO: Usar dados pré-calculados da tabela evaluation_results
         test = Test.query.get(test_id)
-        questions = Question.query.filter_by(test_id=test_id).all()
+        # Buscar questões do teste através da tabela de associação
+        from app.models.testQuestion import TestQuestion
+        test_question_ids = [tq.question_id for tq in TestQuestion.query.filter_by(test_id=test_id).order_by(TestQuestion.order).all()]
+        questions = Question.query.filter(Question.id.in_(test_question_ids)).all() if test_question_ids else []
         
         # Usar dados pré-calculados
         total_questions = evaluation_result.total_questions
@@ -2999,8 +3008,10 @@ def get_student_answers(test_id, student_id):
                 "message": "Aluno não respondeu este teste"
             }), 200
         
-        # Buscar questões do teste
-        questions = Question.query.filter_by(test_id=test_id).all()
+        # Buscar questões do teste através da tabela de associação
+        from app.models.testQuestion import TestQuestion
+        test_question_ids = [tq.question_id for tq in TestQuestion.query.filter_by(test_id=test_id).order_by(TestQuestion.order).all()]
+        questions = Question.query.filter(Question.id.in_(test_question_ids)).all() if test_question_ids else []
         questions_dict = {q.id: q for q in questions}
         
         # Buscar resultado de avaliação para dados agregados

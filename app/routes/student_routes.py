@@ -60,7 +60,7 @@ def criar_usuario_e_aluno():
             logging.info(f"Usuário existente encontrado: {usuario.email}")
             # Verificar se o usuário já é um aluno
             if Student.query.filter_by(user_id=usuario.id).first():
-                logging.warning(f"Usuário {usuario.email} já é um aluno.")
+                logging.warning(f"Usuário {usuario.email} já é um aluno.") 
                 return jsonify({"error": "User is already a student"}), 400
         else:
             logging.info("Usuário não encontrado, criando novo usuário.")

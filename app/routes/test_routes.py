@@ -103,7 +103,6 @@ def criar_avaliacao():
                 return jsonify({"error": "Uma ou mais escolas não foram encontradas"}), 400
         
         # Validação de turmas se fornecidas
-        classes_to_apply = []
         if data.get('classes'):
             if isinstance(data['classes'], list):
                 class_ids = [c.get('id') if isinstance(c, dict) else c for c in data['classes']]
@@ -114,8 +113,6 @@ def criar_avaliacao():
             existing_classes = Class.query.filter(Class.id.in_(class_ids)).all()
             if len(existing_classes) != len(class_ids):
                 return jsonify({"error": "Uma ou mais turmas não foram encontradas"}), 400
-            
-            classes_to_apply = class_ids
             
             # Se turmas foram especificadas, extrair as escolas das turmas
             school_ids_from_classes = list(set([c.school_id for c in existing_classes]))
@@ -205,23 +202,12 @@ def criar_avaliacao():
                     db.session.add(test_question)
                     logging.info(f"Nova questão criada e associada à avaliação")
         
-        # Se turmas específicas foram fornecidas, criar registros em ClassTest
-        if classes_to_apply:
-            for class_id in classes_to_apply:
-                class_test = ClassTest(
-                    class_id=class_id,
-                    test_id=nova_avaliacao.id,
-                    status='pendente'  # Status inicial
-                )
-                db.session.add(class_test)
-            logging.info(f"Criados registros ClassTest para {len(classes_to_apply)} turmas")
-
         db.session.commit()
 
         return jsonify({
             "message": "Test created successfully",
             "id": nova_avaliacao.id,
-            "classes_applied": len(classes_to_apply) if classes_to_apply else 0
+            "classes_applied": 0
         }), 201
 
     except ValueError as e:
@@ -361,7 +347,7 @@ def listar_avaliacoes_por_usuario(user_id):
             joinedload(Test.creator),
             joinedload(Test.subject_rel),
             joinedload(Test.grade),
-            subqueryload(Test.questions).options(
+            subqueryload(Test.test_questions).subqueryload(TestQuestion.question).options(
                 joinedload(Question.subject),
                 joinedload(Question.grade),
                 joinedload(Question.education_stage),
@@ -415,7 +401,7 @@ def listar_avaliacoes_por_escola(school_id):
             joinedload(Test.creator),
             joinedload(Test.subject_rel),
             joinedload(Test.grade),
-            subqueryload(Test.questions).options(
+            subqueryload(Test.test_questions).subqueryload(TestQuestion.question).options(
                 joinedload(Question.subject),
                 joinedload(Question.grade),
                 joinedload(Question.education_stage),
@@ -489,7 +475,7 @@ def listar_avaliacoes_por_aluno(student_id):
             joinedload(Test.creator),
             joinedload(Test.subject_rel),
             joinedload(Test.grade),
-            subqueryload(Test.questions).options(
+            subqueryload(Test.test_questions).subqueryload(TestQuestion.question).options(
                 joinedload(Question.subject),
                 joinedload(Question.grade),
                 joinedload(Question.education_stage),
@@ -866,6 +852,7 @@ def aplicar_avaliacao_classe(test_id):
             expiration = class_data.get('expiration')
 
 
+
             if not class_id:
                 errors.append("class_id is required for each class")
                 continue
@@ -876,41 +863,60 @@ def aplicar_avaliacao_classe(test_id):
                 test_id=test_id
             ).first()
 
-            print(f"Existing application found: {existing_application is not None}")
-
             if existing_application:
                 # Atualizar aplicação existente com novas datas
                 try:
-                    print(f"Updating existing application for class_id: {class_id}")
-                    existing_application.application = datetime.fromisoformat(application) if application else None
-                    existing_application.expiration = datetime.fromisoformat(expiration) if expiration else None
+                    # ✅ CORRIGIDO: Converter para timezone do Brasil antes de salvar
+                    if application:
+                        from app.utils.timezone_utils import convert_to_brazil_time
+                        application_dt = datetime.fromisoformat(application)
+                        application_brazil = convert_to_brazil_time(application_dt)
+                        existing_application.application = application_brazil
+                    else:
+                        existing_application.application = None
+                        
+                    if expiration:
+                        from app.utils.timezone_utils import convert_to_brazil_time
+                        expiration_dt = datetime.fromisoformat(expiration)
+                        expiration_brazil = convert_to_brazil_time(expiration_dt)
+                        existing_application.expiration = expiration_brazil
+                    else:
+                        existing_application.expiration = None
+                        
                     applied_classes.append(class_id)
-                    print(f"Existing application updated successfully for class_id: {class_id}")
                 except ValueError as e:
-                    print(f"ValueError updating class {class_id}: {str(e)}")
                     errors.append(f"Invalid date format for class {class_id}: {str(e)}")
                 except Exception as e:
-                    print(f"Unexpected error updating class {class_id}: {str(e)}")
                     errors.append(f"Error updating application for class {class_id}: {str(e)}")
                 continue
 
             # Criar nova aplicação
             try:
-                print(f"Creating ClassTest with class_id: {class_id}, test_id: {test_id}")
+                # ✅ CORRIGIDO: Converter para timezone do Brasil antes de salvar
+                application_brazil = None
+                expiration_brazil = None
+                
+                if application:
+                    from app.utils.timezone_utils import convert_to_brazil_time
+                    application_dt = datetime.fromisoformat(application)
+                    application_brazil = convert_to_brazil_time(application_dt)
+                    
+                if expiration:
+                    from app.utils.timezone_utils import convert_to_brazil_time
+                    expiration_dt = datetime.fromisoformat(expiration)
+                    expiration_brazil = convert_to_brazil_time(expiration_dt)
+                
                 class_test = ClassTest(
                     class_id=class_id,
                     test_id=test_id,
-                    application=datetime.fromisoformat(application) if application else None,
-                    expiration=datetime.fromisoformat(expiration) if expiration else None
+                    application=application_brazil,
+                    expiration=expiration_brazil
                 )
                 db.session.add(class_test)
                 applied_classes.append(class_id)
-                print(f"ClassTest created successfully for class_id: {class_id}")
             except ValueError as e:
-                print(f"ValueError for class {class_id}: {str(e)}")
                 errors.append(f"Invalid date format for class {class_id}: {str(e)}")
             except Exception as e:
-                print(f"Unexpected error for class {class_id}: {str(e)}")
                 errors.append(f"Error creating application for class {class_id}: {str(e)}")
 
         if applied_classes:
@@ -1201,7 +1207,7 @@ def obter_avaliacoes_completas_classe(class_id):
             joinedload(Test.creator),
             joinedload(Test.subject_rel),
             joinedload(Test.grade),
-            subqueryload(Test.questions).options(
+            subqueryload(Test.test_questions).subqueryload(TestQuestion.question).options(
                 joinedload(Question.subject),
                 joinedload(Question.grade),
                 joinedload(Question.education_stage),
@@ -1413,7 +1419,7 @@ def listar_avaliacoes_por_classe(class_id):
             joinedload(Test.creator),
             joinedload(Test.subject_rel),
             joinedload(Test.grade),
-            subqueryload(Test.questions)
+            subqueryload(Test.test_questions).subqueryload(TestQuestion.question)
         ).filter(Test.id.in_(test_ids)).all()
 
         # Criar um dicionário para mapear test_id -> ClassTest
@@ -1546,7 +1552,7 @@ def listar_avaliacoes_minha_classe():
             joinedload(Test.creator),
             joinedload(Test.subject_rel),
             joinedload(Test.grade),
-            subqueryload(Test.questions)
+            subqueryload(Test.test_questions).subqueryload(TestQuestion.question)
         ).filter(Test.id.in_(test_ids)).all()
 
         # Criar um dicionário para mapear test_id -> ClassTest
@@ -1558,6 +1564,8 @@ def listar_avaliacoes_minha_classe():
         # Usar fuso horário do Brasil
         from app.utils.timezone_utils import get_brazil_time
         current_time = get_brazil_time()
+        
+
         
         # Buscar todas as sessões do aluno para estas avaliações
         from app.models.testSession import TestSession
@@ -1604,24 +1612,45 @@ def listar_avaliacoes_minha_classe():
             if test.status == 'agendada' or test.status == 'em_andamento':
                 if not has_completed:
                     # Verificar se a avaliação já está disponível (data de aplicação)
-                    is_available_now = True
-                    if class_test.application:
-                        # Converter data de aplicação para fuso horário do Brasil
-                        from app.utils.timezone_utils import get_brazil_time
-                        current_time = get_brazil_time()
-                        application_brazil = class_test.application.replace(tzinfo=None) if class_test.application.tzinfo else class_test.application
-                        current_brazil = current_time.replace(tzinfo=None) if current_time.tzinfo else current_time
-                        is_available_now = current_brazil >= application_brazil
+                    is_available_now = False  # Por padrão, não está disponível
+                    if class_test.application and class_test.application is not None:
+                        try:
+                            # Converter data de aplicação para fuso horário do Brasil
+                            from app.utils.timezone_utils import get_brazil_time, convert_to_brazil_time
+                            current_time = get_brazil_time()
+                            
+                            # Converter a data de aplicação para fuso horário do Brasil
+                            application_brazil = convert_to_brazil_time(class_test.application)
+                            current_brazil = current_time
+                            
+                            # Comparar datas com timezone - só disponível se já passou da data de aplicação
+                            # Usar comparação mais precisa para evitar problemas de timezone
+                            time_diff = current_brazil - application_brazil
+                            is_available_now = time_diff.total_seconds() >= 0
+                        except Exception as e:
+                            # Se houver erro na conversão, não disponível
+                            import logging
+                            logging.error(f"Erro ao converter data de aplicação para teste {test.id}: {str(e)}")
+                            is_available_now = False
+                    else:
+                        # Se não há data de aplicação definida, não está disponível
+                        is_available_now = False
                     
                     # Verificar se a avaliação não expirou (data de expiração)
                     is_expired = False
-                    if class_test.expiration:
-                        # Converter data de expiração para fuso horário do Brasil
-                        from app.utils.timezone_utils import get_brazil_time
-                        current_time = get_brazil_time()
-                        expiration_brazil = class_test.expiration.replace(tzinfo=None) if class_test.expiration.tzinfo else class_test.expiration
-                        current_brazil = current_time.replace(tzinfo=None) if current_time.tzinfo else current_time
-                        is_expired = current_brazil > expiration_brazil
+                    if class_test.expiration and class_test.expiration is not None:
+                        try:
+                            # Converter data de expiração para fuso horário do Brasil
+                            expiration_brazil = convert_to_brazil_time(class_test.expiration)
+                            current_brazil = current_time
+                            
+                            # Comparar datas com timezone usando diferença de tempo
+                            time_diff = current_brazil - expiration_brazil
+                            is_expired = time_diff.total_seconds() > 0
+                        except Exception as e:
+                            # Se houver erro na conversão, não expirada
+                            logging.error(f"Erro ao converter data de expiração para teste {test.id}: {str(e)}")
+                            is_expired = False
                     
                     # Avaliação disponível apenas se já passou da data de aplicação E não expirou
                     if is_available_now and not is_expired:
@@ -1633,6 +1662,8 @@ def listar_avaliacoes_minha_classe():
                     else:
                         availability_status = "expired"
                         can_start = False
+                    
+
                 else:
                     availability_status = "completed"
             else:
@@ -1756,23 +1787,29 @@ def start_test_session(test_id):
             return jsonify({"error": "Avaliação não está aplicada na sua classe"}), 404
         
         # Verificar se a avaliação está disponível (data de aplicação) e não expirou (data de expiração)
-        from app.utils.timezone_utils import get_brazil_time
+        from app.utils.timezone_utils import get_brazil_time, convert_to_brazil_time
         current_time = get_brazil_time()
         
         # Verificar se já passou da data de aplicação
         if class_test.application:
             # Converter data de aplicação para fuso horário do Brasil
-            application_brazil = class_test.application.replace(tzinfo=None) if class_test.application.tzinfo else class_test.application
-            current_brazil = current_time.replace(tzinfo=None) if current_time.tzinfo else current_time
-            if current_brazil < application_brazil:
+            application_brazil = convert_to_brazil_time(class_test.application)
+            current_brazil = current_time
+            
+            # Comparar datas com timezone usando diferença de tempo
+            time_diff = current_brazil - application_brazil
+            if time_diff.total_seconds() < 0:
                 return jsonify({"error": "Avaliação ainda não está disponível"}), 410
         
         # Verificar se a avaliação não expirou
         if class_test.expiration:
             # Converter data de expiração para fuso horário do Brasil
-            expiration_brazil = class_test.expiration.replace(tzinfo=None) if class_test.expiration.tzinfo else class_test.expiration
-            current_brazil = current_time.replace(tzinfo=None) if current_time.tzinfo else current_time
-            if current_brazil > expiration_brazil:
+            expiration_brazil = convert_to_brazil_time(class_test.expiration)
+            current_brazil = current_time
+            
+            # Comparar datas com timezone usando diferença de tempo
+            time_diff = current_brazil - expiration_brazil
+            if time_diff.total_seconds() > 0:
                 return jsonify({"error": "Avaliação expirada"}), 410
         
         # Verificar se já existe sessão ativa para este aluno/teste

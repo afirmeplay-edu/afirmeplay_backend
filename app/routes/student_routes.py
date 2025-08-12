@@ -423,9 +423,26 @@ def get_students_by_school(school_id):
                 logging.warning(f"User {user.get('id')} tried to access students from school in different city")
                 return jsonify({"message": "You don't have permission to view students from this school"}), 403
 
-        # Get all students from the school
+        # Get all students from the school with related data using joins
         try:
-            students = Student.query.filter_by(school_id=school_id).all()
+            students = db.session.query(
+                Student,
+                User,
+                School,
+                Class,
+                Grade
+            ).join(
+                User, Student.user_id == User.id
+            ).join(
+                School, Student.school_id == School.id
+            ).join(
+                Class, Student.class_id == Class.id
+            ).outerjoin(
+                Grade, Student.grade_id == Grade.id
+            ).filter(
+                Student.school_id == school_id
+            ).all()
+            
             logging.info(f"Found {len(students)} students for school {school_id}")
         except SQLAlchemyError as e:
             logging.error(f"Database error while querying students: {str(e)}")

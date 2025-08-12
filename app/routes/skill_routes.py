@@ -118,7 +118,7 @@ def get_skills_by_grade(grade_id):
 
 @skill_bp.route('/skills/evaluation/<test_id>', methods=['GET'])
 @jwt_required()
-@role_required("admin", "professor", "coordenador", "diretor")
+@role_required("admin", "professor", "coordenador", "diretor", "tecadm")
 def get_skills_by_evaluation(test_id):
     """
     Busca skills utilizadas em uma avaliação específica.

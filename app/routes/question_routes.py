@@ -7,7 +7,7 @@ from app.models.test import Test
 from app.models.testQuestion import TestQuestion
 from app.models.user import User
 from app import db
-from app.utils.auth import get_current_tenant_id
+from app.decorators.role_required import get_current_tenant_id
 from flask_jwt_extended import jwt_required
 from app.decorators.role_required import role_required, get_current_user_from_token
 from sqlalchemy.exc import SQLAlchemyError, IntegrityError
@@ -94,7 +94,7 @@ def handle_generic_error(error):
 
 @bp.route('', methods=['POST'])
 @jwt_required()
-@role_required("admin", "professor", "coordenador", "diretor")
+@role_required("admin", "professor", "coordenador", "diretor", "tecadm")
 def create_question():
     try:
         data = request.get_json()
@@ -164,7 +164,7 @@ def create_question():
 
 @bp.route('/', methods=['GET'])
 @jwt_required()
-@role_required("admin", "professor", "coordenador", "diretor")
+@role_required("admin", "professor", "coordenador", "diretor", "tecadm")
 def list_questions():
     try:
         user = get_current_user_from_token()
@@ -306,7 +306,7 @@ def update_question(question_id):
 
 @bp.route('', methods=['DELETE'])
 @jwt_required()
-@role_required("admin", "professor", "coordenador", "diretor")
+@role_required("admin", "professor", "coordenador", "diretor","tecadm")
 def bulk_delete_questions():
     """ Rota para deletar múltiplas questões em massa. """
     try:
@@ -338,7 +338,7 @@ def bulk_delete_questions():
 
 @bp.route('/<string:question_id>', methods=['DELETE'])
 @jwt_required()
-@role_required("admin", "professor", "coordenador", "diretor")
+@role_required("admin", "professor", "coordenador", "diretor","tecadm")
 def delete_question(question_id):
     try:
         question = Question.query.get(question_id)

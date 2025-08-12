@@ -1,5 +1,5 @@
 from flask import Blueprint, jsonify, request
-from app.utils.auth import get_current_tenant_id
+from app.decorators.role_required import get_current_tenant_id
 from app.models.user import User, RoleEnum
 from app.decorators.role_required import role_required, get_current_user_from_token
 from flask_jwt_extended import jwt_required
@@ -11,6 +11,8 @@ from app.models.student import Student
 from app.models.school import School
 from app.models.studentClass import Class
 from app.models.grades import Grade
+from app.models.teacher import Teacher
+from app.models.manager import Manager
 from sqlalchemy.orm import joinedload
 from app.utils.email_service import EmailService
 from datetime import datetime, timedelta
@@ -75,7 +77,7 @@ def list_users():
 
         # Filtra por city_id se for tecadmin
         if current_user['role'] == "tecadm":
-            city_id = get_current_tenant_id()
+            city_id = current_user.get('tenant_id') or current_user.get('city_id')
             if not city_id:
                 return jsonify({"erro": "ID da cidade não disponível"}), 400
             query = query.filter_by(city_id=city_id)
@@ -450,4 +452,62 @@ def validate_reset_token():
         return jsonify({"erro": "Erro interno do servidor"}), 500
     except Exception as e:
         logging.error(f"Erro inesperado ao validar token: {e}", exc_info=True)
+        return jsonify({"erro": "Erro interno do servidor"}), 500 
+
+@bp.route('/<string:user_id>', methods=['DELETE'])
+@jwt_required()
+@role_required("admin", "tecadm")
+def delete_user(user_id):
+    """Deleta um usuário específico"""
+    try:
+        current_user = get_current_user_from_token()
+        if not current_user:
+            return jsonify({"erro": "Usuário não encontrado"}), 404
+        
+        # Verificar se o usuário está tentando deletar a si mesmo
+        if current_user['id'] == user_id:
+            return jsonify({"erro": "Não é possível deletar o próprio usuário"}), 400
+        
+        # Buscar usuário a ser deletado
+        user_to_delete = User.query.get(user_id)
+        if not user_to_delete:
+            return jsonify({"erro": "Usuário não encontrado"}), 404
+        
+        # Verificar se o usuário atual tem permissão para deletar o usuário alvo
+        # Tecadm só pode deletar usuários da mesma cidade
+        if current_user['role'] == "tecadm":
+            current_city_id = current_user.get('tenant_id') or current_user.get('city_id')
+            if user_to_delete.city_id != current_city_id:
+                return jsonify({"erro": "Sem permissão para deletar usuário de outra cidade"}), 403
+        
+        # Verificar se há relacionamentos que impedem a exclusão
+        # Verificar se é um estudante
+        student = Student.query.filter_by(user_id=user_id).first()
+        if student:
+            return jsonify({"erro": "Não é possível deletar usuário que é estudante. Delete o estudante primeiro."}), 400
+        
+        # Verificar se é um professor
+        teacher = Teacher.query.filter_by(user_id=user_id).first()
+        if teacher:
+            return jsonify({"erro": "Não é possível deletar usuário que é professor. Delete o professor primeiro."}), 400
+        
+        # Verificar se é um diretor/coordenador
+        manager = Manager.query.filter_by(user_id=user_id).first()
+        if manager:
+            return jsonify({"erro": "Não é possível deletar usuário que é diretor/coordenador. Delete o cargo primeiro."}), 400
+        
+        # Deletar usuário
+        db.session.delete(user_to_delete)
+        db.session.commit()
+        
+        logging.info(f"Usuário {user_to_delete.email} deletado por {current_user['email']}")
+        
+        return jsonify({"mensagem": "Usuário deletado com sucesso"}), 200
+        
+    except SQLAlchemyError as e:
+        db.session.rollback()
+        logging.error(f"Erro no banco de dados ao deletar usuário: {e}")
+        return jsonify({"erro": "Erro interno do servidor"}), 500
+    except Exception as e:
+        logging.error(f"Erro inesperado ao deletar usuário: {e}", exc_info=True)
         return jsonify({"erro": "Erro interno do servidor"}), 500 

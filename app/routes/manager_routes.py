@@ -241,7 +241,7 @@ def unlink_manager_from_school(user_id):
 # GET - Listar diretores/coordenadores por escola
 @bp.route('/school/<string:school_id>', methods=['GET'])
 @jwt_required()
-@role_required("admin", "diretor", "coordenador", "tecadm")
+@role_required("admin", "diretor", "coordenador", "tecadm", "professor")
 def get_managers_by_school(school_id):
     try:
         # Verificar se escola existe

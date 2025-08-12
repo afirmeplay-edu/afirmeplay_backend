@@ -3,7 +3,7 @@ from app.models.school import School
 from app import db
 from app.decorators.role_required import role_required, get_current_user_from_token
 from flask_jwt_extended import jwt_required
-from app.utils.auth import get_current_tenant_id
+from app.decorators.role_required import get_current_tenant_id
 from sqlalchemy.exc import SQLAlchemyError
 import logging
 from app.models.city import City
@@ -77,7 +77,7 @@ def criar_escola():
 # GET - Listar escolas
 @bp.route('', methods=['GET'])
 @jwt_required()
-@role_required("admin", "diretor", "coordenador", "professor")
+@role_required("admin", "diretor", "coordenador", "professor", "tecadm")
 def listar_escolas():
     try:
         user = get_current_user_from_token()
@@ -137,7 +137,7 @@ def listar_escolas():
             schools = query.filter(School.id == teacher_school.school_id).all()
         else:
             # TecAdmin vê escolas do município
-            city_id = get_current_tenant_id()
+            city_id = user.get('tenant_id') or user.get('city_id')
             if not city_id:
                 return jsonify({"error": "City ID not available for this user"}), 400
             schools = query.filter(School.city_id == city_id).all()
@@ -263,7 +263,7 @@ def deletar_escola(escola_id):
 # GET - Buscar escola específica
 @bp.route('/<string:escola_id>', methods=['GET'])
 @jwt_required()
-@role_required("admin", "diretor", "coordenador", "professor")
+@role_required("admin", "diretor", "coordenador", "professor", "tecadm")
 def buscar_escola(escola_id):
     try:
         user = get_current_user_from_token()
@@ -326,7 +326,7 @@ def buscar_escola(escola_id):
                 return jsonify({"error": "You don't have permission to view this school"}), 403
         else:
             # TecAdmin só pode ver escolas do seu município
-            city_id = get_current_tenant_id()
+            city_id = user.get('tenant_id') or user.get('city_id')
             if not city_id or school.city_id != city_id:
                 return jsonify({"error": "You don't have permission to view this school"}), 403
 
@@ -357,7 +357,7 @@ def buscar_escola(escola_id):
 # GET - Buscar escolas por cidade
 @bp.route('/city/<string:city_id>', methods=['GET'])
 @jwt_required()
-@role_required("admin", "diretor", "coordenador", "professor")
+@role_required("admin", "diretor", "coordenador", "professor", "tecadm")
 def buscar_escolas_por_cidade(city_id):
     try:
         user = get_current_user_from_token()
@@ -405,7 +405,8 @@ def buscar_escolas_por_cidade(city_id):
                 return jsonify({"message": "Professor não está alocado em nenhuma escola"}), 404
         else:
             # Diretor e coordenador só podem ver escolas da mesma cidade
-            if city_id != get_current_tenant_id():
+            current_city_id = user.get('tenant_id') or user.get('city_id')
+            if city_id != current_city_id:
                 return jsonify({"error": "Você não tem permissão para visualizar escolas desta cidade"}), 403
             schools = query.all()
 
@@ -505,7 +506,7 @@ def adicionar_professor_escola():
         # Verificar permissões (diretor só pode adicionar professores a escolas da sua cidade)
         user = get_current_user_from_token()
         if user['role'] == "diretor":
-            city_id = get_current_tenant_id()
+            city_id = user.get('tenant_id') or user.get('city_id')
             if not city_id:
                 return jsonify({"error": "City ID not available for this user"}), 400
             

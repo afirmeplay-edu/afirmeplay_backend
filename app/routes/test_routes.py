@@ -717,16 +717,14 @@ def bulk_delete_tests():
                 db.session.delete(class_test)
             logging.info(f"🗑️ Excluídas {len(class_tests)} aplicações de classe para teste {test.id}")
             
-            # 4. Excluir associações de questões (test_questions)
+            # 4. Excluir apenas as associações de questões (test_questions)
+            # As questões permanecem no banco para reutilização futura
             from app.models.testQuestion import TestQuestion
             test_questions = TestQuestion.query.filter_by(test_id=test.id).all()
             for test_question in test_questions:
-                # Se a questão foi criada especificamente para este teste, deletar a questão
-                question = Question.query.get(test_question.question_id)
-                if question and question.created_by == test.created_by:
-                    db.session.delete(question)
-                # A associação (test_question) será removida automaticamente pelo cascade
-            logging.info(f"🗑️ Processadas {len(test_questions)} associações de questões para teste {test.id}")
+                # Apenas remove a associação, NÃO a questão
+                db.session.delete(test_question)
+            logging.info(f"🗑️ Removidas {len(test_questions)} associações de questões para teste {test.id} (questões preservadas)")
             
             # 5. Finalmente, excluir o teste
             db.session.delete(test)
@@ -793,16 +791,14 @@ def deletar_avaliacao(test_id):
             db.session.delete(class_test)
         logging.info(f"🗑️ Excluídas {len(class_tests)} aplicações de classe")
         
-        # 4. Tratar associações de questões (test_questions)
+        # 4. Excluir apenas as associações de questões (test_questions)
+        # As questões permanecem no banco para reutilização futura
         from app.models.testQuestion import TestQuestion
         test_questions = TestQuestion.query.filter_by(test_id=test_id).all()
         for test_question in test_questions:
-            # Se a questão foi criada especificamente para este teste, deletar a questão
-            question = Question.query.get(test_question.question_id)
-            if question and question.created_by == test.created_by:
-                db.session.delete(question)
-            # A associação (test_question) será removida automaticamente pelo cascade
-        logging.info(f"🗑️ Processadas {len(test_questions)} associações de questões")
+            # Apenas remove a associação, NÃO a questão
+            db.session.delete(test_question)
+        logging.info(f"🗑️ Removidas {len(test_questions)} associações de questões (questões preservadas)")
         
         # 5. Finalmente, excluir o teste
         db.session.delete(test)

@@ -981,8 +981,14 @@ def can_student_start_test(test_id):
             }), 200
         
         # ✅ CORRIGIDO: Verificar se já completou, se a avaliação está disponível E se não expirou
-        can_start = True
-        reason = "Avaliação disponível"
+        can_start = False  # Por padrão, não pode iniciar
+        reason = "Verificando disponibilidade..."
+        
+        # Buscar sessão do aluno (sempre buscar, independente da expiração)
+        session = TestSession.query.filter_by(
+            student_id=student.id,
+            test_id=test_id
+        ).first()
         
         # Buscar sessão do aluno (sempre buscar, independente da expiração)
         session = TestSession.query.filter_by(
@@ -991,68 +997,51 @@ def can_student_start_test(test_id):
         ).first()
         
         # Verificar se a avaliação está disponível (data de aplicação) e não expirou (data de expiração)
-        from app.utils.timezone_utils import get_brazil_time
+        from app.utils.timezone_utils import get_brazil_time, convert_to_brazil_time
         current_time = get_brazil_time()
         
         # Verificar se já passou da data de aplicação
-        if class_test.application:
-            # Converter data de aplicação para fuso horário do Brasil
-            application_brazil = class_test.application.replace(tzinfo=None) if class_test.application.tzinfo else class_test.application
-            current_brazil = current_time.replace(tzinfo=None) if current_time.tzinfo else current_time
-            if current_brazil < application_brazil:
-                can_start = False
-                reason = "Avaliação ainda não está disponível"
-            else:
-                # Verificar se a avaliação não expirou
-                if class_test.expiration:
-                    # Converter data de expiração para fuso horário do Brasil
-                    expiration_brazil = class_test.expiration.replace(tzinfo=None) if class_test.expiration.tzinfo else class_test.expiration
-                    current_brazil = current_time.replace(tzinfo=None) if current_time.tzinfo else current_time
-                    if current_brazil > expiration_brazil:
-                        can_start = False
-                        reason = "Avaliação expirada"
-                    else:
-                        # Verificar se o aluno já completou
-                        if session:
-                            if session.status in ['finalizada', 'expirada', 'corrigida', 'revisada']:
-                                can_start = False
-                                reason = "Você já completou esta avaliação"
-                            elif session.status == 'em_andamento':
-                                # Verificar se há respostas salvas
-                                has_answers = StudentAnswer.query.filter_by(
-                                    student_id=student.id,
-                                    test_id=test_id
-                                ).first() is not None
-                                
-                                if has_answers:
-                                    can_start = False
-                                    reason = "Você já iniciou esta avaliação"
-                else:
-                    # Verificar se o aluno já completou (quando não há data de expiração)
-                    if session:
-                        if session.status in ['finalizada', 'expirada', 'corrigida', 'revisada']:
-                            can_start = False
-                            reason = "Você já completou esta avaliação"
-                        elif session.status == 'em_andamento':
-                            # Verificar se há respostas salvas
-                            has_answers = StudentAnswer.query.filter_by(
-                                student_id=student.id,
-                                test_id=test_id
-                            ).first() is not None
-                            
-                            if has_answers:
-                                can_start = False
-                                reason = "Você já iniciou esta avaliação"
-        else:
-            # Quando não há data de aplicação, verificar apenas expiração e se já completou
-            if class_test.expiration:
-                # Converter data de expiração para fuso horário do Brasil
-                expiration_brazil = class_test.expiration.replace(tzinfo=None) if class_test.expiration.tzinfo else class_test.expiration
-                current_brazil = current_time.replace(tzinfo=None) if current_time.tzinfo else current_time
-                if current_brazil > expiration_brazil:
+        if class_test.application and class_test.application is not None:
+            try:
+                # Converter data de aplicação para fuso horário do Brasil
+                application_brazil = convert_to_brazil_time(class_test.application)
+                current_brazil = current_time
+                
+                # Log de debug para verificar as datas
+                import logging
+                logging.info(f"DEBUG CAN-START DATES - Test: {test_id}, Application: {class_test.application}, Application Brazil: {application_brazil}, Current: {current_time}")
+                
+                # Comparar datas com timezone - só disponível se já passou da data de aplicação
+                time_diff = current_brazil - application_brazil
+                if time_diff.total_seconds() < 0:
                     can_start = False
-                    reason = "Avaliação expirada"
+                    reason = "Avaliação ainda não está disponível"
+                    logging.info(f"DEBUG CAN-START TIME DIFF - Test: {test_id}, Time Difference: {time_diff}, Total Seconds: {time_diff.total_seconds()}, Can Start: {can_start}")
                 else:
+                    # Verificar se a avaliação não expirou
+                    if class_test.expiration and class_test.expiration is not None:
+                        try:
+                            # Converter data de expiração para fuso horário do Brasil
+                            expiration_brazil = convert_to_brazil_time(class_test.expiration)
+                            current_brazil = current_time
+                            
+                            # Log de debug para verificar as datas de expiração
+                            logging.info(f"DEBUG CAN-START EXPIRATION - Test: {test_id}, Expiration: {class_test.expiration}, Expiration Brazil: {expiration_brazil}, Current: {current_time}")
+                            
+                            # Comparar datas com timezone usando diferença de tempo
+                            time_diff = current_brazil - expiration_brazil
+                            if time_diff.total_seconds() > 0:
+                                can_start = False
+                                reason = "Avaliação expirada"
+                                logging.info(f"DEBUG CAN-START EXPIRATION TIME DIFF - Test: {test_id}, Time Difference: {time_diff}, Total Seconds: {time_diff.total_seconds()}, Can Start: {can_start}")
+                        except Exception as e:
+                            # Se houver erro na conversão, não expirada
+                            logging.error(f"Erro ao converter data de expiração para teste {test_id}: {str(e)}")
+                    
+                    # Se chegou até aqui, a avaliação está disponível e não expirou
+                    can_start = True
+                    reason = "Avaliação disponível"
+                    
                     # Verificar se o aluno já completou
                     if session:
                         if session.status in ['finalizada', 'expirada', 'corrigida', 'revisada']:
@@ -1068,22 +1057,18 @@ def can_student_start_test(test_id):
                             if has_answers:
                                 can_start = False
                                 reason = "Você já iniciou esta avaliação"
-            else:
-                # Verificar se o aluno já completou (quando não há data de aplicação nem expiração)
-                if session:
-                    if session.status in ['finalizada', 'expirada', 'corrigida', 'revisada']:
-                        can_start = False
-                        reason = "Você já completou esta avaliação"
-                    elif session.status == 'em_andamento':
-                        # Verificar se há respostas salvas
-                        has_answers = StudentAnswer.query.filter_by(
-                            student_id=student.id,
-                            test_id=test_id
-                        ).first() is not None
-                        
-                        if has_answers:
-                            can_start = False
-                            reason = "Você já iniciou esta avaliação"
+            except Exception as e:
+                # Se houver erro na conversão, não disponível
+                logging.error(f"Erro ao converter data de aplicação para teste {test_id}: {str(e)}")
+                can_start = False
+                reason = "Erro ao verificar disponibilidade da avaliação"
+        else:
+            # Se não há data de aplicação definida, não está disponível
+            can_start = False
+            reason = "Avaliação não tem data de aplicação definida"
+        
+        # Log de debug para o resultado final
+        logging.info(f"DEBUG CAN-START FINAL - Test: {test_id}, Can Start: {can_start}, Reason: {reason}")
         
         return jsonify({
             'can_start': can_start,

@@ -55,8 +55,20 @@ def login():
             tenant_id = school.city_id  # ✅ Usar city_id da escola ao invés de school_id
         elif usuario.role == RoleEnum('admin'):
             tenant_id = None # Admin pode ver tudo, sem restrição de tenant
+        elif usuario.role == RoleEnum('tecadm'):
+            # Tecadm deve ter city_id definido
+            if not usuario.city_id:
+                logging.error(f"Usuário tecadm {usuario.id} sem city_id vinculado.")
+                return jsonify({"erro": "Tecadm não vinculado a um município."}), 400
+            tenant_id = usuario.city_id
+        elif usuario.role == RoleEnum('professor'):
+            # Professor deve ter city_id definido
+            if not usuario.city_id:
+                logging.error(f"Usuário professor {usuario.id} sem city_id vinculado.")
+                return jsonify({"erro": "Professor não vinculado a um município."}), 400
+            tenant_id = usuario.city_id
         else:
-            # Para outras roles, usar city_id do usuário
+            # Para outras roles (diretor, coordenador), usar city_id do usuário
             if not usuario.city_id:
                  logging.error(f"Usuário {usuario.id} ({usuario.role}) sem city_id vinculado.")
                  return jsonify({"erro": f"{usuario.role} não vinculado a um município."}), 400

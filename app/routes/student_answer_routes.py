@@ -38,7 +38,7 @@ def handle_error(error):
 
 @bp.route('/sessions/<session_id>/status', methods=['GET'])
 @jwt_required()
-@role_required("student", "admin", "professor", "aluno")
+@role_required("student", "admin", "professor", "aluno", "tecadm")
 def get_session_status(session_id):
     """
     Retorna o status atual da sessão
@@ -84,7 +84,7 @@ def get_session_status(session_id):
 
 @bp.route('/sessions/<session_id>/end', methods=['POST'])
 @jwt_required()
-@role_required("student", "admin", "professor", "aluno")
+@role_required("student", "admin", "professor", "aluno", "tecadm")
 def end_test_session(session_id):
     """
     Encerra uma sessão de prova

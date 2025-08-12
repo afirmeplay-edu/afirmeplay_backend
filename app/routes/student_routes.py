@@ -6,7 +6,7 @@ from app.models.user import RoleEnum
 from sqlalchemy.exc import SQLAlchemyError, IntegrityError
 import logging
 from app.decorators.role_required import role_required, get_current_user_from_token
-from app.utils.auth import get_current_tenant_id
+from app.decorators.role_required import get_current_tenant_id
 from datetime import datetime
 from app import db
 from flask_jwt_extended import jwt_required
@@ -207,7 +207,7 @@ def format_student_details(student, user=None, school=None, class_obj=None, grad
 # GET - Listar alunos
 @bp.route('', methods=['GET'])
 @jwt_required()
-@role_required("admin", "diretor", "coordenador", "professor")
+@role_required("admin", "diretor", "coordenador", "professor", "tecadm")
 def listar_alunos():
     try:
         user = get_current_user_from_token()
@@ -271,7 +271,7 @@ def listar_alunos():
             students = query.filter(Student.school_id == teacher_school.school_id).all()
         else:
             # TecAdmin vê alunos de todas as escolas do município
-            city_id = get_current_tenant_id()
+            city_id = user.get('tenant_id') or user.get('city_id')
             if not city_id:
                 return jsonify({"message": "ID da cidade não disponível para este usuário"}), 400
 
@@ -368,7 +368,7 @@ def deletar_aluno(aluno_id):
 
 @bp.route('/school/<string:school_id>', methods=['GET'])
 @jwt_required()
-@role_required("admin", "professor", "coordenador", "diretor")
+@role_required("admin", "professor", "coordenador", "diretor","tecadm")
 def get_students_by_school(school_id):
     try:
         logging.info(f"Fetching students for school_id: {school_id}")
@@ -418,7 +418,7 @@ def get_students_by_school(school_id):
                 return jsonify({"message": "You don't have permission to view students from this school"}), 403
         else:
             # TecAdmin can access schools in their municipality
-            city_id = get_current_tenant_id()
+            city_id = user.get('tenant_id') or user.get('city_id')
             if not city_id or school.city_id != city_id:
                 logging.warning(f"User {user.get('id')} tried to access students from school in different city")
                 return jsonify({"message": "You don't have permission to view students from this school"}), 403
@@ -460,7 +460,7 @@ def get_students_by_school(school_id):
 
 @bp.route('/classes/<string:class_id>', methods=['GET'])
 @jwt_required()
-@role_required("admin", "diretor", "coordenador", "professor")
+@role_required("admin", "diretor", "coordenador", "professor","tecadm")
 def get_students_by_class(class_id):
     try:
         logging.info(f"Fetching students for class_id: {class_id}")
@@ -589,7 +589,7 @@ def get_student_class(student_id):
                 return jsonify({"message": "You don't have permission to view this student's class"}), 403
         elif current_user['role'] in ["diretor", "coordenador"]:
             # Diretor e coordenador só podem ver alunos de escolas da sua cidade
-            city_id = get_current_tenant_id()
+            city_id = current_user.get('tenant_id') or current_user.get('city_id')
             if not city_id:
                 return jsonify({"message": "City ID not available"}), 400
             if school.city_id != city_id:

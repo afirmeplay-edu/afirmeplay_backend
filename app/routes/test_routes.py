@@ -10,7 +10,7 @@ from app.models.student import Student
 from app.models.schoolTeacher import SchoolTeacher
 from app.models.teacher import Teacher
 from app import db
-from app.utils.auth import get_current_tenant_id
+from app.decorators.role_required import get_current_tenant_id
 from flask_jwt_extended import jwt_required
 from app.decorators.role_required import role_required, get_current_user_from_token
 from sqlalchemy.exc import SQLAlchemyError, IntegrityError
@@ -49,7 +49,7 @@ def handle_generic_error(error):
 
 @bp.route('', methods=['POST'])
 @jwt_required()
-@role_required("admin", "professor", "coordenador", "diretor")
+@role_required("admin", "professor", "coordenador", "diretor", "tecadm")
 def criar_avaliacao():
     try:
         data = request.get_json()
@@ -219,7 +219,7 @@ def criar_avaliacao():
 
 @bp.route('/', methods=['GET'])
 @jwt_required()
-@role_required("admin", "professor", "coordenador", "diretor")
+@role_required("admin", "professor", "coordenador", "diretor", "tecadm")
 def listar_avaliacoes():
     try:
         user = get_current_user_from_token()
@@ -246,6 +246,64 @@ def listar_avaliacoes():
                 joinedload(Test.grade)
                 # Remover subqueryload de questions para melhor performance
             )
+
+        # Filtrar por município se for tecadm
+        if user['role'] == "tecadm":
+            city_id = user.get('tenant_id') or user.get('city_id')
+            if not city_id:
+                return jsonify({"erro": "ID da cidade não disponível"}), 400
+            
+            # Filtrar testes que têm turmas das escolas da cidade
+            schools_in_city = School.query.filter_by(city_id=city_id).with_entities(School.id).all()
+            school_ids = [school.id for school in schools_in_city]
+            
+            if school_ids:
+                # Filtrar testes que têm turmas das escolas da cidade
+                class_tests = ClassTest.query.filter(
+                    ClassTest.class_id.in_(
+                        Class.query.filter(Class.school_id.in_(school_ids)).with_entities(Class.id)
+                    )
+                ).with_entities(ClassTest.test_id).all()
+                test_ids = [ct.test_id for ct in class_tests]
+                
+                if test_ids:
+                    query = query.filter(Test.id.in_(test_ids))
+                else:
+                    # Se não há testes, retornar lista vazia
+                    if only_count:
+                        return jsonify({"total": 0}), 200
+                    else:
+                        return jsonify({
+                            "data": [],
+                            "pagination": {
+                                "page": page,
+                                "per_page": per_page,
+                                "total": 0,
+                                "pages": 0,
+                                "has_next": False,
+                                "has_prev": False,
+                                "next_num": None,
+                                "prev_num": None
+                            }
+                        }), 200
+            else:
+                # Se não há escolas na cidade, retornar lista vazia
+                if only_count:
+                    return jsonify({"total": 0}), 200
+                else:
+                    return jsonify({
+                        "data": [],
+                        "pagination": {
+                            "page": page,
+                            "per_page": per_page,
+                            "total": 0,
+                            "pages": 0,
+                            "has_next": False,
+                            "has_prev": False,
+                            "next_num": None,
+                            "prev_num": None
+                        }
+                    }), 200
 
         # Se o usuário for professor, filtra para ver apenas os seus testes
         if user['role'] == 'professor':

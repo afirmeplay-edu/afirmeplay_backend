@@ -5,6 +5,10 @@ from app.models.user import RoleEnum
 from app.models.teacher import Teacher
 from app.models.school import School
 from app.models.schoolTeacher import SchoolTeacher
+from app.models.teacherClass import TeacherClass
+from app.models.studentClass import Class
+from app.models.grades import Grade
+from app.models.city import City
 from werkzeug.security import generate_password_hash
 from datetime import datetime
 from app import db
@@ -29,7 +33,7 @@ def handle_generic_error(error):
 
 @bp.route('', methods=['POST'])
 @jwt_required()
-@role_required("admin", "diretor")
+@role_required("admin", "diretor", "tecadm")
 def criar_professor():
     try:
         logging.info("Iniciando criação de usuário/professor combinada")
@@ -46,7 +50,6 @@ def criar_professor():
                 return jsonify({"erro": f"Campo obrigatório ausente: {campo}"}), 400
 
         # Obter usuário atual para determinar city_id
-        from app.decorators.role_required import get_current_user_from_token
         current_user = get_current_user_from_token()
         if not current_user:
             return jsonify({"erro": "Usuário não encontrado"}), 404
@@ -163,7 +166,7 @@ def criar_professor():
 
 @bp.route('/school/<string:school_id>', methods=['GET'])
 @jwt_required()
-@role_required("admin", "diretor", "coordenador", "professor")
+@role_required("admin", "diretor", "coordenador", "professor", "tecadm")
 def listar_professores_por_escola(school_id):
     try:
         user = get_current_user_from_token()
@@ -178,7 +181,14 @@ def listar_professores_por_escola(school_id):
         # Verificar permissões
         if user['role'] == "professor":
             # Professor só pode ver professores da sua própria escola
-            if not any(st.school_id == school_id for st in SchoolTeacher.query.filter_by(teacher_id=user.get('teacher_id')).all()):
+            teacher = Teacher.query.filter_by(user_id=user['id']).first()
+            
+            if not teacher:
+                return jsonify({"erro": "Professor não encontrado na tabela teacher"}), 404
+            
+            # Buscar escolas onde o professor está vinculado
+            teacher_schools = SchoolTeacher.query.filter_by(teacher_id=teacher.id).all()
+            if not any(st.school_id == school_id for st in teacher_schools):
                 return jsonify({"erro": "Você não tem permissão para ver professores desta escola"}), 403
         elif user['role'] in ["diretor", "coordenador"]:
             # Diretor e coordenador só podem ver escolas do seu município
@@ -295,14 +305,11 @@ def listar_professores():
                 })
             
             # Buscar turmas onde o professor leciona
-            from app.models.teacherClass import TeacherClass
             turmas_professor = TeacherClass.query.filter_by(teacher_id=professor.id).all()
             
             turmas = []
             for turma_vinculo in turmas_professor:
                 # Buscar dados da turma
-                from app.models.studentClass import Class
-                from app.models.grades import Grade
                 turma = Class.query.get(turma_vinculo.class_id)
                 if turma:
                     serie = Grade.query.get(turma.grade_id) if turma.grade_id else None
@@ -379,7 +386,6 @@ def listar_diretores():
         resultado = []
         for diretor in diretores:
             # Buscar dados do município
-            from app.models.city import City
             municipio = None
             if diretor.city_id:
                 municipio = City.query.get(diretor.city_id)
@@ -445,7 +451,6 @@ def listar_coordenadores():
         resultado = []
         for coordenador in coordenadores:
             # Buscar dados do município
-            from app.models.city import City
             municipio = None
             if coordenador.city_id:
                 municipio = City.query.get(coordenador.city_id)
@@ -499,7 +504,6 @@ def listar_tecadm():
         resultado = []
         for tecadm in tecadm_users:
             # Buscar dados do município
-            from app.models.city import City
             municipio = None
             if tecadm.city_id:
                 municipio = City.query.get(tecadm.city_id)

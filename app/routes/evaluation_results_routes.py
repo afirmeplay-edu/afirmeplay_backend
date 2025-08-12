@@ -22,6 +22,7 @@ from app.models.city import City
 from app.models.studentClass import Class
 from app.models.grades import Grade
 from app.models.classTest import ClassTest
+from app.models.schoolTeacher import SchoolTeacher
 from app import db
 import logging
 from typing import Dict, Any, List, Optional
@@ -31,11 +32,113 @@ from sqlalchemy.orm import joinedload
 
 bp = Blueprint('evaluation_results', __name__, url_prefix='/evaluation-results')
 
+def verificar_permissao_filtros(user: dict, scope_info: dict = None) -> Dict[str, Any]:
+    """
+    Verifica permissões do usuário para acessar filtros baseado no seu papel
+    
+    Args:
+        user: Dicionário com informações do usuário logado
+        scope_info: Dicionário com informações do escopo (opcional)
+    
+    Returns:
+        Dict com informações de permissão e filtros aplicáveis
+    """
+    role = user.get('role')
+    city_id = user.get('city_id')
+    
+    if role == 'admin':
+        # Admin vê todos os resultados de todos os municípios
+        return {
+            'permitted': True,
+            'scope': 'all',
+            'filters': {
+                'estados': 'all',
+                'municipios': 'all',
+                'escolas': 'all',
+                'series': 'all',
+                'turmas': 'all',
+                'avaliacoes': 'all'
+            }
+        }
+    
+    elif role == 'tecadm':
+        # Tecadm vê resultados de todas as escolas do seu município
+        if not city_id:
+            return {
+                'permitted': False,
+                'error': 'Tecadm não vinculado a um município'
+            }
+        
+        return {
+            'permitted': True,
+            'scope': 'municipio',
+            'city_id': city_id,
+            'filters': {
+                'estados': 'specific',
+                'municipios': 'specific',
+                'escolas': 'municipio',
+                'series': 'municipio',
+                'turmas': 'municipio',
+                'avaliacoes': 'municipio'
+            }
+        }
+    
+    elif role in ['diretor', 'coordenador']:
+        # Diretor e Coordenador vêem apenas da sua escola
+        if not city_id:
+            return {
+                'permitted': False,
+                'error': 'Usuário não vinculado a uma escola'
+            }
+        
+        return {
+            'permitted': True,
+            'scope': 'escola',
+            'city_id': city_id,
+            'filters': {
+                'estados': 'specific',
+                'municipios': 'specific',
+                'escolas': 'specific',
+                'series': 'escola',
+                'turmas': 'escola',
+                'avaliacoes': 'escola'
+            }
+        }
+    
+    elif role == 'professor':
+        # Professor vê de todas as escolas em que está vinculado
+        if not city_id:
+            return {
+                'permitted': False,
+                'error': 'Professor não vinculado a uma escola'
+            }
+        
+        return {
+            'permitted': True,
+            'scope': 'escolas_vinculadas',
+            'city_id': city_id,
+            'filters': {
+                'estados': 'specific',
+                'municipios': 'specific',
+                'escolas': 'vinculadas',
+                'series': 'vinculadas',
+                'turmas': 'vinculadas',
+                'avaliacoes': 'vinculadas'
+            }
+        }
+    
+    else:
+        # Aluno e outros papéis não têm acesso
+        return {
+            'permitted': False,
+            'error': 'Papel não autorizado para visualizar resultados'
+        }
+
 # ==================== ENDPOINTS TEMPORÁRIOS DE TESTE ====================
 
 @bp.route('/grades', methods=['GET'])
 @jwt_required()
-@role_required("admin", "professor", "coordenador", "diretor")
+@role_required("admin", "professor", "coordenador", "diretor", "tecadm")
 def listar_grades():
     """
     Lista todas as grades (séries) disponíveis
@@ -3357,7 +3460,7 @@ def relatorio_detalhado_filtrado(evaluation_id: str):
 
 @bp.route('/opcoes-filtros/<string:evaluation_id>', methods=['GET'])
 @jwt_required()
-@role_required("admin", "professor", "coordenador", "diretor")
+@role_required("admin", "professor", "coordenador", "diretor", "tecadm")
 def opcoes_filtros(evaluation_id: str):
     """
     Retorna opções disponíveis para filtros da avaliação
@@ -3367,12 +3470,17 @@ def opcoes_filtros(evaluation_id: str):
         if not user:
             return jsonify({"error": "Usuário não encontrado"}), 401
 
+        # Verificar permissões
+        permissao = verificar_permissao_filtros(user)
+        if not permissao['permitted']:
+            return jsonify({"error": permissao['error']}), 403
+
         # Verificar se avaliação existe
         test = Test.query.get(evaluation_id)
         if not test:
             return jsonify({"error": "Avaliação não encontrada"}), 404
         
-        # Verificar permissões
+        # Verificar permissões específicas para professor
         if user['role'] == 'professor' and test.created_by != user['id']:
             return jsonify({"error": "Acesso negado"}), 403
         
@@ -3769,7 +3877,7 @@ def obter_estatisticas_status():
 
 @bp.route('/opcoes-filtros', methods=['GET'])
 @jwt_required()
-@role_required("admin", "professor", "coordenador", "diretor")
+@role_required("admin", "professor", "coordenador", "diretor", "tecadm")
 def obter_opcoes_filtros():
     """
     Retorna as opções disponíveis para os filtros de avaliações
@@ -3787,6 +3895,11 @@ def obter_opcoes_filtros():
         user = get_current_user_from_token()
         if not user:
             return jsonify({"error": "Usuário não encontrado"}), 401
+
+        # Verificar permissões
+        permissao = verificar_permissao_filtros(user)
+        if not permissao['permitted']:
+            return jsonify({"error": permissao['error']}), 403
 
         # Extrair parâmetros de filtro
         estado = request.args.get('estado')
@@ -3810,7 +3923,7 @@ def obter_opcoes_filtros():
         }
         
         # 1. Estados disponíveis (baseado no papel do usuário)
-        if user['role'] == 'admin':
+        if permissao['scope'] == 'all':
             # Admin vê todos os estados
             estados = db.session.query(City.state).distinct().filter(City.state.isnot(None)).all()
             opcoes["estados"] = [{"id": estado[0], "nome": estado[0]} for estado in estados]
@@ -3818,32 +3931,51 @@ def obter_opcoes_filtros():
             # Outros usuários veem apenas estados das suas cidades
             estados = db.session.query(City.state).distinct().filter(
                 City.state.isnot(None),
-                City.id.in_([user.get('city_id')] if user.get('city_id') else [])
+                City.id == user.get('city_id')
             ).all()
             opcoes["estados"] = [{"id": estado[0], "nome": estado[0]} for estado in estados]
         
         # 2. Municípios do estado selecionado
         if estado:
-            municipios = City.query.filter(City.state.ilike(f"%{estado}%")).all()
+            if permissao['scope'] == 'all':
+                # Admin vê todos os municípios do estado
+                municipios = City.query.filter(City.state.ilike(f"%{estado}%")).all()
+            else:
+                # Outros usuários veem apenas seu município
+                municipios = City.query.filter(
+                    City.state.ilike(f"%{estado}%"),
+                    City.id == user.get('city_id')
+                ).all()
             opcoes["municipios"] = [{"id": str(m.id), "nome": m.name} for m in municipios]
         
         # 3. Avaliações do município selecionado
         if estado and municipio:
             city = City.query.get(municipio)
             if city:
+                # Verificar se o usuário tem acesso ao município
+                if permissao['scope'] != 'all' and user.get('city_id') != city.id:
+                    return jsonify({"error": "Acesso negado a este município"}), 403
+                
                 query_avaliacoes = Test.query.with_entities(Test.id, Test.title)\
                                             .join(ClassTest, Test.id == ClassTest.test_id)\
                                             .join(Class, ClassTest.class_id == Class.id)\
                                             .join(School, Class.school_id == School.id)\
                                             .join(City, School.city_id == City.id)\
-                                            .filter(City.id == city.id)\
-                                            .distinct()
+                                            .filter(City.id == city.id)
                 
-                # Filtrar por papel do usuário
-                if user['role'] == 'professor':
+                # Aplicar filtros baseados no papel do usuário
+                if permissao['scope'] == 'escola':
+                    # Diretor e Coordenador veem apenas avaliações da sua escola
+                    query_avaliacoes = query_avaliacoes.filter(School.id == user.get('school_id', ''))
+                elif permissao['scope'] == 'escolas_vinculadas':
+                    # Professor vê avaliações das escolas onde está vinculado
+                    teacher_schools = SchoolTeacher.query.filter_by(teacher_id=user.get('id')).all()
+                    school_ids = [ts.school_id for ts in teacher_schools]
+                    query_avaliacoes = query_avaliacoes.filter(School.id.in_(school_ids))
+                    # Professor também vê apenas avaliações que criou
                     query_avaliacoes = query_avaliacoes.filter(Test.created_by == user['id'])
                 
-                avaliacoes = query_avaliacoes.all()
+                avaliacoes = query_avaliacoes.distinct().all()
                 opcoes["avaliacoes"] = [{"id": str(a[0]), "titulo": a[1]} for a in avaliacoes]
         
         # 4. Escolas onde a avaliação foi aplicada
@@ -3856,16 +3988,36 @@ def obter_opcoes_filtros():
                                            .join(Test, ClassTest.test_id == Test.id)\
                                            .join(City, School.city_id == City.id)\
                                            .filter(Test.id == avaliacao)\
-                                           .filter(City.id == city.id)\
-                                           .distinct()
+                                           .filter(City.id == city.id)
                 
-                escolas = query_escolas.all()
+                # Aplicar filtros baseados no papel do usuário
+                if permissao['scope'] == 'escola':
+                    # Diretor e Coordenador veem apenas sua escola
+                    query_escolas = query_escolas.filter(School.id == user.get('school_id', ''))
+                elif permissao['scope'] == 'escolas_vinculadas':
+                    # Professor vê escolas onde está vinculado
+                    teacher_schools = SchoolTeacher.query.filter_by(teacher_id=user.get('id')).all()
+                    school_ids = [ts.school_id for ts in teacher_schools]
+                    query_escolas = query_escolas.filter(School.id.in_(school_ids))
+                
+                escolas = query_escolas.distinct().all()
                 opcoes["escolas"] = [{"id": str(e[0]), "nome": e[1]} for e in escolas]
         
         # 5. Séries onde a avaliação foi aplicada na escola
         if estado and municipio and avaliacao and escola:
             city = City.query.get(municipio)
             if city:
+                # Verificar se o usuário tem acesso à escola
+                if permissao['scope'] == 'escola' and escola != user.get('school_id', ''):
+                    return jsonify({"error": "Acesso negado a esta escola"}), 403
+                elif permissao['scope'] == 'escolas_vinculadas':
+                    teacher_school = SchoolTeacher.query.filter_by(
+                        teacher_id=user.get('id'),
+                        school_id=escola
+                    ).first()
+                    if not teacher_school:
+                        return jsonify({"error": "Acesso negado a esta escola"}), 403
+                
                 query_series = Grade.query.with_entities(Grade.id, Grade.name)\
                                          .join(Class, Grade.id == Class.grade_id)\
                                          .join(ClassTest, Class.id == ClassTest.class_id)\
@@ -3874,10 +4026,9 @@ def obter_opcoes_filtros():
                                          .join(City, School.city_id == City.id)\
                                          .filter(Test.id == avaliacao)\
                                          .filter(School.id == escola)\
-                                         .filter(City.id == city.id)\
-                                         .distinct()
+                                         .filter(City.id == city.id)
                 
-                series = query_series.all()
+                series = query_series.distinct().all()
                 opcoes["series"] = [{"id": str(s[0]), "nome": s[1]} for s in series]
         
         # 6. Turmas onde a avaliação foi aplicada na escola e série
@@ -3893,10 +4044,9 @@ def obter_opcoes_filtros():
                                          .filter(Test.id == avaliacao)\
                                          .filter(School.id == escola)\
                                          .filter(Grade.id == serie)\
-                                         .filter(City.id == city.id)\
-                                         .distinct()
+                                         .filter(City.id == city.id)
                 
-                turmas = query_turmas.all()
+                turmas = query_turmas.distinct().all()
                 opcoes["turmas"] = [{"id": str(t[0]), "nome": t[1] or f"Turma {t[0]}"} for t in turmas]
         
         return jsonify({
@@ -3919,24 +4069,29 @@ def obter_opcoes_filtros():
 
 @bp.route('/opcoes-filtros/estados', methods=['GET'])
 @jwt_required()
-@role_required("admin", "professor", "coordenador", "diretor")
+@role_required("admin", "professor", "coordenador", "diretor", "tecadm")
 def obter_estados():
     """
-    Retorna todos os estados disponíveis
+    Retorna todos os estados disponíveis baseado nas permissões do usuário
     """
     try:
         user = get_current_user_from_token()
         if not user:
             return jsonify({"error": "Usuário não encontrado"}), 401
 
-        if user['role'] == 'admin':
+        # Verificar permissões
+        permissao = verificar_permissao_filtros(user)
+        if not permissao['permitted']:
+            return jsonify({"error": permissao['error']}), 403
+
+        if permissao['scope'] == 'all':
             # Admin vê todos os estados
             estados = db.session.query(City.state).distinct().filter(City.state.isnot(None)).all()
         else:
             # Outros usuários veem apenas estados das suas cidades
             estados = db.session.query(City.state).distinct().filter(
                 City.state.isnot(None),
-                City.id.in_([user.get('city_id')] if user.get('city_id') else [])
+                City.id == user.get('city_id')
             ).all()
         
         estados_list = [{"id": estado[0], "nome": estado[0]} for estado in estados]
@@ -3953,17 +4108,31 @@ def obter_estados():
 
 @bp.route('/opcoes-filtros/municipios/<string:estado>', methods=['GET'])
 @jwt_required()
-@role_required("admin", "professor", "coordenador", "diretor")
+@role_required("admin", "professor", "coordenador", "diretor", "tecadm")
 def obter_municipios_estado(estado: str):
     """
-    Retorna municípios de um estado específico
+    Retorna municípios de um estado específico baseado nas permissões do usuário
     """
     try:
         user = get_current_user_from_token()
         if not user:
             return jsonify({"error": "Usuário não encontrado"}), 401
 
-        municipios = City.query.filter(City.state.ilike(f"%{estado}%")).all()
+        # Verificar permissões
+        permissao = verificar_permissao_filtros(user)
+        if not permissao['permitted']:
+            return jsonify({"error": permissao['error']}), 403
+
+        if permissao['scope'] == 'all':
+            # Admin vê todos os municípios do estado
+            municipios = City.query.filter(City.state.ilike(f"%{estado}%")).all()
+        else:
+            # Outros usuários veem apenas o seu município
+            municipios = City.query.filter(
+                City.state.ilike(f"%{estado}%"),
+                City.id == user.get('city_id')
+            ).all()
+        
         municipios_list = [{"id": str(m.id), "nome": m.name} for m in municipios]
         
         return jsonify({
@@ -3979,17 +4148,48 @@ def obter_municipios_estado(estado: str):
 
 @bp.route('/opcoes-filtros/escolas/<string:municipio_id>', methods=['GET'])
 @jwt_required()
-@role_required("admin", "professor", "coordenador", "diretor")
+@role_required("admin", "professor", "coordenador", "diretor", "tecadm")
 def obter_escolas_municipio(municipio_id: str):
     """
-    Retorna escolas de um município específico
+    Retorna escolas de um município específico baseado nas permissões do usuário
     """
     try:
         user = get_current_user_from_token()
         if not user:
             return jsonify({"error": "Usuário não encontrado"}), 401
 
-        escolas = School.query.filter_by(city_id=municipio_id).all()
+        # Verificar permissões
+        permissao = verificar_permissao_filtros(user)
+        if not permissao['permitted']:
+            return jsonify({"error": permissao['error']}), 403
+
+        # Verificar se o usuário tem acesso ao município
+        if permissao['scope'] != 'all' and user.get('city_id') != municipio_id:
+            return jsonify({"error": "Acesso negado a este município"}), 403
+
+        if permissao['scope'] == 'all':
+            # Admin vê todas as escolas do município
+            escolas = School.query.filter_by(city_id=municipio_id).all()
+        elif permissao['scope'] == 'municipio':
+            # Tecadm vê todas as escolas do município
+            escolas = School.query.filter_by(city_id=municipio_id).all()
+        elif permissao['scope'] == 'escola':
+            # Diretor e Coordenador veem apenas sua escola
+            escolas = School.query.filter(
+                School.city_id == municipio_id,
+                School.id == user.get('school_id', '')
+            ).all()
+        elif permissao['scope'] == 'escolas_vinculadas':
+            # Professor vê escolas onde está vinculado
+            teacher_schools = SchoolTeacher.query.filter_by(teacher_id=user.get('id')).all()
+            school_ids = [ts.school_id for ts in teacher_schools]
+            escolas = School.query.filter(
+                School.city_id == municipio_id,
+                School.id.in_(school_ids)
+            ).all()
+        else:
+            escolas = []
+
         escolas_list = [{"id": str(e.id), "nome": e.name} for e in escolas]
         
         return jsonify({
@@ -4005,7 +4205,7 @@ def obter_escolas_municipio(municipio_id: str):
 
 @bp.route('/opcoes-filtros/escolas-por-avaliacao', methods=['GET'])
 @jwt_required()
-@role_required("admin", "professor", "coordenador", "diretor")
+@role_required("admin", "professor", "coordenador", "diretor", "tecadm")
 def obter_escolas_por_avaliacao():
     """
     Retorna escolas onde uma avaliação específica foi aplicada
@@ -4015,6 +4215,11 @@ def obter_escolas_por_avaliacao():
         user = get_current_user_from_token()
         if not user:
             return jsonify({"error": "Usuário não encontrado"}), 401
+
+        # Verificar permissões
+        permissao = verificar_permissao_filtros(user)
+        if not permissao['permitted']:
+            return jsonify({"error": permissao['error']}), 403
 
         # Extrair parâmetros de filtro
         estado = request.args.get('estado')
@@ -4038,12 +4243,16 @@ def obter_escolas_por_avaliacao():
         if not city:
             return jsonify({"error": "Município não encontrado"}), 404
         
+        # Verificar se o usuário tem acesso ao município
+        if permissao['scope'] != 'all' and user.get('city_id') != city.id:
+            return jsonify({"error": "Acesso negado a este município"}), 403
+        
         # Buscar avaliação
         test = Test.query.get(avaliacao)
         if not test:
             return jsonify({"error": "Avaliação não encontrada"}), 404
         
-        # Verificar permissões
+        # Verificar permissões específicas para professor
         if user['role'] == 'professor' and test.created_by != user['id']:
             return jsonify({"error": "Acesso negado"}), 403
         
@@ -4054,10 +4263,19 @@ def obter_escolas_por_avaliacao():
                                    .join(Test, ClassTest.test_id == Test.id)\
                                    .join(City, School.city_id == City.id)\
                                    .filter(Test.id == avaliacao)\
-                                   .filter(City.id == city.id)\
-                                   .distinct()
+                                   .filter(City.id == city.id)
         
-        escolas = query_escolas.all()
+        # Aplicar filtros baseados no papel do usuário
+        if permissao['scope'] == 'escola':
+            # Diretor e Coordenador veem apenas sua escola
+            query_escolas = query_escolas.filter(School.id == user.get('school_id', ''))
+        elif permissao['scope'] == 'escolas_vinculadas':
+            # Professor vê escolas onde está vinculado
+            teacher_schools = SchoolTeacher.query.filter_by(teacher_id=user.get('id')).all()
+            school_ids = [ts.school_id for ts in teacher_schools]
+            query_escolas = query_escolas.filter(School.id.in_(school_ids))
+        
+        escolas = query_escolas.distinct().all()
         escolas_list = [{"id": str(e[0]), "nome": e[1]} for e in escolas]
         
         return jsonify({
@@ -4078,7 +4296,7 @@ def obter_escolas_por_avaliacao():
 
 @bp.route('/opcoes-filtros/series', methods=['GET'])
 @jwt_required()
-@role_required("admin", "professor", "coordenador", "diretor")
+@role_required("admin", "professor", "coordenador", "diretor", "tecadm")
 def obter_series():
     """
     Retorna séries disponíveis baseado na avaliação e escola escolhidas
@@ -4088,6 +4306,11 @@ def obter_series():
         user = get_current_user_from_token()
         if not user:
             return jsonify({"error": "Usuário não encontrado"}), 401
+
+        # Verificar permissões
+        permissao = verificar_permissao_filtros(user)
+        if not permissao['permitted']:
+            return jsonify({"error": permissao['error']}), 403
 
         # Extrair parâmetros de filtro
         estado = request.args.get('estado')
@@ -4115,12 +4338,16 @@ def obter_series():
         if not city:
             return jsonify({"error": "Município não encontrado"}), 404
         
+        # Verificar se o usuário tem acesso ao município
+        if permissao['scope'] != 'all' and user.get('city_id') != city.id:
+            return jsonify({"error": "Acesso negado a este município"}), 403
+        
         # Buscar avaliação
         test = Test.query.get(avaliacao)
         if not test:
             return jsonify({"error": "Avaliação não encontrada"}), 404
         
-        # Verificar permissões
+        # Verificar permissões específicas para professor
         if user['role'] == 'professor' and test.created_by != user['id']:
             return jsonify({"error": "Acesso negado"}), 403
         
@@ -4128,6 +4355,17 @@ def obter_series():
         school = School.query.get(escola)
         if not school:
             return jsonify({"error": "Escola não encontrada"}), 404
+        
+        # Verificar se o usuário tem acesso à escola
+        if permissao['scope'] == 'escola' and school.id != user.get('school_id', ''):
+            return jsonify({"error": "Acesso negado a esta escola"}), 403
+        elif permissao['scope'] == 'escolas_vinculadas':
+            teacher_school = SchoolTeacher.query.filter_by(
+                teacher_id=user.get('id'),
+                school_id=escola
+            ).first()
+            if not teacher_school:
+                return jsonify({"error": "Acesso negado a esta escola"}), 403
         
         # Buscar séries onde a avaliação foi aplicada na escola específica
         query_series = Grade.query.with_entities(Grade.id, Grade.name)\
@@ -4138,10 +4376,9 @@ def obter_series():
                                  .join(City, School.city_id == City.id)\
                                  .filter(Test.id == avaliacao)\
                                  .filter(School.id == escola)\
-                                 .filter(City.id == city.id)\
-                                 .distinct()
+                                 .filter(City.id == city.id)
         
-        series = query_series.all()
+        series = query_series.distinct().all()
         series_list = [{"id": str(s[0]), "nome": s[1]} for s in series]
         
         return jsonify({
@@ -4166,7 +4403,7 @@ def obter_series():
 
 @bp.route('/opcoes-filtros/turmas', methods=['GET'])
 @jwt_required()
-@role_required("admin", "professor", "coordenador", "diretor")
+@role_required("admin", "professor", "coordenador", "diretor", "tecadm")
 def obter_turmas():
     """
     Retorna turmas disponíveis baseado na avaliação, escola e série escolhidas
@@ -4176,6 +4413,11 @@ def obter_turmas():
         user = get_current_user_from_token()
         if not user:
             return jsonify({"error": "Usuário não encontrado"}), 401
+
+        # Verificar permissões
+        permissao = verificar_permissao_filtros(user)
+        if not permissao['permitted']:
+            return jsonify({"error": permissao['error']}), 403
 
         # Extrair parâmetros de filtro
         estado = request.args.get('estado')
@@ -4207,12 +4449,16 @@ def obter_turmas():
         if not city:
             return jsonify({"error": "Município não encontrado"}), 404
         
+        # Verificar se o usuário tem acesso ao município
+        if permissao['scope'] != 'all' and user.get('city_id') != city.id:
+            return jsonify({"error": "Acesso negado a este município"}), 403
+        
         # Buscar avaliação
         test = Test.query.get(avaliacao)
         if not test:
             return jsonify({"error": "Avaliação não encontrada"}), 404
         
-        # Verificar permissões
+        # Verificar permissões específicas para professor
         if user['role'] == 'professor' and test.created_by != user['id']:
             return jsonify({"error": "Acesso negado"}), 403
         
@@ -4220,6 +4466,17 @@ def obter_turmas():
         school = School.query.get(escola)
         if not school:
             return jsonify({"error": "Escola não encontrada"}), 404
+        
+        # Verificar se o usuário tem acesso à escola
+        if permissao['scope'] == 'escola' and school.id != user.get('school_id', ''):
+            return jsonify({"error": "Acesso negado a esta escola"}), 403
+        elif permissao['scope'] == 'escolas_vinculadas':
+            teacher_school = SchoolTeacher.query.filter_by(
+                teacher_id=user.get('id'),
+                school_id=escola
+            ).first()
+            if not teacher_school:
+                return jsonify({"error": "Acesso negado a esta escola"}), 403
         
         # Buscar série
         grade = Grade.query.get(serie)
@@ -4236,10 +4493,9 @@ def obter_turmas():
                                  .filter(Test.id == avaliacao)\
                                  .filter(School.id == escola)\
                                  .filter(Grade.id == serie)\
-                                 .filter(City.id == city.id)\
-                                 .distinct()
+                                 .filter(City.id == city.id)
         
-        turmas = query_turmas.all()
+        turmas = query_turmas.distinct().all()
         turmas_list = [{"id": str(t[0]), "nome": t[1] or f"Turma {t[0]}"} for t in turmas]
         
         return jsonify({
@@ -4268,7 +4524,7 @@ def obter_turmas():
 
 @bp.route('/opcoes-filtros/avaliacoes', methods=['GET'])
 @jwt_required()
-@role_required("admin", "professor", "coordenador", "diretor")
+@role_required("admin", "professor", "coordenador", "diretor", "tecadm")
 def obter_avaliacoes():
     """
     Retorna avaliações disponíveis baseado no estado e município escolhidos
@@ -4278,6 +4534,11 @@ def obter_avaliacoes():
         user = get_current_user_from_token()
         if not user:
             return jsonify({"error": "Usuário não encontrado"}), 401
+
+        # Verificar permissões
+        permissao = verificar_permissao_filtros(user)
+        if not permissao['permitted']:
+            return jsonify({"error": permissao['error']}), 403
 
         # Extrair parâmetros de filtro
         estado = request.args.get('estado')
@@ -4297,20 +4558,31 @@ def obter_avaliacoes():
         if not city:
             return jsonify({"error": "Município não encontrado"}), 404
         
+        # Verificar se o usuário tem acesso ao município
+        if permissao['scope'] != 'all' and user.get('city_id') != city.id:
+            return jsonify({"error": "Acesso negado a este município"}), 403
+        
         # Buscar todas as avaliações que foram aplicadas no município
         query_avaliacoes = Test.query.with_entities(Test.id, Test.title)\
                                     .join(ClassTest, Test.id == ClassTest.test_id)\
                                     .join(Class, ClassTest.class_id == Class.id)\
                                     .join(School, Class.school_id == School.id)\
                                     .join(City, School.city_id == City.id)\
-                                    .filter(City.id == city.id)\
-                                    .distinct()
+                                    .filter(City.id == city.id)
         
-        # Filtrar por papel do usuário
-        if user['role'] == 'professor':
+        # Aplicar filtros baseados no papel do usuário
+        if permissao['scope'] == 'escola':
+            # Diretor e Coordenador veem apenas avaliações da sua escola
+            query_avaliacoes = query_avaliacoes.filter(School.id == user.get('school_id', ''))
+        elif permissao['scope'] == 'escolas_vinculadas':
+            # Professor vê avaliações das escolas onde está vinculado
+            teacher_schools = SchoolTeacher.query.filter_by(teacher_id=user.get('id')).all()
+            school_ids = [ts.school_id for ts in teacher_schools]
+            query_avaliacoes = query_avaliacoes.filter(School.id.in_(school_ids))
+            # Professor também vê apenas avaliações que criou
             query_avaliacoes = query_avaliacoes.filter(Test.created_by == user['id'])
         
-        avaliacoes = query_avaliacoes.all()
+        avaliacoes = query_avaliacoes.distinct().all()
         avaliacoes_list = [{"id": str(a[0]), "titulo": a[1]} for a in avaliacoes]
         
         return jsonify({

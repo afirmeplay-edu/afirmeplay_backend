@@ -3,7 +3,7 @@ from app import db
 from app.models.city import City
 from flask_jwt_extended import jwt_required
 from app.decorators.role_required import role_required, get_current_user_from_token
-from app.utils.auth import get_current_tenant_id
+from app.decorators.role_required import get_current_tenant_id
 
 bp = Blueprint('city', __name__, url_prefix='/city')
 
@@ -27,7 +27,7 @@ def criar_municipio():
 # GET - Listar municípios
 @bp.route("", methods=["GET"])
 @jwt_required()
-@role_required("admin", "diretor", "coordenador", "professor")
+@role_required("admin", "diretor", "coordenador", "professor", "tecadm")
 def listar_municipios():
     user = get_current_user_from_token()
     
@@ -54,7 +54,7 @@ def listar_municipios():
 # GET - Buscar município específico
 @bp.route("<string:municipio_id>", methods=["GET"])
 @jwt_required()
-@role_required("admin", "diretor", "coordenador", "professor")
+@role_required("admin", "diretor", "coordenador", "professor", "tecadm")
 def buscar_municipio(municipio_id):
     user = get_current_user_from_token()
     
@@ -112,7 +112,7 @@ def deletar_municipio(municipio_id):
 # GET - Listar estados únicos
 @bp.route("/states", methods=["GET"])
 @jwt_required()
-@role_required("admin", "diretor", "coordenador", "professor")
+@role_required("admin", "diretor", "coordenador", "professor", "tecadm")
 def listar_estados():
     user = get_current_user_from_token()
     

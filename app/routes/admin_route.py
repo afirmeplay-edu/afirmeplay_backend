@@ -5,7 +5,7 @@ from app.models.user import RoleEnum
 from app import db
 from app.decorators.role_required import role_required
 
-from app.utils.auth import get_current_tenant_id
+from app.decorators.role_required import get_current_tenant_id
 
 
 

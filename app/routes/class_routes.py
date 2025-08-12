@@ -10,7 +10,7 @@ from app.models.school import School
 from app.models.grades import Grade
 from app.models.city import City
 from app.models.educationStage import EducationStage
-from app.utils.auth import get_current_tenant_id
+from app.decorators.role_required import get_current_tenant_id
 
 bp = Blueprint('classes', __name__, url_prefix="/classes")
 
@@ -33,7 +33,7 @@ def handle_generic_error(error):
 
 @bp.route('/filtered', methods=['GET'])
 @jwt_required()
-@role_required("admin", "professor", "coordenador", "diretor")
+@role_required("admin", "professor", "coordenador", "diretor", "tecadm")
 def get_filtered_classes():
     """
     Busca turmas com filtros avançados
@@ -252,7 +252,7 @@ def get_classes():
             classes = query.filter(Class.school_id == teacher_school.school_id).all()
         else:
             # TecAdmin vê turmas de todas as escolas do município
-            city_id = get_current_tenant_id()
+            city_id = user.get('tenant_id') or user.get('city_id')
             if not city_id:
                 return jsonify({"error": "ID da cidade não disponível"}), 400
             
@@ -434,7 +434,7 @@ def create_class():
 
 @bp.route('/<string:class_id>/add_student', methods=['PUT'])
 @jwt_required()
-@role_required("admin", "diretor", "coordenador", "professor")
+@role_required("admin", "diretor", "coordenador", "professor", "tecadm")
 def add_student_to_class(class_id):
     try:
         logging.info(f"Attempting to add student to class ID: {class_id}")
@@ -479,7 +479,7 @@ def add_student_to_class(class_id):
 
 @bp.route('/<string:class_id>/remove_student', methods=['PUT'])
 @jwt_required()
-@role_required("admin", "diretor", "coordenador", "professor")
+@role_required("admin", "diretor", "coordenador", "professor", "tecadm")
 def remove_student_from_class(class_id):
     try:
         logging.info(f"Attempting to remove student from class ID: {class_id}")
@@ -524,7 +524,7 @@ def remove_student_from_class(class_id):
 
 @bp.route('/<string:class_id>/teachers', methods=['GET'])
 @jwt_required()
-@role_required("admin", "diretor", "coordenador", "professor")
+@role_required("admin", "diretor", "coordenador", "professor", "tecadm")
 def get_class_teachers(class_id):
     try:
         # Verificar se a turma existe

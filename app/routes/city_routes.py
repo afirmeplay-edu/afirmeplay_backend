@@ -10,7 +10,7 @@ bp = Blueprint('city', __name__, url_prefix='/city')
 # POST - Criar município
 @bp.route("", methods=["POST"])
 @jwt_required()
-@role_required("admin")
+@role_required("admin","tecadm")
 def criar_municipio():
     data = request.get_json()
 
@@ -76,7 +76,7 @@ def buscar_municipio(municipio_id):
 # PUT - Atualizar município
 @bp.route("<string:municipio_id>/", methods=["PUT"])
 @jwt_required()
-@role_required("admin", "diretor", "coordenador")
+@role_required("admin", "diretor", "coordenador","tecadm")
 def atualizar_municipio(municipio_id):
     user = get_current_user_from_token()
     
@@ -98,7 +98,7 @@ def atualizar_municipio(municipio_id):
 # DELETE - Excluir município
 @bp.route("<string:municipio_id>/", methods=["DELETE"])
 @jwt_required()
-@role_required("admin")
+@role_required("admin","tecadm")
 def deletar_municipio(municipio_id):
     municipio = City.query.get(municipio_id)
 
@@ -144,7 +144,7 @@ def listar_estados():
 # GET - Listar municípios por estado
 @bp.route("/municipalities/state/<string:state_name>", methods=["GET"])
 @jwt_required()
-@role_required("admin", "diretor", "coordenador", "professor")
+@role_required("admin", "diretor", "coordenador", "professor","tecadm")
 def listar_municipios_por_estado(state_name):
     user = get_current_user_from_token()
     

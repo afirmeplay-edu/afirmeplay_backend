@@ -18,7 +18,7 @@ bp = Blueprint('school', __name__, url_prefix='/school')
 # POST - Criar escola
 @bp.route('', methods=['POST'])
 @jwt_required()
-@role_required("admin",  "diretor", "coordenador",)
+@role_required("admin",  "diretor", "coordenador","tecadm")
 def criar_escola():
     try:
         data = request.get_json()

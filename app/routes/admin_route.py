@@ -29,13 +29,14 @@ def criar_usuario():
     if not all([name, email, password, role]):
         return jsonify({"erro": "Campos obrigatórios faltando."}), 400
 
-    if role == 'aluno' and not registration:
-        return jsonify({"erro": "Campo 'matricula' é obrigatório para alunos."}), 400
+    # Matrícula é opcional para todos os usuários
+    pass
 
     if User.query.filter_by(email=email).first():
         return jsonify({"erro": "Email já cadastrado."}), 400
 
-    if role == 'aluno' and User.query.filter_by(registration=registration).first():
+    # Verificar se matrícula já existe (apenas se for fornecida)
+    if registration and User.query.filter_by(registration=registration).first():
         return jsonify({"erro": "Matrícula já cadastrada."}), 400
 
     novo_usuario = User(
@@ -44,7 +45,7 @@ def criar_usuario():
         city_id=city_id,
         password_hash=generate_password_hash(password),
         role=RoleEnum(role),
-        # registration=registration if role == 'aluno' else None,
+        registration=registration,  # Matrícula é opcional
     )
 
     db.session.add(novo_usuario)

@@ -221,7 +221,7 @@ def get_user_by_id(user_id):
             "updated_at": user.updated_at.isoformat() if user.updated_at else None
         }
 
-        if user.role == RoleEnum.aluno:
+        if user.role == RoleEnum.ALUNO:
             student = Student.query.options(
                 joinedload(Student.school),
                 joinedload(Student.class_),

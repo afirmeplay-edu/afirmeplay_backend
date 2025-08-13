@@ -16,8 +16,11 @@ from app.decorators.role_required import role_required, get_current_user_from_to
 from sqlalchemy.exc import SQLAlchemyError, IntegrityError
 from datetime import datetime, timedelta
 import logging
+import json
 from app.utils.response_formatters import format_test_response
 from sqlalchemy.orm import joinedload, subqueryload
+from sqlalchemy import cast
+from sqlalchemy.dialects.postgresql import JSONB
 
 bp = Blueprint('tests', __name__, url_prefix="/test")
 
@@ -54,7 +57,7 @@ def criar_avaliacao():
     try:
         data = request.get_json()
         logging.info(f"Recebendo requisição POST para criar avaliação: {data}")
-        
+        print
         if not data:
             logging.error("Nenhum dado fornecido na requisição")
             return jsonify({"error": "No data provided"}), 400
@@ -177,6 +180,7 @@ def criar_avaliacao():
                         title=question_data.get('title'),
                         description=question_data.get('description'),
                         command=question_data.get('command'),
+                        secondstatement=question_data.get('secondStatement'),
                         subtitle=question_data.get('subtitle'),
                         alternatives=question_data.get('options'),
                         skill=question_data.get('skills'),
@@ -253,57 +257,54 @@ def listar_avaliacoes():
             if not city_id:
                 return jsonify({"erro": "ID da cidade não disponível"}), 400
             
-            # Filtrar testes que têm turmas das escolas da cidade
+            # Para tecadm, mostrar:
+            # 1. Avaliações que ele mesmo criou
+            # 2. Avaliações criadas no seu município (por qualquer usuário)
+            
+            # Obter escolas da cidade
             schools_in_city = School.query.filter_by(city_id=city_id).with_entities(School.id).all()
             school_ids = [school.id for school in schools_in_city]
             
+            # Criar lista de filtros para usar com db.or_
+            filters = []
+            
+            # Critério 1: Avaliações criadas pelo próprio usuário tecadm
+            filters.append(Test.created_by == user['id'])
+            
+            # Critério 2: Avaliações criadas por usuários da cidade
             if school_ids:
-                # Filtrar testes que têm turmas das escolas da cidade
-                class_tests = ClassTest.query.filter(
-                    ClassTest.class_id.in_(
-                        Class.query.filter(Class.school_id.in_(school_ids)).with_entities(Class.id)
-                    )
-                ).with_entities(ClassTest.test_id).all()
-                test_ids = [ct.test_id for ct in class_tests]
+                # Buscar usuários que estão nas escolas da cidade
+                from app.models.schoolTeacher import SchoolTeacher
+                from app.models.teacher import Teacher
                 
-                if test_ids:
-                    query = query.filter(Test.id.in_(test_ids))
-                else:
-                    # Se não há testes, retornar lista vazia
-                    if only_count:
-                        return jsonify({"total": 0}), 200
-                    else:
-                        return jsonify({
-                            "data": [],
-                            "pagination": {
-                                "page": page,
-                                "per_page": per_page,
-                                "total": 0,
-                                "pages": 0,
-                                "has_next": False,
-                                "has_prev": False,
-                                "next_num": None,
-                                "prev_num": None
-                            }
-                        }), 200
-            else:
-                # Se não há escolas na cidade, retornar lista vazia
-                if only_count:
-                    return jsonify({"total": 0}), 200
-                else:
-                    return jsonify({
-                        "data": [],
-                        "pagination": {
-                            "page": page,
-                            "per_page": per_page,
-                            "total": 0,
-                            "pages": 0,
-                            "has_next": False,
-                            "has_prev": False,
-                            "next_num": None,
-                            "prev_num": None
-                        }
-                    }), 200
+                # Obter IDs de professores das escolas da cidade
+                teacher_ids = db.session.query(SchoolTeacher.teacher_id).filter(
+                    SchoolTeacher.school_id.in_(school_ids)
+                ).distinct().all()
+                teacher_ids = [t[0] for t in teacher_ids]
+                
+                # Obter IDs de usuários que são professores das escolas da cidade
+                if teacher_ids:
+                    user_ids_in_city = db.session.query(Teacher.user_id).filter(
+                        Teacher.id.in_(teacher_ids)
+                    ).distinct().all()
+                    user_ids_in_city = [u[0] for u in user_ids_in_city]
+                    
+                    # Adicionar filtro para avaliações criadas por usuários da cidade
+                    if user_ids_in_city:
+                        filters.append(Test.created_by.in_(user_ids_in_city))
+                
+                # Critério 3: Avaliações que têm escolas especificadas da cidade
+                # Para campos JSON array, usar operador PostgreSQL @> (contains) com cast explícito para JSONB
+                # Como garantimos que schools é sempre um array, podemos usar o operador @> diretamente
+                for school_id in school_ids:
+                    # Fazer cast explícito para JSONB na coluna e usar operador @> para verificar se contém o valor
+                    # Usar cast() para converter a coluna para JSONB e passar o valor como lista Python
+                    filters.append(cast(Test.schools, JSONB).op('@>')([school_id]))
+            
+            # Aplicar filtros se houver algum
+            if filters:
+                query = query.filter(db.or_(*filters))
 
         # Se o usuário for professor, filtra para ver apenas os seus testes
         if user['role'] == 'professor':
@@ -603,7 +604,7 @@ def atualizar_status_avaliacao(test_id):
 
 @bp.route('/<string:test_id>', methods=['GET'])
 @jwt_required()
-@role_required("admin", "professor", "coordenador", "diretor", "aluno")
+@role_required("admin", "professor", "coordenador", "diretor", "aluno","tecadm")
 def obter_avaliacao(test_id):
     try:
         test = Test.query.options(
@@ -697,7 +698,7 @@ def atualizar_avaliacao(test_id):
 
 @bp.route('', methods=['DELETE'])
 @jwt_required()
-@role_required("admin", "professor", "coordenador", "diretor")
+@role_required("admin", "professor", "coordenador", "diretor", "tecadm")
 def bulk_delete_tests():
     """ Rota para deletar múltiplos testes em massa. """
     try:
@@ -800,7 +801,7 @@ def bulk_delete_tests():
 
 @bp.route('/<string:test_id>', methods=['DELETE'])
 @jwt_required()
-@role_required("admin", "professor", "coordenador", "diretor")
+@role_required("admin", "professor", "coordenador", "diretor", "tecadm")
 def deletar_avaliacao(test_id):
     try:
         logging.info(f"🗑️ Tentativa de deletar avaliação: {test_id}")

@@ -233,7 +233,7 @@ def list_questions():
 
 @bp.route('/<string:question_id>', methods=['GET'])
 @jwt_required()
-@role_required("admin", "professor", "coordenador", "diretor")
+@role_required("admin", "professor", "coordenador", "diretor","tecadm")
 def get_question(question_id):
     try:
         question = Question.query.options(
@@ -255,7 +255,7 @@ def get_question(question_id):
 
 @bp.route('/<string:question_id>', methods=['PUT'])
 @jwt_required()
-@role_required("admin", "professor", "coordenador", "diretor")
+@role_required("admin", "professor", "coordenador", "diretor","tecadm")
 def update_question(question_id):
     try:
         question = Question.query.get(question_id)
@@ -275,6 +275,7 @@ def update_question(question_id):
             'title': 'title',
             'description': 'description',
             'command': 'command',
+            'secondStatement': 'secondstatement',
             'subtitle': 'subtitle',
             'options': 'alternatives',
             'skills': 'skill',

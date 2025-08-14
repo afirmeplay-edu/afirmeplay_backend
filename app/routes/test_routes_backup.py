@@ -934,8 +934,7 @@ def aplicar_avaliacao_classe(test_id):
                             import pytz
                             target_tz = pytz.timezone(timezone)
                             application_dt = application_dt.replace(tzinfo=target_tz)
-                        # Converter para string antes de salvar no banco
-                        existing_application.application = application_dt.isoformat()
+                        existing_application.application = application_dt
                     else:
                         existing_application.application = None
                         
@@ -947,8 +946,7 @@ def aplicar_avaliacao_classe(test_id):
                             import pytz
                             target_tz = pytz.timezone(timezone)
                             expiration_dt = expiration_dt.replace(tzinfo=target_tz)
-                        # Converter para string antes de salvar no banco
-                        existing_application.expiration = expiration_dt.isoformat()
+                        existing_application.expiration = expiration_dt
                     else:
                         existing_application.expiration = None
                     
@@ -989,8 +987,8 @@ def aplicar_avaliacao_classe(test_id):
                 class_test = ClassTest(
                     class_id=class_id,
                     test_id=test_id,
-                    application=application_dt.isoformat() if application_dt else None,
-                    expiration=expiration_dt.isoformat() if expiration_dt else None,
+                    application=application_dt,
+                    expiration=expiration_dt,
                     timezone=timezone
                 )
                 db.session.add(class_test)
@@ -1670,6 +1668,8 @@ def listar_avaliacoes_minha_classe():
         # ✅ CORRIGIDO: O current_time será obtido individualmente para cada teste
         # usando o timezone da aplicação, não o timezone local do servidor
         
+
+        
         # Buscar todas as sessões do aluno para estas avaliações
         from app.models.testSession import TestSession
         from app.models.studentAnswer import StudentAnswer
@@ -1711,23 +1711,22 @@ def listar_avaliacoes_minha_classe():
                 
                 can_start = session.status == 'nao_iniciada' or (session.status == 'em_andamento' and not has_answers)
             
-            # ✅ REGRA 4: Obter tempo atual no timezone da aplicação (sempre definir)
-            current_time = None
-            if class_test.timezone:
-                import pytz
-                try:
-                    target_tz = pytz.timezone(class_test.timezone)
-                    current_time = datetime.now(target_tz)
-                except pytz.exceptions.UnknownTimeZoneError:
-                    from app.utils.timezone_utils import get_local_time
-                    current_time = get_local_time()
-            else:
-                from app.utils.timezone_utils import get_local_time
-                current_time = get_local_time()
-            
             # ✅ REGRA 4: Verificar disponibilidade considerando status global, se já completou, data de aplicação E data de expiração
             if test.status == 'agendada' or test.status == 'em_andamento':
                 if not has_completed:
+                    # ✅ REGRA 4: Obter tempo atual no timezone da aplicação
+                    current_time = None
+                    if class_test.timezone:
+                        import pytz
+                        try:
+                            target_tz = pytz.timezone(class_test.timezone)
+                            current_time = datetime.now(target_tz)
+                        except pytz.exceptions.UnknownTimeZoneError:
+                            from app.utils.timezone_utils import get_local_time
+                            current_time = get_local_time()
+                    else:
+                        from app.utils.timezone_utils import get_local_time
+                        current_time = get_local_time()
                     
                     # Verificar se a avaliação já está disponível (data de aplicação)
                     is_available_now = False  # Por padrão, não está disponível
@@ -2245,42 +2244,42 @@ def debug_test_dates(test_id):
                         application_dt = application_dt.replace(tzinfo=current_time.tzinfo)
                 application_time = application_dt
             
-                if class_test.expiration:
+            if class_test.expiration:
 
-                    import dateutil.parser
-                    expiration_dt = dateutil.parser.parse(class_test.expiration)
-                    if expiration_dt.tzinfo is None:
-                        if class_test.timezone:
-                            import pytz
-                            target_tz = pytz.timezone(class_test.timezone)
-                            expiration_dt = expiration_dt.replace(tzinfo=target_tz)
-                        else:
-                            expiration_dt = expiration_dt.replace(tzinfo=current_time.tzinfo)
-                    expiration_time = expiration_dt
+                import dateutil.parser
+                expiration_dt = dateutil.parser.parse(class_test.expiration)
+                if expiration_dt.tzinfo is None:
+                    if class_test.timezone:
+                        import pytz
+                        target_tz = pytz.timezone(class_test.timezone)
+                        expiration_dt = expiration_dt.replace(tzinfo=target_tz)
+                    else:
+                        expiration_dt = expiration_dt.replace(tzinfo=current_time.tzinfo)
+                expiration_time = expiration_dt
             
-                debug_class_test = {
-                    'class_test_id': class_test.id,
-                    'class_id': class_test.class_id,
-                    'application_original': class_test.application if class_test.application else None,
-                    'application_timezone_aware': application_time.isoformat() if application_time else None,
-                    'expiration_original': class_test.expiration if class_test.expiration else None,
-                    'expiration_timezone_aware': expiration_time.isoformat() if expiration_time else None,
-                    'current_time': current_time.isoformat(),
-                    'is_application_passed': current_time >= application_time if application_time else None,
-                    'is_expired': current_time > expiration_time if expiration_time else None,
-                    'time_until_application': None,
-                    'time_until_expiration': None
-                }
+            debug_class_test = {
+                'class_test_id': class_test.id,
+                'class_id': class_test.class_id,
+                'application_original': class_test.application if class_test.application else None,
+                'application_timezone_aware': application_time.isoformat() if application_time else None,
+                'expiration_original': class_test.expiration if class_test.expiration else None,
+                'expiration_timezone_aware': expiration_time.isoformat() if expiration_time else None,
+                'current_time': current_time.isoformat(),
+                'is_application_passed': current_time >= application_time if application_time else None,
+                'is_expired': current_time > expiration_time if expiration_time else None,
+                'time_until_application': None,
+                'time_until_expiration': None
+            }
             
-                if application_time:
-                    time_diff = application_time - current_time
-                    debug_class_test['time_until_application'] = str(time_diff)
-                
-                if expiration_time:
-                    time_diff = expiration_time - current_time
-                    debug_class_test['time_until_expiration'] = str(time_diff)
-                
-                debug_info['class_tests'].append(debug_class_test)
+            if application_time:
+                time_diff = application_time - current_time
+                debug_class_test['time_until_application'] = str(time_diff)
+            
+            if expiration_time:
+                time_diff = expiration_time - current_time
+                debug_class_test['time_until_expiration'] = str(time_diff)
+            
+            debug_info['class_tests'].append(debug_class_test)
         
         return jsonify(debug_info), 200
         

@@ -302,8 +302,8 @@ def format_test_response(test):
                                 "name": grade_obj.name
                             } if grade_obj else None
                         },
-                        "application": ct.application.isoformat() if ct.application else None,
-                        "expiration": ct.expiration.isoformat() if ct.expiration else None
+                        "application": ct.application if ct.application else None,
+                        "expiration": ct.expiration if ct.expiration else None
                     })
             except Exception as e:
                 logging.warning(f"Erro ao processar class_test {ct.id}: {str(e)}")

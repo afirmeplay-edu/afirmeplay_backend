@@ -22,13 +22,19 @@ def get_current_user_from_token():
             "id": user.id,
             "email": user.email,
             "role": user.role.value,
-            "city_id": user.city_id  # Adicionando city_id
+            "city_id": user.city_id,
+            "tenant_id": payload.get('tenant_id')  # Usar tenant_id do token JWT
         }
     
     except jwt.ExpiredSignatureError:
         return None
     except jwt.InvalidTokenError:
         return None
+
+def get_current_tenant_id():
+    """Função auxiliar para obter o tenant_id do token atual"""
+    user = get_current_user_from_token()
+    return user.get('tenant_id') if user else None
     
 def role_required(*roles):
     def decorator(f):

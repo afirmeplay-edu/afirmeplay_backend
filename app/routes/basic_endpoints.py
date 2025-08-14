@@ -19,6 +19,10 @@ from sqlalchemy import func
 from datetime import datetime, timedelta
 import logging
 from app.models.question import Question
+from app.models.classTest import ClassTest
+from app.models.schoolTeacher import SchoolTeacher
+from app.decorators.role_required import get_current_tenant_id
+from app.decorators.role_required import get_current_user_from_token
 
 bp = Blueprint('basic_endpoints', __name__)
 
@@ -63,7 +67,7 @@ def health_check():
 
 @bp.route('/dashboard/stats', methods=['GET'])
 @jwt_required()
-@role_required("admin", "professor", "coordenador", "diretor")
+@role_required("admin", "professor", "coordenador", "diretor", "tecadm")
 def dashboard_stats():
     """
     Retorna estatísticas do dashboard
@@ -79,18 +83,73 @@ def dashboard_stats():
         }
     """
     try:
+        current_user = get_current_user_from_token()
+        if not current_user:
+            return jsonify({"erro": "Usuário não encontrado"}), 404
+        
+        # Base queries
+        test_query = Test.query
+        student_query = Student.query
+        session_query = TestSession.query
+        
+        # Filtrar por city_id se for tecadm
+        if current_user['role'] == "tecadm":
+            city_id = current_user.get('tenant_id') or current_user.get('city_id')
+            if not city_id:
+                return jsonify({"erro": "ID da cidade não disponível"}), 400
+            
+            # Filtrar testes por escolas da cidade
+            schools_in_city = School.query.filter_by(city_id=city_id).with_entities(School.id).all()
+            school_ids = [school.id for school in schools_in_city]
+            
+            if school_ids:
+                # Filtrar testes que têm turmas das escolas da cidade
+                class_tests = ClassTest.query.filter(
+                    ClassTest.class_id.in_(
+                        Class.query.filter(Class.school_id.in_(school_ids)).with_entities(Class.id)
+                    )
+                ).with_entities(ClassTest.test_id).all()
+                test_ids = [ct.test_id for ct in class_tests]
+                
+                if test_ids:
+                    test_query = test_query.filter(Test.id.in_(test_ids))
+                    session_query = session_query.filter(TestSession.test_id.in_(test_ids))
+                else:
+                    # Se não há testes, retornar zeros
+                    return jsonify({
+                        "total_evaluations": 0,
+                        "active_evaluations": 0,
+                        "completed_evaluations": 0,
+                        "total_students": 0,
+                        "average_completion": 0.0,
+                        "last_sync": datetime.now().isoformat()
+                    }), 200
+                
+                # Filtrar estudantes por escolas da cidade
+                student_query = student_query.filter(Student.school_id.in_(school_ids))
+            else:
+                # Se não há escolas na cidade, retornar zeros
+                return jsonify({
+                    "total_evaluations": 0,
+                    "active_evaluations": 0,
+                    "completed_evaluations": 0,
+                    "total_students": 0,
+                    "average_completion": 0.0,
+                    "last_sync": datetime.now().isoformat()
+                }), 200
+        
         # Buscar estatísticas de avaliações
-        total_evaluations = Test.query.count()
-        active_evaluations = Test.query.filter(Test.status.in_(['agendada', 'em_andamento'])).count()
-        completed_evaluations = Test.query.filter(Test.status == 'concluida').count()
+        total_evaluations = test_query.count()
+        active_evaluations = test_query.filter(Test.status.in_(['agendada', 'em_andamento'])).count()
+        completed_evaluations = test_query.filter(Test.status == 'concluida').count()
         
         # Buscar estatísticas de estudantes
-        total_students = Student.query.count()
+        total_students = student_query.count()
         
         # Calcular taxa de conclusão média
         # Buscar todas as sessões de teste dos últimos 30 dias
         thirty_days_ago = datetime.now() - timedelta(days=30)
-        recent_sessions = TestSession.query.filter(
+        recent_sessions = session_query.filter(
             TestSession.started_at >= thirty_days_ago
         ).all()
         
@@ -120,7 +179,7 @@ def dashboard_stats():
 
 @bp.route('/dashboard/comprehensive-stats', methods=['GET'])
 @jwt_required()
-@role_required("admin", "professor", "coordenador", "diretor")
+@role_required("admin", "professor", "coordenador", "diretor", "tecadm")
 def comprehensive_dashboard_stats():
     """
     Retorna estatísticas mais completas do dashboard
@@ -145,16 +204,91 @@ def comprehensive_dashboard_stats():
         from app.models.studentClass import Class
         from app.models.teacher import Teacher
         
+        current_user = get_current_user_from_token()
+        if not current_user:
+            return jsonify({"erro": "Usuário não encontrado"}), 404
+        
+        # Base queries
+        student_query = Student.query
+        school_query = School.query
+        test_query = Test.query
+        game_query = Game.query
+        user_query = User.query
+        question_query = Question.query
+        class_query = Class.query
+        teacher_query = Teacher.query
+        
+        # Filtrar por city_id se for tecadm
+        if current_user['role'] == "tecadm":
+            city_id = current_user.get('tenant_id') or current_user.get('city_id')
+            if not city_id:
+                return jsonify({"erro": "ID da cidade não disponível"}), 400
+            
+            # Filtrar escolas por cidade
+            school_query = school_query.filter_by(city_id=city_id)
+            
+            # Obter IDs das escolas da cidade
+            schools_in_city = school_query.with_entities(School.id).all()
+            school_ids = [school.id for school in schools_in_city]
+            
+            if school_ids:
+                # Filtrar estudantes por escolas da cidade
+                student_query = student_query.filter(Student.school_id.in_(school_ids))
+                
+                # Filtrar turmas por escolas da cidade
+                class_query = class_query.filter(Class.school_id.in_(school_ids))
+                
+                # Filtrar professores por escolas da cidade através da tabela de associação
+                teacher_query = teacher_query.join(SchoolTeacher).filter(SchoolTeacher.school_id.in_(school_ids))
+                
+                # Filtrar testes que têm turmas das escolas da cidade
+                class_tests = ClassTest.query.filter(
+                    ClassTest.class_id.in_(
+                        Class.query.filter(Class.school_id.in_(school_ids)).with_entities(Class.id)
+                    )
+                ).with_entities(ClassTest.test_id).all()
+                test_ids = [ct.test_id for ct in class_tests]
+                
+                if test_ids:
+                    test_query = test_query.filter(Test.id.in_(test_ids))
+                else:
+                    # Se não há testes, definir como 0
+                    test_query = test_query.filter(Test.id.is_(None))
+                
+                # Filtrar usuários por cidade
+                user_query = user_query.filter_by(city_id=city_id)
+                
+                # Filtrar jogos por cidade (se tiver city_id)
+                if hasattr(Game, 'city_id'):
+                    game_query = game_query.filter_by(city_id=city_id)
+                
+                # Filtrar questões por cidade (se tiver city_id)
+                if hasattr(Question, 'city_id'):
+                    question_query = question_query.filter_by(city_id=city_id)
+            else:
+                # Se não há escolas na cidade, retornar zeros
+                return jsonify({
+                    "students": 0,
+                    "schools": 0,
+                    "evaluations": 0,
+                    "games": 0,
+                    "users": 0,
+                    "questions": 0,
+                    "classes": 0,
+                    "teachers": 0,
+                    "last_sync": datetime.now().isoformat()
+                }), 200
+        
         # Buscar todas as estatísticas em paralelo
         stats = {
-            "students": Student.query.count(),
-            "schools": School.query.count(),
-            "evaluations": Test.query.count(),
-            "games": Game.query.count(),
-            "users": User.query.count(),
-            "questions": Question.query.count(),
-            "classes": Class.query.count(),
-            "teachers": Teacher.query.count(),
+            "students": student_query.count(),
+            "schools": school_query.count(),
+            "evaluations": test_query.count(),
+            "games": game_query.count(),
+            "users": user_query.count(),
+            "questions": question_query.count(),
+            "classes": class_query.count(),
+            "teachers": teacher_query.count(),
             "last_sync": datetime.now().isoformat()
         }
         
@@ -170,7 +304,7 @@ def comprehensive_dashboard_stats():
 
 @bp.route('/evaluations/stats', methods=['GET'])
 @jwt_required()
-@role_required("admin", "professor", "coordenador", "diretor")
+@role_required("admin", "professor", "coordenador", "diretor", "tecadm")
 def evaluations_stats():
     """
     Retorna estatísticas específicas de avaliações de forma robusta
@@ -332,7 +466,7 @@ def evaluations_stats():
 
 @bp.route('/test-sessions/submitted', methods=['GET'])
 @jwt_required()
-@role_required("admin", "professor", "coordenador", "diretor")
+@role_required("admin", "professor", "coordenador", "diretor", "tecadm")
 def get_submitted_evaluations():
     """
     Retorna avaliações enviadas pelos alunos para correção
@@ -382,10 +516,37 @@ def get_submitted_evaluations():
             TestSession.submitted_at.isnot(None)  # Apenas sessões enviadas
         )
         
-        # Filtrar apenas avaliações criadas pelo usuário logado
-        if user:
+        # Filtrar por município se for tecadm
+        if user and user['role'] == "tecadm":
+            city_id = user.get('tenant_id') or user.get('city_id')
+            if not city_id:
+                return jsonify({"erro": "ID da cidade não disponível"}), 400
+            
+            # Filtrar por escolas da cidade
+            schools_in_city = School.query.filter_by(city_id=city_id).with_entities(School.id).all()
+            school_ids = [school.id for school in schools_in_city]
+            
+            if school_ids:
+                # Filtrar estudantes por escolas da cidade
+                query = query.join(Student).filter(Student.school_id.in_(school_ids))
+            else:
+                # Se não há escolas na cidade, retornar lista vazia
+                return jsonify({
+                    "items": [],
+                    "total": 0,
+                    "pages": 0,
+                    "current_page": page,
+                    "per_page": per_page
+                }), 200
+        
+        # Filtrar apenas avaliações criadas pelo usuário logado (exceto para admin e tecadm)
+        if user and user['role'] not in ['admin', 'tecadm']:
             query = query.join(Test).filter(Test.created_by == user['id'])
             print(f"Filtro aplicado: apenas avaliações criadas pelo usuário {user['id']} (role: {user.get('role')})")
+        else:
+            # Para admin e tecadm, mostrar todas as avaliações (filtradas por cidade se for tecadm)
+            query = query.join(Test)
+            print(f"Filtro aplicado: todas as avaliações para usuário {user['id']} (role: {user.get('role')})")
         
         print("Query base criada com sucesso")
         
@@ -507,7 +668,7 @@ def get_submitted_evaluations():
 
 @bp.route('/test-session/<string:session_id>/correct', methods=['POST'])
 @jwt_required()
-@role_required("admin", "professor", "coordenador", "diretor")
+@role_required("admin", "professor", "coordenador", "diretor", "tecadm")
 def correct_evaluation(session_id):
     """
     Salva a correção de uma avaliação (sem finalizar)
@@ -604,7 +765,7 @@ def correct_evaluation(session_id):
 
 @bp.route('/test-session/<string:session_id>/finalize', methods=['POST'])
 @jwt_required()
-@role_required("admin", "professor", "coordenador", "diretor")
+@role_required("admin", "professor", "coordenador", "diretor", "tecadm")
 def finalize_evaluation(session_id):
     """
     Finaliza a correção de uma avaliação (não pode mais ser editada)
@@ -1031,7 +1192,7 @@ def calculate_proficiency(percentage):
 
 @bp.route('/courses', methods=['GET'])
 @jwt_required()
-@role_required("admin", "professor", "coordenador", "diretor")
+@role_required("admin", "professor", "coordenador", "diretor", "tecadm")
 def list_courses():
     """
     Lista todos os cursos/stages educacionais
@@ -1078,7 +1239,7 @@ def list_courses():
 
 @bp.route('/subjects', methods=['GET'])
 @jwt_required()
-@role_required("admin", "professor", "coordenador", "diretor")
+@role_required("admin", "professor", "coordenador", "diretor", "tecadm")
 def list_subjects():
     """
     Lista todas as disciplinas
@@ -1110,7 +1271,7 @@ def list_subjects():
 
 @bp.route('/classes', methods=['GET'])
 @jwt_required()
-@role_required("admin", "professor", "coordenador", "diretor")
+@role_required("admin", "professor", "coordenador", "diretor", "tecadm")
 def list_classes():
     """
     Lista todas as turmas
@@ -1150,7 +1311,7 @@ def list_classes():
 
 @bp.route('/schools', methods=['GET'])
 @jwt_required()
-@role_required("admin", "professor", "coordenador", "diretor")
+@role_required("admin", "professor", "coordenador", "diretor", "tecadm")
 def list_schools():
     """
     Lista todas as escolas
@@ -1186,7 +1347,7 @@ def list_schools():
 
 @bp.route('/schools/recent', methods=['GET'])
 @jwt_required()
-@role_required("admin", "professor", "coordenador", "diretor")
+@role_required("admin", "professor", "coordenador", "diretor", "tecadm")
 def recent_schools():
     """
     Retorna as escolas mais recentes com detalhes completos
@@ -1198,10 +1359,25 @@ def recent_schools():
         from sqlalchemy.orm import joinedload
         from sqlalchemy import func
         
-        # Buscar as 5 escolas mais recentes com relacionamentos
-        recent_schools = School.query.options(
+        current_user = get_current_user_from_token()
+        if not current_user:
+            return jsonify({"erro": "Usuário não encontrado"}), 404
+        
+        # Base query
+        school_query = School.query.options(
             joinedload(School.city)
-        ).order_by(
+        )
+        
+        # Filtrar por city_id se for tecadm
+        if current_user['role'] == "tecadm":
+            city_id = current_user.get('tenant_id') or current_user.get('city_id')
+            if not city_id:
+                return jsonify({"erro": "ID da cidade não disponível"}), 400
+            
+            school_query = school_query.filter_by(city_id=city_id)
+        
+        # Buscar as 5 escolas mais recentes com relacionamentos
+        recent_schools = school_query.order_by(
             School.created_at.desc()
         ).limit(5).all()
         
@@ -1239,7 +1415,7 @@ def recent_schools():
 
 @bp.route('/students/recent', methods=['GET'])
 @jwt_required()
-@role_required("admin", "professor", "coordenador", "diretor")
+@role_required("admin", "professor", "coordenador", "diretor", "tecadm")
 def recent_students():
     """
     Retorna os alunos mais recentes com detalhes completos
@@ -1309,7 +1485,7 @@ def recent_students():
 
 @bp.route('/questions/recent', methods=['GET'])
 @jwt_required()
-@role_required("admin", "professor", "coordenador", "diretor")
+@role_required("admin", "professor", "coordenador", "diretor", "tecadm")
 def recent_questions():
     """
     Retorna as questões mais recentes com detalhes completos
@@ -1320,12 +1496,33 @@ def recent_questions():
     try:
         from sqlalchemy.orm import joinedload
         
-        # Buscar as 5 questões mais recentes com relacionamentos
-        recent_questions = Question.query.options(
+        current_user = get_current_user_from_token()
+        if not current_user:
+            return jsonify({"erro": "Usuário não encontrado"}), 404
+        
+        # Base query
+        question_query = Question.query.options(
             joinedload(Question.subject),
             joinedload(Question.grade),
             joinedload(Question.creator)
-        ).order_by(
+        )
+        
+        # Filtrar por city_id se for tecadm
+        if current_user['role'] == "tecadm":
+            city_id = current_user.get('tenant_id') or current_user.get('city_id')
+            if not city_id:
+                return jsonify({"erro": "ID da cidade não disponível"}), 400
+            
+            # Filtrar questões por cidade (se tiver city_id)
+            if hasattr(Question, 'city_id'):
+                question_query = question_query.filter_by(city_id=city_id)
+            else:
+                # Se não tiver city_id, filtrar por usuários da cidade
+                from app.models.user import User
+                question_query = question_query.join(User, Question.created_by == User.id).filter(User.city_id == city_id)
+        
+        # Buscar as 5 questões mais recentes com relacionamentos
+        recent_questions = question_query.order_by(
             Question.created_at.desc()
         ).limit(5).all()
         
@@ -1367,7 +1564,7 @@ def recent_questions():
 
 @bp.route('/evaluation-results/stats', methods=['GET'])
 @jwt_required()
-@role_required("admin", "professor", "coordenador", "diretor")
+@role_required("admin", "professor", "coordenador", "diretor", "tecadm")
 def get_evaluation_results_stats():
     """
     Retorna estatísticas gerais dos resultados de avaliações
@@ -1472,7 +1669,7 @@ def get_evaluation_results_stats():
 
 @bp.route('/evaluation-results/list', methods=['GET'])
 @jwt_required()
-@role_required("admin", "professor", "coordenador", "diretor")
+@role_required("admin", "professor", "coordenador", "diretor", "tecadm")
 def get_evaluation_results_list():
     """
     Retorna lista de avaliações com seus resultados agregados
@@ -1565,7 +1762,7 @@ def get_evaluation_results_list():
 
 @bp.route('/evaluation-results/<string:evaluation_id>/export', methods=['GET'])
 @jwt_required()
-@role_required("admin", "professor", "coordenador", "diretor")
+@role_required("admin", "professor", "coordenador", "diretor", "tecadm")
 def export_evaluation_results(evaluation_id):
     """
     Exporta resultados de uma avaliação específica
@@ -1614,7 +1811,7 @@ def export_evaluation_results(evaluation_id):
 
 @bp.route('/evaluation-results/export-all', methods=['GET'])
 @jwt_required()
-@role_required("admin", "professor", "coordenador", "diretor")
+@role_required("admin", "professor", "coordenador", "diretor", "tecadm")
 def export_all_results():
     """
     Exporta todos os resultados de avaliações

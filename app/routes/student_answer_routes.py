@@ -14,9 +14,11 @@ from app.models.testSession import TestSession
 from app.models.test import Test
 from app.models.question import Question
 from app.models.student import Student
+from app.models.testQuestion import TestQuestion
 from app.decorators.role_required import role_required
 from datetime import datetime, timedelta
 import logging
+import dateutil.parser
 
 bp = Blueprint('student_answer', __name__, url_prefix='/student-answers')
 
@@ -37,7 +39,7 @@ def handle_error(error):
 
 @bp.route('/sessions/<session_id>/status', methods=['GET'])
 @jwt_required()
-@role_required("student", "admin", "professor", "aluno")
+@role_required("student", "admin", "professor", "aluno", "tecadm")
 def get_session_status(session_id):
     """
     Retorna o status atual da sessão
@@ -53,7 +55,7 @@ def get_session_status(session_id):
         is_expired = False
         
         if session.started_at and session.time_limit_minutes:
-            from datetime import datetime
+
             elapsed_minutes = int((datetime.utcnow() - session.started_at).total_seconds() / 60)
             remaining_minutes = max(0, session.time_limit_minutes - elapsed_minutes)
             is_expired = remaining_minutes <= 0
@@ -83,7 +85,7 @@ def get_session_status(session_id):
 
 @bp.route('/sessions/<session_id>/end', methods=['POST'])
 @jwt_required()
-@role_required("student", "admin", "professor", "aluno")
+@role_required("student", "admin", "professor", "aluno", "tecadm")
 def end_test_session(session_id):
     """
     Encerra uma sessão de prova
@@ -248,7 +250,10 @@ def submit_answers():
         if class_test and class_test.expiration:
             current_time = datetime.utcnow()
             # Garantir que ambas as datas estejam em UTC para comparação
-            expiration_utc = class_test.expiration.replace(tzinfo=None) if class_test.expiration.tzinfo else class_test.expiration
+
+            import dateutil.parser
+            expiration_dt = dateutil.parser.parse(class_test.expiration)
+            expiration_utc = expiration_dt.replace(tzinfo=None) if expiration_dt.tzinfo else expiration_dt
             current_utc = current_time.replace(tzinfo=None) if current_time.tzinfo else current_time
             if current_utc > expiration_utc:
                 session.status = 'expirada'
@@ -265,9 +270,20 @@ def submit_answers():
         
         # Validar tempo limite (cálculo no frontend, mas validação adicional aqui)
         if session.started_at and session.time_limit_minutes:
-            from app.utils.timezone_utils import get_brazil_time
-            current_time = get_brazil_time()
-            elapsed_minutes = int((current_time - session.started_at).total_seconds() / 60)
+            from app.utils.timezone_utils import get_local_time
+            from datetime import timezone
+            current_time = get_local_time()
+            
+            # Converter started_at para timezone local para comparação
+            started_at_dt = session.started_at
+            if started_at_dt.tzinfo is None:
+                # Se não tem timezone, assumir UTC e converter para local
+                started_at_dt = started_at_dt.replace(tzinfo=timezone.utc)
+            
+            # Converter para timezone local para comparação
+            started_at_local = started_at_dt.astimezone(current_time.tzinfo)
+            
+            elapsed_minutes = int((current_time - started_at_local).total_seconds() / 60)
             if elapsed_minutes > session.time_limit_minutes:
                 session.status = 'expirada'
                 db.session.commit()
@@ -275,8 +291,9 @@ def submit_answers():
                     'error': 'Tempo limite excedido. Sessão expirada.'
                 }), 410  # 410 Gone
         
-        # Buscar questões do teste para validação e correção
-        test_questions = Question.query.filter_by(test_id=session.test_id).all()
+        # Buscar questões do teste através da tabela de associação
+        test_question_ids = [tq.question_id for tq in TestQuestion.query.filter_by(test_id=session.test_id).order_by(TestQuestion.order).all()]
+        test_questions = Question.query.filter(Question.id.in_(test_question_ids)).all() if test_question_ids else []
         questions_dict = {q.id: q for q in test_questions}
         
         correct_count = 0
@@ -437,7 +454,10 @@ def save_partial_answers():
         if class_test and class_test.expiration:
             current_time = datetime.utcnow()
             # Garantir que ambas as datas estejam em UTC para comparação
-            expiration_utc = class_test.expiration.replace(tzinfo=None) if class_test.expiration.tzinfo else class_test.expiration
+
+            import dateutil.parser
+            expiration_dt = dateutil.parser.parse(class_test.expiration)
+            expiration_utc = expiration_dt.replace(tzinfo=None) if expiration_dt.tzinfo else expiration_dt
             current_utc = current_time.replace(tzinfo=None) if current_time.tzinfo else current_time
             if current_utc > expiration_utc:
                 session.status = 'expirada'
@@ -454,9 +474,20 @@ def save_partial_answers():
         
         # Validar tempo limite (cálculo no frontend, mas validação adicional aqui)
         if session.started_at and session.time_limit_minutes:
-            from app.utils.timezone_utils import get_brazil_time
-            current_time = get_brazil_time()
-            elapsed_minutes = int((current_time - session.started_at).total_seconds() / 60)
+            from app.utils.timezone_utils import get_local_time
+            from datetime import timezone
+            current_time = get_local_time()
+            
+            # Converter started_at para timezone local para comparação
+            started_at_dt = session.started_at
+            if started_at_dt.tzinfo is None:
+                # Se não tem timezone, assumir UTC e converter para local
+                started_at_dt = started_at_dt.replace(tzinfo=timezone.utc)
+            
+            # Converter para timezone local para comparação
+            started_at_local = started_at_dt.astimezone(current_time.tzinfo)
+            
+            elapsed_minutes = int((current_time - started_at_local).total_seconds() / 60)
             if elapsed_minutes > session.time_limit_minutes:
                 session.status = 'expirada'
                 db.session.commit()
@@ -464,8 +495,9 @@ def save_partial_answers():
                     'error': 'Tempo limite excedido. Sessão expirada.'
                 }), 410  # 410 Gone
         
-        # Buscar questões do teste
-        test_questions = Question.query.filter_by(test_id=session.test_id).all()
+        # Buscar questões do teste através da tabela de associação
+        test_question_ids = [tq.question_id for tq in TestQuestion.query.filter_by(test_id=session.test_id).order_by(TestQuestion.order).all()]
+        test_questions = Question.query.filter(Question.id.in_(test_question_ids)).all() if test_question_ids else []
         questions_dict = {q.id: q for q in test_questions}
         
         saved_answers = []
@@ -565,7 +597,7 @@ def get_active_session(test_id):
         is_expired = False
         
         if session.started_at and session.time_limit_minutes:
-            from datetime import datetime
+
             elapsed_minutes = int((datetime.utcnow() - session.started_at).total_seconds() / 60)
             remaining_minutes = max(0, session.time_limit_minutes - elapsed_minutes)
             is_expired = remaining_minutes <= 0
@@ -879,7 +911,7 @@ def get_student_sessions():
             is_expired = False
             
             if session.started_at and session.time_limit_minutes:
-                from datetime import datetime
+
                 elapsed_minutes = int((datetime.utcnow() - session.started_at).total_seconds() / 60)
                 remaining_minutes = max(0, session.time_limit_minutes - elapsed_minutes)
                 is_expired = remaining_minutes <= 0
@@ -941,7 +973,7 @@ def can_student_start_test(test_id):
     try:
         from app.models.student import Student
         from app.models.classTest import ClassTest
-        from datetime import datetime
+
         
         # Obter user_id do JWT token
         current_user_id = get_jwt_identity()
@@ -979,8 +1011,8 @@ def can_student_start_test(test_id):
             }), 200
         
         # ✅ CORRIGIDO: Verificar se já completou, se a avaliação está disponível E se não expirou
-        can_start = True
-        reason = "Avaliação disponível"
+        can_start = False  # Por padrão, não pode iniciar
+        reason = "Verificando disponibilidade..."
         
         # Buscar sessão do aluno (sempre buscar, independente da expiração)
         session = TestSession.query.filter_by(
@@ -988,100 +1020,125 @@ def can_student_start_test(test_id):
             test_id=test_id
         ).first()
         
-        # Verificar se a avaliação está disponível (data de aplicação) e não expirou (data de expiração)
-        from app.utils.timezone_utils import get_brazil_time
-        current_time = get_brazil_time()
+        # Verificar se já completou
+        has_completed = False
+        if session:
+            has_completed = session.status in ['finalizada', 'expirada', 'corrigida', 'revisada']
         
-        # Verificar se já passou da data de aplicação
-        if class_test.application:
-            # Converter data de aplicação para fuso horário do Brasil
-            application_brazil = class_test.application.replace(tzinfo=None) if class_test.application.tzinfo else class_test.application
-            current_brazil = current_time.replace(tzinfo=None) if current_time.tzinfo else current_time
-            if current_brazil < application_brazil:
-                can_start = False
-                reason = "Avaliação ainda não está disponível"
-            else:
-                # Verificar se a avaliação não expirou
-                if class_test.expiration:
-                    # Converter data de expiração para fuso horário do Brasil
-                    expiration_brazil = class_test.expiration.replace(tzinfo=None) if class_test.expiration.tzinfo else class_test.expiration
-                    current_brazil = current_time.replace(tzinfo=None) if current_time.tzinfo else current_time
-                    if current_brazil > expiration_brazil:
-                        can_start = False
-                        reason = "Avaliação expirada"
-                    else:
-                        # Verificar se o aluno já completou
-                        if session:
-                            if session.status in ['finalizada', 'expirada', 'corrigida', 'revisada']:
-                                can_start = False
-                                reason = "Você já completou esta avaliação"
-                            elif session.status == 'em_andamento':
-                                # Verificar se há respostas salvas
-                                has_answers = StudentAnswer.query.filter_by(
-                                    student_id=student.id,
-                                    test_id=test_id
-                                ).first() is not None
-                                
-                                if has_answers:
-                                    can_start = False
-                                    reason = "Você já iniciou esta avaliação"
-                else:
-                    # Verificar se o aluno já completou (quando não há data de expiração)
-                    if session:
-                        if session.status in ['finalizada', 'expirada', 'corrigida', 'revisada']:
-                            can_start = False
-                            reason = "Você já completou esta avaliação"
-                        elif session.status == 'em_andamento':
-                            # Verificar se há respostas salvas
-                            has_answers = StudentAnswer.query.filter_by(
-                                student_id=student.id,
-                                test_id=test_id
-                            ).first() is not None
-                            
-                            if has_answers:
-                                can_start = False
-                                reason = "Você já iniciou esta avaliação"
+        # Se já completou, não pode iniciar novamente
+        if has_completed:
+            can_start = False
+            reason = "Avaliação já foi completada"
         else:
-            # Quando não há data de aplicação, verificar apenas expiração e se já completou
-            if class_test.expiration:
-                # Converter data de expiração para fuso horário do Brasil
-                expiration_brazil = class_test.expiration.replace(tzinfo=None) if class_test.expiration.tzinfo else class_test.expiration
-                current_brazil = current_time.replace(tzinfo=None) if current_time.tzinfo else current_time
-                if current_brazil > expiration_brazil:
+            # Verificar se a avaliação está disponível (data de aplicação) e não expirou (data de expiração)
+            is_available_now = False
+            is_expired = False
+            
+            # ✅ REGRA 4: Obter tempo atual no timezone da aplicação
+            current_time = None
+            if class_test.timezone:
+                import pytz
+                try:
+                    target_tz = pytz.timezone(class_test.timezone)
+                    current_time = datetime.now(target_tz)
+                except pytz.exceptions.UnknownTimeZoneError:
+                    from app.utils.timezone_utils import get_local_time
+                    current_time = get_local_time()
+            else:
+                from app.utils.timezone_utils import get_local_time
+                current_time = get_local_time()
+            
+            # Verificar se a avaliação já está disponível (data de aplicação)
+            if class_test.application and class_test.application is not None:
+                try:
+                    # ✅ REGRA 4: Comparar no mesmo timezone da aplicação
+                    if class_test.timezone:
+                        import pytz
+                        try:
+                            # Obter timezone da aplicação
+                            target_tz = pytz.timezone(class_test.timezone)
+                            
+                            # Converter string para datetime com timezone
+                            application_dt = dateutil.parser.parse(class_test.application)
+                            if application_dt.tzinfo is None:
+                                application_dt = application_dt.replace(tzinfo=target_tz)
+                            
+                            # ✅ REGRA 4: Comparar diretamente no mesmo timezone
+                            is_available_now = current_time >= application_dt
+                            
+                        except pytz.exceptions.UnknownTimeZoneError:
+                            # Se o timezone for inválido, usar lógica de fallback
+                            logging.warning(f"Timezone inválido: {class_test.timezone}, usando fallback")
+                            raise Exception(f"Timezone inválido: {class_test.timezone}")
+                    else:
+                        # Fallback para lógica antiga se não houver timezone
+                        # Converter string para datetime
+                        application_dt = dateutil.parser.parse(class_test.application)
+                        if application_dt.tzinfo is None:
+                            application_dt = application_dt.replace(tzinfo=current_time.tzinfo)
+                        
+                        is_available_now = current_time >= application_dt
+                        
+                except Exception as e:
+                    # Se houver erro na conversão, não disponível
+                    logging.error(f"Erro ao converter data de aplicação para teste {test_id}: {str(e)}")
+                    is_available_now = False
+            else:
+                # Se não há data de aplicação definida, não está disponível
+                is_available_now = False
+            
+            # Verificar se a avaliação não expirou (data de expiração)
+            if class_test.expiration and class_test.expiration is not None:
+                try:
+                    # ✅ REGRA 4: Comparar no mesmo timezone da aplicação
+                    if class_test.timezone:
+                        import pytz
+                        try:
+                            # Obter timezone da aplicação
+                            target_tz = pytz.timezone(class_test.timezone)
+                            
+                            # Converter string para datetime com timezone
+                            expiration_dt = dateutil.parser.parse(class_test.expiration)
+                            if expiration_dt.tzinfo is None:
+                                expiration_dt = expiration_dt.replace(tzinfo=target_tz)
+                            
+                            # ✅ REGRA 4: Comparar diretamente no mesmo timezone
+                            is_expired = current_time > expiration_dt
+                            
+                        except pytz.exceptions.UnknownTimeZoneError:
+                            logging.warning(f"Timezone inválido: {class_test.timezone}, usando fallback")
+                            raise Exception(f"Timezone inválido: {class_test.timezone}")
+                    else:
+                        # Fallback para lógica antiga
+                        # Converter string para datetime
+                        expiration_dt = dateutil.parser.parse(class_test.expiration)
+                        if expiration_dt.tzinfo is None:
+                            expiration_dt = expiration_dt.replace(tzinfo=current_time.tzinfo)
+                        
+                        is_expired = current_time > expiration_dt
+                        
+                except Exception as e:
+                    # Se houver erro na conversão, não expirada
+                    logging.error(f"Erro ao converter data de expiração para teste {test_id}: {str(e)}")
+                    is_expired = False
+            
+            # Determinar se pode iniciar baseado na disponibilidade e expiração
+            if test.status in ['agendada', 'em_andamento']:
+                if is_available_now and not is_expired:
+                    can_start = True
+                    reason = "Avaliação disponível para início"
+                elif not is_available_now:
+                    can_start = False
+                    reason = "Avaliação ainda não está disponível"
+                else:
                     can_start = False
                     reason = "Avaliação expirada"
-                else:
-                    # Verificar se o aluno já completou
-                    if session:
-                        if session.status in ['finalizada', 'expirada', 'corrigida', 'revisada']:
-                            can_start = False
-                            reason = "Você já completou esta avaliação"
-                        elif session.status == 'em_andamento':
-                            # Verificar se há respostas salvas
-                            has_answers = StudentAnswer.query.filter_by(
-                                student_id=student.id,
-                                test_id=test_id
-                            ).first() is not None
-                            
-                            if has_answers:
-                                can_start = False
-                                reason = "Você já iniciou esta avaliação"
             else:
-                # Verificar se o aluno já completou (quando não há data de aplicação nem expiração)
-                if session:
-                    if session.status in ['finalizada', 'expirada', 'corrigida', 'revisada']:
-                        can_start = False
-                        reason = "Você já completou esta avaliação"
-                    elif session.status == 'em_andamento':
-                        # Verificar se há respostas salvas
-                        has_answers = StudentAnswer.query.filter_by(
-                            student_id=student.id,
-                            test_id=test_id
-                        ).first() is not None
-                        
-                        if has_answers:
-                            can_start = False
-                            reason = "Você já iniciou esta avaliação"
+                can_start = False
+                reason = f"Status da avaliação não permite início: {test.status}"
+
+        # Log de debug para o resultado final
+        logging.info(f"DEBUG CAN-START FINAL - Test: {test_id}, Can Start: {can_start}, Reason: {reason}")
         
         return jsonify({
             'can_start': can_start,
@@ -1090,8 +1147,8 @@ def can_student_start_test(test_id):
                 'id': test_id,
                 'title': test.title,
                 'status': test.status,
-                'application': class_test.application.isoformat() if class_test.application else None,
-                'expiration': class_test.expiration.isoformat() if class_test.expiration else None
+                'application': class_test.application if class_test.application else None,
+                'expiration': class_test.expiration if class_test.expiration else None
             },
             'student_info': {
                 'id': student.id,
@@ -1103,6 +1160,148 @@ def can_student_start_test(test_id):
     except Exception as e:
         logging.error(f"Erro ao verificar se aluno pode iniciar teste: {str(e)}", exc_info=True)
         return jsonify({"error": "Erro ao verificar permissão", "details": str(e)}), 500
+
+
+# ==================== ENDPOINT DE DEBUG ====================
+
+@bp.route('/debug/session/<string:session_id>', methods=['GET'])
+@jwt_required()
+@role_required("student", "admin", "professor", "aluno")
+def debug_session_status(session_id):
+    """
+    Endpoint de debug para verificar o status detalhado de uma sessão
+    """
+    try:
+        session = TestSession.query.get(session_id)
+        if not session:
+            return jsonify({'error': 'Sessão não encontrada'}), 404
+        
+        # Buscar informações do teste
+        test = Test.query.get(session.test_id)
+        class_test = None
+        if test:
+            from app.models.classTest import ClassTest
+            class_test = ClassTest.query.filter_by(
+                class_id=session.student.class_id,
+                test_id=session.test_id
+            ).first()
+        
+        # Buscar respostas do aluno
+        answers = StudentAnswer.query.filter_by(
+            student_id=session.student_id,
+            test_id=session.test_id
+        ).all()
+        
+        debug_info = {
+            'session': {
+                'id': session.id,
+                'student_id': session.student_id,
+                'test_id': session.test_id,
+                'status': session.status,
+                'started_at': session.started_at.isoformat() if session.started_at else None,
+                'submitted_at': session.submitted_at.isoformat() if session.submitted_at else None,
+                'time_limit_minutes': session.time_limit_minutes,
+                'total_questions': session.total_questions,
+                'correct_answers': session.correct_answers,
+                'score': session.score,
+                'grade': session.grade,
+                'duration_minutes': session.duration_minutes
+            },
+            'test': {
+                'id': test.id if test else None,
+                'title': test.title if test else None,
+                'status': test.status if test else None
+            },
+            'class_test': {
+                'id': class_test.id if class_test else None,
+                'application': class_test.application if class_test else None,
+                'expiration': class_test.expiration if class_test else None,
+                'timezone': class_test.timezone if class_test else None
+            },
+            'answers': {
+                'total_answers': len(answers),
+                'answers_list': [
+                    {
+                        'question_id': answer.question_id,
+                        'answer': answer.answer,
+                        'answered_at': answer.answered_at.isoformat() if answer.answered_at else None
+                    } for answer in answers
+                ]
+            }
+        }
+        
+        return jsonify(debug_info), 200
+        
+    except Exception as e:
+        logging.error(f"Erro no debug de sessão: {str(e)}", exc_info=True)
+        return jsonify({"error": "Erro no debug", "details": str(e)}), 500
+    """
+    Endpoint de debug para verificar o status detalhado de uma sessão
+    """
+    try:
+        session = TestSession.query.get(session_id)
+        if not session:
+            return jsonify({'error': 'Sessão não encontrada'}), 404
+        
+        # Buscar informações do teste
+        test = Test.query.get(session.test_id)
+        class_test = None
+        if test:
+            from app.models.classTest import ClassTest
+            class_test = ClassTest.query.filter_by(
+                class_id=session.student.class_id,
+                test_id=session.test_id
+            ).first()
+        
+        # Buscar respostas do aluno
+        answers = StudentAnswer.query.filter_by(
+            student_id=session.student_id,
+            test_id=session.test_id
+        ).all()
+        
+        debug_info = {
+            'session': {
+                'id': session.id,
+                'student_id': session.student_id,
+                'test_id': session.test_id,
+                'status': session.status,
+                'started_at': session.started_at.isoformat() if session.started_at else None,
+                'submitted_at': session.submitted_at.isoformat() if session.submitted_at else None,
+                'time_limit_minutes': session.time_limit_minutes,
+                'total_questions': session.total_questions,
+                'correct_answers': session.correct_answers,
+                'score': session.score,
+                'grade': session.grade,
+                'duration_minutes': session.duration_minutes
+            },
+            'test': {
+                'id': test.id if test else None,
+                'title': test.title if test else None,
+                'status': test.status if test else None
+            },
+            'class_test': {
+                'id': class_test.id if class_test else None,
+                'application': class_test.application if class_test else None,
+                'expiration': class_test.expiration if class_test else None,
+                'timezone': class_test.timezone if class_test else None
+            },
+            'answers': {
+                'total_answers': len(answers),
+                'answers_list': [
+                    {
+                        'question_id': answer.question_id,
+                        'answer': answer.answer,
+                        'answered_at': answer.answered_at.isoformat() if answer.answered_at else None
+                    } for answer in answers
+                ]
+            }
+        }
+        
+        return jsonify(debug_info), 200
+        
+    except Exception as e:
+        logging.error(f"Erro no debug de sessão: {str(e)}", exc_info=True)
+        return jsonify({"error": "Erro no debug", "details": str(e)}), 500
 
 
 # ==================== ENDPOINT LEGADO (COMPATIBILIDADE) ====================

@@ -8,6 +8,7 @@ from .studentClass import Class
 from .classSubject import ClassSubject
 from .classTest import ClassTest
 from .test import Test
+from .testQuestion import TestQuestion
 from .educationStage import EducationStage
 from .grades import Grade
 from .skill import Skill
@@ -19,4 +20,5 @@ from .teacherClass import TeacherClass
 from .user import User
 from .game import Game
 from .evaluationResult import EvaluationResult
+from .manager import Manager
 

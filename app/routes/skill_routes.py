@@ -118,7 +118,7 @@ def get_skills_by_grade(grade_id):
 
 @skill_bp.route('/skills/evaluation/<test_id>', methods=['GET'])
 @jwt_required()
-@role_required("admin", "professor", "coordenador", "diretor")
+@role_required("admin", "professor", "coordenador", "diretor", "tecadm")
 def get_skills_by_evaluation(test_id):
     """
     Busca skills utilizadas em uma avaliação específica.
@@ -159,7 +159,10 @@ def get_skills_by_evaluation(test_id):
             return jsonify({"error": "Acesso negado"}), 403
 
         # Buscar questões da avaliação
-        questions = Question.query.filter_by(test_id=test_id).all()
+        # Buscar questões do teste através da tabela de associação
+        from app.models.testQuestion import TestQuestion
+        test_question_ids = [tq.question_id for tq in TestQuestion.query.filter_by(test_id=test_id).order_by(TestQuestion.order).all()]
+        questions = Question.query.filter(Question.id.in_(test_question_ids)).all() if test_question_ids else []
         
         if not questions:
             return jsonify({"message": "Avaliação não possui questões."}), 404

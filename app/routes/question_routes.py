@@ -4,9 +4,10 @@ from app.models.subject import Subject
 from app.models.grades import Grade
 from app.models.educationStage import EducationStage
 from app.models.test import Test
+from app.models.testQuestion import TestQuestion
 from app.models.user import User
 from app import db
-from app.utils.auth import get_current_tenant_id
+from app.decorators.role_required import get_current_tenant_id
 from flask_jwt_extended import jwt_required
 from app.decorators.role_required import role_required, get_current_user_from_token
 from sqlalchemy.exc import SQLAlchemyError, IntegrityError
@@ -93,7 +94,7 @@ def handle_generic_error(error):
 
 @bp.route('', methods=['POST'])
 @jwt_required()
-@role_required("admin", "professor", "coordenador", "diretor")
+@role_required("admin", "professor", "coordenador", "diretor", "tecadm")
 def create_question():
     try:
         data = request.get_json()
@@ -138,7 +139,7 @@ def create_question():
             difficulty_level=data.get('difficulty'),
             correct_answer=data.get('solution'),
             formatted_solution=data.get('formattedSolution'),
-            test_id=data.get('test_id'),
+            # test_id=data.get('test_id'),  # REMOVIDO - agora usamos tabela de associação
             question_type=data.get('type'),
             value=data.get('value'),
             topics=data.get('topics'),
@@ -163,7 +164,7 @@ def create_question():
 
 @bp.route('/', methods=['GET'])
 @jwt_required()
-@role_required("admin", "professor", "coordenador", "diretor")
+@role_required("admin", "professor", "coordenador", "diretor", "tecadm")
 def list_questions():
     try:
         user = get_current_user_from_token()
@@ -181,7 +182,7 @@ def list_questions():
                 joinedload(Test.creator),
                 joinedload(Test.subject_rel),
                 joinedload(Test.grade),
-                subqueryload(Test.questions).options(
+                subqueryload(Test.test_questions).subqueryload(TestQuestion.question).options(
                     joinedload(Question.subject),
                     joinedload(Question.grade),
                     joinedload(Question.education_stage),
@@ -204,7 +205,6 @@ def list_questions():
             joinedload(Question.subject),
             joinedload(Question.grade),
             joinedload(Question.education_stage),
-            joinedload(Question.test),
             joinedload(Question.creator),
             joinedload(Question.last_modifier)
         )
@@ -233,14 +233,13 @@ def list_questions():
 
 @bp.route('/<string:question_id>', methods=['GET'])
 @jwt_required()
-@role_required("admin", "professor", "coordenador", "diretor")
+@role_required("admin", "professor", "coordenador", "diretor","tecadm")
 def get_question(question_id):
     try:
         question = Question.query.options(
             joinedload(Question.subject),
             joinedload(Question.grade),
             joinedload(Question.education_stage),
-            joinedload(Question.test),
             joinedload(Question.creator),
             joinedload(Question.last_modifier)
         ).get(question_id)
@@ -256,7 +255,7 @@ def get_question(question_id):
 
 @bp.route('/<string:question_id>', methods=['PUT'])
 @jwt_required()
-@role_required("admin", "professor", "coordenador", "diretor")
+@role_required("admin", "professor", "coordenador", "diretor","tecadm")
 def update_question(question_id):
     try:
         question = Question.query.get(question_id)
@@ -276,6 +275,7 @@ def update_question(question_id):
             'title': 'title',
             'description': 'description',
             'command': 'command',
+            'secondStatement': 'secondstatement',
             'subtitle': 'subtitle',
             'options': 'alternatives',
             'skills': 'skill',
@@ -284,7 +284,7 @@ def update_question(question_id):
             'difficulty': 'difficulty_level',
             'solution': 'correct_answer',
             'formattedSolution': 'formatted_solution',
-            'test_id': 'test_id',
+            # 'test_id': 'test_id',  # REMOVIDO - agora usamos tabela de associação
             'type': 'question_type',
             'value': 'value',
             'topics': 'topics',
@@ -307,7 +307,7 @@ def update_question(question_id):
 
 @bp.route('', methods=['DELETE'])
 @jwt_required()
-@role_required("admin", "professor", "coordenador", "diretor")
+@role_required("admin", "professor", "coordenador", "diretor","tecadm")
 def bulk_delete_questions():
     """ Rota para deletar múltiplas questões em massa. """
     try:
@@ -339,7 +339,7 @@ def bulk_delete_questions():
 
 @bp.route('/<string:question_id>', methods=['DELETE'])
 @jwt_required()
-@role_required("admin", "professor", "coordenador", "diretor")
+@role_required("admin", "professor", "coordenador", "diretor","tecadm")
 def delete_question(question_id):
     try:
         question = Question.query.get(question_id)

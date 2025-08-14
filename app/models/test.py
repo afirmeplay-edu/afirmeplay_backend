@@ -37,6 +37,14 @@ class Test(db.Model):
     grade = db.relationship('Grade', foreign_keys=[grade_id])
     class_tests = db.relationship("ClassTest", backref="test")
     
+    # Relacionamento many-to-many com Question através da tabela de associação
+    test_questions = db.relationship('TestQuestion', back_populates='test', cascade='all, delete-orphan')
+    
+    @property
+    def questions(self):
+        """Retorna as questões ordenadas"""
+        return [tq.question for tq in sorted(self.test_questions, key=lambda x: x.order or 0)]
+    
     # Relacionamento para acessar as classes onde a avaliação foi aplicada
     @property
     def applied_classes(self):

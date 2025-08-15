@@ -480,21 +480,55 @@ def delete_user(user_id):
             if user_to_delete.city_id != current_city_id:
                 return jsonify({"erro": "Sem permissão para deletar usuário de outra cidade"}), 403
         
-        # Verificar se há relacionamentos que impedem a exclusão
-        # Verificar se é um estudante
+        # Exclusão em cascata - deletar registros relacionados primeiro
+        deleted_relations = []
+        
+        # Verificar e deletar se é um estudante
         student = Student.query.filter_by(user_id=user_id).first()
         if student:
-            return jsonify({"erro": "Não é possível deletar usuário que é estudante. Delete o estudante primeiro."}), 400
+            db.session.delete(student)
+            deleted_relations.append("estudante")
+            logging.info(f"Deletando registro de estudante para usuário {user_id}")
         
-        # Verificar se é um professor
+        # Verificar e deletar se é um professor
         teacher = Teacher.query.filter_by(user_id=user_id).first()
         if teacher:
-            return jsonify({"erro": "Não é possível deletar usuário que é professor. Delete o professor primeiro."}), 400
+            db.session.delete(teacher)
+            deleted_relations.append("professor")
+            logging.info(f"Deletando registro de professor para usuário {user_id}")
         
-        # Verificar se é um diretor/coordenador
+        # Verificar e deletar se é um diretor/coordenador/tecadm
         manager = Manager.query.filter_by(user_id=user_id).first()
         if manager:
-            return jsonify({"erro": "Não é possível deletar usuário que é diretor/coordenador. Delete o cargo primeiro."}), 400
+            db.session.delete(manager)
+            deleted_relations.append("manager")
+            logging.info(f"Deletando registro de manager para usuário {user_id}")
+        
+        # Verificar e deletar vínculos com escolas (SchoolTeacher)
+        from app.models.schoolTeacher import SchoolTeacher
+        school_teachers = SchoolTeacher.query.filter_by(teacher_id=user_id).all()
+        if school_teachers:
+            for school_teacher in school_teachers:
+                db.session.delete(school_teacher)
+            deleted_relations.append(f"{len(school_teachers)} vínculos escolares")
+            logging.info(f"Deletando {len(school_teachers)} vínculos escolares para usuário {user_id}")
+        
+        # Verificar e deletar vínculos com turmas (TeacherClass)
+        from app.models.teacherClass import TeacherClass
+        teacher_classes = TeacherClass.query.filter_by(teacher_id=user_id).all()
+        if teacher_classes:
+            for teacher_class in teacher_classes:
+                db.session.delete(teacher_class)
+            deleted_relations.append(f"{len(teacher_classes)} vínculos com turmas")
+            logging.info(f"Deletando {len(teacher_classes)} vínculos com turmas para usuário {user_id}")
+        
+        # Verificar e deletar UserQuickLinks
+        from app.models.userQuickLinks import UserQuickLinks
+        user_quick_links = UserQuickLinks.query.filter_by(user_id=user_id).first()
+        if user_quick_links:
+            db.session.delete(user_quick_links)
+            deleted_relations.append("atalhos rápidos")
+            logging.info(f"Deletando atalhos rápidos para usuário {user_id}")
         
         # Deletar usuário
         db.session.delete(user_to_delete)
@@ -502,7 +536,17 @@ def delete_user(user_id):
         
         logging.info(f"Usuário {user_to_delete.email} deletado por {current_user['email']}")
         
-        return jsonify({"mensagem": "Usuário deletado com sucesso"}), 200
+        # Preparar mensagem de resposta
+        if deleted_relations:
+            relations_text = ", ".join(deleted_relations)
+            message = f"Usuário deletado com sucesso. Registros relacionados também deletados: {relations_text}"
+        else:
+            message = "Usuário deletado com sucesso"
+        
+        return jsonify({
+            "mensagem": message,
+            "deleted_relations": deleted_relations
+        }), 200
         
     except SQLAlchemyError as e:
         db.session.rollback()

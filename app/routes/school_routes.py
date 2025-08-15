@@ -123,18 +123,17 @@ def listar_escolas():
                 return jsonify({"message": "Professor não está alocado em nenhuma escola"}), 404
         elif user['role'] in ["diretor", "coordenador"]:
             # Diretor e coordenador veem apenas sua escola
-            from app.models.teacher import Teacher
-            teacher = Teacher.query.filter_by(user_id=user['id']).first()
+            from app.models.manager import Manager
+            manager = Manager.query.filter_by(user_id=user['id']).first()
             
-            if not teacher:
-                return jsonify({"error": "Diretor/Coordenador não encontrado na tabela teacher"}), 404
+            if not manager:
+                return jsonify({"error": "Diretor/Coordenador não encontrado na tabela manager"}), 404
             
             # Buscar a escola do diretor/coordenador
-            teacher_school = SchoolTeacher.query.filter_by(teacher_id=teacher.id).first()
-            if not teacher_school:
+            if not manager.school_id:
                 return jsonify({"error": "Diretor/Coordenador não está vinculado a nenhuma escola"}), 400
             
-            schools = query.filter(School.id == teacher_school.school_id).all()
+            schools = query.filter(School.id == manager.school_id).all()
         else:
             # TecAdmin vê escolas do município
             city_id = user.get('tenant_id') or user.get('city_id')
@@ -315,14 +314,13 @@ def buscar_escola(escola_id):
                 return jsonify({"error": "You don't have permission to view this school"}), 403
         elif user['role'] in ["diretor", "coordenador"]:
             # Diretor e coordenador só podem ver sua escola
-            from app.models.teacher import Teacher
-            teacher = Teacher.query.filter_by(user_id=user['id']).first()
+            from app.models.manager import Manager
+            manager = Manager.query.filter_by(user_id=user['id']).first()
             
-            if not teacher:
-                return jsonify({"error": "Diretor/Coordenador não encontrado na tabela teacher"}), 404
+            if not manager:
+                return jsonify({"error": "Diretor/Coordenador não encontrado na tabela manager"}), 404
             
-            teacher_school = SchoolTeacher.query.filter_by(teacher_id=teacher.id).first()
-            if not teacher_school or teacher_school.school_id != school.id:
+            if not manager.school_id or manager.school_id != school.id:
                 return jsonify({"error": "You don't have permission to view this school"}), 403
         else:
             # TecAdmin só pode ver escolas do seu município

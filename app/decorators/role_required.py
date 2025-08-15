@@ -17,14 +17,16 @@ def get_current_user_from_token():
         user = User.query.get(payload['sub'])
         if not user:
             return None
-            
-        return {
+        
+        user_data = {
             "id": user.id,
             "email": user.email,
             "role": user.role.value,
             "city_id": user.city_id,
             "tenant_id": payload.get('tenant_id')  # Usar tenant_id do token JWT
         }
+        
+        return user_data
     
     except jwt.ExpiredSignatureError:
         return None

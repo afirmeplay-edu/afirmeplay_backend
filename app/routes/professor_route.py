@@ -538,9 +538,10 @@ def listar_tecadm():
         logging.error(f"Erro inesperado ao listar tecadm: {str(e)}", exc_info=True)
         return jsonify({"erro": "Ocorreu um erro inesperado", "detalhes": str(e)}), 500
 
+
 @bp.route('/directors', methods=['POST'])
 @jwt_required()
-@role_required("admin", "diretor")
+@role_required("admin", "diretor", "tecadm")
 def criar_diretor():
     try:
         logging.info("Iniciando criação de diretor")
@@ -563,16 +564,24 @@ def criar_diretor():
 
         # Determinar city_id baseado na role do usuário atual
         city_id = None
+        
         if current_user['role'] == "admin":
             # Admin pode escolher qualquer city_id
             city_id = dados.get("city_id")
             if not city_id:
                 return jsonify({"erro": "city_id é obrigatório para admin criando diretores"}), 400
         else:
-            # Diretor usa seu próprio city_id
+            # Diretor e tecadm usam seu próprio city_id
             city_id = current_user.get("city_id")
+            
+            # Verificação adicional: buscar city_id diretamente do banco
             if not city_id:
-                return jsonify({"erro": "Usuário não tem city_id atribuído"}), 400
+                user_from_db = User.query.get(current_user['id'])
+                if user_from_db and user_from_db.city_id:
+                    city_id = user_from_db.city_id
+                    logging.info(f"City_id recuperado do banco para usuário {current_user['id']}: {city_id}")
+                else:
+                    return jsonify({"erro": "Usuário não tem city_id atribuído"}), 400
 
         # Verificar se usuário já existe
         usuario = User.query.filter_by(email=dados["email"]).first()
@@ -632,7 +641,7 @@ def criar_diretor():
 
 @bp.route('/coordinators', methods=['POST'])
 @jwt_required()
-@role_required("admin", "diretor")
+@role_required("admin", "diretor", "tecadm")
 def criar_coordenador():
     try:
         logging.info("Iniciando criação de coordenador")
@@ -655,16 +664,24 @@ def criar_coordenador():
 
         # Determinar city_id baseado na role do usuário atual
         city_id = None
+        
         if current_user['role'] == "admin":
             # Admin pode escolher qualquer city_id
             city_id = dados.get("city_id")
             if not city_id:
                 return jsonify({"erro": "city_id é obrigatório para admin criando coordenadores"}), 400
         else:
-            # Diretor usa seu próprio city_id
+            # Diretor e tecadm usam seu próprio city_id
             city_id = current_user.get("city_id")
+            
+            # Verificação adicional: buscar city_id diretamente do banco
             if not city_id:
-                return jsonify({"erro": "Usuário não tem city_id atribuído"}), 400
+                user_from_db = User.query.get(current_user['id'])
+                if user_from_db and user_from_db.city_id:
+                    city_id = user_from_db.city_id
+                    logging.info(f"City_id recuperado do banco para usuário {current_user['id']}: {city_id}")
+                else:
+                    return jsonify({"erro": "Usuário não tem city_id atribuído"}), 400
 
         # Verificar se usuário já existe
         usuario = User.query.filter_by(email=dados["email"]).first()

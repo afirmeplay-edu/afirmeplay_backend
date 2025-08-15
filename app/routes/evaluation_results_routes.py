@@ -29,8 +29,12 @@ from typing import Dict, Any, List, Optional
 from sqlalchemy import func, case
 from datetime import datetime
 from sqlalchemy.orm import joinedload
+import dateutil.parser
 
 bp = Blueprint('evaluation_results', __name__, url_prefix='/evaluation-results')
+
+
+
 
 def verificar_permissao_filtros(user: dict, scope_info: dict = None) -> Dict[str, Any]:
     """
@@ -3590,9 +3594,15 @@ def _check_and_update_evaluation_status(test_id: str) -> Dict[str, Any]:
         has_expired = False
         if class_tests and class_tests[0].expiration:
             current_time = datetime.utcnow()
-            expiration_time = class_tests[0].expiration
-            if current_time > expiration_time:
-                has_expired = True
+            # Converter string para datetime para comparação
+            try:
+                expiration_time = dateutil.parser.parse(class_tests[0].expiration)
+                if current_time > expiration_time:
+                    has_expired = True
+            except (ValueError, TypeError) as e:
+                # Se houver erro na conversão, não considerar como expirada
+                logging.warning(f"Erro ao converter data de expiração '{class_tests[0].expiration}': {str(e)}")
+                has_expired = False
         
         # Determinar se deve ser marcada como concluída
         should_be_completed = False
@@ -3641,6 +3651,7 @@ def _get_evaluation_status_summary(test_id: str) -> Dict[str, Any]:
         from app.models.testSession import TestSession
         from app.models.classTest import ClassTest
         from datetime import datetime
+        import dateutil.parser
         
         # Buscar aplicações da avaliação
         class_tests = ClassTest.query.filter_by(test_id=test_id).all()
@@ -3658,13 +3669,32 @@ def _get_evaluation_status_summary(test_id: str) -> Dict[str, Any]:
         expiration_info = None
         if class_tests and class_tests[0].expiration:
             current_time = datetime.utcnow()
-            expiration_time = class_tests[0].expiration
-            is_expired = current_time > expiration_time
-            expiration_info = {
-                "expiration_date": expiration_time.isoformat() if expiration_time else None,
-                "is_expired": is_expired,
-                "days_until_expiration": (expiration_time - current_time).days if not is_expired else 0
-            }
+            
+            # Converter string para datetime para comparação
+            try:
+                expiration_time = dateutil.parser.parse(class_tests[0].expiration)
+                is_expired = current_time > expiration_time
+                
+                # Calcular dias até expiração
+                days_until_expiration = 0
+                if not is_expired:
+                    time_diff = expiration_time - current_time
+                    days_until_expiration = time_diff.days
+                
+                expiration_info = {
+                    "expiration_date": class_tests[0].expiration,  # Manter como string original
+                    "is_expired": is_expired,
+                    "days_until_expiration": days_until_expiration
+                }
+            except (ValueError, TypeError) as e:
+                # Se houver erro na conversão, não incluir informações de expiração
+                logging.warning(f"Erro ao converter data de expiração '{class_tests[0].expiration}': {str(e)}")
+                expiration_info = {
+                    "expiration_date": class_tests[0].expiration,
+                    "is_expired": None,
+                    "days_until_expiration": None,
+                    "error": "Formato de data inválido"
+                }
         
         return {
             "test_id": test_id,
@@ -3956,98 +3986,38 @@ def obter_opcoes_filtros():
                 if permissao['scope'] != 'all' and user.get('city_id') != city.id:
                     return jsonify({"error": "Acesso negado a este município"}), 403
                 
-                query_avaliacoes = Test.query.with_entities(Test.id, Test.title)\
-                                            .join(ClassTest, Test.id == ClassTest.test_id)\
-                                            .join(Class, ClassTest.class_id == Class.id)\
-                                            .join(School, Class.school_id == School.id)\
-                                            .join(City, School.city_id == City.id)\
-                                            .filter(City.id == city.id)
-                
-                # Aplicar filtros baseados no papel do usuário
-                if permissao['scope'] == 'escola':
-                    # Diretor e Coordenador veem apenas avaliações da sua escola
-                    query_avaliacoes = query_avaliacoes.filter(School.id == user.get('school_id', ''))
-                elif permissao['scope'] == 'escolas_vinculadas':
-                    # Professor vê avaliações das escolas onde está vinculado
-                    teacher_schools = SchoolTeacher.query.filter_by(teacher_id=user.get('id')).all()
-                    school_ids = [ts.school_id for ts in teacher_schools]
-                    query_avaliacoes = query_avaliacoes.filter(School.id.in_(school_ids))
-                    # Professor também vê apenas avaliações que criou
-                    query_avaliacoes = query_avaliacoes.filter(Test.created_by == user['id'])
-                
-                avaliacoes = query_avaliacoes.distinct().all()
-                opcoes["avaliacoes"] = [{"id": str(a[0]), "titulo": a[1]} for a in avaliacoes]
+                # Para educadores (professor, diretor, coordenador), retornar avaliações que criaram primeiro
+                if permissao['scope'] in ['escola', 'escolas_vinculadas']:
+                    # Para educadores, mostrar avaliações que criaram no município
+                    query_avaliacoes = Test.query.with_entities(Test.id, Test.title)\
+                                        .filter(Test.created_by == user['id'])
+                    
+                    # Aplicar joins
+                    query_avaliacoes = query_avaliacoes.join(ClassTest, Test.id == ClassTest.test_id)
+                    query_avaliacoes = query_avaliacoes.join(Class, ClassTest.class_id == Class.id)
+                    query_avaliacoes = query_avaliacoes.join(School, Class.school_id == School.id)
+                    query_avaliacoes = query_avaliacoes.join(City, School.city_id == City.id)
+                    query_avaliacoes = query_avaliacoes.filter(City.id == city.id)
+                    
+                    # Aplicar filtros adicionais baseados no papel do usuário
+                    if permissao['scope'] == 'escola':
+                        query_avaliacoes = query_avaliacoes.filter(School.id == user.get('school_id', ''))
+                    elif permissao['scope'] == 'escolas_vinculadas':
+                        # Professor vê avaliações das escolas onde está vinculado
+                        teacher_schools = SchoolTeacher.query.filter_by(teacher_id=user.get('id')).all()
+                        school_ids = [ts.school_id for ts in teacher_schools]
+                        query_avaliacoes = query_avaliacoes.filter(School.id.in_(school_ids))
+                else:
+                    # Para admin e tecadm, manter lógica atual
+                    query_avaliacoes = Test.query.with_entities(Test.id, Test.title)\
+                                        .join(ClassTest, Test.id == ClassTest.test_id)\
+                                        .join(Class, ClassTest.class_id == Class.id)\
+                                        .join(School, Class.school_id == School.id)\
+                                        .join(City, School.city_id == City.id)\
+                                        .filter(City.id == city.id)
         
-        # 4. Escolas onde a avaliação foi aplicada
-        if estado and municipio and avaliacao:
-            city = City.query.get(municipio)
-            if city:
-                query_escolas = School.query.with_entities(School.id, School.name)\
-                                           .join(Class, School.id == Class.school_id)\
-                                           .join(ClassTest, Class.id == ClassTest.class_id)\
-                                           .join(Test, ClassTest.test_id == Test.id)\
-                                           .join(City, School.city_id == City.id)\
-                                           .filter(Test.id == avaliacao)\
-                                           .filter(City.id == city.id)
-                
-                # Aplicar filtros baseados no papel do usuário
-                if permissao['scope'] == 'escola':
-                    # Diretor e Coordenador veem apenas sua escola
-                    query_escolas = query_escolas.filter(School.id == user.get('school_id', ''))
-                elif permissao['scope'] == 'escolas_vinculadas':
-                    # Professor vê escolas onde está vinculado
-                    teacher_schools = SchoolTeacher.query.filter_by(teacher_id=user.get('id')).all()
-                    school_ids = [ts.school_id for ts in teacher_schools]
-                    query_escolas = query_escolas.filter(School.id.in_(school_ids))
-                
-                escolas = query_escolas.distinct().all()
-                opcoes["escolas"] = [{"id": str(e[0]), "nome": e[1]} for e in escolas]
-        
-        # 5. Séries onde a avaliação foi aplicada na escola
-        if estado and municipio and avaliacao and escola:
-            city = City.query.get(municipio)
-            if city:
-                # Verificar se o usuário tem acesso à escola
-                if permissao['scope'] == 'escola' and escola != user.get('school_id', ''):
-                    return jsonify({"error": "Acesso negado a esta escola"}), 403
-                elif permissao['scope'] == 'escolas_vinculadas':
-                    teacher_school = SchoolTeacher.query.filter_by(
-                        teacher_id=user.get('id'),
-                        school_id=escola
-                    ).first()
-                    if not teacher_school:
-                        return jsonify({"error": "Acesso negado a esta escola"}), 403
-                
-                query_series = Grade.query.with_entities(Grade.id, Grade.name)\
-                                         .join(Class, Grade.id == Class.grade_id)\
-                                         .join(ClassTest, Class.id == ClassTest.class_id)\
-                                         .join(Test, ClassTest.test_id == Test.id)\
-                                         .join(School, Class.school_id == School.id)\
-                                         .join(City, School.city_id == City.id)\
-                                         .filter(Test.id == avaliacao)\
-                                         .filter(School.id == escola)\
-                                         .filter(City.id == city.id)
-                
-                series = query_series.distinct().all()
-                opcoes["series"] = [{"id": str(s[0]), "nome": s[1]} for s in series]
-        
-        # 6. Turmas onde a avaliação foi aplicada na escola e série
-        if estado and municipio and avaliacao and escola and serie:
-            city = City.query.get(municipio)
-            if city:
-                query_turmas = Class.query.with_entities(Class.id, Class.name)\
-                                         .join(ClassTest, Class.id == ClassTest.class_id)\
-                                         .join(Test, ClassTest.test_id == Test.id)\
-                                         .join(School, Class.school_id == School.id)\
-                                         .join(City, School.city_id == City.id)\
-                                         .join(Grade, Class.grade_id == Grade.id)\
-                                         .filter(Test.id == avaliacao)\
-                                         .filter(School.id == escola)\
-                                         .filter(Grade.id == serie)\
-                                         .filter(City.id == city.id)
-                
-                turmas = query_turmas.distinct().all()
-                opcoes["turmas"] = [{"id": str(t[0]), "nome": t[1] or f"Turma {t[0]}"} for t in turmas]
+        avaliacoes = query_avaliacoes.distinct().all()
+        avaliacoes_list = [{"id": str(a[0]), "titulo": a[1]} for a in avaliacoes]
         
         return jsonify({
             "opcoes": opcoes,
@@ -4531,6 +4501,7 @@ def obter_avaliacoes():
     Nova hierarquia: Estado → Município → Avaliações
     """
     try:
+
         user = get_current_user_from_token()
         if not user:
             return jsonify({"error": "Usuário não encontrado"}), 401
@@ -4562,25 +4533,52 @@ def obter_avaliacoes():
         if permissao['scope'] != 'all' and user.get('city_id') != city.id:
             return jsonify({"error": "Acesso negado a este município"}), 403
         
-        # Buscar todas as avaliações que foram aplicadas no município
-        query_avaliacoes = Test.query.with_entities(Test.id, Test.title)\
-                                    .join(ClassTest, Test.id == ClassTest.test_id)\
-                                    .join(Class, ClassTest.class_id == Class.id)\
-                                    .join(School, Class.school_id == School.id)\
-                                    .join(City, School.city_id == City.id)\
-                                    .filter(City.id == city.id)
-        
-        # Aplicar filtros baseados no papel do usuário
-        if permissao['scope'] == 'escola':
-            # Diretor e Coordenador veem apenas avaliações da sua escola
-            query_avaliacoes = query_avaliacoes.filter(School.id == user.get('school_id', ''))
-        elif permissao['scope'] == 'escolas_vinculadas':
-            # Professor vê avaliações das escolas onde está vinculado
-            teacher_schools = SchoolTeacher.query.filter_by(teacher_id=user.get('id')).all()
-            school_ids = [ts.school_id for ts in teacher_schools]
-            query_avaliacoes = query_avaliacoes.filter(School.id.in_(school_ids))
-            # Professor também vê apenas avaliações que criou
-            query_avaliacoes = query_avaliacoes.filter(Test.created_by == user['id'])
+        # Para educadores (professor, diretor, coordenador), retornar avaliações que criaram primeiro
+        if permissao['scope'] in ['escola', 'escolas_vinculadas']:
+            if permissao['scope'] == 'escola':
+                # Diretor e Coordenador veem apenas avaliações da sua escola
+                query_avaliacoes = Test.query.with_entities(Test.id, Test.title)\
+                                            .filter(Test.created_by == user['id'])\
+                                            .join(ClassTest, Test.id == ClassTest.test_id)\
+                                            .join(Class, ClassTest.class_id == Class.id)\
+                                            .join(School, Class.school_id == School.id)\
+                                            .join(City, School.city_id == City.id)\
+                                            .filter(City.id == city.id)\
+                                            .filter(School.id == user.get('school_id', ''))
+            elif permissao['scope'] == 'escolas_vinculadas':
+                # Professor vê avaliações aplicadas nas turmas onde está associado
+                from app.models.teacherClass import TeacherClass
+                from app.models.teacher import Teacher
+                
+                # Buscar o ID do professor baseado no user_id
+                teacher = Teacher.query.filter_by(user_id=user.get('id')).first()
+                if not teacher:
+                    # Professor não encontrado, retornar lista vazia
+                    query_avaliacoes = Test.query.with_entities(Test.id, Test.title).filter(Test.id == None)
+                else:
+                    # Buscar turmas do professor usando o ID do professor
+                    teacher_classes = TeacherClass.query.filter_by(teacher_id=teacher.id).all()
+                    class_ids = [tc.class_id for tc in teacher_classes]
+                    
+                    if class_ids:
+                        # Buscar avaliações aplicadas nessas turmas que o professor criou
+                        query_avaliacoes = Test.query.with_entities(Test.id, Test.title)\
+                                                    .filter(Test.created_by == user['id'])\
+                                                    .join(ClassTest, Test.id == ClassTest.test_id)\
+                                                    .filter(ClassTest.class_id.in_(class_ids))\
+                                                    .join(Class, ClassTest.class_id == Class.id)\
+                                                    .join(School, Class.school_id == School.id)\
+                                                    .filter(City.id == city.id)
+                    else:
+                        # Professor não tem turmas associadas, retornar lista vazia
+                        query_avaliacoes = Test.query.with_entities(Test.id, Test.title).filter(Test.id == None)
+        else:
+            # Para admin e tecadm, manter lógica atual
+            query_avaliacoes = Test.query.with_entities(Test.id, Test.title)\
+                                        .join(ClassTest, Test.id == ClassTest.test_id)\
+                                        .join(Class, ClassTest.class_id == Class.id)\
+                                        .join(School, Class.school_id == School.id)\
+                                        .filter(City.id == city.id)
         
         avaliacoes = query_avaliacoes.distinct().all()
         avaliacoes_list = [{"id": str(a[0]), "titulo": a[1]} for a in avaliacoes]

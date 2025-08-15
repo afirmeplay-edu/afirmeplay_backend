@@ -310,6 +310,66 @@ def listar_avaliacoes():
         # Se o usuário for professor, filtra para ver apenas os seus testes
         if user['role'] == 'professor':
             query = query.filter(Test.created_by == user['id'])
+        
+        # Filtrar por município se for diretor ou coordenador
+        elif user['role'] in ["diretor", "coordenador"]:
+            # Buscar o município do diretor/coordenador através da escola onde trabalha
+            from app.models.manager import Manager
+            from app.models.school import School
+            
+            manager = Manager.query.filter_by(user_id=user['id']).first()
+            if not manager or not manager.school_id:
+                return jsonify({"error": "Diretor/Coordenador não encontrado ou não vinculado a uma escola"}), 404
+            
+            # Buscar a escola para obter o city_id
+            school = School.query.get(manager.school_id)
+            if not school or not school.city_id:
+                return jsonify({"error": "Escola do diretor/coordenador não encontrada ou sem município"}), 404
+            
+            city_id = school.city_id
+            logging.info(f"Diretor/Coordenador {user['id']} - filtrando por município: {city_id}")
+            
+            # Obter escolas do município
+            schools_in_city = School.query.filter_by(city_id=city_id).with_entities(School.id).all()
+            school_ids = [school.id for school in schools_in_city]
+            
+            # Criar lista de filtros para usar com db.or_
+            filters = []
+            
+            # Critério 1: Avaliações criadas pelo próprio usuário diretor/coordenador
+            filters.append(Test.created_by == user['id'])
+            
+            # Critério 2: Avaliações criadas por usuários da cidade
+            if school_ids:
+                # Buscar usuários que estão nas escolas da cidade
+                from app.models.schoolTeacher import SchoolTeacher
+                from app.models.teacher import Teacher
+                
+                # Obter IDs de professores das escolas da cidade
+                teacher_ids = db.session.query(SchoolTeacher.teacher_id).filter(
+                    SchoolTeacher.school_id.in_(school_ids)
+                ).distinct().all()
+                teacher_ids = [t[0] for t in teacher_ids]
+                
+                # Obter IDs de usuários que são professores das escolas da cidade
+                if teacher_ids:
+                    user_ids_in_city = db.session.query(Teacher.user_id).filter(
+                        Teacher.id.in_(teacher_ids)
+                    ).distinct().all()
+                    user_ids_in_city = [u[0] for u in user_ids_in_city]
+                    
+                    # Adicionar filtro para avaliações criadas por usuários da cidade
+                    if user_ids_in_city:
+                        filters.append(Test.created_by.in_(user_ids_in_city))
+                
+                # Critério 3: Avaliações que têm escolas especificadas da cidade
+                for school_id in school_ids:
+                    filters.append(cast(Test.schools, JSONB).op('@>')([school_id]))
+            
+            # Aplicar filtros se houver algum
+            if filters:
+                query = query.filter(db.or_(*filters))
+                logging.info(f"Aplicados {len(filters)} filtros para diretor/coordenador")
 
         # Filtros
         status_filter = request.args.get('status')
@@ -455,6 +515,25 @@ def listar_avaliacoes_por_escola(school_id):
             ).first()
             if not teacher_school:
                 return jsonify({"error": "You don't have permission to view tests for this school"}), 403
+        
+        elif user['role'] in ["diretor", "coordenador"]:
+            # Diretor e coordenador só podem ver avaliações de escolas do seu município
+            from app.models.manager import Manager
+            
+            manager = Manager.query.filter_by(user_id=user['id']).first()
+            if not manager or not manager.school_id:
+                return jsonify({"error": "Diretor/Coordenador não encontrado ou não vinculado a uma escola"}), 404
+            
+            # Buscar a escola do diretor/coordenador para obter o city_id
+            manager_school = School.query.get(manager.school_id)
+            if not manager_school or not manager_school.city_id:
+                return jsonify({"error": "Escola do diretor/coordenador não encontrada ou sem município"}), 404
+            
+            # Verificar se a escola solicitada é do mesmo município
+            if school.city_id != manager_school.city_id:
+                return jsonify({"error": "Você só pode visualizar avaliações de escolas do seu município"}), 403
+            
+            logging.info(f"Diretor/Coordenador {user['id']} - verificando escola {school_id} do município {manager_school.city_id}")
 
         # Buscar avaliações que incluem esta escola
         query = Test.query.options(
@@ -529,6 +608,27 @@ def listar_avaliacoes_por_aluno(student_id):
             ).first()
             if not teacher_school:
                 return jsonify({"error": "You don't have permission to view tests for this student"}), 403
+        
+        elif user['role'] in ["diretor", "coordenador"]:
+            # Diretor e coordenador só podem ver alunos de escolas do seu município
+            from app.models.manager import Manager
+            
+            manager = Manager.query.filter_by(user_id=user['id']).first()
+            if not manager or not manager.school_id:
+                return jsonify({"error": "Diretor/Coordenador não encontrado ou não vinculado a uma escola"}), 404
+            
+            # Buscar a escola do diretor/coordenador para obter o city_id
+            manager_school = School.query.get(manager.school_id)
+            if not manager_school or not manager_school.city_id:
+                return jsonify({"error": "Escola do diretor/coordenador não encontrada ou sem município"}), 404
+            
+            # Verificar se a escola do aluno é do mesmo município
+            if student.school_id:
+                student_school = School.query.get(student.school_id)
+                if student_school and student_school.city_id != manager_school.city_id:
+                    return jsonify({"error": "Você só pode visualizar avaliações de alunos de escolas do seu município"}), 403
+            
+            logging.info(f"Diretor/Coordenador {user['id']} - verificando aluno {student_id} do município {manager_school.city_id}")
 
         # Buscar avaliações que incluem a escola do aluno
         query = Test.query.options(
@@ -838,20 +938,27 @@ def deletar_avaliacao(test_id):
             db.session.delete(answer)
         logging.info(f"🗑️ Excluídas {len(student_answers)} respostas de alunos")
         
-        # 2. Excluir sessões de teste
+        # 2. Excluir resultados de avaliação (antes das sessões)
+        from app.models.evaluationResult import EvaluationResult
+        evaluation_results = EvaluationResult.query.filter_by(test_id=test_id).all()
+        for result in evaluation_results:
+            db.session.delete(result)
+        logging.info(f"🗑️ Excluídos {len(evaluation_results)} resultados de avaliação")
+        
+        # 3. Excluir sessões de teste
         from app.models.testSession import TestSession
         test_sessions = TestSession.query.filter_by(test_id=test_id).all()
         for session in test_sessions:
             db.session.delete(session)
         logging.info(f"🗑️ Excluídas {len(test_sessions)} sessões de teste")
         
-        # 3. Excluir aplicações de classe
+        # 4. Excluir aplicações de classe
         class_tests = ClassTest.query.filter_by(test_id=test_id).all()
         for class_test in class_tests:
             db.session.delete(class_test)
         logging.info(f"🗑️ Excluídas {len(class_tests)} aplicações de classe")
         
-        # 4. Excluir apenas as associações de questões (test_questions)
+        # 5. Excluir apenas as associações de questões (test_questions)
         # As questões permanecem no banco para reutilização futura
         from app.models.testQuestion import TestQuestion
         test_questions = TestQuestion.query.filter_by(test_id=test_id).all()
@@ -860,7 +967,7 @@ def deletar_avaliacao(test_id):
             db.session.delete(test_question)
         logging.info(f"🗑️ Removidas {len(test_questions)} associações de questões (questões preservadas)")
         
-        # 5. Finalmente, excluir o teste
+        # 6. Finalmente, excluir o teste
         db.session.delete(test)
         logging.info("🗑️ Excluindo a avaliação principal...")
         

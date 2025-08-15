@@ -40,19 +40,12 @@ def login():
 
         # Define o tenant_id com base na role
         if usuario.role == RoleEnum('aluno'):
-            # Para aluno, buscar school_id na tabela student e pegar city_id da escola
-            student = Student.query.filter_by(user_id=usuario.id).first()
-            if not student or not student.school_id:
-                 logging.error(f"Usuário aluno {usuario.id} sem registro de estudante ou school_id associado.")
-                 return jsonify({"erro": "Aluno não vinculado a uma escola."}), 400
+            # Para aluno, usar city_id direto do usuário
+            if not usuario.city_id:
+                logging.error(f"Usuário aluno {usuario.id} sem city_id vinculado.")
+                return jsonify({"erro": "Aluno não vinculado a um município."}), 400
             
-            # Buscar a escola para obter o city_id
-            school = School.query.get(student.school_id)
-            if not school:
-                logging.error(f"Escola {student.school_id} não encontrada para o aluno {usuario.id}")
-                return jsonify({"erro": "Escola do aluno não encontrada."}), 400
-            
-            tenant_id = school.city_id  # ✅ Usar city_id da escola ao invés de school_id
+            tenant_id = usuario.city_id
         elif usuario.role == RoleEnum('admin'):
             tenant_id = None # Admin pode ver tudo, sem restrição de tenant
         elif usuario.role == RoleEnum('tecadm'):

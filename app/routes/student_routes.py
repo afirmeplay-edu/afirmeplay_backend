@@ -68,27 +68,34 @@ def criar_usuario_e_aluno():
             if data.get("registration") and User.query.filter_by(registration=data["registration"]).first():
                 return jsonify({"error": "Registration number already exists"}), 400
 
-            # Criar usuário (role padrão: aluno) - sem city_id (herdará da escola)
+            # Buscar turma para determinar city_id
+            class_obj = Class.query.get(data["class_id"])
+            if not class_obj:
+                return jsonify({"error": "Class not found"}), 404
+            
+            # Buscar escola da turma
+            school = School.query.get(class_obj.school_id)
+            if not school:
+                return jsonify({"error": "School not found for the specified class"}), 404
+            
+            # Determinar city_id baseado na escola
+            city_id = school.city_id
+            
+            # Criar usuário (role padrão: aluno) com city_id da escola
             usuario = User(
                 name=data["name"],
                 email=data["email"],
                 password_hash=generate_password_hash(data["password"]),
                 registration=data.get("registration"),
                 role=RoleEnum("aluno"),
-                city_id=None  # Alunos não têm city_id direto, herdam da escola
+                city_id=city_id
             )
             db.session.add(usuario)
             db.session.flush() 
             print(usuario.id)
             logging.info(f"Novo usuário criado com sucesso. ID: {usuario.id}")
 
-        # Buscar turma
-        class_obj = Class.query.get(data["class_id"])
-        if not class_obj:
-            # Se o usuário foi criado neste request, precisamos desfazê-lo
-            if not usuario.id:
-                db.session.rollback()
-                return jsonify({"error": "Class not found"}), 404
+        # class_obj já foi buscado acima, não precisa buscar novamente
 
         # Verificar formato da data de nascimento (se fornecida)
         birth_date = None
@@ -215,7 +222,7 @@ def listar_alunos():
         if not user:
             return jsonify({"message": "Usuário não encontrado"}), 404
 
-        # Base query with joins
+        # Base query with joins - usando LEFT JOIN para incluir alunos sem escola
         query = db.session.query(
             Student,
             User,
@@ -224,11 +231,11 @@ def listar_alunos():
             Grade
         ).join(
             User, Student.user_id == User.id
-        ).join(
+        ).outerjoin(
             School, Student.school_id == School.id
-        ).join(
+        ).outerjoin(
             Class, Student.class_id == Class.id
-        ).join(
+        ).outerjoin(
             Grade, Student.grade_id == Grade.id
         )
 
@@ -270,7 +277,7 @@ def listar_alunos():
             
             students = query.filter(Student.school_id == teacher_school.school_id).all()
         else:
-            # TecAdmin vê alunos de todas as escolas do município
+            # TecAdmin vê alunos de todas as escolas do município + alunos sem escola mas com city_id
             city_id = user.get('tenant_id') or user.get('city_id')
             if not city_id:
                 return jsonify({"message": "ID da cidade não disponível para este usuário"}), 400
@@ -279,8 +286,13 @@ def listar_alunos():
             schools_in_city = School.query.filter_by(city_id=city_id).all()
             school_ids = [school.id for school in schools_in_city]
 
-            # Busca todos os alunos das escolas da cidade
-            students = query.filter(Student.school_id.in_(school_ids)).all()
+            # Busca alunos das escolas da cidade OU alunos sem escola mas com city_id correto
+            students = query.filter(
+                db.or_(
+                    Student.school_id.in_(school_ids),
+                    db.and_(Student.school_id.is_(None), User.city_id == city_id)
+                )
+            ).all()
 
         return jsonify([format_student_details(student, user, school, class_obj, grade) 
                        for student, user, school, class_obj, grade in students]), 200
@@ -329,6 +341,13 @@ def atualizar_aluno(student_id, class_id):
             except ValueError:
                 return jsonify({"error": "Invalid date format. Use YYYY-MM-DD"}), 400
 
+        # Atualizar city_id do usuário se o aluno foi movido para outra escola
+        if aluno.school_id:
+            school = School.query.get(aluno.school_id)
+            if school and school.city_id != usuario.city_id:
+                usuario.city_id = school.city_id
+                logging.info(f"Atualizando city_id do aluno {usuario.id} para {school.city_id}")
+
         db.session.commit()
         return jsonify({"message": "Student updated successfully"}), 200
 
@@ -365,6 +384,156 @@ def deletar_aluno(aluno_id):
         db.session.rollback()
         logging.error(f"Error deleting student: {str(e)}", exc_info=True)
         return jsonify({"error": "Error deleting student", "details": str(e)}), 500
+
+@bp.route('/available', methods=['GET'])
+@jwt_required()
+@role_required("admin", "diretor", "coordenador", "professor", "tecadm")
+def get_available_students():
+    """
+    Lista alunos que não estão vinculados a nenhuma escola (disponíveis para alocação)
+    """
+    try:
+        user = get_current_user_from_token()
+        if not user:
+            return jsonify({"message": "Usuário não encontrado"}), 404
+
+        # Buscar TODOS os usuários com role aluno (disponíveis para alocação)
+        # Isso inclui tanto usuários sem registro Student quanto com Student mas sem school_id
+        all_users_with_aluno_role = db.session.query(
+            User
+        ).filter(
+            User.role == RoleEnum.ALUNO
+        ).all()
+        
+        logging.info(f"Todos os usuários com role aluno: {[(u.id, u.name, u.city_id) for u in all_users_with_aluno_role]}")
+        
+        # Filtrar apenas os que são realmente "disponíveis" (sem escola)
+        available_students = []
+        
+        for user_obj in all_users_with_aluno_role:
+            # Verificar se tem registro na tabela Student
+            student_record = Student.query.filter_by(user_id=user_obj.id).first()
+            
+            if student_record:
+                # Se tem registro Student, só é disponível se school_id for NULL
+                if student_record.school_id is None:
+                    available_students.append((student_record, user_obj))
+                    logging.info(f"Aluno disponível (com Student, sem escola): {user_obj.name} (city_id: {user_obj.city_id})")
+            else:
+                # Se não tem registro Student, é disponível
+                available_students.append((None, user_obj))
+                logging.info(f"Aluno disponível (sem Student): {user_obj.name} (city_id: {user_obj.city_id})")
+        
+        students = available_students
+        logging.info(f"Total de alunos disponíveis: {len(students)}")
+
+        # Filtrar por permissões
+        logging.info(f"Verificando permissões para role: {user['role']}")
+        
+        if user['role'] == "admin":
+            # Admin vê todos os alunos disponíveis
+            logging.info("Admin - permitindo acesso a todos os alunos disponíveis")
+            pass
+        elif user['role'] == "tecadm":
+            # Tecadm vê apenas alunos do seu município
+            city_id = user.get('tenant_id') or user.get('city_id')
+            logging.info(f"Tecadm - city_id: {city_id}")
+            if not city_id:
+                return jsonify({"message": "ID da cidade não disponível para este usuário"}), 400
+            
+            # Log antes do filtro
+            print(f"Alunos antes do filtro por city_id: {[(s[0].id if s[0] else 'None', s[1].id, s[1].name, s[1].city_id) for s in students]}")
+            logging.info(f"Alunos antes do filtro por city_id: {[(s[0].id if s[0] else 'None', s[1].id, s[1].name, s[1].city_id) for s in students]}")
+            
+            # Filtro com verificação detalhada
+            filtered_students = []
+            for s in students:
+                user_city_id = s[1].city_id
+                logging.info(f"Comparando: user_city_id={user_city_id} (tipo: {type(user_city_id)}) vs city_id={city_id} (tipo: {type(city_id)})")
+                if user_city_id == city_id:
+                    filtered_students.append(s)
+                    logging.info(f"Match encontrado para usuário {s[1].name} (city_id: {user_city_id})")
+                else:
+                    logging.info(f"Não match para usuário {s[1].name} (city_id: {user_city_id})")
+            
+            students = filtered_students
+            logging.info(f"Tecadm - {len(students)} alunos filtrados por city_id")
+            
+            # Log após o filtro
+            logging.info(f"Alunos após filtro por city_id: {[(s[0].id if s[0] else 'None', s[1].id, s[1].name, s[1].city_id) for s in students]}")
+        elif user['role'] in ["diretor", "coordenador"]:
+            # Diretor e coordenador podem ver alunos disponíveis do seu município
+            city_id = user.get('tenant_id') or user.get('city_id')
+            logging.info(f"{user['role'].title()} - city_id: {city_id}")
+            if not city_id:
+                return jsonify({"message": "ID da cidade não disponível para este usuário"}), 400
+            
+            # Log antes do filtro
+            print(f"Alunos antes do filtro por city_id: {[(s[0].id if s[0] else 'None', s[1].id, s[1].name, s[1].city_id) for s in students]}")
+            logging.info(f"Alunos antes do filtro por city_id: {[(s[0].id if s[0] else 'None', s[1].id, s[1].name, s[1].city_id) for s in students]}")
+            
+            # Filtro com verificação detalhada
+            filtered_students = []
+            for s in students:
+                user_city_id = s[1].city_id
+                logging.info(f"Comparando: user_city_id={user_city_id} (tipo: {type(user_city_id)}) vs city_id={city_id} (tipo: {type(city_id)})")
+                if user_city_id == city_id:
+                    filtered_students.append(s)
+                    logging.info(f"Match encontrado para usuário {s[1].name} (city_id: {user_city_id})")
+                else:
+                    logging.info(f"Não match para usuário {s[1].name} (city_id: {user_city_id})")
+            
+            students = filtered_students
+            print(f"Alunos após filtro por city_id: {[(s[0].id if s[0] else 'None', s[1].id, s[1].name, s[1].city_id) for s in students]}")
+            logging.info(f"{user['role'].title()} - {len(students)} alunos filtrados por city_id")
+            
+            # Log após o filtro
+            print(f"Alunos após filtro por city_id: {[(s[0].id if s[0] else 'None', s[1].id, s[1].name, s[1].city_id) for s in students]}")
+            logging.info(f"Alunos após filtro por city_id: {[(s[0].id if s[0] else 'None', s[1].id, s[1].name, s[1].city_id) for s in students]}")
+        elif user['role'] == "professor":
+            # Professor não pode ver alunos disponíveis
+            logging.info(f"Role {user['role']} - negando acesso")
+            return jsonify({"message": "Você não tem permissão para visualizar alunos disponíveis"}), 403
+
+        result = []
+        for student, user_obj in students:
+            # Se student é None, usar dados do user_obj
+            if student is None:
+                result.append({
+                    "id": None,  # Não tem ID de student
+                    "name": user_obj.name,
+                    "registration": user_obj.registration,
+                    "birth_date": None,  # Não tem birth_date no user
+                    "user": {
+                        "id": user_obj.id,
+                        "name": user_obj.name,
+                        "email": user_obj.email,
+                        "registration": user_obj.registration,
+                        "role": user_obj.role.value,
+                        "city_id": user_obj.city_id
+                    }
+                })
+            else:
+                result.append({
+                    "id": student.id,
+                    "name": student.name,
+                    "registration": student.registration,
+                    "birth_date": student.birth_date.isoformat() if student.birth_date else None,
+                    "user": {
+                        "id": user_obj.id,
+                        "name": user_obj.name,
+                        "email": user_obj.email,
+                        "registration": user_obj.registration,
+                        "role": user_obj.role.value,
+                        "city_id": user_obj.city_id
+                    }
+                })
+
+        return jsonify(result), 200
+
+    except Exception as e:
+        logging.error(f"Erro ao listar alunos disponíveis: {str(e)}", exc_info=True)
+        return jsonify({"message": "Erro ao listar alunos disponíveis", "details": str(e)}), 500
 
 @bp.route('/school/<string:school_id>', methods=['GET'])
 @jwt_required()
@@ -405,15 +574,13 @@ def get_students_by_school(school_id):
                 return jsonify({"message": "You don't have permission to view students from this school"}), 403
         elif user['role'] in ["diretor", "coordenador"]:
             # Director and coordinator can only see students from their school
-            from app.models.teacher import Teacher
-            from app.models.schoolTeacher import SchoolTeacher
+            from app.models.manager import Manager
             
-            teacher = Teacher.query.filter_by(user_id=user['id']).first()
-            if not teacher:
-                return jsonify({"message": "Diretor/Coordenador não encontrado"}), 404
+            manager = Manager.query.filter_by(user_id=user['id']).first()
+            if not manager:
+                return jsonify({"message": "Diretor/Coordenador não encontrado na tabela manager"}), 404
             
-            teacher_school = SchoolTeacher.query.filter_by(teacher_id=teacher.id).first()
-            if not teacher_school or teacher_school.school_id != school_id:
+            if not manager.school_id or manager.school_id != school_id:
                 logging.warning(f"User {user.get('id')} tried to access students from school {school_id}")
                 return jsonify({"message": "You don't have permission to view students from this school"}), 403
         else:

@@ -92,9 +92,96 @@ def dashboard_stats():
         student_query = Student.query
         session_query = TestSession.query
         
-        # Filtrar por city_id se for tecadm
-        if current_user['role'] == "tecadm":
+        # Filtragem baseada no papel do usuário
+        if current_user['role'] == "admin":
+            # Admin vê todas as estatísticas do sistema
+            pass
+        elif current_user['role'] == "tecadm":
+            # Tecadm vê apenas estatísticas do seu município
             city_id = current_user.get('tenant_id') or current_user.get('city_id')
+            if not city_id:
+                return jsonify({"erro": "ID da cidade não disponível"}), 400
+            
+            # Filtrar testes por escolas da cidade
+            schools_in_city = School.query.filter_by(city_id=city_id).with_entities(School.id).all()
+            school_ids = [school.id for school in schools_in_city]
+            
+            if school_ids:
+                # Filtrar testes que têm turmas das escolas da cidade
+                class_tests = ClassTest.query.filter(
+                    ClassTest.class_id.in_(
+                        Class.query.filter(Class.school_id.in_(school_ids)).with_entities(Class.id)
+                    )
+                ).with_entities(ClassTest.test_id).all()
+                test_ids = [ct.test_id for ct in class_tests]
+                
+                if test_ids:
+                    test_query = test_query.filter(Test.id.in_(test_ids))
+                    session_query = session_query.filter(TestSession.test_id.in_(test_ids))
+                else:
+                    # Se não há testes, retornar zeros
+                    return jsonify({
+                        "total_evaluations": 0,
+                        "active_evaluations": 0,
+                        "completed_evaluations": 0,
+                        "total_students": 0,
+                        "average_completion": 0.0,
+                        "last_sync": datetime.now().isoformat()
+                    }), 200
+                
+                # Filtrar estudantes por escolas da cidade
+                student_query = student_query.filter(Student.school_id.in_(school_ids))
+            else:
+                # Se não há escolas na cidade, retornar zeros
+                return jsonify({
+                    "total_evaluations": 0,
+                    "active_evaluations": 0,
+                    "completed_evaluations": 0,
+                    "total_students": 0,
+                    "average_completion": 0.0,
+                    "last_sync": datetime.now().isoformat()
+                }), 200
+        elif current_user['role'] in ["diretor", "coordenador"]:
+            # Diretor e coordenador vêem apenas estatísticas da sua escola
+            from app.models.manager import Manager
+            
+            # Buscar o manager vinculado ao usuário atual
+            manager = Manager.query.filter_by(user_id=current_user['id']).first()
+            if not manager or not manager.school_id:
+                return jsonify({"erro": "Usuário não está vinculado a nenhuma escola"}), 400
+            
+            # Buscar a escola do manager
+            school = School.query.get(manager.school_id)
+            if not school:
+                return jsonify({"erro": "Escola não encontrada"}), 400
+            
+            # Filtrar testes que têm turmas da escola
+            class_tests = ClassTest.query.filter(
+                ClassTest.class_id.in_(
+                    Class.query.filter_by(school_id=school.id).with_entities(Class.id)
+                )
+            ).with_entities(ClassTest.test_id).all()
+            test_ids = [ct.test_id for ct in class_tests]
+            
+            if test_ids:
+                test_query = test_query.filter(Test.id.in_(test_ids))
+                session_query = session_query.filter(TestSession.test_id.in_(test_ids))
+            else:
+                # Se não há testes, retornar zeros
+                return jsonify({
+                    "total_evaluations": 0,
+                    "active_evaluations": 0,
+                    "completed_evaluations": 0,
+                    "total_students": 0,
+                    "average_completion": 0.0,
+                    "last_sync": datetime.now().isoformat()
+                }), 200
+            
+            # Filtrar estudantes por escola
+            student_query = student_query.filter_by(school_id=school.id)
+        elif current_user['role'] == "professor":
+            # Professor vê apenas estatísticas do seu município
+            city_id = current_user.get('city_id')
             if not city_id:
                 return jsonify({"erro": "ID da cidade não disponível"}), 400
             
@@ -218,9 +305,123 @@ def comprehensive_dashboard_stats():
         class_query = Class.query
         teacher_query = Teacher.query
         
-        # Filtrar por city_id se for tecadm
-        if current_user['role'] == "tecadm":
+        # Filtragem baseada no papel do usuário
+        if current_user['role'] == "admin":
+            # Admin vê todas as estatísticas do sistema
+            pass
+        elif current_user['role'] == "tecadm":
+            # Tecadm vê apenas estatísticas do seu município
             city_id = current_user.get('tenant_id') or current_user.get('city_id')
+            if not city_id:
+                return jsonify({"erro": "ID da cidade não disponível"}), 400
+            
+            # Filtrar escolas por cidade
+            school_query = school_query.filter_by(city_id=city_id)
+            
+            # Obter IDs das escolas da cidade
+            schools_in_city = school_query.with_entities(School.id).all()
+            school_ids = [school.id for school in schools_in_city]
+            
+            if school_ids:
+                # Filtrar estudantes por escolas da cidade
+                student_query = student_query.filter(Student.school_id.in_(school_ids))
+                
+                # Filtrar turmas por escolas da cidade
+                class_query = class_query.filter(Class.school_id.in_(school_ids))
+                
+                # Filtrar professores por escolas da cidade através da tabela de associação
+                teacher_query = teacher_query.join(SchoolTeacher).filter(SchoolTeacher.school_id.in_(school_ids))
+                
+                # Filtrar testes que têm turmas das escolas da cidade
+                class_tests = ClassTest.query.filter(
+                    ClassTest.class_id.in_(
+                        Class.query.filter(Class.school_id.in_(school_ids)).with_entities(Class.id)
+                    )
+                ).with_entities(ClassTest.test_id).all()
+                test_ids = [ct.test_id for ct in class_tests]
+                
+                if test_ids:
+                    test_query = test_query.filter(Test.id.in_(test_ids))
+                else:
+                    # Se não há testes, definir como 0
+                    test_query = test_query.filter(Test.id.is_(None))
+                
+                # Filtrar usuários por cidade
+                user_query = user_query.filter_by(city_id=city_id)
+                
+                # Filtrar jogos por cidade (se tiver city_id)
+                if hasattr(Game, 'city_id'):
+                    game_query = game_query.filter_by(city_id=city_id)
+                
+                # Filtrar questões por cidade (se tiver city_id)
+                if hasattr(Question, 'city_id'):
+                    question_query = question_query.filter_by(city_id=city_id)
+            else:
+                # Se não há escolas na cidade, retornar zeros
+                return jsonify({
+                    "students": 0,
+                    "schools": 0,
+                    "evaluations": 0,
+                    "games": 0,
+                    "users": 0,
+                    "questions": 0,
+                    "classes": 0,
+                    "teachers": 0,
+                    "last_sync": datetime.now().isoformat()
+                }), 200
+        elif current_user['role'] in ["diretor", "coordenador"]:
+            # Diretor e coordenador vêem apenas estatísticas da sua escola
+            from app.models.manager import Manager
+            
+            # Buscar o manager vinculado ao usuário atual
+            manager = Manager.query.filter_by(user_id=current_user['id']).first()
+            if not manager or not manager.school_id:
+                return jsonify({"erro": "Usuário não está vinculado a nenhuma escola"}), 400
+            
+            # Buscar a escola do manager
+            school = School.query.get(manager.school_id)
+            if not school:
+                return jsonify({"erro": "Escola não encontrada"}), 400
+            
+            # Filtrar escolas (apenas a escola do manager)
+            school_query = school_query.filter_by(id=school.id)
+            
+            # Filtrar estudantes por escola
+            student_query = student_query.filter_by(school_id=school.id)
+            
+            # Filtrar turmas por escola
+            class_query = class_query.filter_by(school_id=school.id)
+            
+            # Filtrar professores por escola através da tabela de associação
+            teacher_query = teacher_query.join(SchoolTeacher).filter(SchoolTeacher.school_id == school.id)
+            
+            # Filtrar testes que têm turmas da escola
+            class_tests = ClassTest.query.filter(
+                ClassTest.class_id.in_(
+                    Class.query.filter_by(school_id=school.id).with_entities(Class.id)
+                )
+            ).with_entities(ClassTest.test_id).all()
+            test_ids = [ct.test_id for ct in class_tests]
+            
+            if test_ids:
+                test_query = test_query.filter(Test.id.in_(test_ids))
+            else:
+                # Se não há testes, definir como 0
+                test_query = test_query.filter(Test.id.is_(None))
+            
+            # Filtrar usuários por cidade da escola
+            user_query = user_query.filter_by(city_id=school.city_id)
+            
+            # Filtrar jogos por cidade da escola (se tiver city_id)
+            if hasattr(Game, 'city_id'):
+                game_query = game_query.filter_by(city_id=school.city_id)
+            
+            # Filtrar questões por cidade da escola (se tiver city_id)
+            if hasattr(Question, 'city_id'):
+                question_query = question_query.filter_by(city_id=school.city_id)
+        elif current_user['role'] == "professor":
+            # Professor vê apenas estatísticas do seu município
+            city_id = current_user.get('city_id')
             if not city_id:
                 return jsonify({"erro": "ID da cidade não disponível"}), 400
             
@@ -325,9 +526,171 @@ def evaluations_stats():
     try:
         logging.info("📊 Iniciando cálculo de estatísticas de avaliações")
         
+        # Obter usuário atual para filtragem
+        current_user = get_current_user_from_token()
+        if not current_user:
+            return jsonify({"erro": "Usuário não encontrado"}), 404
+        
+        # Base queries
+        test_query = Test.query
+        question_query = Question.query
+        
+        # Filtragem baseada no papel do usuário
+        if current_user['role'] == "admin":
+            # Admin vê todas as estatísticas do sistema
+            pass
+        elif current_user['role'] == "tecadm":
+            # Tecadm vê apenas estatísticas do seu município
+            city_id = current_user.get('tenant_id') or current_user.get('city_id')
+            if not city_id:
+                return jsonify({"erro": "ID da cidade não disponível"}), 400
+            
+            # Filtrar testes por escolas da cidade
+            schools_in_city = School.query.filter_by(city_id=city_id).with_entities(School.id).all()
+            school_ids = [school.id for school in schools_in_city]
+            
+            if school_ids:
+                # Filtrar testes que têm turmas das escolas da cidade
+                class_tests = ClassTest.query.filter(
+                    ClassTest.class_id.in_(
+                        Class.query.filter(Class.school_id.in_(school_ids)).with_entities(Class.id)
+                    )
+                ).with_entities(ClassTest.test_id).all()
+                test_ids = [ct.test_id for ct in class_tests]
+                
+                if test_ids:
+                    test_query = test_query.filter(Test.id.in_(test_ids))
+                else:
+                    # Se não há testes, retornar zeros
+                    return jsonify({
+                        "total": 0,
+                        "this_month": 0,
+                        "total_questions": 0,
+                        "average_questions": 0.0,
+                        "virtual_evaluations": 0,
+                        "physical_evaluations": 0,
+                        "by_type": {},
+                        "by_model": {},
+                        "by_status": {},
+                        "last_sync": datetime.now().isoformat()
+                    }), 200
+                
+                # Filtrar questões por cidade (se tiver city_id)
+                if hasattr(Question, 'city_id'):
+                    question_query = question_query.filter_by(city_id=city_id)
+            else:
+                # Se não há escolas na cidade, retornar zeros
+                return jsonify({
+                    "total": 0,
+                    "this_month": 0,
+                    "total_questions": 0,
+                    "average_questions": 0.0,
+                    "virtual_evaluations": 0,
+                    "physical_evaluations": 0,
+                    "by_type": {},
+                    "by_model": {},
+                    "by_status": {},
+                    "last_sync": datetime.now().isoformat()
+                }), 200
+        elif current_user['role'] in ["diretor", "coordenador"]:
+            # Diretor e coordenador vêem apenas estatísticas da sua escola
+            from app.models.manager import Manager
+            
+            # Buscar o manager vinculado ao usuário atual
+            manager = Manager.query.filter_by(user_id=current_user['id']).first()
+            if not manager or not manager.school_id:
+                return jsonify({"erro": "Usuário não está vinculado a nenhuma escola"}), 400
+            
+            # Buscar a escola do manager
+            school = School.query.get(manager.school_id)
+            if not school:
+                return jsonify({"erro": "Escola não encontrada"}), 400
+            
+            # Filtrar testes que têm turmas da escola
+            class_tests = ClassTest.query.filter(
+                ClassTest.class_id.in_(
+                    Class.query.filter_by(school_id=school.id).with_entities(Class.id)
+                )
+            ).with_entities(ClassTest.test_id).all()
+            test_ids = [ct.test_id for ct in class_tests]
+            
+            if test_ids:
+                test_query = test_query.filter(Test.id.in_(test_ids))
+            else:
+                # Se não há testes, retornar zeros
+                return jsonify({
+                    "total": 0,
+                    "this_month": 0,
+                    "total_questions": 0,
+                    "average_questions": 0.0,
+                    "virtual_evaluations": 0,
+                    "physical_evaluations": 0,
+                    "by_type": {},
+                    "by_model": {},
+                    "by_status": {},
+                    "last_sync": datetime.now().isoformat()
+                }), 200
+            
+            # Filtrar questões por cidade da escola (se tiver city_id)
+            if hasattr(Question, 'city_id'):
+                question_query = question_query.filter_by(city_id=school.city_id)
+        elif current_user['role'] == "professor":
+            # Professor vê apenas estatísticas do seu município
+            city_id = current_user.get('city_id')
+            if not city_id:
+                return jsonify({"erro": "ID da cidade não disponível"}), 400
+            
+            # Filtrar testes por escolas da cidade
+            schools_in_city = School.query.filter_by(city_id=city_id).with_entities(School.id).all()
+            school_ids = [school.id for school in schools_in_city]
+            
+            if school_ids:
+                # Filtrar testes que têm turmas das escolas da cidade
+                class_tests = ClassTest.query.filter(
+                    ClassTest.class_id.in_(
+                        Class.query.filter(Class.school_id.in_(school_ids)).with_entities(Class.id)
+                    )
+                ).with_entities(ClassTest.test_id).all()
+                test_ids = [ct.test_id for ct in class_tests]
+                
+                if test_ids:
+                    test_query = test_query.filter(Test.id.in_(test_ids))
+                else:
+                    # Se não há testes, retornar zeros
+                    return jsonify({
+                        "total": 0,
+                        "this_month": 0,
+                        "total_questions": 0,
+                        "average_questions": 0.0,
+                        "virtual_evaluations": 0,
+                        "physical_evaluations": 0,
+                        "by_type": {},
+                        "by_model": {},
+                        "by_status": {},
+                        "last_sync": datetime.now().isoformat()
+                    }), 200
+                
+                # Filtrar questões por cidade (se tiver city_id)
+                if hasattr(Question, 'city_id'):
+                    question_query = question_query.filter_by(city_id=city_id)
+            else:
+                # Se não há escolas na cidade, retornar zeros
+                return jsonify({
+                    "total": 0,
+                    "this_month": 0,
+                    "total_questions": 0,
+                    "average_questions": 0.0,
+                    "virtual_evaluations": 0,
+                    "physical_evaluations": 0,
+                    "by_type": {},
+                    "by_model": {},
+                    "by_status": {},
+                    "last_sync": datetime.now().isoformat()
+                }), 200
+        
         # Estatísticas básicas - versão mais segura
         logging.info("🔢 Contando total de avaliações...")
-        total_evaluations = Test.query.count()
+        total_evaluations = test_query.count()
         logging.info(f"✅ Total de avaliações: {total_evaluations}")
         
         # Avaliações deste mês
@@ -339,7 +702,7 @@ def evaluations_stats():
             
             # Versão mais compatível sem extract
             from sqlalchemy import and_
-            this_month_evaluations = Test.query.filter(
+            this_month_evaluations = test_query.filter(
                 and_(
                     Test.created_at >= datetime(current_year, current_month, 1),
                     Test.created_at < datetime(current_year, current_month + 1, 1) if current_month < 12 else datetime(current_year + 1, 1, 1)
@@ -354,7 +717,7 @@ def evaluations_stats():
         logging.info("❓ Contando total de questões...")
         total_questions_result = 0
         try:
-            total_questions_result = Question.query.count()
+            total_questions_result = question_query.count()
             logging.info(f"✅ Total de questões: {total_questions_result}")
         except Exception as e:
             logging.error(f"❌ Erro ao contar questões: {e}")
@@ -365,7 +728,7 @@ def evaluations_stats():
         questions_per_evaluation = 0
         try:
             # Buscar todas as avaliações e contar questões
-            evaluations = Test.query.all()
+            evaluations = test_query.all()
             if evaluations:
                 total_questions_in_evaluations = 0
                 evaluations_with_questions = 0
@@ -387,7 +750,7 @@ def evaluations_stats():
         logging.info("📊 Calculando estatísticas por tipo...")
         by_type = {}
         try:
-            evaluations_by_type = db.session.query(Test.type, db.func.count(Test.id)).group_by(Test.type).all()
+            evaluations_by_type = db.session.query(Test.type, db.func.count(Test.id)).filter(Test.id.in_(test_query.with_entities(Test.id))).group_by(Test.type).all()
             by_type = {item[0]: item[1] for item in evaluations_by_type if item[0]}
             logging.info(f"✅ Estatísticas por tipo: {by_type}")
         except Exception as e:
@@ -398,8 +761,8 @@ def evaluations_stats():
         logging.info("📊 Calculando estatísticas por modelo...")
         by_model = {}
         try:
-            evaluations_by_model = db.session.query(Test.model, db.func.count(Test.id)).group_by(Test.model).all()
-            by_model = {item[0]: item[1] for item in evaluations_by_model if item[0]}
+            evaluations_by_model = db.session.query(Test.model, db.func.count(Test.id)).filter(Test.id.in_(test_query.with_entities(Test.id))).group_by(Test.model).all()
+            by_model = {item[0]: item[1] for item in evaluations_by_type if item[0]}
             logging.info(f"✅ Estatísticas por modelo: {by_model}")
         except Exception as e:
             logging.error(f"❌ Erro ao calcular estatísticas por modelo: {e}")
@@ -409,7 +772,7 @@ def evaluations_stats():
         logging.info("📊 Calculando estatísticas por status...")
         by_status = {}
         try:
-            evaluations_by_status = db.session.query(Test.status, db.func.count(Test.id)).group_by(Test.status).all()
+            evaluations_by_status = db.session.query(Test.status, db.func.count(Test.id)).filter(Test.id.in_(test_query.with_entities(Test.id))).group_by(Test.status).all()
             by_status = {item[0]: item[1] for item in evaluations_by_status if item[0]}
             logging.info(f"✅ Estatísticas por status: {by_status}")
         except Exception as e:
@@ -421,8 +784,8 @@ def evaluations_stats():
         virtual_evaluations = 0
         physical_evaluations = 0
         try:
-            virtual_evaluations = Test.query.filter(Test.evaluation_mode == 'virtual').count()
-            physical_evaluations = Test.query.filter(Test.evaluation_mode == 'physical').count()
+            virtual_evaluations = test_query.filter(Test.evaluation_mode == 'virtual').count()
+            physical_evaluations = test_query.filter(Test.evaluation_mode == 'physical').count()
             logging.info(f"✅ Virtuais: {virtual_evaluations}, Físicas: {physical_evaluations}")
         except Exception as e:
             logging.error(f"❌ Erro ao calcular estatísticas por modo: {e}")
@@ -1368,9 +1731,36 @@ def recent_schools():
             joinedload(School.city)
         )
         
-        # Filtrar por city_id se for tecadm
-        if current_user['role'] == "tecadm":
+        # Filtragem baseada no papel do usuário
+        if current_user['role'] == "admin":
+            # Admin vê todas as escolas do sistema
+            pass
+        elif current_user['role'] == "tecadm":
+            # Tecadm vê apenas escolas do seu município
             city_id = current_user.get('tenant_id') or current_user.get('city_id')
+            if not city_id:
+                return jsonify({"erro": "ID da cidade não disponível"}), 400
+            
+            school_query = school_query.filter_by(city_id=city_id)
+        elif current_user['role'] in ["diretor", "coordenador"]:
+            # Diretor e coordenador vêem apenas sua escola
+            from app.models.manager import Manager
+            
+            # Buscar o manager vinculado ao usuário atual
+            manager = Manager.query.filter_by(user_id=current_user['id']).first()
+            if not manager or not manager.school_id:
+                return jsonify({"erro": "Usuário não está vinculado a nenhuma escola"}), 400
+            
+            # Buscar a escola do manager
+            school = School.query.get(manager.school_id)
+            if not school:
+                return jsonify({"erro": "Escola não encontrada"}), 400
+            
+            # Filtrar apenas a escola do manager
+            school_query = school_query.filter_by(id=school.id)
+        elif current_user['role'] == "professor":
+            # Professor vê apenas escolas do seu município
+            city_id = current_user.get('city_id')
             if not city_id:
                 return jsonify({"erro": "ID da cidade não disponível"}), 400
             
@@ -1426,12 +1816,71 @@ def recent_students():
     try:
         from sqlalchemy.orm import joinedload
         
-        # Buscar os 5 alunos mais recentes com relacionamentos (versão mais segura)
-        recent_students = Student.query.options(
+        # Obter usuário atual para filtragem
+        current_user = get_current_user_from_token()
+        if not current_user:
+            return jsonify({"erro": "Usuário não encontrado"}), 404
+        
+        # Base query
+        student_query = Student.query.options(
             joinedload(Student.school),
             joinedload(Student.class_),
             joinedload(Student.grade)
-        ).order_by(
+        )
+        
+        # Filtragem baseada no papel do usuário
+        if current_user['role'] == "admin":
+            # Admin vê todos os estudantes do sistema
+            pass
+        elif current_user['role'] == "tecadm":
+            # Tecadm vê apenas estudantes do seu município
+            city_id = current_user.get('tenant_id') or current_user.get('city_id')
+            if not city_id:
+                return jsonify({"erro": "ID da cidade não disponível"}), 400
+            
+            # Filtrar estudantes por escolas da cidade
+            schools_in_city = School.query.filter_by(city_id=city_id).with_entities(School.id).all()
+            school_ids = [school.id for school in schools_in_city]
+            
+            if school_ids:
+                student_query = student_query.filter(Student.school_id.in_(school_ids))
+            else:
+                # Se não há escolas na cidade, retornar lista vazia
+                return jsonify([]), 200
+        elif current_user['role'] in ["diretor", "coordenador"]:
+            # Diretor e coordenador vêem apenas estudantes da sua escola
+            from app.models.manager import Manager
+            
+            # Buscar o manager vinculado ao usuário atual
+            manager = Manager.query.filter_by(user_id=current_user['id']).first()
+            if not manager or not manager.school_id:
+                return jsonify({"erro": "Usuário não está vinculado a nenhuma escola"}), 400
+            
+            # Buscar a escola do manager
+            school = School.query.get(manager.school_id)
+            if not school:
+                return jsonify({"erro": "Escola não encontrada"}), 400
+            
+            # Filtrar estudantes por escola
+            student_query = student_query.filter_by(school_id=school.id)
+        elif current_user['role'] == "professor":
+            # Professor vê apenas estudantes do seu município
+            city_id = current_user.get('city_id')
+            if not city_id:
+                return jsonify({"erro": "ID da cidade não disponível"}), 400
+            
+            # Filtrar estudantes por escolas da cidade
+            schools_in_city = School.query.filter_by(city_id=city_id).with_entities(School.id).all()
+            school_ids = [school.id for school in schools_in_city]
+            
+            if school_ids:
+                student_query = student_query.filter(Student.school_id.in_(school_ids))
+            else:
+                # Se não há escolas na cidade, retornar lista vazia
+                return jsonify([]), 200
+        
+        # Buscar os 5 alunos mais recentes com relacionamentos (versão mais segura)
+        recent_students = student_query.order_by(
             Student.created_at.desc()
         ).limit(5).all()
         
@@ -1507,9 +1956,47 @@ def recent_questions():
             joinedload(Question.creator)
         )
         
-        # Filtrar por city_id se for tecadm
-        if current_user['role'] == "tecadm":
+        # Filtragem baseada no papel do usuário
+        if current_user['role'] == "admin":
+            # Admin vê todas as questões do sistema
+            pass
+        elif current_user['role'] == "tecadm":
+            # Tecadm vê apenas questões do seu município
             city_id = current_user.get('tenant_id') or current_user.get('city_id')
+            if not city_id:
+                return jsonify({"erro": "ID da cidade não disponível"}), 400
+            
+            # Filtrar questões por cidade (se tiver city_id)
+            if hasattr(Question, 'city_id'):
+                question_query = question_query.filter_by(city_id=city_id)
+            else:
+                # Se não tiver city_id, filtrar por usuários da cidade
+                from app.models.user import User
+                question_query = question_query.join(User, Question.created_by == User.id).filter(User.city_id == city_id)
+        elif current_user['role'] in ["diretor", "coordenador"]:
+            # Diretor e coordenador vêem apenas questões da sua escola
+            from app.models.manager import Manager
+            
+            # Buscar o manager vinculado ao usuário atual
+            manager = Manager.query.filter_by(user_id=current_user['id']).first()
+            if not manager or not manager.school_id:
+                return jsonify({"erro": "Usuário não está vinculado a nenhuma escola"}), 400
+            
+            # Buscar a escola do manager
+            school = School.query.get(manager.school_id)
+            if not school:
+                return jsonify({"erro": "Escola não encontrada"}), 400
+            
+            # Filtrar questões por cidade da escola (se tiver city_id)
+            if hasattr(Question, 'city_id'):
+                question_query = question_query.filter_by(city_id=school.city_id)
+            else:
+                # Se não tiver city_id, filtrar por usuários da cidade da escola
+                from app.models.user import User
+                question_query = question_query.join(User, Question.created_by == User.id).filter(User.city_id == school.city_id)
+        elif current_user['role'] == "professor":
+            # Professor vê apenas questões do seu município
+            city_id = current_user.get('city_id')
             if not city_id:
                 return jsonify({"erro": "ID da cidade não disponível"}), 400
             
@@ -1587,36 +2074,185 @@ def get_evaluation_results_stats():
         from app.models.subject import Subject
         from sqlalchemy import func
         
+        # Obter usuário atual para filtragem
+        current_user = get_current_user_from_token()
+        if not current_user:
+            return jsonify({"erro": "Usuário não encontrado"}), 404
+        
+        # Base queries
+        test_session_query = TestSession.query
+        test_query = Test.query
+        student_query = Student.query
+        
+        # Filtragem baseada no papel do usuário
+        if current_user['role'] == "admin":
+            # Admin vê todas as estatísticas do sistema
+            pass
+        elif current_user['role'] == "tecadm":
+            # Tecadm vê apenas estatísticas do seu município
+            city_id = current_user.get('tenant_id') or current_user.get('city_id')
+            if not city_id:
+                return jsonify({"erro": "ID da cidade não disponível"}), 400
+            
+            # Filtrar testes por escolas da cidade
+            schools_in_city = School.query.filter_by(city_id=city_id).with_entities(School.id).all()
+            school_ids = [school.id for school in schools_in_city]
+            
+            if school_ids:
+                # Filtrar testes que têm turmas das escolas da cidade
+                class_tests = ClassTest.query.filter(
+                    ClassTest.class_id.in_(
+                        Class.query.filter(Class.school_id.in_(school_ids)).with_entities(Class.id)
+                    )
+                ).with_entities(ClassTest.test_id).all()
+                test_ids = [ct.test_id for ct in class_tests]
+                
+                if test_ids:
+                    test_query = test_query.filter(Test.id.in_(test_ids))
+                    test_session_query = test_session_query.filter(TestSession.test_id.in_(test_ids))
+                else:
+                    # Se não há testes, retornar zeros
+                    return jsonify({
+                        "completed_evaluations": 0,
+                        "pending_results": 0,
+                        "total_evaluations": 0,
+                        "average_score": 0.0,
+                        "total_students": 0,
+                        "average_completion_time": 0,
+                        "top_performance_subject": "Não disponível"
+                    }), 200
+                
+                # Filtrar estudantes por escolas da cidade
+                student_query = student_query.filter(Student.school_id.in_(school_ids))
+            else:
+                # Se não há escolas na cidade, retornar zeros
+                return jsonify({
+                    "completed_evaluations": 0,
+                    "pending_results": 0,
+                    "total_evaluations": 0,
+                    "average_score": 0.0,
+                    "total_students": 0,
+                    "average_completion_time": 0,
+                    "top_performance_subject": "Não disponível"
+                }), 200
+        elif current_user['role'] in ["diretor", "coordenador"]:
+            # Diretor e coordenador vêem apenas estatísticas da sua escola
+            from app.models.manager import Manager
+            
+            # Buscar o manager vinculado ao usuário atual
+            manager = Manager.query.filter_by(user_id=current_user['id']).first()
+            if not manager or not manager.school_id:
+                return jsonify({"erro": "Usuário não está vinculado a nenhuma escola"}), 400
+            
+            # Buscar a escola do manager
+            school = School.query.get(manager.school_id)
+            if not school:
+                return jsonify({"erro": "Escola não encontrada"}), 400
+            
+            # Filtrar testes que têm turmas da escola
+            class_tests = ClassTest.query.filter(
+                ClassTest.class_id.in_(
+                    Class.query.filter_by(school_id=school.id).with_entities(Class.id)
+                )
+            ).with_entities(ClassTest.test_id).all()
+            test_ids = [ct.test_id for ct in class_tests]
+            
+            if test_ids:
+                test_query = test_query.filter(Test.id.in_(test_ids))
+                test_session_query = test_session_query.filter(TestSession.test_id.in_(test_ids))
+            else:
+                # Se não há testes, retornar zeros
+                return jsonify({
+                    "completed_evaluations": 0,
+                    "pending_results": 0,
+                    "total_evaluations": 0,
+                    "average_score": 0.0,
+                    "total_students": 0,
+                    "average_completion_time": 0,
+                    "top_performance_subject": "Não disponível"
+                }), 200
+            
+            # Filtrar estudantes por escola
+            student_query = student_query.filter_by(school_id=school.id)
+        elif current_user['role'] == "professor":
+            # Professor vê apenas estatísticas do seu município
+            city_id = current_user.get('city_id')
+            if not city_id:
+                return jsonify({"erro": "ID da cidade não disponível"}), 400
+            
+            # Filtrar testes por escolas da cidade
+            schools_in_city = School.query.filter_by(city_id=city_id).with_entities(School.id).all()
+            school_ids = [school.id for school in schools_in_city]
+            
+            if school_ids:
+                # Filtrar testes que têm turmas das escolas da cidade
+                class_tests = ClassTest.query.filter(
+                    ClassTest.class_id.in_(
+                        Class.query.filter(Class.school_id.in_(school_ids)).with_entities(Class.id)
+                    )
+                ).with_entities(ClassTest.test_id).all()
+                test_ids = [ct.test_id for ct in class_tests]
+                
+                if test_ids:
+                    test_query = test_query.filter(Test.id.in_(test_ids))
+                    test_session_query = test_session_query.filter(TestSession.test_id.in_(test_ids))
+                else:
+                    # Se não há testes, retornar zeros
+                    return jsonify({
+                        "completed_evaluations": 0,
+                        "pending_results": 0,
+                        "total_evaluations": 0,
+                        "average_score": 0.0,
+                        "total_students": 0,
+                        "average_completion_time": 0,
+                        "top_performance_subject": "Não disponível"
+                    }), 200
+                
+                # Filtrar estudantes por escolas da cidade
+                student_query = student_query.filter(Student.school_id.in_(school_ids))
+            else:
+                # Se não há escolas na cidade, retornar zeros
+                return jsonify({
+                    "completed_evaluations": 0,
+                    "pending_results": 0,
+                    "total_evaluations": 0,
+                    "average_score": 0.0,
+                    "total_students": 0,
+                    "average_completion_time": 0,
+                    "top_performance_subject": "Não disponível"
+                }), 200
+        
         # Avaliações concluídas (finalizadas)
-        completed_evaluations = TestSession.query.filter(
+        completed_evaluations = test_session_query.filter(
             TestSession.status.in_(['finalized', 'reviewed']),
             TestSession.submitted_at.isnot(None)
         ).count()
         
         # Avaliações pendentes de correção
-        pending_results = TestSession.query.filter(
+        pending_results = test_session_query.filter(
             TestSession.status.in_(['completed', 'submitted', 'corrected']),
             TestSession.submitted_at.isnot(None)
         ).count()
         
         # Total de avaliações no sistema
-        total_evaluations = Test.query.count()
+        total_evaluations = test_query.count()
         
         # Média de pontuação das avaliações finalizadas
         avg_score_result = db.session.query(func.avg(TestSession.score)).filter(
+            TestSession.id.in_(test_session_query.with_entities(TestSession.id)),
             TestSession.status.in_(['finalized', 'reviewed']),
             TestSession.score.isnot(None)
         ).scalar()
         average_score = round(avg_score_result or 0, 1)
         
         # Total de estudantes que participaram
-        total_students = TestSession.query.filter(
+        total_students = test_session_query.filter(
             TestSession.submitted_at.isnot(None)
         ).distinct(TestSession.student_id).count()
         
         # Tempo médio de conclusão (em minutos)
         # Como time_spent não existe no modelo, calcular baseado em submitted_at - started_at
-        sessions_with_time = TestSession.query.filter(
+        sessions_with_time = test_session_query.filter(
             TestSession.submitted_at.isnot(None),
             TestSession.started_at.isnot(None)
         ).all()
@@ -1637,6 +2273,7 @@ def get_evaluation_results_stats():
         ).join(
             TestSession, Test.id == TestSession.test_id
         ).filter(
+            TestSession.id.in_(test_session_query.with_entities(TestSession.id)),
             TestSession.status.in_(['finalized', 'reviewed']),
             TestSession.score.isnot(None),
             Test.subject.isnot(None)

@@ -426,6 +426,7 @@ def listar_avaliacoes():
         
         # Identificar escopo de busca baseado nos filtros aplicados
         scope_info = _determinar_escopo_busca(estado, municipio, escola, serie, turma, avaliacao)
+        logging.info(f"scope_info: {scope_info}")
         
         if not scope_info:
             return jsonify({"error": "Não foi possível determinar o escopo de busca"}), 400
@@ -590,6 +591,7 @@ def listar_avaliacoes():
             # Se ainda houver erro, tentar com uma nova sessão
             try:
                 todas_avaliacoes_escopo = query_base.all()
+                logging.info(f"Query executada com sucesso: {len(todas_avaliacoes_escopo)} avaliações encontradas")
             except Exception as inner_e:
                 if "InFailedSqlTransaction" in str(inner_e):
                     logging.warning("Tentando com nova sessão devido a transação falhada")
@@ -622,6 +624,7 @@ def listar_avaliacoes():
                         query_base = query_base.filter(Test.created_by == user['id'])
                     
                     todas_avaliacoes_escopo = query_base.all()
+                    logging.info(f"Query executada com nova sessão: {len(todas_avaliacoes_escopo)} avaliações encontradas")
                 else:
                     raise inner_e
                     
@@ -632,6 +635,7 @@ def listar_avaliacoes():
         
         # Determinar nível de granularidade
         nivel_granularidade = _determinar_nivel_granularidade(estado, municipio, escola, serie, turma, avaliacao)
+        logging.info(f"nivel_granularidade: {nivel_granularidade}, estado: {estado}, municipio: {municipio}, escola: {escola}, serie: {serie}, turma: {turma}, avaliacao: {avaliacao}")
         
         # Calcular estatísticas consolidadas baseadas no escopo dos filtros
         estatisticas_consolidadas = _calcular_estatisticas_consolidadas_por_escopo(todas_avaliacoes_escopo, scope_info, nivel_granularidade)
@@ -1274,7 +1278,7 @@ def _determinar_escopo_busca(estado, municipio, escola, serie, turma, avaliacao)
                 # Todas as escolas do município
                 escolas = School.query.filter_by(city_id=municipio_id).all()
         
-        return {
+        scope_result = {
             'municipio_id': municipio_id,
             'city_data': city_data,
             'escolas': escolas,
@@ -1285,6 +1289,8 @@ def _determinar_escopo_busca(estado, municipio, escola, serie, turma, avaliacao)
             'turma': turma,
             'avaliacao': avaliacao
         }
+        logging.info(f"Escopo de busca determinado: {scope_result}")
+        return scope_result
         
     except Exception as e:
         logging.error(f"Erro ao determinar escopo de busca: {str(e)}")
@@ -1378,20 +1384,24 @@ def _determinar_nivel_granularidade(estado, municipio, escola, serie, turma, ava
     """
     Determina o nível de granularidade baseado nos filtros aplicados
     """
+    nivel = None
     if avaliacao:
-        return "avaliacao"
+        nivel = "avaliacao"
     elif turma:
-        return "turma"
+        nivel = "turma"
     elif serie:
-        return "serie"
+        nivel = "serie"
     elif escola:
-        return "escola"
+        nivel = "escola"
     elif municipio:
-        return "municipio"
+        nivel = "municipio"
     elif estado:
-        return "estado"
+        nivel = "estado"
     else:
-        return "geral"
+        nivel = "geral"
+    
+    logging.info(f"Nível de granularidade determinado: {nivel} (avaliacao={avaliacao}, turma={turma}, serie={serie}, escola={escola}, municipio={municipio}, estado={estado})")
+    return nivel
 
 
 def _calcular_estatisticas_gerais(class_tests: list, scope_info, nivel_granularidade):
@@ -4609,18 +4619,29 @@ def _calcular_estatisticas_consolidadas_por_escopo(class_tests: list, scope_info
         
         # Determinar escopo de cálculo baseado nos filtros
         escopo_calculo = _determinar_escopo_calculo(scope_info, nivel_granularidade)
+        logging.info(f"escopo_calculo: {escopo_calculo}")
         
         # Coletar dados do escopo
         test_ids = [ct.test_id for ct in class_tests]
         class_ids = [ct.class_id for ct in class_tests]
+        logging.info(f"class_tests: {len(class_tests)}, test_ids: {test_ids}, class_ids: {class_ids}")
         
-        # Buscar TODOS os alunos do escopo (não apenas das avaliações)
-        todos_alunos = _buscar_alunos_por_escopo(escopo_calculo)
-        total_alunos = len(todos_alunos)
+        # Buscar alunos baseado no escopo
+        if nivel_granularidade == "avaliacao":
+            # Para avaliação específica, contar apenas alunos das turmas onde foi aplicada
+            todos_alunos = Student.query.filter(Student.class_id.in_(class_ids)).all()
+            total_alunos = len(todos_alunos)
+            logging.info(f"Avaliação específica: total_alunos={total_alunos}, class_ids={class_ids}")
+        else:
+            # Para outros níveis, buscar todos os alunos do escopo
+            todos_alunos = _buscar_alunos_por_escopo(escopo_calculo)
+            total_alunos = len(todos_alunos)
+            logging.info(f"Outro nível: total_alunos={total_alunos}, nivel={nivel_granularidade}")
         
         # Buscar resultados das avaliações do escopo
         resultados_escopo = EvaluationResult.query.filter(EvaluationResult.test_id.in_(test_ids)).all()
         alunos_participantes = len(resultados_escopo)
+        logging.info(f"resultados_escopo: {alunos_participantes}, test_ids: {test_ids}")
         
         # Calcular estatísticas consolidadas
         if resultados_escopo:
@@ -4664,6 +4685,10 @@ def _calcular_estatisticas_consolidadas_por_escopo(class_tests: list, scope_info
             if serie_obj:
                 serie_info = serie_obj.name
         
+        # Calcular alunos ausentes
+        alunos_ausentes = total_alunos - alunos_participantes
+        logging.info(f"Cálculo final: total_alunos={total_alunos}, alunos_participantes={alunos_participantes}, alunos_ausentes={alunos_ausentes}")
+        
         return {
             "tipo": nivel_granularidade,
             "nome": _get_nome_granularidade(nivel_granularidade, scope_info, escola_info, serie_info),
@@ -4678,7 +4703,7 @@ def _calcular_estatisticas_consolidadas_por_escopo(class_tests: list, scope_info
             "total_alunos": total_alunos,
             "alunos_participantes": alunos_participantes,
             "alunos_pendentes": 0,
-            "alunos_ausentes": total_alunos - alunos_participantes,
+            "alunos_ausentes": alunos_ausentes,
             "media_nota_geral": round(media_nota, 2),
             "media_proficiencia_geral": round(media_proficiencia, 2),
             "distribuicao_classificacao_geral": distribuicao_geral
@@ -4695,7 +4720,18 @@ def _determinar_escopo_calculo(scope_info: dict, nivel_granularidade: str) -> Di
     """
     escopo = {}
     
-    if nivel_granularidade == "municipio":
+    if nivel_granularidade == "avaliacao":
+        # Avaliação específica selecionada
+        escopo['tipo'] = "avaliacao"
+        escopo['avaliacao_id'] = scope_info.get('avaliacao')
+        escopo['municipio_id'] = scope_info.get('municipio_id')
+        # Buscar as turmas onde esta avaliação foi aplicada
+        from app.models.classTest import ClassTest
+        class_tests = ClassTest.query.filter_by(test_id=escopo['avaliacao_id']).all()
+        escopo['class_ids'] = [ct.class_id for ct in class_tests]
+        logging.info(f"Escopo avaliação: {escopo}")
+        
+    elif nivel_granularidade == "municipio":
         # Estado + Município + Avaliação "all"
         escopo['tipo'] = "municipio"
         escopo['municipio_id'] = scope_info.get('municipio_id')
@@ -4722,6 +4758,7 @@ def _determinar_escopo_calculo(scope_info: dict, nivel_granularidade: str) -> Di
         escopo['escola_id'] = scope_info.get('escola')
         escopo['avaliacao_id'] = scope_info.get('avaliacao')
     
+    logging.info(f"Escopo calculado para {nivel_granularidade}: {escopo}")
     return escopo
 
 
@@ -4730,28 +4767,54 @@ def _buscar_alunos_por_escopo(escopo_calculo: dict) -> List[Student]:
     Busca alunos baseado no escopo de cálculo
     """
     try:
-        if escopo_calculo['tipo'] == "municipio":
+        logging.info(f"Buscando alunos por escopo: {escopo_calculo}")
+        
+        if escopo_calculo['tipo'] == "avaliacao":
+            # Todos os alunos das turmas onde a avaliação foi aplicada
+            class_ids = escopo_calculo.get('class_ids', [])
+            logging.info(f"Tipo avaliação, class_ids: {class_ids}")
+            if class_ids:
+                alunos = Student.query.filter(Student.class_id.in_(class_ids)).all()
+                logging.info(f"Alunos encontrados para avaliação: {len(alunos)}")
+                return alunos
+            else:
+                logging.warning("Nenhum class_id encontrado para avaliação")
+                return []
+        
+        elif escopo_calculo['tipo'] == "municipio":
             # Todos os alunos do município
-            return Student.query.join(Class).join(School).join(City)\
+            alunos = Student.query.join(Class).join(School).join(City)\
                                .filter(City.id == escopo_calculo['municipio_id']).all()
+            logging.info(f"Alunos encontrados para município: {len(alunos)}")
+            return alunos
         
         elif escopo_calculo['tipo'] == "escola":
             # Todos os alunos da escola
-            return Student.query.join(Class).join(School)\
+            alunos = Student.query.join(Class).join(School)\
                                .filter(School.id == escopo_calculo['escola_id']).all()
+            logging.info(f"Alunos encontrados para escola: {len(alunos)}")
+            return alunos
         
         elif escopo_calculo['tipo'] == "serie":
             # Todos os alunos da série
-            return Student.query.join(Class).join(Grade)\
+            alunos = Student.query.join(Class).join(Grade)\
                                .filter(Grade.id == escopo_calculo['serie_id']).all()
+            logging.info(f"Alunos encontrados para série: {len(alunos)}")
+            return alunos
         
         elif escopo_calculo['tipo'] == "turma":
             # Todos os alunos da turma
-            return Student.query.filter(Student.class_id == escopo_calculo['turma_id']).all()
+            alunos = Student.query.filter(Student.class_id == escopo_calculo['turma_id']).all()
+            logging.info(f"Alunos encontrados para turma: {len(alunos)}")
+            return alunos
         
         else:
             # Fallback: retornar alunos das turmas das avaliações
-            return Student.query.filter(Student.class_id.in_(escopo_calculo.get('class_ids', []))).all()
+            class_ids = escopo_calculo.get('class_ids', [])
+            logging.info(f"Fallback, class_ids: {class_ids}")
+            alunos = Student.query.filter(Student.class_id.in_(class_ids)).all()
+            logging.info(f"Alunos encontrados no fallback: {len(alunos)}")
+            return alunos
             
     except Exception as e:
         logging.error(f"Erro ao buscar alunos por escopo: {str(e)}")

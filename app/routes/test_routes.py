@@ -1131,7 +1131,7 @@ def aplicar_avaliacao_classe(test_id):
 
 @bp.route('/<string:test_id>/classes', methods=['GET'])
 @jwt_required()
-@role_required("admin", "professor", "coordenador", "diretor")
+@role_required("admin", "professor", "coordenador", "diretor",'tecadm')
 def listar_classes_avaliacao(test_id):
     """Lista todas as classes onde uma avaliação foi aplicada ou está configurada para aplicação."""
     try:

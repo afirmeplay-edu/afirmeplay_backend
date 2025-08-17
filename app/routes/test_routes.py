@@ -315,7 +315,6 @@ def listar_avaliacoes():
         elif user['role'] in ["diretor", "coordenador"]:
             # Buscar o município do diretor/coordenador através da escola onde trabalha
             from app.models.manager import Manager
-            from app.models.school import School
             
             manager = Manager.query.filter_by(user_id=user['id']).first()
             if not manager or not manager.school_id:

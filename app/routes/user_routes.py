@@ -65,7 +65,7 @@ def format_student_details(student):
 
 @bp.route('/list', methods=['GET'])
 @jwt_required()
-@role_required("admin", "tecadm")
+@role_required("admin", "tecadm", "diretor", "coordenador", "professor")
 def list_users():
     try:
         current_user = get_current_user_from_token()
@@ -75,9 +75,36 @@ def list_users():
         # Base query
         query = User.query
 
-        # Filtra por city_id se for tecadmin
-        if current_user['role'] == "tecadm":
+        # Filtragem baseada no papel do usuário
+        if current_user['role'] == "admin":
+            # Admin vê todos os usuários do sistema
+            pass
+        elif current_user['role'] == "tecadm":
+            # Tecadm vê apenas usuários do seu município
             city_id = current_user.get('tenant_id') or current_user.get('city_id')
+            if not city_id:
+                return jsonify({"erro": "ID da cidade não disponível"}), 400
+            query = query.filter_by(city_id=city_id)
+        elif current_user['role'] in ["diretor", "coordenador"]:
+            # Diretor e coordenador vêem apenas usuários da sua escola
+            from app.models.manager import Manager
+            from app.models.school import School
+            
+            # Buscar o manager vinculado ao usuário atual
+            manager = Manager.query.filter_by(user_id=current_user['id']).first()
+            if not manager or not manager.school_id:
+                return jsonify({"erro": "Usuário não está vinculado a nenhuma escola"}), 400
+            
+            # Buscar a escola do manager
+            school = School.query.get(manager.school_id)
+            if not school:
+                return jsonify({"erro": "Escola não encontrada"}), 400
+            
+            # Filtrar usuários por city_id da escola
+            query = query.filter_by(city_id=school.city_id)
+        elif current_user['role'] == "professor":
+            # Professor vê apenas usuários do seu município
+            city_id = current_user.get('city_id')
             if not city_id:
                 return jsonify({"erro": "ID da cidade não disponível"}), 400
             query = query.filter_by(city_id=city_id)

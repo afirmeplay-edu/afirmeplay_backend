@@ -51,7 +51,7 @@ def create_app():
     migrate.init_app(app, db)
     
     # Importar rotas
-    from .routes import school_routes, test_routes, question_routes, login, logout, admin_route, educationStage_routes, grades_routes, persistUser_routes, city_routes, student_routes, user_routes, class_routes, schoolTeacher, teacherClass, professor_route, subject_routes, skill_routes,student_answer_routes, userQuickLinks_routes, evaluation_results_routes, basic_endpoints, evaluation_routes, game_routes, manager_routes
+    from .routes import school_routes, test_routes, question_routes, login, logout, admin_route, educationStage_routes, grades_routes, persistUser_routes, city_routes, student_routes, user_routes, class_routes, schoolTeacher, teacherClass, professor_route, subject_routes, skill_routes,student_answer_routes, userQuickLinks_routes, evaluation_results_routes, basic_endpoints, evaluation_routes, game_routes, manager_routes, report_routes
     
     app.register_blueprint(school_routes.bp)
     app.register_blueprint(test_routes.bp)
@@ -75,6 +75,7 @@ def create_app():
     app.register_blueprint(student_answer_routes.bp)
     app.register_blueprint(userQuickLinks_routes.bp)
     app.register_blueprint(evaluation_results_routes.bp)
+    app.register_blueprint(report_routes.bp)
     app.register_blueprint(basic_endpoints.bp)
     app.register_blueprint(game_routes.bp)
     app.register_blueprint(manager_routes.bp)

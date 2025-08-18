@@ -983,11 +983,9 @@ def deletar_avaliacao(test_id):
 
 @bp.route('/<string:test_id>/apply', methods=['POST'])
 @jwt_required()
-@role_required("admin", "professor", "coordenador", "diretor")
+@role_required("admin", "professor", "coordenador", "diretor","tecadm")
 def aplicar_avaliacao_classe(test_id):
     """Aplica uma avaliação a uma ou múltiplas classes."""
-    print(test_id)
-    print(request.get_json())
     try:
         data = request.get_json()
         if not data:

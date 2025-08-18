@@ -371,6 +371,9 @@ def format_test_response(test):
             logging.warning(f"Erro ao calcular duração: {str(e)}")
             duration = 90
 
+    # Determinar se a avaliação foi aplicada baseado na existência de class_tests
+    is_applied = len(test.class_tests) > 0 if test.class_tests else False
+
     return {
         'id': test.id,
         'title': test.title,
@@ -397,6 +400,7 @@ def format_test_response(test):
         'model': test.model,
         'subjects_info': test.subjects_info,  # Manter o campo original para compatibilidade
         'status': test.status,
+        'is_applied': is_applied,  # Campo explícito indicando se a avaliação foi aplicada
         'applied_classes': applied_classes_info,
         'applied_classes_count': len(applied_classes_info),
         'total_students': total_students,

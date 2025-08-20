@@ -6,6 +6,7 @@ from app.models.educationStage import EducationStage
 from app.models.test import Test
 from app.models.testQuestion import TestQuestion
 from app.models.user import User
+from app.models.studentAnswer import StudentAnswer
 from app import db
 from app.decorators.role_required import get_current_tenant_id
 from flask_jwt_extended import jwt_required

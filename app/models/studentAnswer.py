@@ -19,9 +19,9 @@ class StudentAnswer(db.Model):
     corrected_at = db.Column(db.DateTime, nullable=True)  # Data da correção
     
     # Relacionamentos
-    student = db.relationship('Student', backref='student_answers')
-    test = db.relationship('Test', backref='student_answers')
-    question = db.relationship('Question', backref='student_answers')
+    # student = db.relationship('Student', backref='student_answers')  # Removido - agora definido no modelo Student
+    # test = db.relationship('Test', backref='student_answers')  # Removido - agora definido no modelo Test
+    # question = db.relationship('Question', backref='student_answers')  # Removido - agora definido no modelo Question
     
     def __init__(self, student_id, test_id, question_id, answer, **kwargs):
         """

@@ -14,7 +14,7 @@ school_teacher_bp = Blueprint('school_teacher', __name__)
 
 @school_teacher_bp.route('/school-teacher', methods=['POST'])
 @jwt_required()
-@role_required('admin', 'tecadm', 'diretor', 'coordenador')
+@role_required('admin', 'tecadm', 'diretor', 'coordenador',"professor")
 def create_school_teacher():
     data = request.get_json()
     logging.info(f"Dados recebidos para vincular professor à escola: {data}")
@@ -109,7 +109,7 @@ def create_school_teacher():
 
 @school_teacher_bp.route('/school-teacher', methods=['GET'])
 @jwt_required()
-@role_required('admin', 'tecadm', 'diretor', 'coordenador')
+@role_required('admin', 'tecadm', 'diretor', 'coordenador',"professor")
 def get_school_teachers():
     try:
         # Obter usuário atual
@@ -130,6 +130,19 @@ def get_school_teachers():
             if not manager:
                 return jsonify({"erro": "Usuário não está vinculado a nenhuma escola"}), 403
             vinculos = SchoolTeacher.query.filter_by(school_id=manager.school_id).all()
+        elif current_user['role'] == 'professor':
+            # Professor vê apenas o seu próprio vínculo
+            teacher = Teacher.query.filter_by(user_id=current_user['id']).first()
+            if not teacher:
+                return jsonify({"erro": "Usuário não está vinculado como professor"}), 403
+            vinculos = SchoolTeacher.query.filter_by(teacher_id=teacher.id).all()
+        else:
+            # Role não reconhecido
+            return jsonify({"erro": "Role não autorizado para esta operação"}), 403
+        
+        # Verificar se vinculos foi definido
+        if 'vinculos' not in locals():
+            return jsonify({"erro": "Erro interno: role não processado corretamente"}), 500
         
         resultado = []
         for vinculo in vinculos:

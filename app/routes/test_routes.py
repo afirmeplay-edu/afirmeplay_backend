@@ -22,6 +22,7 @@ from app.utils.response_formatters import format_test_response
 from sqlalchemy.orm import joinedload, subqueryload
 from sqlalchemy import cast
 from sqlalchemy.dialects.postgresql import JSONB
+from app.models.studentAnswer import StudentAnswer
 
 bp = Blueprint('tests', __name__, url_prefix="/test")
 

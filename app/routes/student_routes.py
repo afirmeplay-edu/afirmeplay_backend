@@ -2,7 +2,6 @@ from flask import Blueprint, request, jsonify
 from app.models.student import Student
 from app.models.user import User, RoleEnum
 from app.models.school import School
-from app.models.user import RoleEnum
 from sqlalchemy.exc import SQLAlchemyError, IntegrityError
 import logging
 from app.decorators.role_required import role_required, get_current_user_from_token
@@ -12,6 +11,7 @@ from app import db
 from flask_jwt_extended import jwt_required
 from werkzeug.security import generate_password_hash
 from marshmallow import ValidationError
+from app.models.studentAnswer import StudentAnswer
 from app.models.studentClass import Class
 from app.models.grades import Grade
 from app.models.classTest import ClassTest
@@ -673,7 +673,7 @@ def get_students_by_class(class_id):
 
 @bp.route('/school/<string:school_id>/class/<string:class_id>', methods=['GET'])
 @jwt_required()
-@role_required("admin", "diretor", "coordenador", "professor")
+@role_required("admin", "diretor", "coordenador", "professor","tecadm")
 def get_students_by_school_and_class(school_id, class_id):
     try:
         logging.info(f"Fetching students for school_id: {school_id} and class_id: {class_id}")

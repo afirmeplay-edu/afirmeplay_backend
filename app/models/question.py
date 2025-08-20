@@ -53,6 +53,9 @@ class Question(db.Model):
     
     # Relacionamento many-to-many com Test através da tabela de associação
     test_questions = db.relationship('TestQuestion', back_populates='question', cascade='all, delete-orphan')
+
+    # Relacionamento com StudentAnswer para permitir exclusão em cascata
+    student_answers = db.relationship('StudentAnswer', backref='question', cascade='all, delete-orphan')
     
     @property
     def tests(self):

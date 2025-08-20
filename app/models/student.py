@@ -18,6 +18,9 @@ class Student(db.Model):
     grade_id = db.Column(UUID(as_uuid=True), db.ForeignKey('grade.id'))
     class_id = db.Column(db.String, db.ForeignKey('class.id'))
     school_id = db.Column(db.String, db.ForeignKey('school.id'))
+
+    # Relacionamento com StudentAnswer para permitir exclusão em cascata
+    student_answers = db.relationship('StudentAnswer', backref='student', cascade='all, delete-orphan')
     
     
     

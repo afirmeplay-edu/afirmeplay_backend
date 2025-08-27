@@ -4716,22 +4716,29 @@ def obter_avaliacoes():
         if permissao['scope'] != 'all' and user.get('city_id') != city.id:
             return jsonify({"error": "Acesso negado a este município"}), 403
         
-        # Para educadores (professor, diretor, coordenador), retornar avaliações que criaram primeiro
+        # Para educadores (professor, diretor, coordenador), retornar avaliações que criaram e que estão aplicadas
         if permissao['scope'] in ['escola', 'escolas_vinculadas']:
             if permissao['scope'] == 'escola':
-                # Diretor e Coordenador veem apenas avaliações da sua escola
-                query_avaliacoes = Test.query.with_entities(Test.id, Test.title)\
-                                            .filter(Test.created_by == user['id'])\
-                                            .join(ClassTest, Test.id == ClassTest.test_id)\
-                                            .join(Class, ClassTest.class_id == Class.id)\
-                                            .join(School, Class.school_id == School.id)\
-                                            .join(City, School.city_id == City.id)\
-                                            .filter(City.id == city.id)\
-                                            .filter(School.id == user.get('school_id', ''))
+                # Diretor e Coordenador veem apenas avaliações que criaram e que estão aplicadas na sua escola
+                from app.models.manager import Manager
+                
+                # Buscar o manager vinculado ao usuário atual
+                manager = Manager.query.filter_by(user_id=user['id']).first()
+                if not manager or not manager.school_id:
+                    # Manager não encontrado ou não vinculado a escola, retornar lista vazia
+                    query_avaliacoes = Test.query.with_entities(Test.id, Test.title).filter(Test.id == None)
+                else:
+                    # Buscar avaliações que o diretor/coordenador criou e que estão aplicadas na sua escola
+                    query_avaliacoes = Test.query.with_entities(Test.id, Test.title)\
+                                                .filter(Test.created_by == user['id'])\
+                                                .join(ClassTest, Test.id == ClassTest.test_id)\
+                                                .join(Class, ClassTest.class_id == Class.id)\
+                                                .filter(Class.school_id == manager.school_id)
             elif permissao['scope'] == 'escolas_vinculadas':
-                # Professor vê avaliações aplicadas nas turmas onde está associado
+                # Professor vê avaliações que criou e que estão aplicadas nas escolas onde está vinculado
                 from app.models.teacherClass import TeacherClass
                 from app.models.teacher import Teacher
+                from app.models.schoolTeacher import SchoolTeacher
                 
                 # Buscar o ID do professor baseado no user_id
                 teacher = Teacher.query.filter_by(user_id=user.get('id')).first()
@@ -4739,21 +4746,19 @@ def obter_avaliacoes():
                     # Professor não encontrado, retornar lista vazia
                     query_avaliacoes = Test.query.with_entities(Test.id, Test.title).filter(Test.id == None)
                 else:
-                    # Buscar turmas do professor usando o ID do professor
-                    teacher_classes = TeacherClass.query.filter_by(teacher_id=teacher.id).all()
-                    class_ids = [tc.class_id for tc in teacher_classes]
+                    # Buscar escolas onde o professor está vinculado através da tabela school_teacher
+                    teacher_schools = SchoolTeacher.query.filter_by(teacher_id=teacher.id).all()
+                    school_ids = [ts.school_id for ts in teacher_schools]
                     
-                    if class_ids:
-                        # Buscar avaliações aplicadas nessas turmas que o professor criou
+                    if school_ids:
+                        # Buscar avaliações que o professor criou e que estão aplicadas nas escolas onde está vinculado
                         query_avaliacoes = Test.query.with_entities(Test.id, Test.title)\
                                                     .filter(Test.created_by == user['id'])\
                                                     .join(ClassTest, Test.id == ClassTest.test_id)\
-                                                    .filter(ClassTest.class_id.in_(class_ids))\
                                                     .join(Class, ClassTest.class_id == Class.id)\
-                                                    .join(School, Class.school_id == School.id)\
-                                                    .filter(City.id == city.id)
+                                                    .filter(Class.school_id.in_(school_ids))
                     else:
-                        # Professor não tem turmas associadas, retornar lista vazia
+                        # Professor não está vinculado a nenhuma escola, retornar lista vazia
                         query_avaliacoes = Test.query.with_entities(Test.id, Test.title).filter(Test.id == None)
         else:
             # Para admin e tecadm, manter lógica atual

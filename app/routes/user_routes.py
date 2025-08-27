@@ -17,6 +17,13 @@ from sqlalchemy.orm import joinedload
 from app.utils.email_service import EmailService
 from datetime import datetime, timedelta
 from flask import current_app
+import csv
+import io
+import uuid
+from werkzeug.utils import secure_filename
+import os
+from openpyxl import load_workbook
+from xlrd import open_workbook
 
 bp = Blueprint('users', __name__, url_prefix='/users')
 
@@ -582,3 +589,349 @@ def delete_user(user_id):
     except Exception as e:
         logging.error(f"Erro inesperado ao deletar usuário: {e}", exc_info=True)
         return jsonify({"erro": "Erro interno do servidor"}), 500 
+
+@bp.route('/bulk-upload-students', methods=['POST'])
+@jwt_required()
+@role_required("admin", "tecadm", "diretor", "coordenador")
+def bulk_upload_students():
+    """
+    Rota para upload em massa de alunos via arquivo CSV ou Excel
+    """
+    try:
+        # Verificar se há arquivo no request
+        if 'file' not in request.files:
+            return jsonify({"erro": "Nenhum arquivo enviado"}), 400
+        
+        file = request.files['file']
+        if file.filename == '':
+            return jsonify({"erro": "Nenhum arquivo selecionado"}), 400
+        
+        # Verificar extensão do arquivo
+        allowed_extensions = {'csv', 'xlsx', 'xls'}
+        file_extension = file.filename.rsplit('.', 1)[1].lower() if '.' in file.filename else ''
+        
+        if file_extension not in allowed_extensions:
+            return jsonify({"erro": "Formato de arquivo não suportado. Use CSV, XLSX ou XLS"}), 400
+        
+        # Obter usuário atual para verificar permissões
+        current_user = get_current_user_from_token()
+        if not current_user:
+            return jsonify({"erro": "Usuário não encontrado"}), 404
+        
+        # Ler o arquivo
+        try:
+            if file_extension == 'csv':
+                # Para CSV, tentar diferentes encodings
+                try:
+                    content = file.read().decode('utf-8')
+                except UnicodeDecodeError:
+                    file.seek(0)
+                    content = file.read().decode('latin-1')
+                
+                # Processar CSV
+                csv_reader = csv.DictReader(io.StringIO(content))
+                rows = list(csv_reader)
+            else:
+                # Para Excel
+                if file_extension == 'xlsx':
+                    workbook = load_workbook(file, data_only=True)
+                    sheet = workbook.active
+                else:  # xls
+                    workbook = open_workbook(file_contents=file.read())
+                    sheet = workbook.sheet_by_index(0)
+                
+                # Converter para lista de dicionários
+                rows = []
+                if file_extension == 'xlsx':
+                    headers = [cell.value for cell in sheet[1]]
+                    for row in sheet.iter_rows(min_row=2):
+                        row_data = {}
+                        for i, cell in enumerate(row):
+                            if i < len(headers) and headers[i]:
+                                row_data[headers[i]] = cell.value
+                        if any(row_data.values()):  # Ignorar linhas vazias
+                            rows.append(row_data)
+                else:  # xls
+                    headers = [sheet.cell_value(0, i) for i in range(sheet.ncols)]
+                    for row_idx in range(1, sheet.nrows):
+                        row_data = {}
+                        for col_idx in range(sheet.ncols):
+                            if col_idx < len(headers) and headers[col_idx]:
+                                row_data[headers[col_idx]] = sheet.cell_value(row_idx, col_idx)
+                        if any(row_data.values()):  # Ignorar linhas vazias
+                            rows.append(row_data)
+        except Exception as e:
+            return jsonify({"erro": f"Erro ao ler arquivo: {str(e)}"}), 400
+        
+        # Verificar colunas obrigatórias
+        required_columns = ['nome', 'email', 'data_nascimento', 'escola', 'endereco_escola', 'estado_escola', 'municipio_escola', 'serie', 'turma']
+        if rows:
+            missing_columns = [col for col in required_columns if col not in rows[0].keys()]
+        else:
+            missing_columns = required_columns
+        
+        if missing_columns:
+            return jsonify({
+                "erro": f"Colunas obrigatórias ausentes: {', '.join(missing_columns)}",
+                "colunas_encontradas": list(rows[0].keys()) if rows else [],
+                "colunas_obrigatorias": required_columns
+            }), 400
+        
+        # Limpar dados
+        rows = [row for row in rows if all(str(row.get(col, '')).strip() for col in ['nome', 'email', 'escola', 'endereco_escola', 'estado_escola', 'municipio_escola', 'serie', 'turma'])]
+        
+        # Converter data de nascimento
+        def parse_date(date_str):
+            if not date_str or str(date_str).strip() == '':
+                return None
+            try:
+                date_str = str(date_str).strip()
+                # Tentar diferentes formatos de data
+                for fmt in ['%d/%m/%Y', '%d-%m-%Y', '%Y-%m-%d', '%d/%m/%y', '%d-%m-%y']:
+                    try:
+                        return datetime.strptime(date_str, fmt).date()
+                    except:
+                        continue
+                # Se nenhum formato funcionar, tentar parse automático
+                return datetime.strptime(date_str, '%Y-%m-%d').date()
+            except:
+                return None
+        
+        # Processar cada linha para adicionar data parseada
+        for row in rows:
+            row['data_nascimento_parsed'] = parse_date(row.get('data_nascimento'))
+        
+        # Validar dados e processar
+        results = {
+            "total_linhas": len(rows),
+            "sucessos": 0,
+            "erros": [],
+            "alunos_criados": []
+        }
+        
+        # Verificar permissões baseadas no papel do usuário
+        allowed_schools = []
+        if current_user['role'] == "admin":
+            # Admin pode criar alunos em qualquer escola
+            allowed_schools = [school.id for school in School.query.all()]
+        elif current_user['role'] == "tecadm":
+            # Tecadm pode criar alunos em escolas da sua cidade
+            city_id = current_user.get('tenant_id') or current_user.get('city_id')
+            if city_id:
+                allowed_schools = [school.id for school in School.query.filter_by(city_id=city_id).all()]
+        elif current_user['role'] in ["diretor", "coordenador"]:
+            # Diretor e coordenador podem criar alunos apenas na sua escola
+            manager = Manager.query.filter_by(user_id=current_user['id']).first()
+            if manager and manager.school_id:
+                allowed_schools = [manager.school_id]
+        
+        if not allowed_schools:
+            return jsonify({"erro": "Usuário não tem permissão para criar alunos em nenhuma escola"}), 403
+        
+        # Processar cada linha
+        for index, row in enumerate(rows):
+            try:
+                # Validar email
+                email = str(row.get('email', '')).strip().lower()
+                if not email or '@' not in email:
+                    results["erros"].append({
+                        "linha": index + 2,  # +2 porque index começa em 0 e há cabeçalho
+                        "campo": "email",
+                        "valor": email,
+                        "erro": "Email inválido"
+                    })
+                    continue
+                
+                # Verificar se email já existe
+                existing_user = User.query.filter_by(email=email).first()
+                if existing_user:
+                    results["erros"].append({
+                        "linha": index + 2,
+                        "campo": "email",
+                        "valor": email,
+                        "erro": "Email já cadastrado"
+                    })
+                    continue
+                
+                # Validar matrícula se fornecida
+                matricula = str(row.get('matricula', '')).strip()
+                if matricula and User.query.filter_by(registration=matricula).first():
+                    results["erros"].append({
+                        "linha": index + 2,
+                        "campo": "matricula",
+                        "valor": matricula,
+                        "erro": "Matrícula já cadastrada"
+                    })
+                    continue
+                
+                # Buscar ou criar escola
+                escola_nome = str(row.get('escola', '')).strip()
+                escola = School.query.filter(School.name.ilike(f"%{escola_nome}%")).first()
+                
+                if not escola:
+                    # Criar escola automaticamente
+                    try:
+                        # Buscar cidade pelo município e estado
+                        municipio_nome = str(row.get('municipio_escola', '')).strip()
+                        estado_sigla = str(row.get('estado_escola', '')).strip()
+                        
+                        # Buscar cidade existente
+                        cidade = City.query.filter(
+                            City.name.ilike(f"%{municipio_nome}%"),
+                            City.state.ilike(f"%{estado_sigla}%")
+                        ).first()
+                        
+                        if not cidade:
+                            # Criar cidade se não existir
+                            cidade = City(
+                                id=str(uuid.uuid4()),
+                                name=municipio_nome,
+                                state=estado_sigla
+                            )
+                            db.session.add(cidade)
+                            db.session.flush()  # Para obter o ID da cidade
+                        
+                        # Criar escola
+                        escola = School(
+                            id=str(uuid.uuid4()),
+                            name=escola_nome,
+                            address=str(row.get('endereco_escola', '')).strip(),
+                            city_id=cidade.id
+                        )
+                        db.session.add(escola)
+                        db.session.flush()  # Para obter o ID da escola
+                        
+                        logging.info(f"Escola criada automaticamente: {escola_nome} em {municipio_nome}, {estado_sigla}")
+                        
+                    except Exception as e:
+                        results["erros"].append({
+                            "linha": index + 2,
+                            "campo": "escola",
+                            "valor": escola_nome,
+                            "erro": f"Erro ao criar escola: {str(e)}"
+                        })
+                        continue
+                
+                # Verificar se usuário tem permissão para esta escola
+                if escola.id not in allowed_schools:
+                    results["erros"].append({
+                        "linha": index + 2,
+                        "campo": "escola",
+                        "valor": escola_nome,
+                        "erro": "Sem permissão para criar alunos nesta escola"
+                    })
+                    continue
+                
+                # Buscar série
+                serie_nome = str(row.get('serie', '')).strip()
+                serie = Grade.query.filter(Grade.name.ilike(f"%{serie_nome}%")).first()
+                if not serie:
+                    results["erros"].append({
+                        "linha": index + 2,
+                        "campo": "serie",
+                        "valor": serie_nome,
+                        "erro": "Série não encontrada"
+                    })
+                    continue
+                
+                # Buscar turma
+                turma_nome = str(row.get('turma', '')).strip()
+                turma = Class.query.filter(
+                    Class.name.ilike(f"%{turma_nome}%"),
+                    Class.school_id == escola.id,
+                    Class.grade_id == serie.id
+                ).first()
+                if not turma:
+                    results["erros"].append({
+                        "linha": index + 2,
+                        "campo": "turma",
+                        "valor": turma_nome,
+                        "erro": f"Turma não encontrada na escola {escola_nome} e série {serie_nome}"
+                    })
+                    continue
+                
+                # Validar data de nascimento
+                data_nascimento = row.get('data_nascimento_parsed')
+                if not data_nascimento:
+                    results["erros"].append({
+                        "linha": index + 2,
+                        "campo": "data_nascimento",
+                        "valor": row.get('data_nascimento', ''),
+                        "erro": "Data de nascimento inválida"
+                    })
+                    continue
+                
+                # Criar usuário
+                novo_usuario = User(
+                    id=str(uuid.uuid4()),
+                    name=str(row.get('nome', '')).strip(),
+                    email=email,
+                    password_hash=generate_password_hash(str(uuid.uuid4())),  # Senha aleatória
+                    registration=matricula if matricula else None,
+                    role=RoleEnum.ALUNO,
+                    city_id=escola.city_id
+                )
+                db.session.add(novo_usuario)
+                
+                # Criar estudante
+                novo_aluno = Student(
+                    id=str(uuid.uuid4()),
+                    name=str(row.get('nome', '')).strip(),
+                    registration=matricula if matricula else None,
+                    birth_date=data_nascimento,
+                    profile_picture=str(row.get('foto_perfil', '')).strip() if row.get('foto_perfil') else None,
+                    user_id=novo_usuario.id,
+                    school_id=escola.id,
+                    grade_id=serie.id,
+                    class_id=turma.id
+                )
+                db.session.add(novo_aluno)
+                
+                # Commit para esta linha
+                db.session.commit()
+                
+                results["sucessos"] += 1
+                results["alunos_criados"].append({
+                    "nome": novo_aluno.name,
+                    "email": novo_usuario.email,
+                    "matricula": novo_aluno.registration,
+                    "escola": escola.name,
+                    "serie": serie.name,
+                    "turma": turma.name
+                })
+                
+                logging.info(f"Aluno criado com sucesso: {novo_aluno.name} ({novo_usuario.email})")
+                
+            except Exception as e:
+                db.session.rollback()
+                results["erros"].append({
+                    "linha": index + 2,
+                    "campo": "geral",
+                    "valor": "",
+                    "erro": f"Erro inesperado: {str(e)}"
+                })
+                logging.error(f"Erro ao processar linha {index + 2}: {str(e)}")
+                continue
+        
+        # Preparar resposta
+        if results["sucessos"] > 0:
+            message = f"Upload concluído! {results['sucessos']} alunos criados com sucesso."
+            if results["erros"]:
+                message += f" {len(results['erros'])} erros encontrados."
+        else:
+            message = "Nenhum aluno foi criado. Verifique os erros abaixo."
+        
+        return jsonify({
+            "mensagem": message,
+            "resumo": {
+                "total_linhas": results["total_linhas"],
+                "sucessos": results["sucessos"],
+                "erros": len(results["erros"])
+            },
+            "alunos_criados": results["alunos_criados"],
+            "erros": results["erros"]
+        }), 200 if results["sucessos"] > 0 else 400
+        
+    except Exception as e:
+        logging.error(f"Erro inesperado no upload em massa: {str(e)}", exc_info=True)
+        return jsonify({"erro": "Erro interno do servidor", "detalhes": str(e)}), 500 

@@ -822,10 +822,19 @@ def listar_avaliacoes():
         # Gerar opções dos próximos filtros
         opcoes_proximos_filtros = _gerar_opcoes_proximos_filtros(scope_info, nivel_granularidade)
         
-        # Gerar tabela detalhada por disciplina
-        tabela_detalhada = _gerar_tabela_detalhada_por_disciplina(
-            avaliacao, scope_info, nivel_granularidade, user
-        )
+        # Gerar tabela detalhada por disciplina (apenas se uma avaliação específica for selecionada)
+        tabela_detalhada = {}
+        ranking_alunos = []
+        
+        if avaliacao and avaliacao.lower() != 'all':
+            tabela_detalhada = _gerar_tabela_detalhada_por_disciplina(
+                avaliacao, scope_info, nivel_granularidade, user
+            )
+            
+            # Calcular ranking global dos alunos
+            ranking_alunos = _calcular_ranking_global_alunos(
+                avaliacao, scope_info, nivel_granularidade, user
+            )
         
         return jsonify({
             "nivel_granularidade": nivel_granularidade,
@@ -849,6 +858,7 @@ def listar_avaliacoes():
                 }
             },
             "tabela_detalhada": tabela_detalhada,
+            "ranking": ranking_alunos,
             "opcoes_proximos_filtros": opcoes_proximos_filtros
         }), 200
 
@@ -3527,8 +3537,9 @@ def get_student_answers(test_id, student_id):
         # Verificar permissões
         if user['role'] == 'aluno':
             # Aluno só pode ver suas próprias respostas
+            # O student_id enviado é o user_id, não o id da tabela Student
             if user['id'] != student_id:
-                return jsonify({"error": "Você só pode ver suas próprias respostas"}), 403
+                return jsonify({"error": "Você só pode ver seus próprios resultados"}), 403
         elif user['role'] == 'professor':
             # Professor só pode ver respostas de testes que criou
             test = Test.query.get(test_id)
@@ -5328,3 +5339,149 @@ def _buscar_alunos_por_escopo(escopo_calculo: dict) -> List[Student]:
 
 
 # ==================== ENDPOINT 1: GET /avaliacoes ====================
+
+def _calcular_ranking_global_alunos(avaliacao_id: str, scope_info: Dict, nivel_granularidade: str, user: Dict) -> List[Dict]:
+    """
+    Calcula o ranking global dos alunos baseado em nota e acertos totais
+    para o nível de granularidade especificado
+    
+    Args:
+        avaliacao_id: ID da avaliação
+        scope_info: Informações do escopo de busca
+        nivel_granularidade: Nível de granularidade atual
+        user: Informações do usuário logado
+    
+    Returns:
+        Lista de alunos ordenados por ranking com formato: "Aluno X, Acertos X, Nota X"
+    """
+    try:
+        from app.models.evaluationResult import EvaluationResult
+        
+        # Determinar escopo de alunos baseado na granularidade
+        class_tests = ClassTest.query.filter_by(test_id=avaliacao_id).all()
+        class_ids = [ct.class_id for ct in class_tests]
+        
+        if not class_ids:
+            return []
+        
+        # Buscar alunos baseado no escopo e filtros
+        query_alunos = Student.query.options(
+            joinedload(Student.class_).joinedload(Class.grade),
+            joinedload(Student.class_).joinedload(Class.school).joinedload(School.city)
+        ).filter(Student.class_id.in_(class_ids))
+        
+        # Aplicar filtros baseados na granularidade
+        if nivel_granularidade in ['escola', 'serie', 'turma']:
+            # Filtrar por escola se especificada
+            if scope_info.get('escolas') and len(scope_info['escolas']) == 1:
+                escola_id = scope_info['escolas'][0].id
+                query_alunos = query_alunos.join(Class).filter(Class.school_id == escola_id)
+            
+            # Filtrar por série se especificada
+            if nivel_granularidade in ['serie', 'turma'] and scope_info.get('serie_id') and scope_info['serie_id'] != 'all':
+                query_alunos = query_alunos.join(Class).filter(Class.grade_id == scope_info['serie_id'])
+            
+            # Filtrar por turma se especificada
+            if nivel_granularidade == 'turma' and scope_info.get('turma_id') and scope_info['turma_id'] != 'all':
+                query_alunos = query_alunos.filter(Student.class_id == scope_info['turma_id'])
+        
+        all_students = query_alunos.all()
+        
+        if not all_students:
+            return []
+        
+        # Buscar resultados pré-calculados
+        evaluation_results = EvaluationResult.query.filter_by(test_id=avaliacao_id).all()
+        results_dict = {er.student_id: er for er in evaluation_results}
+        
+        # Buscar todas as respostas dos alunos para esta avaliação
+        all_student_answers = StudentAnswer.query.filter(
+            StudentAnswer.test_id == avaliacao_id
+        ).all()
+        
+        # Criar dicionário de respostas por aluno
+        respostas_por_aluno = {}
+        for resposta in all_student_answers:
+            if resposta.student_id not in respostas_por_aluno:
+                respostas_por_aluno[resposta.student_id] = {}
+            respostas_por_aluno[resposta.student_id][resposta.question_id] = resposta
+        
+        # Calcular estatísticas para cada aluno
+        alunos_ranking = []
+        
+        for student in all_students:
+            # Buscar resultado pré-calculado
+            evaluation_result = results_dict.get(student.id)
+            
+            # Calcular acertos totais
+            total_acertos = 0
+            total_respondidas = 0
+            
+            if student.id in respostas_por_aluno:
+                for question_id, resposta in respostas_por_aluno[student.id].items():
+                    # Buscar a questão para verificar se acertou
+                    question = Question.query.get(question_id)
+                    if question:
+                        total_respondidas += 1
+                        
+                        # Verificar se acertou
+                        acertou = False
+                        if question.question_type == 'multiple_choice':
+                            acertou = EvaluationResultService.check_multiple_choice_answer(resposta.answer, question.alternatives)
+                        else:
+                            acertou = str(resposta.answer).strip().lower() == str(question.correct_answer).strip().lower()
+                        
+                        if acertou:
+                            total_acertos += 1
+            
+            # Dados do aluno para ranking
+            nota = evaluation_result.grade if evaluation_result else 0.0
+            
+            aluno_ranking = {
+                "id": student.id,
+                "nome": student.name,
+                "escola": student.class_.school.name if student.class_ and student.class_.school else "N/A",
+                "serie": student.class_.grade.name if student.class_ and student.class_.grade else "N/A",
+                "turma": student.class_.name if student.class_ else "N/A",
+                "total_acertos": total_acertos,
+                "total_respondidas": total_respondidas,
+                "nota": nota,
+                "proficiencia": round(evaluation_result.proficiency, 2) if evaluation_result else 0.0,
+                "nivel_proficiencia": evaluation_result.classification if evaluation_result else "Abaixo do Básico"
+            }
+            
+            alunos_ranking.append(aluno_ranking)
+        
+        # Calcular pontuação para ranking (nota * 100 + acertos * 10 + respondidas)
+        for aluno in alunos_ranking:
+            nota = float(aluno.get('nota', 0))
+            acertos = int(aluno.get('total_acertos', 0))
+            respondidas = int(aluno.get('total_respondidas', 0))
+            
+            # Pontuação: nota tem peso 100, acertos peso 10, respondidas peso 1
+            pontuacao_ranking = (nota * 100) + (acertos * 10) + respondidas
+            aluno['pontuacao_ranking'] = pontuacao_ranking
+        
+        # Ordenar por pontuação (maior para menor)
+        alunos_ordenados = sorted(alunos_ranking, key=lambda x: x['pontuacao_ranking'], reverse=True)
+        
+        # Adicionar posição no ranking e formatar descrição
+        ranking_final = []
+        for i, aluno in enumerate(alunos_ordenados):
+            # Remover campo auxiliar
+            del aluno['pontuacao_ranking']
+            
+            # Formatar descrição do ranking
+            descricao_ranking = f"{aluno['nome']}, Acertos {aluno['total_acertos']}, Nota {aluno['nota']:.1f}"
+            
+            ranking_final.append({
+                "posicao": i + 1,
+                "descricao": descricao_ranking,
+                "aluno": aluno
+            })
+        
+        return ranking_final
+        
+    except Exception as e:
+        logging.error(f"Erro ao calcular ranking global dos alunos: {str(e)}", exc_info=True)
+        return []

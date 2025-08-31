@@ -22,33 +22,50 @@ class EvaluationResultService:
         Compara por ID da alternativa (recomendado) ou por texto (fallback)
         """
         if not alternatives or not student_answer:
+            logging.warning(f"Alternativas ou resposta do aluno vazias: alternatives={alternatives}, student_answer={student_answer}")
             return False
             
         student_answer = str(student_answer).strip()
+        logging.info(f"Verificando resposta: '{student_answer}' contra alternativas: {alternatives}")
         
         # Se alternatives é uma string JSON, converter para lista
         if isinstance(alternatives, str):
             try:
                 alternatives = json.loads(alternatives)
-            except json.JSONDecodeError:
+                logging.info(f"Alternativas convertidas de JSON: {alternatives}")
+            except json.JSONDecodeError as e:
+                logging.error(f"Erro ao converter JSON das alternativas: {e}")
                 return False
         
         # Opção 1: Comparar por ID da alternativa (recomendado)
         for alt in alternatives:
+            logging.info(f"Verificando alternativa: {alt} (tipo: {type(alt)})")
             if isinstance(alt, dict) and alt.get('isCorrect') and alt.get('id'):
+                logging.info(f"Alternativa correta encontrada: ID={alt['id']}, isCorrect={alt['isCorrect']}")
                 if student_answer == str(alt['id']):
+                    logging.info(f"Resposta correta! student_answer='{student_answer}' == alt['id']='{alt['id']}'")
+                    return True
+                else:
+                    logging.info(f"IDs não coincidem: student_answer='{student_answer}' != alt['id']='{alt['id']}'")
+            else:
+                logging.info(f"Alternativa não tem estrutura esperada: isCorrect={alt.get('isCorrect')}, id={alt.get('id')}")
+        
+        # Opção 2: Comparar por texto (fallback) - HABILITADO
+        logging.info("Tentando fallback por texto...")
+        for alt in alternatives:
+            if isinstance(alt, dict) and alt.get('isCorrect'):
+                alt_text = alt.get('text', '').strip()
+                logging.info(f"Comparando texto: student_answer='{student_answer}' vs alt_text='{alt_text}'")
+                if student_answer.lower() == alt_text.lower():
+                    logging.info(f"Resposta correta por texto! student_answer='{student_answer}' == alt_text='{alt_text}'")
+                    return True
+            elif isinstance(alt, str):
+                logging.info(f"Comparando string direta: student_answer='{student_answer}' vs alt='{alt}'")
+                if student_answer.lower() == alt.strip().lower():
+                    logging.info(f"Resposta correta por string! student_answer='{student_answer}' == alt='{alt}'")
                     return True
         
-        # Opção 2: Comparar por texto (fallback)
-        # for alt in alternatives:
-        #     if isinstance(alt, dict) and alt.get('isCorrect'):
-        #         alt_text = alt.get('text', '').strip()
-        #         if student_answer.lower() == alt_text.lower():
-        #             return True
-        #     elif isinstance(alt, str):
-        #         if student_answer.lower() == alt.strip().lower():
-        #             return True
-                    
+        logging.warning(f"Nenhuma alternativa correta encontrada para resposta: '{student_answer}'")
         return False
     
     @staticmethod
@@ -93,7 +110,7 @@ class EvaluationResultService:
             for answer in answers:
                 question = next((q for q in questions if q.id == answer.question_id), None)
                 if question:
-                    if question.question_type == 'multipleChoice':
+                    if question.question_type == 'multiple_choice':
                         # Verificar usando alternatives para questões de múltipla escolha
                         is_correct = EvaluationResultService.check_multiple_choice_answer(answer.answer, question.alternatives)
                         if is_correct:
@@ -140,8 +157,7 @@ class EvaluationResultService:
             ).first()
             
             if existing_result:
-                # Atualizar resultado existente
-                existing_result.session_id = session_id
+                # Atualizar resultado existente (não alterar session_id para evitar problemas de FK)
                 existing_result.correct_answers = correct_answers
                 existing_result.total_questions = total_questions
                 existing_result.score_percentage = score_percentage

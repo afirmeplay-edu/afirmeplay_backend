@@ -4,7 +4,7 @@ Rotas especializadas para relatórios de avaliações
 Endpoint para geração de relatórios completos com estatísticas detalhadas
 """
 
-from flask import Blueprint, request, jsonify, render_template_string
+from flask import Blueprint, request, jsonify, render_template_string, send_file
 from flask_jwt_extended import jwt_required
 from app.decorators.role_required import role_required, get_current_user_from_token
 from app.models.test import Test
@@ -38,6 +38,17 @@ from reportlab.lib.enums import TA_CENTER, TA_LEFT, TA_RIGHT
 from reportlab.pdfgen.canvas import Canvas
 from io import BytesIO
 from app.services.ai_analysis_service import AIAnalysisService
+
+# Importar docxtpl para template Word
+try:
+    from docxtpl import DocxTemplate
+    from docx.shared import Mm, Pt, RGBColor
+    from docx.enum.text import WD_ALIGN_PARAGRAPH
+    from docx.oxml import parse_xml
+    DOCXTPL_AVAILABLE = True
+except ImportError:
+    DOCXTPL_AVAILABLE = False
+    logging.warning("docxtpl não disponível. Instale com: pip install docxtpl")
 
 # Constantes de cores para o PDF
 BLUE_900 = colors.HexColor("#0b2a56")
@@ -449,16 +460,19 @@ def relatorio_com_ia(evaluation_id: str):
 @role_required("admin", "professor", "coordenador", "diretor","tecadm")
 def relatorio_pdf(evaluation_id: str):
     """
-    Gera relatório PDF de uma avaliação
+    Gera relatório PDF de uma avaliação usando template Word
     
     Args:
         evaluation_id: ID da avaliação
     
     Returns:
-        PDF do relatório para download
+        Arquivo DOCX do relatório para download
     """
     try:
-        # Usar a mesma lógica da rota relatorio_completo
+        # Verificar se docxtpl está disponível
+        if not DOCXTPL_AVAILABLE:
+            return jsonify({"error": "docxtpl não está disponível. Instale com: pip install docxtpl"}), 500
+        
         # Verificar se a avaliação existe
         test = Test.query.get(evaluation_id)
         if not test:
@@ -509,54 +523,35 @@ def relatorio_pdf(evaluation_id: str):
             "acertos_por_habilidade": acertos_habilidade
         })
         
-        # Preparar dados para o template (incluindo dados extras e IA)
-        template_data = _preparar_dados_template_pdf(
+        # Preparar dados para o template Word
+        template_data = _preparar_dados_template_word(
             test, total_alunos, niveis_aprendizagem, 
-            proficiencia, nota_geral, acertos_habilidade, ai_analysis
+            proficiencia, nota_geral, acertos_habilidade, ai_analysis, avaliacao_data
         )
         
-        # Ler o template HTML
-        template_path = os.path.join(os.path.dirname(__file__), '..', 'templates', 'relatorio_avaliacao_novo.html')
-        with open(template_path, 'r', encoding='utf-8') as f:
-            template_content = f.read()
-        
-        # Renderizar o template
-        template = Template(template_content)
-        html_content = template.render(**template_data)
-        
-        # Gerar PDF com ReportLab
+        # Gerar relatório Word usando docxtpl
         try:
-            pdf_content = _gerar_pdf_reportlab(template_data)
+            docx_content = _gerar_docx_com_template(template_data)
             
             # Preparar nome do arquivo com o nome da avaliação
             nome_avaliacao = test.title.replace(' ', '_').replace('/', '_').replace('\\', '_').replace(':', '_').replace('?', '_').replace('*', '_').replace('"', '_').replace('<', '_').replace('>', '_').replace('|', '_')
-            nome_arquivo = f"relatorio_{nome_avaliacao}.pdf"
+            nome_arquivo = f"relatorio_{nome_avaliacao}.docx"
             
-            # Retornar PDF
+            # Retornar arquivo DOCX
             from flask import Response
-            response = Response(pdf_content, mimetype='application/pdf')
+            response = Response(docx_content, mimetype='application/vnd.openxmlformats-officedocument.wordprocessingml.document')
             response.headers['Content-Disposition'] = f'attachment; filename={nome_arquivo}'
             
             return response
             
-        except Exception as pdf_error:
-            logging.error(f"Erro ao gerar PDF com ReportLab: {str(pdf_error)}")
+        except Exception as docx_error:
+            logging.error(f"Erro ao gerar DOCX com template: {str(docx_error)}")
             
-            # Fallback: retornar HTML se PDF falhar
-            logging.warning("Falha na geração do PDF, retornando HTML como fallback")
-            
-            # Preparar nome do arquivo com o nome da avaliação
-            nome_avaliacao = test.title.replace(' ', '_').replace('/', '_').replace('\\', '_').replace(':', '_').replace('?', '_').replace('*', '_').replace('"', '_').replace('<', '_').replace('>', '_').replace('|', '_')
-            nome_arquivo = f"relatorio_{nome_avaliacao}.html"
-            
-            from flask import Response
-            response = Response(html_content, mimetype='text/html')
-            response.headers['Content-Disposition'] = f'inline; filename={nome_arquivo}'
-            
-            return response
+            # Fallback: retornar erro se DOCX falhar
+            return jsonify({"error": "Erro ao gerar relatório DOCX", "details": str(docx_error)}), 500
         
     except Exception as e:
-        logging.error(f"Erro ao gerar relatório PDF: {str(e)}")
+        logging.error(f"Erro ao gerar relatório DOCX: {str(e)}")
         return jsonify({"error": "Erro interno do servidor", "details": str(e)}), 500
 
 
@@ -701,409 +696,879 @@ def _preparar_dados_template(test: Test, total_alunos: Dict, niveis_aprendizagem
     }
 
 
-def _preparar_dados_template_pdf(test: Test, total_alunos: Dict, niveis_aprendizagem: Dict, 
+def _preparar_dados_template_word(test: Test, total_alunos: Dict, niveis_aprendizagem: Dict, 
                                proficiencia: Dict, nota_geral: Dict, acertos_habilidade: Dict, 
-                               ai_analysis: Dict) -> Dict[str, Any]:
-    """Prepara os dados para o template Jinja2 do PDF (com dados extras)"""
+                               ai_analysis: Dict, avaliacao_data: Dict) -> Dict[str, Any]:
+    """Prepara os dados para o template Word com docxtpl"""
     
-    # Usar a função base para obter dados comuns
-    dados_base = _preparar_dados_template(test, total_alunos, niveis_aprendizagem, 
-                                        proficiencia, nota_geral, acertos_habilidade)
+    # Obter informações da escola e município
+    escola_nome = "Escola não identificada"
+    municipio_nome = "Município não identificado"
+    uf = "AL"
     
-    # Adicionar dados extras específicos para o PDF
-    dados_extras = _obter_dados_extras_pdf(test, total_alunos)
-    
-    # Adicionar dados específicos do novo template
-    dados_template = _preparar_dados_template_novo(test, total_alunos, proficiencia, nota_geral, acertos_habilidade)
-    
-    # Combinar todos os dados incluindo a IA e níveis de aprendizagem
-    dados_completos = {**dados_base, **dados_extras, **dados_template, **ai_analysis}
-    
-    # Adicionar dados de níveis de aprendizagem se disponíveis
-    if 'niveis_aprendizagem' in dados_base:
-        dados_completos['niveis_aprendizagem'] = dados_base['niveis_aprendizagem']
-    
-    return dados_completos
-
-
-def _obter_dados_extras_pdf(test: Test, total_alunos: Dict) -> Dict[str, Any]:
-    """Obtém dados extras necessários para o template do PDF"""
-    
-    # Obter informações detalhadas da escola
-    escola_info = _obter_info_escola_detalhada(test)
-    
-    # Obter informações do município
-    municipio_info = _obter_info_municipio_detalhada(test)
-    
-    # Obter estatísticas adicionais
-    estatisticas_extras = _obter_estatisticas_extras(test, total_alunos)
-    
-    return {
-        'escola_info': escola_info,
-        'municipio_info': municipio_info,
-        'estatisticas_extras': estatisticas_extras
-    }
-
-
-def _obter_info_escola_detalhada(test: Test) -> Dict[str, Any]:
-    """Obtém informações detalhadas da escola"""
     try:
+        # Buscar primeira turma para obter escola e município
         if test.class_tests:
             first_class_test = test.class_tests[0]
             first_class = Class.query.get(first_class_test.class_id)
             if first_class and first_class.school:
-                school = first_class.school
-                return {
-                    'nome': school.name,
-                    'codigo': school.code if hasattr(school, 'code') else 'N/A',
-                    'endereco': school.address if hasattr(school, 'address') else 'Endereço não informado',
-                    'telefone': school.phone if hasattr(school, 'phone') else 'Telefone não informado',
-                    'email': school.email if hasattr(school, 'email') else 'Email não informado'
-                }
+                escola_nome = first_class.school.name
+                if first_class.school.city:
+                    municipio_nome = first_class.school.city.name
+                    uf = first_class.school.city.state or "AL"
     except Exception as e:
-        logging.warning(f"Erro ao obter informações da escola: {str(e)}")
+        logging.warning(f"Erro ao obter dados da escola/município: {str(e)}")
     
-    return {
-        'nome': 'Escola não identificada',
-        'codigo': 'N/A',
-        'endereco': 'Endereço não informado',
-        'telefone': 'Telefone não informado',
-        'email': 'Email não informado'
-    }
-
-
-def _obter_info_municipio_detalhada(test: Test) -> Dict[str, Any]:
-    """Obtém informações detalhadas do município"""
-    try:
-        if test.class_tests:
-            first_class_test = test.class_tests[0]
-            first_class = Class.query.get(first_class_test.class_id)
-            if first_class and first_class.school and first_class.school.city:
-                city = first_class.school.city
-                return {
-                    'nome': city.name,
-                    'estado': city.state or 'AL',
-                    'regiao': city.region if hasattr(city, 'region') else 'Região não informada',
-                    'populacao': city.population if hasattr(city, 'population') else 'População não informada'
-                }
-    except Exception as e:
-        logging.warning(f"Erro ao obter informações do município: {str(e)}")
+    # Determinar período atual
+    from datetime import datetime
+    now = datetime.now()
+    mes_atual = now.strftime("%B").upper()
+    ano_atual = now.year
+    periodo = f"{ano_atual}.1"
     
-    return {
-        'nome': 'Município não identificado',
-        'estado': 'AL',
-        'regiao': 'Região não informada',
-        'populacao': 'População não informada'
+    # Dados básicos do template
+    dados_base = {
+        'periodo': periodo,
+        'municipio': municipio_nome,
+        'uf': uf,
+        'escola': escola_nome,
+        'mes': mes_atual,
+        'ano': ano_atual,
+        'total_alunos': total_alunos.get('total_geral', {}).get('avaliados', 0),
+        'percentual_avaliados': total_alunos.get('total_geral', {}).get('percentual', 0),
+        'disciplinas': ', '.join(avaliacao_data.get('disciplinas', ['Disciplina Geral']))
     }
+    
+    # Dados do sumário
+    dados_sumario = {
+        'sumario_p1': 'Este relatório apresenta os resultados da avaliação educacional realizada no período de 2024.',
+        'sumario_p2': 'A avaliação abrangeu múltiplas disciplinas e habilidades dos estudantes.',
+        'sumario_p3': 'Os resultados demonstram o progresso e as áreas de melhoria necessárias.',
+        'sumario_p4': 'Recomendações específicas são apresentadas para otimizar o aprendizado.',
+        'sumario_p41': 'Os dados apresentados refletem o desempenho real dos estudantes.',
+        'sumario_p42': 'Análises detalhadas por disciplina foram realizadas.',
+        'sumario_p43': 'Comparações com médias municipais foram incluídas.',
+        'sumario_p44': 'Recomendações pedagógicas específicas foram elaboradas.'
+    }
+    
+    # Dados de participação
+    dados_participacao = _preparar_dados_participacao(total_alunos)
+    
+    # Dados de níveis de aprendizagem
+    dados_niveis = _preparar_dados_niveis(niveis_aprendizagem)
+    
+    # Dados de proficiência
+    dados_proficiencia = _preparar_dados_proficiencia_word(proficiencia)
+    
+    # Dados de notas
+    dados_notas = _preparar_dados_notas_word(nota_geral)
+    
+    # Dados de habilidades
+    dados_habilidades = _preparar_dados_habilidades_word(acertos_habilidade)
+    
+    # Dados de análise da IA
+    dados_ia = _preparar_dados_ia(ai_analysis, {
+        "total_alunos": total_alunos,
+        "niveis_aprendizagem": niveis_aprendizagem,
+        "proficiencia": proficiencia,
+        "nota_geral": nota_geral,
+        "acertos_por_habilidade": acertos_habilidade
+    })
+    
+    # Combinar todos os dados
+    dados_completos = {
+        **dados_base,
+        **dados_sumario,
+        **dados_participacao,
+        **dados_niveis,
+        **dados_proficiencia,
+        **dados_notas,
+        **dados_habilidades,
+        **dados_ia
+    }
+    
+    return dados_completos
 
 
-def _obter_estatisticas_extras(test: Test, total_alunos: Dict) -> Dict[str, Any]:
-    """Obtém estatísticas extras para o PDF"""
+def _preparar_dados_participacao(total_alunos: Dict) -> Dict[str, Any]:
+    """Prepara dados de participação para o template"""
     try:
         total_geral = total_alunos.get('total_geral', {})
         
-        # Calcular estatísticas adicionais
-        total_turmas = len(test.class_tests) if test.class_tests else 0
-        total_escolas = len(set(ct.class_.school_id for ct in test.class_tests if ct.class_ and ct.class_.school_id)) if test.class_tests else 0
-        
-        # Calcular taxas
-        taxa_participacao = total_geral.get('percentual', 0)
-        taxa_ausencia = 100 - taxa_participacao if taxa_participacao else 0
-        
         return {
-            'total_turmas': total_turmas,
-            'total_escolas': total_escolas,
-            'taxa_participacao': taxa_participacao,
-            'taxa_ausencia': taxa_ausencia,
-            'data_geracao': datetime.now().strftime("%d/%m/%Y às %H:%M"),
-            'periodo_avaliacao': test.created_at.strftime("%B/%Y") if test.created_at else "Período não informado"
-        }
-    except Exception as e:
-        logging.warning(f"Erro ao obter estatísticas extras: {str(e)}")
-        return {
-            'total_turmas': 0,
-            'total_escolas': 0,
-            'taxa_participacao': 0,
-            'taxa_ausencia': 0,
-            'data_geracao': datetime.now().strftime("%d/%m/%Y às %H:%M"),
-            'periodo_avaliacao': "Período não informado"
-        }
-
-
-def _preparar_dados_template_novo(test: Test, total_alunos: Dict, proficiencia: Dict, nota_geral: Dict, acertos_habilidade: Dict) -> Dict[str, Any]:
-    """Prepara dados específicos para o novo template"""
-    try:
-        total_geral = total_alunos.get('total_geral', {})
-        
-        # Dados básicos do sumário
-        sumario_data = {
-            'sumario_p1': '3',
-            'sumario_p2': '3', 
-            'sumario_p3': '4',
-            'sumario_p4': '4',
-            'sumario_p41': '4-5',
-            'sumario_p42': '5-6',
-            'sumario_p43': '6-7',
-            'sumario_p44': '7-8',
-            'sumario_p45': '8-9',
-            'sumario_p5': '9'
-        }
-        
-        # Dados da apresentação
-        apresentacao_data = {
-            'simulados_label': '1º Simulado',
-            'referencia': '9º de 2025',
-            'escola_extenso': 'ESCOLA MUNICIPAL DE EDUCAÇÃO BÁSICA MONSENHOR HILDEBRANDO',
-            'total_avaliados': total_geral.get('avaliados', 0),
-            'percentual_avaliados': f"{total_geral.get('percentual', 0)}%"
-        }
-        
-        # Dados das considerações gerais
-        consideracoes_data = {
-            'qtd_questoes_anuladas': 2,
-            'serie_alvo': '9º ano',
-            'questoes_anuladas': '10 e 11',
-            'ordens_avaliacao': '36ª e 37ª'
-        }
-        
-        # Dados da participação
-        participacao_data = {
-            'total_avaliados': total_geral.get('avaliados', 0),
             'total_matriculados': total_geral.get('matriculados', 0),
+            'total_avaliados': total_geral.get('avaliados', 0),
             'total_faltosos': total_geral.get('faltosos', 0),
-            'percentual_avaliados': f"{total_geral.get('percentual', 0)}%",
-            'serie_titulo': '9º ANO'
+            'percentual_avaliados': total_geral.get('percentual', 0),
+            'participacao_por_turma': total_alunos.get('por_turma', []),
+            'total_alunos': total_geral.get('avaliados', 0)
         }
-        
-        # Dados de proficiência
-        prof_data = _preparar_dados_proficiencia(proficiencia)
-        
-        # Dados de notas
-        notas_data = _preparar_dados_notas(nota_geral)
-        
-        # Dados de habilidades
-        habilidades_data = _preparar_dados_habilidades(acertos_habilidade)
-        
-        # Dados municipais para comparação
-        municipais_data = {
-            'municipal_media': '265,00',  # Média municipal de proficiência
-            'municipal_nota_media': '5,50'  # Média municipal de notas
-        }
-        
-        return {
-            **sumario_data,
-            **apresentacao_data,
-            **consideracoes_data,
-            **participacao_data,
-            **prof_data,
-            **notas_data,
-            **habilidades_data,
-            **municipais_data
-        }
-        
     except Exception as e:
-        logging.warning(f"Erro ao preparar dados do novo template: {str(e)}")
+        logging.warning(f"Erro ao preparar dados de participação: {str(e)}")
         return {}
 
 
-def _preparar_dados_proficiencia(proficiencia: Dict) -> Dict[str, Any]:
-    """Prepara dados de proficiência para o template"""
+def _preparar_dados_niveis(niveis_aprendizagem: Dict) -> Dict[str, Any]:
+    """Prepara dados de níveis de aprendizagem para o template"""
     try:
-        # Valores padrão
-        prof_lp_media = '298,86'
-        prof_mat_media = '268,29'
-        prof_lp_saeb = '272,19'
-        prof_mat_saeb = '293,55'
+        dados_niveis = {}
         
-        # Tentar extrair dados reais
-        if proficiencia and 'por_disciplina' in proficiencia:
-            disciplinas = proficiencia['por_disciplina']
-            
-            # Buscar Língua Portuguesa
-            for disciplina, dados in disciplinas.items():
-                if 'portuguesa' in disciplina.lower() or 'língua' in disciplina.lower():
-                    prof_lp_media = f"{dados.get('media_geral', 298.86):.2f}".replace('.', ',')
-                elif 'matemática' in disciplina.lower() or 'matematica' in disciplina.lower():
-                    prof_mat_media = f"{dados.get('media_geral', 268.29):.2f}".replace('.', ',')
+        for disciplina, dados in niveis_aprendizagem.items():
+            if disciplina != 'GERAL':
+                dados_niveis[f'niveis_{disciplina.lower().replace(" ", "_")}'] = dados.get('por_turma', [])
         
-        # Preparar dados de proficiência por turma
-        proficiencia_turmas = []
-        if proficiencia and 'por_disciplina' in proficiencia:
-            disciplinas = proficiencia['por_disciplina']
-            
-            # Buscar dados por turma
-            for disciplina, dados in disciplinas.items():
-                if disciplina == 'GERAL' and 'por_turma' in dados:
-                    for turma in dados['por_turma']:
-                        proficiencia_turmas.append({
-                            'serie_turno': turma.get('turma', 'Turma'),
-                            'lp': turma.get('proficiencia', 0),
-                            'mat': turma.get('proficiencia', 0),  # Mesmo valor para ambas disciplinas
-                            'media': turma.get('proficiencia', 0)
-                        })
+        # Dados gerais
+        dados_niveis['niveis_geral'] = niveis_aprendizagem.get('GERAL', {}).get('por_turma', [])
+        
+        return dados_niveis
+        
+    except Exception as e:
+        logging.warning(f"Erro ao preparar dados de níveis: {str(e)}")
+        return {}
+
+
+def _preparar_dados_proficiencia_word(proficiencia: Dict) -> Dict[str, Any]:
+    """Prepara dados de proficiência para o template Word"""
+    try:
+        disciplinas = proficiencia.get('por_disciplina', {})
+        
+        # Lista de disciplinas disponíveis
+        proficiencia_disciplinas = []
+        for disciplina in disciplinas.keys():
+            if disciplina != 'GERAL':
+                proficiencia_disciplinas.append(disciplina)
+        
+        # Dados por série/turma
+        proficiencia_series = []
+        
+        # Verificar se há dados gerais
+        if 'GERAL' in disciplinas and 'por_turma' in disciplinas['GERAL']:
+            for turma in disciplinas['GERAL']['por_turma']:
+                serie_data = {'serie_turno': turma.get('turma', 'Turma')}
+                
+                # Adicionar proficiência por disciplina
+                for disciplina in proficiencia_disciplinas:
+                    if disciplina in disciplinas and 'por_turma' in disciplinas[disciplina]:
+                        # Buscar proficiência desta turma nesta disciplina
+                        for turma_disc in disciplinas[disciplina]['por_turma']:
+                            if turma_disc.get('turma') == turma.get('turma'):
+                                serie_data[disciplina] = turma_disc.get('proficiencia', 0)
+                                break
+                        else:
+                            serie_data[disciplina] = 0
+                    else:
+                        serie_data[disciplina] = 0
+                
+                # Adicionar média municipal
+                serie_data['MUNICIPAL'] = proficiencia.get('media_municipal_por_disciplina', {}).get('GERAL', 0)
+                proficiencia_series.append(serie_data)
+        else:
+            # Se não há dados gerais, criar dados básicos
+            logging.warning("Dados gerais de proficiência não encontrados")
+            proficiencia_series = []
         
         return {
-            'prof_lp_media': prof_lp_media,
-            'prof_mat_media': prof_mat_media,
-            'prof_lp_saeb': prof_lp_saeb,
-            'prof_mat_saeb': prof_mat_saeb,
-            'proficiencia': proficiencia_turmas
+            'proficiencia_disciplinas': proficiencia_disciplinas,
+            'proficiencia_series': proficiencia_series
         }
         
     except Exception as e:
         logging.warning(f"Erro ao preparar dados de proficiência: {str(e)}")
         return {
-            'prof_lp_media': '298,86',
-            'prof_mat_media': '268,29',
-            'prof_lp_saeb': '272,19',
-            'prof_mat_saeb': '293,55',
-            'proficiencia': []
+            'proficiencia_disciplinas': [],
+            'proficiencia_series': []
         }
 
 
-def _preparar_dados_notas(nota_geral: Dict) -> Dict[str, Any]:
-    """Prepara dados de notas para o template"""
+def _preparar_dados_notas_word(nota_geral: Dict) -> Dict[str, Any]:
+    """Prepara dados de notas para o template Word"""
     try:
-        # Valores padrão
-        media_geral = '6,31'
-        media_lp = '6,77'
-        media_mat = '5,85'
-        saeb_nota_ref = '6,1'
-        label_media_municipal = 'MUNICIPAL'
+        disciplinas = nota_geral.get('por_disciplina', {})
         
-        # Tentar extrair dados reais
-        if nota_geral and 'por_disciplina' in nota_geral:
-            disciplinas = nota_geral['por_disciplina']
-            
-            # Buscar Língua Portuguesa e Matemática
-            for disciplina, dados in disciplinas.items():
-                if 'portuguesa' in disciplina.lower() or 'língua' in disciplina.lower():
-                    media_lp = f"{dados.get('media_geral', 6.77):.2f}".replace('.', ',')
-                elif 'matemática' in disciplina.lower() or 'matematica' in disciplina.lower():
-                    media_mat = f"{dados.get('media_geral', 5.85):.2f}".replace('.', ',')
-            
-            # Calcular média geral
-            medias = []
-            for disciplina, dados in disciplinas.items():
-                if disciplina != 'GERAL':
-                    medias.append(dados.get('media_geral', 0))
-            
-            if medias:
-                media_geral = f"{sum(medias) / len(medias):.2f}".replace('.', ',')
+        # Lista de disciplinas disponíveis
+        notas_disciplinas = []
+        for disciplina in disciplinas.keys():
+            if disciplina != 'GERAL':
+                notas_disciplinas.append(disciplina)
         
-        # Preparar dados de notas por turma
-        notas_turmas = []
-        if nota_geral and 'por_disciplina' in nota_geral:
-            disciplinas = nota_geral['por_disciplina']
-            
-            # Buscar dados por turma
-            for disciplina, dados in disciplinas.items():
-                if disciplina == 'GERAL' and 'por_turma' in dados:
-                    for turma in dados['por_turma']:
-                        notas_turmas.append({
-                            'serie_turno': turma.get('turma', 'Turma'),
-                            'lp': turma.get('nota', 0),
-                            'mat': turma.get('nota', 0),  # Mesmo valor para ambas disciplinas
-                            'media': turma.get('nota', 0)
-                        })
+        # Dados por série/turma
+        notas_series = []
+        
+        # Verificar se há dados gerais
+        if 'GERAL' in disciplinas and 'por_turma' in disciplinas['GERAL']:
+            for turma in disciplinas['GERAL']['por_turma']:
+                serie_data = {'serie_turno': turma.get('turma', 'Turma')}
+                
+                # Adicionar nota por disciplina
+                for disciplina in notas_disciplinas:
+                    if disciplina in disciplinas and 'por_turma' in disciplinas[disciplina]:
+                        # Buscar nota desta turma nesta disciplina
+                        for turma_disc in disciplinas[disciplina]['por_turma']:
+                            if turma_disc.get('turma') == turma.get('turma'):
+                                serie_data[disciplina] = turma_disc.get('nota', 0)
+                                break
+                        else:
+                            serie_data[disciplina] = 0
+                    else:
+                        serie_data[disciplina] = 0
+                
+                # Adicionar média municipal
+                serie_data['MUNICIPAL'] = nota_geral.get('media_municipal_por_disciplina', {}).get('GERAL', 0)
+                notas_series.append(serie_data)
+        else:
+            # Se não há dados gerais, criar dados básicos
+            logging.warning("Dados gerais de notas não encontrados")
+            notas_series = []
         
         return {
-            'media_geral': media_geral,
-            'media_lp': media_lp,
-            'media_mat': media_mat,
-            'saeb_nota_ref': saeb_nota_ref,
-            'label_media_municipal': label_media_municipal,
-            'notas': notas_turmas
+            'notas_disciplinas': notas_disciplinas,
+            'notas_series': notas_series
         }
         
     except Exception as e:
         logging.warning(f"Erro ao preparar dados de notas: {str(e)}")
         return {
-            'media_geral': '6,31',
-            'media_lp': '6,77',
-            'media_mat': '5,85',
-            'saeb_nota_ref': '6,1',
-            'label_media_municipal': 'MUNICIPAL',
-            'notas': []
+            'notas_disciplinas': [],
+            'notas_series': []
         }
 
 
-def _preparar_dados_habilidades(acertos_habilidade: Dict) -> Dict[str, Any]:
-    """Prepara dados de habilidades para o template"""
+def _preparar_dados_habilidades_word(acertos_habilidade: Dict) -> Dict[str, Any]:
+    """Prepara dados de habilidades para o template Word"""
     try:
-        lp_habilidades = []
-        mat_habilidades = []
-        lp_dentro_meta = []
-        lp_abaixo_meta = []
-        mat_dentro_meta = []
-        mat_abaixo_meta = []
+        dados_habilidades = {}
         
-        if acertos_habilidade:
-            # Processar Língua Portuguesa
-            for disciplina, dados in acertos_habilidade.items():
-                if 'portuguesa' in disciplina.lower() or 'língua' in disciplina.lower():
-                    if 'habilidades' in dados:
-                        for habilidade in dados['habilidades']:
-                            lp_habilidades.append({
-                                'questao': habilidade.get('questoes', [{}])[0].get('numero', 'N/A') if habilidade.get('questoes') else 'N/A',
-                                'codigo': habilidade.get('codigo', 'N/A'),
-                                'percentual': habilidade.get('percentual', 0)
-                            })
-                            
-                            # Separar por meta
-                            percentual_val = habilidade.get('percentual', 0)
-                            try:
-                                percentual_val = float(percentual_val)
-                            except (ValueError, TypeError):
-                                logging.warning(f"Could not convert percentual '{percentual_val}' to float. Defaulting to 0.0.")
-                                percentual_val = 0.0
-                            
-                            if percentual_val >= 70:
-                                lp_dentro_meta.append(f"<strong>{habilidade.get('codigo', 'N/A')}</strong> - {habilidade.get('percentual', 0):.1f}%")
-                            else:
-                                lp_abaixo_meta.append(f"<strong>{habilidade.get('codigo', 'N/A')}</strong> - {habilidade.get('percentual', 0):.1f}%")
-                
-                elif 'matemática' in disciplina.lower() or 'matematica' in disciplina.lower():
-                    if 'habilidades' in dados:
-                        for habilidade in dados['habilidades']:
-                            mat_habilidades.append({
-                                'questao': habilidade.get('questoes', [{}])[0].get('numero', 'N/A') if habilidade.get('questoes') else 'N/A',
-                                'codigo': habilidade.get('codigo', 'N/A'),
-                                'percentual': habilidade.get('percentual', 0)
-                            })
-                            
-                            # Separar por meta
-                            percentual_val = habilidade.get('percentual', 0)
-                            try:
-                                percentual_val = float(percentual_val)
-                            except (ValueError, TypeError):
-                                logging.warning(f"Could not convert percentual '{percentual_val}' to float. Defaulting to 0.0.")
-                                percentual_val = 0.0
-                            
-                            if percentual_val >= 70:
-                                mat_dentro_meta.append(f"<strong>{habilidade.get('codigo', 'N/A')}</strong> - {habilidade.get('percentual', 0):.1f}%")
-                            else:
-                                mat_abaixo_meta.append(f"<strong>{habilidade.get('codigo', 'N/A')}</strong> - {habilidade.get('percentual', 0):.1f}%")
+        for disciplina, dados in acertos_habilidade.items():
+            if disciplina != 'GERAL':
+                dados_habilidades[f'habilidades_{disciplina.lower().replace(" ", "_")}'] = dados.get('habilidades', [])
         
-        return {
-            'lp_habilidades': lp_habilidades,
-            'mat_habilidades': mat_habilidades,
-            'lp_dentro_meta': lp_dentro_meta,
-            'lp_abaixo_meta': lp_abaixo_meta,
-            'mat_dentro_meta': mat_dentro_meta,
-            'mat_abaixo_meta': mat_abaixo_meta
-        }
+        # Dados gerais
+        dados_habilidades['habilidades_geral'] = acertos_habilidade.get('GERAL', {}).get('habilidades', [])
+        
+        return dados_habilidades
         
     except Exception as e:
         logging.warning(f"Erro ao preparar dados de habilidades: {str(e)}")
+        return {}
+
+
+def _preparar_dados_ia(ai_analysis: Dict, template_data: Dict) -> Dict[str, Any]:
+    """Prepara dados de análise da IA para o template com análises inteligentes baseadas nos dados"""
+    try:
+        # Gerar análises inteligentes baseadas nos dados das tabelas
+        analise_participacao = _gerar_analise_participacao(template_data)
+        analise_proficiencia = _gerar_analise_proficiencia(template_data)
+        analise_nota_geral = _gerar_analise_notas(template_data)
+        analise_acertos_por_habilidade = _gerar_analise_habilidades(template_data)
+        
+        # Análise geral combinada
+        analises = []
+        if analise_participacao:
+            analises.append(f"Participação: {analise_participacao}")
+        if analise_proficiencia:
+            analises.append(f"Proficiência: {analise_proficiencia}")
+        if analise_nota_geral:
+            analises.append(f"Notas: {analise_nota_geral}")
+        if analise_acertos_por_habilidade:
+            analises.append(f"Habilidades: {analise_acertos_por_habilidade}")
+        
+        analise_completa = ' '.join(analises) if analises else 'Análise não disponível.'
+        
         return {
-            'lp_habilidades': [],
-            'mat_habilidades': [],
-            'lp_dentro_meta': [],
-            'lp_abaixo_meta': [],
-            'mat_dentro_meta': [],
-            'mat_abaixo_meta': []
+            'analise_ia': analise_completa,
+            'analise_IA_participacao': analise_participacao,
+            'analise_IA_proficiencia': analise_proficiencia,
+            'analise_IA_nota': analise_nota_geral,
+            'analise_IA_acertos': analise_acertos_por_habilidade,
+            'consideracoes_finais': 'Com base na análise dos dados, recomenda-se atenção especial às áreas identificadas como críticas e continuidade no desenvolvimento das habilidades que apresentaram melhor desempenho.'
         }
+    except Exception as e:
+        logging.warning(f"Erro ao preparar dados da IA: {str(e)}")
+        return {
+            'analise_ia': 'Análise não disponível.',
+            'analise_IA_participacao': 'Análise de participação não disponível.',
+            'analise_IA_proficiencia': 'Análise de proficiência não disponível.',
+            'analise_IA_nota': 'Análise de notas não disponível.',
+            'analise_IA_acertos': 'Análise de habilidades não disponível.',
+            'consideracoes_finais': 'Relatório gerado automaticamente pelo sistema.'
+        }
+
+
+def _gerar_docx_com_template(template_data: Dict[str, Any]) -> bytes:
+    """Gera arquivo DOCX usando o template Word com docxtpl"""
+    
+    try:
+        # Caminho para o template funcionando com formatação profissional
+        template_path = os.path.join(os.path.dirname(__file__), '..', 'templates', 'templateDoc_working.docx')
+        
+        if not os.path.exists(template_path):
+            raise FileNotFoundError(f"Template não encontrado em: {template_path}")
+        
+        # Carregar template
+        doc = DocxTemplate(template_path)
+        
+        # Preparar contexto com dados
+        context = _preparar_contexto_docxtpl(doc, template_data)
+        
+        # Renderizar template
+        doc.render(context)
+        
+        # Salvar em buffer
+        buffer = BytesIO()
+        doc.save(buffer)
+        buffer.seek(0)
+        
+        return buffer.getvalue()
+        
+    except Exception as e:
+        logging.error(f"Erro ao gerar DOCX: {str(e)}")
+        raise
+
+
+def _preparar_contexto_docxtpl(doc: DocxTemplate, template_data: Dict[str, Any]) -> Dict[str, Any]:
+    """Prepara o contexto para o template docxtpl"""
+    
+    context = {}
+    
+    # Função para criar tabelas com formatação
+    def make_table(headers, rows, table_type="default"):
+        sub = doc.new_subdoc()
+        t = sub.add_table(rows=1, cols=len(headers))
+        
+        # Configurar largura das colunas
+        for col in t.columns:
+            col.width = Mm(30)  # 30mm por coluna
+        
+        # Formatar cabeçalho
+        header_row = t.rows[0]
+        for j, h in enumerate(headers):
+            cell = header_row.cells[j]
+            cell.text = str(h)
+            
+            # Aplicar formatação específica por tipo de tabela
+            if table_type == "participacao":
+                # Cabeçalho azul escuro com texto branco
+                cell._tc.get_or_add_tcPr().append(parse_xml(f'<w:shd xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" w:fill="0B2A56" w:val="clear"/>'))
+                for paragraph in cell.paragraphs:
+                    for run in paragraph.runs:
+                        run.font.color.rgb = RGBColor(255, 255, 255)
+                        run.font.bold = True
+                        run.font.size = Pt(10)
+                        paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
+            elif table_type == "niveis":
+                # Cores específicas para cada coluna de níveis
+                colors = ["1F4E79", "C00000", "FFC000", "70AD47", "00B050"]
+                if j < len(colors):
+                    cell._tc.get_or_add_tcPr().append(parse_xml(f'<w:shd xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" w:fill="{colors[j]}" w:val="clear"/>'))
+                    for paragraph in cell.paragraphs:
+                        for run in paragraph.runs:
+                            run.font.bold = True
+                            run.font.size = Pt(10)
+                            if j == 0:  # Primeira coluna
+                                run.font.color.rgb = RGBColor(0, 0, 0)
+                            else:  # Outras colunas
+                                run.font.color.rgb = RGBColor(255, 255, 255)
+                            paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
+            elif table_type in ["proficiencia", "notas"]:
+                # Cabeçalho azul escuro com texto branco
+                cell._tc.get_or_add_tcPr().append(parse_xml(f'<w:shd xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" w:fill="002060" w:val="clear"/>'))
+                for paragraph in cell.paragraphs:
+                    for run in paragraph.runs:
+                        run.font.color.rgb = RGBColor(255, 255, 255)
+                        run.font.bold = True
+                        run.font.size = Pt(10)
+                        paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
+            elif table_type == "habilidades":
+                # Cabeçalho azul escuro com texto branco
+                cell._tc.get_or_add_tcPr().append(parse_xml(f'<w:shd xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" w:fill="002060" w:val="clear"/>'))
+                for paragraph in cell.paragraphs:
+                    for run in paragraph.runs:
+                        run.font.color.rgb = RGBColor(255, 255, 255)
+                        run.font.bold = True
+                        run.font.size = Pt(10)
+                        paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        
+        # Adicionar linhas de dados
+        for i, r in enumerate(rows):
+            row = t.add_row().cells
+            
+            # Aplicar fundo alternado para proficiência e notas
+            if table_type in ["proficiencia", "notas"] and i % 2 == 0:
+                row_bg_color = "F2F2F2"  # Cinza claro
+            else:
+                row_bg_color = "FFFFFF"  # Branco
+            
+            for j, val in enumerate(r):
+                cell = row[j]
+                cell.text = str(val)
+                
+                # Formatar células de dados
+                if table_type == "participacao":
+                    # Primeira coluna em negrito
+                    if j == 0:
+                        for paragraph in cell.paragraphs:
+                            for run in paragraph.runs:
+                                run.font.bold = True
+                    # Outras colunas alinhadas à direita
+                    else:
+                        for paragraph in cell.paragraphs:
+                            paragraph.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+                
+                elif table_type == "niveis":
+                    # Primeira coluna em negrito
+                    if j == 0:
+                        for paragraph in cell.paragraphs:
+                            for run in paragraph.runs:
+                                run.font.bold = True
+                    # Outras colunas centralizadas
+                    else:
+                        for paragraph in cell.paragraphs:
+                            paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                
+                elif table_type in ["proficiencia", "notas"]:
+                    # Aplicar fundo alternado
+                    cell._tc.get_or_add_tcPr().append(parse_xml(f'<w:shd xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" w:fill="{row_bg_color}" w:val="clear"/>'))
+                    # Primeira coluna em negrito
+                    if j == 0:
+                        for paragraph in cell.paragraphs:
+                            for run in paragraph.runs:
+                                run.font.bold = True
+                    # Outras colunas alinhadas à direita
+                    else:
+                        for paragraph in cell.paragraphs:
+                            paragraph.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+                
+                elif table_type == "habilidades":
+                    # Primeira coluna em negrito
+                    if j == 0:
+                        for paragraph in cell.paragraphs:
+                            for run in paragraph.runs:
+                                run.font.bold = True
+                    # Outras colunas centralizadas
+                    else:
+                        for paragraph in cell.paragraphs:
+                            paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        
+        # Aplicar bordas a todas as células
+        for row in t.rows:
+            for cell in row.cells:
+                cell._tc.get_or_add_tcPr().append(parse_xml('<w:tcBorders xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:top w:val="single" w:sz="4" w:space="0" w:color="000000"/><w:left w:val="single" w:sz="4" w:space="0" w:color="000000"/><w:bottom w:val="single" w:sz="4" w:space="0" w:color="000000"/><w:right w:val="single" w:sz="4" w:space="0" w:color="000000"/></w:tcBorders>'))
+        
+        return sub
+    
+    # Função para dividir listas em chunks
+    def chunk(lst, n): 
+        return [lst[i:i+n] for i in range(0, len(lst), n)]
+    
+    # Função para construir tabelas multicolunas
+    def build_multicol(series, disciplinas, max_cols=3, incluir_media=True, incluir_municipal=True, table_type="default"):
+        subs = []
+        for cols in chunk(disciplinas, max_cols):
+            headers = ["SÉRIE/TURNO"] + cols + (["MÉDIA"] if incluir_media else []) + (["MUNICIPAL"] if incluir_municipal else [])
+            rows = []
+            for s in series:
+                linha = [s["serie_turno"]]
+                soma = cont = 0
+                for c in cols:
+                    v = s.get(c, ""); 
+                    linha.append(v)
+                    if isinstance(v, (int, float)): 
+                        soma += v; 
+                        cont += 1
+                if incluir_media: 
+                    linha.append(round(soma/cont, 2) if cont else "")
+                if incluir_municipal: 
+                    linha.append(s.get("MUNICIPAL", ""))
+                rows.append(linha)
+            
+            # Adicionar linha total
+            if rows:
+                total_row = ["9º GERAL"]
+                for j in range(1, len(headers)):
+                    if j == 1:  # Primeira coluna de dados
+                        valores = [r[j] for r in rows if isinstance(r[j], (int, float))]
+                        total = sum(valores) / len(valores) if valores else 0
+                        total_row.append(round(total, 2))
+                    elif j == len(headers) - 2 and incluir_media:  # Coluna MÉDIA
+                        valores = [r[j] for r in rows if isinstance(r[j], (int, float))]
+                        total = sum(valores) / len(valores) if valores else 0
+                        total_row.append(round(total, 2))
+                    elif j == len(headers) - 1 and incluir_municipal:  # Coluna MUNICIPAL
+                        total_row.append("")  # Vazia para linha total
+                    else:
+                        valores = [r[j] for r in rows if isinstance(r[j], (int, float))]
+                        total = sum(valores) / len(valores) if valores else 0
+                        total_row.append(round(total, 2))
+                rows.append(total_row)
+            
+            subs.append(make_table(headers, rows, table_type))
+        return subs
+    
+    # 1. Tabela de participação
+    if template_data.get("participacao_por_turma"):
+        headers = ["SÉRIE/TURNO", "MATRICULADOS", "AVALIADOS", "PERCENTUAL", "FALTOSOS"]
+        rows = []
+        for p in template_data["participacao_por_turma"]:
+            rows.append([
+                p.get("turma", ""),
+                p.get("matriculados", 0),
+                p.get("avaliados", 0),
+                f"{p.get('percentual', 0)}%",
+                p.get("faltosos", 0)
+            ])
+        
+        # Adicionar linha total
+        rows.append([
+            "9º GERAL",
+            template_data.get("total_matriculados", 0),
+            template_data.get("total_avaliados", 0),
+            f"{template_data.get('percentual_avaliados', 0)}%",
+            template_data.get("total_faltosos", 0)
+        ])
+        
+        context["tabela_participacao"] = make_table(headers, rows, "participacao")
+    
+    # 2. Blocos de níveis de aprendizagem
+    context["blocos_niveis"] = _construir_blocos_niveis(doc, template_data)
+    
+    # 3. Tabelas de proficiência
+    if template_data.get("proficiencia_disciplinas") and template_data.get("proficiencia_series"):
+        subs_prof = build_multicol(
+            template_data["proficiencia_series"], 
+            template_data["proficiencia_disciplinas"],
+            table_type="proficiencia"
+        )
+        context["tabela_proficiencia_1"] = subs_prof[0] if subs_prof else doc.new_subdoc()
+        context["tabela_proficiencia_2"] = subs_prof[1] if len(subs_prof) > 1 else doc.new_subdoc()
+    
+    # 4. Tabelas de notas
+    if template_data.get("notas_disciplinas") and template_data.get("notas_series"):
+        subs_notas = build_multicol(
+            template_data["notas_series"], 
+            template_data["notas_disciplinas"],
+            table_type="notas"
+        )
+        context["tabela_nota_1"] = subs_notas[0] if subs_notas else doc.new_subdoc()
+        context["tabela_nota_2"] = subs_notas[1] if len(subs_notas) > 1 else doc.new_subdoc()
+    
+    # 5. Tabelas de habilidades por disciplina
+    # Criar um Subdoc para cada disciplina individual
+    disciplinas_list = template_data.get("disciplinas", []).split(", ") if isinstance(template_data.get("disciplinas"), str) else template_data.get("disciplinas", [])
+    
+    for disciplina in disciplinas_list:
+        if disciplina and disciplina != "Disciplina Geral":
+            # Criar placeholder específico para cada disciplina
+            placeholder_name = f"tabela_habilidades_{disciplina.lower().replace(' ', '_').replace('-', '_')}"
+            
+            key = f"habilidades_{disciplina.lower().replace(' ', '_')}"
+            habilidades = template_data.get(key, [])
+            
+            if habilidades:
+                # Criar Subdoc para esta disciplina
+                sub_doc = doc.new_subdoc()
+                
+                # Título da disciplina
+                p = sub_doc.add_paragraph(disciplina.upper())
+                p.runs[0].bold = True
+                
+                headers = ["QUESTÃO", "HABILIDADE", "ACERTOS", "TOTAL", "PERCENTUAL"]
+                rows = []
+                for h in habilidades:
+                    rows.append([
+                        h.get("questoes", [{}])[0].get("numero", "N/A") if h.get("questoes") else "N/A",
+                        h.get("codigo", "N/A"),
+                        h.get("acertos", 0),
+                        h.get("total", 0),
+                        f"{h.get('percentual', 0)}%"
+                    ])
+                
+                # Criar tabela
+                table = sub_doc.add_table(rows=1, cols=len(headers))
+                for j, h in enumerate(headers): 
+                    table.rows[0].cells[j].text = str(h)
+                for r in rows:
+                    row = table.add_row().cells
+                    for j, val in enumerate(r): 
+                        row[j].text = str(val)
+                
+                # Adicionar ao contexto com o nome específico da disciplina
+                context[placeholder_name] = sub_doc
+    
+    # Também criar um Subdoc combinado para o placeholder geral
+    habilidades_combined = doc.new_subdoc()
+    for disciplina in disciplinas_list:
+        if disciplina and disciplina != "Disciplina Geral":
+            key = f"habilidades_{disciplina.lower().replace(' ', '_')}"
+            habilidades = template_data.get(key, [])
+            if habilidades:
+                # Título da disciplina
+                p = habilidades_combined.add_paragraph(disciplina.upper())
+                p.runs[0].bold = True
+                
+                headers = ["QUESTÃO", "HABILIDADE", "ACERTOS", "TOTAL", "PERCENTUAL"]
+                rows = []
+                for h in habilidades:
+                    rows.append([
+                        h.get("questoes", [{}])[0].get("numero", "N/A") if h.get("questoes") else "N/A",
+                        h.get("codigo", "N/A"),
+                        h.get("acertos", 0),
+                        h.get("total", 0),
+                        f"{h.get('percentual', 0)}%"
+                    ])
+                
+                # Criar tabela com formatação especial
+                table = habilidades_combined.add_table(rows=2, cols=len(headers))  # 2 linhas: cabeçalho + códigos
+                
+                # Configurar largura das colunas
+                for col in table.columns:
+                    col.width = Mm(25)
+                
+                # Formatar cabeçalho (primeira linha)
+                header_row = table.rows[0]
+                for j, h in enumerate(headers):
+                    cell = header_row.cells[j]
+                    cell.text = str(h)
+                    # Cabeçalho azul escuro com texto branco
+                    cell._tc.get_or_add_tcPr().append(parse_xml('<w:shd xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" w:fill="002060" w:val="clear"/>'))
+                    for paragraph in cell.paragraphs:
+                        for run in paragraph.runs:
+                            run.font.color.rgb = RGBColor(255, 255, 255)
+                            run.font.bold = True
+                            run.font.size = Pt(10)
+                            paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                
+                # Adicionar linha de códigos (segunda linha)
+                codes_row = table.rows[1]
+                for j in range(len(headers)):
+                    cell = codes_row.cells[j]
+                    if j == 0:  # Primeira coluna
+                        cell.text = "CÓDIGOS"
+                    else:  # Outras colunas com códigos das habilidades
+                        if j-1 < len(habilidades):
+                            skill_code = habilidades[j-1].get("codigo", "")
+                            cell.text = str(skill_code)
+                        else:
+                            cell.text = ""
+                    
+                    # Fundo amarelo para linha de códigos
+                    cell._tc.get_or_add_tcPr().append(parse_xml('<w:shd xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" w:fill="FFC000" w:val="clear"/>'))
+                    for paragraph in cell.paragraphs:
+                        for run in paragraph.runs:
+                            run.font.bold = True
+                            run.font.size = Pt(9)
+                            run.font.color.rgb = RGBColor(0, 0, 0)
+                            paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                
+                # Adicionar linhas de dados (percentuais)
+                for r in rows:
+                    row = table.add_row().cells
+                    for j, val in enumerate(r):
+                        cell = row[j]
+                        cell.text = str(val)
+                        
+                        # Primeira coluna em negrito
+                        if j == 0:
+                            for paragraph in cell.paragraphs:
+                                for run in paragraph.runs:
+                                    run.font.bold = True
+                        # Outras colunas centralizadas
+                        else:
+                            for paragraph in cell.paragraphs:
+                                paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                
+                # Aplicar bordas
+                for row in table.rows:
+                    for cell in row.cells:
+                        cell._tc.get_or_add_tcPr().append(parse_xml('<w:tcBorders xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:top w:val="single" w:sz="4" w:space="0" w:color="000000"/><w:left w:val="single" w:sz="4" w:space="0" w:color="000000"/><w:bottom w:val="single" w:sz="4" w:space="0" w:color="000000"/><w:right w:val="single" w:sz="4" w:space="0" w:color="000000"/></w:tcBorders>'))
+                
+                # Espaçamento
+                habilidades_combined.add_paragraph("")
+    
+    context["tabela_habilidades_disc"] = habilidades_combined
+    
+    # 6. Análises da IA (já preparadas na função _preparar_dados_ia)
+    # Essas variáveis já estão sendo adicionadas automaticamente no loop abaixo
+    
+    # 7. Considerações finais
+    context["consideracoes_finais"] = template_data.get("consideracoes_finais", "Relatório gerado automaticamente pelo sistema.")
+    
+    # 8. Adicionar todos os campos de texto simples
+    for key, value in template_data.items():
+        if isinstance(value, (str, int, float)) and key not in context:
+            context[key] = value
+    
+    # 9. Adicionar campos específicos que podem estar faltando
+    context["simulados_label"] = "Avaliação Diagnóstica"
+    context["referencia"] = "Relatório de Avaliação Educacional"
+    context["escola_extenso"] = template_data.get("escola", "Escola")
+    
+    # Adicionar campos que podem estar faltando
+    context["total_avaliados"] = template_data.get("total_alunos", 0)
+    context["percentual_avaliados"] = template_data.get("percentual_avaliados", 0)
+    
+    # Debug: mostrar quais campos estão sendo enviados
+    logging.info(f"Campos do contexto: {list(context.keys())}")
+    logging.info(f"Disciplinas encontradas: {disciplinas_list}")
+    
+    return context
+
+
+def _construir_blocos_niveis(doc: DocxTemplate, template_data: Dict[str, Any]):
+    """Constrói os blocos de níveis de aprendizagem como Subdoc"""
+    sub = doc.new_subdoc()
+    
+    # Adicionar tabelas para cada disciplina
+    for disciplina in template_data.get("disciplinas", []).split(", "):
+        if disciplina and disciplina != "Disciplina Geral":
+            key = f"niveis_{disciplina.lower().replace(' ', '_')}"
+            niveis = template_data.get(key, [])
+            
+            if niveis:
+                # Título da disciplina
+                p = sub.add_paragraph(disciplina.upper())
+                p.runs[0].bold = True
+                
+                # Tabela de níveis
+                headers = ["SÉRIE/TURNO", "ABAIXO DO BÁSICO", "BÁSICO", "ADEQUADO", "AVANÇADO"]
+                rows = []
+                for n in niveis:
+                    rows.append([
+                        n.get("turma", ""),
+                        n.get("abaixo_do_basico", 0),
+                        n.get("basico", 0),
+                        n.get("adequado", 0),
+                        n.get("avancado", 0)
+                    ])
+                
+                # Adicionar linha total se disponível
+                total_key = f"niveis_{disciplina.lower().replace(' ', '_')}_total"
+                if total_key in template_data:
+                    total = template_data[total_key]
+                    rows.append([
+                        "TOTAL",
+                        total.get("abaixo_do_basico", 0),
+                        total.get("basico", 0),
+                        total.get("adequado", 0),
+                        total.get("avancado", 0)
+                    ])
+                
+                # Criar tabela com formatação
+                table = sub.add_table(rows=1, cols=len(headers))
+                
+                # Configurar largura das colunas
+                for col in table.columns:
+                    col.width = Mm(30)
+                
+                # Formatar cabeçalho com cores específicas
+                header_colors = ["1F4E79", "C00000", "FFC000", "70AD47", "00B050"]
+                for j, h in enumerate(headers):
+                    cell = table.rows[0].cells[j]
+                    cell.text = str(h)
+                    
+                    if j < len(header_colors):
+                        cell._tc.get_or_add_tcPr().append(parse_xml(f'<w:shd xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" w:fill="{header_colors[j]}" w:val="clear"/>'))
+                        for paragraph in cell.paragraphs:
+                            for run in paragraph.runs:
+                                run.font.bold = True
+                                run.font.size = Pt(10)
+                                if j == 0:  # Primeira coluna
+                                    run.font.color.rgb = RGBColor(0, 0, 0)
+                                else:  # Outras colunas
+                                    run.font.color.rgb = RGBColor(255, 255, 255)
+                                paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                
+                # Adicionar linhas de dados
+                for r in rows:
+                    row = table.add_row().cells
+                    for j, val in enumerate(r):
+                        cell = row[j]
+                        cell.text = str(val)
+                        
+                        # Primeira coluna em negrito
+                        if j == 0:
+                            for paragraph in cell.paragraphs:
+                                for run in paragraph.runs:
+                                    run.font.bold = True
+                        # Outras colunas centralizadas
+                        else:
+                            for paragraph in cell.paragraphs:
+                                paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                
+                # Aplicar bordas
+                for row in table.rows:
+                    for cell in row.cells:
+                        cell._tc.get_or_add_tcPr().append(parse_xml('<w:tcBorders xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:top w:val="single" w:sz="4" w:space="0" w:color="000000"/><w:left w:val="single" w:sz="4" w:space="0" w:color="000000"/><w:bottom w:val="single" w:sz="4" w:space="0" w:color="000000"/><w:right w:val="single" w:sz="4" w:space="0" w:color="000000"/></w:tcBorders>'))
+                
+                # Espaçamento
+                sub.add_paragraph("")
+    
+    # Adicionar tabela geral
+    niveis_geral = template_data.get("niveis_geral", [])
+    if niveis_geral:
+        p = sub.add_paragraph("MÉDIA GERAL")
+        p.runs[0].bold = True
+        
+        headers = ["SÉRIE/TURNO", "ABAIXO DO BÁSICO", "BÁSICO", "ADEQUADO", "AVANÇADO"]
+        rows = []
+        for n in niveis_geral:
+            rows.append([
+                n.get("turma", ""),
+                n.get("abaixo_do_basico", 0),
+                n.get("basico", 0),
+                n.get("adequado", 0),
+                n.get("avancado", 0)
+            ])
+        
+        table = sub.add_table(rows=1, cols=len(headers))
+        
+        # Configurar largura das colunas
+        for col in table.columns:
+            col.width = Mm(30)
+        
+        # Formatar cabeçalho com cores específicas
+        header_colors = ["1F4E79", "C00000", "FFC000", "70AD47", "00B050"]
+        for j, h in enumerate(headers):
+            cell = table.rows[0].cells[j]
+            cell.text = str(h)
+            
+            if j < len(header_colors):
+                cell._tc.get_or_add_tcPr().append(parse_xml(f'<w:shd xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" w:fill="{header_colors[j]}" w:val="clear"/>'))
+                for paragraph in cell.paragraphs:
+                    for run in paragraph.runs:
+                        run.font.bold = True
+                        run.font.size = Pt(10)
+                        if j == 0:  # Primeira coluna
+                            run.font.color.rgb = RGBColor(0, 0, 0)
+                        else:  # Outras colunas
+                            run.font.color.rgb = RGBColor(255, 255, 255)
+                        paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        
+        # Adicionar linhas de dados
+        for r in rows:
+            row = table.add_row().cells
+            for j, val in enumerate(r):
+                cell = row[j]
+                cell.text = str(val)
+                
+                # Aplicar fundo cinza para linha total
+                cell._tc.get_or_add_tcPr().append(parse_xml('<w:shd xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" w:fill="D9D9D9" w:val="clear"/>'))
+                
+                # Primeira coluna em negrito
+                if j == 0:
+                    for paragraph in cell.paragraphs:
+                        for run in paragraph.runs:
+                            run.font.bold = True
+                # Outras colunas centralizadas
+                else:
+                    for paragraph in cell.paragraphs:
+                        paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        
+        # Aplicar bordas
+        for row in table.rows:
+            for cell in row.cells:
+                cell._tc.get_or_add_tcPr().append(parse_xml('<w:tcBorders xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:top w:val="single" w:sz="4" w:space="0" w:color="000000"/><w:left w:val="single" w:sz="4" w:space="0" w:color="000000"/><w:bottom w:val="single" w:sz="4" w:space="0" w:color="000000"/><w:right w:val="single" w:sz="4" w:space="0" w:color="000000"/></w:tcBorders>'))
+    
+    return sub
 
 
 def _obter_disciplinas_avaliacao(test: Test) -> List[str]:
@@ -2168,291 +2633,222 @@ def _calcular_media_municipal_nota_por_disciplina(evaluation_id: str, question_d
         return {}
 
 
-def _gerar_pdf_reportlab(template_data: Dict[str, Any]) -> bytes:
-    """Gera PDF usando ReportLab replicando fielmente o template HTML"""
-    
-    buffer = BytesIO()
-
-    # Margens do modelo (~14–18mm)
-    LEFT = RIGHT = 14*mm
-    TOP = 16*mm
-    BOTTOM = 18*mm
-
-    doc = BaseDocTemplate(
-        buffer, pagesize=A4,
-        leftMargin=LEFT, rightMargin=RIGHT, topMargin=TOP, bottomMargin=BOTTOM
-    )
-    frame = Frame(LEFT, BOTTOM, doc.width, doc.height, id='normal')
-    doc.addPageTemplates([
-        PageTemplate(id='pagina', frames=[frame],
-                     onPage=lambda c,d: _header(c,d, template_data.get("logo_esquerda"), template_data.get("logo_direita")))
-    ])
-
-    # ======== ESTILOS ========
-    styles = getSampleStyleSheet()
-    title = ParagraphStyle('TitleItal',
-        parent=styles['Heading1'], fontName='Helvetica-BoldOblique',
-        fontSize=22, alignment=TA_CENTER, spaceAfter=12)
-    
-    subtitle = ParagraphStyle('Sub',
-        parent=styles['Heading2'], fontName='Helvetica-Bold',
-        fontSize=16, alignment=TA_CENTER, spaceBefore=30, spaceAfter=6)
-    mutedCenter = ParagraphStyle('MutedC',
-        parent=styles['Normal'], fontSize=12, textColor=colors.HexColor('#111'),
-        alignment=TA_CENTER, spaceAfter=2)
-    hSection = ParagraphStyle('HSection',
-        parent=styles['Heading2'], fontSize=13.5, spaceBefore=6, spaceAfter=6,
-        fontName='Helvetica-Bold')
-    hBlock = ParagraphStyle('HBlock',
-        parent=styles['Normal'], fontSize=12, fontName='Helvetica-Bold',
-        spaceBefore=8, spaceAfter=4)
-    normal = ParagraphStyle('Normal12', parent=styles['Normal'], fontSize=12, leading=16)
-    bold = ParagraphStyle('Bold12', parent=styles['Normal'], fontName='Helvetica-Bold', fontSize=12, leading=16)
-    small = ParagraphStyle('Small', parent=styles['Normal'], fontSize=11, leading=14)
-    
-    story = []
-    
-    # ================== CAPA ==================
-    story.append(Spacer(1, 90))
-    story.append(Paragraph(f"<b><i>RELATÓRIO DA AVALIAÇÃO DIAGNÓSTICA {template_data.get('periodo','2025.1')}</i></b>", title))
-    story.append(Paragraph("DA REDE MUNICIPAL DE ENSINO", mutedCenter))
-    story.append(Paragraph(f"{template_data.get('municipio','CAMPO ALEGRE')} / {template_data.get('uf','AL')}", mutedCenter))
-    story.append(Spacer(1, 45))
-    story.append(Paragraph(template_data.get('escola','E. M. E. B. MONSENHOR HILDEBRANDO'), subtitle))
-    story.append(Spacer(1, 120))
-    story.append(Paragraph(f"{template_data.get('mes','MAIO')} / {template_data.get('ano','2025')}", mutedCenter))
-    story.append(PageBreak())
-    
-    # ================== SUMÁRIO ==================
-    story.append(Paragraph("SUMÁRIO", hSection))
-    def linha_sumario(txt, pagina):
-        # alinha número da página à direita como no modelo
-        return Paragraph(f"{txt} <font size='12'>{pagina}</font>", normal)
-    story += [
-        linha_sumario("1. APRESENTAÇÃO", template_data.get('sumario_p1','3')),
-        linha_sumario("2. CONSIDERAÇÕES GERAIS", template_data.get('sumario_p2','3')),
-        linha_sumario("3. PARTICIPAÇÃO DA REDE NO PROCESSO DE AVALIAÇÃO DIAGNÓSTICA", template_data.get('sumario_p3','4')),
-        linha_sumario("4. RENDIMENTO POR SÉRIE, POR TURMA E POR ESCOLA", template_data.get('sumario_p4','4')),
-        linha_sumario("4.1 PROFICIÊNCIA POR UNIDADE DE ENSINO/ TURMA - 9º ANO", template_data.get('sumario_p41','4-5')),
-        linha_sumario("4.2 NOTA POR UNIDADE DE ENSINO/ TURMA - 9º ANO", template_data.get('sumario_p42','5')),
-        linha_sumario("4.3 ACERTOS POR HABILIDADE POR UNIDADE DE ENSINO/ TURMA - 9º ANO", template_data.get('sumario_p43','6')),
-        linha_sumario("4.4 ACERTOS POR HABILIDADE POR UNIDADE DE ENSINO/ TURMA - 9º ANO", template_data.get('sumario_p44','7')),
-    ]
-    story.append(PageBreak())
-    
-    # ================== 1. APRESENTAÇÃO ==================
-    story.append(Paragraph("1. APRESENTAÇÃO", hSection))
-    story.append(Spacer(1, 4))
-    story.append(Paragraph(
-        f"Este relatório apresenta os resultados do <b>{template_data.get('simulados_label','1º Simulado')}</b> "
-        f"da Rede Municipal de Ensino de <b>{template_data.get('municipio','Campo Alegre')} – {template_data.get('uf','AL')}</b> "
-        f"referente ao <b>{template_data.get('referencia','9º de 2025')}</b> da <b>{template_data.get('escola_extenso','ESCOLA MUNICIPAL DE EDUCAÇÃO BÁSICA MONSENHOR HILDEBRANDO')}</b>. "
-        f"Foram avaliados <b>{template_data.get('total_avaliados',222)}</b> alunos, o que corresponde a <b>{template_data.get('percentual_avaliados','89%')}</b> do total de estudantes dessas séries.",
-        normal
-    ))
-    story.append(Paragraph("<b>Para a análise, utilizamos:</b>", normal))
-    for li in ["Frequência absoluta (número de alunos)", "Frequência relativa (percentual)", "Média aritmética simples"]:
-        story.append(Paragraph(f"&bull; {li}", normal))
-    story.append(Paragraph(
-        "As competências avaliadas foram <b>Língua Portuguesa</b> e <b>Matemática</b>... "
-        "Gráficos nominais por aluno e rendimento de cada turma estão disponíveis na <b>Plataforma InnovPlay</b>.",
-        normal
-    ))
-    story.append(Paragraph(
-        "A escala de cores das médias variou do <b>vermelho (0)</b> ao <b>verde (10)</b>... "
-        "índice de erro superior a <b>40%</b> em destaque vermelho.", normal))
-    story.append(PageBreak())
-    
-    # ================== 2. CONSIDERAÇÕES GERAIS ==================
-    story.append(Paragraph("2. CONSIDERAÇÕES GERAIS", hSection))
-    story.append(Spacer(1, 15))
-    
-    story.append(Paragraph("""
-    Antes de olharmos os resultados é importante nos atentarmos que cada escola tem suas especificidades, assim como cada turma. 
-    Existem resultados que só serão explicados considerando estas especificidades.
-    """, normal))
-    
-    story.append(Paragraph("""
-    As turmas são únicas e, portanto, a observação das necessidades de cada turma deve ser analisada através do sistema.
-    """, normal))
-    
-    story.append(Paragraph("""
-    Foram constatadas algumas inconsistências em algumas questões. Para conhecimento:
-    """, normal))
-    
-    # Nota destacada
-    note_text = f"""
-    A necessidade de anulação de <b>{template_data.get('qtd_questoes_anuladas', 2)}</b> questões de <b>Matemática</b> direcionadas ao <b>{template_data.get('serie_alvo', '9º ano')}</b>. 
-    As questões (<b>nº {template_data.get('questoes_anuladas', '10 e 11')}</b> do material da SEMED), referentes a <b>{template_data.get('ordens_avaliacao', '36ª e 37ª')}</b> na avaliação InnovPlay foram enviadas com possíveis erros pela equipe responsável pela elaboração da SEMED, 
-    por este motivo havendo a necessidade de anular.
-    """
-    story.append(Paragraph(note_text, normal))
-    
-    story.append(PageBreak())
-    
-    # ================== 3. PARTICIPAÇÃO ==================
-    story.append(Paragraph("3. PARTICIPAÇÃO DA REDE NO PROCESSO DE AVALIAÇÃO DIAGNÓSTICA", hSection))
-    
-    # Cabeçalho cinza simples
-    story.append(Paragraph(f"<b>TOTAL DE ALUNOS QUE REALIZARAM A AVALIAÇÃO DIAGNÓSTICA {template_data.get('periodo','2025.1')}</b>", hBlock))
-    
-    # Tabela de participação simplificada
-    if template_data.get("participacao"):
-        participacao_data = [["SÉRIE/TURNO","MATRICULADOS","AVALIADOS","PERCENTUAL","FALTOSOS"]]
+def _gerar_analise_participacao(template_data: Dict) -> str:
+    """Gera análise inteligente da participação baseada nos dados"""
+    try:
+        total_alunos = template_data.get("total_alunos", {})
+        total_geral = total_alunos.get("total_geral", {})
         
-        for r in template_data.get("participacao", []):
-            participacao_data.append([
-                r.get("serie_turno", ""),
-                str(r.get("matriculados", 0)),
-                str(r.get("avaliados", 0)),
-                f"{r.get('percentual', 0)}%",
-                str(r.get("faltosos", 0))
-            ])
+        matriculados = total_geral.get("matriculados", 0)
+        avaliados = total_geral.get("avaliados", 0)
+        percentual = total_geral.get("percentual", 0)
+        faltosos = total_geral.get("faltosos", 0)
         
-        # Adicionar linha total
-        participacao_data.append([
-            template_data.get("total_label","9º GERAL"),
-            str(template_data.get("total_matriculados",0)),
-            str(template_data.get("total_avaliados",0)),
-            template_data.get("percentual_avaliados","0%"),
-            str(template_data.get("total_faltosos",0))
-        ])
+        if matriculados == 0:
+            return "Dados de participação não disponíveis."
         
-        # Criar tabela
-        colw = [doc.width*0.35, doc.width*0.16, doc.width*0.16, doc.width*0.16, doc.width*0.17]
-        t = Table(participacao_data, colWidths=colw, repeatRows=1)
-        t.setStyle(TableStyle([
-            ('BACKGROUND',(0,0),(-1,0), BLUE_900), ('TEXTCOLOR',(0,0),(-1,0), colors.white),
-            ('ALIGN',(1,1),(-1,-1),'RIGHT'), ('ALIGN',(0,1),(0,-1),'LEFT'),
-            ('FONTNAME',(0,0),(-1,0),'Helvetica-Bold'),
-            ('GRID',(0,0),(-1,-1), 0.7, GRID), ('FONTSIZE',(0,0),(-1,-1),11),
-            ('VALIGN',(0,0),(-1,-1),'MIDDLE'),
-            ('BACKGROUND', (0,len(participacao_data)-1), (-1,len(participacao_data)-1), GRAY_150),
-            ('FONTNAME',(0,len(participacao_data)-1),(-1,len(participacao_data)-1),'Helvetica-Bold'),
-        ]))
+        # Análise baseada nos percentuais
+        if percentual >= 90:
+            avaliacao = "excelente"
+            recomendacao = "manter o alto engajamento"
+        elif percentual >= 80:
+            avaliacao = "boa"
+            recomendacao = "investigar causas das ausências e contatar famílias"
+        elif percentual >= 70:
+            avaliacao = "regular"
+            recomendacao = "implementar estratégias de motivação e contato com famílias"
+        else:
+            avaliacao = "baixa"
+            recomendacao = "ação imediata para aumentar participação"
         
-        story.append(KeepTogether(t))
-        story.append(Spacer(1,6))
-    
-    # Texto de participação
-    story.append(Paragraph(template_data.get("participacao_texto_padrao",
-        "A escola avaliou alunos do 9º ano... planejamento de reposição diagnóstica."), normal))
-    
-    # ===== 4. RENDIMENTO =====
-    story.append(Paragraph("4. RENDIMENTO POR SÉRIE, POR TURMA E POR ESCOLA", hSection))
-    
-    # ===== NÍVEIS LP/MAT/MÉDIA (colunas coloridas) =====
-    def tabela_niveis(titulo, rows, totais=None):
-        story.append(Spacer(1,6))
-        story.append(Paragraph(titulo, hBlock))
-        hdr = ["SÉRIE/TURNO","ABAIXO DO BÁSICO","BÁSICO","ADEQUADO","AVANÇADO"]
-        data = [hdr] + rows + ([totais] if totais else [])
-        t = Table(data, colWidths=[doc.width*0.34, doc.width*0.165, doc.width*0.165, doc.width*0.165, doc.width*0.165], repeatRows=1)
-        t.setStyle(TableStyle([
-            ('GRID',(0,0),(-1,-1),0.7, GRID), ('FONTSIZE',(0,0),(-1,-1),11),
-            ('BACKGROUND',(0,0),(0,0), BLUE_900), ('TEXTCOLOR',(0,0),(0,0), colors.white),
-            ('BACKGROUND',(1,0),(1,0), RED), ('BACKGROUND',(2,0),(2,0), YELLOW),
-            ('BACKGROUND',(3,0),(3,0), ADEQ), ('BACKGROUND',(4,0),(4,0), GREEN),
-            ('TEXTCOLOR',(1,0),(-1,0), colors.white),
-            ('ALIGN',(1,1),(-1,-1),'RIGHT'), ('ALIGN',(0,1),(0,-1),'LEFT'),
-        ]))
-        if totais:
-            t.setStyle(TableStyle([('BACKGROUND', (0,len(rows)+1), (-1,len(rows)+1), GRAY_150),
-                                   ('FONTNAME',(0,len(rows)+1),(-1,len(rows)+1),'Helvetica-Bold')]), append=True)
-        story.append(KeepTogether(t))
-
-    tabela_niveis("LÍNGUA PORTUGUESA", template_data.get("lp_niveis", []),
-                  template_data.get("lp_totais"))
-    story.append(Paragraph("<b>Língua Portuguesa (total de 222 alunos avaliados):</b>", bold))
-    for li in template_data.get("lp_resumo_lista", [
-        "Abaixo do Básico: 20 alunos (9,0%)","Básico: 27 alunos (12,2%)",
-        "Adequado: 45 alunos (20,3%)","Avançado: 130 alunos (58,6%)"
-    ]):
-        story.append(Paragraph(f"&bull; {li}", normal))
-
-    tabela_niveis("MATEMÁTICA", template_data.get("mat_niveis", []),
-                  template_data.get("mat_totais"))
-    # idem resumos…
-    # tabela_niveis("MÉDIA GERAL", ...)
-
-    story.append(PageBreak())
-
-    # ===== PROFICIÊNCIA (com "badge" municipal) =====
-    story.append(Paragraph("PROFICIÊNCIA POR TURMA/GERAL – AVALIAÇÃO DIAGNÓSTICA " + template_data.get("periodo","2025.1"), hBlock))
-    prof_hdr = ["SÉRIE/TURNO","LÍNGUA PORTUGUESA","MATEMÁTICA","MÉDIA","MUNICIPAL"]
-    prof_rows = [prof_hdr]
-    for p in template_data.get("proficiencia", []):
-        prof_rows.append([p["serie_turno"], p["lp"], p["mat"], p.get("media",""), p.get("municipal","")])
-    prof = Table(prof_rows, colWidths=[doc.width*0.30, doc.width*0.17, doc.width*0.17, doc.width*0.17, doc.width*0.19], repeatRows=1)
-    prof.setStyle(TableStyle([
-        ('BACKGROUND',(0,0),(-1,0), GRAY_150), ('GRID',(0,0),(-1,-1),0.7, GRID),
-        ('ALIGN',(1,1),(-2,-1),'RIGHT'), ('ALIGN',(-1,1),(-1,-1),'CENTER'),
-        ('FONTNAME',(0,0),(-1,0),'Helvetica-Bold'),
-    ]))
-    story.append(prof)
-    story.append(Spacer(1,6))
-    story.append(Paragraph(template_data.get("proficiencia_texto_padrao",
-        "A proficiência média da escola nesta avaliação diagnóstica foi de 298,86 em LP e 268,29 em Matemática..."), normal))
-
-    # ===== NOTA =====
-    story.append(Spacer(1,8))
-    story.append(Paragraph("NOTA POR TURMA/GERAL – AVALIAÇÃO DIAGNÓSTICA " + template_data.get("periodo","2025.1"), hBlock))
-    # ... montar tabela e texto idênticos
-
-    story.append(PageBreak())
-    
-    # ===== ACERTOS POR HABILIDADE (duas linhas de 13 colunas) =====
-    story.append(Paragraph("ACERTOS POR HABILIDADE TURMA/GERAL – AVALIAÇÃO DIAGNÓSTICA " + template_data.get("periodo","2025.1"), hBlock))
-    story.append(Paragraph("LÍNGUA PORTUGUESA", hBlock))
-    def grid_13(rotulos, pct):
-        # Verificar se os dados existem e têm o tamanho correto
-        if not rotulos or not pct or len(rotulos) != 13 or len(pct) != 13:
-            # Retornar tabela vazia se os dados não estiverem corretos
-            empty_data = [['H1', 'H2', 'H3', 'H4', 'H5', 'H6', 'H7', 'H8', 'H9', 'H10', 'H11', 'H12', 'H13'],
-                         ['0%', '0%', '0%', '0%', '0%', '0%', '0%', '0%', '0%', '0%', '0%', '0%', '0%']]
-            t = Table(empty_data, colWidths=[doc.width/13.0]*13)
-            t.setStyle(TableStyle([
-                ('GRID',(0,0),(-1,-1),0.7, GRID),
-                ('BACKGROUND',(0,0),(-1,0), BLUE_900), ('TEXTCOLOR',(0,0),(-1,0), colors.white),
-                ('ALIGN',(0,0),(-1,-1),'CENTER'), ('FONTNAME',(0,0),(-1,0),'Helvetica-Bold'),
-            ]))
-            return t
+        analise = f"A escola avaliou {avaliados} alunos do 9º ano, o que representa {percentual}% do total de {matriculados} alunos matriculados. "
+        analise += f"Registrou-se um total de {faltosos} alunos faltosos. "
+        analise += f"A taxa de participação de {percentual}% é {avaliacao}, indicando um {avaliacao} engajamento geral. "
         
-        data = [rotulos, pct]
-        colw = [doc.width/13.0]*13
-        t = Table(data, colWidths=colw)
-        st = TableStyle([
-            ('GRID',(0,0),(-1,-1),0.7, GRID),
-            ('BACKGROUND',(0,0),(-1,0), BLUE_900), ('TEXTCOLOR',(0,0),(-1,0), colors.white),
-            ('ALIGN',(0,0),(-1,-1),'CENTER'), ('FONTNAME',(0,0),(-1,0),'Helvetica-Bold'),
-        ])
-        # cores por faixa
-        for i, val in enumerate(pct):
-            try:
-                v = float(str(val).replace('%','').replace(',','.'))
-            except: 
-                v = 0
-            color = colors.white
-            if v < 60: color = colors.HexColor("#ffd1d1")
-            elif v < 70: color = colors.HexColor("#ffe9b3")
-            elif v < 80: color = colors.HexColor("#d6f5d6")
-            else: color = colors.HexColor("#b9eabb")
-            st.add('BACKGROUND',(i,1),(i,1), color)
-            st.add('FONTNAME',(i,1),(i,1),'Helvetica-Bold')
-        t.setStyle(st)
-        return t
+        if faltosos > 0:
+            analise += f"Contudo, a ausência de {faltosos} alunos é um número considerável. "
+        
+        analise += f"Recomenda-se {recomendacao} para elevar a participação em futuras avaliações e o planejamento de uma reposição diagnóstica para os alunos faltosos, visando obter um panorama mais completo da aprendizagem na série."
+        
+        return analise
+        
+    except Exception as e:
+        logging.warning(f"Erro ao gerar análise de participação: {str(e)}")
+        return "Análise de participação não disponível."
 
-    story.append(grid_13(template_data.get("lp_rotulos_1_13", []), template_data.get("lp_pct_1_13", [])))
-    story.append(Spacer(1,6))
-    story.append(grid_13(template_data.get("lp_rotulos_14_26", []), template_data.get("lp_pct_14_26", [])))
-    # … listas "dentro da meta/abaixo da meta" como Paragraph + bullets
 
-    # ===== FINALIZA =====
-    doc.build(story)
-    pdf_content = buffer.getvalue()
-    buffer.close()
-    
-    return pdf_content
+def _gerar_analise_proficiencia(template_data: Dict) -> str:
+    """Gera análise inteligente da proficiência baseada nos dados"""
+    try:
+        proficiencia = template_data.get("proficiencia", {})
+        disciplinas = proficiencia.get("por_disciplina", {})
+        
+        if not disciplinas:
+            return "Dados de proficiência não disponíveis."
+        
+        # Buscar médias por disciplina
+        medias_disciplinas = {}
+        for disciplina, dados in disciplinas.items():
+            if disciplina != "GERAL" and "por_turma" in dados:
+                valores = [t.get("proficiencia", 0) for t in dados["por_turma"] if t.get("proficiencia")]
+                if valores:
+                    medias_disciplinas[disciplina] = sum(valores) / len(valores)
+        
+        if not medias_disciplinas:
+            return "Dados de proficiência por disciplina não disponíveis."
+        
+        # Gerar análise
+        analise = "A proficiência média da escola nesta avaliação diagnóstica foi de "
+        
+        disciplinas_list = list(medias_disciplinas.keys())
+        for i, disciplina in enumerate(disciplinas_list):
+            media = round(medias_disciplinas[disciplina], 2)
+            if i == 0:
+                analise += f"{media} em {disciplina}"
+            elif i == len(disciplinas_list) - 1:
+                analise += f" e {media} em {disciplina}."
+            else:
+                analise += f", {media} em {disciplina}"
+        
+        # Comparação com referencial (simulado)
+        analise += " Comparativamente, o desempenho em "
+        
+        melhor_disciplina = max(medias_disciplinas.items(), key=lambda x: x[1])
+        pior_disciplina = min(medias_disciplinas.items(), key=lambda x: x[1])
+        
+        analise += f"{melhor_disciplina[0]} ({melhor_disciplina[1]}) está significativamente acima da média de proficiência de 272,19 alcançada na Prova Saeb/2023 para o 9º ano. "
+        analise += f"Este é um resultado excelente e um grande destaque para a escola, indicando um alto nível de domínio das competências em {melhor_disciplina[0]}. "
+        
+        analise += f"Em {pior_disciplina[0]}, a proficiência de {pior_disciplina[1]} encontra-se abaixo da média de 293,55 obtida no Saeb/2023. "
+        analise += f"Apesar de ser uma proficiência considerável, ainda há uma lacuna para atingir o referencial nacional, indicando que esta é a área que demanda maior foco estratégico."
+        
+        return analise
+        
+    except Exception as e:
+        logging.warning(f"Erro ao gerar análise de proficiência: {str(e)}")
+        return "Análise de proficiência não disponível."
+
+
+def _gerar_analise_notas(template_data: Dict) -> str:
+    """Gera análise inteligente das notas baseada nos dados"""
+    try:
+        nota_geral = template_data.get("nota_geral", {})
+        disciplinas = nota_geral.get("por_disciplina", {})
+        
+        if not disciplinas:
+            return "Dados de notas não disponíveis."
+        
+        # Buscar médias por disciplina
+        medias_disciplinas = {}
+        for disciplina, dados in disciplinas.items():
+            if disciplina != "GERAL" and "por_turma" in dados:
+                valores = [t.get("nota", 0) for t in dados["por_turma"] if t.get("nota")]
+                if valores:
+                    medias_disciplinas[disciplina] = sum(valores) / len(valores)
+        
+        if not medias_disciplinas:
+            return "Dados de notas por disciplina não disponíveis."
+        
+        # Calcular média geral
+        media_geral = sum(medias_disciplinas.values()) / len(medias_disciplinas)
+        
+        # Gerar análise
+        analise = f"A média geral de nota da escola na avaliação diagnóstica foi de {round(media_geral, 2)}, com "
+        
+        disciplinas_list = list(medias_disciplinas.keys())
+        for i, disciplina in enumerate(disciplinas_list):
+            media = round(medias_disciplinas[disciplina], 2)
+            if i == 0:
+                analise += f"{media} em {disciplina}"
+            elif i == len(disciplinas_list) - 1:
+                analise += f" e {media} em {disciplina}."
+            else:
+                analise += f", {media} em {disciplina}"
+        
+        # Comparação com referencial
+        analise += f" Esta média geral de {round(media_geral, 2)} está "
+        
+        if media_geral >= 6.0:
+            analise += "exatamente alinhada e ligeiramente acima da nota padronizada de 6,1 obtida na Prova Saeb/2023 para o 9º ano, o que é um resultado muito positivo para a escola como um todo. "
+        else:
+            analise += "abaixo da nota padronizada de 6,1 obtida na Prova Saeb/2023 para o 9º ano, indicando a necessidade de melhorias para atingir o padrão nacional. "
+        
+        # Análise por disciplina
+        melhor_disciplina = max(medias_disciplinas.items(), key=lambda x: x[1])
+        pior_disciplina = min(medias_disciplinas.items(), key=lambda x: x[1])
+        
+        analise += f"A nota em {melhor_disciplina[0]} ({melhor_disciplina[1]}) é excelente e reflete a alta proficiência alcançada. "
+        analise += f"A nota em {pior_disciplina[0]} ({pior_disciplina[1]}), embora contribua para a boa média geral, ainda está abaixo do ideal e indica a necessidade de melhorias nesta disciplina para que a escola possa elevar ainda mais seu desempenho global."
+        
+        return analise
+        
+    except Exception as e:
+        logging.warning(f"Erro ao gerar análise de notas: {str(e)}")
+        return "Análise de notas não disponível."
+
+
+def _gerar_analise_habilidades(template_data: Dict) -> str:
+    """Gera análise inteligente das habilidades baseada nos dados"""
+    try:
+        acertos_por_habilidade = template_data.get("acertos_por_habilidade", {})
+        
+        if not acertos_por_habilidade:
+            return "Dados de habilidades não disponíveis."
+        
+        # Analisar habilidades por disciplina
+        analises_disciplinas = []
+        
+        for disciplina, dados in acertos_por_habilidade.items():
+            if disciplina == "GERAL" or not dados.get("habilidades"):
+                continue
+            
+            habilidades = dados["habilidades"]
+            if not habilidades:
+                continue
+            
+            # Calcular estatísticas
+            total_habilidades = len(habilidades)
+            habilidades_acima_70 = [h for h in habilidades if h.get("percentual", 0) >= 70]
+            habilidades_abaixo_70 = [h for h in habilidades if h.get("percentual", 0) < 70]
+            
+            percentual_acima_70 = (len(habilidades_acima_70) / total_habilidades) * 100
+            
+            # Gerar análise para esta disciplina
+            analise_disc = f"Os alunos demonstraram "
+            
+            if percentual_acima_70 >= 80:
+                analise_disc += "excelente desempenho na grande maioria das habilidades de "
+            elif percentual_acima_70 >= 60:
+                analise_disc += "bom desempenho na maioria das habilidades de "
+            else:
+                analise_disc += "desempenho regular nas habilidades de "
+            
+            analise_disc += f"{disciplina}. "
+            
+            # Destacar habilidades com melhor desempenho
+            if habilidades_acima_70:
+                melhor_habilidade = max(habilidades_acima_70, key=lambda x: x.get("percentual", 0))
+                analise_disc += f"Destacam-se habilidades como {melhor_habilidade.get('codigo', 'N/A')} com {melhor_habilidade.get('percentual', 0)}% de acerto. "
+            
+            # Pontos de atenção
+            if habilidades_abaixo_70:
+                analise_disc += f"Habilidades com Desempenho Abaixo da Meta (< 70%) – Pontos de Atenção: "
+                for h in habilidades_abaixo_70[:3]:  # Limitar a 3 exemplos
+                    analise_disc += f"{h.get('codigo', 'N/A')} ({h.get('percentual', 0)}%), "
+                analise_disc = analise_disc.rstrip(", ") + ". "
+                
+                analise_disc += "Mesmo com o alto desempenho geral, focar nessas habilidades pode levar a um domínio ainda mais completo."
+            
+            analises_disciplinas.append(analise_disc)
+        
+        if not analises_disciplinas:
+            return "Análise detalhada de habilidades não disponível."
+        
+        return " ".join(analises_disciplinas)
+        
+    except Exception as e:
+        logging.warning(f"Erro ao gerar análise de habilidades: {str(e)}")
+        return "Análise de habilidades não disponível."
 
 
 @bp.errorhandler(Exception)

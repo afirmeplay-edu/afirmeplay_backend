@@ -678,32 +678,44 @@ def get_students_by_school_and_class(school_id, class_id):
     try:
         logging.info(f"Fetching students for school_id: {school_id} and class_id: {class_id}")
 
-        # Query with explicit joins
-        students = db.session.query(
-            Student,
-            User,
-            School,
-            Class,
-            Grade
-        ).join(
-            User, Student.user_id == User.id
-        ).join(
-            School, Student.school_id == School.id
-        ).join(
-            Class, Student.class_id == Class.id
-        ).join(
-            Grade, Student.grade_id == Grade.id
-        ).filter(
-            Student.school_id == school_id,
-            Student.class_id == class_id
-        ).all()
+        # Primeiro validar se escola e turma existem
+        school = School.query.get(school_id)
+        if not school:
+            logging.warning(f"School not found with id: {school_id}")
+            return jsonify({"error": "School not found"}), 404
 
+        class_obj = Class.query.get(class_id)
+        if not class_obj:
+            logging.warning(f"Class not found with id: {class_id}")
+            return jsonify({"error": "Class not found"}), 404
+
+        # Validar se a turma pertence à escola especificada
+        if class_obj.school_id != school_id:
+            logging.warning(f"Class {class_id} does not belong to school {school_id}")
+            return jsonify({"error": "Class does not belong to the specified school"}), 400
+
+        # Agora buscar os alunos com validação correta
+        # Primeiro buscar apenas os alunos para garantir que todos sejam retornados
+        students = Student.query.filter_by(
+            school_id=school_id,
+            class_id=class_id
+        ).all()
+        
         if not students:
             logging.info(f"No students found for school_id: {school_id} and class_id: {class_id}")
             return jsonify([]), 200  # Return empty list if no students found
-
-        return jsonify([format_student_details(student, user, school, class_obj, grade) 
-                       for student, user, school, class_obj, grade in students]), 200
+        
+        # Agora buscar os dados relacionados para cada aluno
+        formatted_students = []
+        for student in students:
+            user = User.query.get(student.user_id)
+            school = School.query.get(student.school_id)
+            class_obj = Class.query.get(student.class_id)
+            grade = Grade.query.get(student.grade_id) if student.grade_id else None
+            
+            formatted_students.append(format_student_details(student, user, school, class_obj, grade))
+        
+        return jsonify(formatted_students), 200
 
     except SQLAlchemyError as e:
         logging.error(f"Database error while fetching students by school and class: {str(e)}")

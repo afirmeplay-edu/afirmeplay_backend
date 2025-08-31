@@ -140,7 +140,6 @@ def create_question():
             difficulty_level=data.get('difficulty'),
             correct_answer=data.get('solution'),
             formatted_solution=data.get('formattedSolution'),
-            # test_id=data.get('test_id'),  # REMOVIDO - agora usamos tabela de associação
             question_type=data.get('type'),
             value=data.get('value'),
             topics=data.get('topics'),

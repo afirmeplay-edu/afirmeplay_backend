@@ -18,6 +18,11 @@ from datetime import datetime, timedelta
 import logging
 import json
 import dateutil.parser
+import base64
+import uuid
+import os
+from PIL import Image
+import io
 from app.utils.response_formatters import format_test_response
 from sqlalchemy.orm import joinedload, subqueryload
 from sqlalchemy import cast
@@ -25,6 +30,58 @@ from sqlalchemy.dialects.postgresql import JSONB
 from app.models.studentAnswer import StudentAnswer
 
 bp = Blueprint('tests', __name__, url_prefix="/test")
+
+def process_image(image_data, image_type):
+    """
+    Processa uma imagem em base64 e retorna um dicionário com suas informações
+    """
+    try:
+        # Remove o cabeçalho do base64 se existir
+        if ',' in image_data:
+            image_data = image_data.split(',')[1]
+        
+        # Decodifica o base64
+        image_bytes = base64.b64decode(image_data)
+        
+        # Abre a imagem com PIL para processamento
+        image = Image.open(io.BytesIO(image_bytes))
+        
+        # Gera um ID único para a imagem
+        image_id = str(uuid.uuid4())
+        
+        # Obtém informações da imagem
+        image_info = {
+            "id": image_id,
+            "type": image_type,
+            "size": len(image_bytes),
+            "width": image.width,
+            "height": image.height,
+            "data": image_data  # Mantém o base64 para armazenamento
+        }
+        
+        return image_info
+    except Exception as e:
+        logging.error(f"Error processing image: {str(e)}")
+        raise
+
+def extract_images_from_html(html_content):
+    """
+    Extrai imagens em base64 do conteúdo HTML
+    """
+    import re
+    images = []
+    
+    # Procura por tags img com src em base64
+    img_pattern = r'<img[^>]+src="(data:image/[^;]+;base64,[^"]+)"[^>]*>'
+    matches = re.finditer(img_pattern, html_content)
+    
+    for match in matches:
+        base64_data = match.group(1)
+        image_type = base64_data.split(';')[0].split(':')[1]
+        image_info = process_image(base64_data, image_type)
+        images.append(image_info)
+    
+    return images
 
 def process_subjects_for_test(test):
     """
@@ -174,15 +231,25 @@ def criar_avaliacao():
                     if isinstance(grade_level, dict) and 'id' in grade_level:
                         grade_level = grade_level['id']
                     
+                    # Processa imagens do texto formatado
+                    images = []
+                    if question_data.get('formattedText'):
+                        images.extend(extract_images_from_html(question_data['formattedText']))
+                    
+                    # Processa imagens da solução formatada
+                    if question_data.get('formattedSolution'):
+                        images.extend(extract_images_from_html(question_data['formattedSolution']))
+                    
                     question = Question(
                         number=question_data.get('number'),
                         text=question_data.get('text'),
                         formatted_text=question_data.get('formattedText'),
+                        secondstatement=question_data.get('secondStatement'),
+                        images=images,
                         subject_id=question_data.get('subjectId') or question_data.get('subject_id'),
                         title=question_data.get('title'),
                         description=question_data.get('description'),
                         command=question_data.get('command'),
-                        secondstatement=question_data.get('secondStatement'),
                         subtitle=question_data.get('subtitle'),
                         alternatives=question_data.get('options'),
                         skill=question_data.get('skills'),
@@ -193,7 +260,9 @@ def criar_avaliacao():
                         question_type=question_data.get('type'),
                         value=question_data.get('value'),
                         topics=question_data.get('topics'),
-                        created_by=question_data.get('created_by') or data.get('created_by')
+                        education_stage_id=question_data.get('educationStageId'),
+                        created_by=question_data.get('created_by') or data.get('created_by'),
+                        last_modified_by=question_data.get('lastModifiedBy') or data.get('lastModifiedBy')
                     )
                     db.session.add(question)
                     db.session.flush()  # Para obter o ID da questão

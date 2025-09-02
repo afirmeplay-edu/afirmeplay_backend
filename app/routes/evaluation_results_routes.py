@@ -835,6 +835,19 @@ def listar_avaliacoes():
             ranking_alunos = _calcular_ranking_global_alunos(
                 avaliacao, scope_info, nivel_granularidade, user
             )
+        # Gerar tabela detalhada por disciplina (apenas se uma avaliação específica for selecionada)
+        tabela_detalhada = {}
+        ranking_alunos = []
+        
+        if avaliacao and avaliacao.lower() != 'all':
+            tabela_detalhada = _gerar_tabela_detalhada_por_disciplina(
+                avaliacao, scope_info, nivel_granularidade, user
+            )
+            
+            # Calcular ranking global dos alunos
+            ranking_alunos = _calcular_ranking_global_alunos(
+                avaliacao, scope_info, nivel_granularidade, user
+            )
         
         return jsonify({
             "nivel_granularidade": nivel_granularidade,
@@ -858,6 +871,7 @@ def listar_avaliacoes():
                 }
             },
             "tabela_detalhada": tabela_detalhada,
+            "ranking": ranking_alunos,
             "ranking": ranking_alunos,
             "opcoes_proximos_filtros": opcoes_proximos_filtros
         }), 200
@@ -3524,7 +3538,9 @@ def get_student_answers(test_id, student_id):
         if user['role'] == 'aluno':
             # Aluno só pode ver suas próprias respostas
             # O student_id enviado é o user_id, não o id da tabela Student
+            # O student_id enviado é o user_id, não o id da tabela Student
             if user['id'] != student_id:
+                return jsonify({"error": "Você só pode ver seus próprios resultados"}), 403
                 return jsonify({"error": "Você só pode ver seus próprios resultados"}), 403
         elif user['role'] == 'professor':
             # Professor só pode ver respostas de testes que criou

@@ -968,14 +968,17 @@ def _gerar_tabela_detalhada_por_disciplina(avaliacao_id: str, scope_info: Dict, 
         
         # Aplicar filtros baseados na granularidade
         if nivel_granularidade in ['escola', 'serie', 'turma']:
+            # Fazer join com Class apenas uma vez
+            query_alunos = query_alunos.join(Class)
+            
             # Filtrar por escola se especificada
             if scope_info.get('escolas') and len(scope_info['escolas']) == 1:
                 escola_id = scope_info['escolas'][0].id
-                query_alunos = query_alunos.join(Class).filter(Class.school_id == escola_id)
+                query_alunos = query_alunos.filter(Class.school_id == escola_id)
             
             # Filtrar por série se especificada
             if nivel_granularidade in ['serie', 'turma'] and scope_info.get('serie_id') and scope_info['serie_id'] != 'all':
-                query_alunos = query_alunos.join(Class).filter(Class.grade_id == scope_info['serie_id'])
+                query_alunos = query_alunos.filter(Class.grade_id == scope_info['serie_id'])
             
             # Filtrar por turma se especificada
             if nivel_granularidade == 'turma' and scope_info.get('turma_id') and scope_info['turma_id'] != 'all':
@@ -1054,7 +1057,7 @@ def _gerar_tabela_detalhada_por_disciplina(avaliacao_id: str, scope_info: Dict, 
                             acertou = False
                             if question.question_type == 'multiple_choice':
                                 logging.info(f"Questão de múltipla escolha - verificando com alternatives")
-                                acertou = EvaluationResultService.check_multiple_choice_answer(resposta_aluno.answer, question.alternatives)
+                                acertou = EvaluationResultService.check_multiple_choice_answer(resposta_aluno.answer, question.correct_answer)
                                 logging.info(f"Resultado da verificação múltipla escolha: {acertou}")
                             else:
                                 logging.info(f"Questão não é múltipla escolha - comparando respostas diretamente")
@@ -1702,13 +1705,10 @@ def _calcular_estatisticas_por_disciplina(class_tests: list):
                 correct_answers = 0
                 for answer in answers:
                     question = next((q for q in questions if q.id == answer.question_id), None)
-                    if question and question.alternatives:
+                    if question and question.correct_answer:
                         # Verificar se a resposta está correta
-                        for alt in question.alternatives:
-                            if isinstance(alt, dict) and alt.get('isCorrect') and alt.get('id'):
-                                if str(answer.answer) == str(alt['id']):
-                                    correct_answers += 1
-                                    break
+                        if str(answer.answer).strip().lower() == str(question.correct_answer).strip().lower():
+                            correct_answers += 1
                 
                 correct_answers_by_student[student_id] = correct_answers
             
@@ -1719,25 +1719,37 @@ def _calcular_estatisticas_por_disciplina(class_tests: list):
                 proficiencias_disciplina = []
                 classificacoes_disciplina = {'Abaixo do Básico': 0, 'Básico': 0, 'Adequado': 0, 'Avançado': 0}
                 
+                # Buscar nome do curso para cálculos corretos
+                course_name = "Anos Iniciais"  # Padrão
+                if test.course:
+                    try:
+                        from app.models.educationStage import EducationStage
+                        import uuid
+                        course_uuid = uuid.UUID(test.course)
+                        course_obj = EducationStage.query.get(course_uuid)
+                        if course_obj:
+                            course_name = course_obj.name
+                    except (ValueError, TypeError, Exception):
+                        pass
+                
                 for student_id, correct_answers in correct_answers_by_student.items():
-                    # Calcular nota (0-10)
-                    nota = (correct_answers / total_questions_disciplina) * 10 if total_questions_disciplina > 0 else 0
+                    # Usar EvaluationCalculator para cálculos corretos por disciplina
+                    from app.services.evaluation_calculator import EvaluationCalculator
+                    
+                    result = EvaluationCalculator.calculate_complete_evaluation(
+                        correct_answers=correct_answers,
+                        total_questions=total_questions_disciplina,
+                        course_name=course_name,
+                        subject_name=subject.name,
+                        use_simple_calculation=False
+                    )
+                    
+                    nota = result['grade']
+                    proficiencia = result['proficiency']
+                    classificacao = result['classification']
+                    
                     notas_disciplina.append(nota)
-                    
-                    # Calcular proficiência (0-400)
-                    proficiencia = (correct_answers / total_questions_disciplina) * 400 if total_questions_disciplina > 0 else 0
                     proficiencias_disciplina.append(proficiencia)
-                    
-                    # Determinar classificação
-                    if nota < 2.5:
-                        classificacao = 'Abaixo do Básico'
-                    elif nota < 5.0:
-                        classificacao = 'Básico'
-                    elif nota < 7.5:
-                        classificacao = 'Adequado'
-                    else:
-                        classificacao = 'Avançado'
-                    
                     classificacoes_disciplina[classificacao] += 1
                 
                 media_nota = sum(notas_disciplina) / len(notas_disciplina) if notas_disciplina else 0.0
@@ -2359,12 +2371,12 @@ def relatorio_detalhado(evaluation_id: str):
                 # Calcular acertos corretamente baseado no tipo de questão
                 acertos = 0
                 if question.question_type == 'multipleChoice':
-                    # Para questões de múltipla escolha, verificar alternatives
+                    # Para questões de múltipla escolha, verificar correct_answer
                     for answer in StudentAnswer.query.filter_by(
                         test_id=evaluation_id,
                         question_id=question.id
                     ).all():
-                        if EvaluationResultService.check_multiple_choice_answer(answer.answer, question.alternatives):
+                        if EvaluationResultService.check_multiple_choice_answer(answer.answer, question.correct_answer):
                             acertos += 1
                 else:
                     # Para outros tipos, usar correct_answer
@@ -2453,7 +2465,7 @@ def relatorio_detalhado(evaluation_id: str):
                     # Verificar se a resposta está correta
                     is_correct = False
                     if question.question_type == 'multipleChoice':
-                        is_correct = EvaluationResultService.check_multiple_choice_answer(answer.answer, question.alternatives)
+                        is_correct = EvaluationResultService.check_multiple_choice_answer(answer.answer, question.correct_answer)
                     else:
                         is_correct = str(answer.answer).strip().lower() == str(question.correct_answer).strip().lower()
                     
@@ -2976,7 +2988,7 @@ def calculate_test_scores(test_id):
                 if question.question_type == 'multipleChoice':
                     results[student_id]["multiple_choice_questions"] += 1
                     # Questão de múltipla escolha - correção automática
-                    is_correct = check_multiple_choice_answer(answer.answer, question.alternatives)
+                    is_correct = EvaluationResultService.check_multiple_choice_answer(answer.answer, question.correct_answer)
                     if is_correct:
                         results[student_id]["correct_answers"] += 1
                         results[student_id]["total_score"] += question_value
@@ -3240,7 +3252,7 @@ def get_student_test_results(test_id, student_id):
                 }
                 
                 if question.question_type == 'multipleChoice':
-                    is_correct = EvaluationResultService.check_multiple_choice_answer(answer.answer, question.alternatives)
+                    is_correct = EvaluationResultService.check_multiple_choice_answer(answer.answer, question.correct_answer)
                     answer_detail["is_correct"] = is_correct
                     answer_detail["score"] = question_value if is_correct else 0
                     
@@ -3492,33 +3504,7 @@ def get_pending_corrections(test_id):
         return jsonify({"error": "Erro ao buscar correções pendentes", "details": str(e)}), 500
 
 
-def check_multiple_choice_answer(student_answer, alternatives):
-    """
-    Verifica se a resposta do aluno está correta para questão de múltipla escolha
-    Compara por ID da alternativa (recomendado) ou por texto (fallback)
-    """
-    if not alternatives or not student_answer:
-        return False
-        
-    student_answer = str(student_answer).strip()
-    
-    # Opção 1: Comparar por ID da alternativa (recomendado)
-    for alt in alternatives:
-        if isinstance(alt, dict) and alt.get('isCorrect') and alt.get('id'):
-            if student_answer == str(alt['id']):
-                return True
-    
-    # Opção 2: Comparar por texto (fallback)
-    for alt in alternatives:
-        if isinstance(alt, dict) and alt.get('isCorrect'):
-            alt_text = alt.get('text', '').strip()
-            if student_answer.lower() == alt_text.lower():
-                return True
-        elif isinstance(alt, str):
-            if student_answer.lower() == alt.strip().lower():
-                return True
-                
-    return False 
+ 
 
 # ==================== ENDPOINT: GET /{test_id}/student/{student_id}/answers ====================
 
@@ -3615,7 +3601,7 @@ def get_student_answers(test_id, student_id):
                 
                 # Verificar se a resposta está correta baseado no tipo de questão
                 if question.question_type == 'multipleChoice':
-                    is_correct = EvaluationResultService.check_multiple_choice_answer(answer.answer, question.alternatives)
+                    is_correct = EvaluationResultService.check_multiple_choice_answer(answer.answer, question.correct_answer)
                     answer_detail["is_correct"] = is_correct
                     answer_detail["score"] = question.value if is_correct else 0
                     if is_correct:
@@ -3756,7 +3742,7 @@ def relatorio_detalhado_filtrado(evaluation_id: str):
                         test_id=evaluation_id,
                         question_id=question.id
                     ).all():
-                        if EvaluationResultService.check_multiple_choice_answer(answer.answer, question.alternatives):
+                        if EvaluationResultService.check_multiple_choice_answer(answer.answer, question.correct_answer):
                             acertos += 1
                 else:
                     acertos = StudentAnswer.query.filter_by(
@@ -3853,7 +3839,7 @@ def relatorio_detalhado_filtrado(evaluation_id: str):
                         
                         is_correct = False
                         if question.question_type == 'multipleChoice':
-                            is_correct = EvaluationResultService.check_multiple_choice_answer(answer.answer, question.alternatives)
+                            is_correct = EvaluationResultService.check_multiple_choice_answer(answer.answer, question.correct_answer)
                         else:
                             is_correct = answer.answer == question.correct_answer
                         
@@ -4361,6 +4347,50 @@ def obter_estatisticas_status():
     except Exception as e:
         logging.error(f"Erro ao obter estatísticas de status: {str(e)}", exc_info=True)
         return jsonify({"error": "Erro ao obter estatísticas", "details": str(e)}), 500
+
+
+@bp.route('/avaliacoes/<string:test_id>/estatisticas-por-disciplina', methods=['GET'])
+@jwt_required()
+@role_required("admin", "professor", "coordenador", "diretor", "tecadm")
+def obter_estatisticas_por_disciplina(test_id: str):
+    """
+    Obtém estatísticas detalhadas por disciplina de uma avaliação
+    
+    Args:
+        test_id: ID da avaliação
+        
+    Returns:
+        Estatísticas detalhadas por disciplina
+    """
+    try:
+        from app.services.evaluation_result_service import EvaluationResultService
+        
+        # Verificar permissões do usuário
+        user = get_current_user_from_token()
+        if not user:
+            return jsonify({"error": "Usuário não encontrado"}), 401
+        
+        # Buscar o teste para verificar permissões
+        from app.models.test import Test
+        test = Test.query.get(test_id)
+        if not test:
+            return jsonify({"error": "Avaliação não encontrada"}), 404
+        
+        # Verificar permissões específicas
+        if user['role'] == 'professor' and test.created_by != user['id']:
+            return jsonify({"error": "Verificação de permissões falhou"}), 403
+        
+        # Obter estatísticas por disciplina
+        statistics = EvaluationResultService.get_subject_detailed_statistics(test_id)
+        
+        if "error" in statistics:
+            return jsonify(statistics), 400
+        
+        return jsonify(statistics), 200
+        
+    except Exception as e:
+        logging.error(f"Erro ao obter estatísticas por disciplina para avaliação {test_id}: {str(e)}", exc_info=True)
+        return jsonify({"error": "Erro ao obter estatísticas por disciplina", "details": str(e)}), 500
 
 # ==================== ENDPOINTS PARA OPÇÕES DE FILTROS ====================
 
@@ -5427,7 +5457,7 @@ def _calcular_ranking_global_alunos(avaliacao_id: str, scope_info: Dict, nivel_g
                         # Verificar se acertou
                         acertou = False
                         if question.question_type == 'multiple_choice':
-                            acertou = EvaluationResultService.check_multiple_choice_answer(resposta.answer, question.alternatives)
+                            acertou = EvaluationResultService.check_multiple_choice_answer(resposta.answer, question.correct_answer)
                         else:
                             acertou = str(resposta.answer).strip().lower() == str(question.correct_answer).strip().lower()
                         

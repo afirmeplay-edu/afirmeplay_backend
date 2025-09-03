@@ -835,19 +835,6 @@ def listar_avaliacoes():
             ranking_alunos = _calcular_ranking_global_alunos(
                 avaliacao, scope_info, nivel_granularidade, user
             )
-        # Gerar tabela detalhada por disciplina (apenas se uma avaliação específica for selecionada)
-        tabela_detalhada = {}
-        ranking_alunos = []
-        
-        if avaliacao and avaliacao.lower() != 'all':
-            tabela_detalhada = _gerar_tabela_detalhada_por_disciplina(
-                avaliacao, scope_info, nivel_granularidade, user
-            )
-            
-            # Calcular ranking global dos alunos
-            ranking_alunos = _calcular_ranking_global_alunos(
-                avaliacao, scope_info, nivel_granularidade, user
-            )
         
         return jsonify({
             "nivel_granularidade": nivel_granularidade,
@@ -871,7 +858,6 @@ def listar_avaliacoes():
                 }
             },
             "tabela_detalhada": tabela_detalhada,
-            "ranking": ranking_alunos,
             "ranking": ranking_alunos,
             "opcoes_proximos_filtros": opcoes_proximos_filtros
         }), 200
@@ -1030,10 +1016,17 @@ def _gerar_tabela_detalhada_por_disciplina(avaliacao_id: str, scope_info: Dict, 
             
             # Para cada aluno, verificar TODAS as questões desta disciplina
             for student in all_students:
-                # Buscar informações da turma e escola
-                turma_nome = student.class_.name if student.class_ else "N/A"
-                serie_nome = student.class_.grade.name if student.class_ and student.class_.grade else "N/A"
-                escola_nome = student.class_.school.name if student.class_ and student.class_.school else "N/A"
+                # Buscar informações da turma e escola com verificação mais robusta
+                turma_nome = "N/A"
+                serie_nome = "N/A"
+                escola_nome = "N/A"
+                
+                if student.class_:
+                    turma_nome = student.class_.name or "N/A"
+                    if student.class_.grade:
+                        serie_nome = student.class_.grade.name or "N/A"
+                    if student.class_.school:
+                        escola_nome = student.class_.school.name or "N/A"
                 
                 # Buscar resultado pré-calculado
                 evaluation_result = results_dict.get(student.id)
@@ -1102,6 +1095,30 @@ def _gerar_tabela_detalhada_por_disciplina(avaliacao_id: str, scope_info: Dict, 
                             })
                             logging.info(f"Aluno {student.name} NÃO respondeu a questão {questao_info['numero']}")
                 
+                # CORREÇÃO: Calcular nota, proficiência e classificação baseado nos acertos específicos desta disciplina
+                disciplina_nota = 0.0
+                disciplina_proficiencia = 0.0
+                disciplina_classificacao = "Abaixo do Básico"
+                
+                if total_respondidas > 0:
+                    # Calcular baseado nos acertos específicos desta disciplina
+                    percentual_acertos = (total_acertos / total_respondidas) * 100
+                    disciplina_nota = round(percentual_acertos, 2)
+                    disciplina_proficiencia = round((total_acertos / total_respondidas) * 400, 2)
+                    
+                    # Determinar classificação baseada na proficiência específica da disciplina
+                    if disciplina_proficiencia >= 300:
+                        disciplina_classificacao = "Avançado"
+                    elif disciplina_proficiencia >= 200:
+                        disciplina_classificacao = "Adequado"
+                    elif disciplina_proficiencia >= 100:
+                        disciplina_classificacao = "Básico"
+                    else:
+                        disciplina_classificacao = "Abaixo do Básico"
+                
+                # Determinar status do aluno
+                status = "concluida" if total_respondidas > 0 else "pendente"
+                
                 # Dados do aluno para esta disciplina (sempre incluído, mesmo sem respostas)
                 aluno_disciplina = {
                     "id": student.id,
@@ -1114,9 +1131,12 @@ def _gerar_tabela_detalhada_por_disciplina(avaliacao_id: str, scope_info: Dict, 
                     "total_erros": total_erros,
                     "total_respondidas": total_respondidas,
                     "total_questoes_disciplina": len(disciplina_data["questoes"]),
-                    "nivel_proficiencia": evaluation_result.classification if evaluation_result else "Abaixo do Básico",
-                    "nota": evaluation_result.grade if evaluation_result else 0.0,
-                    "proficiencia": round(evaluation_result.proficiency, 2) if evaluation_result else 0.0
+                    "total_em_branco": len(disciplina_data["questoes"]) - total_respondidas,
+                    "nivel_proficiencia": disciplina_classificacao,
+                    "nota": disciplina_nota,
+                    "proficiencia": disciplina_proficiencia,
+                    "status": status,
+                    "percentual_acertos": round((total_acertos / total_respondidas * 100), 2) if total_respondidas > 0 else 0.0
                 }
                 
                 alunos_disciplina.append(aluno_disciplina)
@@ -1125,11 +1145,111 @@ def _gerar_tabela_detalhada_por_disciplina(avaliacao_id: str, scope_info: Dict, 
             disciplina_data["alunos"] = alunos_disciplina
             logging.info(f"Disciplina {disciplina_data['nome']}: {len(alunos_disciplina)} alunos processados")
         
-        return {"disciplinas": list(questoes_por_disciplina.values())}
+        # NOVA FUNCIONALIDADE: Calcular dados gerais (média de todas as disciplinas)
+        dados_gerais = _calcular_dados_gerais_alunos(questoes_por_disciplina)
+        
+        return {
+            "disciplinas": list(questoes_por_disciplina.values()),
+            "geral": dados_gerais
+        }
         
     except Exception as e:
         logging.error(f"Erro ao gerar tabela detalhada por disciplina: {str(e)}", exc_info=True)
-        return {"disciplinas": [], "error": str(e)}
+        return {"disciplinas": [], "geral": {"alunos": []}, "error": str(e)}
+
+
+def _calcular_dados_gerais_alunos(questoes_por_disciplina: dict) -> dict:
+    """
+    Calcula dados gerais (média de todas as disciplinas) para cada aluno
+    """
+    try:
+        # Criar dicionário para armazenar dados consolidados por aluno
+        dados_alunos = {}
+        
+        # Para cada disciplina, coletar dados dos alunos
+        for disciplina_id, disciplina_data in questoes_por_disciplina.items():
+            for aluno_data in disciplina_data.get("alunos", []):
+                aluno_id = aluno_data["id"]
+                
+                if aluno_id not in dados_alunos:
+                    # Inicializar dados do aluno
+                    dados_alunos[aluno_id] = {
+                        "id": aluno_id,
+                        "nome": aluno_data["nome"],
+                        "escola": aluno_data["escola"],
+                        "serie": aluno_data["serie"],
+                        "turma": aluno_data["turma"],
+                        "notas_disciplinas": [],
+                        "proficiencias_disciplinas": [],
+                        "total_acertos_geral": 0,
+                        "total_questoes_geral": 0,
+                        "total_respondidas_geral": 0
+                    }
+                
+                # Acumular dados das disciplinas
+                dados_alunos[aluno_id]["notas_disciplinas"].append(aluno_data["nota"])
+                dados_alunos[aluno_id]["proficiencias_disciplinas"].append(aluno_data["proficiencia"])
+                dados_alunos[aluno_id]["total_acertos_geral"] += aluno_data["total_acertos"]
+                dados_alunos[aluno_id]["total_questoes_geral"] += aluno_data["total_questoes_disciplina"]
+                dados_alunos[aluno_id]["total_respondidas_geral"] += aluno_data["total_respondidas"]
+        
+        # Calcular médias e classificação geral para cada aluno
+        alunos_gerais = []
+        for aluno_id, dados in dados_alunos.items():
+            # Calcular médias
+            if dados["notas_disciplinas"]:
+                nota_geral = sum(dados["notas_disciplinas"]) / len(dados["notas_disciplinas"])
+                proficiencia_geral = sum(dados["proficiencias_disciplinas"]) / len(dados["proficiencias_disciplinas"])
+            else:
+                nota_geral = 0.0
+                proficiencia_geral = 0.0
+            
+            # Calcular percentual geral
+            if dados["total_questoes_geral"] > 0:
+                percentual_acertos_geral = (dados["total_acertos_geral"] / dados["total_questoes_geral"]) * 100
+            else:
+                percentual_acertos_geral = 0.0
+            
+            # Determinar classificação geral baseada na proficiência média
+            if proficiencia_geral >= 300:
+                nivel_proficiencia_geral = "Avançado"
+            elif proficiencia_geral >= 200:
+                nivel_proficiencia_geral = "Adequado"
+            elif proficiencia_geral >= 100:
+                nivel_proficiencia_geral = "Básico"
+            else:
+                nivel_proficiencia_geral = "Abaixo do Básico"
+            
+            # Determinar status geral
+            status_geral = "concluida" if dados["total_respondidas_geral"] > 0 else "pendente"
+            
+            aluno_geral = {
+                "id": dados["id"],
+                "nome": dados["nome"],
+                "escola": dados["escola"],
+                "serie": dados["serie"],
+                "turma": dados["turma"],
+                "nota_geral": round(nota_geral, 2),
+                "proficiencia_geral": round(proficiencia_geral, 2),
+                "nivel_proficiencia_geral": nivel_proficiencia_geral,
+                "total_acertos_geral": dados["total_acertos_geral"],
+                "total_questoes_geral": dados["total_questoes_geral"],
+                "total_respondidas_geral": dados["total_respondidas_geral"],
+                "total_em_branco_geral": dados["total_questoes_geral"] - dados["total_respondidas_geral"],
+                "percentual_acertos_geral": round(percentual_acertos_geral, 2),
+                "status_geral": status_geral
+            }
+            
+            alunos_gerais.append(aluno_geral)
+        
+        # Ordenar alunos por nome
+        alunos_gerais.sort(key=lambda x: x["nome"])
+        
+        return {"alunos": alunos_gerais}
+        
+    except Exception as e:
+        logging.error(f"Erro ao calcular dados gerais dos alunos: {str(e)}")
+        return {"alunos": []}
 
 
 def _calculate_evaluation_stats_frontend(test_id: str) -> Dict[str, Any]:
@@ -1649,15 +1769,16 @@ def _determinar_escopo_busca(estado, municipio, escola, serie, turma, avaliacao,
 
 def _calcular_estatisticas_por_disciplina(class_tests: list):
     """
-    Calcula estatísticas agrupadas por disciplina baseado no subjects_info da avaliação
+    Calcula estatísticas agrupadas por disciplina baseado nos acertos específicos de cada disciplina
     """
     try:
         from app.models.evaluationResult import EvaluationResult
         from app.models.student import Student
         from app.models.question import Question
         from app.models.subject import Subject
-        from app.models.studentAnswer import StudentAnswer
         from app.models.testQuestion import TestQuestion
+        from app.models.studentAnswer import StudentAnswer
+        from app.services.evaluation_result_service import EvaluationResultService
         
         if not class_tests:
             return []
@@ -1682,6 +1803,10 @@ def _calcular_estatisticas_por_disciplina(class_tests: list):
         todos_alunos = Student.query.filter(Student.class_id.in_(class_ids)).all()
         total_alunos = len(todos_alunos)
         
+        # Buscar alunos que participaram da avaliação
+        evaluation_results = EvaluationResult.query.filter_by(test_id=test_id).all()
+        alunos_participantes = len(evaluation_results)
+        
         resultados_disciplina = []
         
         for subject in subjects:
@@ -1695,83 +1820,64 @@ def _calcular_estatisticas_por_disciplina(class_tests: list):
             if not questions:
                 continue
             
-            # Buscar respostas dos alunos para questões desta disciplina
-            question_ids = [q.id for q in questions]
-            student_answers = StudentAnswer.query.filter(
-                StudentAnswer.test_id == test_id,
-                StudentAnswer.question_id.in_(question_ids)
-            ).all()
-            
-            # Agrupar respostas por aluno
-            answers_by_student = {}
-            for answer in student_answers:
-                if answer.student_id not in answers_by_student:
-                    answers_by_student[answer.student_id] = []
-                answers_by_student[answer.student_id].append(answer)
-            
-            # Calcular estatísticas para esta disciplina
-            alunos_participantes = len(answers_by_student)
             total_questions_disciplina = len(questions)
+            question_ids = [q.id for q in questions]
             
-            # Calcular acertos por aluno para esta disciplina
-            correct_answers_by_student = {}
-            for student_id, answers in answers_by_student.items():
-                correct_answers = 0
+            # CORREÇÃO: Calcular estatísticas baseadas nos acertos específicos desta disciplina
+            notas_disciplina = []
+            proficiencias_disciplina = []
+            classificacoes_disciplina = {'Abaixo do Básico': 0, 'Básico': 0, 'Adequado': 0, 'Avançado': 0}
+            
+            for student in todos_alunos:
+                # Buscar respostas do aluno para esta disciplina específica
+                answers = StudentAnswer.query.filter(
+                    StudentAnswer.test_id == test_id,
+                    StudentAnswer.student_id == student.id,
+                    StudentAnswer.question_id.in_(question_ids)
+                ).all()
+                
+                if not answers:
+                    continue
+                
+                # Calcular acertos específicos desta disciplina
+                acertos_disciplina = 0
                 for answer in answers:
                     question = next((q for q in questions if q.id == answer.question_id), None)
-                    if question and question.correct_answer:
-                        # Verificar se a resposta está correta
-                        if str(answer.answer).strip().lower() == str(question.correct_answer).strip().lower():
-                            correct_answers += 1
+                    if question:
+                        if question.question_type == 'multiple_choice':
+                            is_correct = EvaluationResultService.check_multiple_choice_answer(answer.answer, question.correct_answer)
+                        else:
+                            is_correct = str(answer.answer).strip().lower() == str(question.correct_answer).strip().lower()
+                        
+                        if is_correct:
+                            acertos_disciplina += 1
                 
-                correct_answers_by_student[student_id] = correct_answers
+                # Calcular nota e proficiência para esta disciplina específica
+                if total_questions_disciplina > 0:
+                    percentual_acertos = (acertos_disciplina / total_questions_disciplina) * 100
+                    nota_disciplina = round(percentual_acertos, 2)
+                    proficiencia_disciplina = round((acertos_disciplina / total_questions_disciplina) * 400, 2)
+                    
+                    notas_disciplina.append(nota_disciplina)
+                    proficiencias_disciplina.append(proficiencia_disciplina)
+                    
+                    # Determinar classificação baseada na proficiência específica da disciplina
+                    if proficiencia_disciplina >= 300:
+                        classificacoes_disciplina['Avançado'] += 1
+                    elif proficiencia_disciplina >= 200:
+                        classificacoes_disciplina['Adequado'] += 1
+                    elif proficiencia_disciplina >= 100:
+                        classificacoes_disciplina['Básico'] += 1
+                    else:
+                        classificacoes_disciplina['Abaixo do Básico'] += 1
             
             # Calcular médias da disciplina
-            if correct_answers_by_student:
-                # Calcular notas baseadas nos acertos
-                notas_disciplina = []
-                proficiencias_disciplina = []
-                classificacoes_disciplina = {'Abaixo do Básico': 0, 'Básico': 0, 'Adequado': 0, 'Avançado': 0}
-                
-                # Buscar nome do curso para cálculos corretos
-                course_name = "Anos Iniciais"  # Padrão
-                if test.course:
-                    try:
-                        from app.models.educationStage import EducationStage
-                        import uuid
-                        course_uuid = uuid.UUID(test.course)
-                        course_obj = EducationStage.query.get(course_uuid)
-                        if course_obj:
-                            course_name = course_obj.name
-                    except (ValueError, TypeError, Exception):
-                        pass
-                
-                for student_id, correct_answers in correct_answers_by_student.items():
-                    # Usar EvaluationCalculator para cálculos corretos por disciplina
-                    from app.services.evaluation_calculator import EvaluationCalculator
-                    
-                    result = EvaluationCalculator.calculate_complete_evaluation(
-                        correct_answers=correct_answers,
-                        total_questions=total_questions_disciplina,
-                        course_name=course_name,
-                        subject_name=subject.name,
-                        use_simple_calculation=False
-                    )
-                    
-                    nota = result['grade']
-                    proficiencia = result['proficiency']
-                    classificacao = result['classification']
-                    
-                    notas_disciplina.append(nota)
-                    proficiencias_disciplina.append(proficiencia)
-                    classificacoes_disciplina[classificacao] += 1
-                
-                media_nota = sum(notas_disciplina) / len(notas_disciplina) if notas_disciplina else 0.0
-                media_proficiencia = sum(proficiencias_disciplina) / len(proficiencias_disciplina) if proficiencias_disciplina else 0.0
+            if notas_disciplina:
+                media_nota_disciplina = sum(notas_disciplina) / len(notas_disciplina)
+                media_proficiencia_disciplina = sum(proficiencias_disciplina) / len(proficiencias_disciplina)
             else:
-                media_nota = 0.0
-                media_proficiencia = 0.0
-                classificacoes_disciplina = {'Abaixo do Básico': 0, 'Básico': 0, 'Adequado': 0, 'Avançado': 0}
+                media_nota_disciplina = 0.0
+                media_proficiencia_disciplina = 0.0
             
             # Converter classificação para o formato esperado
             distribuicao_disciplina = {
@@ -1788,8 +1894,8 @@ def _calcular_estatisticas_por_disciplina(class_tests: list):
                 "alunos_participantes": alunos_participantes,
                 "alunos_pendentes": total_alunos - alunos_participantes,
                 "alunos_ausentes": 0,
-                "media_nota": round(media_nota, 2),
-                "media_proficiencia": round(media_proficiencia, 2),
+                "media_nota": round(media_nota_disciplina, 2),
+                "media_proficiencia": round(media_proficiencia_disciplina, 2),
                 "distribuicao_classificacao": distribuicao_disciplina
             }
             
@@ -2384,7 +2490,7 @@ def relatorio_detalhado(evaluation_id: str):
                 
                 # Calcular acertos corretamente baseado no tipo de questão
                 acertos = 0
-                if question.question_type == 'multipleChoice':
+                if question.question_type == 'multiple_choice':
                     # Para questões de múltipla escolha, verificar correct_answer
                     for answer in StudentAnswer.query.filter_by(
                         test_id=evaluation_id,
@@ -2478,7 +2584,7 @@ def relatorio_detalhado(evaluation_id: str):
                 if question:
                     # Verificar se a resposta está correta
                     is_correct = False
-                    if question.question_type == 'multipleChoice':
+                    if question.question_type == 'multiple_choice':
                         is_correct = EvaluationResultService.check_multiple_choice_answer(answer.answer, question.correct_answer)
                     else:
                         is_correct = str(answer.answer).strip().lower() == str(question.correct_answer).strip().lower()
@@ -2999,7 +3105,7 @@ def calculate_test_scores(test_id):
                 results[student_id]["max_possible_score"] += question_value
                 
                 # Verificar tipo de questão
-                if question.question_type == 'multipleChoice':
+                if question.question_type == 'multiple_choice':
                     results[student_id]["multiple_choice_questions"] += 1
                     # Questão de múltipla escolha - correção automática
                     is_correct = EvaluationResultService.check_multiple_choice_answer(answer.answer, question.correct_answer)
@@ -3265,7 +3371,7 @@ def get_student_test_results(test_id, student_id):
                     "corrected_at": answer.corrected_at.isoformat() if answer.corrected_at else None
                 }
                 
-                if question.question_type == 'multipleChoice':
+                if question.question_type == 'multiple_choice':
                     is_correct = EvaluationResultService.check_multiple_choice_answer(answer.answer, question.correct_answer)
                     answer_detail["is_correct"] = is_correct
                     answer_detail["score"] = question_value if is_correct else 0
@@ -3538,9 +3644,7 @@ def get_student_answers(test_id, student_id):
         if user['role'] == 'aluno':
             # Aluno só pode ver suas próprias respostas
             # O student_id enviado é o user_id, não o id da tabela Student
-            # O student_id enviado é o user_id, não o id da tabela Student
             if user['id'] != student_id:
-                return jsonify({"error": "Você só pode ver seus próprios resultados"}), 403
                 return jsonify({"error": "Você só pode ver seus próprios resultados"}), 403
         elif user['role'] == 'professor':
             # Professor só pode ver respostas de testes que criou
@@ -3616,7 +3720,7 @@ def get_student_answers(test_id, student_id):
                 }
                 
                 # Verificar se a resposta está correta baseado no tipo de questão
-                if question.question_type == 'multipleChoice':
+                if question.question_type == 'multiple_choice':
                     is_correct = EvaluationResultService.check_multiple_choice_answer(answer.answer, question.correct_answer)
                     answer_detail["is_correct"] = is_correct
                     answer_detail["score"] = question.value if is_correct else 0
@@ -3753,7 +3857,7 @@ def relatorio_detalhado_filtrado(evaluation_id: str):
                 
                 # Calcular acertos
                 acertos = 0
-                if question.question_type == 'multipleChoice':
+                if question.question_type == 'multiple_choice':
                     for answer in StudentAnswer.query.filter_by(
                         test_id=evaluation_id,
                         question_id=question.id
@@ -3854,7 +3958,7 @@ def relatorio_detalhado_filtrado(evaluation_id: str):
                             continue
                         
                         is_correct = False
-                        if question.question_type == 'multipleChoice':
+                        if question.question_type == 'multiple_choice':
                             is_correct = EvaluationResultService.check_multiple_choice_answer(answer.answer, question.correct_answer)
                         else:
                             is_correct = answer.answer == question.correct_answer

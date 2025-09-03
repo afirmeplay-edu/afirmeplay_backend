@@ -2316,7 +2316,7 @@ def _calcular_acertos_habilidade(evaluation_id: str) -> Dict[str, Any]:
         
         for answer in answers:
             # Verificar se a resposta está correta
-            if question.question_type == 'multipleChoice':
+            if question.question_type == 'multiple_choice':
                 # Para múltipla escolha, verificar se a resposta está correta
                 if question.correct_answer and str(answer.answer).strip().lower() == str(question.correct_answer).strip().lower():
                     acertos += 1

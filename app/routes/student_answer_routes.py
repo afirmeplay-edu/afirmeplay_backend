@@ -342,7 +342,7 @@ def submit_answers():
             
             # Verificar se a resposta está correta (correção automática)
             question = questions_dict[question_id]
-            if question.question_type == 'multipleChoice':
+            if question.question_type == 'multiple_choice':
                 # Verificar usando correct_answer para questões de múltipla escolha
                 from app.services.evaluation_result_service import EvaluationResultService
                 is_correct = EvaluationResultService.check_multiple_choice_answer(answer, question.correct_answer)

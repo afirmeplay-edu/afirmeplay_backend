@@ -207,25 +207,16 @@ class EvaluationResultService:
                     test_id, student_id, questions, answers, course_name
                 )
                 
-                # Calcular resultado geral baseado na média das proficiências
+                # CORREÇÃO: Calcular resultado geral baseado no total de acertos, não na média das disciplinas
                 if subject_results:
-                    total_proficiency = sum(sr['proficiency'] for sr in subject_results)
-                    total_grade = sum(sr['grade'] for sr in subject_results)
-                    avg_proficiency = total_proficiency / len(subject_results)
-                    avg_grade = total_grade / len(subject_results)
-                    
-                    # Determinar classificação geral baseada na proficiência média
-                    # Usar a primeira disciplina como referência para o cálculo
-                    first_subject = subject_results[0]['subject_name']
-                    classification = EvaluationCalculator.determine_classification(
-                        avg_proficiency, course_name, first_subject
+                    # Usar o total de acertos calculado para determinar o resultado geral
+                    result = EvaluationCalculator.calculate_complete_evaluation(
+                        correct_answers=correct_answers,
+                        total_questions=total_questions,
+                        course_name=course_name,
+                        subject_name=subject_name,
+                        use_simple_calculation=use_simple_calculation
                     )
-                    
-                    result = {
-                        'grade': round(avg_grade, 2),
-                        'proficiency': round(avg_proficiency, 2),
-                        'classification': classification
-                    }
                 else:
                     # Fallback se não conseguir calcular por disciplina
                     result = EvaluationCalculator.calculate_complete_evaluation(

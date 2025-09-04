@@ -315,6 +315,12 @@ def handle_error(error):
     }), 500
 
 
+def format_decimal_two_places(value: float) -> float:
+    """
+    Formata um número para duas casas decimais sem arredondamento (trunca)
+    """
+    return float(f"{value:.2f}")
+
 def convert_proficiency_to_1000_scale(proficiency: float, course: str, subject: str) -> float:
     """
     Converte proficiência do sistema atual para escala 0-1000
@@ -461,7 +467,12 @@ def listar_avaliacoes():
             escola_ids = [escola.id for escola in escolas_escopo if escola.city_id == user.get('city_id')]
         elif permissao['scope'] == 'escola':
             # Diretor e Coordenador veem apenas sua escola
-            escola_ids = [escola.id for escola in escolas_escopo if escola.id == user.get('school_id', '')]
+            from app.models.manager import Manager
+            manager = Manager.query.filter_by(user_id=user['id']).first()
+            if not manager or not manager.school_id:
+                escola_ids = []  # Sem escola vinculada
+            else:
+                escola_ids = [escola.id for escola in escolas_escopo if escola.id == manager.school_id]
         elif permissao['scope'] == 'escolas_vinculadas':
             # Professor vê todas as escolas do escopo (simplificado para mostrar avaliações que criou)
             escola_ids = [escola.id for escola in escolas_escopo]
@@ -554,7 +565,13 @@ def listar_avaliacoes():
                 query_base = query_base.filter(City.id == user.get('city_id'))
             elif permissao['scope'] == 'escola':
                 # Diretor e Coordenador veem apenas avaliações da sua escola
-                query_base = query_base.filter(School.id == user.get('school_id', ''))
+                from app.models.manager import Manager
+                manager = Manager.query.filter_by(user_id=user['id']).first()
+                if not manager or not manager.school_id:
+                    # Se não tem manager ou escola vinculada, retornar lista vazia
+                    query_base = query_base.filter(School.id == None)  # Força resultado vazio
+                else:
+                    query_base = query_base.filter(School.id == manager.school_id)
             elif permissao['scope'] == 'escolas_vinculadas':
                 # Professor vê avaliações de todas as escolas (filtro será aplicado por created_by)
                 pass
@@ -1243,7 +1260,7 @@ def _calcular_dados_gerais_alunos(questoes_por_disciplina: dict) -> dict:
                 "serie": dados["serie"],
                 "turma": dados["turma"],
                 "nota_geral": round(nota_geral, 2),
-                "proficiencia_geral": round(proficiencia_geral, 2),
+                "proficiencia_geral": format_decimal_two_places(proficiencia_geral),
                 "nivel_proficiencia_geral": nivel_proficiencia_geral,
                 "total_acertos_geral": dados["total_acertos_geral"],
                 "total_questoes_geral": dados["total_questoes_geral"],
@@ -1375,7 +1392,7 @@ def _calculate_evaluation_stats_frontend(test_id: str) -> Dict[str, Any]:
     
     # Calcular médias apenas dos alunos que participaram
     media_nota = round(sum(notas) / len(notas), 2) if notas else 0.0
-    media_proficiencia = round(sum(proficiencias) / len(proficiencias), 2) if proficiencias else 0.0
+    media_proficiencia = format_decimal_two_places(sum(proficiencias) / len(proficiencias)) if proficiencias else 0.0
     
     return {
         'total_alunos': total_alunos,
@@ -1498,7 +1515,7 @@ def _calculate_evaluation_stats_by_class(test_id: str, class_id: str) -> Dict[st
     
     # Calcular médias apenas dos alunos que participaram
     media_nota = round(sum(notas) / len(notas), 2) if notas else 0.0
-    media_proficiencia = round(sum(proficiencias) / len(proficiencias), 2) if proficiencias else 0.0
+    media_proficiencia = format_decimal_two_places(sum(proficiencias) / len(proficiencias)) if proficiencias else 0.0
     
     return {
         'total_alunos': total_alunos,
@@ -1623,7 +1640,7 @@ def _calcular_estatisticas_municipio(class_tests: list, scope_info) -> Dict[str,
             "alunos_pendentes": total_alunos - alunos_participantes,
             "alunos_ausentes": total_alunos - alunos_participantes,  # Calculado corretamente
             "media_nota_geral": round(media_nota_geral, 2),
-            "media_proficiencia_geral": round(media_proficiencia_geral, 2),
+            "media_proficiencia_geral": format_decimal_two_places(media_proficiencia_geral),
             "distribuicao_classificacao_geral": distribuicao_geral
         }
         
@@ -1756,7 +1773,12 @@ def _determinar_escopo_busca(estado, municipio, escola, serie, turma, avaliacao,
                 escolas = [e for e in escolas if e.city_id == user.get('city_id')]
             elif permissao['scope'] == 'escola':
                 # Diretor e Coordenador veem apenas sua escola
-                escolas = [e for e in escolas if e.id == user.get('school_id', '')]
+                from app.models.manager import Manager
+                manager = Manager.query.filter_by(user_id=user['id']).first()
+                if not manager or not manager.school_id:
+                    escolas = []  # Sem escola vinculada
+                else:
+                    escolas = [e for e in escolas if e.id == manager.school_id]
             elif permissao['scope'] == 'escolas_vinculadas':
                 # Professor vê todas as escolas do escopo (filtro será por created_by na avaliação)
                 pass
@@ -1868,8 +1890,8 @@ def _calcular_estatisticas_por_disciplina(class_tests: list):
                 # Calcular nota e proficiência para esta disciplina específica
                 if total_questions_disciplina > 0:
                     percentual_acertos = (acertos_disciplina / total_questions_disciplina) * 100
-                    nota_disciplina = round(percentual_acertos, 2)
-                    proficiencia_disciplina = round((acertos_disciplina / total_questions_disciplina) * 400, 2)
+                    nota_disciplina = format_decimal_two_places(percentual_acertos / 10)
+                    proficiencia_disciplina = format_decimal_two_places((acertos_disciplina / total_questions_disciplina) * 400)
                     
                     notas_disciplina.append(nota_disciplina)
                     proficiencias_disciplina.append(proficiencia_disciplina)
@@ -1886,8 +1908,8 @@ def _calcular_estatisticas_por_disciplina(class_tests: list):
             
             # Calcular médias da disciplina
             if notas_disciplina:
-                media_nota_disciplina = sum(notas_disciplina) / len(notas_disciplina)
-                media_proficiencia_disciplina = sum(proficiencias_disciplina) / len(proficiencias_disciplina)
+                media_nota_disciplina = format_decimal_two_places(sum(notas_disciplina) / len(notas_disciplina))
+                media_proficiencia_disciplina = format_decimal_two_places(sum(proficiencias_disciplina) / len(proficiencias_disciplina))
             else:
                 media_nota_disciplina = 0.0
                 media_proficiencia_disciplina = 0.0
@@ -1907,8 +1929,8 @@ def _calcular_estatisticas_por_disciplina(class_tests: list):
                 "alunos_participantes": alunos_participantes,
                 "alunos_pendentes": total_alunos - alunos_participantes,
                 "alunos_ausentes": 0,
-                "media_nota": round(media_nota_disciplina, 2),
-                "media_proficiencia": round(media_proficiencia_disciplina, 2),
+                "media_nota": media_nota_disciplina,
+                "media_proficiencia": media_proficiencia_disciplina,
                 "distribuicao_classificacao": distribuicao_disciplina
             }
             
@@ -2044,7 +2066,7 @@ def _calcular_estatisticas_gerais(class_tests: list, scope_info, nivel_granulari
             "alunos_pendentes": total_alunos - alunos_participantes,
             "alunos_ausentes": 0,  # Pode ser calculado se necessário
             "media_nota_geral": round(media_nota_geral, 2),
-            "media_proficiencia_geral": round(media_proficiencia_geral, 2),
+            "media_proficiencia_geral": format_decimal_two_places(media_proficiencia_geral),
             "distribuicao_classificacao_geral": distribuicao_geral
         }
         
@@ -2350,7 +2372,7 @@ def listar_alunos():
                 "turma": turma_nome,
                 "grade": grade_nome,
                 "nota": evaluation_result.grade if evaluation_result else 0.0,
-                "proficiencia": round(proficiency_original, 2),
+                "proficiencia": format_decimal_two_places(proficiency_original),
                 "classificacao": classification_original,
                 "questoes_respondidas": total_answered,
                 "acertos": correct_answers,
@@ -2620,7 +2642,7 @@ def relatorio_detalhado(evaluation_id: str):
                 "total_erros": total_answered - correct_answers,
                 "total_em_branco": len(test.questions) - total_answered if test.questions else 0,
                 "nota_final": evaluation_result.grade if evaluation_result else 0.0,
-                "proficiencia": round(proficiency_original, 2),
+                "proficiencia": format_decimal_two_places(proficiency_original),
                 "classificacao": classification_original,
                 "status": status
             }
@@ -3418,7 +3440,7 @@ def get_student_test_results(test_id, student_id):
             "total_score": round(grade, 2),  # Usar nota como total_score
             "max_possible_score": total_questions,  # Simplificado
             "grade": round(grade, 2),
-            "proficiencia": round(proficiency_original, 2),
+            "proficiencia": format_decimal_two_places(proficiency_original),
             "classificacao": classification,
             "calculated_at": evaluation_result.calculated_at.isoformat() if evaluation_result.calculated_at else None,
             "answers": detailed_answers if request.args.get('include_answers', 'false').lower() == 'true' else []
@@ -5385,7 +5407,7 @@ def _calcular_estatisticas_consolidadas_por_escopo(class_tests: list, scope_info
             "alunos_pendentes": 0,
             "alunos_ausentes": alunos_ausentes,
             "media_nota_geral": round(media_nota, 2),
-            "media_proficiencia_geral": round(media_proficiencia, 2),
+            "media_proficiencia_geral": format_decimal_two_places(media_proficiencia),
             "distribuicao_classificacao_geral": distribuicao_geral
         }
         
@@ -5609,7 +5631,7 @@ def _calcular_ranking_global_alunos(avaliacao_id: str, scope_info: Dict, nivel_g
                 "total_acertos": total_acertos,
                 "total_respondidas": total_respondidas,
                 "nota": nota,
-                "proficiencia": round(evaluation_result.proficiency, 2) if evaluation_result else 0.0,
+                "proficiencia": format_decimal_two_places(evaluation_result.proficiency) if evaluation_result else 0.0,
                 "nivel_proficiencia": evaluation_result.classification if evaluation_result else "Abaixo do Básico"
             }
             

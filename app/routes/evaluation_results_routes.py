@@ -1101,20 +1101,33 @@ def _gerar_tabela_detalhada_por_disciplina(avaliacao_id: str, scope_info: Dict, 
                 disciplina_classificacao = "Abaixo do Básico"
                 
                 if total_respondidas > 0:
-                    # Calcular baseado nos acertos específicos desta disciplina
-                    percentual_acertos = (total_acertos / total_respondidas) * 100
-                    disciplina_nota = round(percentual_acertos, 2)
-                    disciplina_proficiencia = round((total_acertos / total_respondidas) * 400, 2)
+                    # Obter informações do curso da avaliação
+                    course_name = "Anos Iniciais"  # Padrão
+                    if test.course:
+                        try:
+                            from app.models.educationStage import EducationStage
+                            import uuid
+                            # Converter string para UUID
+                            course_uuid = uuid.UUID(test.course)
+                            course_obj = EducationStage.query.get(course_uuid)
+                            if course_obj:
+                                course_name = course_obj.name
+                        except (ValueError, TypeError, Exception):
+                            # Se houver erro, manter o padrão
+                            pass
                     
-                    # Determinar classificação baseada na proficiência específica da disciplina
-                    if disciplina_proficiencia >= 300:
-                        disciplina_classificacao = "Avançado"
-                    elif disciplina_proficiencia >= 200:
-                        disciplina_classificacao = "Adequado"
-                    elif disciplina_proficiencia >= 100:
-                        disciplina_classificacao = "Básico"
-                    else:
-                        disciplina_classificacao = "Abaixo do Básico"
+                    # Usar o EvaluationCalculator para calcular corretamente
+                    from app.services.evaluation_calculator import EvaluationCalculator
+                    result = EvaluationCalculator.calculate_complete_evaluation(
+                        correct_answers=total_acertos,
+                        total_questions=total_respondidas,
+                        course_name=course_name,
+                        subject_name=disciplina_data['nome']
+                    )
+                    
+                    disciplina_nota = result['grade']
+                    disciplina_proficiencia = result['proficiency']
+                    disciplina_classificacao = result['classification']
                 
                 # Determinar status do aluno
                 status = "concluida" if total_respondidas > 0 else "pendente"

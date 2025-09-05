@@ -20,7 +20,7 @@ class EvaluationResult(db.Model):
     classification = db.Column(db.String(50), nullable=False)
     
     # Metadados
-    calculated_at = db.Column(db.DateTime, default=datetime.utcnow)
+    calculated_at = db.Column(db.TIMESTAMP, default=datetime.utcnow)
     
     # Relacionamentos
     test = db.relationship('Test', backref='evaluation_results')

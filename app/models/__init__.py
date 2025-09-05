@@ -21,4 +21,6 @@ from .user import User
 from .game import Game
 from .evaluationResult import EvaluationResult
 from .manager import Manager
+from .physicalTestAnswer import PhysicalTestAnswer
+from .physicalTestForm import PhysicalTestForm
 

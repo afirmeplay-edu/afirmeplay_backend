@@ -13,8 +13,9 @@ class TestSession(db.Model):
     test_id = db.Column(db.String, db.ForeignKey('test.id'), nullable=False)
     
     # Controle de tempo simplificado
-    started_at = db.Column(db.DateTime, nullable=True)  # Quando o aluno iniciou
-    submitted_at = db.Column(db.DateTime, nullable=True)  # Quando o aluno finalizou
+    started_at = db.Column(db.TIMESTAMP, nullable=True)  # Quando o aluno iniciou
+    actual_start_time = db.Column(db.TIMESTAMP, nullable=True)  # Tempo real de início
+    submitted_at = db.Column(db.TIMESTAMP, nullable=True)  # Quando o aluno finalizou
     time_limit_minutes = db.Column(db.Integer, nullable=True)  # Tempo limite em minutos
     
     # Status da sessão
@@ -25,18 +26,19 @@ class TestSession(db.Model):
     correct_answers = db.Column(db.Integer, nullable=True)
     score = db.Column(db.Float, nullable=True)
     grade = db.Column(db.Float, nullable=True)  # nota final (0-10)
+    manual_score = db.Column(db.Numeric(5, 2), nullable=True)  # Nota manual do professor
     
     # Campos para correção
     feedback = db.Column(db.Text, nullable=True)  # Feedback geral do professor
     corrected_by = db.Column(db.String, db.ForeignKey('users.id'), nullable=True)  # Professor que corrigiu
-    corrected_at = db.Column(db.DateTime, nullable=True)  # Data da correção
+    corrected_at = db.Column(db.TIMESTAMP, nullable=True)  # Data da correção
     
     # Metadados
     ip_address = db.Column(db.String(45), nullable=True)  # IP do aluno
     user_agent = db.Column(db.Text, nullable=True)  # navegador usado
     
-    created_at = db.Column(db.DateTime, default=datetime.utcnow)
-    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at = db.Column(db.TIMESTAMP, default=datetime.utcnow)
+    updated_at = db.Column(db.TIMESTAMP, default=datetime.utcnow, onupdate=datetime.utcnow)
     
     # Relacionamentos
     student = db.relationship('Student', backref='test_sessions')

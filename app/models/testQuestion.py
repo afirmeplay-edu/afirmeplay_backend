@@ -9,7 +9,7 @@ class TestQuestion(db.Model):
     test_id = db.Column(db.String, db.ForeignKey('test.id'), nullable=False)
     question_id = db.Column(db.String, db.ForeignKey('question.id'), nullable=False)
     order = db.Column(db.Integer, nullable=True)  # Para manter ordem das questões
-    created_at = db.Column(db.DateTime, server_default=db.text('CURRENT_TIMESTAMP'))
+    created_at = db.Column(db.TIMESTAMP, server_default=db.text('CURRENT_TIMESTAMP'))
     
     # Relacionamentos
     test = db.relationship('Test', back_populates='test_questions')

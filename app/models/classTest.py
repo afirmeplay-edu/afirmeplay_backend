@@ -9,6 +9,6 @@ class ClassTest(db.Model):
     class_id = db.Column(db.String, db.ForeignKey('class.id'))
     test_id = db.Column(db.String, db.ForeignKey('test.id'))
     status = db.Column(db.String, default='agendada')
-    application = db.Column(db.String, nullable=True)
-    expiration = db.Column(db.String, nullable=True)
+    application = db.Column(db.Text, nullable=False)
+    expiration = db.Column(db.Text, nullable=False)
     timezone = db.Column(db.String(50), nullable=True, comment='Timezone da aplicação da avaliação (ex: America/Sao_Paulo)')

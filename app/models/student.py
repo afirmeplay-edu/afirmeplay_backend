@@ -10,7 +10,7 @@ class Student(db.Model):
     name = db.Column(db.String(100))
     profile_picture = db.Column(db.String)
     registration = db.Column(db.String(50), nullable=True, unique=True)
-    created_at = db.Column(db.DateTime, server_default=db.func.now())
+    created_at = db.Column(db.TIMESTAMP, server_default=db.func.now())
     birth_date = db.Column(db.Date)
 
     user_id = db.Column(db.String, db.ForeignKey('users.id'), unique=True)

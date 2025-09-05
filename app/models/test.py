@@ -12,13 +12,13 @@ class Test(db.Model):
     intructions = db.Column(db.String(500))
     type = db.Column(db.String)
     max_score = db.Column(db.Float)
-    time_limit = db.Column(db.DateTime)
-    end_time = db.Column(db.DateTime)
+    time_limit = db.Column(db.TIMESTAMP)
+    end_time = db.Column(db.TIMESTAMP)
     duration = db.Column(db.Integer)  # Duração em minutos
     evaluation_mode = db.Column(db.String(20), default='virtual')  # virtual, physical
     created_by = db.Column(db.String, db.ForeignKey('users.id'))
-    created_at = db.Column(db.DateTime, server_default=db.text('CURRENT_TIMESTAMP'))
-    updated_at = db.Column(db.DateTime, server_default=db.text('CURRENT_TIMESTAMP'), onupdate=db.text('CURRENT_TIMESTAMP'))
+    created_at = db.Column(db.TIMESTAMP, server_default=db.text('CURRENT_TIMESTAMP'))
+    updated_at = db.Column(db.TIMESTAMP, server_default=db.text('CURRENT_TIMESTAMP'), onupdate=db.text('CURRENT_TIMESTAMP'))
     subject = db.Column(db.String, db.ForeignKey('subject.id'), nullable=True)
     grade_id = db.Column(UUID(as_uuid=True), db.ForeignKey("grade.id"))
     

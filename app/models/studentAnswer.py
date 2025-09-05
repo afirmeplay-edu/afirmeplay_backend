@@ -9,14 +9,14 @@ class StudentAnswer(db.Model):
     test_id = db.Column(db.String, db.ForeignKey('test.id'), nullable=False)
     question_id = db.Column(db.String, db.ForeignKey('question.id'), nullable=False)
     answer = db.Column(db.Text, nullable=False)
-    answered_at = db.Column(db.DateTime, default=datetime.utcnow)
+    answered_at = db.Column(db.TIMESTAMP, default=datetime.utcnow)
     
     # Campos para correção manual
     is_correct = db.Column(db.Boolean, nullable=True)  # Se a resposta está correta
     manual_score = db.Column(db.Float, nullable=True)  # Pontuação manual atribuída pelo professor
     feedback = db.Column(db.Text, nullable=True)  # Feedback específico da questão
     corrected_by = db.Column(db.String, db.ForeignKey('users.id'), nullable=True)  # Professor que corrigiu
-    corrected_at = db.Column(db.DateTime, nullable=True)  # Data da correção
+    corrected_at = db.Column(db.TIMESTAMP, nullable=True)  # Data da correção
     
     # Relacionamentos
     # student = db.relationship('Student', backref='student_answers')  # Removido - agora definido no modelo Student

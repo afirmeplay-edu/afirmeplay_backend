@@ -1,0 +1,160 @@
+================================================================================
+RELATÓRIO DE VERIFICAÇÃO: MODELS vs BANCO DE DADOS
+================================================================================
+Data/Hora: 05/09/2025 12:46:47
+
+MODEL: City (Tabela: city)
+------------------------------------------------------------
+⚠️  DIFERENÇAS DE TIPO:
+  - created_at: Model(DATETIME) vs DB(TIMESTAMP)
+
+MODEL: School (Tabela: school)
+------------------------------------------------------------
+⚠️  DIFERENÇAS DE TIPO:
+  - created_at: Model(DATETIME) vs DB(TIMESTAMP)
+
+MODEL: SchoolTeacher (Tabela: school_teacher)
+------------------------------------------------------------
+⚠️  DIFERENÇAS DE TIPO:
+  - created_at: Model(DATETIME) vs DB(TIMESTAMP)
+  - updated_at: Model(DATETIME) vs DB(TIMESTAMP)
+
+MODEL: Teacher (Tabela: teacher)
+------------------------------------------------------------
+⚠️  DIFERENÇAS DE TIPO:
+  - created_at: Model(DATETIME) vs DB(TIMESTAMP)
+
+MODEL: Student (Tabela: student)
+------------------------------------------------------------
+⚠️  DIFERENÇAS DE TIPO:
+  - created_at: Model(DATETIME) vs DB(TIMESTAMP)
+
+MODEL: Subject (Tabela: subject)
+------------------------------------------------------------
+✅ Model e banco estão sincronizados!
+
+MODEL: Class (Tabela: class)
+------------------------------------------------------------
+✅ Model e banco estão sincronizados!
+
+MODEL: ClassSubject (Tabela: class_subject)
+------------------------------------------------------------
+❌ CAMPOS FALTANDO NO MODEL:
+  - created_at (TIMESTAMP)
+  - updated_at (TIMESTAMP)
+
+MODEL: ClassTest (Tabela: class_test)
+------------------------------------------------------------
+⚠️  DIFERENÇAS DE TIPO:
+  - application: Model(VARCHAR) vs DB(TEXT)
+  - expiration: Model(VARCHAR) vs DB(TEXT)
+⚠️  DIFERENÇAS DE NULLABLE:
+  - application: Model(nullable=True) vs DB(nullable=False)
+  - expiration: Model(nullable=True) vs DB(nullable=False)
+
+MODEL: Test (Tabela: test)
+------------------------------------------------------------
+⚠️  DIFERENÇAS DE TIPO:
+  - max_score: Model(FLOAT) vs DB(DOUBLE PRECISION)
+  - time_limit: Model(DATETIME) vs DB(TIMESTAMP)
+  - end_time: Model(DATETIME) vs DB(TIMESTAMP)
+  - created_at: Model(DATETIME) vs DB(TIMESTAMP)
+  - updated_at: Model(DATETIME) vs DB(TIMESTAMP)
+
+MODEL: TestQuestion (Tabela: test_questions)
+------------------------------------------------------------
+⚠️  DIFERENÇAS DE TIPO:
+  - created_at: Model(DATETIME) vs DB(TIMESTAMP)
+
+MODEL: EducationStage (Tabela: education_stage)
+------------------------------------------------------------
+⚠️  DIFERENÇAS DE TIPO:
+  - name: Model(VARCHAR(100)) vs DB(VARCHAR)
+⚠️  DIFERENÇAS DE NULLABLE:
+  - name: Model(nullable=True) vs DB(nullable=False)
+
+MODEL: Grade (Tabela: grade)
+------------------------------------------------------------
+⚠️  DIFERENÇAS DE TIPO:
+  - name: Model(VARCHAR(100)) vs DB(VARCHAR)
+⚠️  DIFERENÇAS DE NULLABLE:
+  - name: Model(nullable=True) vs DB(nullable=False)
+  - education_stage_id: Model(nullable=True) vs DB(nullable=False)
+
+MODEL: Skill (Tabela: skills)
+------------------------------------------------------------
+⚠️  DIFERENÇAS DE TIPO:
+  - code: Model(VARCHAR) vs DB(TEXT)
+  - description: Model(VARCHAR) vs DB(TEXT)
+  - subject_id: Model(VARCHAR) vs DB(TEXT)
+
+MODEL: Question (Tabela: question)
+------------------------------------------------------------
+⚠️  DIFERENÇAS DE TIPO:
+  - value: Model(FLOAT) vs DB(DOUBLE PRECISION)
+  - created_at: Model(DATETIME) vs DB(TIMESTAMP)
+  - updated_at: Model(DATETIME) vs DB(TIMESTAMP)
+
+MODEL: StudentAnswer (Tabela: student_answers)
+------------------------------------------------------------
+⚠️  DIFERENÇAS DE TIPO:
+  - answered_at: Model(DATETIME) vs DB(TIMESTAMP)
+  - manual_score: Model(FLOAT) vs DB(DOUBLE PRECISION)
+  - corrected_at: Model(DATETIME) vs DB(TIMESTAMP)
+
+MODEL: TestSession (Tabela: test_sessions)
+------------------------------------------------------------
+❌ CAMPOS FALTANDO NO MODEL:
+  - actual_start_time (TIMESTAMP)
+  - manual_score (NUMERIC(5, 2))
+⚠️  DIFERENÇAS DE TIPO:
+  - started_at: Model(DATETIME) vs DB(TIMESTAMP)
+  - submitted_at: Model(DATETIME) vs DB(TIMESTAMP)
+  - score: Model(FLOAT) vs DB(DOUBLE PRECISION)
+  - grade: Model(FLOAT) vs DB(DOUBLE PRECISION)
+  - created_at: Model(DATETIME) vs DB(TIMESTAMP)
+  - updated_at: Model(DATETIME) vs DB(TIMESTAMP)
+  - corrected_at: Model(DATETIME) vs DB(TIMESTAMP)
+
+MODEL: UserQuickLinks (Tabela: user_quick_links)
+------------------------------------------------------------
+⚠️  DIFERENÇAS DE TIPO:
+  - created_at: Model(DATETIME) vs DB(TIMESTAMP)
+  - updated_at: Model(DATETIME) vs DB(TIMESTAMP)
+
+MODEL: TeacherClass (Tabela: teacher_class)
+------------------------------------------------------------
+⚠️  DIFERENÇAS DE TIPO:
+  - created_at: Model(DATETIME) vs DB(TIMESTAMP)
+  - updated_at: Model(DATETIME) vs DB(TIMESTAMP)
+
+MODEL: User (Tabela: users)
+------------------------------------------------------------
+⚠️  DIFERENÇAS DE TIPO:
+  - created_at: Model(DATETIME) vs DB(TIMESTAMP)
+  - updated_at: Model(DATETIME) vs DB(TIMESTAMP)
+  - reset_token_expires: Model(DATETIME) vs DB(TIMESTAMP)
+
+MODEL: Game (Tabela: games)
+------------------------------------------------------------
+⚠️  DIFERENÇAS DE TIPO:
+  - createdAt: Model(DATETIME) vs DB(TIMESTAMP)
+  - updatedAt: Model(DATETIME) vs DB(TIMESTAMP)
+
+MODEL: EvaluationResult (Tabela: evaluation_results)
+------------------------------------------------------------
+⚠️  DIFERENÇAS DE TIPO:
+  - score_percentage: Model(FLOAT) vs DB(DOUBLE PRECISION)
+  - grade: Model(FLOAT) vs DB(DOUBLE PRECISION)
+  - proficiency: Model(FLOAT) vs DB(DOUBLE PRECISION)
+  - calculated_at: Model(DATETIME) vs DB(TIMESTAMP)
+
+MODEL: Manager (Tabela: manager)
+------------------------------------------------------------
+⚠️  DIFERENÇAS DE TIPO:
+  - created_at: Model(DATETIME) vs DB(TIMESTAMP)
+  - updated_at: Model(DATETIME) vs DB(TIMESTAMP)
+
+================================================================================
+TOTAL DE PROBLEMAS ENCONTRADOS: 56
+================================================================================

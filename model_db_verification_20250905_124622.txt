@@ -1,0 +1,100 @@
+================================================================================
+RELATÓRIO DE VERIFICAÇÃO: MODELS vs BANCO DE DADOS
+================================================================================
+Data/Hora: 05/09/2025 12:46:22
+
+MODEL: City (Tabela: city)
+------------------------------------------------------------
+❌ ERRO: Schema do banco não encontrado
+
+MODEL: School (Tabela: school)
+------------------------------------------------------------
+❌ ERRO: Schema do banco não encontrado
+
+MODEL: SchoolTeacher (Tabela: school_teacher)
+------------------------------------------------------------
+❌ ERRO: Schema do banco não encontrado
+
+MODEL: Teacher (Tabela: teacher)
+------------------------------------------------------------
+❌ ERRO: Schema do banco não encontrado
+
+MODEL: Student (Tabela: student)
+------------------------------------------------------------
+❌ ERRO: Schema do banco não encontrado
+
+MODEL: Subject (Tabela: subject)
+------------------------------------------------------------
+❌ ERRO: Schema do banco não encontrado
+
+MODEL: Class (Tabela: class)
+------------------------------------------------------------
+❌ ERRO: Schema do banco não encontrado
+
+MODEL: ClassSubject (Tabela: class_subject)
+------------------------------------------------------------
+❌ ERRO: Schema do banco não encontrado
+
+MODEL: ClassTest (Tabela: class_test)
+------------------------------------------------------------
+❌ ERRO: Schema do banco não encontrado
+
+MODEL: Test (Tabela: test)
+------------------------------------------------------------
+❌ ERRO: Schema do banco não encontrado
+
+MODEL: TestQuestion (Tabela: test_questions)
+------------------------------------------------------------
+❌ ERRO: Schema do banco não encontrado
+
+MODEL: EducationStage (Tabela: education_stage)
+------------------------------------------------------------
+❌ ERRO: Schema do banco não encontrado
+
+MODEL: Grade (Tabela: grade)
+------------------------------------------------------------
+❌ ERRO: Schema do banco não encontrado
+
+MODEL: Skill (Tabela: skills)
+------------------------------------------------------------
+❌ ERRO: Schema do banco não encontrado
+
+MODEL: Question (Tabela: question)
+------------------------------------------------------------
+❌ ERRO: Schema do banco não encontrado
+
+MODEL: StudentAnswer (Tabela: student_answers)
+------------------------------------------------------------
+❌ ERRO: Schema do banco não encontrado
+
+MODEL: TestSession (Tabela: test_sessions)
+------------------------------------------------------------
+❌ ERRO: Schema do banco não encontrado
+
+MODEL: UserQuickLinks (Tabela: user_quick_links)
+------------------------------------------------------------
+❌ ERRO: Schema do banco não encontrado
+
+MODEL: TeacherClass (Tabela: teacher_class)
+------------------------------------------------------------
+❌ ERRO: Schema do banco não encontrado
+
+MODEL: User (Tabela: users)
+------------------------------------------------------------
+❌ ERRO: Schema do banco não encontrado
+
+MODEL: Game (Tabela: games)
+------------------------------------------------------------
+❌ ERRO: Schema do banco não encontrado
+
+MODEL: EvaluationResult (Tabela: evaluation_results)
+------------------------------------------------------------
+❌ ERRO: Schema do banco não encontrado
+
+MODEL: Manager (Tabela: manager)
+------------------------------------------------------------
+❌ ERRO: Schema do banco não encontrado
+
+================================================================================
+TOTAL DE PROBLEMAS ENCONTRADOS: 23
+================================================================================

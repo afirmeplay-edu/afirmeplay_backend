@@ -5,10 +5,10 @@ import uuid
 class Skill(db.Model):
     __tablename__ = "skills"
     id = db.Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    code = db.Column(db.String, nullable=False)
-    description = db.Column(db.String, nullable=False)
+    code = db.Column(db.Text, nullable=False)
+    description = db.Column(db.Text, nullable=False)
 
-    subject_id = db.Column(db.String, db.ForeignKey('subject.id'))
+    subject_id = db.Column(db.Text, db.ForeignKey('subject.id'))
     grade_id =  db.Column(UUID(as_uuid=True), db.ForeignKey('grade.id'))
 
     # subject = db.relationship("Subject", back_populates="skills")

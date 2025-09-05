@@ -10,8 +10,8 @@ class Manager(db.Model):
     profile_picture = db.Column(db.String)
     registration = db.Column(db.String(50), nullable=True, unique=True)
     birth_date = db.Column(db.Date)
-    created_at = db.Column(db.DateTime, server_default=db.func.now())
-    updated_at = db.Column(db.DateTime, server_default=db.func.now(), onupdate=db.func.now())
+    created_at = db.Column(db.TIMESTAMP, server_default=db.func.now())
+    updated_at = db.Column(db.TIMESTAMP, server_default=db.func.now(), onupdate=db.func.now())
 
     # Relacionamento com User
     user_id = db.Column(db.String, db.ForeignKey('users.id'), unique=True)

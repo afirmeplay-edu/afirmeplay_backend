@@ -934,19 +934,43 @@ def bulk_delete_tests():
                 db.session.delete(answer)
             logging.info(f"🗑️ Excluídas {len(student_answers)} respostas de alunos para teste {test.id}")
             
-            # 2. Excluir sessões de teste
+            # 2. Excluir formulários físicos e suas respostas
+            from app.models.physicalTestForm import PhysicalTestForm
+            from app.models.physicalTestAnswer import PhysicalTestAnswer
+            
+            # Buscar formulários físicos
+            physical_forms = PhysicalTestForm.query.filter_by(test_id=test.id).all()
+            total_physical_answers_deleted = 0
+            
+            for physical_form in physical_forms:
+                # Excluir respostas físicas relacionadas
+                physical_answers = PhysicalTestAnswer.query.filter_by(
+                    physical_form_id=physical_form.id
+                ).all()
+                
+                for answer in physical_answers:
+                    db.session.delete(answer)
+                
+                total_physical_answers_deleted += len(physical_answers)
+                
+                # Excluir formulário físico
+                db.session.delete(physical_form)
+            
+            logging.info(f"🗑️ Excluídos {len(physical_forms)} formulários físicos e {total_physical_answers_deleted} respostas físicas para teste {test.id}")
+            
+            # 3. Excluir sessões de teste
             test_sessions = TestSession.query.filter_by(test_id=test.id).all()
             for session in test_sessions:
                 db.session.delete(session)
             logging.info(f"🗑️ Excluídas {len(test_sessions)} sessões de teste para teste {test.id}")
             
-            # 3. Excluir aplicações de classe
+            # 4. Excluir aplicações de classe
             class_tests = ClassTest.query.filter_by(test_id=test.id).all()
             for class_test in class_tests:
                 db.session.delete(class_test)
             logging.info(f"🗑️ Excluídas {len(class_tests)} aplicações de classe para teste {test.id}")
             
-            # 4. Excluir apenas as associações de questões (test_questions)
+            # 5. Excluir apenas as associações de questões (test_questions)
             # As questões permanecem no banco para reutilização futura
             from app.models.testQuestion import TestQuestion
             test_questions = TestQuestion.query.filter_by(test_id=test.id).all()
@@ -955,7 +979,7 @@ def bulk_delete_tests():
                 db.session.delete(test_question)
             logging.info(f"🗑️ Removidas {len(test_questions)} associações de questões para teste {test.id} (questões preservadas)")
             
-            # 5. Finalmente, excluir o teste
+            # 6. Finalmente, excluir o teste
             db.session.delete(test)
             logging.info(f"🗑️ Teste {test.id} marcado para exclusão")
         
@@ -1007,27 +1031,51 @@ def deletar_avaliacao(test_id):
             db.session.delete(answer)
         logging.info(f"🗑️ Excluídas {len(student_answers)} respostas de alunos")
         
-        # 2. Excluir resultados de avaliação (antes das sessões)
+        # 2. Excluir formulários físicos e suas respostas
+        from app.models.physicalTestForm import PhysicalTestForm
+        from app.models.physicalTestAnswer import PhysicalTestAnswer
+        
+        # Buscar formulários físicos
+        physical_forms = PhysicalTestForm.query.filter_by(test_id=test_id).all()
+        total_physical_answers_deleted = 0
+        
+        for physical_form in physical_forms:
+            # Excluir respostas físicas relacionadas
+            physical_answers = PhysicalTestAnswer.query.filter_by(
+                physical_form_id=physical_form.id
+            ).all()
+            
+            for answer in physical_answers:
+                db.session.delete(answer)
+            
+            total_physical_answers_deleted += len(physical_answers)
+            
+            # Excluir formulário físico
+            db.session.delete(physical_form)
+        
+        logging.info(f"🗑️ Excluídos {len(physical_forms)} formulários físicos e {total_physical_answers_deleted} respostas físicas")
+        
+        # 3. Excluir resultados de avaliação (antes das sessões)
         from app.models.evaluationResult import EvaluationResult
         evaluation_results = EvaluationResult.query.filter_by(test_id=test_id).all()
         for result in evaluation_results:
             db.session.delete(result)
         logging.info(f"🗑️ Excluídos {len(evaluation_results)} resultados de avaliação")
         
-        # 3. Excluir sessões de teste
+        # 4. Excluir sessões de teste
         from app.models.testSession import TestSession
         test_sessions = TestSession.query.filter_by(test_id=test_id).all()
         for session in test_sessions:
             db.session.delete(session)
         logging.info(f"🗑️ Excluídas {len(test_sessions)} sessões de teste")
         
-        # 4. Excluir aplicações de classe
+        # 5. Excluir aplicações de classe
         class_tests = ClassTest.query.filter_by(test_id=test_id).all()
         for class_test in class_tests:
             db.session.delete(class_test)
         logging.info(f"🗑️ Excluídas {len(class_tests)} aplicações de classe")
         
-        # 5. Excluir apenas as associações de questões (test_questions)
+        # 6. Excluir apenas as associações de questões (test_questions)
         # As questões permanecem no banco para reutilização futura
         from app.models.testQuestion import TestQuestion
         test_questions = TestQuestion.query.filter_by(test_id=test_id).all()
@@ -1036,7 +1084,7 @@ def deletar_avaliacao(test_id):
             db.session.delete(test_question)
         logging.info(f"🗑️ Removidas {len(test_questions)} associações de questões (questões preservadas)")
         
-        # 6. Finalmente, excluir o teste
+        # 7. Finalmente, excluir o teste
         db.session.delete(test)
         logging.info("🗑️ Excluindo a avaliação principal...")
         

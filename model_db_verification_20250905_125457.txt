@@ -1,0 +1,115 @@
+================================================================================
+RELATÓRIO DE VERIFICAÇÃO: MODELS vs BANCO DE DADOS
+================================================================================
+Data/Hora: 05/09/2025 12:54:57
+
+MODEL: City (Tabela: city)
+------------------------------------------------------------
+✅ Model e banco estão sincronizados!
+
+MODEL: School (Tabela: school)
+------------------------------------------------------------
+✅ Model e banco estão sincronizados!
+
+MODEL: SchoolTeacher (Tabela: school_teacher)
+------------------------------------------------------------
+✅ Model e banco estão sincronizados!
+
+MODEL: Teacher (Tabela: teacher)
+------------------------------------------------------------
+✅ Model e banco estão sincronizados!
+
+MODEL: Student (Tabela: student)
+------------------------------------------------------------
+✅ Model e banco estão sincronizados!
+
+MODEL: Subject (Tabela: subject)
+------------------------------------------------------------
+✅ Model e banco estão sincronizados!
+
+MODEL: Class (Tabela: class)
+------------------------------------------------------------
+✅ Model e banco estão sincronizados!
+
+MODEL: ClassSubject (Tabela: class_subject)
+------------------------------------------------------------
+✅ Model e banco estão sincronizados!
+
+MODEL: ClassTest (Tabela: class_test)
+------------------------------------------------------------
+⚠️  DIFERENÇAS DE TIPO:
+  - application: Model(VARCHAR) vs DB(TEXT)
+  - expiration: Model(VARCHAR) vs DB(TEXT)
+
+MODEL: Test (Tabela: test)
+------------------------------------------------------------
+⚠️  DIFERENÇAS DE TIPO:
+  - max_score: Model(DOUBLE) vs DB(DOUBLE PRECISION)
+
+MODEL: TestQuestion (Tabela: test_questions)
+------------------------------------------------------------
+✅ Model e banco estão sincronizados!
+
+MODEL: EducationStage (Tabela: education_stage)
+------------------------------------------------------------
+⚠️  DIFERENÇAS DE TIPO:
+  - name: Model(VARCHAR(100)) vs DB(VARCHAR)
+
+MODEL: Grade (Tabela: grade)
+------------------------------------------------------------
+⚠️  DIFERENÇAS DE TIPO:
+  - name: Model(VARCHAR(100)) vs DB(VARCHAR)
+
+MODEL: Skill (Tabela: skills)
+------------------------------------------------------------
+⚠️  DIFERENÇAS DE TIPO:
+  - code: Model(VARCHAR) vs DB(TEXT)
+  - description: Model(VARCHAR) vs DB(TEXT)
+  - subject_id: Model(VARCHAR) vs DB(TEXT)
+
+MODEL: Question (Tabela: question)
+------------------------------------------------------------
+⚠️  DIFERENÇAS DE TIPO:
+  - value: Model(DOUBLE) vs DB(DOUBLE PRECISION)
+
+MODEL: StudentAnswer (Tabela: student_answers)
+------------------------------------------------------------
+⚠️  DIFERENÇAS DE TIPO:
+  - manual_score: Model(DOUBLE) vs DB(DOUBLE PRECISION)
+
+MODEL: TestSession (Tabela: test_sessions)
+------------------------------------------------------------
+⚠️  DIFERENÇAS DE TIPO:
+  - score: Model(DOUBLE) vs DB(DOUBLE PRECISION)
+  - grade: Model(DOUBLE) vs DB(DOUBLE PRECISION)
+
+MODEL: UserQuickLinks (Tabela: user_quick_links)
+------------------------------------------------------------
+✅ Model e banco estão sincronizados!
+
+MODEL: TeacherClass (Tabela: teacher_class)
+------------------------------------------------------------
+✅ Model e banco estão sincronizados!
+
+MODEL: User (Tabela: users)
+------------------------------------------------------------
+✅ Model e banco estão sincronizados!
+
+MODEL: Game (Tabela: games)
+------------------------------------------------------------
+✅ Model e banco estão sincronizados!
+
+MODEL: EvaluationResult (Tabela: evaluation_results)
+------------------------------------------------------------
+⚠️  DIFERENÇAS DE TIPO:
+  - score_percentage: Model(DOUBLE) vs DB(DOUBLE PRECISION)
+  - grade: Model(DOUBLE) vs DB(DOUBLE PRECISION)
+  - proficiency: Model(DOUBLE) vs DB(DOUBLE PRECISION)
+
+MODEL: Manager (Tabela: manager)
+------------------------------------------------------------
+✅ Model e banco estão sincronizados!
+
+================================================================================
+TOTAL DE PROBLEMAS ENCONTRADOS: 15
+================================================================================

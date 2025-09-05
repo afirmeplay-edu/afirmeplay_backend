@@ -15,8 +15,8 @@ class Game(db.Model):
     provider = db.Column(db.String(50), nullable=False, default='wordwall')
     subject = db.Column(db.String(100), nullable=False)
     userId = db.Column(db.String, db.ForeignKey('users.id'), nullable=False)
-    createdAt = db.Column(db.DateTime, server_default=db.func.now())
-    updatedAt = db.Column(db.DateTime, server_default=db.func.now(), onupdate=db.func.now())
+    createdAt = db.Column(db.TIMESTAMP, server_default=db.func.now())
+    updatedAt = db.Column(db.TIMESTAMP, server_default=db.func.now(), onupdate=db.func.now())
     
     # Relacionamento com User
     user = db.relationship("User", backref="games") 

@@ -9,5 +9,5 @@ class ClassSubject(db.Model):
     class_id = db.Column(db.String, db.ForeignKey('class.id'))
     subject_id = db.Column(db.String, db.ForeignKey('subject.id'))
     teacher_id = db.Column(db.String, db.ForeignKey('teacher.id'))
-    # created_at = db.Column(db.DateTime, server_default=db.text('CURRENT_TIMESTAMP'))
-    # updated_at = db.Column(db.DateTime, server_default=db.text('CURRENT_TIMESTAMP'), onupdate=db.text('CURRENT_TIMESTAMP'))
+    created_at = db.Column(db.TIMESTAMP, server_default=db.text('CURRENT_TIMESTAMP'))
+    updated_at = db.Column(db.TIMESTAMP, server_default=db.text('CURRENT_TIMESTAMP'), onupdate=db.text('CURRENT_TIMESTAMP'))

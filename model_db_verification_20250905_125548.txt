@@ -1,0 +1,108 @@
+================================================================================
+RELATÓRIO DE VERIFICAÇÃO: MODELS vs BANCO DE DADOS
+================================================================================
+Data/Hora: 05/09/2025 12:55:48
+
+MODEL: City (Tabela: city)
+------------------------------------------------------------
+✅ Model e banco estão sincronizados!
+
+MODEL: School (Tabela: school)
+------------------------------------------------------------
+✅ Model e banco estão sincronizados!
+
+MODEL: SchoolTeacher (Tabela: school_teacher)
+------------------------------------------------------------
+✅ Model e banco estão sincronizados!
+
+MODEL: Teacher (Tabela: teacher)
+------------------------------------------------------------
+✅ Model e banco estão sincronizados!
+
+MODEL: Student (Tabela: student)
+------------------------------------------------------------
+✅ Model e banco estão sincronizados!
+
+MODEL: Subject (Tabela: subject)
+------------------------------------------------------------
+✅ Model e banco estão sincronizados!
+
+MODEL: Class (Tabela: class)
+------------------------------------------------------------
+✅ Model e banco estão sincronizados!
+
+MODEL: ClassSubject (Tabela: class_subject)
+------------------------------------------------------------
+✅ Model e banco estão sincronizados!
+
+MODEL: ClassTest (Tabela: class_test)
+------------------------------------------------------------
+✅ Model e banco estão sincronizados!
+
+MODEL: Test (Tabela: test)
+------------------------------------------------------------
+⚠️  DIFERENÇAS DE TIPO:
+  - max_score: Model(FLOAT) vs DB(DOUBLE PRECISION)
+
+MODEL: TestQuestion (Tabela: test_questions)
+------------------------------------------------------------
+✅ Model e banco estão sincronizados!
+
+MODEL: EducationStage (Tabela: education_stage)
+------------------------------------------------------------
+✅ Model e banco estão sincronizados!
+
+MODEL: Grade (Tabela: grade)
+------------------------------------------------------------
+✅ Model e banco estão sincronizados!
+
+MODEL: Skill (Tabela: skills)
+------------------------------------------------------------
+✅ Model e banco estão sincronizados!
+
+MODEL: Question (Tabela: question)
+------------------------------------------------------------
+⚠️  DIFERENÇAS DE TIPO:
+  - value: Model(FLOAT) vs DB(DOUBLE PRECISION)
+
+MODEL: StudentAnswer (Tabela: student_answers)
+------------------------------------------------------------
+⚠️  DIFERENÇAS DE TIPO:
+  - manual_score: Model(FLOAT) vs DB(DOUBLE PRECISION)
+
+MODEL: TestSession (Tabela: test_sessions)
+------------------------------------------------------------
+⚠️  DIFERENÇAS DE TIPO:
+  - score: Model(FLOAT) vs DB(DOUBLE PRECISION)
+  - grade: Model(FLOAT) vs DB(DOUBLE PRECISION)
+
+MODEL: UserQuickLinks (Tabela: user_quick_links)
+------------------------------------------------------------
+✅ Model e banco estão sincronizados!
+
+MODEL: TeacherClass (Tabela: teacher_class)
+------------------------------------------------------------
+✅ Model e banco estão sincronizados!
+
+MODEL: User (Tabela: users)
+------------------------------------------------------------
+✅ Model e banco estão sincronizados!
+
+MODEL: Game (Tabela: games)
+------------------------------------------------------------
+✅ Model e banco estão sincronizados!
+
+MODEL: EvaluationResult (Tabela: evaluation_results)
+------------------------------------------------------------
+⚠️  DIFERENÇAS DE TIPO:
+  - score_percentage: Model(FLOAT) vs DB(DOUBLE PRECISION)
+  - grade: Model(FLOAT) vs DB(DOUBLE PRECISION)
+  - proficiency: Model(FLOAT) vs DB(DOUBLE PRECISION)
+
+MODEL: Manager (Tabela: manager)
+------------------------------------------------------------
+✅ Model e banco estão sincronizados!
+
+================================================================================
+TOTAL DE PROBLEMAS ENCONTRADOS: 8
+================================================================================

@@ -1,0 +1,8 @@
+id,nome,email,nota
+11202321965,Welbert da Silva Freitas Filho,welbertfilho9@gmail.com,2/20
+11202321966,Edmildo Duarte da Silva,edmildo@gmail.com
+11202321967,Antonella Awanes Santos Pimentel,antonellaawanes@gmail.com,0/2
+11202321969,Dannyely Wedja Balbino dos Santos da Silva,dannyely@gmail.com
+11202321970,Damiana Balbino dos Santos da Silva,damianabalbino@gmail.com
+11202321971,Lionel Messi,lionelmessi10@gmail.com
+11202321972,Cristiano Ronaldo,cristianoronaldo7@gmail.com

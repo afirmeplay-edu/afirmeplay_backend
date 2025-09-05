@@ -1176,7 +1176,20 @@ def _gerar_tabela_detalhada_por_disciplina(avaliacao_id: str, scope_info: Dict, 
             logging.info(f"Disciplina {disciplina_data['nome']}: {len(alunos_disciplina)} alunos processados")
         
         # NOVA FUNCIONALIDADE: Calcular dados gerais (média de todas as disciplinas)
-        dados_gerais = _calcular_dados_gerais_alunos(questoes_por_disciplina)
+        # Obter informações do curso da avaliação para classificação geral
+        course_name = "Anos Iniciais"  # Padrão
+        if test.course:
+            try:
+                from app.models.educationStage import EducationStage
+                import uuid
+                course_uuid = uuid.UUID(test.course)
+                course_obj = EducationStage.query.get(course_uuid)
+                if course_obj:
+                    course_name = course_obj.name
+            except (ValueError, TypeError, Exception):
+                pass
+        
+        dados_gerais = _calcular_dados_gerais_alunos(questoes_por_disciplina, course_name)
         
         return {
             "disciplinas": list(questoes_por_disciplina.values()),
@@ -1188,7 +1201,7 @@ def _gerar_tabela_detalhada_por_disciplina(avaliacao_id: str, scope_info: Dict, 
         return {"disciplinas": [], "geral": {"alunos": []}, "error": str(e)}
 
 
-def _calcular_dados_gerais_alunos(questoes_por_disciplina: dict) -> dict:
+def _calcular_dados_gerais_alunos(questoes_por_disciplina: dict, course_name: str = "Anos Iniciais") -> dict:
     """
     Calcula dados gerais (média de todas as disciplinas) para cada aluno
     """
@@ -1241,14 +1254,27 @@ def _calcular_dados_gerais_alunos(questoes_por_disciplina: dict) -> dict:
                 percentual_acertos_geral = 0.0
             
             # Determinar classificação geral baseada na proficiência média
-            if proficiencia_geral >= 300:
-                nivel_proficiencia_geral = "Avançado"
-            elif proficiencia_geral >= 200:
-                nivel_proficiencia_geral = "Adequado"
-            elif proficiencia_geral >= 100:
-                nivel_proficiencia_geral = "Básico"
+            # CORREÇÃO: Para Anos Finais/Ensino Médio, usar faixas de Matemática
+            if "finais" in course_name.lower() or "médio" in course_name.lower() or "medio" in course_name.lower():
+                # Faixas de Matemática para Anos Finais/Ensino Médio
+                if proficiencia_geral >= 340:
+                    nivel_proficiencia_geral = "Avançado"
+                elif proficiencia_geral >= 290:
+                    nivel_proficiencia_geral = "Adequado"
+                elif proficiencia_geral >= 212.50:
+                    nivel_proficiencia_geral = "Básico"
+                else:
+                    nivel_proficiencia_geral = "Abaixo do Básico"
             else:
-                nivel_proficiencia_geral = "Abaixo do Básico"
+                # Faixas padrão para outros níveis (Educação Infantil/Anos Iniciais/EJA)
+                if proficiencia_geral >= 263:
+                    nivel_proficiencia_geral = "Avançado"
+                elif proficiencia_geral >= 213:
+                    nivel_proficiencia_geral = "Adequado"
+                elif proficiencia_geral >= 163:
+                    nivel_proficiencia_geral = "Básico"
+                else:
+                    nivel_proficiencia_geral = "Abaixo do Básico"
             
             # Determinar status geral
             status_geral = "concluida" if dados["total_respondidas_geral"] > 0 else "pendente"

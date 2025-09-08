@@ -404,6 +404,7 @@ class EvaluationResultService:
     def get_subject_detailed_statistics(test_id: str) -> Dict[str, Any]:
         """
         Obtém estatísticas detalhadas por disciplina de uma avaliação
+        CORRIGIDO: Agora segue o fluxo correto: evaluation_results → test → subjects_info → education_stage
         
         Args:
             test_id: ID do teste
@@ -417,47 +418,79 @@ class EvaluationResultService:
             from app.models.subject import Subject
             from app.models.testQuestion import TestQuestion
             from app.models.evaluationResult import EvaluationResult
+            from app.models.educationStage import EducationStage
+            from app.services.evaluation_calculator import EvaluationCalculator
             
-            # Buscar o teste
+            # 1. Buscar o teste
             test = Test.query.get(test_id)
             if not test:
                 return {"error": "Teste não encontrado"}
             
-            # Verificar se há subjects_info
-            if not test.subjects_info or not isinstance(test.subjects_info, list):
-                return {"error": "Teste não possui múltiplas disciplinas configuradas"}
+            # 2. Verificar se há subjects_info (OBRIGATÓRIO - sem fallback)
+            if not test.subjects_info:
+                return {"error": "Campo subjects_info é obrigatório e não foi preenchido"}
             
-            # Buscar questões do teste
+            # 3. Buscar o nome do curso usando o course ID
+            course_name = "Anos Iniciais"  # Padrão
+            if test.course:
+                education_stage = EducationStage.query.get(test.course)
+                if education_stage:
+                    course_name = education_stage.name
+                else:
+                    return {"error": f"Course ID {test.course} não encontrado na education_stage"}
+            
+            # 4. Processar subjects_info (pode ser lista de IDs ou lista de objetos)
+            subject_ids = []
+            if isinstance(test.subjects_info, list):
+                for subject_info in test.subjects_info:
+                    if isinstance(subject_info, dict):
+                        # Se é objeto com 'id'
+                        if 'id' in subject_info:
+                            subject_ids.append(subject_info['id'])
+                    elif isinstance(subject_info, str):
+                        # Se é string (ID direto)
+                        subject_ids.append(subject_info)
+            else:
+                return {"error": "subjects_info deve ser uma lista"}
+            
+            if not subject_ids:
+                return {"error": "Nenhuma disciplina encontrada em subjects_info"}
+            
+            # 5. Buscar informações das disciplinas
+            subjects = Subject.query.filter(Subject.id.in_(subject_ids)).all()
+            if not subjects:
+                return {"error": "Disciplinas não encontradas na tabela Subject"}
+            
+            # 6. Buscar questões do teste agrupadas por disciplina
             test_question_ids = [tq.question_id for tq in TestQuestion.query.filter_by(test_id=test_id).order_by(TestQuestion.order).all()]
             questions = Question.query.filter(Question.id.in_(test_question_ids)).all() if test_question_ids else []
             
             if not questions:
                 return {"error": "Nenhuma questão encontrada para este teste"}
             
-            # Agrupar questões por disciplina
+            # 7. Agrupar questões por disciplina usando subjects_info
             questions_by_subject = {}
             for question in questions:
-                if question.subject_id:
+                if question.subject_id and str(question.subject_id) in subject_ids:
                     if question.subject_id not in questions_by_subject:
                         questions_by_subject[question.subject_id] = []
                     questions_by_subject[question.subject_id].append(question)
             
-            # Buscar resultados dos alunos
+            # 8. Buscar resultados dos alunos
             results = EvaluationResult.query.filter_by(test_id=test_id).all()
             
             subject_statistics = {}
             
-            for subject_id, subject_questions in questions_by_subject.items():
-                # Buscar informações da disciplina
-                subject_obj = Subject.query.get(subject_id)
-                if not subject_obj:
+            # 9. Para cada disciplina em subjects_info, calcular estatísticas
+            for subject in subjects:
+                subject_id = subject.id
+                subject_name = subject.name
+                
+                if subject_id not in questions_by_subject:
                     continue
                 
-                subject_name = subject_obj.name
+                subject_questions = questions_by_subject[subject_id]
                 total_questions_subject = len(subject_questions)
-                
-                # Calcular estatísticas para esta disciplina
-                subject_question_ids = [q.id for q in subject_questions]
                 
                 # Filtrar questões desta disciplina que têm correct_answer
                 questions_with_answer = [q for q in subject_questions if q.correct_answer]
@@ -470,6 +503,7 @@ class EvaluationResultService:
                 for result in results:
                     # Para cada aluno, calcular acertos específicos desta disciplina
                     from app.models.studentAnswer import StudentAnswer
+                    subject_question_ids = [q.id for q in questions_with_answer]
                     student_answers = StudentAnswer.query.filter(
                         StudentAnswer.test_id == test_id,
                         StudentAnswer.student_id == result.student_id,
@@ -489,14 +523,21 @@ class EvaluationResultService:
                                 if str(answer.answer).strip().lower() == str(question.correct_answer).strip().lower():
                                     correct_answers_subject += 1
                     
-                    # Calcular proficiência para esta disciplina
-                    proficiency_subject = (correct_answers_subject / len(questions_with_answer)) * 400  # Assumindo proficiência máxima 400
+                    # CORRIGIDO: Usar EvaluationCalculator com curso e disciplina corretos
+                    evaluation_result = EvaluationCalculator.calculate_complete_evaluation(
+                        correct_answers=correct_answers_subject,
+                        total_questions=len(questions_with_answer),
+                        course_name=course_name,
+                        subject_name=subject_name
+                    )
                     
                     subject_results.append({
                         'student_id': result.student_id,
                         'correct_answers': correct_answers_subject,
                         'total_questions': len(questions_with_answer),
-                        'proficiency': round(proficiency_subject, 2),
+                        'proficiency': evaluation_result['proficiency'],
+                        'grade': evaluation_result['grade'],
+                        'classification': evaluation_result['classification'],
                         'score_percentage': round((correct_answers_subject / len(questions_with_answer)) * 100, 2) if len(questions_with_answer) > 0 else 0
                     })
                 
@@ -504,39 +545,45 @@ class EvaluationResultService:
                     # Calcular estatísticas agregadas da disciplina
                     total_students = len(subject_results)
                     avg_proficiency = sum(sr['proficiency'] for sr in subject_results) / total_students
+                    avg_grade = sum(sr['grade'] for sr in subject_results) / total_students
                     avg_score_percentage = sum(sr['score_percentage'] for sr in subject_results) / total_students
                     
-                    # Distribuição de proficiência
-                    proficiency_ranges = {
-                        '0-100': 0,
-                        '101-200': 0,
-                        '201-300': 0,
-                        '301-400': 0
+                    # Distribuição de classificação
+                    classification_distribution = {
+                        'abaixo_do_basico': 0,
+                        'basico': 0,
+                        'adequado': 0,
+                        'avancado': 0
                     }
                     
                     for sr in subject_results:
-                        if sr['proficiency'] <= 100:
-                            proficiency_ranges['0-100'] += 1
-                        elif sr['proficiency'] <= 200:
-                            proficiency_ranges['101-200'] += 1
-                        elif sr['proficiency'] <= 300:
-                            proficiency_ranges['201-300'] += 1
-                        else:
-                            proficiency_ranges['301-400'] += 1
+                        classification = sr['classification'].lower()
+                        if 'abaixo' in classification or 'básico' in classification:
+                            classification_distribution['abaixo_do_basico'] += 1
+                        elif 'básico' in classification or 'basico' in classification:
+                            classification_distribution['basico'] += 1
+                        elif 'adequado' in classification:
+                            classification_distribution['adequado'] += 1
+                        elif 'avançado' in classification or 'avancado' in classification:
+                            classification_distribution['avancado'] += 1
                     
                     subject_statistics[subject_name] = {
+                        'subject_id': str(subject_id),
+                        'subject_name': subject_name,
                         'total_questions': total_questions_subject,
                         'questions_with_answer': len(questions_with_answer),
                         'total_students': total_students,
                         'average_proficiency': round(avg_proficiency, 2),
+                        'average_grade': round(avg_grade, 2),
                         'average_score_percentage': round(avg_score_percentage, 2),
-                        'proficiency_distribution': proficiency_ranges,
+                        'classification_distribution': classification_distribution,
                         'student_results': subject_results
                     }
             
             return {
                 'test_id': test_id,
                 'test_title': test.title,
+                'course_name': course_name,
                 'subjects_count': len(subject_statistics),
                 'subjects': subject_statistics
             }

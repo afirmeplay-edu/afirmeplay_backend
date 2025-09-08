@@ -1253,28 +1253,42 @@ def _calcular_dados_gerais_alunos(questoes_por_disciplina: dict, course_name: st
             else:
                 percentual_acertos_geral = 0.0
             
-            # Determinar classificação geral baseada na proficiência média
-            # CORREÇÃO: Para Anos Finais/Ensino Médio, usar faixas de Matemática
-            if "finais" in course_name.lower() or "médio" in course_name.lower() or "medio" in course_name.lower():
-                # Faixas de Matemática para Anos Finais/Ensino Médio
-                if proficiencia_geral >= 340:
-                    nivel_proficiencia_geral = "Avançado"
-                elif proficiencia_geral >= 290:
-                    nivel_proficiencia_geral = "Adequado"
-                elif proficiencia_geral >= 212.50:
-                    nivel_proficiencia_geral = "Básico"
+            # CORREÇÃO: Usar parâmetros específicos para classificação de MÉDIA GERAL
+            if dados["notas_disciplinas"] and dados["proficiencias_disciplinas"]:
+                # Usar média das proficiências para determinar classificação geral
+                proficiencia_media = sum(dados["proficiencias_disciplinas"]) / len(dados["proficiencias_disciplinas"])
+                
+                # Determinar classificação baseada nos parâmetros específicos para MÉDIA GERAL
+                if "finais" in course_name.lower() or "médio" in course_name.lower() or "medio" in course_name.lower():
+                    # Média Geral (Anos Finais/Ensino Médio):
+                    # - Abaixo do Básico: 0-212.49
+                    # - Básico: 212,50-289.99
+                    # - Adequado: 290-339.99
+                    # - Avançado: 340-425
+                    if proficiencia_media >= 340:
+                        nivel_proficiencia_geral = "Avançado"
+                    elif proficiencia_media >= 290:
+                        nivel_proficiencia_geral = "Adequado"
+                    elif proficiencia_media >= 212.50:
+                        nivel_proficiencia_geral = "Básico"
+                    else:
+                        nivel_proficiencia_geral = "Abaixo do Básico"
                 else:
-                    nivel_proficiencia_geral = "Abaixo do Básico"
+                    # Média Geral (Educação Infantil/Anos Iniciais/EJA):
+                    # - Abaixo do Básico: 0-162
+                    # - Básico: 163-212
+                    # - Adequado: 213-262
+                    # - Avançado: 263-375
+                    if proficiencia_media >= 263:
+                        nivel_proficiencia_geral = "Avançado"
+                    elif proficiencia_media >= 213:
+                        nivel_proficiencia_geral = "Adequado"
+                    elif proficiencia_media >= 163:
+                        nivel_proficiencia_geral = "Básico"
+                    else:
+                        nivel_proficiencia_geral = "Abaixo do Básico"
             else:
-                # Faixas padrão para outros níveis (Educação Infantil/Anos Iniciais/EJA)
-                if proficiencia_geral >= 263:
-                    nivel_proficiencia_geral = "Avançado"
-                elif proficiencia_geral >= 213:
-                    nivel_proficiencia_geral = "Adequado"
-                elif proficiencia_geral >= 163:
-                    nivel_proficiencia_geral = "Básico"
-                else:
-                    nivel_proficiencia_geral = "Abaixo do Básico"
+                nivel_proficiencia_geral = "Abaixo do Básico"
             
             # Determinar status geral
             status_geral = "concluida" if dados["total_respondidas_geral"] > 0 else "pendente"
@@ -1830,15 +1844,9 @@ def _determinar_escopo_busca(estado, municipio, escola, serie, turma, avaliacao,
 
 def _calcular_estatisticas_por_disciplina(class_tests: list):
     """
-    Calcula estatísticas agrupadas por disciplina baseado nos acertos específicos de cada disciplina
+    Calcula estatísticas agrupadas por disciplina usando a função corrigida do EvaluationResultService
     """
     try:
-        from app.models.evaluationResult import EvaluationResult
-        from app.models.student import Student
-        from app.models.question import Question
-        from app.models.subject import Subject
-        from app.models.testQuestion import TestQuestion
-        from app.models.studentAnswer import StudentAnswer
         from app.services.evaluation_result_service import EvaluationResultService
         
         if not class_tests:
@@ -1849,118 +1857,41 @@ def _calcular_estatisticas_por_disciplina(class_tests: list):
         if not test or not test.subjects_info:
             return []
         
-        # Buscar informações das disciplinas
-        subject_ids = test.subjects_info
-        subjects = Subject.query.filter(Subject.id.in_(subject_ids)).all()
-        
-        if not subjects:
-            return []
-        
-        # Coletar dados das turmas
-        class_ids = [ct.class_id for ct in class_tests]
         test_id = test.id
         
-        # Buscar todos os alunos das turmas envolvidas
-        todos_alunos = Student.query.filter(Student.class_id.in_(class_ids)).all()
-        total_alunos = len(todos_alunos)
+        # Usar a função corrigida do EvaluationResultService
+        statistics = EvaluationResultService.get_subject_detailed_statistics(test_id)
         
-        # Buscar alunos que participaram da avaliação
-        evaluation_results = EvaluationResult.query.filter_by(test_id=test_id).all()
-        alunos_participantes = len(evaluation_results)
+        if "error" in statistics:
+            logging.error(f"Erro ao obter estatísticas por disciplina: {statistics['error']}")
+            return []
         
+        # Converter o formato retornado para o formato esperado pela rota
         resultados_disciplina = []
         
-        for subject in subjects:
-            # Buscar questões desta disciplina para esta avaliação
-            questions = Question.query.filter(
-                Question.subject_id == subject.id
-            ).join(TestQuestion).filter(
-                TestQuestion.test_id == test_id
-            ).all()
-            
-            if not questions:
-                continue
-            
-            total_questions_disciplina = len(questions)
-            question_ids = [q.id for q in questions]
-            
-            # CORREÇÃO: Calcular estatísticas baseadas nos acertos específicos desta disciplina
-            notas_disciplina = []
-            proficiencias_disciplina = []
-            classificacoes_disciplina = {'Abaixo do Básico': 0, 'Básico': 0, 'Adequado': 0, 'Avançado': 0}
-            
-            for student in todos_alunos:
-                # Buscar respostas do aluno para esta disciplina específica
-                answers = StudentAnswer.query.filter(
-                    StudentAnswer.test_id == test_id,
-                    StudentAnswer.student_id == student.id,
-                    StudentAnswer.question_id.in_(question_ids)
-                ).all()
+        if 'subjects' in statistics:
+            for subject_name, subject_data in statistics['subjects'].items():
+                # Converter classificação para o formato esperado
+                distribuicao_classificacao = subject_data.get('classification_distribution', {})
                 
-                if not answers:
-                    continue
+                resultado_disciplina = {
+                    "disciplina": subject_name,
+                    "total_avaliacoes": 1,
+                    "total_alunos": subject_data.get('total_students', 0),
+                    "alunos_participantes": subject_data.get('total_students', 0),
+                    "alunos_pendentes": 0,
+                    "alunos_ausentes": 0,
+                    "media_nota": subject_data.get('average_grade', 0.0),
+                    "media_proficiencia": subject_data.get('average_proficiency', 0.0),
+                    "distribuicao_classificacao": {
+                        'abaixo_do_basico': distribuicao_classificacao.get('abaixo_do_basico', 0),
+                        'basico': distribuicao_classificacao.get('basico', 0),
+                        'adequado': distribuicao_classificacao.get('adequado', 0),
+                        'avancado': distribuicao_classificacao.get('avancado', 0)
+                    }
+                }
                 
-                # Calcular acertos específicos desta disciplina
-                acertos_disciplina = 0
-                for answer in answers:
-                    question = next((q for q in questions if q.id == answer.question_id), None)
-                    if question:
-                        if question.question_type == 'multiple_choice':
-                            is_correct = EvaluationResultService.check_multiple_choice_answer(answer.answer, question.correct_answer)
-                        else:
-                            is_correct = str(answer.answer).strip().lower() == str(question.correct_answer).strip().lower()
-                        
-                        if is_correct:
-                            acertos_disciplina += 1
-                
-                # Calcular nota e proficiência para esta disciplina específica
-                if total_questions_disciplina > 0:
-                    percentual_acertos = (acertos_disciplina / total_questions_disciplina) * 100
-                    nota_disciplina = format_decimal_two_places(percentual_acertos / 10)
-                    proficiencia_disciplina = format_decimal_two_places((acertos_disciplina / total_questions_disciplina) * 400)
-                    
-                    notas_disciplina.append(nota_disciplina)
-                    proficiencias_disciplina.append(proficiencia_disciplina)
-                    
-                    # Determinar classificação baseada na proficiência específica da disciplina
-                    if proficiencia_disciplina >= 300:
-                        classificacoes_disciplina['Avançado'] += 1
-                    elif proficiencia_disciplina >= 200:
-                        classificacoes_disciplina['Adequado'] += 1
-                    elif proficiencia_disciplina >= 100:
-                        classificacoes_disciplina['Básico'] += 1
-                    else:
-                        classificacoes_disciplina['Abaixo do Básico'] += 1
-            
-            # Calcular médias da disciplina
-            if notas_disciplina:
-                media_nota_disciplina = format_decimal_two_places(sum(notas_disciplina) / len(notas_disciplina))
-                media_proficiencia_disciplina = format_decimal_two_places(sum(proficiencias_disciplina) / len(proficiencias_disciplina))
-            else:
-                media_nota_disciplina = 0.0
-                media_proficiencia_disciplina = 0.0
-            
-            # Converter classificação para o formato esperado
-            distribuicao_disciplina = {
-                'abaixo_do_basico': classificacoes_disciplina['Abaixo do Básico'],
-                'basico': classificacoes_disciplina['Básico'],
-                'adequado': classificacoes_disciplina['Adequado'],
-                'avancado': classificacoes_disciplina['Avançado']
-            }
-            
-            resultado_disciplina = {
-                "disciplina": subject.name,
-                "total_avaliacoes": 1,  # Uma avaliação pode ter múltiplas disciplinas
-                "total_alunos": total_alunos,
-                "alunos_participantes": alunos_participantes,
-                "alunos_pendentes": total_alunos - alunos_participantes,
-                "alunos_ausentes": 0,
-                "media_nota": media_nota_disciplina,
-                "media_proficiencia": media_proficiencia_disciplina,
-                "distribuicao_classificacao": distribuicao_disciplina
-            }
-            
-            resultados_disciplina.append(resultado_disciplina)
+                resultados_disciplina.append(resultado_disciplina)
         
         return resultados_disciplina
         

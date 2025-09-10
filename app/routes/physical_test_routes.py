@@ -178,6 +178,16 @@ def generate_physical_forms(test_id):
         
         for student in students_data:
             try:
+                # Verificar se já existe formulário para este aluno (evitar duplicatas)
+                existing_form = PhysicalTestForm.query.filter_by(
+                    test_id=test_id,
+                    student_id=student['id']
+                ).first()
+                
+                if existing_form:
+                    print(f"  ⚠️ Formulário já existe para {student['nome']} (ID: {student['id']}) - pulando geração")
+                    continue
+                
                 # Gerar formulário estilo formularios.py
                 form_image, form_coords, qr_coords = generator._create_formulario_style_form(
                     student['nome'], 

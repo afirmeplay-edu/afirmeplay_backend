@@ -23,4 +23,5 @@ from .evaluationResult import EvaluationResult
 from .manager import Manager
 from .physicalTestAnswer import PhysicalTestAnswer
 from .physicalTestForm import PhysicalTestForm
+from .formCoordinates import FormCoordinates
 

@@ -32,6 +32,7 @@ class PhysicalTestForm(db.Model):
     # Status do formulário
     status = db.Column(db.String, default='gerado')  # gerado, preenchido, corrigido, processado
     is_corrected = db.Column(db.Boolean, default=False)
+    form_type = db.Column(db.String, default='institutional')  # institutional, projeto_style
     
     # Metadados
     generated_at = db.Column(db.DateTime, default=datetime.utcnow)
@@ -86,6 +87,7 @@ class PhysicalTestForm(db.Model):
             'qr_code_coordinates': self.qr_code_coordinates,
             'status': self.status,
             'is_corrected': self.is_corrected,
+            'form_type': self.form_type,
             'generated_at': self.generated_at.isoformat() if self.generated_at else None,
             'corrected_at': self.corrected_at.isoformat() if self.corrected_at else None,
             'processed_at': self.processed_at.isoformat() if self.processed_at else None,

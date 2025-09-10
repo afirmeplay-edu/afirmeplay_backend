@@ -7,6 +7,7 @@ from flask import Blueprint, request, jsonify, send_file
 from flask_jwt_extended import jwt_required
 from app.decorators.role_required import role_required, get_current_user_from_token
 from app.services.physical_test_form_service import PhysicalTestFormService
+from app.services.institutional_test_pdf_generator import InstitutionalTestPDFGenerator
 from app.models.test import Test
 from app.models.classTest import ClassTest
 from app.models.physicalTestForm import PhysicalTestForm
@@ -25,13 +26,14 @@ bp = Blueprint('physical_tests', __name__, url_prefix='/physical-tests')
 @role_required("admin", "professor", "coordenador", "diretor")
 def generate_physical_forms(test_id):
     """
-    Gera formulários físicos para uma prova específica
+    Gera PDFs institucionais para uma prova específica (formato das imagens fornecidas)
     
     Body:
         - output_dir (opcional): Diretório para salvar os PDFs
+        - logo_data (opcional): Dados do logo (base64 ou URL)
     
     Returns:
-        - Lista de formulários gerados
+        - Lista de PDFs institucionais gerados
         - URLs dos PDFs
         - Informações dos alunos
     """
@@ -47,35 +49,289 @@ def generate_physical_forms(test_id):
         
         # Verificar permissões do professor
         if user['role'] == 'professor' and test.created_by != user['id']:
-            return jsonify({"error": "Você só pode gerar formulários para suas próprias provas"}), 403
+            return jsonify({"error": "Você só pode gerar PDFs institucionais para suas próprias provas"}), 403
         
-        # Obter diretório de saída
+        # Obter dados da requisição
         try:
             data = request.get_json() or {}
         except:
             data = {}
-        output_dir = data.get('output_dir', 'physical_forms')
+        logo_data = data.get('logo_data')  # Logo será implementado posteriormente
         
-        # Gerar formulários
-        service = PhysicalTestFormService()
-        result = service.generate_physical_forms(test_id, output_dir)
+        # Buscar questões da prova
+        from app.models.testQuestion import TestQuestion
+        from app.models.question import Question
+        from app.models.subject import Subject
         
-        if result['success']:
+        test_question_ids = [tq.question_id for tq in TestQuestion.query.filter_by(test_id=test_id).order_by(TestQuestion.order).all()]
+        questions = Question.query.filter(Question.id.in_(test_question_ids)).all() if test_question_ids else []
+        
+        if not questions:
+            return jsonify({"error": "Nenhuma questão encontrada para esta prova"}), 400
+        
+        # Buscar alunos das turmas que aplicaram a prova
+        from app.models.student import Student
+        from app.models.studentClass import Class
+        
+        class_tests = ClassTest.query.filter_by(test_id=test_id).all()
+        if not class_tests:
+            return jsonify({"error": "A prova não foi aplicada em nenhuma turma"}), 400
+        
+        class_ids = [ct.class_id for ct in class_tests]
+        students = Student.query.filter(Student.class_id.in_(class_ids)).all()
+        
+        if not students:
+            return jsonify({"error": "Nenhum aluno encontrado nas turmas que aplicaram a prova"}), 400
+        
+        # Buscar dados dinâmicos das tabelas
+        education_stage_name = None
+        course_name = None
+        
+        # Buscar education_stage através do grade
+        if test.grade and test.grade.education_stage_id:
+            from app.models.educationStage import EducationStage
+            education_stage = EducationStage.query.get(test.grade.education_stage_id)
+            if education_stage:
+                education_stage_name = education_stage.name
+        
+        # Buscar course (se for um ID de education_stage)
+        if test.course:
+            from app.models.educationStage import EducationStage
+            course = EducationStage.query.get(test.course)
+            if course:
+                course_name = course.name
+        
+        # Preparar dados para o gerador
+        test_data = {
+            'id': test.id,
+            'title': test.title,
+            'description': test.description,
+            'course': test.course,
+            'course_name': course_name,
+            'education_stage_id': test.grade.education_stage_id if test.grade else None,
+            'education_stage_name': education_stage_name,
+            'grade_name': test.grade.name if test.grade else '9° ANO'
+        }
+        
+        students_data = []
+        for student in students:
+            students_data.append({
+                'id': student.id,
+                'nome': student.name
+            })
+        
+        questions_data = []
+        for question in questions:
+            # Buscar disciplina da questão
+            subject = Subject.query.get(question.subject_id) if question.subject_id else None
+            
+            # Buscar código da habilidade
+            skill_code = None
+            if question.skill:
+                from app.models.skill import Skill
+                skill = Skill.query.get(question.skill)
+                if skill:
+                    skill_code = skill.code
+            
+            # Extrair IDs das alternativas
+            alternative_ids = []
+            if question.alternatives:
+                try:
+                    import json
+                    alternatives_json = json.loads(question.alternatives) if isinstance(question.alternatives, str) else question.alternatives
+                    alternative_ids = [alt.get('id', '') for alt in alternatives_json if alt.get('id')]
+                except:
+                    alternative_ids = []
+            
+            question_data = {
+                'id': question.id,
+                'title': question.title,
+                'text': question.text,
+                'formatted_text': question.formatted_text,
+                'secondstatement': question.secondstatement,
+                'alternatives': question.alternatives or [],
+                'alternative_ids': alternative_ids,  # IDs das alternativas para o formulário
+                'skills': [skill_code] if skill_code else [],
+                'subject': {
+                    'id': subject.id,
+                    'name': subject.name
+                } if subject else None
+            }
+            questions_data.append(question_data)
+        
+        # Obter class_test_id (usar o primeiro se houver múltiplos)
+        class_test_id = class_tests[0].id if class_tests else None
+        
+        # Gerar PDFs institucionais e salvar no banco
+        generator = InstitutionalTestPDFGenerator()
+        generated_files = generator.generate_institutional_test_pdf(
+            test_data, students_data, questions_data, class_test_id
+        )
+        
+        # Gerar formulários individuais no estilo formularios.py para cada aluno
+        print(f"🎯 GERANDO FORMULÁRIOS ESTILO FORMULARIOS.PY PARA {len(students_data)} ALUNOS...")
+        
+        from app.models.physicalTestForm import PhysicalTestForm
+        from app import db
+        
+        formularios_gerados = []
+        
+        for student in students_data:
+            try:
+                # Verificar se já existe formulário para este aluno (evitar duplicatas)
+                existing_form = PhysicalTestForm.query.filter_by(
+                    test_id=test_id,
+                    student_id=student['id']
+                ).first()
+                
+                if existing_form:
+                    print(f"  ⚠️ Formulário já existe para {student['nome']} (ID: {student['id']}) - pulando geração")
+                    continue
+                
+                # Gerar formulário estilo formularios.py
+                form_image, form_coords, qr_coords = generator._create_formulario_style_form(
+                    student['nome'], 
+                    student['id'],
+                    len(questions_data)  # Número total de questões
+                )
+                
+                if form_image and form_coords and qr_coords:
+                    # Salvar no banco de dados
+                    form = PhysicalTestForm(
+                        test_id=test_id,
+                        student_id=student['id'],
+                        class_test_id=class_test_id,
+                        form_pdf_data=form_image.tobytes(),  # Converter PIL para bytes
+                        qr_code_data=student['id'],  # APENAS o student_id, como no projeto.py
+                        form_type='formularios_style'
+                    )
+                    
+                    db.session.add(form)
+                    
+                    # Salvar coordenadas na tabela FormCoordinates (atualizar se existir)
+                    from app.models.formCoordinates import FormCoordinates
+                    
+                    # Verificar se já existem coordenadas para este aluno
+                    existing_coords = FormCoordinates.query.filter_by(
+                        qr_code_id=student['id'],
+                        test_id=test_id
+                    ).first()
+                    
+                    if existing_coords:
+                        # Atualizar coordenadas existentes
+                        existing_coords.coordinates = form_coords
+                        print(f"  🔄 Coordenadas atualizadas para {student['nome']} (ID: {student['id']})")
+                    else:
+                        # Criar novas coordenadas
+                        form_coordinates = FormCoordinates(
+                            test_id=test_id,
+                            qr_code_id=student['id'],  # QR code contém apenas o student_id
+                            student_id=student['id'],
+                            coordinates=form_coords  # Lista de coordenadas [x, y, w, h]
+                        )
+                        db.session.add(form_coordinates)
+                        print(f"  ➕ Novas coordenadas criadas para {student['nome']} (ID: {student['id']})")
+                    
+                    formularios_gerados.append({
+                        'student_id': student['id'],
+                        'student_name': student['nome'],
+                        'form_type': 'formularios_style',
+                        'coordinates': form_coords,
+                        'qr_coordinates': qr_coords
+                    })
+                    
+                    print(f"  ✅ Formulário gerado para {student['nome']} (ID: {student['id']}) - {len(form_coords)} coordenadas salvas")
+                else:
+                    print(f"  ❌ Erro ao gerar formulário para {student['nome']}")
+                    
+            except Exception as e:
+                print(f"  ❌ Erro ao gerar formulário para {student['nome']}: {str(e)}")
+                continue
+        
+        # Commit das alterações
+        db.session.commit()
+        
+        print(f"🎯 FORMULÁRIOS ESTILO FORMULARIOS.PY GERADOS: {len(formularios_gerados)}/{len(students_data)}")
+        
+        if generated_files:
             return jsonify({
-                "message": result['message'],
-                "generated_forms": result['generated_forms'],
-                "test_title": result['test_title'],
-                "total_questions": result['total_questions'],
-                "total_students": result['total_students'],
-                "forms": result['forms']
+                "message": f"PDFs institucionais e formulários estilo projeto.py gerados para {len(generated_files)} alunos",
+                "generated_forms": generated_files,
+                "projeto_style_forms": formularios_gerados,
+                "test_title": test.title,
+                "total_questions": len(questions),
+                "total_students": len(students)
+            }), 200
+        else:
+            return jsonify({"error": "Nenhum PDF foi gerado"}), 400
+            
+    except Exception as e:
+        logging.error(f"Erro ao gerar PDFs institucionais: {str(e)}")
+        return jsonify({"error": "Erro interno do servidor"}), 500
+
+@bp.route('/test-deteccao-bolhas', methods=['POST'])
+@jwt_required()
+@role_required("admin", "professor", "coordenador", "diretor")
+def testar_deteccao_bolhas():
+    """
+    Rota de teste para verificar se a detecção de bolhas está funcionando
+    com correção de perspectiva
+    
+    Body:
+        - image: Imagem do gabarito preenchido (base64)
+    
+    Returns:
+        - Resultado da detecção de bolhas
+        - Respostas detectadas
+    """
+    try:
+        user = get_current_user_from_token()
+        if not user:
+            return jsonify({"error": "User not found or token invalid"}), 401
+        
+        # Obter dados da imagem
+        image_data = None
+        
+        if 'image' in request.files:
+            # Upload de arquivo
+            file = request.files['image']
+            if file and file.filename:
+                image_data = file.read()
+        else:
+            # Tentar obter dados JSON
+            try:
+                data = request.get_json() or {}
+                if 'image' in data:
+                    # Base64
+                    image_base64 = data['image']
+                    if image_base64.startswith('data:image'):
+                        image_base64 = image_base64.split(',')[1]
+                    image_data = base64.b64encode(base64.b64decode(image_base64)).decode('utf-8')
+                    image_data = f"data:image/jpeg;base64,{image_data}"
+            except Exception as e:
+                return jsonify({"error": "Formato de dados inválido"}), 400
+        
+        if not image_data:
+            return jsonify({"error": "Imagem não fornecida"}), 400
+        
+        # Testar detecção usando o serviço
+        from app.services.physical_test_pdf_generator import PhysicalTestPDFGenerator
+        pdf_generator = PhysicalTestPDFGenerator()
+        
+        result = pdf_generator.testar_deteccao_bolhas(image_data)
+        
+        if result.get('success'):
+            return jsonify({
+                "message": "Teste de detecção concluído",
+                "resultado": result
             }), 200
         else:
             return jsonify({
-                "error": result['error']
+                "error": result.get('error', 'Erro desconhecido')
             }), 400
             
     except Exception as e:
-        logging.error(f"Erro ao gerar formulários físicos: {str(e)}")
+        logging.error(f"Erro no teste de detecção: {str(e)}")
         return jsonify({"error": "Erro interno do servidor"}), 500
 
 @bp.route('/test/<string:test_id>/process-correction', methods=['POST'])
@@ -108,52 +364,75 @@ def process_physical_correction(test_id):
         if user['role'] == 'professor' and test.created_by != user['id']:
             return jsonify({"error": "Você só pode processar correções de suas próprias provas"}), 403
         
-        # Obter dados da imagem
+        # Obter dados da imagem e parâmetros opcionais
         image_data = None
-        correction_image_url = None
+        student_id = None
+        class_test_id = None
         
         if 'image' in request.files:
             # Upload de arquivo
             file = request.files['image']
             if file and file.filename:
                 image_data = file.read()
-        elif 'image' in request.json:
-            # Base64
+            # Não precisamos mais de parâmetros adicionais
+        else:
+            # Tentar obter dados JSON (mais flexível)
             try:
-                image_base64 = request.json['image']
-                if image_base64.startswith('data:image'):
-                    image_base64 = image_base64.split(',')[1]
-                image_data = base64.b64decode(image_base64)
+                data = request.get_json() or {}
+                if 'image' in data:
+                    # Base64
+                    image_base64 = data['image']
+                    if image_base64.startswith('data:image'):
+                        image_base64 = image_base64.split(',')[1]
+                    image_data = base64.b64decode(image_base64)
+                # Não precisamos mais de parâmetros adicionais
             except Exception as e:
-                return jsonify({"error": "Formato de imagem inválido"}), 400
+                # Se não conseguir obter JSON, tentar form data
+                try:
+                    image_base64 = request.form.get('image')
+                    if image_base64:
+                        if image_base64.startswith('data:image'):
+                            image_base64 = image_base64.split(',')[1]
+                        image_data = base64.b64decode(image_base64)
+                    # Não precisamos mais de parâmetros adicionais
+                except Exception as e2:
+                    return jsonify({"error": "Formato de dados inválido. Envie como JSON ou form-data"}), 400
         
         if not image_data:
             return jsonify({"error": "Imagem não fornecida"}), 400
         
-        # Obter URL da imagem corrigida
-        data = request.get_json() or {}
-        correction_image_url = data.get('correction_image_url')
+        # Processar correção usando nossa nova função completa
+        from app.services.physical_test_pdf_generator import PhysicalTestPDFGenerator
+        pdf_generator = PhysicalTestPDFGenerator()
         
-        # Processar correção
-        service = PhysicalTestFormService()
-        result = service.process_physical_correction(test_id, image_data, correction_image_url)
+        # Converter image_data para base64 string se necessário
+        if isinstance(image_data, bytes):
+            image_base64 = base64.b64encode(image_data).decode('utf-8')
+            image_data_str = f"data:image/jpeg;base64,{image_base64}"
+        else:
+            image_data_str = image_data
         
-        if result['success']:
-            # Salvar resultado na tabela evaluation_results se necessário
-            if result.get('evaluation_results'):
-                self._save_evaluation_result(test_id, result)
-            
+        # Usar função de correção completa (QR code + detecção + salvamento)
+        print(f"🎯 USANDO PROCESSAMENTO COMPLETO (QR + DETECÇÃO + SALVAMENTO)")
+        result = pdf_generator.processar_correcao_completa(test_id, image_data_str)
+        
+        if result.get('success'):
+            # Preparar dados de resposta
             response_data = {
-                "message": result['message'],
+                "message": "Correção processada com sucesso",
                 "student_id": result['student_id'],
-                "correction_results": result['correction_results'],
-                "physical_form_id": result['physical_form_id']
+                "test_id": result['test_id'],
+                "correct_answers": result['correct_answers'],
+                "total_questions": result['total_questions'],
+                "score_percentage": result['score_percentage'],
+                "grade": result['grade'],
+                "proficiency": result['proficiency'],
+                "classification": result['classification'],
+                "answers_detected": result['answers_detected'],
+                "student_answers": result['student_answers'],
+                "evaluation_result_id": result['evaluation_result_id'],
+                "method": "complete_processing"
             }
-            
-            # Adicionar imagem corrigida se disponível
-            if 'corrected_image' in result:
-                corrected_image_b64 = base64.b64encode(result['corrected_image']).decode('utf-8')
-                response_data['corrected_image'] = f"data:image/jpeg;base64,{corrected_image_b64}"
             
             return jsonify(response_data), 200
         else:
@@ -266,6 +545,76 @@ def download_physical_form(test_id, form_id):
         
     except Exception as e:
         logging.error(f"Erro ao baixar formulário físico: {str(e)}")
+        return jsonify({"error": "Erro interno do servidor"}), 500
+
+@bp.route('/test/<string:test_id>/download-all', methods=['GET'])
+@jwt_required()
+@role_required("admin", "professor", "coordenador", "diretor")
+def download_all_physical_forms(test_id):
+    """
+    Download de todos os formulários físicos de uma prova em um arquivo ZIP
+    
+    Returns:
+        - Arquivo ZIP contendo todos os PDFs dos alunos
+    """
+    try:
+        import zipfile
+        from io import BytesIO
+        
+        user = get_current_user_from_token()
+        if not user:
+            return jsonify({"error": "User not found or token invalid"}), 401
+        
+        # Verificar se a prova existe
+        test = Test.query.get(test_id)
+        if not test:
+            return jsonify({"error": "Prova não encontrada"}), 404
+        
+        # Verificar permissões do professor
+        if user['role'] == 'professor' and test.created_by != user['id']:
+            return jsonify({"error": "Você não tem permissão para baixar formulários desta prova"}), 403
+        
+        # Buscar todos os formulários da prova
+        forms = PhysicalTestForm.query.filter_by(test_id=test_id).all()
+        
+        if not forms:
+            return jsonify({"error": "Nenhum formulário encontrado para esta prova"}), 404
+        
+        # Criar arquivo ZIP em memória
+        zip_buffer = BytesIO()
+        
+        with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
+            for form in forms:
+                if form.form_pdf_data:
+                    # Buscar nome do aluno
+                    from app.models.student import Student
+                    student = Student.query.get(form.student_id)
+                    student_name = student.name if student else f"aluno_{form.student_id}"
+                    
+                    # Nome do arquivo no ZIP
+                    filename = f"prova_{test.title}_{student_name}_{form.student_id}.pdf"
+                    # Limpar caracteres inválidos do nome do arquivo
+                    filename = "".join(c for c in filename if c.isalnum() or c in (' ', '-', '_', '.')).rstrip()
+                    
+                    # Adicionar PDF ao ZIP
+                    zip_file.writestr(filename, form.form_pdf_data)
+        
+        zip_buffer.seek(0)
+        
+        # Nome do arquivo ZIP
+        zip_filename = f"provas_{test.title}_{test_id}.zip"
+        zip_filename = "".join(c for c in zip_filename if c.isalnum() or c in (' ', '-', '_', '.')).rstrip()
+        
+        # Enviar arquivo ZIP
+        return send_file(
+            zip_buffer,
+            as_attachment=True,
+            download_name=zip_filename,
+            mimetype='application/zip'
+        )
+        
+    except Exception as e:
+        logging.error(f"Erro ao baixar todos os formulários físicos: {str(e)}")
         return jsonify({"error": "Erro interno do servidor"}), 500
 
 @bp.route('/test/<string:test_id>/status', methods=['GET'])
@@ -797,3 +1146,5 @@ def _save_evaluation_result(test_id: str, correction_result: Dict) -> bool:
         logging.error(f"Erro ao salvar resultado da avaliação: {str(e)}")
         db.session.rollback()
         return False
+
+

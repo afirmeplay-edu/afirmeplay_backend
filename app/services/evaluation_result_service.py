@@ -207,16 +207,54 @@ class EvaluationResultService:
                     test_id, student_id, questions, answers, course_name
                 )
                 
-                # CORREÇÃO: Calcular resultado geral baseado no total de acertos, não na média das disciplinas
+                # CORREÇÃO: Calcular resultado geral como média aritmética das disciplinas
                 if subject_results:
-                    # Usar o total de acertos calculado para determinar o resultado geral
-                    result = EvaluationCalculator.calculate_complete_evaluation(
-                        correct_answers=correct_answers,
-                        total_questions=total_questions,
-                        course_name=course_name,
-                        subject_name=subject_name,
-                        use_simple_calculation=use_simple_calculation
-                    )
+                    # Calcular proficiência geral como média das disciplinas
+                    proficiencies = [sr['proficiency'] for sr in subject_results]
+                    grades = [sr['grade'] for sr in subject_results]
+                    
+                    proficiency_geral = sum(proficiencies) / len(proficiencies) if proficiencies else 0.0
+                    grade_geral = sum(grades) / len(grades) if grades else 0.0
+                    
+                    # Determinar classificação geral baseada na proficiência média
+                    # Usar faixas específicas para média geral
+                    if "finais" in course_name.lower() or "médio" in course_name.lower() or "medio" in course_name.lower():
+                        # Média Geral (Anos Finais/Ensino Médio):
+                        # - Abaixo do Básico: 0-212.49
+                        # - Básico: 212,50-289.99
+                        # - Adequado: 290-339.99
+                        # - Avançado: 340-425
+                        if proficiency_geral >= 340:
+                            classification_geral = "Avançado"
+                        elif proficiency_geral >= 290:
+                            classification_geral = "Adequado"
+                        elif proficiency_geral >= 212.50:
+                            classification_geral = "Básico"
+                        else:
+                            classification_geral = "Abaixo do Básico"
+                    else:
+                        # Média Geral (Educação Infantil/Anos Iniciais/EJA):
+                        # - Abaixo do Básico: 0-162
+                        # - Básico: 163-212
+                        # - Adequado: 213-262
+                        # - Avançado: 263-375
+                        if proficiency_geral >= 263:
+                            classification_geral = "Avançado"
+                        elif proficiency_geral >= 213:
+                            classification_geral = "Adequado"
+                        elif proficiency_geral >= 163:
+                            classification_geral = "Básico"
+                        else:
+                            classification_geral = "Abaixo do Básico"
+                    
+                    result = {
+                        'proficiency': round(proficiency_geral, 2),
+                        'grade': round(grade_geral, 2),
+                        'classification': classification_geral,
+                        'correct_answers': correct_answers,
+                        'total_questions': total_questions,
+                        'accuracy_rate': round((correct_answers / total_questions) * 100, 2) if total_questions > 0 else 0.0
+                    }
                 else:
                     # Fallback se não conseguir calcular por disciplina
                     result = EvaluationCalculator.calculate_complete_evaluation(

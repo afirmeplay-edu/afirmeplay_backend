@@ -1357,33 +1357,111 @@ class PhysicalTestPDFGenerator:
         else:
             x, y, w, h = best_bbox
             m = 8
+            m_right = 20  # Margem direita maior para capturar bolha D da Questão 4
             sx, sy = max(0, x - m), max(0, y - m)
-            ex, ey = min(img_corrigida.shape[1], x + w + m), min(img_corrigida.shape[0], y + h + m)
+            ex, ey = min(img_corrigida.shape[1], x + w + m_right), min(img_corrigida.shape[0], y + h + m)
+            print(f"🔧 Crop expandido: margem direita {m_right}px para capturar bolha D")
         
         crop = img_corrigida[sy:ey, sx:ex]
         cgray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
         cblur = cv2.GaussianBlur(cgray, (5, 5), 0)
+        
+        # DEBUG: Testar threshold OTSU adicional para detectar bolha D
+        _, th_otsu = cv2.threshold(cblur, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+        
+        # Usar threshold adaptativo (original)
         cth = cv2.adaptiveThreshold(cblur, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 11, 3)
+        
+        print(f"🔧 DEBUG: Testando threshold OTSU adicional para bolha D")
         
         print(f"📦 Crop aplicado: {crop.shape}")
         
-        # 4. Detectar contornos no crop
+        # 4. Detectar contornos no crop (threshold adaptativo)
         conts_crop, _ = cv2.findContours(cth, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
+        
+        # DEBUG: Detectar contornos com threshold OTSU para comparação
+        conts_otsu, _ = cv2.findContours(th_otsu, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
+        print(f"🔍 DEBUG: Contornos OTSU: {len(conts_otsu)} vs Adaptativo: {len(conts_crop)}")
         cand2 = []
-        for c in conts_crop:
+        rejected_by_area = 0
+        rejected_by_circularity = 0
+        rejected_by_radius = 0
+        
+        print(f"🔍 DEBUG: Total de contornos encontrados: {len(conts_crop)}")
+        
+        for i, c in enumerate(conts_crop):
             area = cv2.contourArea(c)
-            if area < 50 or area > 2000:
+            # CORRIGIDO: Área mínima ainda mais reduzida para capturar bolha D (área 29.5)
+            if area < 20 or area > 2000:  # Reduzido de 30 para 20
+                rejected_by_area += 1
+                if rejected_by_area <= 5:  # Log apenas dos primeiros 5 rejeitados por área
+                    print(f"  ❌ Contorno {i}: rejeitado por área ({area:.1f})")
                 continue
             peri = cv2.arcLength(c, True)
             if peri == 0:
                 continue
             circ = 4 * np.pi * area / (peri * peri)
-            if circ < 0.25 or circ > 1.3:
+            # RELAXADO: Circularidade mais flexível para bolha D
+            if circ < 0.20 or circ > 1.4:  # Ajustado de 0.25-1.3 para 0.20-1.4
+                rejected_by_circularity += 1
+                if rejected_by_circularity <= 5:  # Log apenas dos primeiros 5 rejeitados por circularidade
+                    print(f"  ❌ Contorno {i}: rejeitado por circularidade ({circ:.3f})")
                 continue
             (cx, cy), r = cv2.minEnclosingCircle(c)
-            if r < 3 or r > 40:
+            # RELAXADO: Raio mínimo reduzido para bolha D
+            if r < 2 or r > 40:  # Reduzido de 3 para 2
+                rejected_by_radius += 1
+                if rejected_by_radius <= 5:  # Log apenas dos primeiros 5 rejeitados por raio
+                    print(f"  ❌ Contorno {i}: rejeitado por raio ({r:.1f})")
                 continue
+            
+            # Candidato aceito - log dos primeiros 10
             cand2.append((int(cx), int(cy), int(r), area, circ, c))
+            if len(cand2) <= 10:
+                print(f"  ✅ Contorno {i}: ACEITO - área={area:.1f}, circularidade={circ:.3f}, raio={r:.1f}, pos=({cx:.1f},{cy:.1f})")
+        
+        print(f"🔧 Critérios CORRIGIDOS: área mínima 20, circularidade 0.20-1.4, raio mínimo 2")
+        print(f"📊 DEBUG: Rejeitados - área: {rejected_by_area}, circularidade: {rejected_by_circularity}, raio: {rejected_by_radius}")
+        print(f"📊 DEBUG: Aceitos: {len(cand2)}/{len(conts_crop)} contornos")
+        
+        # DEBUG: Mostrar coordenadas de TODOS os contornos (aceitos e rejeitados) próximos à região da bolha D
+        print(f"🔍 DEBUG: Buscando contornos próximos à região da bolha D (X≈160, Y≈97):")
+        contornos_proximos_d = 0
+        for i, c in enumerate(conts_crop):
+            (cx, cy), r = cv2.minEnclosingCircle(c)
+            # Verificar se está próximo da região da bolha D da Questão 4
+            if 150 <= cx <= 170 and 90 <= cy <= 105:  # Região aproximada da bolha D
+                area = cv2.contourArea(c)
+                peri = cv2.arcLength(c, True)
+                if peri > 0:
+                    circ = 4 * np.pi * area / (peri * peri)
+                    status = "ACEITO" if (30 <= area <= 2000 and 0.20 <= circ <= 1.4 and 2 <= r <= 40) else "REJEITADO"
+                    print(f"  🎯 Contorno {i} próximo à bolha D: pos=({cx:.1f},{cy:.1f}), área={area:.1f}, circularidade={circ:.3f}, raio={r:.1f} -> {status}")
+                    contornos_proximos_d += 1
+        
+        if contornos_proximos_d == 0:
+            print(f"  ❌ NENHUM contorno encontrado próximo à região da bolha D (X≈160, Y≈97)")
+        else:
+            print(f"  📊 Total de contornos próximos à bolha D: {contornos_proximos_d}")
+        
+        # DEBUG: Verificar se threshold OTSU detecta contornos na região da bolha D
+        print(f"🔍 DEBUG: Verificando threshold OTSU na região da bolha D:")
+        contornos_otsu_proximos_d = 0
+        for i, c in enumerate(conts_otsu):
+            (cx, cy), r = cv2.minEnclosingCircle(c)
+            if 150 <= cx <= 170 and 90 <= cy <= 105:  # Região aproximada da bolha D
+                area = cv2.contourArea(c)
+                peri = cv2.arcLength(c, True)
+                if peri > 0:
+                    circ = 4 * np.pi * area / (peri * peri)
+                    status = "ACEITO" if (30 <= area <= 2000 and 0.20 <= circ <= 1.4 and 2 <= r <= 40) else "REJEITADO"
+                    print(f"  🎯 OTSU Contorno {i} próximo à bolha D: pos=({cx:.1f},{cy:.1f}), área={area:.1f}, circularidade={circ:.3f}, raio={r:.1f} -> {status}")
+                    contornos_otsu_proximos_d += 1
+        
+        if contornos_otsu_proximos_d == 0:
+            print(f"  ❌ NENHUM contorno OTSU encontrado próximo à região da bolha D")
+        else:
+            print(f"  📊 Total de contornos OTSU próximos à bolha D: {contornos_otsu_proximos_d}")
         
         print(f"🔍 Candidatos no crop: {len(cand2)}")
         
@@ -1437,15 +1515,31 @@ class PhysicalTestPDFGenerator:
         
         print(f"📋 Grid: {len(grid)} linhas detectadas")
         
+        # DEBUG: Mostrar mapeamento detalhado do grid para Questão 4
+        print(f"🔍 DEBUG: Análise detalhada do grid:")
+        for ri in sorted(grid.keys()):
+            cells = grid[ri]
+            distinct_cols = set([c['col'] for c in cells])
+            print(f"🔍 DEBUG Grid Linha {ri}: {len(cells)} candidatos, colunas {sorted(distinct_cols)}")
+            for cell in cells:
+                col_letter = ['A', 'B', 'C', 'D'][cell['col']]
+                print(f"    Posição ({cell['cx']:.1f},{cell['cy']:.1f}) -> Coluna {cell['col']} ({col_letter})")
+        
         # 8. Processar cada linha
         answers = {}
         question_number = 1
         
         row_indices_sorted = sorted(grid.keys(), key=lambda x: row_means[x])
+        print(f"🔍 DEBUG: Processando {len(row_indices_sorted)} linhas detectadas")
+        
         for ri in row_indices_sorted:
             cells = grid[ri]
             distinct_cols = set([c['col'] for c in cells])
+            print(f"🔍 DEBUG Linha {ri} (Questão {question_number}): {len(cells)} candidatos, {len(distinct_cols)} colunas distintas")
+            
+            # CORRIGIDO: Permitir questões com pelo menos 2 colunas (não exigir 4)
             if len(distinct_cols) < 2:
+                print(f"⚠️ Linha {ri} rejeitada: apenas {len(distinct_cols)} coluna(s) distintas")
                 continue
             
             option_means = {}
@@ -1468,6 +1562,20 @@ class PhysicalTestPDFGenerator:
             
             if not option_means:
                 continue
+            
+            # CORRIGIDO: Preencher colunas faltantes com placeholder
+            for col in range(4):  # Sempre 4 colunas (A, B, C, D)
+                if col not in option_means:
+                    # Usar posição esperada da coluna e média alta (não marcada)
+                    expected_x = col_means[col] if col < len(col_means) else 160.0
+                    expected_y = row_means[ri] if ri < len(row_means) else 97.0
+                    option_means[col] = {
+                        'mean': 255,  # Média alta = não marcada
+                        'cx': expected_x,
+                        'cy': expected_y,
+                        'r': 8  # Raio padrão
+                    }
+                    print(f"  🔧 Coluna {col} faltante preenchida com placeholder (posição esperada)")
             
             # Regras de decisão adaptativas
             ordered = sorted([(v['mean'], k) for k, v in option_means.items()], key=lambda x: x[0])
@@ -1497,7 +1605,15 @@ class PhysicalTestPDFGenerator:
                 ans = letters
             
             answers[question_number] = ans
-            print(f"  ✅ Questão {question_number}: {ans}")
+            
+            # DEBUG: Mostrar detalhes da resposta detectada
+            if isinstance(ans, int):
+                ans_letter = ['A', 'B', 'C', 'D'][ans]
+                print(f"  ✅ Questão {question_number}: {ans} ({ans_letter})")
+            else:
+                print(f"  ✅ Questão {question_number}: {ans}")
+            print(f"    📊 Opções detectadas: {option_means}")
+            
             question_number += 1
         
         print(f"📊 RESPOSTAS DETECTADAS: {answers}")

@@ -9,7 +9,7 @@ from reportlab.pdfgen import canvas
 from reportlab.lib.pagesizes import A4, portrait
 from reportlab.lib.units import cm
 from reportlab.lib.utils import ImageReader
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, PageBreak, Image as RLImage
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, PageBreak, Image as RLImage, Frame, PageTemplate
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.enums import TA_CENTER, TA_LEFT, TA_JUSTIFY
 from reportlab.lib import colors
@@ -64,6 +64,47 @@ class PhysicalTestPDFGenerator:
     def __init__(self):
         self.styles = getSampleStyleSheet()
         self._setup_custom_styles()
+    
+    def create_pdf_with_large_frame(self, pdf_buffer, story):
+        """
+        Cria PDF com frame maior (margens de 1cm) para melhor aproveitamento da página
+        
+        Args:
+            pdf_buffer: Buffer para salvar o PDF
+            story: Lista de elementos ReportLab para adicionar ao PDF
+        """
+        try:
+            from reportlab.platypus import BaseDocTemplate
+            
+            # Criar frame que ocupa quase toda a página A4 (margens reduzidas para formulário alto)
+            frame = Frame(
+                x1=0.5*cm,                # margem esquerda reduzida
+                y1=0.5*cm,                # margem inferior reduzida
+                width=A4[0] - 1*cm,       # largura do frame = largura total - margens reduzidas
+                height=A4[1] - 1*cm,      # altura do frame = altura total - margens reduzidas
+                id='normal',
+                leftPadding=0,
+                bottomPadding=0,
+                rightPadding=0,
+                topPadding=0
+            )
+            
+            # Criar template de página com frame maior
+            page_template = PageTemplate(id='Later', frames=[frame])
+            
+            # Criar documento com template customizado
+            doc = BaseDocTemplate(pdf_buffer, pagesize=A4)
+            doc.addPageTemplates([page_template])
+            
+            # Construir PDF
+            doc.build(story)
+            
+            logging.info(f"PDF criado com frame maior: {frame.width:.1f}x{frame.height:.1f} pontos")
+            return True
+            
+        except Exception as e:
+            logging.error(f"Erro ao criar PDF com frame maior: {str(e)}")
+            return False
     
     def _setup_custom_styles(self):
         """Configura estilos personalizados para o PDF"""
@@ -173,391 +214,7 @@ class PhysicalTestPDFGenerator:
             fontName='Helvetica-Bold'
         ))
 
-    # FUNÇÃO NÃO UTILIZADA - comentada para teste
-    # def generate_test_pdf(self, test_data: Dict, students_data: List[Dict], 
-    #                      questions_data: List[Dict], output_dir: str) -> List[Dict]:
-        # """
-        # Gera PDFs de provas físicas para todos os alunos
-        # 
-        # Args:
-        #     test_data: Dados da prova (test_id, title, description, etc.)
-        #     students_data: Lista de alunos com dados (id, nome, email, etc.)
-        #     questions_data: Lista de questões ordenadas
-        #     output_dir: Diretório para salvar os PDFs
-        #     
-        # Returns:
-        #     Lista com informações dos PDFs gerados
-        # """
-        # # Criar diretório absoluto
-        # abs_output_dir = os.path.abspath(output_dir)
-        # os.makedirs(abs_output_dir, exist_ok=True)
-        # generated_files = []
-        # 
-        # # Gerar gabarito único para o professor
-        # answer_key_path = self._generate_answer_key_pdf(test_data, questions_data, abs_output_dir)
-        # 
-        # for student in students_data:
-        #     try:
-        #         # Gerar PDF individual para cada aluno (SEM gabarito)
-        #         pdf_path = self._generate_individual_test_pdf(
-        #             test_data, student, questions_data, abs_output_dir
-        #         )
-        #         
-        #         if pdf_path:
-        #             generated_files.append({
-        #                 'student_id': student['id'],
-        #                 'student_name': student['nome'],
-        #                 'pdf_path': pdf_path,
-        #                 'answer_key_path': answer_key_path,  # Caminho do gabarito
-        #                 'qr_code_data': f"{test_data['id']}_{student['id']}"
-        #             })
-        #                     
-        #     except Exception as e:
-        #         logging.error(f"Erro ao gerar PDF para aluno {student['id']}: {str(e)}")
-        #         continue
-        # 
-        # return generated_files
-        pass  # Função comentada - não utilizada
 
-    # FUNÇÃO NÃO UTILIZADA - comentada para teste
-    # def generate_combined_test_pdf(self, test_data: Dict, students_data: List[Dict], 
-    #                               questions_data: List[Dict], output_dir: str) -> Optional[str]:
-        # """
-        # Gera 1 PDF único contendo todas as provas e gabaritos
-        # 
-        # Args:
-        #     test_data: Dados da prova (test_id, title, description, etc.)
-        #     students_data: Lista de alunos com dados (id, nome, email, etc.)
-        #     questions_data: Lista de questões ordenadas
-        #     output_dir: Diretório para salvar o PDF
-        #     
-        # Returns:
-        #     Caminho do PDF gerado ou None se houver erro
-        # """
-        # try:
-        #     # Criar diretório absoluto
-        #     abs_output_dir = os.path.abspath(output_dir)
-        #     os.makedirs(abs_output_dir, exist_ok=True)
-        #     
-        #     # Nome do arquivo combinado usando o nome da prova
-        #     test_title = test_data.get('title', 'Prova').replace(' ', '_').replace('/', '_')
-        #     filename = f"{test_title}_{test_data['id']}.pdf"
-        #     pdf_path = os.path.join(abs_output_dir, filename)
-        #     
-        #     # Criar documento PDF
-        #     doc = SimpleDocTemplate(pdf_path, pagesize=portrait(A4))
-        #     story = []
-        #     
-        #     # Adicionar cada aluno
-        #     for i, student in enumerate(students_data):
-        #         # Cabeçalho da prova para este aluno
-        #         story.extend(self._create_test_header(test_data, student))
-        #         
-        #         # Questões da prova
-        #         story.extend(self._create_questions_section(questions_data))
-        #         
-        #         # Gabarito para este aluno (usando o mesmo método do gabarito separado)
-        #         story.extend(self._create_answer_key(test_data, questions_data, student))
-        #         
-        #         # Quebra de página entre alunos (exceto no último)
-        #         if i < len(students_data) - 1:
-        #             story.append(PageBreak())
-        #     
-        #     # Construir PDF
-        #     doc.build(story)
-        #     
-        #     return pdf_path
-        #     
-        # except Exception as e:
-        #     logging.error(f"Erro ao gerar PDF combinado: {str(e)}")
-        #     return None
-        pass  # Função comentada - não utilizada
-
-    # FUNÇÃO NÃO UTILIZADA - comentada para teste
-    # def _generate_individual_test_pdf(self, test_data: Dict, student: Dict, 
-    #                                 questions_data: List[Dict], output_dir: str) -> Optional[str]:
-        # """
-        # Gera PDF individual para um aluno específico
-        # """
-        # try:
-        #     # Nome do arquivo
-        #     safe_name = "".join(c for c in student['nome'] if c.isalnum() or c in (' ', '_')).rstrip().replace(" ", "_")
-        #     filename = f"prova_{test_data['id']}_{student['id']}_{safe_name}.pdf"
-        #     pdf_path = os.path.join(output_dir, filename)
-        #     
-        #     # Criar documento PDF
-        #     doc = SimpleDocTemplate(pdf_path, pagesize=portrait(A4))
-        #     story = []
-        #     
-        #     # Adicionar cabeçalho da prova
-        #     story.extend(self._create_test_header(test_data, student))
-        #     
-        #     # Adicionar questões
-        #     story.extend(self._create_questions_section(questions_data))
-        #     
-        #     # Adicionar formulário de resposta
-        #     story.extend(self._create_answer_sheet(test_data, student, len(questions_data)))
-        #     
-        #     # NÃO adicionar gabarito no PDF do aluno!
-        #     
-        #     # Construir PDF
-        #     doc.build(story)
-        #     
-        #     return pdf_path
-        #     
-        # except Exception as e:
-        #     logging.error(f"Erro ao gerar PDF individual: {str(e)}")
-        #     return None
-        pass  # Função comentada - não utilizada
-
-    # FUNÇÃO NÃO UTILIZADA - comentada para teste
-    # def _create_test_header(self, test_data: Dict, student: Dict) -> List:
-        # """Cria cabeçalho da prova com dados do aluno"""
-        # from reportlab.platypus import Table, TableStyle
-        # from reportlab.lib import colors
-        # 
-        # story = []
-        # 
-        # # Título da prova
-        # story.append(Paragraph(f"{test_data.get('title', 'Prova')}", self.styles['TestTitle']))
-        # 
-        # # Dados do aluno em formato moderno
-        # current_date = datetime.now().strftime("%d/%m/%Y")
-        # 
-        # # Criar tabela para layout moderno
-        # header_data = [
-        #     ['Aluno:', student['nome']],
-        #     ['Data:', current_date],
-        #     ['Prova:', test_data.get('description', '')]
-        # ]
-        # 
-        # header_table = Table(header_data, colWidths=[80, 400])
-        # header_table.setStyle(TableStyle([
-        #     ('ALIGN', (0, 0), (0, -1), 'LEFT'),
-        #     ('ALIGN', (1, 0), (1, -1), 'LEFT'),
-        #     ('FONTNAME', (0, 0), (0, -1), 'Helvetica-Bold'),
-        #     ('FONTNAME', (1, 0), (1, -1), 'Helvetica'),
-        #     ('FONTSIZE', (0, 0), (-1, -1), 14),
-        #     ('TEXTCOLOR', (0, 0), (-1, -1), colors.HexColor('#374151')),
-        #     ('BOTTOMPADDING', (0, 0), (-1, -1), 8),
-        #     ('TOPPADDING', (0, 0), (-1, -1), 8),
-        # ]))
-        # 
-        # story.append(header_table)
-        # story.append(Spacer(1, 15))
-        # 
-        # return story
-        pass  # Função comentada - não utilizada
-
-    # FUNÇÃO NÃO UTILIZADA - comentada para teste
-    # def _create_questions_section(self, questions_data: List[Dict]) -> List:
-        # """Cria seção com todas as questões"""
-        # story = []
-        # 
-        # # Adicionar cada questão
-        # for i, question in enumerate(questions_data, 1):
-        #     story.extend(self._create_single_question(question, i))
-        #     story.append(Spacer(1, 35))  # Aumentado de 25 para 35
-        # 
-        # return story
-        pass  # Função comentada - não utilizada
-
-    # FUNÇÃO NÃO UTILIZADA - comentada para teste
-    # def _create_single_question(self, question: Dict, question_number: int) -> List:
-        # """Cria uma questão individual com layout moderno"""
-        # from reportlab.platypus import Table, TableStyle, KeepTogether
-        # from reportlab.lib import colors
-        pass  # Função comentada - não utilizada (corpo muito grande)
-        
-        # story = []
-        # 
-        # # Container da questão com bordas e sombra
-        # question_content = []
-        # 
-        # # Número da questão
-        # question_content.append(Paragraph(f"Questão {question_number}", self.styles['QuestionNumber']))
-        
-        # # Adicionar espaçamento após o número da questão
-        # question_content.append(Spacer(1, 8))
-        
-        # # Tags de informação
-        # tags_data = []
-        # if question.get('question_type'):
-        #     # Traduzir multiple_choice para português
-        #     question_type = question['question_type']
-        #     if question_type == 'multiple_choice':
-        #         question_type = 'Multipla Escolha'
-        #     tags_data.append(question_type)
-        # if question.get('value'):
-        #     tags_data.append(f"{question['value']} pontos")
-        # if question.get('difficulty_level'):
-        #     tags_data.append(question['difficulty_level'])
-        # if question.get('skills'):
-        #     tags_data.append(f"{len(question['skills'])} habilidade(s)")
-        # 
-        # if tags_data:
-        #     tags_text = " • ".join(tags_data)
-        #     question_content.append(Paragraph(f"<font color='#6b7280'>{tags_text}</font>", self.styles['InfoTag']))
-        
-        # # Título da questão (se houver)
-        # if question.get('title'):
-        #     title_text = question['title']
-        #     # Verificar se o título tem quebra de linha
-        #     if '\n' in title_text or '<br' in title_text:
-        #         # Criar estilo com leading aumentado para espaçamento entre linhas
-        #         title_style = ParagraphStyle(
-        #             'QuestionTitleMultiLine',
-        #             parent=self.styles['QuestionTitle'],
-        #             leading=24,  # controla o espaçamento entre linhas (fontSize=16 + 8 de espaçamento)
-        #             fontSize=16,  # Garantir que o fontSize seja mantido
-        #             fontName='Helvetica-Bold'  # Garantir que a fonte seja mantida
-        #         )
-        #         # Processar quebras de linha mantendo o texto como um único parágrafo
-        #         processed_title = re.sub(r'\n|<br\s*/?>', '<br/>', title_text)
-        #         title_para = Paragraph(processed_title, title_style)
-        #         question_content.append(title_para)
-        #     else:
-        #         title_para = Paragraph(title_text, self.styles['QuestionTitle'])
-        #         question_content.append(title_para)
-        # 
-        # # Texto da questão (renderizar HTML)
-        # question_text = question.get('formatted_text', question.get('text', ''))
-        # if question_text:
-        #     # Processar HTML mantendo formatação
-        #     question_content.extend(self._process_html_content(question_text, self.styles['QuestionText']))
-        # 
-        # # Segundo enunciado (se houver) - renderizar HTML
-        # second_statement = question.get('secondstatement', '')
-        # if second_statement:
-        #     question_content.extend(self._process_html_content(second_statement, self.styles['SecondStatement']))
-        # 
-        # # Habilidades avaliadas
-        # skill_codes = self._get_skill_codes(question)
-        # if skill_codes:
-        #     skills_text = " • ".join(skill_codes)
-        #     question_content.append(Paragraph(f"<font color='#8b5cf6'>• Habilidades Avaliadas: {skills_text}</font>", self.styles['Skills']))
-        
-        # # Alternativas
-        # alternatives = question.get('alternatives', [])
-        # if alternatives:
-        #     question_content.append(Paragraph("<font color='#8b5cf6'>• Alternativas:</font>", self.styles['Skills']))
-            
-        #     # Criar tabela para alternativas
-        #     alt_data = []
-        #     for alt in alternatives:
-        #         letter = alt.get('id', '')  # Usar 'id' em vez de 'letter'
-        #         text = alt.get('text', '')
-        #         alt_data.append([f"{letter}: ( )", text])
-        #     
-        #     if alt_data:
-        #         alt_table = Table(alt_data, colWidths=[40, 450])  # Aumentado espaçamento
-        #         alt_table.setStyle(TableStyle([
-        #             ('ALIGN', (0, 0), (0, -1), 'CENTER'),  # Letras centralizadas
-        #             ('ALIGN', (1, 0), (1, -1), 'LEFT'),    # Texto alinhado à esquerda
-        #             ('FONTNAME', (0, 0), (-1, -1), 'Helvetica-Bold'),
-        #             ('FONTSIZE', (0, 0), (-1, -1), 12),  # Aumentado de 11 para 12
-        #             ('TEXTCOLOR', (0, 0), (-1, -1), colors.HexColor('#374151')),
-        #             ('BOTTOMPADDING', (0, 0), (-1, -1), 12),  # Aumentado de 8 para 12
-        #             ('TOPPADDING', (0, 0), (-1, -1), 12),     # Aumentado de 8 para 12
-        #             ('LEFTPADDING', (0, 0), (-1, -1), 15),    # Aumentado de 10 para 15
-        #             ('RIGHTPADDING', (0, 0), (-1, -1), 15),   # Aumentado de 10 para 15
-        #             ('VALIGN', (0, 0), (-1, -1), 'TOP'),      # Alinhamento vertical no topo
-        #         ]))
-        #         question_content.append(alt_table)
-        # 
-        # # Criar container com bordas e estilo moderno como na imagem
-        # container_table = Table([[question_content]], colWidths=[500])
-        # container_table.setStyle(TableStyle([
-        #     ('BORDER', (0, 0), (-1, -1), 1, colors.HexColor('#e5e7eb')),  # Borda cinza
-        #     ('LEFTPADDING', (0, 0), (-1, -1), 10),  # Diminuído de 20 para 10
-        #     ('RIGHTPADDING', (0, 0), (-1, -1), 10),  # Diminuído de 20 para 10
-        #     ('TOPPADDING', (0, 0), (-1, -1), 20),
-        #     ('BOTTOMPADDING', (0, 0), (-1, -1), 20),
-        #     ('VALIGN', (0, 0), (-1, -1), 'TOP'),
-        # ]))
-        # 
-        # story.append(container_table)
-        # story.append(Spacer(1, 20))  # Espaçamento entre questões
-        # 
-        # return story
-
-    # FUNÇÃO NÃO UTILIZADA - comentada para teste
-    # def _process_html_content(self, html_text: str, style) -> List:
-        # """
-        # Processa HTML convertendo para elementos ReportLab nativos
-        # Mantém processamento de imagens intacto
-        # """
-        # story = []
-        pass  # Função comentada - não utilizada
-        
-        # if not html_text.strip():
-        #     return story
-        # 
-        # # Dividir texto por tags de imagem (manter processamento atual)
-        # parts = re.split(r'<img[^>]*src=["\']([^"\']*)["\'][^>]*>', html_text)
-        # 
-        # for i, part in enumerate(parts):
-        #     if i % 2 == 0:
-        #         # Texto HTML - limpar e converter para elementos ReportLab
-        #         if part.strip():
-        #             # Aplicar limpeza HTML antes da conversão
-        #             clean_html = self._clean_html_for_reportlab(part.strip())
-        #             story.extend(self._convert_html_to_reportlab(clean_html, style))
-        #     else:
-        #         # URL da imagem - manter processamento atual
-        #         if part.strip():
-        #             img = self._process_image_from_text(part)
-        #             if img:
-        #                 # Centralizar a imagem
-        #                 img.hAlign = 'CENTER'
-        #                 story.append(img)
-        # 
-        # return story
-
-    # FUNÇÃO NÃO UTILIZADA - comentada para teste
-    # def _convert_html_to_reportlab(self, html_text: str, base_style) -> List:
-        # """
-        # Converte HTML de texto para elementos ReportLab nativos
-        # """
-        # try:
-        #     story = []
-        pass  # Função comentada - não utilizada
-            
-        # if not html_text.strip():
-        #     return story
-            
-        # # Criar estilos específicos
-        # bold_style = ParagraphStyle(
-        #     'BoldStyle',
-        #     parent=base_style,
-        #     fontName='Helvetica-Bold'
-        # )
-        # 
-        # italic_style = ParagraphStyle(
-        #     'ItalicStyle', 
-        #     parent=base_style,
-        #     fontName='Helvetica-Oblique'
-        # )
-        # 
-        # # Dividir por parágrafos
-        # paragraphs = re.split(r'</?p[^>]*>', html_text)
-        # 
-        # for para_text in paragraphs:
-        #     if not para_text.strip():
-        #         continue
-                    
-        #     # Processar formatação dentro do parágrafo
-        #     story.extend(self._process_paragraph_formatting(para_text.strip(), base_style, bold_style, italic_style))
-        #     
-        #     # Adicionar espaçamento entre parágrafos
-        #     story.append(Spacer(1, 6))
-        # 
-        # return story
-        # 
-        # except Exception as e:
-        # # Fallback: converter para texto simples
-        # logging.warning(f"Erro ao converter HTML para ReportLab, usando fallback: {e}")
-        # return self._fallback_html_to_text(html_text, base_style)
 
     def _process_paragraph_formatting(self, text: str, base_style, bold_style, italic_style) -> List:
         """
@@ -685,43 +342,13 @@ class PhysicalTestPDFGenerator:
         """
         return self._process_html_content(text, self.styles['QuestionText'])
 
-    # FUNÇÃO NÃO UTILIZADA - comentada para teste
-    # def _generate_answer_key_pdf(self, test_data: Dict, questions_data: List[Dict], output_dir: str) -> Optional[str]:
-        # """
-        # Gera PDF separado com apenas o gabarito para o professor
-        # """
-        # try:
-        #     # Nome do arquivo do gabarito
-        pass  # Função comentada - não utilizada
-        # filename = f"gabarito_{test_data['id']}.pdf"
-        # pdf_path = os.path.join(output_dir, filename)
-            
-        # # Criar documento PDF
-        # doc = SimpleDocTemplate(pdf_path, pagesize=portrait(A4))
-        # story = []
-            
-        # # Adicionar cabeçalho do gabarito
-        # story.append(Paragraph(f"<b>GABARITO - {test_data.get('title', 'Prova')}</b>", self.styles['TestTitle']))
-        # story.append(Spacer(1, 20))
-            
-        # # Adicionar gabarito
-        # story.extend(self._create_answer_key(test_data, questions_data, None))
-        # 
-        # # Construir PDF
-        # doc.build(story)
-        # 
-        # return pdf_path
-        # 
-        # except Exception as e:
-        # logging.error(f"Erro ao gerar gabarito: {str(e)}")
-        # return None
 
     def _create_answer_sheet(self, test_data: Dict, student: Dict, questions_data: List[Dict], class_test_id: str = None) -> List:
         """Cria formulário de resposta com QR Code usando ReportLab"""
         story = []
         
-        story.append(PageBreak())
-        story.append(Paragraph("<b>GABARITO DE RESPOSTAS</b>", self.styles['TestTitle']))
+        # story.append(PageBreak())
+        story.append(Paragraph("<b>CARTÃO-RESPOSTA</b>", self.styles['TestTitle']))
         story.append(Spacer(1, 20))
         
         # Adicionar class_test_id aos dados do teste
@@ -751,6 +378,13 @@ class PhysicalTestPDFGenerator:
             sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
             
             from app.formularios import gerar_formulario_com_qrcode
+            from app.models.student import Student
+            from app.models.user import User
+            from app.models.school import School
+            from app.models.studentClass import Class
+            from app.models.grades import Grade
+            from app.models.city import City
+            from app import db
             
             # Temporariamente modificar ALTERNATIVAS para 4 alternativas
             import app.formularios as formularios_module
@@ -762,15 +396,25 @@ class PhysicalTestPDFGenerator:
                 student_id = student.get('id', 'unknown')
                 student_name = student.get('nome', 'Nome não informado')
                 
+                # Buscar dados completos do aluno com joins
+                student_data = self._get_complete_student_data(student_id)
+                
                 # Contar total de questões
                 total_questions = len(questions_data)
                 
-                # Usar a função original do formularios.py
+                # Usar tempfile para melhor gerenciamento de arquivos temporários
+                import tempfile
+                with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
+                    temp_path = tmp.name
+                
+                # Usar a função modificada do formularios.py com dados completos
                 imagem, coordenadas_respostas, coordenadas_qr = gerar_formulario_com_qrcode(
                     student_id, 
                     student_name, 
                     total_questions, 
-                    "temp_form.png"  # Arquivo temporário
+                    temp_path,  # Arquivo temporário
+                    student_data,  # Dados completos do aluno
+                    test_data  # Dados do teste
                 )
                 
                 if imagem and coordenadas_respostas and coordenadas_qr:
@@ -779,13 +423,60 @@ class PhysicalTestPDFGenerator:
                     imagem.save(img_buffer, format='PNG')
                     img_buffer.seek(0)
                     
-                    # Adicionar imagem ao PDF com dimensões do formularios.py
-                    elements.append(RLImage(img_buffer, width=15.58*cm, height=6.93*cm))
+                    # Adicionar imagem ao PDF com dimensões que garantem que caiba no frame
+                    from reportlab.lib.pagesizes import A4
+                    
+                    # Dimensões do frame maior (A4 - 1cm de margem para acomodar formulário alto)
+                    # Frame será criado com: Frame(x1=0.5*cm, y1=0.5*cm, width=A4[0]-1*cm, height=A4[1]-1*cm)
+                    frame_width = A4[0] - 1*cm   # largura = 595 - 1*28.35 = 566.65 pontos
+                    frame_height = A4[1] - 1*cm  # altura = 842 - 1*28.35 = 813.65 pontos
+                    
+                    # Calcula proporção da imagem original
+                    img_width, img_height = imagem.size
+                    img_ratio = img_width / img_height
+                    
+                    # Ajusta para caber no frame maior (usando toda a largura disponível)
+                    # Prioriza usar toda a largura do frame para maximizar o tamanho visual
+                    largura_pdf = frame_width  # Usar toda a largura disponível (538.3 pontos)
+                    altura_pdf = largura_pdf / img_ratio  # Calcular altura proporcional
+                    
+                    # Se a altura exceder o frame, ajustar para caber
+                    if altura_pdf > frame_height:
+                        altura_pdf = frame_height  # Usar toda a altura disponível (785.2 pontos)
+                        largura_pdf = altura_pdf * img_ratio  # Recalcular largura proporcional
+                    
+                    # Debug: verificar dimensões calculadas
+                    logging.info(f"Imagem original: {img_width}x{img_height} pixels")
+                    logging.info(f"Proporção da imagem: {img_ratio:.3f}")
+                    logging.info(f"Frame disponível: {frame_width:.1f}x{frame_height:.1f} pontos")
+                    logging.info(f"Dimensões finais: {largura_pdf:.1f}x{altura_pdf:.1f} pontos")
+                    logging.info(f"Margem de segurança: {frame_width - largura_pdf:.1f}x{frame_height - altura_pdf:.1f} pontos")
+                    
+                    # Calcular espaçamento para centralizar verticalmente e horizontalmente na página A4
+                    from reportlab.platypus import KeepTogether
+                    
+                    altura_pagina = A4[1]  # Altura da página A4 em pontos
+                    largura_pagina = A4[0]  # Largura da página A4 em pontos
+                    
+                    # largura_pdf e altura_pdf já estão em pontos (cm * 28.35)
+                    altura_pdf_pontos = altura_pdf
+                    largura_pdf_pontos = largura_pdf
+                    
+                    # Posicionamento próximo ao label "CARTÃO-RESPOSTA" (reduzido espaçamento)
+                    espaco_superior = 10  # Espaçamento mínimo entre label e formulário
+                    espaco_esquerdo = max((frame_width - largura_pdf) / 2, 0)
+                    
+                    # Criar imagem flowable
+                    img_flowable = RLImage(img_buffer, width=largura_pdf, height=altura_pdf)
+                    
+                    # Aplicar deslocamento vertical e horizontal
+                    elements.append(Spacer(1, espaco_superior))
+                    elements.append(KeepTogether([Spacer(espaco_esquerdo, 1), img_flowable]))
                     elements.append(Spacer(1, 20))
                     
                     # Limpar arquivo temporário
-                    if os.path.exists("temp_form.png"):
-                        os.remove("temp_form.png")
+                    if os.path.exists(temp_path):
+                        os.remove(temp_path)
                 else:
                     logging.error("Falha ao gerar formulário usando formularios.py")
                 
@@ -793,11 +484,80 @@ class PhysicalTestPDFGenerator:
                 # Restaurar ALTERNATIVAS original
                 formularios_module.ALTERNATIVAS = original_alternativas
                 
+                # Garantir limpeza do arquivo temporário mesmo em caso de erro
+                if 'temp_path' in locals() and os.path.exists(temp_path):
+                    os.remove(temp_path)
+                
             return elements
             
         except Exception as e:
             logging.error(f"Erro ao gerar formulário usando formularios.py: {str(e)}")
             return []
+    
+    def _get_complete_student_data(self, student_id: str) -> Dict:
+        """
+        Busca dados completos do aluno incluindo escola, cidade, turma e série
+        """
+        try:
+            from app.models.student import Student
+            from app.models.user import User
+            from app.models.school import School
+            from app.models.studentClass import Class
+            from app.models.grades import Grade
+            from app.models.city import City
+            from app import db
+            
+            # Query com joins para buscar dados completos do aluno
+            result = db.session.query(
+                Student,
+                User,
+                School,
+                Class,
+                Grade,
+                City
+            ).join(
+                User, Student.user_id == User.id
+            ).outerjoin(
+                School, Student.school_id == School.id
+            ).outerjoin(
+                Class, Student.class_id == Class.id
+            ).outerjoin(
+                Grade, Student.grade_id == Grade.id
+            ).outerjoin(
+                City, School.city_id == City.id
+            ).filter(
+                Student.id == student_id
+            ).first()
+            
+            if not result:
+                logging.warning(f"Dados completos do aluno {student_id} não encontrados")
+                return {
+                    'student_name': 'Nome não informado',
+                    'class_name': 'Turma não informada',
+                    'school_name': 'Escola não informada',
+                    'city_name': 'Município não informado',
+                    'state_name': 'Estado não informado'
+                }
+            
+            student, user, school, class_obj, grade, city = result
+            
+            return {
+                'student_name': student.name or 'Nome não informado',
+                'class_name': class_obj.name if class_obj else 'Turma não informada',
+                'school_name': school.name if school else 'Escola não informada',
+                'city_name': city.name if city else 'Município não informado',
+                'state_name': city.state if city else 'Estado não informado'
+            }
+            
+        except Exception as e:
+            logging.error(f"Erro ao buscar dados completos do aluno {student_id}: {str(e)}")
+            return {
+                'student_name': 'Nome não informado',
+                'class_name': 'Turma não informada',
+                'school_name': 'Escola não informada',
+                'city_name': 'Município não informado',
+                'state_name': 'Estado não informado'
+            }
     
     def _generate_coordinates_map(self, questions_data: List[Dict], num_questions: int) -> Dict:
         """
@@ -3389,88 +3149,7 @@ class PhysicalTestPDFGenerator:
             logging.error(f"Erro ao processar imagem: {str(e)}")
             return None
 
-    # FUNÇÃO NÃO UTILIZADA - comentada para teste
-    # def generate_individual_test_pdf(self, test_data: Dict, student_data: Dict, 
-    #                                questions_data: List[Dict], output_dir: str) -> Optional[str]:
-        # """
-        # Gera PDF individual para um aluno específico
-        # 
-        # Args:
-        #     test_data: Dados da prova
-        pass  # Função comentada - não utilizada
-        # student_data: Dados do aluno
-        # questions_data: Lista de questões
-        # output_dir: Diretório de saída
-        # 
-        # Returns:
-        #     Caminho do arquivo gerado ou None se erro
-        # """
-        # try:
-        #     # Criar diretório se não existir
-        #     os.makedirs(output_dir, exist_ok=True)
-            
-        # # Nome do arquivo
-        # timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        # filename = f"prova_individual_{test_data['id']}_{student_data['id']}_{timestamp}.pdf"
-        # filepath = os.path.join(output_dir, filename)
-            
-        # # Gerar PDF usando o método existente, mas com dados de um aluno apenas
-        # students_data = [student_data]  # Lista com apenas um aluno
-        # 
-        # # Usar o método existente de geração combinada, mas com apenas um aluno
-        # result = self.generate_combined_test_pdf(test_data, students_data, questions_data, output_dir)
-        # 
-        # if result:
-        #     # Renomear arquivo para individual
-        #     if os.path.exists(result):
-        # os.rename(result, filepath)
-        # return filepath
-        # 
-        # return None
-        # 
-        # except Exception as e:
-        # logging.error(f"Erro ao gerar PDF individual: {str(e)}")
-        # return None
-
-    # FUNÇÃO NÃO UTILIZADA - comentada para teste
-    # def generate_individual_answer_key(self, test_data: Dict, questions_data: List[Dict], 
-    #                                  output_dir: str) -> Optional[str]:
-        # """
-        # Gera gabarito individual para uma prova
-        # 
-        # Args:
-        #     test_data: Dados da prova
-        pass  # Função comentada - não utilizada
-        # questions_data: Lista de questões
-        # output_dir: Diretório de saída
-        # 
-        # Returns:
-        #     Caminho do arquivo gerado ou None se erro
-        # """
-        # try:
-        #     # Criar diretório se não existir
-        #     os.makedirs(output_dir, exist_ok=True)
-            
-        # # Nome do arquivo
-        # timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        # filename = f"gabarito_individual_{test_data['id']}_{timestamp}.pdf"
-        # filepath = os.path.join(output_dir, filename)
-            
-        # # Gerar gabarito usando o método existente
-        # result = self.generate_answer_key_pdf(test_data, questions_data, output_dir)
-        # 
-        # if result:
-        # # Renomear arquivo para individual
-        # if os.path.exists(result):
-        #     os.rename(result, filepath)
-        #     return filepath
-        # 
-        # return None
-        # 
-        # except Exception as e:
-        # logging.error(f"Erro ao gerar gabarito individual: {str(e)}")
-        # return None
-
+   
     def _get_skill_codes(self, question: Dict) -> List[str]:
         """
         Extrai códigos das habilidades da questão (já formatados pelo serviço)

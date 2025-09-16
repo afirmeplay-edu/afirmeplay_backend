@@ -273,8 +273,7 @@ class InstitutionalTestPDFGenerator:
             # Criar buffer em memória
             pdf_buffer = io.BytesIO()
             
-            # Criar documento PDF
-            doc = SimpleDocTemplate(pdf_buffer, pagesize=portrait(A4))
+            # Criar story com todo o conteúdo
             story = []
             
             # 1. Adicionar capa institucional
@@ -294,13 +293,16 @@ class InstitutionalTestPDFGenerator:
                 story.extend(self._create_subject_questions(subject_questions))
                 story.append(PageBreak())
             
-            # 4. Adicionar gabarito (usando o gerador existente)
+            # 4. Adicionar gabarito (usando o gerador existente com frame maior)
             from app.services.physical_test_pdf_generator import PhysicalTestPDFGenerator
             physical_generator = PhysicalTestPDFGenerator()
             story.extend(physical_generator._create_answer_sheet(test_data, student, questions_data))
             
-            # Construir PDF
-            doc.build(story)
+            # Construir PDF com frame maior (margens de 1cm)
+            success = physical_generator.create_pdf_with_large_frame(pdf_buffer, story)
+            if not success:
+                logging.error("Erro ao criar PDF com frame maior")
+                return None
             
             # Retornar dados do PDF
             pdf_buffer.seek(0)

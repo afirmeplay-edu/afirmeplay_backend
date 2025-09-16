@@ -31,6 +31,7 @@ def generate_physical_forms(test_id):
     Body:
         - output_dir (opcional): Diretório para salvar os PDFs
         - logo_data (opcional): Dados do logo (base64 ou URL)
+        - force_regenerate (opcional): Forçar regeneração de formulários existentes (padrão: false)
     
     Returns:
         - Lista de PDFs institucionais gerados
@@ -57,6 +58,7 @@ def generate_physical_forms(test_id):
         except:
             data = {}
         logo_data = data.get('logo_data')  # Logo será implementado posteriormente
+        force_regenerate = data.get('force_regenerate', False)  # Forçar regeneração de formulários existentes
         
         # Buscar questões da prova
         from app.models.testQuestion import TestQuestion
@@ -184,9 +186,14 @@ def generate_physical_forms(test_id):
                     student_id=student['id']
                 ).first()
                 
-                if existing_form:
+                if existing_form and not force_regenerate:
                     print(f"  ⚠️ Formulário já existe para {student['nome']} (ID: {student['id']}) - pulando geração")
                     continue
+                elif existing_form and force_regenerate:
+                    print(f"  🔄 Formulário já existe para {student['nome']} (ID: {student['id']}) - forçando regeneração")
+                    # Excluir formulário existente
+                    db.session.delete(existing_form)
+                    db.session.flush()  # Aplicar exclusão antes de criar novo
                 
                 # Gerar formulário estilo formularios.py
                 form_image, form_coords, qr_coords = generator._create_formulario_style_form(

@@ -1517,7 +1517,7 @@ class PhysicalTestPDFGenerator:
             img_color = self._decode_image_direct(image_data)
             if img_color is None:
             # 1. Decodificar imagem original (sem processamento pesado)
-            img_color = self._decode_image_direct(image_data)
+                img_color = self._decode_image_direct(image_data)
             if img_color is None:
                 return {"success": False, "error": "Erro ao decodificar imagem"}
             

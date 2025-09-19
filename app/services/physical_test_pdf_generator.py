@@ -1505,6 +1505,7 @@ class PhysicalTestPDFGenerator:
         """
         Processa correção completa: QR code + detecção de bolhas + salvamento no banco
         NOVA ORDEM: QR Code primeiro na imagem original, depois processamento para bolhas
+        NOVA ORDEM: QR Code primeiro na imagem original, depois processamento para bolhas
         """
         from app import db
         
@@ -1515,8 +1516,16 @@ class PhysicalTestPDFGenerator:
             # 1. Decodificar imagem original (sem processamento pesado)
             img_color = self._decode_image_direct(image_data)
             if img_color is None:
+            # 1. Decodificar imagem original (sem processamento pesado)
+                img_color = self._decode_image_direct(image_data)
+            if img_color is None:
                 return {"success": False, "error": "Erro ao decodificar imagem"}
             
+            print(f"🖼️ Imagem original decodificada: {img_color.shape}")
+            
+            # 2. EXTRAIR QR CODE PRIMEIRO (na imagem original, sem processamento)
+            print(f"🔍 ETAPA 1: DETECTANDO QR CODE NA IMAGEM ORIGINAL...")
+            student_id = self._extrair_qr_code_original(img_color)
             print(f"🖼️ Imagem original decodificada: {img_color.shape}")
             
             # 2. EXTRAIR QR CODE PRIMEIRO (na imagem original, sem processamento)
@@ -1535,13 +1544,26 @@ class PhysicalTestPDFGenerator:
             
             img_gray = img_result['image_processed']
             print(f"🖼️ Imagem processada para bolhas: {img_gray.shape}")
+            print(f"✅ QR CODE DETECTADO: {student_id}")
             
+            # 3. AGORA processar imagem para detecção de bolhas (mantendo funcionalidade existente)
+            print(f"🔍 ETAPA 2: PROCESSANDO IMAGEM PARA DETECÇÃO DE BOLHAS...")
+            img_result = self.processar_imagem_formulario(image_data)
+            if img_result is None or not img_result.get('success'):
+                return {"success": False, "error": "Erro ao processar imagem para detecção de bolhas"}
+            
+            img_gray = img_result['image_processed']
+            print(f"🖼️ Imagem processada para bolhas: {img_gray.shape}")
+            
+            # 4. Detectar respostas usando pipeline robusto (MANTENDO FUNCIONALIDADE EXISTENTE)
+            print(f"🔍 ETAPA 3: DETECTANDO RESPOSTAS (BOLHAS)...")
             # 4. Detectar respostas usando pipeline robusto (MANTENDO FUNCIONALIDADE EXISTENTE)
             print(f"🔍 ETAPA 3: DETECTANDO RESPOSTAS (BOLHAS)...")
             respostas_detectadas = self.detect_bubbles_robust(img_color, expected_cols=4, debug=True)
             if not respostas_detectadas:
                 return {"success": False, "error": "Nenhuma resposta detectada"}
             
+            print(f"✅ RESPOSTAS DETECTADAS: {respostas_detectadas}")
             print(f"✅ RESPOSTAS DETECTADAS: {respostas_detectadas}")
             
             # 4. Buscar questões da prova
@@ -1915,9 +1937,238 @@ class PhysicalTestPDFGenerator:
             print(f"❌ Erro ao extrair QR code da imagem original: {str(e)}")
             return None
 
+    def _extrair_qr_code_original(self, img):
+        """
+        Extrai QR code da imagem ORIGINAL (sem processamento pesado)
+        PRIORIDADE: Detectar QR Code na melhor qualidade possível
+        """
+        try:
+            import cv2
+            import numpy as np
+            
+            print(f"🔍 INICIANDO DETECÇÃO DE QR CODE NA IMAGEM ORIGINAL")
+            print(f"📏 Imagem original: {img.shape}, dtype: {img.dtype}")
+            print(f"📊 Valores únicos: {len(np.unique(img))}, min: {img.min()}, max: {img.max()}")
+            
+            # Converter para escala de cinza se necessário
+            if len(img.shape) == 3:
+                gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+            else:
+                gray = img.copy()
+            
+            print(f"📊 Escala de cinza: {gray.shape}, valores únicos: {len(np.unique(gray))}, min: {gray.min()}, max: {gray.max()}")
+            
+            # Detector de QR Code
+            qr_detector = cv2.QRCodeDetector()
+            
+            # MÉTODO 1: Detecção direta na imagem colorida (melhor qualidade)
+            if len(img.shape) == 3:
+                print(f"🔍 Tentando detecção em imagem colorida...")
+                try:
+                    data, bbox, _ = qr_detector.detectAndDecode(img)
+                    print(f"📱 Resultado colorida: dados='{data}', bbox={bbox}")
+                    if data and data.strip():
+                        print(f"✅ QR Code detectado (imagem colorida): {data}")
+                        return data.strip()
+                except Exception as e:
+                    print(f"❌ Erro detecção colorida: {e}")
+            
+            # MÉTODO 2: Detecção direta em escala de cinza
+            print(f"🔍 Tentando detecção em escala de cinza...")
+            try:
+                data, bbox, _ = qr_detector.detectAndDecode(gray)
+                print(f"📱 Resultado grayscale: dados='{data}', bbox={bbox}")
+                if data and data.strip():
+                    print(f"✅ QR Code detectado (escala de cinza): {data}")
+                    return data.strip()
+            except Exception as e:
+                print(f"❌ Erro detecção grayscale: {e}")
+            
+            # MÉTODO 3: ROI no canto superior esquerdo (onde geralmente está o QR Code)
+            print(f"🔍 Tentando detecção por ROI (canto superior esquerdo)...")
+            h, w = gray.shape
+            roi_size = min(w, h) // 3  # 1/3 da imagem
+            roi = gray[0:roi_size, 0:roi_size]
+            print(f"📍 ROI superior esquerda: {roi.shape}, valores únicos: {len(np.unique(roi))}")
+            
+            try:
+                data, bbox, _ = qr_detector.detectAndDecode(roi)
+                print(f"📱 Resultado ROI 1/3: dados='{data}', bbox={bbox}")
+                if data and data.strip():
+                    print(f"✅ QR Code detectado (ROI superior esquerda): {data}")
+                    return data.strip()
+            except Exception as e:
+                print(f"❌ Erro ROI 1/3: {e}")
+            
+            # MÉTODO 4: ROI menor no canto superior esquerdo (QR Code pode estar pequeno)
+            print(f"🔍 Tentando ROI menor...")
+            roi_size_small = min(w, h) // 4  # 1/4 da imagem
+            roi_small = gray[0:roi_size_small, 0:roi_size_small]
+            print(f"📍 ROI pequena: {roi_small.shape}, valores únicos: {len(np.unique(roi_small))}")
+            
+            try:
+                data, bbox, _ = qr_detector.detectAndDecode(roi_small)
+                print(f"📱 Resultado ROI 1/4: dados='{data}', bbox={bbox}")
+                if data and data.strip():
+                    print(f"✅ QR Code detectado (ROI pequena): {data}")
+                    return data.strip()
+            except Exception as e:
+                print(f"❌ Erro ROI 1/4: {e}")
+            
+            # MÉTODO 5: Threshold OTSU (método mais suave)
+            print(f"🔍 Tentando threshold OTSU...")
+            try:
+                _, thresh = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+                print(f"📊 OTSU threshold: {thresh.shape}, valores únicos: {len(np.unique(thresh))}")
+                data, bbox, _ = qr_detector.detectAndDecode(thresh)
+                print(f"📱 Resultado OTSU: dados='{data}', bbox={bbox}")
+                if data and data.strip():
+                    print(f"✅ QR Code detectado (threshold OTSU): {data}")
+                    return data.strip()
+            except Exception as e:
+                print(f"❌ Erro OTSU: {e}")
+            
+            # MÉTODO 6: Threshold adaptativo (mais suave)
+            print(f"🔍 Tentando threshold adaptativo...")
+            try:
+                thresh_adapt = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 11, 2)
+                print(f"📊 Threshold adaptativo: {thresh_adapt.shape}, valores únicos: {len(np.unique(thresh_adapt))}")
+                data, bbox, _ = qr_detector.detectAndDecode(thresh_adapt)
+                print(f"📱 Resultado adaptativo: dados='{data}', bbox={bbox}")
+                if data and data.strip():
+                    print(f"✅ QR Code detectado (threshold adaptativo): {data}")
+                    return data.strip()
+            except Exception as e:
+                print(f"❌ Erro adaptativo: {e}")
+            
+            # MÉTODO 7: Threshold inverso
+            print(f"🔍 Tentando threshold inverso...")
+            try:
+                _, thresh_inv = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+                print(f"📊 Threshold inverso: {thresh_inv.shape}, valores únicos: {len(np.unique(thresh_inv))}")
+                data, bbox, _ = qr_detector.detectAndDecode(thresh_inv)
+                print(f"📱 Resultado inverso: dados='{data}', bbox={bbox}")
+                if data and data.strip():
+                    print(f"✅ QR Code detectado (threshold inverso): {data}")
+                    return data.strip()
+            except Exception as e:
+                print(f"❌ Erro inverso: {e}")
+            
+            # MÉTODO 8: Tentar em diferentes regiões (caso QR Code não esteja no canto superior esquerdo)
+            print(f"🔍 Tentando detecção em múltiplas regiões...")
+            regions = [
+                (0, 0, w//2, h//2),      # Superior esquerda
+                (w//2, 0, w, h//2),      # Superior direita
+                (0, h//2, w//2, h),      # Inferior esquerda
+                (w//2, h//2, w, h)       # Inferior direita
+            ]
+            
+            for i, (x1, y1, x2, y2) in enumerate(regions):
+                roi = gray[y1:y2, x1:x2]
+                if roi.size > 0:
+                    try:
+                        data, bbox, _ = qr_detector.detectAndDecode(roi)
+                        print(f"📱 Resultado região {i+1}: dados='{data}', bbox={bbox}")
+                        if data and data.strip():
+                            print(f"✅ QR Code detectado (região {i+1}): {data}")
+                            return data.strip()
+                    except Exception as e:
+                        print(f"❌ Erro região {i+1}: {e}")
+            
+            # MÉTODO 9: Tentar com diferentes tamanhos de ROI
+            print(f"🔍 Tentando diferentes tamanhos de ROI...")
+            for size_factor in [0.1, 0.15, 0.2, 0.25, 0.3, 0.35, 0.4, 0.45, 0.5]:
+                roi_size = int(min(w, h) * size_factor)
+                if roi_size > 20:  # Mínimo de 20x20 pixels
+                    roi = gray[0:roi_size, 0:roi_size]
+                    try:
+                        data, bbox, _ = qr_detector.detectAndDecode(roi)
+                        print(f"📱 Resultado ROI {roi_size}x{roi_size}: dados='{data}', bbox={bbox}")
+                        if data and data.strip():
+                            print(f"✅ QR Code detectado (ROI {roi_size}x{roi_size}): {data}")
+                            return data.strip()
+                    except Exception as e:
+                        print(f"❌ Erro ROI {roi_size}x{roi_size}: {e}")
+            
+            # MÉTODO 10: Tentar com diferentes valores de threshold manual
+            print(f"🔍 Tentando threshold manual...")
+            for threshold_value in [50, 100, 127, 150, 200]:
+                try:
+                    _, thresh_manual = cv2.threshold(gray, threshold_value, 255, cv2.THRESH_BINARY)
+                    data, bbox, _ = qr_detector.detectAndDecode(thresh_manual)
+                    print(f"📱 Resultado threshold {threshold_value}: dados='{data}', bbox={bbox}")
+                    if data and data.strip():
+                        print(f"✅ QR Code detectado (threshold {threshold_value}): {data}")
+                        return data.strip()
+                except Exception as e:
+                    print(f"❌ Erro threshold {threshold_value}: {e}")
+            
+            # MÉTODO 11: Tentar com pyzbar (biblioteca alternativa)
+            print(f"🔍 Tentando detecção com pyzbar...")
+            try:
+                from pyzbar import pyzbar
+                import numpy as np
+                
+                # Converter para formato PIL se necessário
+                if len(img.shape) == 3:
+                    from PIL import Image
+                    pil_img = Image.fromarray(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
+                else:
+                    from PIL import Image
+                    pil_img = Image.fromarray(gray)
+                
+                barcodes = pyzbar.decode(pil_img)
+                print(f"📱 Resultado pyzbar: {len(barcodes)} códigos encontrados")
+                
+                for barcode in barcodes:
+                    data = barcode.data.decode('utf-8')
+                    print(f"📱 Código pyzbar: {data}")
+                    if data and data.strip():
+                        print(f"✅ QR Code detectado (pyzbar): {data}")
+                        return data.strip()
+                        
+            except ImportError:
+                print(f"⚠️ pyzbar não disponível")
+            except Exception as e:
+                print(f"❌ Erro pyzbar: {e}")
+            
+            # MÉTODO 12: Tentar com pyzbar em ROI
+            print(f"🔍 Tentando pyzbar em ROI...")
+            try:
+                from pyzbar import pyzbar
+                from PIL import Image
+                
+                # Tentar em ROI do canto superior esquerdo
+                roi_size = min(w, h) // 3
+                roi = gray[0:roi_size, 0:roi_size]
+                pil_roi = Image.fromarray(roi)
+                
+                barcodes = pyzbar.decode(pil_roi)
+                print(f"📱 Resultado pyzbar ROI: {len(barcodes)} códigos encontrados")
+                
+                for barcode in barcodes:
+                    data = barcode.data.decode('utf-8')
+                    print(f"📱 Código pyzbar ROI: {data}")
+                    if data and data.strip():
+                        print(f"✅ QR Code detectado (pyzbar ROI): {data}")
+                        return data.strip()
+                        
+            except ImportError:
+                print(f"⚠️ pyzbar não disponível para ROI")
+            except Exception as e:
+                print(f"❌ Erro pyzbar ROI: {e}")
+            
+            print("❌ QR Code não detectado em nenhum método na imagem original")
+            return None
+                
+        except Exception as e:
+            print(f"❌ Erro ao extrair QR code da imagem original: {str(e)}")
+            return None
+
     def _extrair_qr_code(self, img):
         """
         Extrai QR code da imagem e retorna o student_id
+        MANTIDO PARA COMPATIBILIDADE - usar _extrair_qr_code_original para nova implementação
         MANTIDO PARA COMPATIBILIDADE - usar _extrair_qr_code_original para nova implementação
         """
         try:

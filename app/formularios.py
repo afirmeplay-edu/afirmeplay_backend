@@ -5,6 +5,8 @@ import math
 import csv
 import qrcode
 import sys
+import uuid
+import json
 # Adicionar o diretório pai ao path para encontrar o módulo app
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -21,32 +23,48 @@ from reportlab.pdfgen import canvas
 from reportlab.lib.pagesizes import A4, portrait
 from reportlab.lib.units import cm
 from reportlab.lib.utils import ImageReader
+from reportlab.platypus import SimpleDocTemplate, Image as RLImage, Spacer
+from reportlab.lib.styles import getSampleStyleSheet
+
+# --- Dimensões A4 em pixels (para o PNG) ---
+# Escolha o DPI do PNG. 300 dá 2480 x 3508 px; 200 dá 1654 x 2339 px.
+DPI_PNG = 150
+_MM_POR_INCH = 25.4
+A4_LARGURA_MM = 210
+A4_ALTURA_MM  = 297
+
+A4_PX_LARGURA = int(DPI_PNG * (A4_LARGURA_MM / _MM_POR_INCH))  # ~2480 px a 300 DPI
+A4_PX_ALTURA  = int(DPI_PNG * (A4_ALTURA_MM  / _MM_POR_INCH))  # ~3508 px a 300 DPI
 
 # --- Parâmetros Globais de Layout ---
-# (Idênticos)
-LARGURA_CONTEUDO = 700
-ALTURA_CONTEUDO = 300
-PADDING_EXTERNO = 10
-LARGURA_FINAL = LARGURA_CONTEUDO + (2 * PADDING_EXTERNO) # 720
-ALTURA_FINAL = ALTURA_CONTEUDO + (2 * PADDING_EXTERNO)   # 320
-LARGURA_COL_NUM = 35
-LARGURA_COL_ALT = 40
-ALTURA_LINHA = 28
-PADDING_HORIZONTAL_COL = 8
-PADDING_VERTICAL_FORM = 10
-RAIO_CIRCULO = 9
-ESPESSURA_LINHA = 1
-TAMANHO_FONTE_NUM = 16
-TAMANHO_FONTE_ALT = 14
+# Ajustados para ocupar mais espaço da folha A4 com margem mínima
+LARGURA_CONTEUDO = A4_PX_LARGURA - 20  # Usar quase toda largura A4 (10px de cada lado)
+ALTURA_CONTEUDO = 1200   # Aumentado significativamente para formulário maior
+PADDING_EXTERNO = 10     # Margem mínima de 10px
+LARGURA_FINAL = A4_PX_LARGURA  # Usar toda largura A4
+ALTURA_FINAL = A4_PX_ALTURA
+LARGURA_COL_NUM = 45        # Aumentado para melhor visibilidade
+LARGURA_COL_ALT = 50        # Aumentado para melhor visibilidade
+ALTURA_LINHA = 45           # Aumentado para criar mais espaçamento visual entre as questões
+PADDING_HORIZONTAL_COL = 12 # Aumentado para melhor espaçamento
+PADDING_VERTICAL_FORM = 15  # Aumentado para melhor espaçamento
+RAIO_CIRCULO = 14           # Aumentado para melhor visibilidade
+ESPESSURA_LINHA = 3         # Aumentado para melhor definição das linhas
+TAMANHO_FONTE_NUM = 24       # Aumentado para melhor legibilidade
+TAMANHO_FONTE_ALT = 22       # Aumentado para melhor legibilidade
 ALTERNATIVAS = ["A", "B", "C", "D"]
-MAX_QUESTOES_POR_COLUNA = 10
-QR_CODE_SIZE = 100
-TAMANHO_FONTE_NOME = 14
+MAX_QUESTOES_POR_COLUNA = 25  # Aumentado para suportar até 100 questões (4 colunas)
+QR_CODE_SIZE = 200           # Aumentado para melhor detecção QR
+TAMANHO_FONTE_NOME = 20      # Nome do aluno / prova
+TAMANHO_FONTE_TITULO = 22    # "CARTÃO-RESPOSTA"
+TAMANHO_FONTE_HEADER = 28    # Nome, Estado, Município, Escola
+TAMANHO_FONTE_TEXTO = 20     # Instruções
 PADDING_NOME_QR = 5
 PADDING_LEFT_AREA_QR = 15
 PADDING_QR_FORM = 25
 SPACING_FORM_COLS = 30
 MAX_LARGURA_NOME = QR_CODE_SIZE + 10
+HEADER_HEIGHT = 120  # Altura do cabeçalho com informações do aluno
 
 # --- Função Auxiliar para Desenhar Uma Coluna (sem alterações) ---
 # Coleta coordenadas ABSOLUTAS (relativas ao 0,0 da imagem final)
@@ -55,7 +73,9 @@ def desenhar_coluna_formulario(desenho, fonte_num, fonte_alt, num_questao_inicia
        e adiciona coordenadas ABSOLUTAS à lista_coords_abs."""
     largura_col_unica = LARGURA_COL_NUM + (len(ALTERNATIVAS) * LARGURA_COL_ALT) + (PADDING_HORIZONTAL_COL * 2)
     altura_efetiva_linhas = num_questoes_nesta_coluna * ALTURA_LINHA
-    y_final_borda_real = offset_y + altura_efetiva_linhas
+    # Altura final da coluna (sem padding extra desnecessário)
+    padding_extra_final = 0  # Removido padding extra que causava linhas vazias
+    y_final_borda_real = offset_y + altura_efetiva_linhas + padding_extra_final
 
     desenho.line([(offset_x, offset_y), (offset_x, y_final_borda_real)], fill='black', width=ESPESSURA_LINHA)
     desenho.line([(offset_x + largura_col_unica - 1, offset_y), (offset_x + largura_col_unica - 1, y_final_borda_real)], fill='black', width=ESPESSURA_LINHA)
@@ -69,8 +89,9 @@ def desenhar_coluna_formulario(desenho, fonte_num, fonte_alt, num_questao_inicia
     desenho.line([(offset_x, offset_y), (offset_x + largura_col_unica - 1, offset_y)], fill='black', width=ESPESSURA_LINHA)
 
     if num_questoes_nesta_coluna == 0:
-         desenho.line([(offset_x, offset_y), (offset_x + largura_col_unica - 1, offset_y)], fill='black', width=ESPESSURA_LINHA)
          return
+
+    
 
     for i in range(num_questoes_nesta_coluna):
         linha_atual = num_questao_inicial + i
@@ -78,6 +99,7 @@ def desenhar_coluna_formulario(desenho, fonte_num, fonte_alt, num_questao_inicia
         y_linha_inferior = y_linha_superior + ALTURA_LINHA
         centro_y_linha = y_linha_superior + (ALTURA_LINHA / 2)
 
+        # Sempre desenhar linha horizontal para fechar cada questão
         desenho.line([(offset_x, y_linha_inferior), (offset_x + largura_col_unica - 1, y_linha_inferior)], fill='black', width=ESPESSURA_LINHA)
 
         texto_num = str(linha_atual)
@@ -91,24 +113,43 @@ def desenhar_coluna_formulario(desenho, fonte_num, fonte_alt, num_questao_inicia
              y_num_texto = centro_y_linha - (altura_texto_num / 2)
              desenho.text((x_num_texto, y_num_texto - 2), texto_num, fill='black', font=fonte_num)
 
-        for j, alt in enumerate(ALTERNATIVAS):
-            centro_x_alt = offset_x + PADDING_HORIZONTAL_COL + LARGURA_COL_NUM + (j * LARGURA_COL_ALT) + (LARGURA_COL_ALT / 2)
+        # Usar coordenadas fixas especificadas pelo usuário
+        # Ajustar para compensar o offset do formulário (+4 em X, +4 em Y)
+        x_positions = [112+4, 162+4, 212+4, 262+4]  # [116, 166, 216, 266] - compensar offset
+        y_positions = [950+4, 995+4, 1040+4, 1085+4]  # [954, 999, 1044, 1089] - compensar offset
+        
+        # Usar coordenadas fixas para Y da questão atual
+        if linha_atual <= len(y_positions):
+            centro_y_linha = y_positions[linha_atual - 1]
+        else:
+            # Se houver mais de 4 questões, continuar o padrão
+            centro_y_linha = y_positions[-1] + (linha_atual - len(y_positions)) * 45
 
-            x0_circ = centro_x_alt - RAIO_CIRCULO; y0_circ = centro_y_linha - RAIO_CIRCULO
-            x1_circ = centro_x_alt + RAIO_CIRCULO; y1_circ = centro_y_linha + RAIO_CIRCULO
+        for j, alt in enumerate(ALTERNATIVAS):
+            # Usar coordenadas fixas para X das alternativas
+            if j < len(x_positions):
+                centro_x_alt = x_positions[j]
+            else:
+                # Se houver mais de 4 alternativas, continuar o padrão
+                centro_x_alt = x_positions[-1] + (j - len(x_positions) + 1) * 50
+            
+            centro_y_alt = centro_y_linha
+
+            x0_circ = centro_x_alt - RAIO_CIRCULO; y0_circ = centro_y_alt - RAIO_CIRCULO
+            x1_circ = centro_x_alt + RAIO_CIRCULO; y1_circ = centro_y_alt + RAIO_CIRCULO
             desenho.ellipse([(x0_circ, y0_circ), (x1_circ, y1_circ)], outline='black', width=ESPESSURA_LINHA)
             try:
-                desenho.text((centro_x_alt, centro_y_linha), alt, fill='black', font=fonte_alt, anchor="mm")
+                desenho.text((centro_x_alt, centro_y_alt), alt, fill='black', font=fonte_alt, anchor="mm")
             except AttributeError:
                 bbox_alt = desenho.textbbox((0, 0), alt, font=fonte_alt)
                 largura_texto_alt = bbox_alt[2] - bbox_alt[0]; altura_texto_alt = bbox_alt[3] - bbox_alt[1]
                 x_alt_texto = centro_x_alt - (largura_texto_alt / 2)
-                y_alt_texto = centro_y_linha - (altura_texto_alt / 2)
+                y_alt_texto = centro_y_alt - (altura_texto_alt / 2)
                 desenho.text((x_alt_texto, y_alt_texto - 1), alt, fill='black', font=fonte_alt)
 
             # Guarda coordenadas ABSOLUTAS, já convertidas para INT aqui
-            coord_x_abs = int(round(x0_circ))
-            coord_y_abs = int(round(y0_circ))
+            coord_x_abs = int(round(x0_circ + offset_x))
+            coord_y_abs = int(round(y0_circ + offset_y))
             lista_coords_abs.append((coord_x_abs, coord_y_abs, coord_width, coord_height))
 
 
@@ -258,12 +299,57 @@ def wrap_text(text, font, max_width):
     return linhas, altura_total_texto, altura_linha_aprox
 
 # --- Função Principal (Coordenadas Relativas INTEIRAS) ---
-def gerar_formulario_com_qrcode(aluno_id, aluno_nome, num_questoes_total, nome_arquivo_saida):
+def _draw_text_with_bold(desenho, text, x, y, font_normal, font_bold):
+    """Desenha texto com partes em negrito"""
+    import re
+    
+    # Dividir texto por **texto**
+    parts = re.split(r'(\*\*.*?\*\*)', text)
+    current_x = x
+    
+    for part in parts:
+        if part.startswith('**') and part.endswith('**'):
+            # Texto em negrito
+            bold_text = part[2:-2]  # Remove **
+            desenho.text((current_x, y), bold_text, fill='black', font=font_bold)
+            # Calcular largura do texto em negrito
+            try:
+                width = desenho.textlength(bold_text, font=font_bold)
+            except AttributeError:
+                try:
+                    bbox = desenho.textbbox((0,0), bold_text, font=font_bold)
+                    width = bbox[2] - bbox[0]
+                except:
+                    width = len(bold_text) * 8  # Fallback
+            current_x += width
+        else:
+            # Texto normal
+            if part.strip():  # Só desenhar se não for vazio
+                desenho.text((current_x, y), part, fill='black', font=font_normal)
+                try:
+                    width = desenho.textlength(part, font=font_normal)
+                except AttributeError:
+                    try:
+                        bbox = desenho.textbbox((0,0), part, font=font_normal)
+                        width = bbox[2] - bbox[0]
+                    except:
+                        width = len(part) * 6  # Fallback
+                current_x += width
+
+def gerar_formulario_com_qrcode(aluno_id, aluno_nome, num_questoes_total, nome_arquivo_saida, student_data=None, test_data=None):
     """
     Gera formulário em 720x320, retorna a imagem e as coordenadas INTEIRAS das
     respostas e do QR Code RELATIVAS ao canto sup. esq. do RETÂNGULO EXTERNO.
+    
+    Args:
+        aluno_id: ID do aluno
+        aluno_nome: Nome do aluno
+        num_questoes_total: Número total de questões (agora suporta até 100)
+        nome_arquivo_saida: Nome do arquivo de saída
+        student_data: Dicionário com dados completos do aluno (opcional)
+        test_data: Dicionário com dados do teste (opcional)
     """
-    if not 1 <= num_questoes_total <= 20:
+    if not 1 <= num_questoes_total <= 100:
         print(f"Erro: Número de questões inválido ({num_questoes_total}) para o ID {aluno_id}.")
         return None, None, None
 
@@ -271,7 +357,24 @@ def gerar_formulario_com_qrcode(aluno_id, aluno_nome, num_questoes_total, nome_a
     offset_global_y = PADDING_EXTERNO
 
     qr = qrcode.QRCode(version=1, error_correction=qrcode.constants.ERROR_CORRECT_L, box_size=4, border=2)
-    qr.add_data(str(aluno_id))
+    
+    # Criar metadados para o QR Code incluindo num_questions
+    qr_metadata = {
+        "student_id": str(aluno_id),
+        "num_questions": num_questoes_total
+    }
+    
+    # Adicionar test_id se disponível
+    if test_data and 'id' in test_data:
+        qr_metadata["test_id"] = str(test_data['id'])
+    
+    # Adicionar qr_code_id único
+    import uuid
+    qr_metadata["qr_code_id"] = str(uuid.uuid4())
+    
+    # Converter para JSON e adicionar ao QR Code
+    import json
+    qr.add_data(json.dumps(qr_metadata))
     qr.make(fit=True)
     img_qr = qr.make_image(fill_color="black", back_color="white").resize((QR_CODE_SIZE, QR_CODE_SIZE))
 
@@ -279,90 +382,361 @@ def gerar_formulario_com_qrcode(aluno_id, aluno_nome, num_questoes_total, nome_a
         fonte_num = ImageFont.truetype("arial.ttf", TAMANHO_FONTE_NUM)
         fonte_alt = ImageFont.truetype("arial.ttf", TAMANHO_FONTE_ALT)
         fonte_nome = ImageFont.truetype("arialbd.ttf", TAMANHO_FONTE_NOME)
+        fonte_titulo = ImageFont.truetype("arialbd.ttf", TAMANHO_FONTE_TITULO)
+        fonte_header = ImageFont.truetype("arial.ttf", TAMANHO_FONTE_HEADER)
     except IOError:
         try:
             fonte_num = ImageFont.truetype("DejaVuSans.ttf", TAMANHO_FONTE_NUM)
             fonte_alt = ImageFont.truetype("DejaVuSans.ttf", TAMANHO_FONTE_ALT)
             fonte_nome = ImageFont.truetype("DejaVuSans-Bold.ttf", TAMANHO_FONTE_NOME)
+            fonte_titulo = ImageFont.truetype("DejaVuSans-Bold.ttf", TAMANHO_FONTE_TITULO)
+            fonte_header = ImageFont.truetype("DejaVuSans.ttf", TAMANHO_FONTE_HEADER)
         except IOError:
             print("Aviso: Fontes Arial/DejaVu Sans (Bold) não encontradas.")
             fonte_num = ImageFont.load_default()
             fonte_alt = ImageFont.load_default()
             fonte_nome = ImageFont.load_default()
+            fonte_titulo = ImageFont.load_default()
+            fonte_header = ImageFont.load_default()
 
-    linhas_nome, altura_bloco_nome, altura_linha_nome = wrap_text(aluno_nome, fonte_nome, MAX_LARGURA_NOME)
+    # Preparar dados do aluno (usar dados completos se disponíveis)
+    if student_data:
+        nome_aluno = student_data.get('student_name', aluno_nome)
+        turma = student_data.get('class_name', 'Turma não informada')
+        escola = student_data.get('school_name', 'Escola não informada')
+        municipio = student_data.get('city_name', 'Município não informado')
+        estado = student_data.get('state_name', 'Estado não informado')
+    else:
+        nome_aluno = aluno_nome
+        turma = 'Turma não informada'
+        escola = 'Escola não informada'
+        municipio = 'Município não informado'
+        estado = 'Estado não informado'
 
+    # Calcular layout do grid de respostas
     largura_col_unica = LARGURA_COL_NUM + (len(ALTERNATIVAS) * LARGURA_COL_ALT) + (PADDING_HORIZONTAL_COL * 2)
-    altura_bloco_form_para_layout = MAX_QUESTOES_POR_COLUNA * ALTURA_LINHA
+    
+    # Calcular número de colunas necessárias
+    num_colunas = (num_questoes_total + MAX_QUESTOES_POR_COLUNA - 1) // MAX_QUESTOES_POR_COLUNA
+    if num_colunas > 4:  # Máximo 4 colunas
+        num_colunas = 4
+    
+    # Posições do QR Code (canto superior direito) - ajustado para novo layout
+    x_qr_abs = offset_global_x + LARGURA_CONTEUDO - QR_CODE_SIZE - 80  # Aumentado conforme sugestão
+    y_qr_abs = offset_global_y + 30
 
-    X_QR_FIXO_REL = PADDING_LEFT_AREA_QR
-    Y_QR_FIXO_REL = (ALTURA_CONTEUDO / 2) - (QR_CODE_SIZE / 2)
-    Y_QR_FIXO_REL = max(5, Y_QR_FIXO_REL)
-
-    y_nome_bottom_rel = Y_QR_FIXO_REL - PADDING_NOME_QR
-    y_nome_inicio_rel = y_nome_bottom_rel - altura_bloco_nome
-    y_nome_inicio_rel = max(5, y_nome_inicio_rel)
-
-    y_form_linhas_inicio_rel = (ALTURA_CONTEUDO / 2) - (altura_bloco_form_para_layout / 2)
-    y_form_linhas_inicio_rel = max(5, y_form_linhas_inicio_rel)
-
-    offset_x_col_esq_form_rel = X_QR_FIXO_REL + max(QR_CODE_SIZE, MAX_LARGURA_NOME) + PADDING_QR_FORM
-    offset_x_col_dir_form_rel = offset_x_col_esq_form_rel + largura_col_unica + SPACING_FORM_COLS
-
-    imagem = Image.new('RGB', (LARGURA_FINAL, ALTURA_FINAL), 'white')
+    # Calcular altura necessária para o grid de respostas (ANTES de criar a imagem)
+    num_linhas_necessarias = (num_questoes_total + MAX_QUESTOES_POR_COLUNA - 1) // MAX_QUESTOES_POR_COLUNA
+    if num_linhas_necessarias > 1:
+        num_linhas_necessarias = 1  # Máximo 1 linha de colunas (até 4 colunas)
+    
+    questoes_por_linha = min(num_questoes_total, MAX_QUESTOES_POR_COLUNA)
+    padding_extra_final = 0  # Removido padding extra desnecessário
+    altura_grid_necessaria = (questoes_por_linha * ALTURA_LINHA) + 10  # Altura do grid sem padding extra
+    
+    # Calcular altura total necessária (ajustado para fontes menores)
+    altura_cabecalho = 600  # Aumentado para dar mais espaço vertical
+    altura_instrucoes_estimada = 250  # Aumentado para dar mais espaço
+    altura_total_necessaria = altura_cabecalho + altura_instrucoes_estimada + altura_grid_necessaria + 150  # +150 para margens
+    
+    # Ajustar altura da imagem se necessário
+    altura_imagem_final = max(ALTURA_FINAL, altura_total_necessaria)
+    
+    # Se a altura calculada for maior que ALTURA_FINAL, usar a altura calculada
+    if altura_total_necessaria > ALTURA_FINAL:
+        altura_imagem_final = altura_total_necessaria
+    
+    # Criar imagem com altura dinâmica
+    imagem = Image.new('RGB', (LARGURA_FINAL, altura_imagem_final), 'white')
     desenho = ImageDraw.Draw(imagem)
     coordenadas_respostas_abs = []
 
-    x_qr_abs = offset_global_x + X_QR_FIXO_REL
-    y_qr_abs = offset_global_y + Y_QR_FIXO_REL
-    y_nome_inicio_abs = offset_global_y + y_nome_inicio_rel
-    offset_x_col_esq_form_abs = offset_global_x + offset_x_col_esq_form_rel
-    offset_x_col_dir_form_abs = offset_global_x + offset_x_col_dir_form_rel
-    y_form_linhas_inicio_abs = offset_global_y + y_form_linhas_inicio_rel
+    # Desenhar cabeçalho
+    y_atual = offset_global_y + 10
+    
+    # Turma será desenhada na coluna da esquerda, abaixo da escola
 
-    # Desenhar Nome
-    y_linha_atual_nome_abs = y_nome_inicio_abs
-    x_max_nome_abs = 0
-    for linha in linhas_nome:
-        largura_linha = 0
-        try: largura_linha = desenho.textlength(linha, font=fonte_nome)
-        except AttributeError:
-            try: bbox = desenho.textbbox((0,0), linha, font=fonte_nome); largura_linha = bbox[2]-bbox[0]
-            except: largura_linha, _ = desenho.textsize(linha, font=fonte_nome)
+    # Calcular altura necessária para o cabeçalho baseado no conteúdo (fontes menores)
+    # Altura base: título + turma + espaçamentos
+    altura_base = 100  # Ajustado para fontes menores
+    
+    # Altura das informações do aluno
+    altura_info_aluno = 200  # Ajustado para fontes menores e espaçamentos
+    
+    # Altura da tabela do nome (2 linhas x 26 colunas)
+    altura_tabela_nome = 80  # Ajustado para fontes menores
+    
+    # Altura da seção de prova e assinatura
+    altura_prova_assinatura = 60  # Ajustado para fontes menores
+    
+    # Altura total do cabeçalho
+    header_height = altura_base + altura_info_aluno + altura_tabela_nome + altura_prova_assinatura + 60  # +30 para padding
+    
+    header_y_start = y_atual
+    header_y_end = header_y_start + header_height
+    
+    # Desenhar borda da tabela de cabeçalho
+    desenho.rectangle([
+        (offset_global_x + 10, header_y_start),
+        (offset_global_x + LARGURA_CONTEUDO - 10, header_y_end)
+    ], outline='black', width=2)
+    
+    # Linha vertical para separar as colunas (mais espaço para QR Code)
+    col_divider_x = offset_global_x + LARGURA_CONTEUDO - 250  # Aumentado para dar mais espaço ao QR Code
+    desenho.line([
+        (col_divider_x, header_y_start),
+        (col_divider_x, header_y_end)
+    ], fill='black', width=1)
 
-        x_nome_centro_rel = X_QR_FIXO_REL + (MAX_LARGURA_NOME / 2)
-        x_linha_nome_rel = x_nome_centro_rel - (largura_linha / 2)
-        x_linha_nome_abs = offset_global_x + x_linha_nome_rel
+    # Coluna esquerda - Informações do aluno
+    x_info = offset_global_x + 20
+    y_info = header_y_start + 15
+    
+    # Nome completo (negrito)
+    desenho.text((x_info, y_info), f"Nome completo: {nome_aluno}", fill='black', font=fonte_nome)
+    y_info += 40
+    
+    # Estado (negrito)
+    desenho.text((x_info, y_info), f"Estado: {estado}", fill='black', font=fonte_nome)
+    y_info += 40
+    
+    # Município (negrito)
+    desenho.text((x_info, y_info), f"Município: {municipio}", fill='black', font=fonte_nome)
+    y_info += 40
+    
+    # Escola (negrito)
+    desenho.text((x_info, y_info), f"Escola: {escola}", fill='black', font=fonte_nome)
+    y_info += 30  # Espaçamento para turma
+    
+    # Turma (na coluna da esquerda, abaixo da escola)
+    turma = student_data.get('turma', 'G') if student_data else 'G'
+    desenho.text((x_info, y_info), f"Turma: {turma}", fill='black', font=fonte_nome)
+    y_info += 30  # Espaçamento para NOME DO ALUNO
+    
+    # Label "NOME DO ALUNO:" (negrito)
+    desenho.text((x_info, y_info), "NOME DO ALUNO:", fill='black', font=fonte_nome)
+    y_info += 25
+    
+    # Tabela para o aluno preencher o nome (2 linhas x 13 colunas) - reduzido para dar mais espaço ao QR
+    grid_x_start = x_info
+    grid_y_start = y_info
+    
+    # Calcular largura disponível para os quadradinhos (usar toda a coluna esquerda)
+    largura_disponivel = col_divider_x - 10 - x_info  # Largura da coluna esquerda menos margens mínimas
+    box_size = int(((largura_disponivel - (12 * 1)) // 13) * 0.8)  # 12 espaços entre 13 caixas, reduzido 20%
+    box_spacing = 1  # Espaçamento menor entre caixas para maximizar largura
+    
+    for row in range(2):
+        for col in range(13):
+            x_box = grid_x_start + col * (box_size + box_spacing)
+            y_box = grid_y_start + row * (box_size + box_spacing)
+            desenho.rectangle([
+                (x_box, y_box),
+                (x_box + box_size, y_box + box_size)
+            ], outline='black', width=1)
+    
+    y_info += 120  # Aumentado para dar mais espaço entre quadradinhos e "Nome da Prova"
+    
+    # Label "Nome da prova:" (negrito)
+    desenho.text((x_info, y_info), "Nome da prova:", fill='black', font=fonte_nome)
+    y_info += 30  # Aumentado para dar mais espaço entre label e nome da prova
+    
+    # Nome da prova (fonte menor)
+    test_name = test_data.get('title', 'Avaliação') if test_data else 'Avaliação'
+    desenho.text((x_info, y_info), test_name, fill='black', font=fonte_nome)
+    y_info += 60  # Espaçamento maior para linha de assinatura (como na imagem)
 
-        # Usa int() para garantir posição inteira do texto
-        desenho.text((int(round(x_linha_nome_abs)), int(round(y_linha_atual_nome_abs))), linha, fill='black', font=fonte_nome)
-        y_linha_atual_nome_abs += altura_linha_nome
-        x_max_nome_abs = max(x_max_nome_abs, x_linha_nome_abs + largura_linha)
+    # Coluna direita - QR Code
+    qr_x = col_divider_x + 10
+    qr_y = header_y_start + 20
+    imagem.paste(img_qr, (int(qr_x), int(qr_y)))
+    
+    # Label "QR Code:" (negrito)
+    qr_label_y = qr_y + QR_CODE_SIZE + 10
+    desenho.text((qr_x, qr_label_y), "QR Code:", fill='black', font=fonte_nome)
+    
+    # Linha pontilhada para assinatura (DENTRO do cabeçalho, abaixo do nome da prova)
+    line_y = y_info + 20  # Posicionar abaixo do nome da prova, dentro do cabeçalho
+    line_x_start = x_info  # Começar na coluna esquerda
+    line_x_end = col_divider_x - 20  # Terminar antes da divisória das colunas
+    line_center_x = (line_x_start + line_x_end) // 2
+    
+    # Desenhar linha pontilhada
+    dash_length = 8
+    gap_length = 4
+    current_x = line_x_start
+    while current_x < line_x_end:
+        desenho.line([
+            (current_x, line_y),
+            (min(current_x + dash_length, line_x_end), line_y)
+        ], fill='black', width=2)
+        current_x += dash_length + gap_length
+    
+    # Label "Assinatura do participante:" (centralizado)
+    try:
+        largura_assinatura = desenho.textlength("Assinatura do participante:", font=fonte_nome)
+    except AttributeError:
+        try: bbox = desenho.textbbox((0,0), "Assinatura do participante:", font=fonte_nome); largura_assinatura = bbox[2]-bbox[0]
+        except: largura_assinatura, _ = desenho.textsize("Assinatura do participante:", font=fonte_nome)
+    
+    x_assinatura = line_center_x - (largura_assinatura // 2)
+    desenho.text((int(x_assinatura), int(line_y + 15)), "Assinatura do participante:", fill='black', font=fonte_nome)
+    
+    # Atualizar y_info para incluir a linha de assinatura no cabeçalho
+    y_info = line_y + 40  # Espaçamento reduzido após o label
 
-    # Colar QR Code (já usa int)
-    imagem.paste(img_qr, (int(round(x_qr_abs)), int(round(y_qr_abs))))
+    # Desenhar instruções abaixo do cabeçalho
+    y_instrucoes = header_y_end + 40  # Aumentado conforme sugestão
+    
+    # Instruções do cartão-resposta
+    instrucoes = [
+        "1. Verifique se o seu nome completo, o número da sua matrícula e os demais dados impressos neste cartão **CARTÃO-RESPOSTA** estão corretos. Preencha o seu nome completo e assine somente no local apropriado.",
+        "2. O **CARTÃO-RESPOSTA** é o único documento que será utilizado para a correção eletrônica de suas provas. Não o amasse, não o dobre, nem o rasure. Não haverá substituição deste **CARTÃO-RESPOSTA** por erro de preenchimento.",
+        "3. Preencha suas respostas neste **CARTÃO-RESPOSTA** nos campos apropriados, sob a pena de impossibilidade da leitura óptica de suas respostas."
+    ]
+    
+    # Texto adicional (após linha divisória)
+    texto_adicional = "Para todas as marcações neste **CARTÃO-RESPOSTA**, preencha os círculos completamente e com nitidez, utilizando caneta esferográfica de tinta preta fabricada em material transparente."
+    
+    # Fonte para as instruções (menor que o cabeçalho)
+    try:
+        fonte_instrucoes = ImageFont.truetype("arial.ttf", TAMANHO_FONTE_TEXTO)
+    except IOError:
+        try:
+            fonte_instrucoes = ImageFont.truetype("DejaVuSans.ttf", TAMANHO_FONTE_TEXTO)
+        except IOError:
+            fonte_instrucoes = ImageFont.load_default()
+    
+    # Desenhar instruções (apenas itens 1, 2, 3)
+    y_atual_instrucoes = y_instrucoes
+    
+    for i, instrucao in enumerate(instrucoes):
+        # Quebrar texto em linhas se necessário
+        try:
+            largura_max = LARGURA_CONTEUDO - 80  # Aumentada margem para evitar ultrapassar borda direita
+            linhas_texto, altura_texto, altura_linha = wrap_text(instrucao, fonte_instrucoes, largura_max)
+            
+            for j, linha in enumerate(linhas_texto):
+                # Processar texto com negrito
+                _draw_text_with_bold(desenho, linha, offset_global_x + 20, y_atual_instrucoes, fonte_instrucoes, fonte_nome)
+                y_atual_instrucoes += altura_linha + 4  # Espaçamento ajustado para fonte menor
+        except Exception as e:
+            # Fallback se wrap_text falhar
+            _draw_text_with_bold(desenho, instrucao, offset_global_x + 20, y_atual_instrucoes, fonte_instrucoes, fonte_nome)
+            y_atual_instrucoes += 20  # Ajustado para fonte menor
+        
+        # Adicionar espaçamento maior entre os itens 1, 2 e 3
+        y_atual_instrucoes += 30  # Aumentado para dar mais espaço entre instruções
+    
+    # Linha divisória grossa (entre item 3 e texto adicional)
+    y_linha_divisoria = y_atual_instrucoes + 10
+    desenho.line([
+        (offset_global_x + 20, y_linha_divisoria),
+        (offset_global_x + LARGURA_CONTEUDO - 20, y_linha_divisoria)
+    ], fill='black', width=3)  # Linha mais grossa
+    
+    # Desenhar texto adicional (após linha divisória)
+    y_atual_instrucoes = y_linha_divisoria + 20  # Espaço após linha divisória
+    
+    try:
+        largura_max = LARGURA_CONTEUDO - 80
+        linhas_texto, altura_texto, altura_linha = wrap_text(texto_adicional, fonte_instrucoes, largura_max)
+        
+        for j, linha in enumerate(linhas_texto):
+            _draw_text_with_bold(desenho, linha, offset_global_x + 20, y_atual_instrucoes, fonte_instrucoes, fonte_nome)
+            y_atual_instrucoes += altura_linha + 4
+    except Exception as e:
+        _draw_text_with_bold(desenho, texto_adicional, offset_global_x + 20, y_atual_instrucoes, fonte_instrucoes, fonte_nome)
+        y_atual_instrucoes += 20
+    
+    # Desenhar grid de respostas em tabela separada (abaixo do texto adicional)
+    y_form_inicio = y_atual_instrucoes + 20  # Espaço após o texto adicional
+    
+    # Usar a altura já calculada anteriormente
+    altura_grid = altura_grid_necessaria
+    
+    
+    # Calcular altura total das instruções
+    altura_instrucoes = y_linha_divisoria - y_instrucoes + 20  # Altura das instruções + linha divisória + padding
+    
+    # Borda da tabela removida - as colunas individuais já têm suas próprias bordas
+    # desenho.rectangle([
+    #     (offset_global_x + 10, y_form_inicio),
+    #     (offset_global_x + LARGURA_CONTEUDO - 10, y_form_inicio + altura_grid)
+    # ], outline='black', width=2)
+    
+    # Calcular posições das colunas
+    espaco_disponivel = LARGURA_CONTEUDO - 40  # Margem de 20px de cada lado
+    espaco_entre_colunas = 20
+    
+    if num_colunas == 1:
+        x_colunas = [offset_global_x + 20]
+    elif num_colunas == 2:
+        x_colunas = [
+            offset_global_x + 20,
+            offset_global_x + 20 + largura_col_unica + espaco_entre_colunas
+        ]
+    elif num_colunas == 3:
+        x_colunas = [
+            offset_global_x + 20,
+            offset_global_x + 20 + largura_col_unica + espaco_entre_colunas,
+            offset_global_x + 20 + 2 * (largura_col_unica + espaco_entre_colunas)
+        ]
+    else:  # 4 colunas
+        x_colunas = [
+            offset_global_x + 20,
+            offset_global_x + 20 + largura_col_unica + espaco_entre_colunas,
+            offset_global_x + 20 + 2 * (largura_col_unica + espaco_entre_colunas),
+            offset_global_x + 20 + 3 * (largura_col_unica + espaco_entre_colunas)
+        ]
+    
+    # Ajustar posição do grid para dentro da tabela
+    y_grid_interno = y_form_inicio + 20  # Padding interno da tabela
+    
+    # Desenhar colunas
+    questao_atual = 1
+    for col in range(num_colunas):
+        if questao_atual > num_questoes_total:
+            break
+            
+        questoes_restantes = num_questoes_total - questao_atual + 1
+        questoes_nesta_coluna = min(MAX_QUESTOES_POR_COLUNA, questoes_restantes)
+        
+        desenhar_coluna_formulario(
+            desenho, fonte_num, fonte_alt, 
+            questao_atual, questoes_nesta_coluna, 
+            int(x_colunas[col]), int(y_grid_interno), 
+            coordenadas_respostas_abs
+        )
+        
+        questao_atual += questoes_nesta_coluna
 
-    # Desenhar Formulário(s) e coletar coords ABSOLUTAS
-    if num_questoes_total <= MAX_QUESTOES_POR_COLUNA:
-        num_questoes_col_esq = num_questoes_total
-        desenhar_coluna_formulario(desenho, fonte_num, fonte_alt, 1, num_questoes_col_esq, int(round(offset_x_col_esq_form_abs)), int(round(y_form_linhas_inicio_abs)), coordenadas_respostas_abs)
-    else:
-        num_questoes_col_esq = MAX_QUESTOES_POR_COLUNA
-        num_questoes_col_dir = num_questoes_total - MAX_QUESTOES_POR_COLUNA
-        desenhar_coluna_formulario(desenho, fonte_num, fonte_alt, 1, num_questoes_col_esq, int(round(offset_x_col_esq_form_abs)), int(round(y_form_linhas_inicio_abs)), coordenadas_respostas_abs)
-        desenhar_coluna_formulario(desenho, fonte_num, fonte_alt, 11, num_questoes_col_dir, int(round(offset_x_col_dir_form_abs)), int(round(y_form_linhas_inicio_abs)), coordenadas_respostas_abs)
-
+    # ***** ADICIONAR BORDA GROSSA AO REDOR DA TABELA DE QUESTÕES *****
+    if x_colunas and num_colunas > 0:
+        # Calcular limites da tabela de questões
+        tabela_x_inicio = min(x_colunas) - 10  # Margem esquerda
+        tabela_x_fim = max(x_colunas) + largura_col_unica + 10  # Margem direita
+        tabela_y_inicio = y_grid_interno - 10  # Margem superior
+        tabela_y_fim = y_grid_interno + altura_grid + 10  # Margem inferior
+        
+        # REMOVIDO: Borda grossa da tabela de questões (não é mais necessária)
+        # desenho.rectangle([
+        #     (tabela_x_inicio, tabela_y_inicio),
+        #     (tabela_x_fim, tabela_y_fim)
+        # ], outline='black', width=ESPESSURA_LINHA * 3)  # Borda 3x mais grossa
+        
+        print(f"🎯 Borda grossa da tabela removida - usando borda externa do formulário")
+    # **********************************************************************
 
     # Calcular limites MÁXIMOS potenciais do conteúdo (absolutos)
-    x_min_potential_abs = x_qr_abs
-    y_min_potential_abs = min(y_nome_inicio_abs, y_form_linhas_inicio_abs)
-    x_max_potential_abs = offset_x_col_dir_form_abs + largura_col_unica
+    x_min_potential_abs = min(x_colunas) if x_colunas else x_qr_abs
+    y_min_potential_abs = header_y_start  # Começar do cabeçalho
+    x_max_potential_abs = max(x_colunas) + largura_col_unica if x_colunas else x_qr_abs + QR_CODE_SIZE
     x_max_potential_abs = max(x_max_potential_abs, x_qr_abs + QR_CODE_SIZE)
-    x_max_potential_abs = max(x_max_potential_abs, x_max_nome_abs)
-    y_max_potential_form_abs = y_form_linhas_inicio_abs + altura_bloco_form_para_layout
+    y_max_potential_form_abs = y_form_inicio + altura_grid  # Incluir altura da tabela de questões
     y_max_potential_qr_abs = y_qr_abs + QR_CODE_SIZE
-    y_max_potential_nome_abs = y_nome_inicio_abs + altura_bloco_nome
-    y_max_potential_abs = max(y_max_potential_form_abs, y_max_potential_qr_abs, y_max_potential_nome_abs)
+    y_max_potential_instrucoes_abs = y_linha_divisoria + altura_instrucoes  # Incluir altura das instruções
+    y_max_potential_abs = max(y_max_potential_form_abs, y_max_potential_qr_abs, y_max_potential_instrucoes_abs)
 
     # Definir coordenadas do retângulo externo FIXO (absolutas)
     # Arredonda aqui para garantir que a origem do relativo seja inteira
@@ -373,11 +747,13 @@ def gerar_formulario_com_qrcode(aluno_id, aluno_nome, num_questoes_total, nome_a
 
     rect_x0 = max(0, rect_x0)
     rect_y0 = max(0, rect_y0)
-    rect_x1 = min(LARGURA_FINAL - 1, rect_x1)
-    rect_y1 = min(ALTURA_FINAL - 1, rect_y1)
+    # Permitir que a borda se expanda além dos limites fixos se necessário
+    rect_x1 = max(rect_x1, LARGURA_FINAL - 1)  # Garantir largura mínima
+    rect_y1 = max(rect_y1, altura_imagem_final - 1)  # Garantir altura mínima
 
-    # Desenha o retângulo externo FIXO
-    desenho.rectangle([(rect_x0, rect_y0), (rect_x1, rect_y1)], outline='black', width=ESPESSURA_LINHA * 2)
+    # ATIVADO: Borda grossa ao redor de todo o formulário para alinhamento
+    desenho.rectangle([(rect_x0, rect_y0), (rect_x1, rect_y1)], outline='black', width=ESPESSURA_LINHA * 3)
+    print(f"🎯 Borda grossa adicionada ao formulário: ({rect_x0},{rect_y0}) a ({rect_x1},{rect_y1})")
 
     # ***** CONVERSÃO DAS COORDENADAS PARA RELATIVAS INTEIRAS *****
     coordenadas_respostas_relativas = []
@@ -399,6 +775,8 @@ def gerar_formulario_com_qrcode(aluno_id, aluno_nome, num_questoes_total, nome_a
     qr_coords_rel = (qr_coords_rel_x, qr_coords_rel_y, QR_CODE_SIZE, QR_CODE_SIZE)
     # *************************************************************
 
+
+
     # --- Salvar e Retornar ---
     try:
         imagem.save(nome_arquivo_saida)
@@ -408,187 +786,157 @@ def gerar_formulario_com_qrcode(aluno_id, aluno_nome, num_questoes_total, nome_a
         print(f"Erro ao salvar a imagem '{nome_arquivo_saida}': {e}")
         return None, None, None
 
-# --- Função para Gerar PDF (Layout 1x4 Retrato com Espaçamento Ajustado) ---
-def gerar_pdf_formularios(lista_arquivos_png, nome_pdf_saida):
-    """Gera um PDF A4 Retrato com até 4 formulários por página (layout 1x4),
-       maximizando o tamanho e ajustando espaçamento vertical para caber."""
-    if not lista_arquivos_png:
-        print("Nenhum arquivo PNG para adicionar ao PDF.")
-        return
 
-    print(f"Iniciando geração do PDF '{nome_pdf_saida}' (A4 Retrato, 1x4)...")
-
+def gerar_formulario_com_qrcode_adaptativo(student_id, student_name, num_questoes, nome_arquivo_saida, gabarito_data=None, test_data=None, target_width=None, target_height=None):
+    """
+    Gera formulário adaptativo com dimensões específicas
+    
+    Args:
+        student_id: ID do estudante
+        student_name: Nome do estudante
+        num_questoes: Número de questões
+        nome_arquivo_saida: Caminho do arquivo de saída
+        gabarito_data: Dados do gabarito (opcional)
+        test_data: Dados do teste (opcional)
+        target_width: Largura alvo (opcional)
+        target_height: Altura alvo (opcional)
+    """
     try:
-        c = canvas.Canvas(nome_pdf_saida, pagesize=portrait(A4))
-        largura_a4, altura_a4 = portrait(A4)
-
-        imgs_por_linha = 1
-        linhas_por_pagina = 4
-        imgs_por_pagina = imgs_por_linha * linhas_por_pagina
-
-        margem_h = 1.5 * cm
-        margem_v = 1.0 * cm
-
-        largura_util = largura_a4 - (2 * margem_h)
-        altura_util = altura_a4 - (2 * margem_v)
-
-        slot_largura_max = largura_util
-        slot_altura_max = altura_util / linhas_por_pagina
-
-        escala_larg = slot_largura_max / LARGURA_FINAL
-        escala_alt = slot_altura_max / ALTURA_FINAL
-        escala = min(escala_larg, escala_alt)
-
-        img_largura_pdf = LARGURA_FINAL * escala
-        img_altura_pdf = ALTURA_FINAL * escala
-
-        x_start = margem_h + (largura_util - img_largura_pdf) / 2
-
-        altura_total_imagens = linhas_por_pagina * img_altura_pdf
-        espaco_v_total_restante = altura_util - altura_total_imagens
-
-        if espaco_v_total_restante >= 0:
-             espaco_v = espaco_v_total_restante / (linhas_por_pagina + 1)
-             espaco_v = max(0.2 * cm, espaco_v)
-        else:
-             print("Aviso: Imagens podem estar muito grandes para caber perfeitamente com as margens.")
-             espaco_v = 0.2 * cm
-
-        contador_img_pagina = 0
-        for i, img_path in enumerate(lista_arquivos_png):
-            if not os.path.exists(img_path):
-                print(f"Aviso: Arquivo de imagem não encontrado, pulando: {img_path}")
-                continue
-
-            img_na_pagina = contador_img_pagina % imgs_por_pagina
-            linha_idx = img_na_pagina
-
-            y_img = altura_a4 - margem_v - ((linha_idx + 1) * (img_altura_pdf + espaco_v)) + espaco_v
-
-            try:
-                img_reader = ImageReader(img_path)
-                c.drawImage(img_reader, x_start, y_img, width=img_largura_pdf, height=img_altura_pdf, preserveAspectRatio=True, mask='auto')
-                contador_img_pagina += 1
-
-                if contador_img_pagina % imgs_por_pagina == 0 and i < len(lista_arquivos_png) - 1:
-                    c.showPage()
-            except Exception as e_draw:
-                 print(f"Erro ao desenhar imagem '{img_path}' no PDF: {e_draw}")
-
-        c.save()
-        print(f"PDF '{nome_pdf_saida}' gerado com sucesso com {contador_img_pagina} formulários.")
-        print(f"   Tamanho de cada formulário no PDF: {img_largura_pdf/cm:.2f} cm x {img_altura_pdf/cm:.2f} cm")
-        print(f"   Espaçamento vertical entre formulários: {espaco_v/cm:.2f} cm")
-
-
-    except Exception as e_pdf:
-        print(f"Erro geral ao gerar PDF: {e_pdf}")
-
-
-# --- Bloco Principal de Execução (usando banco de dados) ---
-if __name__ == "__main__":
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    os.chdir(script_dir)
-
-    # Inicializar aplicação Flask
-    app = create_app()
-    with app.app_context():
-        while True:
-            try:
-                test_id = input("Digite o ID do teste: ")
-                if test_id:
-                    break
-                else:
-                    print("Por favor, digite um ID válido.")
-            except ValueError:
-                print("Entrada inválida! Digite um ID válido.")
-
-        # Buscar teste no banco de dados
-        test = Test.query.get(test_id)
-        if not test:
-            print(f"Teste {test_id} não encontrado no banco de dados")
-            exit()
-
-        # Buscar alunos do teste através de TestSession
-        test_sessions = TestSession.query.filter_by(test_id=test_id).all()
-        if not test_sessions:
-            print(f"Nenhuma sessão de teste encontrada para o teste {test_id}")
-            exit()
-
-        # Buscar os alunos das sessões
-        student_ids = [ts.student_id for ts in test_sessions]
-        students = Student.query.filter(Student.id.in_(student_ids)).all()
+        print(f"🔧 Gerando formulário adaptativo...")
+        print(f"📏 Dimensões alvo: {target_width}x{target_height}")
         
-        if not students:
-            print(f"Nenhum aluno encontrado para o teste {test_id}")
-            exit()
-
-        print(f"Encontrados {len(students)} alunos para o teste {test_id}")
-
-        # Buscar número de questões do teste
-        from app.models.testQuestion import TestQuestion
-        test_questions = TestQuestion.query.filter_by(test_id=test_id).all()
-        num_q = len(test_questions)
+        # Se dimensões não especificadas, usar A4 padrão
+        if target_width is None or target_height is None:
+            target_width = A4_PX_LARGURA
+            target_height = A4_PX_ALTURA
+            print(f"📏 Usando dimensões A4 padrão: {target_width}x{target_height}")
         
-        if num_q == 0:
-            print(f"Nenhuma questão encontrada para o teste {test_id}")
-            exit()
-
-        print(f"Teste tem {num_q} questões")
-
-        output_dir = "formularios_gerados"
-        os.makedirs(output_dir, exist_ok=True)
-
-        print("\nIniciando geração dos formulários PNG (Tamanho Final: {}x{})...".format(LARGURA_FINAL, ALTURA_FINAL))
-        todas_coordenadas_respostas_rel = {}
-        coordenadas_qr_salvas_rel = None
-        lista_pngs_gerados = []
-
-        total_alunos = len(students)
-        for idx, student in enumerate(students):
-            aluno_id = str(student.id)
-            aluno_nome = student.name
-            nome_arquivo_seguro = "".join(c for c in aluno_nome if c.isalnum() or c in (' ', '_')).rstrip().replace(" ", "_")
-            nome_arquivo_base = f"formulario_{aluno_id}_{nome_arquivo_seguro}.png"
-            nome_arquivo_png = os.path.join(output_dir, nome_arquivo_base)
-
-            img_gerada, coords_resp_rel, coords_qr_rel = gerar_formulario_com_qrcode(aluno_id, aluno_nome, num_q, nome_arquivo_png)
-
-            if img_gerada and coords_resp_rel and coords_qr_rel:
-                todas_coordenadas_respostas_rel[aluno_id] = coords_resp_rel
-                lista_pngs_gerados.append(nome_arquivo_png)
-                if coordenadas_qr_salvas_rel is None:
-                    coordenadas_qr_salvas_rel = coords_qr_rel
-                
-                # Salvar coordenadas no banco de dados
-                form_coordinates = FormCoordinates(
-                    test_id=test_id,
-                    qr_code_id=aluno_id,
-                    student_id=aluno_id,
-                    coordinates=coords_resp_rel
-                )
-                db.session.add(form_coordinates)
-                print(f"  ➕ Coordenadas salvas para {aluno_nome} (ID: {aluno_id})")
+        # Calcular proporções baseadas no tamanho alvo
+        proporcao_x = target_width / A4_PX_LARGURA
+        proporcao_y = target_height / A4_PX_ALTURA
+        
+        print(f"📏 Proporções: X={proporcao_x:.3f}, Y={proporcao_y:.3f}")
+        
+        # Ajustar parâmetros globais baseados na proporção
+        largura_conteudo_adaptativa = int(LARGURA_CONTEUDO * proporcao_x)
+        altura_conteudo_adaptativa = int(ALTURA_CONTEUDO * proporcao_y)
+        padding_externo_adaptativo = int(PADDING_EXTERNO * min(proporcao_x, proporcao_y))
+        
+        # Criar imagem com dimensões específicas
+        imagem = Image.new('RGB', (target_width, target_height), 'white')
+        desenho = ImageDraw.Draw(imagem)
+        
+        # Ajustar fontes baseadas na proporção
+        tamanho_fonte_adaptativo = int(TAMANHO_FONTE_NUM * min(proporcao_x, proporcao_y))
+        fonte_num = ImageFont.truetype("arial.ttf", tamanho_fonte_adaptativo)
+        fonte_alt = ImageFont.truetype("arial.ttf", int(tamanho_fonte_adaptativo * 0.9))
+        
+        # Gerar QR code
+        qr_data = {
+            "student_id": student_id,
+            "num_questions": num_questoes,
+            "test_id": test_data.get('id', '') if test_data else '',
+            "qr_code_id": str(uuid.uuid4())
+        }
+        
+        qr = qrcode.QRCode(version=1, box_size=10, border=5)
+        qr.add_data(json.dumps(qr_data))
+        qr.make(fit=True)
+        qr_img = qr.make_image(fill_color="black", back_color="white")
+        
+        # Redimensionar QR code baseado na proporção
+        qr_size_adaptativo = int(QR_CODE_SIZE * min(proporcao_x, proporcao_y))
+        qr_img = qr_img.resize((qr_size_adaptativo, qr_size_adaptativo), Image.Resampling.LANCZOS)
+        
+        # Posicionar QR code no canto superior direito
+        qr_x = target_width - qr_size_adaptativo - int(20 * proporcao_x)
+        qr_y = int(20 * proporcao_y)
+        
+        # Colar QR code na imagem
+        imagem.paste(qr_img, (qr_x, qr_y))
+        
+        # Desenhar cabeçalho
+        header_y = int(50 * proporcao_y)
+        desenho.text((int(20 * proporcao_x), header_y), f"Nome completo: {student_name}", fill='black', font=fonte_alt)
+        
+        # Desenhar título da prova
+        if test_data and 'title' in test_data:
+            desenho.text((int(20 * proporcao_x), header_y + int(30 * proporcao_y)), 
+                        f"Nome da prova: {test_data['title']}", fill='black', font=fonte_alt)
+        
+        # Calcular coordenadas das bolhas baseadas no tamanho alvo
+        x_positions = []
+        y_positions = []
+        
+        # Coordenadas X das alternativas (proporcionais)
+        for i in range(4):
+            x_pos = int([112, 162, 212, 262][i] * proporcao_x)
+            x_positions.append(x_pos)
+        
+        # Coordenadas Y das questões (proporcionais)
+        for i in range(num_questoes):
+            if i < 4:
+                y_pos = int([950, 995, 1040, 1085][i] * proporcao_y)
             else:
-                 print(f"Falha ao gerar formulário para {aluno_nome} (ID:{aluno_id})")
+                # Continuar o padrão para questões adicionais
+                y_pos = int((1085 + (i - 3) * 45) * proporcao_y)
+            y_positions.append(y_pos)
+        
+        # Desenhar grade de questões
+        raio_adaptativo = int(RAIO_CIRCULO * min(proporcao_x, proporcao_y))
+        espessura_adaptativa = max(1, int(ESPESSURA_LINHA * min(proporcao_x, proporcao_y)))
+        
+        for i in range(num_questoes):
+            questao_num = i + 1
+            y = y_positions[i]
+            
+            # Desenhar número da questão
+            desenho.text((int(20 * proporcao_x), y - int(10 * proporcao_y)), 
+                        str(questao_num), fill='black', font=fonte_num)
+            
+            # Desenhar círculos das alternativas
+            for j in range(4):
+                x = x_positions[j]
+                alternativa = ['A', 'B', 'C', 'D'][j]
+                
+                # Desenhar círculo
+                desenho.ellipse([x - raio_adaptativo, y - raio_adaptativo, 
+                               x + raio_adaptativo, y + raio_adaptativo], 
+                              outline='black', width=espessura_adaptativa)
+                
+                # Desenhar letra da alternativa
+                desenho.text((x - int(5 * proporcao_x), y - int(8 * proporcao_y)), 
+                           alternativa, fill='black', font=fonte_alt)
+        
+        # Adicionar borda externa
+        desenho.rectangle([(int(10 * proporcao_x), int(10 * proporcao_y)), 
+                         (target_width - int(10 * proporcao_x), target_height - int(10 * proporcao_y))], 
+                        outline='black', width=espessura_adaptativa * 3)
+        
+        # Salvar imagem
+        imagem.save(nome_arquivo_saida)
+        
+        # Retornar coordenadas das bolhas
+        coordenadas_respostas = []
+        for i in range(num_questoes):
+            for j in range(4):
+                x = x_positions[j]
+                y = y_positions[i]
+                w = h = raio_adaptativo * 2
+                coordenadas_respostas.append((x, y, w, h))
+        
+        # Coordenadas do QR code
+        qr_coords = (qr_x, qr_y, qr_size_adaptativo, qr_size_adaptativo)
+        
+        print(f"✅ Formulário adaptativo gerado: {target_width}x{target_height}")
+        print(f"📊 Coordenadas: {len(coordenadas_respostas)} posições")
+        
+        return imagem, coordenadas_respostas, qr_coords
+        
+    except Exception as e:
+        print(f"❌ Erro ao gerar formulário adaptativo: {str(e)}")
+        return None, None, None
 
-            print(f"Progresso: {idx + 1}/{total_alunos} formulários gerados.", end='\r')
 
-        # Salvar no banco de dados
-        try:
-            db.session.commit()
-            print(f"\n✅ Coordenadas salvas no banco de dados")
-        except Exception as e:
-            print(f"\n❌ Erro ao salvar coordenadas: {e}")
-            db.session.rollback()
 
-        print(f"\n{len(lista_pngs_gerados)}/{total_alunos} formulários PNG gerados com sucesso em '{output_dir}'.")
 
-        # --- Gerar PDF ---
-        if lista_pngs_gerados:
-            nome_arquivo_pdf = os.path.join(output_dir, "formularios_todos.pdf")
-            gerar_pdf_formularios(lista_pngs_gerados, nome_arquivo_pdf)
-        else:
-             print("Nenhum formulário PNG foi gerado, PDF não será criado.")
-
-    print("\nScript finalizado.")

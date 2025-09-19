@@ -956,7 +956,17 @@ def bulk_delete_tests():
                 # Excluir formulário físico
                 db.session.delete(physical_form)
             
-            logging.info(f"🗑️ Excluídos {len(physical_forms)} formulários físicos e {total_physical_answers_deleted} respostas físicas para teste {test.id}")
+            # Excluir coordenadas do formulário (FormCoordinates)
+            from app.models.formCoordinates import FormCoordinates
+            form_coordinates = FormCoordinates.query.filter_by(
+                test_id=test.id,
+                form_type='physical_test'
+            ).all()
+            
+            for coord in form_coordinates:
+                db.session.delete(coord)
+            
+            logging.info(f"🗑️ Excluídos {len(physical_forms)} formulários físicos, {total_physical_answers_deleted} respostas físicas e {len(form_coordinates)} coordenadas para teste {test.id}")
             
             # 3. Excluir sessões de teste
             test_sessions = TestSession.query.filter_by(test_id=test.id).all()
@@ -1053,7 +1063,17 @@ def deletar_avaliacao(test_id):
             # Excluir formulário físico
             db.session.delete(physical_form)
         
-        logging.info(f"🗑️ Excluídos {len(physical_forms)} formulários físicos e {total_physical_answers_deleted} respostas físicas")
+        # Excluir coordenadas do formulário (FormCoordinates)
+        from app.models.formCoordinates import FormCoordinates
+        form_coordinates = FormCoordinates.query.filter_by(
+            test_id=test_id,
+            form_type='physical_test'
+        ).all()
+        
+        for coord in form_coordinates:
+            db.session.delete(coord)
+        
+        logging.info(f"🗑️ Excluídos {len(physical_forms)} formulários físicos, {total_physical_answers_deleted} respostas físicas e {len(form_coordinates)} coordenadas")
         
         # 3. Excluir resultados de avaliação (antes das sessões)
         from app.models.evaluationResult import EvaluationResult

@@ -215,29 +215,30 @@ def generate_physical_forms(test_id):
                     
                     db.session.add(form)
                     
-                    # Salvar coordenadas na tabela FormCoordinates (atualizar se existir)
+                    # Salvar template de coordenadas na tabela FormCoordinates (uma vez por prova)
                     from app.models.formCoordinates import FormCoordinates
                     
-                    # Verificar se já existem coordenadas para este aluno
-                    existing_coords = FormCoordinates.query.filter_by(
-                        qr_code_id=student['id'],
-                        test_id=test_id
+                    # Verificar se já existe template para esta prova
+                    existing_template = FormCoordinates.query.filter_by(
+                        test_id=test_id,
+                        form_type='physical_test'
                     ).first()
                     
-                    if existing_coords:
-                        # Atualizar coordenadas existentes
-                        existing_coords.coordinates = form_coords
-                        print(f"  🔄 Coordenadas atualizadas para {student['nome']} (ID: {student['id']})")
+                    if existing_template:
+                        # Atualizar template existente
+                        existing_template.coordinates = form_coords
+                        print(f"  🔄 Template de coordenadas atualizado para prova {test_id}")
                     else:
-                        # Criar novas coordenadas
-                        form_coordinates = FormCoordinates(
+                        # Criar novo template (sem student_id específico)
+                        form_template = FormCoordinates(
                             test_id=test_id,
-                            qr_code_id=student['id'],  # QR code contém apenas o student_id
-                            student_id=student['id'],
-                            coordinates=form_coords  # Lista de coordenadas [x, y, w, h]
+                            form_type='physical_test',
+                            qr_code_id=None,  # Template não tem QR específico
+                            student_id=None,  # Template não é de aluno específico
+                            coordinates=form_coords  # Coordenadas do template
                         )
-                        db.session.add(form_coordinates)
-                        print(f"  ➕ Novas coordenadas criadas para {student['nome']} (ID: {student['id']})")
+                        db.session.add(form_template)
+                        print(f"  ➕ Novo template de coordenadas criado para prova {test_id}")
                     
                     formularios_gerados.append({
                         'student_id': student['id'],
@@ -276,77 +277,15 @@ def generate_physical_forms(test_id):
         logging.error(f"Erro ao gerar PDFs institucionais: {str(e)}")
         return jsonify({"error": "Erro interno do servidor"}), 500
 
-@bp.route('/test-deteccao-bolhas', methods=['POST'])
-@jwt_required()
-@role_required("admin", "professor", "coordenador", "diretor")
-def testar_deteccao_bolhas():
-    """
-    Rota de teste para verificar se a detecção de bolhas está funcionando
-    com correção de perspectiva
-    
-    Body:
-        - image: Imagem do gabarito preenchido (base64)
-    
-    Returns:
-        - Resultado da detecção de bolhas
-        - Respostas detectadas
-    """
-    try:
-        user = get_current_user_from_token()
-        if not user:
-            return jsonify({"error": "User not found or token invalid"}), 401
-        
-        # Obter dados da imagem
-        image_data = None
-        
-        if 'image' in request.files:
-            # Upload de arquivo
-            file = request.files['image']
-            if file and file.filename:
-                image_data = file.read()
-        else:
-            # Tentar obter dados JSON
-            try:
-                data = request.get_json() or {}
-                if 'image' in data:
-                    # Base64
-                    image_base64 = data['image']
-                    if image_base64.startswith('data:image'):
-                        image_base64 = image_base64.split(',')[1]
-                    image_data = base64.b64encode(base64.b64decode(image_base64)).decode('utf-8')
-                    image_data = f"data:image/jpeg;base64,{image_data}"
-            except Exception as e:
-                return jsonify({"error": "Formato de dados inválido"}), 400
-        
-        if not image_data:
-            return jsonify({"error": "Imagem não fornecida"}), 400
-        
-        # Testar detecção usando o serviço
-        from app.services.physical_test_pdf_generator import PhysicalTestPDFGenerator
-        pdf_generator = PhysicalTestPDFGenerator()
-        
-        result = pdf_generator.testar_deteccao_bolhas(image_data)
-        
-        if result.get('success'):
-            return jsonify({
-                "message": "Teste de detecção concluído",
-                "resultado": result
-            }), 200
-        else:
-            return jsonify({
-                "error": result.get('error', 'Erro desconhecido')
-            }), 400
-            
-    except Exception as e:
-        logging.error(f"Erro no teste de detecção: {str(e)}")
-        return jsonify({"error": "Erro interno do servidor"}), 500
-
 @bp.route('/test/<string:test_id>/process-correction', methods=['POST'])
 @jwt_required()
 @role_required("admin", "professor", "coordenador", "diretor")
 def process_physical_correction(test_id):
     """
-    Processa correção de gabarito físico preenchido
+    Processa correção de gabarito físico preenchido usando gabarito de referência
+    
+    Parâmetros da URL:
+        - test_id: ID da avaliação (evaluation_id) para gerar gabarito de referência
     
     Body:
         - image: Imagem do gabarito preenchido (base64 ou file)
@@ -362,26 +301,29 @@ def process_physical_correction(test_id):
         if not user:
             return jsonify({"error": "User not found or token invalid"}), 401
         
-        # Verificar se a prova existe
+        # test_id é o ID da prova diretamente
+        print(f"🔍 Buscando prova com ID: {test_id}")
+        
+        # Buscar a prova diretamente
         test = Test.query.get(test_id)
         if not test:
-            return jsonify({"error": "Prova não encontrada"}), 404
+            print(f"❌ Prova não encontrada: {test_id}")
+            return jsonify({"error": f"Prova não encontrada: {test_id}"}), 404
+        
+        print(f"✅ Prova encontrada: {test.id}, título: {test.title}")
         
         # Verificar permissões do professor
         if user['role'] == 'professor' and test.created_by != user['id']:
             return jsonify({"error": "Você só pode processar correções de suas próprias provas"}), 403
         
-        # Obter dados da imagem e parâmetros opcionais
+        # Obter dados da imagem
         image_data = None
-        student_id = None
-        class_test_id = None
         
         if 'image' in request.files:
             # Upload de arquivo
             file = request.files['image']
             if file and file.filename:
                 image_data = file.read()
-            # Não precisamos mais de parâmetros adicionais
         else:
             # Tentar obter dados JSON (mais flexível)
             try:
@@ -392,7 +334,6 @@ def process_physical_correction(test_id):
                     if image_base64.startswith('data:image'):
                         image_base64 = image_base64.split(',')[1]
                     image_data = base64.b64decode(image_base64)
-                # Não precisamos mais de parâmetros adicionais
             except Exception as e:
                 # Se não conseguir obter JSON, tentar form data
                 try:
@@ -401,14 +342,13 @@ def process_physical_correction(test_id):
                         if image_base64.startswith('data:image'):
                             image_base64 = image_base64.split(',')[1]
                         image_data = base64.b64decode(image_base64)
-                    # Não precisamos mais de parâmetros adicionais
                 except Exception as e2:
                     return jsonify({"error": "Formato de dados inválido. Envie como JSON ou form-data"}), 400
         
         if not image_data:
             return jsonify({"error": "Imagem não fornecida"}), 400
         
-        # Processar correção usando nossa nova função completa
+        # Processar correção usando gabarito de referência
         from app.services.physical_test_pdf_generator import PhysicalTestPDFGenerator
         pdf_generator = PhysicalTestPDFGenerator()
         
@@ -419,9 +359,9 @@ def process_physical_correction(test_id):
         else:
             image_data_str = image_data
         
-        # Usar função de correção completa (QR code + detecção + salvamento)
-        print(f"🎯 USANDO PROCESSAMENTO COMPLETO (QR + DETECÇÃO + SALVAMENTO)")
-        result = pdf_generator.processar_correcao_completa(test_id, image_data_str)
+        # Usar nova função de correção por gabarito de referência
+        print(f"🎯 USANDO CORREÇÃO POR GABARITO DE REFERÊNCIA")
+        result = pdf_generator.processar_correcao_por_gabarito(test_id, image_data_str)
         
         if result.get('success'):
             # Preparar dados de resposta
@@ -440,6 +380,11 @@ def process_physical_correction(test_id):
                 "evaluation_result_id": result['evaluation_result_id'],
                 "method": "complete_processing"
             }
+            
+            # Adicionar caminho da imagem de debug se disponível
+            if 'debug_image_path' in result:
+                response_data['debug_image_path'] = result['debug_image_path']
+                print(f"🔍 Imagem de debug incluída na resposta: {result['debug_image_path']}")
             
             return jsonify(response_data), 200
         else:

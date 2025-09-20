@@ -4036,16 +4036,16 @@ class PhysicalTestPDFGenerator:
             print(f"🔧 ETAPA 5: CALCULANDO RESULTADO...")
             resultado = self._calcular_resultado_final(test_id, respostas_detectadas, student_id)
             
-            # 6. Gerar imagem de debug (sempre)
-            print(f"🔧 ETAPA 6: GERANDO IMAGEM DE DEBUG...")
-            debug_image_path = self._gerar_imagem_debug_alinhamento(
-                aligned_gabarito,  # Gabarito alinhado (lado esquerdo)
-                user_image,        # Imagem original do usuário (lado direito)
-                test_id
-            )
-            if debug_image_path:
-                resultado['debug_image_path'] = debug_image_path
-                print(f"✅ Imagem de debug salva: {debug_image_path}")
+            # 6. Gerar imagem de debug (sempre) - COMENTADO PARA PRODUÇÃO
+            # print(f"🔧 ETAPA 6: GERANDO IMAGEM DE DEBUG...")
+            # debug_image_path = self._gerar_imagem_debug_alinhamento(
+            #     aligned_gabarito,  # Gabarito alinhado (lado esquerdo)
+            #     user_image,        # Imagem original do usuário (lado direito)
+            #     test_id
+            # )
+            # if debug_image_path:
+            #     resultado['debug_image_path'] = debug_image_path
+            #     print(f"✅ Imagem de debug salva: {debug_image_path}")
             
             return resultado
             

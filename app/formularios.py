@@ -7,8 +7,89 @@ import qrcode
 import sys
 import uuid
 import json
+import logging
 # Adicionar o diretório pai ao path para encontrar o módulo app
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+def get_arial_font(size):
+    """
+    Carrega fonte Arial da pasta de recursos com fallback para fonte padrão
+    
+    Args:
+        size: Tamanho da fonte
+        
+    Returns:
+        ImageFont: Fonte carregada ou fonte padrão como fallback
+    """
+    # Caminho principal para a fonte Arial
+    font_paths = [
+        "/app/resources/Fonts/Arial/arial.ttf",
+        "/app/resources/Fonts/Arial/Arial.ttf", 
+        "/app/resources/Fonts/Arial/ARIAL.TTF",
+        "./resources/Fonts/Arial/arial.ttf",
+        "./resources/Fonts/Arial/Arial.ttf",
+        "./resources/Fonts/Arial/ARIAL.TTF"
+    ]
+    
+    # Tentar carregar da pasta de recursos primeiro
+    for font_path in font_paths:
+        try:
+            if os.path.exists(font_path):
+                logging.info(f"Carregando fonte Arial de: {font_path}")
+                return ImageFont.truetype(font_path, size)
+        except (OSError, IOError) as e:
+            logging.warning(f"Erro ao carregar fonte {font_path}: {e}")
+            continue
+    
+    # Fallback para fonte padrão do sistema
+    try:
+        logging.warning("Usando fonte padrão do sistema como fallback")
+        return ImageFont.load_default()
+    except Exception as e:
+        logging.error(f"Erro ao carregar fonte padrão: {e}")
+        # Último recurso - retornar None e deixar o código tratar
+        return None
+
+def get_arial_bold_font(size):
+    """
+    Carrega fonte Arial Bold da pasta de recursos com fallback para fonte padrão
+    
+    Args:
+        size: Tamanho da fonte
+        
+    Returns:
+        ImageFont: Fonte carregada ou fonte padrão como fallback
+    """
+    # Caminho principal para a fonte Arial Bold
+    font_paths = [
+        "/app/resources/Fonts/Arial/arialbd.ttf",
+        "/app/resources/Fonts/Arial/Arial-Bold.ttf", 
+        "/app/resources/Fonts/Arial/ARIALBD.TTF",
+        "/app/resources/Fonts/Arial/ARIAL-BOLD.TTF",
+        "./resources/Fonts/Arial/arialbd.ttf",
+        "./resources/Fonts/Arial/Arial-Bold.ttf",
+        "./resources/Fonts/Arial/ARIALBD.TTF",
+        "./resources/Fonts/Arial/ARIAL-BOLD.TTF"
+    ]
+    
+    # Tentar carregar da pasta de recursos primeiro
+    for font_path in font_paths:
+        try:
+            if os.path.exists(font_path):
+                logging.info(f"Carregando fonte Arial Bold de: {font_path}")
+                return ImageFont.truetype(font_path, size)
+        except (OSError, IOError) as e:
+            logging.warning(f"Erro ao carregar fonte {font_path}: {e}")
+            continue
+    
+    # Fallback para fonte padrão do sistema
+    try:
+        logging.warning("Usando fonte padrão do sistema como fallback para Arial Bold")
+        return ImageFont.load_default()
+    except Exception as e:
+        logging.error(f"Erro ao carregar fonte padrão: {e}")
+        # Último recurso - retornar None e deixar o código tratar
+        return None
 
 # Imports do nosso sistema
 from app import create_app
@@ -25,6 +106,71 @@ from reportlab.lib.units import cm
 from reportlab.lib.utils import ImageReader
 from reportlab.platypus import SimpleDocTemplate, Image as RLImage, Spacer
 from reportlab.lib.styles import getSampleStyleSheet
+
+# --- Função Helper para Carregamento Seguro de Fontes ---
+def get_safe_font(font_name, size):
+    """
+    Carrega fonte de forma segura com fallback
+    
+    Args:
+        font_name: Nome da fonte (ex: 'arial', 'arial-bold')
+        size: Tamanho da fonte
+    
+    Returns:
+        ImageFont object ou fonte padrão em caso de erro
+    """
+    import logging
+    
+    # Caminho base para fontes
+    fonts_dir = "/app/resources/Fonts/Arial"
+    
+    # Mapeamento de nomes de fonte para arquivos
+    font_files = {
+        'arial': 'arial.ttf',
+        'arial-bold': 'arial-bold.ttf',
+        'arial-italic': 'arial-italic.ttf',
+        'arial-bold-italic': 'arial-bold-italic.ttf'
+    }
+    
+    # Tentar carregar fonte personalizada
+    if font_name in font_files:
+        font_path = os.path.join(fonts_dir, font_files[font_name])
+        try:
+            if os.path.exists(font_path):
+                return ImageFont.truetype(font_path, size)
+            else:
+                logging.warning(f"Arquivo de fonte não encontrado: {font_path}")
+        except Exception as e:
+            logging.warning(f"Erro ao carregar fonte {font_path}: {e}")
+    
+    # Fallback 1: Tentar fonte do sistema (Windows)
+    try:
+        return ImageFont.truetype("arial.ttf", size)
+    except Exception as e:
+        logging.warning(f"Erro ao carregar arial.ttf do sistema: {e}")
+    
+    # Fallback 2: Tentar fontes comuns do Linux
+    linux_fonts = [
+        "/usr/share/fonts/truetype/arial.ttf",
+        "/usr/share/fonts/TTF/arial.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf"
+    ]
+    
+    for font_path in linux_fonts:
+        try:
+            if os.path.exists(font_path):
+                return ImageFont.truetype(font_path, size)
+        except Exception as e:
+            logging.warning(f"Erro ao carregar fonte {font_path}: {e}")
+    
+    # Fallback 3: Fonte padrão do sistema
+    try:
+        return ImageFont.load_default()
+    except Exception as e:
+        logging.error(f"Erro ao carregar fonte padrão: {e}")
+        # Último recurso: retornar None (será tratado pelo código que chama)
+        return None
 
 # --- Dimensões A4 em pixels (para o PNG) ---
 # Escolha o DPI do PNG. 300 dá 2480 x 3508 px; 200 dá 1654 x 2339 px.
@@ -379,11 +525,11 @@ def gerar_formulario_com_qrcode(aluno_id, aluno_nome, num_questoes_total, nome_a
     img_qr = qr.make_image(fill_color="black", back_color="white").resize((QR_CODE_SIZE, QR_CODE_SIZE))
 
     try:
-        fonte_num = ImageFont.truetype("arial.ttf", TAMANHO_FONTE_NUM)
-        fonte_alt = ImageFont.truetype("arial.ttf", TAMANHO_FONTE_ALT)
-        fonte_nome = ImageFont.truetype("arialbd.ttf", TAMANHO_FONTE_NOME)
-        fonte_titulo = ImageFont.truetype("arialbd.ttf", TAMANHO_FONTE_TITULO)
-        fonte_header = ImageFont.truetype("arial.ttf", TAMANHO_FONTE_HEADER)
+        fonte_num = get_arial_font(TAMANHO_FONTE_NUM)
+        fonte_alt = get_arial_font(TAMANHO_FONTE_ALT)
+        fonte_nome = get_arial_bold_font(TAMANHO_FONTE_NOME)
+        fonte_titulo = get_arial_bold_font(TAMANHO_FONTE_TITULO)
+        fonte_header = get_arial_font(TAMANHO_FONTE_HEADER)
     except IOError:
         try:
             fonte_num = ImageFont.truetype("DejaVuSans.ttf", TAMANHO_FONTE_NUM)
@@ -600,7 +746,7 @@ def gerar_formulario_com_qrcode(aluno_id, aluno_nome, num_questoes_total, nome_a
     
     # Fonte para as instruções (menor que o cabeçalho)
     try:
-        fonte_instrucoes = ImageFont.truetype("arial.ttf", TAMANHO_FONTE_TEXTO)
+        fonte_instrucoes = get_arial_font(TAMANHO_FONTE_TEXTO)
     except IOError:
         try:
             fonte_instrucoes = ImageFont.truetype("DejaVuSans.ttf", TAMANHO_FONTE_TEXTO)
@@ -828,8 +974,8 @@ def gerar_formulario_com_qrcode_adaptativo(student_id, student_name, num_questoe
         
         # Ajustar fontes baseadas na proporção
         tamanho_fonte_adaptativo = int(TAMANHO_FONTE_NUM * min(proporcao_x, proporcao_y))
-        fonte_num = ImageFont.truetype("arial.ttf", tamanho_fonte_adaptativo)
-        fonte_alt = ImageFont.truetype("arial.ttf", int(tamanho_fonte_adaptativo * 0.9))
+        fonte_num = get_arial_font(tamanho_fonte_adaptativo)
+        fonte_alt = get_arial_font(int(tamanho_fonte_adaptativo * 0.9))
         
         # Gerar QR code
         qr_data = {

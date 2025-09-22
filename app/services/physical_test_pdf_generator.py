@@ -4036,16 +4036,16 @@ class PhysicalTestPDFGenerator:
             print(f"🔧 ETAPA 5: CALCULANDO RESULTADO...")
             resultado = self._calcular_resultado_final(test_id, respostas_detectadas, student_id)
             
-            # 6. Gerar imagem de debug (sempre)
-            print(f"🔧 ETAPA 6: GERANDO IMAGEM DE DEBUG...")
-            debug_image_path = self._gerar_imagem_debug_alinhamento(
-                aligned_gabarito,  # Gabarito alinhado (lado esquerdo)
-                user_image,        # Imagem original do usuário (lado direito)
-                test_id
-            )
-            if debug_image_path:
-                resultado['debug_image_path'] = debug_image_path
-                print(f"✅ Imagem de debug salva: {debug_image_path}")
+            # 6. Gerar imagem de debug (sempre) - COMENTADO PARA PRODUÇÃO
+            # print(f"🔧 ETAPA 6: GERANDO IMAGEM DE DEBUG...")
+            # debug_image_path = self._gerar_imagem_debug_alinhamento(
+            #     aligned_gabarito,  # Gabarito alinhado (lado esquerdo)
+            #     user_image,        # Imagem original do usuário (lado direito)
+            #     test_id
+            # )
+            # if debug_image_path:
+            #     resultado['debug_image_path'] = debug_image_path
+            #     print(f"✅ Imagem de debug salva: {debug_image_path}")
             
             return resultado
             
@@ -4312,7 +4312,7 @@ class PhysicalTestPDFGenerator:
                 opcoes = ["A", "B", "C", "D"]
                 proporcoes = {}
                 
-                print(f"  🔍 Processando questão {questao_num}...")
+                # Processando questão
                 
                 # Processar cada alternativa da questão
                 for j in range(4):
@@ -4334,17 +4334,17 @@ class PhysicalTestPDFGenerator:
                         proporcao = self._calcular_proporcao_pixels_pretos_melhorada(regiao_bolha, None)
                         proporcoes[opcoes[j]] = proporcao
                         
-                        print(f"    📊 Questão {questao_num}, {opcoes[j]}: proporção={proporcao:.3f}, região=({x1},{y1})-({x2},{y2}), tamanho={w}x{h}")
+                        # Processando alternativa
                     else:
                         print(f"    ❌ Região inválida para {opcoes[j]}: ({x1},{y1})-({x2},{y2})")
                 
                 # Aplicar critérios de detecção
                 if proporcoes:
-                    print(f"  🔍 Aplicando critérios para questão {questao_num}: {proporcoes}")
+                    # Aplicando critérios de detecção
                     resposta = self._aplicar_criterios_deteccao(proporcoes, questao_num)
                     if resposta:
                         respostas_detectadas[questao_num] = resposta
-                        print(f"  ✅ Questão {questao_num}: {resposta}")
+                        # Questão processada
                     else:
                         print(f"  ❌ Questão {questao_num}: Não marcada")
                 else:
@@ -4927,7 +4927,7 @@ class PhysicalTestPDFGenerator:
                 opcoes = ["A", "B", "C", "D"]
                 proporcoes = {}
                 
-                print(f"  🔍 Processando questão {questao_num}...")
+                # Processando questão
                 
                 # Processar cada alternativa da questão
                 for j in range(4):
@@ -4971,17 +4971,17 @@ class PhysicalTestPDFGenerator:
                         proporcao = self._calcular_proporcao_pixels_pretos_melhorada(regiao_bolha, debug_path)
                         proporcoes[opcoes[j]] = proporcao
                         
-                        print(f"    📊 Questão {questao_num}, {opcoes[j]}: proporção={proporcao:.3f}, região=({x1},{y1})-({x2},{y2})")
+                        # Processando alternativa
                     else:
                         print(f"    ❌ Região inválida para {opcoes[j]}")
                 
                 # Aplicar critérios de detecção
                 if proporcoes:
-                    print(f"  🔍 Aplicando critérios para questão {questao_num}: {proporcoes}")
+                    # Aplicando critérios de detecção
                     resposta = self._aplicar_criterios_deteccao(proporcoes, questao_num)
                     if resposta:
                         respostas_detectadas[questao_num] = resposta
-                        print(f"  ✅ Questão {questao_num}: {resposta}")
+                        # Questão processada
                     else:
                         print(f"  ❌ Questão {questao_num}: Não marcada")
                 else:
@@ -5116,7 +5116,7 @@ class PhysicalTestPDFGenerator:
                     
                     # Caso de empate técnico (diferença muito pequena)
                     if diff_rel < 0.20:  # < 20% da média => empate técnico
-                        print(f"    🔍 EMPATE TÉCNICO detectado: diferença relativa {diff_rel:.1%} < 20% da média")
+                        # Empate técnico detectado
                         # Em caso de empate técnico, escolher o segundo maior (mais provável ser a marcação real)
                         if segundo_maior_valor >= threshold_absoluto:
                             resposta = opcoes[idx_segundo]
@@ -5220,7 +5220,7 @@ class PhysicalTestPDFGenerator:
                 opcoes = ["A", "B", "C", "D"]
                 proporcoes = {}
                 
-                print(f"  🔍 Processando questão {questao_num}...")
+                # Processando questão
                 
                 # Processar cada alternativa da questão
                 for j in range(4):
@@ -5246,7 +5246,7 @@ class PhysicalTestPDFGenerator:
                             proporcao = self._calcular_proporcao_pixels_pretos_melhorada(regiao_bolha, debug_path)
                             proporcoes[opcoes[j]] = proporcao
                             
-                            print(f"    📊 Questão {questao_num}, {opcoes[j]}: proporção={proporcao:.3f}, pos=({x},{y})")
+                            # Processando alternativa
                         else:
                             print(f"    ❌ Região inválida para {opcoes[j]}")
                     else:
@@ -5254,11 +5254,11 @@ class PhysicalTestPDFGenerator:
                 
                 # Aplicar critérios de detecção
                 if proporcoes:
-                    print(f"  🔍 Aplicando critérios para questão {questao_num}: {proporcoes}")
+                    # Aplicando critérios de detecção
                     resposta = self._aplicar_criterios_deteccao(proporcoes, questao_num)
                     if resposta:
                         respostas_detectadas[questao_num] = resposta
-                        print(f"  ✅ Questão {questao_num}: {resposta}")
+                        # Questão processada
                     else:
                         print(f"  ❌ Questão {questao_num}: Não marcada")
                 else:
@@ -5341,8 +5341,7 @@ class PhysicalTestPDFGenerator:
                 
                 # Critério 3: Empate técnico - sempre escolher o maior valor se estiver acima do mínimo
                 else:
-                    print(f"    🔍 EMPATE TÉCNICO detectado: diff_abs={diff_absoluta:.3f}, diff_rel={diff_relativa:.1%}")
-                    print(f"    ⚠️ Questão {questao_num}: Escolhendo maior valor por empate técnico")
+                    # Empate técnico detectado - escolhendo maior valor
                     return maior_alt
             else:
                 if maior_valor < threshold_absoluto_min:
@@ -5403,17 +5402,51 @@ class PhysicalTestPDFGenerator:
                 else:
                     print(f"  ❌ Questão {questao_num}: {resposta_detectada} (correta: {resposta_correta})")
             
-            # Calcular métricas
-            score_percentage = (acertos / total_questoes * 100) if total_questoes > 0 else 0
-            grade = (acertos / total_questoes * 10) if total_questoes > 0 else 0
-            proficiency = (acertos / total_questoes * 400) if total_questoes > 0 else 0
+            # Calcular métricas usando EvaluationCalculator
+            from app.services.evaluation_calculator import EvaluationCalculator
             
-            if acertos == total_questoes:
-                classification = 'Avançado'
-            elif acertos >= total_questoes / 2:
-                classification = 'Adequado'
-            else:
-                classification = 'Básico'
+            # Buscar informações do curso e disciplina
+            course_name = "Anos Iniciais"  # Padrão
+            subject_name = "Outras"  # Padrão
+            
+            # Buscar nome do curso baseado no ID
+            if test.course:
+                try:
+                    from app.models.educationStage import EducationStage
+                    import uuid
+                    course_uuid = uuid.UUID(test.course)
+                    course_obj = EducationStage.query.get(course_uuid)
+                    if course_obj:
+                        course_name = course_obj.name
+                except (ValueError, TypeError, Exception):
+                    pass
+            
+            # Buscar disciplina da prova
+            if test.subject_rel:
+                subject_name = test.subject_rel.name
+            elif test.subjects_info:
+                try:
+                    import json
+                    subjects_data = json.loads(test.subjects_info) if isinstance(test.subjects_info, str) else test.subjects_info
+                    if subjects_data and len(subjects_data) > 0:
+                        subject_name = subjects_data[0].get('name', 'Outras')
+                except:
+                    pass
+            
+            # Usar EvaluationCalculator para cálculos corretos
+            evaluation_result = EvaluationCalculator.calculate_complete_evaluation(
+                correct_answers=acertos,
+                total_questions=total_questoes,
+                course_name=course_name,
+                subject_name=subject_name,
+                use_simple_calculation=False
+            )
+            
+            # Extrair resultados do EvaluationCalculator
+            score_percentage = evaluation_result['accuracy_rate']  # EvaluationCalculator usa 'accuracy_rate'
+            grade = evaluation_result['grade']
+            proficiency = evaluation_result['proficiency']
+            classification = evaluation_result['classification']
             
             print(f"✅ Resultado calculado: {acertos}/{total_questoes} acertos ({score_percentage:.1f}%)")
             
@@ -5566,7 +5599,7 @@ class PhysicalTestPDFGenerator:
         """
         try:
             import numpy as np
-            print(f"🔍 INICIANDO DETECÇÃO AVANÇADA DE QR CODE")
+            # Detecção avançada de QR code
             
             # Verificar se a imagem é PIL Image e converter para OpenCV
             if hasattr(image, 'mode'):  # É PIL Image
@@ -5579,35 +5612,35 @@ class PhysicalTestPDFGenerator:
             print(f"📏 Imagem de entrada: {image_array.shape}, dtype: {image_array.dtype}")
             
             # ESTRATÉGIA 1: Detecção direta
-            print(f"🔍 ESTRATÉGIA 1: Detecção direta...")
+            # Estratégia 1: Detecção direta
             result = self._detectar_qr_direto(image_array)
             if result:
                 print(f"✅ QR code detectado com estratégia 1")
                 return result
             
             # ESTRATÉGIA 2: Pré-processamento avançado
-            print(f"🔍 ESTRATÉGIA 2: Pré-processamento avançado...")
+            # Estratégia 2: Pré-processamento avançado
             result = self._detectar_qr_preprocessamento_avancado(image_array)
             if result:
                 print(f"✅ QR code detectado com estratégia 2")
                 return result
             
             # ESTRATÉGIA 3: Detecção por regiões específicas
-            print(f"🔍 ESTRATÉGIA 3: Detecção por regiões específicas...")
+            # Estratégia 3: Detecção por regiões específicas
             result = self._detectar_qr_regioes_especificas(image_array)
             if result:
                 print(f"✅ QR code detectado com estratégia 3")
                 return result
             
             # ESTRATÉGIA 4: Detecção por posição específica do formulário
-            print(f"🔍 ESTRATÉGIA 4: Detecção por posição específica do formulário...")
+            # Estratégia 4: Detecção por posição específica do formulário
             result = self._detectar_qr_posicao_formulario(image_array)
             if result:
                 print(f"✅ QR code detectado com estratégia 4")
                 return result
             
             # ESTRATÉGIA 4.5: Detecção resiliente com tight-crop
-            print(f"🔍 ESTRATÉGIA 4.5: Detecção resiliente com tight-crop...")
+            # Estratégia 4.5: Detecção resiliente com tight-crop
             result = self._detectar_qr_resiliente(image_array, upscale=5, margin_factor=0.35, save_debug=False)
             if result:
                 print(f"✅ QR code detectado com estratégia 4.5")
@@ -5698,15 +5731,11 @@ class PhysicalTestPDFGenerator:
             equalized = cv2.equalizeHist(gray)
             preprocessed_images.append(("Equalized", equalized))
             
-            print(f"📊 Testando {len(preprocessed_images)} tipos de pré-processamento...")
-            
             # Testar cada imagem processada
             detector = cv2.QRCodeDetector()
             for name, processed_img in preprocessed_images:
-                print(f"  🔍 Testando {name}...")
                 ret, decoded_info, points, _ = detector.detectAndDecodeMulti(processed_img)
                 if ret and decoded_info:
-                    print(f"  ✅ QR code detectado com {name}!")
                     for i, info in enumerate(decoded_info):
                         if info:
                             try:
@@ -5775,7 +5804,7 @@ class PhysicalTestPDFGenerator:
                     
                     ret, decoded_info, points, _ = detector.detectAndDecodeMulti(roi)
                     if ret and decoded_info:
-                        print(f"  ✅ QR code detectado na região {i+1}!")
+                        # QR code detectado na região
                         for j, info in enumerate(decoded_info):
                             if info:
                                 try:
@@ -5792,7 +5821,8 @@ class PhysicalTestPDFGenerator:
                                     print(f"  ❌ Erro ao processar QR code: {str(e)}")
                                     continue
                     else:
-                        print(f"  ❌ Nenhum QR code encontrado nesta região")
+                        # Nenhum QR code encontrado nesta região
+                        pass
                 else:
                     print(f"  ⚠️ Região muito pequena, pulando...")
             return None
@@ -7529,3 +7559,114 @@ class PhysicalTestPDFGenerator:
         except Exception as e:
             print(f"❌ Erro ao gerar formulário base: {str(e)}")
             return None
+    
+    def _corrigir_com_gabarito_pre_gerado(self, user_image, gabarito_data, test_id, student_id):
+        """
+        Corrige imagem do usuário usando gabarito pré-gerado (otimização para lote)
+        
+        Args:
+            user_image: Imagem processada do usuário
+            gabarito_data: Dados do gabarito pré-gerado
+            test_id: ID da prova
+            student_id: ID do aluno
+            
+        Returns:
+            dict: Resultado da correção
+        """
+        try:
+            print(f"🔧 Corrigindo com gabarito pré-gerado para aluno: {student_id}")
+            
+            # 1. Alinhar gabarito com imagem do usuário
+            print(f"🔧 ETAPA 1: ALINHANDO GABARITO...")
+            
+            # Converter gabarito de base64 para PIL Image se necessário
+            gabarito_image = gabarito_data['gabarito_image']
+            if isinstance(gabarito_image, str) and gabarito_image.startswith('data:image'):
+                # Converter base64 para PIL Image
+                import base64
+                from PIL import Image
+                import io
+                
+                # Extrair dados base64
+                if ',' in gabarito_image:
+                    base64_data = gabarito_image.split(',')[1]
+                else:
+                    base64_data = gabarito_image
+                
+                # Decodificar e converter para PIL Image
+                image_data = base64.b64decode(base64_data)
+                gabarito_image = Image.open(io.BytesIO(image_data))
+            
+            aligned_gabarito = self._alinhar_gabarito_com_usuario(
+                gabarito_image, 
+                user_image
+            )
+            
+            if aligned_gabarito is None:
+                return {
+                    'success': False,
+                    'error': 'Erro ao alinhar gabarito com imagem do usuário'
+                }
+            
+            # 2. Comparar bolhas
+            print(f"🔧 ETAPA 2: COMPARANDO BOLHAS...")
+            respostas_detectadas = self._comparar_bolhas_adaptativo(
+                aligned_gabarito, 
+                user_image, 
+                test_id
+            )
+            
+            if not respostas_detectadas:
+                return {
+                    'success': False,
+                    'error': 'Nenhuma resposta detectada na comparação de bolhas'
+                }
+            
+            # 3. Calcular resultado
+            print(f"🔧 ETAPA 3: CALCULANDO RESULTADO...")
+            result = self._calcular_resultado_final(
+                test_id, respostas_detectadas, student_id
+            )
+            
+            if not result['success']:
+                return result
+            
+            # 4. Salvar no banco
+            print(f"🔧 ETAPA 4: SALVANDO NO BANCO...")
+            evaluation_result_id = self._salvar_resultado_completo(
+                student_id, test_id, respostas_detectadas, gabarito_data['questions_data'],
+                result['correct_answers'], result['total_questions'], 
+                result['score_percentage'], result['grade'], 
+                result['proficiency'], result['classification']
+            )
+            
+            if evaluation_result_id is None:
+                return {
+                    'success': False,
+                    'error': 'Erro ao salvar resultado no banco de dados'
+                }
+            
+            print(f"✅ Correção concluída: {result['correct_answers']}/{result['total_questions']} acertos")
+            
+            return {
+                'success': True,
+                'student_id': student_id,
+                'test_id': test_id,
+                'correct_answers': result['correct_answers'],
+                'total_questions': result['total_questions'],
+                'score_percentage': result['score_percentage'],
+                'grade': result['grade'],
+                'proficiency': result['proficiency'],
+                'classification': result['classification'],
+                'answers_detected': respostas_detectadas,
+                'student_answers': respostas_detectadas,
+                'evaluation_result_id': evaluation_result_id,
+                'method': 'gabarito_pre_gerado'
+            }
+            
+        except Exception as e:
+            print(f"❌ Erro ao corrigir com gabarito pré-gerado: {str(e)}")
+            return {
+                'success': False,
+                'error': f"Erro inesperado: {str(e)}"
+            }

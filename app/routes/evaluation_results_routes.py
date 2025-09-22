@@ -705,7 +705,7 @@ def listar_avaliacoes():
         estatisticas_consolidadas = _calcular_estatisticas_consolidadas_por_escopo(todas_avaliacoes_escopo, scope_info, nivel_granularidade)
         
         # Calcular estatísticas por disciplina
-        resultados_por_disciplina = _calcular_estatisticas_por_disciplina(todas_avaliacoes_escopo)
+        resultados_por_disciplina = _calcular_estatisticas_por_disciplina(todas_avaliacoes_escopo, scope_info, nivel_granularidade)
         
         # Aplicar paginação para resultados detalhados
         try:
@@ -967,41 +967,16 @@ def _gerar_tabela_detalhada_por_disciplina(avaliacao_id: str, scope_info: Dict, 
             })
         
         # Determinar escopo de alunos baseado na granularidade
-        class_tests = ClassTest.query.filter_by(test_id=avaliacao_id).all()
-        class_ids = [ct.class_id for ct in class_tests]
+        # CORRIGIDO: Usar a lógica correta de filtros hierárquicos
+        escopo_calculo = _determinar_escopo_calculo(scope_info, nivel_granularidade)
+        logging.info(f"Escopo de cálculo para tabela detalhada: {escopo_calculo}")
         
-        if not class_ids:
+        # Buscar alunos usando a função corrigida
+        all_students = _buscar_alunos_por_escopo(escopo_calculo)
+        
+        if not all_students:
+            logging.warning("Nenhum aluno encontrado para o escopo especificado")
             return {"disciplinas": list(questoes_por_disciplina.values())}
-        
-        # Buscar alunos baseado no escopo e filtros
-        query_alunos = Student.query.options(
-            joinedload(Student.class_).joinedload(Class.grade),
-            joinedload(Student.class_).joinedload(Class.school).joinedload(School.city)
-        ).filter(Student.class_id.in_(class_ids))
-        
-        # Log para debug
-        logging.info(f"Total de turmas encontradas para avaliação {avaliacao_id}: {len(class_ids)}")
-        logging.info(f"Turmas: {class_ids}")
-        
-        # Aplicar filtros baseados na granularidade
-        if nivel_granularidade in ['escola', 'serie', 'turma']:
-            # Fazer join com Class apenas uma vez
-            query_alunos = query_alunos.join(Class)
-            
-            # Filtrar por escola se especificada
-            if scope_info.get('escolas') and len(scope_info['escolas']) == 1:
-                escola_id = scope_info['escolas'][0].id
-                query_alunos = query_alunos.filter(Class.school_id == escola_id)
-            
-            # Filtrar por série se especificada
-            if nivel_granularidade in ['serie', 'turma'] and scope_info.get('serie_id') and scope_info['serie_id'] != 'all':
-                query_alunos = query_alunos.filter(Class.grade_id == scope_info['serie_id'])
-            
-            # Filtrar por turma se especificada
-            if nivel_granularidade == 'turma' and scope_info.get('turma_id') and scope_info['turma_id'] != 'all':
-                query_alunos = query_alunos.filter(Student.class_id == scope_info['turma_id'])
-        
-        all_students = query_alunos.all()
         
         # Log para debug
         logging.info(f"Total de alunos encontrados: {len(all_students)}")
@@ -1842,9 +1817,10 @@ def _determinar_escopo_busca(estado, municipio, escola, serie, turma, avaliacao,
         return None
 
 
-def _calcular_estatisticas_por_disciplina(class_tests: list):
+def _calcular_estatisticas_por_disciplina(class_tests: list, scope_info: dict, nivel_granularidade: str):
     """
     Calcula estatísticas agrupadas por disciplina usando a função corrigida do EvaluationResultService
+    CORRIGIDO: Agora aplica filtros de granularidade
     """
     try:
         from app.services.evaluation_result_service import EvaluationResultService
@@ -1859,8 +1835,8 @@ def _calcular_estatisticas_por_disciplina(class_tests: list):
         
         test_id = test.id
         
-        # Usar a função corrigida do EvaluationResultService
-        statistics = EvaluationResultService.get_subject_detailed_statistics(test_id)
+        # CORRIGIDO: Usar a função corrigida do EvaluationResultService com filtros de granularidade
+        statistics = EvaluationResultService.get_subject_detailed_statistics(test_id, scope_info, nivel_granularidade)
         
         if "error" in statistics:
             logging.error(f"Erro ao obter estatísticas por disciplina: {statistics['error']}")
@@ -1903,19 +1879,23 @@ def _calcular_estatisticas_por_disciplina(class_tests: list):
 def _determinar_nivel_granularidade(estado, municipio, escola, serie, turma, avaliacao):
     """
     Determina o nível de granularidade baseado nos filtros aplicados
+    LÓGICA CORRIGIDA: Verifica do mais específico para o menos específico
     """
     nivel = None
-    if avaliacao:
-        nivel = "avaliacao"
-    elif turma:
+    
+    # Verificar do mais específico para o menos específico
+    if turma and turma.lower() != 'all':
         nivel = "turma"
-    elif serie:
+    elif serie and serie.lower() != 'all':
         nivel = "serie"
-    elif escola:
+    elif escola and escola.lower() != 'all':
         nivel = "escola"
-    elif municipio:
+    elif avaliacao and avaliacao.lower() != 'all':
+        # Quando só tem avaliação específica, retorna dados do município (todas as escolas)
         nivel = "municipio"
-    elif estado:
+    elif municipio and municipio.lower() != 'all':
+        nivel = "municipio"
+    elif estado and estado.lower() != 'all':
         nivel = "estado"
     else:
         nivel = "geral"
@@ -5376,46 +5356,39 @@ def _calcular_estatisticas_consolidadas_por_escopo(class_tests: list, scope_info
 def _determinar_escopo_calculo(scope_info: dict, nivel_granularidade: str) -> Dict[str, Any]:
     """
     Determina o escopo de cálculo baseado nos filtros aplicados
+    CORRIGIDO: Agora converte corretamente os IDs do scope_info
     """
     escopo = {}
     
-    if nivel_granularidade == "avaliacao":
-        # Avaliação específica selecionada
-        escopo['tipo'] = "avaliacao"
-        escopo['avaliacao_id'] = scope_info.get('avaliacao')
-        escopo['municipio_id'] = scope_info.get('municipio_id')
-        # Buscar as turmas onde esta avaliação foi aplicada
-        from app.models.classTest import ClassTest
-        class_tests = ClassTest.query.filter_by(test_id=escopo['avaliacao_id']).all()
-        escopo['class_ids'] = [ct.class_id for ct in class_tests]
-        logging.info(f"Escopo avaliação: {escopo}")
-        
-    elif nivel_granularidade == "municipio":
-        # Estado + Município + Avaliação "all"
+    if nivel_granularidade == "municipio":
+        # Estado + Município + Avaliação específica (dados de todas as escolas do município)
         escopo['tipo'] = "municipio"
         escopo['municipio_id'] = scope_info.get('municipio_id')
-        escopo['avaliacao_id'] = None  # "all" - todas as avaliações
+        escopo['avaliacao_id'] = scope_info.get('avaliacao')
         
     elif nivel_granularidade == "escola":
-        # Estado + Município + Avaliação + Escola "all"
+        # Estado + Município + Avaliação + Escola específica
         escopo['tipo'] = "escola"
         escopo['escola_id'] = scope_info.get('escola')
         escopo['avaliacao_id'] = scope_info.get('avaliacao')
+        escopo['municipio_id'] = scope_info.get('municipio_id')
         
     elif nivel_granularidade == "serie":
-        # Estado + Município + Avaliação + Escola + Série "all"
+        # Estado + Município + Avaliação + Escola + Série específica
         escopo['tipo'] = "serie"
         escopo['serie_id'] = scope_info.get('serie')
         escopo['escola_id'] = scope_info.get('escola')
         escopo['avaliacao_id'] = scope_info.get('avaliacao')
+        escopo['municipio_id'] = scope_info.get('municipio_id')
         
     elif nivel_granularidade == "turma":
-        # Estado + Município + Avaliação + Escola + Série + Turma "all"
+        # Estado + Município + Avaliação + Escola + Série + Turma específica
         escopo['tipo'] = "turma"
         escopo['turma_id'] = scope_info.get('turma')
         escopo['serie_id'] = scope_info.get('serie')
         escopo['escola_id'] = scope_info.get('escola')
         escopo['avaliacao_id'] = scope_info.get('avaliacao')
+        escopo['municipio_id'] = scope_info.get('municipio_id')
     
     logging.info(f"Escopo calculado para {nivel_granularidade}: {escopo}")
     return escopo
@@ -5428,52 +5401,80 @@ def _buscar_alunos_por_escopo(escopo_calculo: dict) -> List[Student]:
     try:
         logging.info(f"Buscando alunos por escopo: {escopo_calculo}")
         
-        if escopo_calculo['tipo'] == "avaliacao":
-            # Todos os alunos das turmas onde a avaliação foi aplicada
-            class_ids = escopo_calculo.get('class_ids', [])
-            logging.info(f"Tipo avaliação, class_ids: {class_ids}")
-            if class_ids:
-                alunos = Student.query.filter(Student.class_id.in_(class_ids)).all()
-                logging.info(f"Alunos encontrados para avaliação: {len(alunos)}")
-                return alunos
-            else:
-                logging.warning("Nenhum class_id encontrado para avaliação")
-                return []
-        
-        elif escopo_calculo['tipo'] == "municipio":
-            # Todos os alunos do município
-            alunos = Student.query.join(Class).join(School).join(City)\
-                               .filter(City.id == escopo_calculo['municipio_id']).all()
+        if escopo_calculo['tipo'] == "municipio":
+            # Todos os alunos do município (com filtro de avaliação se especificada)
+            query = Student.query.join(Class).join(School).join(City)\
+                               .filter(City.id == escopo_calculo['municipio_id'])
+            
+            # Se há avaliação específica, filtrar apenas turmas onde foi aplicada
+            if escopo_calculo.get('avaliacao_id'):
+                from app.models.classTest import ClassTest
+                class_tests = ClassTest.query.filter_by(test_id=escopo_calculo['avaliacao_id']).all()
+                class_ids = [ct.class_id for ct in class_tests]
+                if class_ids:
+                    query = query.filter(Student.class_id.in_(class_ids))
+            
+            alunos = query.all()
             logging.info(f"Alunos encontrados para município: {len(alunos)}")
             return alunos
         
         elif escopo_calculo['tipo'] == "escola":
-            # Todos os alunos da escola
-            alunos = Student.query.join(Class).join(School)\
-                               .filter(School.id == escopo_calculo['escola_id']).all()
+            # Todos os alunos da escola (com filtro de avaliação se especificada)
+            query = Student.query.join(Class).join(School)\
+                               .filter(School.id == escopo_calculo['escola_id'])
+            
+            # Se há avaliação específica, filtrar apenas turmas onde foi aplicada
+            if escopo_calculo.get('avaliacao_id'):
+                from app.models.classTest import ClassTest
+                class_tests = ClassTest.query.filter_by(test_id=escopo_calculo['avaliacao_id']).all()
+                class_ids = [ct.class_id for ct in class_tests]
+                if class_ids:
+                    query = query.filter(Student.class_id.in_(class_ids))
+            
+            alunos = query.all()
             logging.info(f"Alunos encontrados para escola: {len(alunos)}")
             return alunos
         
         elif escopo_calculo['tipo'] == "serie":
-            # Todos os alunos da série
-            alunos = Student.query.join(Class).join(Grade)\
-                               .filter(Grade.id == escopo_calculo['serie_id']).all()
+            # Todos os alunos da série (com filtro de avaliação se especificada)
+            query = Student.query.join(Class).join(Grade)\
+                               .filter(Grade.id == escopo_calculo['serie_id'])
+            
+            # Se há avaliação específica, filtrar apenas turmas onde foi aplicada
+            if escopo_calculo.get('avaliacao_id'):
+                from app.models.classTest import ClassTest
+                class_tests = ClassTest.query.filter_by(test_id=escopo_calculo['avaliacao_id']).all()
+                class_ids = [ct.class_id for ct in class_tests]
+                if class_ids:
+                    query = query.filter(Student.class_id.in_(class_ids))
+            
+            alunos = query.all()
             logging.info(f"Alunos encontrados para série: {len(alunos)}")
             return alunos
         
         elif escopo_calculo['tipo'] == "turma":
-            # Todos os alunos da turma
-            alunos = Student.query.filter(Student.class_id == escopo_calculo['turma_id']).all()
+            # Todos os alunos da turma (com filtro de avaliação se especificada)
+            query = Student.query.filter(Student.class_id == escopo_calculo['turma_id'])
+            
+            # Se há avaliação específica, verificar se a turma aplicou a avaliação
+            if escopo_calculo.get('avaliacao_id'):
+                from app.models.classTest import ClassTest
+                class_test = ClassTest.query.filter_by(
+                    test_id=escopo_calculo['avaliacao_id'],
+                    class_id=escopo_calculo['turma_id']
+                ).first()
+                if not class_test:
+                    # Turma não aplicou a avaliação, retornar lista vazia
+                    logging.warning(f"Turma {escopo_calculo['turma_id']} não aplicou avaliação {escopo_calculo['avaliacao_id']}")
+                    return []
+            
+            alunos = query.all()
             logging.info(f"Alunos encontrados para turma: {len(alunos)}")
             return alunos
         
         else:
-            # Fallback: retornar alunos das turmas das avaliações
-            class_ids = escopo_calculo.get('class_ids', [])
-            logging.info(f"Fallback, class_ids: {class_ids}")
-            alunos = Student.query.filter(Student.class_id.in_(class_ids)).all()
-            logging.info(f"Alunos encontrados no fallback: {len(alunos)}")
-            return alunos
+            logging.warning(f"Tipo de escopo não reconhecido: {escopo_calculo.get('tipo')}")
+            return []
             
     except Exception as e:
         logging.error(f"Erro ao buscar alunos por escopo: {str(e)}")
@@ -5500,34 +5501,12 @@ def _calcular_ranking_global_alunos(avaliacao_id: str, scope_info: Dict, nivel_g
         from app.models.evaluationResult import EvaluationResult
         
         # Determinar escopo de alunos baseado na granularidade
-        class_tests = ClassTest.query.filter_by(test_id=avaliacao_id).all()
-        class_ids = [ct.class_id for ct in class_tests]
+        # CORRIGIDO: Usar a lógica correta de filtros hierárquicos
+        escopo_calculo = _determinar_escopo_calculo(scope_info, nivel_granularidade)
+        logging.info(f"Escopo de cálculo para ranking: {escopo_calculo}")
         
-        if not class_ids:
-            return []
-        
-        # Buscar alunos baseado no escopo e filtros
-        query_alunos = Student.query.options(
-            joinedload(Student.class_).joinedload(Class.grade),
-            joinedload(Student.class_).joinedload(Class.school).joinedload(School.city)
-        ).filter(Student.class_id.in_(class_ids))
-        
-        # Aplicar filtros baseados na granularidade
-        if nivel_granularidade in ['escola', 'serie', 'turma']:
-            # Filtrar por escola se especificada
-            if scope_info.get('escolas') and len(scope_info['escolas']) == 1:
-                escola_id = scope_info['escolas'][0].id
-                query_alunos = query_alunos.join(Class).filter(Class.school_id == escola_id)
-            
-            # Filtrar por série se especificada
-            if nivel_granularidade in ['serie', 'turma'] and scope_info.get('serie_id') and scope_info['serie_id'] != 'all':
-                query_alunos = query_alunos.join(Class).filter(Class.grade_id == scope_info['serie_id'])
-            
-            # Filtrar por turma se especificada
-            if nivel_granularidade == 'turma' and scope_info.get('turma_id') and scope_info['turma_id'] != 'all':
-                query_alunos = query_alunos.filter(Student.class_id == scope_info['turma_id'])
-        
-        all_students = query_alunos.all()
+        # Buscar alunos usando a função corrigida
+        all_students = _buscar_alunos_por_escopo(escopo_calculo)
         
         if not all_students:
             return []

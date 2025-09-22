@@ -217,7 +217,7 @@ class PhysicalTestFormService:
         """Busca todos os formulários físicos de uma prova"""
         try:
             forms = PhysicalTestForm.query.filter_by(test_id=test_id).all()
-            return [self._format_physical_form_data(form) for form in forms]
+            return [form.to_dict() for form in forms]
         except Exception as e:
             logging.error(f"Erro ao buscar formulários físicos: {str(e)}")
             return []
@@ -229,7 +229,7 @@ class PhysicalTestFormService:
                 test_id=test_id, 
                 student_id=student_id
             ).first()
-            return self._format_physical_form_data(form) if form else None
+            return form.to_dict() if form else None
         except Exception as e:
             logging.error(f"Erro ao buscar formulário do aluno: {str(e)}")
             return None
@@ -388,27 +388,3 @@ class PhysicalTestFormService:
                 'success': False,
                 'error': f'Erro interno: {str(e)}'
             }
-
-    def _format_physical_form_data(self, form: PhysicalTestForm) -> Dict[str, Any]:
-        """Formata dados do formulário físico para resposta da API"""
-        return {
-            'id': form.id,
-            'test_id': form.test_id,
-            'student_id': form.student_id,
-            'class_test_id': form.class_test_id,
-            'form_pdf_url': form.form_pdf_url,
-            'form_pdf_data': form.form_pdf_data is not None,
-            'answer_sheet_url': form.answer_sheet_url,
-            'answer_sheet_data': form.answer_sheet_data is not None,
-            'correction_image_url': form.correction_image_url,
-            'correction_image_data': form.correction_image_data is not None,
-            'qr_code_data': form.qr_code_data,
-            'qr_code_coordinates': form.qr_code_coordinates,
-            'status': form.status,
-            'is_corrected': form.is_corrected,
-            'form_type': form.form_type,
-            'generated_at': form.generated_at.isoformat() if form.generated_at else None,
-            'corrected_at': form.corrected_at.isoformat() if form.corrected_at else None,
-            'processed_at': form.processed_at.isoformat() if form.processed_at else None,
-            'created_at': form.generated_at.isoformat() if form.generated_at else None  # Alias para compatibilidade
-        }

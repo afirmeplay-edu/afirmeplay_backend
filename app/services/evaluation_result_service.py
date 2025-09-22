@@ -439,7 +439,7 @@ class EvaluationResultService:
             return []
     
     @staticmethod
-    def get_subject_detailed_statistics(test_id: str) -> Dict[str, Any]:
+    def get_subject_detailed_statistics(test_id: str, scope_info: dict = None, nivel_granularidade: str = None) -> Dict[str, Any]:
         """
         Obtém estatísticas detalhadas por disciplina de uma avaliação
         CORRIGIDO: Agora segue o fluxo correto: evaluation_results → test → subjects_info → education_stage
@@ -514,8 +514,25 @@ class EvaluationResultService:
                         questions_by_subject[question.subject_id] = []
                     questions_by_subject[question.subject_id].append(question)
             
-            # 8. Buscar resultados dos alunos
-            results = EvaluationResult.query.filter_by(test_id=test_id).all()
+            # 8. Buscar resultados dos alunos (com filtros de granularidade se especificados)
+            if scope_info and nivel_granularidade:
+                # Aplicar filtros de granularidade
+                from app.routes.evaluation_results_routes import _determinar_escopo_calculo, _buscar_alunos_por_escopo
+                
+                escopo_calculo = _determinar_escopo_calculo(scope_info, nivel_granularidade)
+                alunos_escopo = _buscar_alunos_por_escopo(escopo_calculo)
+                
+                if alunos_escopo:
+                    student_ids = [aluno.id for aluno in alunos_escopo]
+                    results = EvaluationResult.query.filter(
+                        EvaluationResult.test_id == test_id,
+                        EvaluationResult.student_id.in_(student_ids)
+                    ).all()
+                else:
+                    results = []
+            else:
+                # Sem filtros de granularidade, buscar todos os resultados
+                results = EvaluationResult.query.filter_by(test_id=test_id).all()
             
             subject_statistics = {}
             

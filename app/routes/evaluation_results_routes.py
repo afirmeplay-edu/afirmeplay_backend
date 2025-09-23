@@ -981,16 +981,28 @@ def _gerar_tabela_detalhada_por_disciplina(avaliacao_id: str, scope_info: Dict, 
         # Log para debug
         logging.info(f"Total de alunos encontrados: {len(all_students)}")
         
-        # Buscar resultados pré-calculados
-        evaluation_results = EvaluationResult.query.filter_by(test_id=avaliacao_id).all()
+        # Buscar resultados pré-calculados (apenas dos alunos do escopo)
+        if all_students:
+            student_ids = [aluno.id for aluno in all_students]
+            evaluation_results = EvaluationResult.query.filter(
+                EvaluationResult.test_id == avaliacao_id,
+                EvaluationResult.student_id.in_(student_ids)
+            ).all()
+        else:
+            evaluation_results = []
+        
         results_dict = {er.student_id: er for er in evaluation_results}
         
         logging.info(f"Total de resultados encontrados: {len(evaluation_results)}")
         
-        # Buscar TODAS as respostas de TODOS os alunos para esta avaliação
-        all_student_answers = StudentAnswer.query.filter(
-            StudentAnswer.test_id == avaliacao_id
-        ).all()
+        # Buscar respostas dos alunos do escopo para esta avaliação
+        if all_students:
+            all_student_answers = StudentAnswer.query.filter(
+                StudentAnswer.test_id == avaliacao_id,
+                StudentAnswer.student_id.in_(student_ids)
+            ).all()
+        else:
+            all_student_answers = []
         
         # Criar dicionário de respostas por aluno
         respostas_por_aluno = {}
@@ -1090,7 +1102,7 @@ def _gerar_tabela_detalhada_por_disciplina(avaliacao_id: str, scope_info: Dict, 
                 # CORREÇÃO: Calcular nota, proficiência e classificação baseado nos acertos específicos desta disciplina
                 disciplina_nota = 0.0
                 disciplina_proficiencia = 0.0
-                disciplina_classificacao = "Abaixo do Básico"
+                disciplina_classificacao = None  # Não classificar se não fez a avaliação
                 
                 if total_respondidas > 0:
                     # Obter informações do curso da avaliação
@@ -1263,7 +1275,8 @@ def _calcular_dados_gerais_alunos(questoes_por_disciplina: dict, course_name: st
                     else:
                         nivel_proficiencia_geral = "Abaixo do Básico"
             else:
-                nivel_proficiencia_geral = "Abaixo do Básico"
+                # Aluno não fez a avaliação - não classificar
+                nivel_proficiencia_geral = None
             
             # Determinar status geral
             status_geral = "concluida" if dados["total_respondidas_geral"] > 0 else "pendente"
@@ -1402,8 +1415,9 @@ def _calculate_evaluation_stats_frontend(test_id: str) -> Dict[str, Any]:
             proficiencias.append(proficiency_original)  # CORREÇÃO: usar valor original
             classificacoes[classification_original] += 1
         else:
-            # Aluno NÃO respondeu - contar como "Abaixo do Básico"
-            classificacoes['Abaixo do Básico'] += 1
+            # Aluno NÃO respondeu - não incluir na distribuição de classificação
+            # Alunos ausentes não são classificados
+            pass
     
     # Calcular médias apenas dos alunos que participaram
     media_nota = round(sum(notas) / len(notas), 2) if notas else 0.0
@@ -2292,7 +2306,7 @@ def listar_alunos():
                 total_answered = 0
                 correct_answers = 0
                 proficiency_original = 0.0
-                classification_original = 'Abaixo do Básico'
+                classification_original = None  # Não classificar se não fez
                 status = "pendente"
             
             # Buscar informações da turma e grade
@@ -2536,7 +2550,7 @@ def relatorio_detalhado(evaluation_id: str):
                 total_answered = 0
                 correct_answers = 0
                 proficiency_original = 0.0
-                classification_original = 'Abaixo do Básico'
+                classification_original = None  # Não classificar se não fez
                 status = "nao_respondida"
             
             # Buscar informações da turma
@@ -3905,7 +3919,7 @@ def relatorio_detalhado_filtrado(evaluation_id: str):
                 total_answered = 0
                 correct_answers = 0
                 proficiency_original = 0.0
-                classification_original = 'Abaixo do Básico'
+                classification_original = None  # Não classificar se não fez
                 status = "nao_respondida"
                 nota = 0.0
             
@@ -5277,10 +5291,18 @@ def _calcular_estatisticas_consolidadas_por_escopo(class_tests: list, scope_info
             total_alunos = len(todos_alunos)
             logging.info(f"Outro nível: total_alunos={total_alunos}, nivel={nivel_granularidade}")
         
-        # Buscar resultados das avaliações do escopo
-        resultados_escopo = EvaluationResult.query.filter(EvaluationResult.test_id.in_(test_ids)).all()
+        # Buscar resultados das avaliações do escopo (apenas dos alunos do escopo específico)
+        if todos_alunos:
+            student_ids = [aluno.id for aluno in todos_alunos]
+            resultados_escopo = EvaluationResult.query.filter(
+                EvaluationResult.test_id.in_(test_ids),
+                EvaluationResult.student_id.in_(student_ids)
+            ).all()
+        else:
+            resultados_escopo = []
+        
         alunos_participantes = len(resultados_escopo)
-        logging.info(f"resultados_escopo: {alunos_participantes}, test_ids: {test_ids}")
+        logging.info(f"resultados_escopo: {alunos_participantes}, test_ids: {test_ids}, total_alunos: {total_alunos}")
         
         # Calcular estatísticas consolidadas
         if resultados_escopo:
@@ -5453,7 +5475,7 @@ def _buscar_alunos_por_escopo(escopo_calculo: dict) -> List[Student]:
             return alunos
         
         elif escopo_calculo['tipo'] == "turma":
-            # Todos os alunos da turma (com filtro de avaliação se especificada)
+            # Todos os alunos da turma (sempre retornar, mesmo se não fez avaliação)
             query = Student.query.filter(Student.class_id == escopo_calculo['turma_id'])
             
             # Se há avaliação específica, verificar se a turma aplicou a avaliação
@@ -5464,9 +5486,8 @@ def _buscar_alunos_por_escopo(escopo_calculo: dict) -> List[Student]:
                     class_id=escopo_calculo['turma_id']
                 ).first()
                 if not class_test:
-                    # Turma não aplicou a avaliação, retornar lista vazia
-                    logging.warning(f"Turma {escopo_calculo['turma_id']} não aplicou avaliação {escopo_calculo['avaliacao_id']}")
-                    return []
+                    # Turma não aplicou a avaliação, mas retornar alunos para dados zerados
+                    logging.warning(f"Turma {escopo_calculo['turma_id']} não aplicou avaliação {escopo_calculo['avaliacao_id']} - retornando alunos para dados zerados")
             
             alunos = query.all()
             logging.info(f"Alunos encontrados para turma: {len(alunos)}")
@@ -5511,14 +5532,26 @@ def _calcular_ranking_global_alunos(avaliacao_id: str, scope_info: Dict, nivel_g
         if not all_students:
             return []
         
-        # Buscar resultados pré-calculados
-        evaluation_results = EvaluationResult.query.filter_by(test_id=avaliacao_id).all()
+        # Buscar resultados pré-calculados (apenas dos alunos do escopo)
+        if all_students:
+            student_ids = [aluno.id for aluno in all_students]
+            evaluation_results = EvaluationResult.query.filter(
+                EvaluationResult.test_id == avaliacao_id,
+                EvaluationResult.student_id.in_(student_ids)
+            ).all()
+        else:
+            evaluation_results = []
+        
         results_dict = {er.student_id: er for er in evaluation_results}
         
-        # Buscar todas as respostas dos alunos para esta avaliação
-        all_student_answers = StudentAnswer.query.filter(
-            StudentAnswer.test_id == avaliacao_id
-        ).all()
+        # Buscar respostas dos alunos do escopo para esta avaliação
+        if all_students:
+            all_student_answers = StudentAnswer.query.filter(
+                StudentAnswer.test_id == avaliacao_id,
+                StudentAnswer.student_id.in_(student_ids)
+            ).all()
+        else:
+            all_student_answers = []
         
         # Criar dicionário de respostas por aluno
         respostas_por_aluno = {}
@@ -5568,7 +5601,7 @@ def _calcular_ranking_global_alunos(avaliacao_id: str, scope_info: Dict, nivel_g
                 "total_respondidas": total_respondidas,
                 "nota": nota,
                 "proficiencia": format_decimal_two_places(evaluation_result.proficiency) if evaluation_result else 0.0,
-                "nivel_proficiencia": evaluation_result.classification if evaluation_result else "Abaixo do Básico"
+                "nivel_proficiencia": evaluation_result.classification if evaluation_result else None
             }
             
             alunos_ranking.append(aluno_ranking)

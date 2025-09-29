@@ -28,14 +28,17 @@ class AIAnalysisService:
             # Preparar dados para análise
             analysis_data = self._prepare_analysis_data(report_data)
             
-            # Gerar prompt específico para esta análise
-            specific_prompt = self._generate_specific_prompt(analysis_data)
+            # Gerar análises específicas para cada página
+            analysis_texts = {}
             
-            # Chamar OpenAI
-            ai_response = self._call_openai(specific_prompt)
+            # Análise da página 4 - Participação
+            analysis_texts['participacao'] = self._analyze_participation(analysis_data, report_data.get('scope_type', 'all'))
             
-            # Processar resposta
-            analysis_texts = self._process_ai_response(ai_response)
+            # Análise da página 6 - Proficiência
+            analysis_texts['proficiencia'] = self._analyze_proficiency(analysis_data, report_data.get('scope_type', 'all'))
+            
+            # Análise da página 6 - Notas
+            analysis_texts['notas'] = self._analyze_grades(analysis_data, report_data.get('scope_type', 'all'))
             
             return analysis_texts
             
@@ -54,12 +57,14 @@ class AIAnalysisService:
             acertos_habilidade = report_data.get('acertos_por_habilidade', {})
             
             # Dados de participação
+            scope_type = report_data.get('scope_type', 'all')
             participacao_data = {
                 'total_matriculados': total_alunos.get('total_geral', {}).get('matriculados', 0),
                 'total_avaliados': total_alunos.get('total_geral', {}).get('avaliados', 0),
                 'total_faltosos': total_alunos.get('total_geral', {}).get('faltosos', 0),
                 'percentual_participacao': total_alunos.get('total_geral', {}).get('percentual', 0),
-                'por_turma': total_alunos.get('por_turma', [])
+                'por_turma': total_alunos.get('por_turma', []),
+                'por_escola': total_alunos.get('por_escola', [])
             }
             
             # Dados de proficiência
@@ -91,6 +96,239 @@ class AIAnalysisService:
         except Exception as e:
             self.logger.error(f"Erro ao preparar dados para análise: {str(e)}")
             return {}
+    
+    def _analyze_participation(self, analysis_data: Dict[str, Any], scope_type: str) -> str:
+        """Analisa dados de participação (Página 4)"""
+        try:
+            participacao = analysis_data.get('participacao', {})
+            total_matriculados = participacao.get('total_matriculados', 0)
+            total_avaliados = participacao.get('total_avaliados', 0)
+            total_faltosos = participacao.get('total_faltosos', 0)
+            percentual_participacao = participacao.get('percentual_participacao', 0)
+            
+            # Dados por escola/turma
+            dados_detalhados = participacao.get('por_turma', []) if scope_type != 'city' else participacao.get('por_escola', [])
+            
+            # Determinar contexto
+            if scope_type == 'city':
+                contexto = "município"
+                unidade = "escola"
+                unidade_plural = "escolas"
+            else:
+                contexto = "escola"
+                unidade = "turma"
+                unidade_plural = "turmas"
+            
+            # Gerar prompt específico para participação
+            prompt = f"""
+            Analise os dados de participação de uma avaliação educacional e gere uma análise resumida e construtiva.
+            
+            DADOS:
+            - Total de alunos matriculados: {total_matriculados}
+            - Total de alunos avaliados: {total_avaliados}
+            - Total de alunos faltosos: {total_faltosos}
+            - Percentual de participação: {percentual_participacao}%
+            - Dados por {unidade}:
+            {self._format_detailed_participation_data(dados_detalhados, unidade)}
+            
+            CONTEXTO: Relatório de {contexto}
+            
+            Gere uma análise RESUMIDA (máximo 5 linhas) que inclua:
+            1. Contexto geral da participação
+            2. Avaliação qualitativa da taxa de participação
+            3. Principais destaques por {unidade}
+            4. Recomendação principal para melhoria
+            
+            Use um tom profissional e construtivo. Seja conciso e específico. NÃO use formatação markdown (sem ###, ####, etc).
+            """
+            
+            response = self._call_openai(prompt)
+            return response.strip()
+            
+        except Exception as e:
+            self.logger.error(f"Erro na análise de participação: {str(e)}")
+            return f"Análise de participação não disponível. {total_avaliados} alunos avaliados de {total_matriculados} matriculados ({percentual_participacao}% de participação)."
+    
+    def _analyze_proficiency(self, analysis_data: Dict[str, Any], scope_type: str) -> str:
+        """Analisa dados de proficiência (Página 6)"""
+        try:
+            proficiencia = analysis_data.get('proficiencia', {})
+            
+            if not proficiencia:
+                return "Dados de proficiência não disponíveis para análise."
+            
+            # Determinar contexto
+            if scope_type == 'city':
+                contexto = "município"
+                unidade = "escola"
+                unidade_plural = "escolas"
+            else:
+                contexto = "escola"
+                unidade = "turma"
+                unidade_plural = "turmas"
+            
+            # Preparar dados de proficiência
+            prof_data = self._prepare_proficiency_data(proficiencia, unidade)
+            
+            # Gerar prompt específico para proficiência
+            prompt = f"""
+            Analise os dados de PROFICIÊNCIA de uma avaliação educacional e gere uma análise resumida e construtiva.
+            
+            DADOS DE PROFICIÊNCIA:
+            {prof_data}
+            
+            CONTEXTO: Relatório de {contexto}
+            
+            Gere uma análise RESUMIDA (máximo 5 linhas) que inclua:
+            1. Visão geral da proficiência por disciplina
+            2. Principais destaques entre as {unidade_plural}
+            3. Pontos fortes e fracos na proficiência
+            4. Recomendação principal para melhoria da proficiência
+            
+            Use um tom profissional e construtivo. Seja conciso e específico. NÃO use formatação markdown (sem ###, ####, etc).
+            """
+            
+            response = self._call_openai(prompt)
+            return response.strip()
+            
+        except Exception as e:
+            self.logger.error(f"Erro na análise de proficiência: {str(e)}")
+            return "Análise de proficiência não disponível."
+    
+    def _analyze_grades(self, analysis_data: Dict[str, Any], scope_type: str) -> str:
+        """Analisa dados de notas (Página 6)"""
+        try:
+            notas = analysis_data.get('notas', {})
+            
+            if not notas:
+                return "Dados de notas não disponíveis para análise."
+            
+            # Determinar contexto
+            if scope_type == 'city':
+                contexto = "município"
+                unidade = "escola"
+                unidade_plural = "escolas"
+            else:
+                contexto = "escola"
+                unidade = "turma"
+                unidade_plural = "turmas"
+            
+            # Preparar dados de notas
+            notas_data = self._prepare_grades_data(notas, unidade)
+            
+            # Gerar prompt específico para notas
+            prompt = f"""
+            Analise os dados de NOTAS de uma avaliação educacional e gere uma análise resumida e construtiva.
+            
+            DADOS DE NOTAS:
+            {notas_data}
+            
+            CONTEXTO: Relatório de {contexto}
+            
+            Gere uma análise RESUMIDA (máximo 5 linhas) que inclua:
+            1. Visão geral das notas por disciplina
+            2. Principais destaques entre as {unidade_plural}
+            3. Pontos fortes e fracos nas notas
+            4. Recomendação principal para melhoria das notas
+            
+            Use um tom profissional e construtivo. Seja conciso e específico. NÃO use formatação markdown (sem ###, ####, etc).
+            """
+            
+            response = self._call_openai(prompt)
+            return response.strip()
+            
+        except Exception as e:
+            self.logger.error(f"Erro na análise de notas: {str(e)}")
+            return "Análise de notas não disponível."
+    
+    def _format_detailed_participation_data(self, dados_detalhados: list, unidade: str) -> str:
+        """Formata dados detalhados de participação para o prompt"""
+        if not dados_detalhados:
+            return "Nenhum dado detalhado disponível."
+        
+        formatted_data = []
+        for item in dados_detalhados:
+            nome = item.get(unidade, 'N/A')
+            matriculados = item.get('matriculados', 0)
+            avaliados = item.get('avaliados', 0)
+            percentual = item.get('percentual', 0)
+            faltosos = item.get('faltosos', 0)
+            
+            formatted_data.append(f"- {nome}: {avaliados} de {matriculados} ({percentual}%) - {faltosos} faltosos")
+        
+        return "\n".join(formatted_data)
+    
+    def _prepare_proficiency_data(self, proficiencia: dict, unidade: str) -> str:
+        """Prepara dados de proficiência para análise"""
+        try:
+            prof_disciplinas = proficiencia.get('por_disciplina', {})
+            
+            if not prof_disciplinas:
+                return "Nenhum dado de proficiência disponível."
+            
+            data_lines = []
+            
+            for disciplina, dados in prof_disciplinas.items():
+                if disciplina == 'GERAL':
+                    continue
+                    
+                data_lines.append(f"\n{disciplina.upper()}:")
+                
+                # Dados por unidade
+                dados_unidade = dados.get(f'por_{unidade}', [])
+                if dados_unidade:
+                    for item in dados_unidade:
+                        nome = item.get(unidade, 'N/A')
+                        media = item.get('media', 0)
+                        total_alunos = item.get('total_alunos', 0)
+                        data_lines.append(f"  - {nome}: {media} (média) - {total_alunos} alunos")
+                
+                # Média geral
+                media_geral = dados.get('media_geral', 0)
+                if media_geral > 0:
+                    data_lines.append(f"  - Média geral: {media_geral}")
+            
+            return "\n".join(data_lines) if data_lines else "Nenhum dado de proficiência disponível."
+            
+        except Exception as e:
+            self.logger.error(f"Erro ao preparar dados de proficiência: {str(e)}")
+            return "Erro ao processar dados de proficiência."
+    
+    def _prepare_grades_data(self, notas: dict, unidade: str) -> str:
+        """Prepara dados de notas para análise"""
+        try:
+            notas_disciplinas = notas.get('por_disciplina', {})
+            
+            if not notas_disciplinas:
+                return "Nenhum dado de notas disponível."
+            
+            data_lines = []
+            
+            for disciplina, dados in notas_disciplinas.items():
+                if disciplina == 'GERAL':
+                    continue
+                    
+                data_lines.append(f"\n{disciplina.upper()}:")
+                
+                # Dados por unidade
+                dados_unidade = dados.get(f'por_{unidade}', [])
+                if dados_unidade:
+                    for item in dados_unidade:
+                        nome = item.get(unidade, 'N/A')
+                        media = item.get('media', 0)
+                        total_alunos = item.get('total_alunos', 0)
+                        data_lines.append(f"  - {nome}: {media} (média) - {total_alunos} alunos")
+                
+                # Média geral
+                media_geral = dados.get('media_geral', 0)
+                if media_geral > 0:
+                    data_lines.append(f"  - Média geral: {media_geral}")
+            
+            return "\n".join(data_lines) if data_lines else "Nenhum dado de notas disponível."
+            
+        except Exception as e:
+            self.logger.error(f"Erro ao preparar dados de notas: {str(e)}")
+            return "Erro ao processar dados de notas."
     
     def _generate_specific_prompt(self, analysis_data: Dict[str, Any]) -> str:
         """Gera prompt específico para esta análise"""

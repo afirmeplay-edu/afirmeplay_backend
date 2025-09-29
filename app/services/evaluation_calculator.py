@@ -289,16 +289,36 @@ class EvaluationCalculator:
         course_level = cls._determine_course_level(course_name)
         subject_type = cls._determine_subject_type(subject_name)
         
-        ranges = cls.CLASSIFICATION_CONFIG.get(
-            (course_level, subject_type),
-            # Padrão para casos não identificados
-            [
-                (0, 149, Classification.ABAIXO_BASICO),
-                (150, 199, Classification.BASICO),
-                (200, 249, Classification.ADEQUADO),
-                (250, 350, Classification.AVANCADO)
-            ]
-        )
+        # Tratamento especial para classificação GERAL
+        if subject_name.upper() == "GERAL":
+            # Para classificação geral, usar faixas mais amplas baseadas no curso
+            if course_level in [CourseLevel.ANOS_FINAIS, CourseLevel.ENSINO_MEDIO]:
+                # Anos Finais e Ensino Médio - faixas mais altas
+                ranges = [
+                    (0, 224.99, Classification.ABAIXO_BASICO),
+                    (225, 299.99, Classification.BASICO),
+                    (300, 349.99, Classification.ADEQUADO),
+                    (350, 425, Classification.AVANCADO)
+                ]
+            else:
+                # Educação Infantil, Anos Iniciais, EJA - faixas padrão
+                ranges = [
+                    (0, 174, Classification.ABAIXO_BASICO),
+                    (175, 224, Classification.BASICO),
+                    (225, 274, Classification.ADEQUADO),
+                    (275, 375, Classification.AVANCADO)
+                ]
+        else:
+            ranges = cls.CLASSIFICATION_CONFIG.get(
+                (course_level, subject_type),
+                # Padrão para casos não identificados
+                [
+                    (0, 149, Classification.ABAIXO_BASICO),
+                    (150, 199, Classification.BASICO),
+                    (200, 249, Classification.ADEQUADO),
+                    (250, 350, Classification.AVANCADO)
+                ]
+            )
         
         for min_val, max_val, classification in ranges:
             if min_val <= proficiency <= max_val:

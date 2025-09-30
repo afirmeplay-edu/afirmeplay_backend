@@ -960,7 +960,7 @@ def _gerar_tabela_detalhada_por_disciplina(avaliacao_id: str, scope_info: Dict, 
                 }
             
             questoes_por_disciplina[subject_id]["questoes"].append({
-                "numero": question.number or 1,
+                "numero": test_question.order or 1,
                 "habilidade": skill_description,  # Descrição da habilidade
                 "codigo_habilidade": skill_code,  # Código da habilidade
                 "question_id": question.id  # Adicionar ID da questão para facilitar busca
@@ -1084,7 +1084,7 @@ def _gerar_tabela_detalhada_por_disciplina(avaliacao_id: str, scope_info: Dict, 
                                 logging.info(f"Aluno {student.name} ERROU a questão {question.number}")
                             
                             respostas_por_questao.append({
-                                "questao": question.number or 1,
+                                "questao": questao_numero,
                                 "acertou": acertou,
                                 "respondeu": True,
                                 "resposta": resposta_aluno.answer

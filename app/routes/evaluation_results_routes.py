@@ -759,79 +759,10 @@ def listar_avaliacoes():
             db.session.rollback()
             return jsonify({"error": "Erro ao aplicar paginação", "details": str(e)}), 500
         
-        # Gerar resultados detalhados usando estatísticas consolidadas
-        resultados_detalhados = []
-        for class_test in class_tests_paginados:
-            evaluation = class_test.test
-            
-            # Usar estatísticas consolidadas em vez de calcular individualmente
-            stats = {
-                'total_alunos': estatisticas_consolidadas['total_alunos'],
-                'alunos_participantes': estatisticas_consolidadas['alunos_participantes'],
-                'alunos_pendentes': estatisticas_consolidadas['alunos_pendentes'],
-                'alunos_ausentes': estatisticas_consolidadas['alunos_ausentes'],
-                'media_nota': estatisticas_consolidadas['media_nota_geral'],
-                'media_proficiencia': estatisticas_consolidadas['media_proficiencia_geral'],
-                'distribuicao_classificacao': estatisticas_consolidadas['distribuicao_classificacao_geral']
-            }
-            
-            # Buscar informações da escola
-            escola_nome = "N/A"
-            municipio_nome = "N/A"
-            estado_nome = "N/A"
-            if class_test.class_ and class_test.class_.school:
-                escola_nome = class_test.class_.school.name
-                if class_test.class_.school.city:
-                    municipio_nome = class_test.class_.school.city.name
-                    estado_nome = class_test.class_.school.city.state
-            
-            # Buscar informações da turma e série
-            serie_nome = "N/A"
-            grade_id = None
-            turma_nome = "N/A"
-            if class_test.class_ and class_test.class_.grade:
-                serie_nome = class_test.class_.grade.name
-                grade_id = str(class_test.class_.grade.id)
-                turma_nome = class_test.class_.name if class_test.class_.name else f"Turma {class_test.class_.id}"
-            
-            # Buscar nome do curso
-            curso_nome = "N/A"
-            if evaluation.course:
-                try:
-                    from app.models.educationStage import EducationStage
-                    import uuid
-                    course_uuid = uuid.UUID(evaluation.course)
-                    course_obj = EducationStage.query.get(course_uuid)
-                    if course_obj:
-                        curso_nome = course_obj.name
-                    else:
-                        curso_nome = "Anos Iniciais"
-                except Exception as e:
-                    logging.warning(f"Erro ao buscar curso {evaluation.course}: {str(e)}")
-                    curso_nome = "Anos Iniciais"
-            
-            result = {
-                "id": evaluation.id,
-                "titulo": evaluation.title,
-                "disciplina": evaluation.subject_rel.name if evaluation.subject_rel else 'N/A',
-                "curso": curso_nome,
-                "serie": serie_nome,
-                "turma": turma_nome,
-                "escola": escola_nome,
-                "municipio": municipio_nome,
-                "estado": estado_nome,
-                "data_aplicacao": evaluation.created_at.isoformat() if evaluation.created_at else None,
-                "status": class_test.status,
-                "total_alunos": stats['total_alunos'],
-                "alunos_participantes": stats['alunos_participantes'],
-                "alunos_pendentes": stats['alunos_pendentes'],
-                "alunos_ausentes": stats['alunos_ausentes'],
-                "media_nota": stats['media_nota'],
-                "media_proficiencia": stats['media_proficiencia'],
-                "distribuicao_classificacao": stats['distribuicao_classificacao']
-            }
-            
-            resultados_detalhados.append(result)
+        # Gerar resultados detalhados agregados por nível de granularidade
+        resultados_detalhados = _gerar_resultados_detalhados_por_granularidade(
+            class_tests_paginados, nivel_granularidade, estatisticas_consolidadas, scope_info
+        )
         
         # Calcular total de páginas
         total_pages = (total + per_page - 1) // per_page
@@ -1893,26 +1824,31 @@ def _calcular_estatisticas_por_disciplina(class_tests: list, scope_info: dict, n
 def _determinar_nivel_granularidade(estado, municipio, escola, serie, turma, avaliacao):
     """
     Determina o nível de granularidade baseado nos filtros aplicados
-    LÓGICA CORRIGIDA: Verifica do mais específico para o menos específico
+    LÓGICA CORRIGIDA: Avaliação é considerada primeiro, depois hierarquia escola > série > turma
     """
     nivel = None
     
-    # Verificar do mais específico para o menos específico
-    if turma and turma.lower() != 'all':
-        nivel = "turma"
-    elif serie and serie.lower() != 'all':
-        nivel = "serie"
-    elif escola and escola.lower() != 'all':
-        nivel = "escola"
-    elif avaliacao and avaliacao.lower() != 'all':
-        # Quando só tem avaliação específica, retorna dados do município (todas as escolas)
-        nivel = "municipio"
-    elif municipio and municipio.lower() != 'all':
-        nivel = "municipio"
-    elif estado and estado.lower() != 'all':
-        nivel = "estado"
+    # Primeiro verificar se tem avaliação específica (obrigatória para granularidade)
+    if not avaliacao or avaliacao.lower() == 'all':
+        # Sem avaliação específica, usar granularidade baseada em município/estado
+        if municipio and municipio.lower() != 'all':
+            nivel = "municipio"
+        elif estado and estado.lower() != 'all':
+            nivel = "estado"
+        else:
+            nivel = "geral"
     else:
-        nivel = "geral"
+        # Com avaliação específica, determinar granularidade baseada nos outros filtros
+        # Hierarquia: turma > série > escola > município (dentro da avaliação)
+        if turma and turma.lower() != 'all':
+            nivel = "turma"
+        elif serie and serie.lower() != 'all':
+            nivel = "serie"
+        elif escola and escola.lower() != 'all':
+            nivel = "escola"
+        else:
+            # Apenas avaliação específica = município (todas as escolas onde foi aplicada)
+            nivel = "municipio"
     
     logging.info(f"Nível de granularidade determinado: {nivel} (avaliacao={avaliacao}, turma={turma}, serie={serie}, escola={escola}, municipio={municipio}, estado={estado})")
     return nivel
@@ -5639,3 +5575,301 @@ def _calcular_ranking_global_alunos(avaliacao_id: str, scope_info: Dict, nivel_g
     except Exception as e:
         logging.error(f"Erro ao calcular ranking global dos alunos: {str(e)}", exc_info=True)
         return []
+
+
+def _gerar_resultados_detalhados_por_granularidade(class_tests_paginados, nivel_granularidade, estatisticas_consolidadas, scope_info):
+    """
+    Gera resultados detalhados agregados por nível de granularidade
+    
+    - MUNICÍPIO: Agrega por ESCOLA (todas as turmas/séries da escola)
+    - ESCOLA: Agrega por SÉRIE (todas as turmas da série)
+    - SÉRIE: Agrega por TURMA (dados específicos da turma)
+    - TURMA: Dados da turma específica
+    """
+    try:
+        from app.models.evaluationResult import EvaluationResult
+        from app.models.student import Student
+        from sqlalchemy import func
+        
+        if not class_tests_paginados:
+            return []
+        
+        # Agrupar class_tests por nível de granularidade
+        grupos = {}
+        
+        for class_test in class_tests_paginados:
+            evaluation = class_test.test
+            
+            # Determinar chave de agrupamento baseada na granularidade
+            if nivel_granularidade == "municipio":
+                # Agrupar por escola
+                if class_test.class_ and class_test.class_.school:
+                    chave = f"escola_{class_test.class_.school.id}"
+                    if chave not in grupos:
+                        grupos[chave] = {
+                            'escola': class_test.class_.school,
+                            'municipio': class_test.class_.school.city if class_test.class_.school.city else None,
+                            'class_tests': [],
+                            'evaluation': evaluation
+                        }
+                    grupos[chave]['class_tests'].append(class_test)
+                    
+            elif nivel_granularidade == "escola":
+                # Agrupar por série
+                if class_test.class_ and class_test.class_.grade:
+                    chave = f"serie_{class_test.class_.grade.id}"
+                    if chave not in grupos:
+                        grupos[chave] = {
+                            'serie': class_test.class_.grade,
+                            'escola': class_test.class_.school if class_test.class_.school else None,
+                            'municipio': class_test.class_.school.city if class_test.class_.school and class_test.class_.school.city else None,
+                            'class_tests': [],
+                            'evaluation': evaluation
+                        }
+                    grupos[chave]['class_tests'].append(class_test)
+                    
+            elif nivel_granularidade == "serie":
+                # Agrupar por turma
+                if class_test.class_:
+                    chave = f"turma_{class_test.class_.id}"
+                    if chave not in grupos:
+                        grupos[chave] = {
+                            'turma': class_test.class_,
+                            'serie': class_test.class_.grade if class_test.class_.grade else None,
+                            'escola': class_test.class_.school if class_test.class_.school else None,
+                            'municipio': class_test.class_.school.city if class_test.class_.school and class_test.class_.school.city else None,
+                            'class_tests': [class_test],
+                            'evaluation': evaluation
+                        }
+                    else:
+                        grupos[chave]['class_tests'].append(class_test)
+                        
+            elif nivel_granularidade == "turma":
+                # Dados da turma específica
+                if class_test.class_:
+                    chave = f"turma_{class_test.class_.id}"
+                    if chave not in grupos:
+                        grupos[chave] = {
+                            'turma': class_test.class_,
+                            'serie': class_test.class_.grade if class_test.class_.grade else None,
+                            'escola': class_test.class_.school if class_test.class_.school else None,
+                            'municipio': class_test.class_.school.city if class_test.class_.school and class_test.class_.school.city else None,
+                            'class_tests': [class_test],
+                            'evaluation': evaluation
+                        }
+        
+        # Gerar resultados agregados para cada grupo
+        resultados_detalhados = []
+        
+        for chave, grupo in grupos.items():
+            class_tests_grupo = grupo['class_tests']
+            evaluation = grupo['evaluation']
+            
+            # Calcular estatísticas do grupo
+            stats_grupo = _calcular_estatisticas_grupo(class_tests_grupo, evaluation)
+            
+            # Determinar informações baseadas na granularidade
+            if nivel_granularidade == "municipio":
+                escola = grupo['escola']
+                municipio = grupo['municipio']
+                
+                result = {
+                    "id": f"escola_{escola.id}",
+                    "titulo": f"{evaluation.title} - {escola.name}",
+                    "disciplina": evaluation.subject_rel.name if evaluation.subject_rel else 'N/A',
+                    "curso": _get_curso_nome(evaluation.course),
+                    "serie": "Todas as séries",
+                    "turma": "Todas as turmas",
+                    "escola": escola.name,
+                    "municipio": municipio.name if municipio else "N/A",
+                    "estado": municipio.state if municipio else "N/A",
+                    "data_aplicacao": evaluation.created_at.isoformat() if evaluation.created_at else None,
+                    "status": "consolidado",
+                    "total_alunos": stats_grupo['total_alunos'],
+                    "alunos_participantes": stats_grupo['alunos_participantes'],
+                    "alunos_pendentes": stats_grupo['alunos_pendentes'],
+                    "alunos_ausentes": stats_grupo['alunos_ausentes'],
+                    "media_nota": stats_grupo['media_nota'],
+                    "media_proficiencia": stats_grupo['media_proficiencia'],
+                    "distribuicao_classificacao": stats_grupo['distribuicao_classificacao']
+                }
+                
+            elif nivel_granularidade == "escola":
+                serie = grupo['serie']
+                escola = grupo['escola']
+                municipio = grupo['municipio']
+                
+                result = {
+                    "id": f"serie_{serie.id}",
+                    "titulo": f"{evaluation.title} - {serie.name}",
+                    "disciplina": evaluation.subject_rel.name if evaluation.subject_rel else 'N/A',
+                    "curso": _get_curso_nome(evaluation.course),
+                    "serie": serie.name,
+                    "turma": "Todas as turmas",
+                    "escola": escola.name if escola else "N/A",
+                    "municipio": municipio.name if municipio else "N/A",
+                    "estado": municipio.state if municipio else "N/A",
+                    "data_aplicacao": evaluation.created_at.isoformat() if evaluation.created_at else None,
+                    "status": "consolidado",
+                    "total_alunos": stats_grupo['total_alunos'],
+                    "alunos_participantes": stats_grupo['alunos_participantes'],
+                    "alunos_pendentes": stats_grupo['alunos_pendentes'],
+                    "alunos_ausentes": stats_grupo['alunos_ausentes'],
+                    "media_nota": stats_grupo['media_nota'],
+                    "media_proficiencia": stats_grupo['media_proficiencia'],
+                    "distribuicao_classificacao": stats_grupo['distribuicao_classificacao']
+                }
+                
+            elif nivel_granularidade in ["serie", "turma"]:
+                turma = grupo['turma']
+                serie = grupo['serie']
+                escola = grupo['escola']
+                municipio = grupo['municipio']
+                
+                result = {
+                    "id": f"turma_{turma.id}",
+                    "titulo": f"{evaluation.title} - {turma.name}",
+                    "disciplina": evaluation.subject_rel.name if evaluation.subject_rel else 'N/A',
+                    "curso": _get_curso_nome(evaluation.course),
+                    "serie": serie.name if serie else "N/A",
+                    "turma": turma.name if turma.name else f"Turma {turma.id}",
+                    "escola": escola.name if escola else "N/A",
+                    "municipio": municipio.name if municipio else "N/A",
+                    "estado": municipio.state if municipio else "N/A",
+                    "data_aplicacao": evaluation.created_at.isoformat() if evaluation.created_at else None,
+                    "status": class_tests_grupo[0].status if class_tests_grupo else "N/A",
+                    "total_alunos": stats_grupo['total_alunos'],
+                    "alunos_participantes": stats_grupo['alunos_participantes'],
+                    "alunos_pendentes": stats_grupo['alunos_pendentes'],
+                    "alunos_ausentes": stats_grupo['alunos_ausentes'],
+                    "media_nota": stats_grupo['media_nota'],
+                    "media_proficiencia": stats_grupo['media_proficiencia'],
+                    "distribuicao_classificacao": stats_grupo['distribuicao_classificacao']
+                }
+            
+            resultados_detalhados.append(result)
+        
+        return resultados_detalhados
+        
+    except Exception as e:
+        logging.error(f"Erro ao gerar resultados detalhados por granularidade: {str(e)}", exc_info=True)
+        return []
+
+
+def _calcular_estatisticas_grupo(class_tests_grupo, evaluation):
+    """
+    Calcula estatísticas consolidadas para um grupo de class_tests
+    """
+    try:
+        from app.models.evaluationResult import EvaluationResult
+        from app.models.student import Student
+        
+        if not class_tests_grupo:
+            return {
+                'total_alunos': 0,
+                'alunos_participantes': 0,
+                'alunos_pendentes': 0,
+                'alunos_ausentes': 0,
+                'media_nota': 0.0,
+                'media_proficiencia': 0.0,
+                'distribuicao_classificacao': {
+                    'abaixo_do_basico': 0,
+                    'basico': 0,
+                    'adequado': 0,
+                    'avancado': 0
+                }
+            }
+        
+        # Coletar todos os alunos das turmas do grupo
+        class_ids = [ct.class_id for ct in class_tests_grupo]
+        todos_alunos = Student.query.filter(Student.class_id.in_(class_ids)).all()
+        total_alunos = len(todos_alunos)
+        
+        # Buscar resultados da avaliação para esses alunos
+        if todos_alunos:
+            student_ids = [aluno.id for aluno in todos_alunos]
+            resultados = EvaluationResult.query.filter(
+                EvaluationResult.test_id == evaluation.id,
+                EvaluationResult.student_id.in_(student_ids)
+            ).all()
+        else:
+            resultados = []
+        
+        alunos_participantes = len(resultados)
+        alunos_pendentes = total_alunos - alunos_participantes
+        alunos_ausentes = 0  # Simplificado - pode ser calculado mais precisamente
+        
+        # Calcular médias
+        if resultados:
+            media_nota = sum(r.grade for r in resultados) / len(resultados)
+            media_proficiencia = sum(r.proficiency for r in resultados) / len(resultados)
+        else:
+            media_nota = 0.0
+            media_proficiencia = 0.0
+        
+        # Calcular distribuição de classificação
+        distribuicao = {
+            'abaixo_do_basico': 0,
+            'basico': 0,
+            'adequado': 0,
+            'avancado': 0
+        }
+        
+        for resultado in resultados:
+            if resultado.classification:
+                if resultado.classification == "Abaixo do Básico":
+                    distribuicao['abaixo_do_basico'] += 1
+                elif resultado.classification == "Básico":
+                    distribuicao['basico'] += 1
+                elif resultado.classification == "Adequado":
+                    distribuicao['adequado'] += 1
+                elif resultado.classification == "Avançado":
+                    distribuicao['avancado'] += 1
+        
+        return {
+            'total_alunos': total_alunos,
+            'alunos_participantes': alunos_participantes,
+            'alunos_pendentes': alunos_pendentes,
+            'alunos_ausentes': alunos_ausentes,
+            'media_nota': format_decimal_two_places(media_nota),
+            'media_proficiencia': format_decimal_two_places(media_proficiencia),
+            'distribuicao_classificacao': distribuicao
+        }
+        
+    except Exception as e:
+        logging.error(f"Erro ao calcular estatísticas do grupo: {str(e)}", exc_info=True)
+        return {
+            'total_alunos': 0,
+            'alunos_participantes': 0,
+            'alunos_pendentes': 0,
+            'alunos_ausentes': 0,
+            'media_nota': 0.0,
+            'media_proficiencia': 0.0,
+            'distribuicao_classificacao': {
+                'abaixo_do_basico': 0,
+                'basico': 0,
+                'adequado': 0,
+                'avancado': 0
+            }
+        }
+
+
+def _get_curso_nome(course_id):
+    """
+    Busca o nome do curso baseado no ID
+    """
+    try:
+        if not course_id:
+            return "Anos Iniciais"
+            
+        from app.models.educationStage import EducationStage
+        import uuid
+        course_uuid = uuid.UUID(course_id)
+        course_obj = EducationStage.query.get(course_uuid)
+        if course_obj:
+            return course_obj.name
+        else:
+            return "Anos Iniciais"
+    except Exception as e:
+        logging.warning(f"Erro ao buscar curso {course_id}: {str(e)}")
+        return "Anos Iniciais"

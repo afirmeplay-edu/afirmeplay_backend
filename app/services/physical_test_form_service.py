@@ -93,31 +93,30 @@ class PhysicalTestFormService:
                 'id': test.id,
                 'title': test.title,
                 'description': test.description,
-                'type': test.type
+                'type': test.type,
+                'subjects_info': test.subjects_info  # Incluir disciplinas da avaliação
             }
             
             questions_data = [self._format_question_data(q) for q in questions]
             students_data = [self._format_student_data(s) for s in students]
             
-            # Gerar apenas PDF combinado (1 arquivo com todas as provas e gabaritos)
-            combined_pdf_path = self.pdf_generator.generate_combined_test_pdf(
-                test_data, students_data, questions_data, output_dir
-            )
+            # Buscar ClassTest associado à prova
+            class_tests = ClassTest.query.filter_by(test_id=test_id).all()
+            class_test_id = class_tests[0].id if class_tests else "temp-class-test-id"
             
-            # Criar lista com apenas o PDF combinado
-            generated_files = []
-            if combined_pdf_path:
-                generated_files.append({
-                    'student_id': 'combined',
-                    'student_name': test.title,  # Usar nome da prova
-                    'pdf_path': combined_pdf_path,
-                    'answer_key_path': None,
-                    'qr_code_data': 'combined'
-                })
+            # Gerar PDFs institucionais usando InstitutionalTestPDFGenerator
+            # Este método gera a prova completa: capa, questões, imagens, alternativas e formulário
+            from app.services.institutional_test_pdf_generator import InstitutionalTestPDFGenerator
+            institutional_generator = InstitutionalTestPDFGenerator()
+            
+            # Gerar PDFs institucionais e salvar no banco
+            generated_files = institutional_generator.generate_institutional_test_pdf(
+                test_data, students_data, questions_data, class_test_id
+            )
             
             # Salvar informações no banco de dados
             saved_forms = self._save_physical_forms_to_db(
-                test_id, students, generated_files, questions
+                test_id, generated_files, questions
             )
             
             return {
@@ -149,11 +148,31 @@ class PhysicalTestFormService:
             'error': 'Método comentado. Use PhysicalTestPDFGenerator.processar_correcao_completa() diretamente.'
         }
 
-    def _get_test_questions(self, test_id: str) -> List[Question]:
-        """Busca questões da prova ordenadas"""
-        return Question.query.join(TestQuestion).filter(
-            TestQuestion.test_id == test_id
-        ).order_by(TestQuestion.order).all()
+    def _get_test_questions(self, test_id: str) -> List[Dict]:
+        """Busca questões da prova ordenadas com campo order"""
+        from app.models.question import Question
+        from app.models.testQuestion import TestQuestion
+        
+        # Buscar TestQuestions ordenadas
+        test_questions = TestQuestion.query.filter_by(test_id=test_id).order_by(TestQuestion.order).all()
+        
+        # Buscar questões correspondentes
+        question_ids = [tq.question_id for tq in test_questions]
+        questions = Question.query.filter(Question.id.in_(question_ids)).all()
+        
+        # Criar dicionário para mapear questões
+        questions_dict = {q.id: q for q in questions}
+        
+        # Retornar questões ordenadas com campo order
+        ordered_questions = []
+        for tq in test_questions:
+            if tq.question_id in questions_dict:
+                question = questions_dict[tq.question_id]
+                # Adicionar campo order ao objeto questão
+                question.order = tq.order
+                ordered_questions.append(question)
+        
+        return ordered_questions
 
     def _get_students_from_applied_tests(self, applied_tests: List[ClassTest]) -> List[Student]:
         """Busca alunos das turmas onde a prova foi aplicada"""
@@ -169,7 +188,10 @@ class PhysicalTestFormService:
             'formatted_text': question.formatted_text,
             'secondstatement': question.secondstatement,
             'alternatives': question.alternatives or [],
-            'correct_answer': question.correct_answer
+            'correct_answer': question.correct_answer,
+            'subject_id': question.subject_id,  # Incluir ID da disciplina da questão
+            'skill': question.skill,  # Incluir ID da habilidade da questão
+            'order': getattr(question, 'order', None)  # Incluir ordem da questão (campo order da TestQuestion)
         }
 
     def _format_student_data(self, student: Student) -> Dict[str, Any]:
@@ -180,30 +202,40 @@ class PhysicalTestFormService:
             'class_id': student.class_id
         }
 
-    def _save_physical_forms_to_db(self, test_id: str, students: List[Student],
-                                 generated_files: List[Dict], questions: List[Question]) -> List[Dict]:
+    def _save_physical_forms_to_db(self, test_id: str, generated_files: List[Dict], questions: List[Question]) -> List[Dict]:
         """Salva formulários físicos no banco de dados"""
         saved_forms = []
         try:
+            # Buscar ClassTest associado à prova
+            class_test = ClassTest.query.filter_by(test_id=test_id).first()
+            
+            if not class_test:
+                # Se não existe ClassTest, criar um temporário ou usar um padrão
+                print(f"⚠️ Nenhum ClassTest encontrado para a prova {test_id}")
+                # Por enquanto, vamos usar um ID temporário
+                class_test_id = "temp-class-test-id"
+            else:
+                class_test_id = class_test.id
+            
             for file_info in generated_files:
-                for student in students:
-                    # Criar registro do formulário físico
-                    physical_form = PhysicalTestForm(
-                        test_id=test_id,
-                        student_id=student.id,
-                        class_test_id=file_info.get('class_test_id'),
-                        form_pdf_url=file_info['pdf_path'],
-                        qr_code_data=student.id,
-                        status='gerado',
-                        form_type='institutional'
-                    )
-                    db.session.add(physical_form)
-                    saved_forms.append({
-                        'student_id': student.id,
-                        'student_name': student.name,
-                        'form_id': physical_form.id,
-                        'pdf_path': file_info['pdf_path']
-                    })
+                # Criar registro do formulário físico
+                physical_form = PhysicalTestForm(
+                    test_id=test_id,
+                    student_id=file_info['student_id'],
+                    class_test_id=class_test_id,
+                    form_pdf_data=file_info.get('pdf_data'),
+                    form_pdf_url=file_info.get('pdf_path', None),
+                    qr_code_data=file_info['student_id'],
+                    status='gerado',
+                    form_type='institutional'
+                )
+                db.session.add(physical_form)
+                saved_forms.append({
+                    'student_id': file_info['student_id'],
+                    'student_name': file_info['student_name'],
+                    'form_id': physical_form.id,
+                    'pdf_path': file_info.get('pdf_path', None)
+                })
             
             db.session.commit()
             return saved_forms
@@ -356,20 +388,42 @@ class PhysicalTestFormService:
             student_data = [self._format_student_data(student)]
             questions_data = [self._format_question_data(q) for q in questions]
             
-            # Gerar formulário individual
-            generated_files = self.pdf_generator.generate_individual_test_pdf(
-                test_data, student_data, questions_data, output_dir
+            # Gerar formulário individual usando InstitutionalTestPDFGenerator
+            from app.services.institutional_test_pdf_generator import InstitutionalTestPDFGenerator
+            institutional_generator = InstitutionalTestPDFGenerator()
+            
+            # Gerar formulário estilo formularios.py
+            form_image, coordinates, qr_coordinates = institutional_generator._create_formulario_style_form(
+                student_name=student.name,
+                student_id=student.id,
+                num_questoes=len(questions)
             )
             
-            if not generated_files:
-                return {
-                    'success': False,
-                    'error': 'Erro ao gerar formulário individual'
-                }
+            # Salvar imagem do formulário
+            form_filename = f"formulario_{student.id}_{test.id}.png"
+            form_path = os.path.join(output_dir, form_filename)
+            form_image.save(form_path)
+            
+            # Converter imagem para PDF
+            from io import BytesIO
+            pdf_buffer = BytesIO()
+            form_image.save(pdf_buffer, format='PDF')
+            pdf_data = pdf_buffer.getvalue()
+            
+            generated_files = [{
+                'student_id': student.id,
+                'student_name': student.name,
+                'pdf_path': form_path,
+                'pdf_data': pdf_data,
+                'answer_key_path': None,
+                'qr_code_data': qr_coordinates,
+                'coordinates': coordinates,
+                'form_image': form_image
+            }]
             
             # Salvar no banco
             saved_forms = self._save_physical_forms_to_db(
-                test_id, [student], generated_files, questions
+                test_id, generated_files, questions
             )
             
             return {

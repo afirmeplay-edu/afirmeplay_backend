@@ -363,136 +363,151 @@ class PhysicalTestPDFGenerator:
 
     def _generate_answer_sheet_reportlab(self, test_data: Dict, student: Dict, questions_data: List[Dict]) -> List:
         """
+        FUNCAO COMENTADA - NAO USAR PARA GERACAO DE FORMULARIOS
+        O sistema agora usa apenas o InstitutionalTestPDFGenerator para gerar formularios de resposta.
+        
         Gera formulário de resposta usando formularios.py e adiciona no PDF
         """
+        # FUNCAO COMENTADA - NAO USAR PARA GERACAO DE FORMULARIOS
+        # O sistema agora usa apenas o InstitutionalTestPDFGenerator para gerar formularios de resposta.
+        
+        print("AVISO: Funcao _generate_answer_sheet_reportlab esta comentada. Use InstitutionalTestPDFGenerator para gerar formularios.")
+        return []
+        
+        # ===== CODIGO ORIGINAL COMENTADO =====
+        # TODO: Todo o código abaixo está comentado pois esta função não é mais usada
+        # para geração de formulários. Use InstitutionalTestPDFGenerator em vez disso.
+        
+        # CODIGO ORIGINAL COMENTADO:
+        # try:
+        #     from reportlab.platypus import Image as RLImage, Spacer
+        #     from reportlab.lib.units import cm
+        #     import io
+        #     import sys
+        #     import os
+        #     
+        #     elements = []
+        
+        #     # Importar e usar diretamente as funções do formularios.py
+        #     sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
+        #     
+        #     from app.formularios import gerar_formulario_com_qrcode
+        
+        from app.models.student import Student
+        from app.models.user import User
+        from app.models.school import School
+        from app.models.studentClass import Class
+        from app.models.grades import Grade
+        from app.models.city import City
+        from app import db
+        
+        # Temporariamente modificar ALTERNATIVAS para 4 alternativas
+        import app.formularios as formularios_module
+        original_alternativas = formularios_module.ALTERNATIVAS
+        formularios_module.ALTERNATIVAS = ["A", "B", "C", "D"]  # Apenas 4 alternativas
+        
         try:
-            from reportlab.platypus import Image as RLImage, Spacer
-            from reportlab.lib.units import cm
-            import io
-            import sys
-            import os
+            # Dados do aluno
+            student_id = student.get('id', 'unknown')
+            student_name = student.get('nome', 'Nome não informado')
             
-            elements = []
+            # Buscar dados completos do aluno com joins
+            student_data = self._get_complete_student_data(student_id)
             
-            # Importar e usar diretamente as funções do formularios.py
-            sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
+            # Contar total de questões
+            total_questions = len(questions_data)
             
-            from app.formularios import gerar_formulario_com_qrcode
-            from app.models.student import Student
-            from app.models.user import User
-            from app.models.school import School
-            from app.models.studentClass import Class
-            from app.models.grades import Grade
-            from app.models.city import City
-            from app import db
+            # Usar tempfile para melhor gerenciamento de arquivos temporários
+            import tempfile
+            with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
+                temp_path = tmp.name
             
-            # Temporariamente modificar ALTERNATIVAS para 4 alternativas
-            import app.formularios as formularios_module
-            original_alternativas = formularios_module.ALTERNATIVAS
-            formularios_module.ALTERNATIVAS = ["A", "B", "C", "D"]  # Apenas 4 alternativas
+            # Usar a função modificada do formularios.py com dados completos
+            imagem, coordenadas_respostas, coordenadas_qr = gerar_formulario_com_qrcode(
+                student_id, 
+                student_name, 
+                total_questions, 
+                temp_path,  # Arquivo temporário
+                student_data,  # Dados completos do aluno
+                test_data  # Dados do teste
+            )
             
-            try:
-                # Dados do aluno
-                student_id = student.get('id', 'unknown')
-                student_name = student.get('nome', 'Nome não informado')
+            if imagem and coordenadas_respostas and coordenadas_qr:
+                # Converter PIL Image para BytesIO
+                img_buffer = io.BytesIO()
+                imagem.save(img_buffer, format='PNG')
+                img_buffer.seek(0)
                 
-                # Buscar dados completos do aluno com joins
-                student_data = self._get_complete_student_data(student_id)
+                # Adicionar imagem ao PDF com dimensões que garantem que caiba no frame
+                from reportlab.lib.pagesizes import A4
+                    
+                # Dimensões do frame maior (A4 - 1cm de margem para acomodar formulário alto)
+                # Frame será criado com: Frame(x1=0.5*cm, y1=0.5*cm, width=A4[0]-1*cm, height=A4[1]-1*cm)
+                frame_width = A4[0] - 1*cm   # largura = 595 - 1*28.35 = 566.65 pontos
+                frame_height = A4[1] - 1*cm  # altura = 842 - 1*28.35 = 813.65 pontos
                 
-                # Contar total de questões
-                total_questions = len(questions_data)
+                # Calcula proporção da imagem original
+                img_width, img_height = imagem.size
+                img_ratio = img_width / img_height
                 
-                # Usar tempfile para melhor gerenciamento de arquivos temporários
-                import tempfile
-                with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
-                    temp_path = tmp.name
+                # Ajusta para caber no frame maior (usando toda a largura disponível)
+                # Prioriza usar toda a largura do frame para maximizar o tamanho visual
+                largura_pdf = frame_width  # Usar toda a largura disponível (538.3 pontos)
+                altura_pdf = largura_pdf / img_ratio  # Calcular altura proporcional
                 
-                # Usar a função modificada do formularios.py com dados completos
-                imagem, coordenadas_respostas, coordenadas_qr = gerar_formulario_com_qrcode(
-                    student_id, 
-                    student_name, 
-                    total_questions, 
-                    temp_path,  # Arquivo temporário
-                    student_data,  # Dados completos do aluno
-                    test_data  # Dados do teste
-                )
+                # Se a altura exceder o frame, ajustar para caber
+                if altura_pdf > frame_height:
+                    altura_pdf = frame_height  # Usar toda a altura disponível (785.2 pontos)
+                    largura_pdf = altura_pdf * img_ratio  # Recalcular largura proporcional
                 
-                if imagem and coordenadas_respostas and coordenadas_qr:
-                    # Converter PIL Image para BytesIO
-                    img_buffer = io.BytesIO()
-                    imagem.save(img_buffer, format='PNG')
-                    img_buffer.seek(0)
-                    
-                    # Adicionar imagem ao PDF com dimensões que garantem que caiba no frame
-                    from reportlab.lib.pagesizes import A4
-                    
-                    # Dimensões do frame maior (A4 - 1cm de margem para acomodar formulário alto)
-                    # Frame será criado com: Frame(x1=0.5*cm, y1=0.5*cm, width=A4[0]-1*cm, height=A4[1]-1*cm)
-                    frame_width = A4[0] - 1*cm   # largura = 595 - 1*28.35 = 566.65 pontos
-                    frame_height = A4[1] - 1*cm  # altura = 842 - 1*28.35 = 813.65 pontos
-                    
-                    # Calcula proporção da imagem original
-                    img_width, img_height = imagem.size
-                    img_ratio = img_width / img_height
-                    
-                    # Ajusta para caber no frame maior (usando toda a largura disponível)
-                    # Prioriza usar toda a largura do frame para maximizar o tamanho visual
-                    largura_pdf = frame_width  # Usar toda a largura disponível (538.3 pontos)
-                    altura_pdf = largura_pdf / img_ratio  # Calcular altura proporcional
-                    
-                    # Se a altura exceder o frame, ajustar para caber
-                    if altura_pdf > frame_height:
-                        altura_pdf = frame_height  # Usar toda a altura disponível (785.2 pontos)
-                        largura_pdf = altura_pdf * img_ratio  # Recalcular largura proporcional
-                    
-                    # Debug: verificar dimensões calculadas
-                    logging.info(f"Imagem original: {img_width}x{img_height} pixels")
-                    logging.info(f"Proporção da imagem: {img_ratio:.3f}")
-                    logging.info(f"Frame disponível: {frame_width:.1f}x{frame_height:.1f} pontos")
-                    logging.info(f"Dimensões finais: {largura_pdf:.1f}x{altura_pdf:.1f} pontos")
-                    logging.info(f"Margem de segurança: {frame_width - largura_pdf:.1f}x{frame_height - altura_pdf:.1f} pontos")
-                    
-                    # Calcular espaçamento para centralizar verticalmente e horizontalmente na página A4
-                    from reportlab.platypus import KeepTogether
-                    
-                    altura_pagina = A4[1]  # Altura da página A4 em pontos
-                    largura_pagina = A4[0]  # Largura da página A4 em pontos
-                    
-                    # largura_pdf e altura_pdf já estão em pontos (cm * 28.35)
-                    altura_pdf_pontos = altura_pdf
-                    largura_pdf_pontos = largura_pdf
-                    
-                    # Posicionamento próximo ao label "CARTÃO-RESPOSTA" (reduzido espaçamento)
-                    espaco_superior = 10  # Espaçamento mínimo entre label e formulário
-                    espaco_esquerdo = max((frame_width - largura_pdf) / 2, 0)
-                    
-                    # Criar imagem flowable
-                    img_flowable = RLImage(img_buffer, width=largura_pdf, height=altura_pdf)
-                    
-                    # Aplicar deslocamento vertical e horizontal
-                    elements.append(Spacer(1, espaco_superior))
-                    elements.append(KeepTogether([Spacer(espaco_esquerdo, 1), img_flowable]))
-                    elements.append(Spacer(1, 20))
-                    
-                    # Limpar arquivo temporário
-                    if os.path.exists(temp_path):
-                        os.remove(temp_path)
-                else:
-                    logging.error("Falha ao gerar formulário usando formularios.py")
+                # Debug: verificar dimensões calculadas
+                logging.info(f"Imagem original: {img_width}x{img_height} pixels")
+                logging.info(f"Proporção da imagem: {img_ratio:.3f}")
+                logging.info(f"Frame disponível: {frame_width:.1f}x{frame_height:.1f} pontos")
+                logging.info(f"Dimensões finais: {largura_pdf:.1f}x{altura_pdf:.1f} pontos")
+                logging.info(f"Margem de segurança: {frame_width - largura_pdf:.1f}x{frame_height - altura_pdf:.1f} pontos")
                 
-            finally:
-                # Restaurar ALTERNATIVAS original
-                formularios_module.ALTERNATIVAS = original_alternativas
+                # Calcular espaçamento para centralizar verticalmente e horizontalmente na página A4
+                from reportlab.platypus import KeepTogether
                 
-                # Garantir limpeza do arquivo temporário mesmo em caso de erro
-                if 'temp_path' in locals() and os.path.exists(temp_path):
+                altura_pagina = A4[1]  # Altura da página A4 em pontos
+                largura_pagina = A4[0]  # Largura da página A4 em pontos
+                
+                # largura_pdf e altura_pdf já estão em pontos (cm * 28.35)
+                altura_pdf_pontos = altura_pdf
+                largura_pdf_pontos = largura_pdf
+                
+                # Posicionamento próximo ao label "CARTÃO-RESPOSTA" (reduzido espaçamento)
+                espaco_superior = 10  # Espaçamento mínimo entre label e formulário
+                espaco_esquerdo = max((frame_width - largura_pdf) / 2, 0)
+                
+                # Criar imagem flowable
+                img_flowable = RLImage(img_buffer, width=largura_pdf, height=altura_pdf)
+                
+                # Aplicar deslocamento vertical e horizontal
+                elements.append(Spacer(1, espaco_superior))
+                elements.append(KeepTogether([Spacer(espaco_esquerdo, 1), img_flowable]))
+                elements.append(Spacer(1, 20))
+                
+                # Limpar arquivo temporário
+                if os.path.exists(temp_path):
                     os.remove(temp_path)
+            else:
+                logging.error("Falha ao gerar formulário usando formularios.py")
                 
-            return elements
+        finally:
+            # Restaurar ALTERNATIVAS original
+            formularios_module.ALTERNATIVAS = original_alternativas
             
-        except Exception as e:
-            logging.error(f"Erro ao gerar formulário usando formularios.py: {str(e)}")
-            return []
+            # Garantir limpeza do arquivo temporário mesmo em caso de erro
+            if 'temp_path' in locals() and os.path.exists(temp_path):
+                os.remove(temp_path)
+            
+            return elements
+        
+    # except Exception as e:
+    #     logging.error(f"Erro ao gerar formulário usando formularios.py: {str(e)}")
+    #     return []
     
     def _get_complete_student_data(self, student_id: str) -> Dict:
         """
@@ -5749,7 +5764,7 @@ class PhysicalTestPDFGenerator:
                                 continue
                 else:
                     print(f"  ❌ Nenhum QR code encontrado com {name}")
-            return None
+                return None
         except Exception as e:
             print(f"❌ Erro no pré-processamento: {str(e)}")
             return None
@@ -7468,6 +7483,71 @@ class PhysicalTestPDFGenerator:
             traceback.print_exc()
             return {"success": False, "error": str(e)}
     
+    def _create_formulario_style_form(self, student_name: str, student_id: str, num_questoes: int) -> tuple:
+        """
+        FUNCAO COMENTADA - NAO USAR PARA GERACAO DE FORMULARIOS
+        O sistema agora usa apenas o InstitutionalTestPDFGenerator para gerar formularios de resposta.
+        Esta funcao e mantida apenas para compatibilidade com funcoes de correcao.
+        
+        Cria formulário usando EXATAMENTE o formularios.py
+        Retorna: (imagem_pil, coordenadas_respostas, coordenadas_qr)
+        """
+        # FUNCAO COMENTADA - NAO USAR PARA GERACAO DE FORMULARIOS
+        # O sistema agora usa apenas o InstitutionalTestPDFGenerator para gerar formularios de resposta.
+        # Esta funcao e mantida apenas para compatibilidade com funcoes de correcao.
+        
+        print("AVISO: Funcao _create_formulario_style_form esta comentada. Use InstitutionalTestPDFGenerator para gerar formularios.")
+        return None, None, None
+        
+        # CODIGO ORIGINAL COMENTADO:
+        # try:
+        #     print(f"Criando formulario estilo formularios.py para {student_name}")
+        #     
+        #     # Importar e usar diretamente as funções do formularios.py
+        #     import sys
+        #     import os
+        #     sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
+        #     
+        #     from app.formularios import gerar_formulario_com_qrcode
+        #     
+        #     # Temporariamente modificar ALTERNATIVAS para 4 alternativas
+        #     import app.formularios as formularios_module
+        #     original_alternativas = formularios_module.ALTERNATIVAS
+        #     formularios_module.ALTERNATIVAS = ["A", "B", "C", "D"]  # Apenas 4 alternativas
+        #     
+        #     try:
+        #         # Usar tempfile para melhor gerenciamento de arquivos temporários
+        #         import tempfile
+        #         with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
+        #             temp_path = tmp.name
+        #         
+        #         # Usar a função original do formularios.py
+        #         imagem, coordenadas_respostas, coordenadas_qr = gerar_formulario_com_qrcode(
+        #             student_id, 
+        #             student_name, 
+        #             num_questoes, 
+        #             temp_path  # Arquivo temporário
+        #         )
+        #         
+        #         # Limpar arquivo temporário
+        #         if os.path.exists(temp_path):
+        #             os.remove(temp_path)
+        #         
+        #         if imagem and coordenadas_respostas and coordenadas_qr:
+        #             print(f"Formulário gerado com sucesso para {student_name}")
+        #             return imagem, coordenadas_respostas, coordenadas_qr
+        #         else:
+        #             print(f"Erro ao gerar formulário para {student_name}")
+        #             return None, None, None
+        #         
+        #     finally:
+        #         # Restaurar ALTERNATIVAS original
+        #         formularios_module.ALTERNATIVAS = original_alternativas
+        #     
+        # except Exception as e:
+        #     print(f"ERRO ao criar formulario usando formularios.py: {str(e)}")
+        #     return None, None, None
+
     def _gerar_formulario_base_simples(self, test_id: str, student_id: str, output_dir: str) -> str:
         """
         Gera formulário base simples para preenchimento

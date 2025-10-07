@@ -11,8 +11,10 @@ from app.models.student import Student
 from app.models.user import User
 from app.models.evaluationResult import EvaluationResult
 from app.models.physicalTestForm import PhysicalTestForm
+from app.models.classTest import ClassTest
 from app.services.physical_test_pdf_generator import PhysicalTestPDFGenerator
 from app.services.physical_test_form_service import PhysicalTestFormService
+import tempfile
 from app.services.batch_correction_service import batch_correction_service
 import logging
 import base64
@@ -39,7 +41,7 @@ def get_current_user_from_token():
             'role': user.role
         }
     except Exception as e:
-        logging.error(f"Erro ao extrair usuário do token: {str(e)}")
+        print(f"❌ Erro ao extrair usuário do token: {str(e)}")
         return None
 
 # ============================================================================
@@ -51,53 +53,309 @@ def get_current_user_from_token():
 @role_required("admin", "professor", "coordenador", "diretor")
 def generate_physical_forms(test_id):
     """
-    Gera formulários físicos para uma prova específica
+    Gera PDFs institucionais para uma prova específica (formato das imagens fornecidas)
+    
+    Body:
+        - output_dir (opcional): Diretório para salvar os PDFs
+        - logo_data (opcional): Dados do logo (base64 ou URL)
+        - force_regenerate (opcional): Forçar regeneração de formulários existentes (padrão: false)
+    
+    Returns:
+        - Lista de PDFs institucionais gerados
+        - URLs dos PDFs
+        - Informações dos alunos
     """
     try:
         user = get_current_user_from_token()
         if not user:
             return jsonify({"error": "User not found or token invalid"}), 401
         
-        # Buscar prova
+        # Verificar se a prova existe
         test = Test.query.get(test_id)
         if not test:
-            return jsonify({"error": f"Prova não encontrada: {test_id}"}), 404
+            return jsonify({"error": "Prova não encontrada"}), 404
         
-        # Verificar permissões
+        # Verificar permissões do professor
         if user['role'] == 'professor' and test.created_by != user['id']:
-            return jsonify({"error": "Você só pode gerar formulários de suas próprias provas"}), 403
+            return jsonify({"error": "Você só pode gerar PDFs institucionais para suas próprias provas"}), 403
         
         # Obter dados da requisição
-        data = request.get_json()
-        if not data:
-            return jsonify({"error": "Dados não fornecidos"}), 400
+        try:
+            data = request.get_json() or {}
+        except:
+            data = {}
+        logo_data = data.get('logo_data')  # Logo será implementado posteriormente
+        force_regenerate = data.get('force_regenerate', False)  # Forçar regeneração de formulários existentes
         
-        # Validar dados obrigatórios
-        required_fields = ['students']
-        for field in required_fields:
-            if field not in data:
-                return jsonify({"error": f"Campo '{field}' é obrigatório"}), 400
+        # Buscar questões da prova
+        from app.models.testQuestion import TestQuestion
+        from app.models.question import Question
+        from app.models.subject import Subject
         
-        students = data['students']
-        if not isinstance(students, list) or len(students) == 0:
-            return jsonify({"error": "Lista de alunos deve ser um array não vazio"}), 400
+        test_question_ids = [tq.question_id for tq in TestQuestion.query.filter_by(test_id=test_id).order_by(TestQuestion.order).all()]
+        questions = Question.query.filter(Question.id.in_(test_question_ids)).all() if test_question_ids else []
         
-        # Gerar formulários
-        pdf_generator = PhysicalTestPDFGenerator()
-        result = pdf_generator.gerar_formularios_adaptativos(test_id, students)
+        if not questions:
+            return jsonify({"error": "Nenhuma questão encontrada para esta prova"}), 400
         
-        if result['success']:
-            return jsonify({
-                "message": "Formulários gerados com sucesso",
-                "test_id": test_id,
-                "total_forms": len(students),
-                "forms": result['forms']
-            }), 200
-        else:
-            return jsonify({"error": result['error']}), 500
+        # Buscar alunos das turmas que aplicaram a prova
+        from app.models.student import Student
+        from app.models.studentClass import Class
+        
+        class_tests = ClassTest.query.filter_by(test_id=test_id).all()
+        if not class_tests:
+            return jsonify({"error": "A prova não foi aplicada em nenhuma turma"}), 400
+        
+        class_ids = [ct.class_id for ct in class_tests]
+        students = Student.query.filter(Student.class_id.in_(class_ids)).all()
+        
+        if not students:
+            return jsonify({"error": "Nenhum aluno encontrado nas turmas que aplicaram a prova"}), 400
+        
+        # Buscar dados dinâmicos das tabelas
+        education_stage_name = None
+        course_name = None
+        
+        # Buscar education_stage através do grade
+        if test.grade and test.grade.education_stage_id:
+            from app.models.educationStage import EducationStage
+            education_stage = EducationStage.query.get(test.grade.education_stage_id)
+            if education_stage:
+                education_stage_name = education_stage.name
+        
+        # Buscar course (se for um ID de education_stage)
+        if test.course:
+            from app.models.educationStage import EducationStage
+            course = EducationStage.query.get(test.course)
+            if course:
+                course_name = course.name
+        
+        # Preparar dados para o gerador
+        test_data = {
+            'id': test.id,
+            'title': test.title,
+            'description': test.description,
+            'course': test.course,
+            'course_name': course_name,
+            'education_stage_id': test.grade.education_stage_id if test.grade else None,
+            'education_stage_name': education_stage_name,
+            'grade_name': test.grade.name if test.grade else '9° ANO'
+        }
+        
+        students_data = []
+        for student in students:
+            students_data.append({
+                'id': student.id,
+                'nome': student.name
+            })
+        
+        questions_data = []
+        for question in questions:
+            # Buscar disciplina da questão
+            subject = Subject.query.get(question.subject_id) if question.subject_id else None
+            
+            # Buscar código da habilidade
+            skill_code = None
+            if question.skill:
+                from app.models.skill import Skill
+                skill = Skill.query.get(question.skill)
+                if skill:
+                    skill_code = skill.code
+            
+            # Extrair IDs das alternativas
+            alternative_ids = []
+            if question.alternatives:
+                try:
+                    import json
+                    alternatives_json = json.loads(question.alternatives) if isinstance(question.alternatives, str) else question.alternatives
+                    alternative_ids = [alt.get('id', '') for alt in alternatives_json if alt.get('id')]
+                except:
+                    alternative_ids = []
+            
+            question_data = {
+                'id': question.id,
+                'title': question.title,
+                'text': question.text,
+                'formatted_text': question.formatted_text,
+                'secondstatement': question.secondstatement,
+                'alternatives': question.alternatives or [],
+                'alternative_ids': alternative_ids,  # IDs das alternativas para o formulário
+                'skills': [skill_code] if skill_code else [],
+                'subject': {
+                    'id': subject.id,
+                    'name': subject.name
+                } if subject else None
+            }
+            questions_data.append(question_data)
+        
+        # Obter class_test_id (usar o primeiro se houver múltiplos)
+        class_test_id = class_tests[0].id if class_tests else None
+        
+        # Usar PhysicalTestFormService para gerar formulários
+        print(f"GERANDO FORMULARIOS PARA {len(students_data)} ALUNOS...")
+        
+        form_service = PhysicalTestFormService()
+        
+        # Gerar formulários usando o serviço
+        with tempfile.TemporaryDirectory() as temp_dir:
+            result = form_service.generate_physical_forms(
+                test_id=test_id,
+                output_dir=temp_dir
+            )
+            
+            if result.get('success'):
+                print(f"SUCESSO: {result.get('generated_forms', 0)} formularios gerados")
+                
+                # Buscar formulários gerados para retornar
+                forms = form_service.get_physical_forms_by_test(test_id)
+                formularios_gerados = []
+                
+                for form in forms:
+                    formularios_gerados.append({
+                        'student_id': form['student_id'],
+                        'student_name': form['student_name'],
+                        'form_id': form['id'],
+                        'form_type': form['form_type'],
+                        'created_at': form['generated_at']
+                    })
+                
+                return jsonify({
+                    "message": f"Formulários gerados com sucesso para {len(formularios_gerados)} alunos",
+                    "test_id": test_id,
+                    "test_title": test.title,
+                    "total_questions": len(questions_data),
+                    "total_students": len(students_data),
+                    "generated_forms": len(formularios_gerados),
+                    "forms": formularios_gerados
+                }), 200
+            else:
+                print(f"ERRO: {result.get('error')}")
+                return jsonify({"error": result.get('error', 'Erro ao gerar formulários')}), 500
         
     except Exception as e:
-        logging.error(f"Erro ao gerar formulários: {str(e)}")
+        print(f"❌ Erro ao gerar formulários: {str(e)}")
+        return jsonify({"error": "Erro interno do servidor"}), 500
+
+# ============================================================================
+# ROTA DE GERAÇÃO INDIVIDUAL
+# ============================================================================
+
+@bp.route('/test/<string:test_id>/student/<string:student_id>/generate', methods=['POST'])
+@jwt_required()
+@role_required("admin", "professor", "coordenador", "diretor")
+def generate_individual_physical_form(test_id, student_id):
+    """
+    Gera formulário físico individual para um aluno específico
+    
+    Body:
+        - output_dir (opcional): Diretório para salvar o PDF
+    
+    Returns:
+        - Formulário físico individual gerado
+        - URL do PDF
+        - Informações do aluno
+    """
+    try:
+        user = get_current_user_from_token()
+        if not user:
+            return jsonify({"error": "User not found or token invalid"}), 401
+        
+        # Verificar se a prova existe
+        test = Test.query.get(test_id)
+        if not test:
+            return jsonify({"error": "Prova não encontrada"}), 404
+        
+        # Verificar se o aluno existe
+        student = Student.query.get(student_id)
+        if not student:
+            return jsonify({"error": "Aluno não encontrado"}), 404
+        
+        # Verificar permissões do professor
+        if user['role'] == 'professor' and test.created_by != user['id']:
+            return jsonify({"error": "Você só pode gerar formulários para suas próprias provas"}), 403
+        
+        # Verificar se o aluno pertence a uma turma que aplicou a prova
+        class_tests = ClassTest.query.filter_by(test_id=test_id).all()
+        if not class_tests:
+            return jsonify({"error": "A prova não foi aplicada em nenhuma turma"}), 400
+        
+        class_ids = [ct.class_id for ct in class_tests]
+        if student.class_id not in class_ids:
+            return jsonify({"error": "O aluno não pertence a uma turma que aplicou esta prova"}), 400
+        
+        # Buscar questões da prova
+        from app.models.testQuestion import TestQuestion
+        from app.models.question import Question
+        from app.models.subject import Subject
+        
+        test_question_ids = [tq.question_id for tq in TestQuestion.query.filter_by(test_id=test_id).order_by(TestQuestion.order).all()]
+        questions = Question.query.filter(Question.id.in_(test_question_ids)).all() if test_question_ids else []
+        
+        if not questions:
+            return jsonify({"error": "Nenhuma questão encontrada para esta prova"}), 400
+        
+        # Preparar dados para o gerador
+        test_data = {
+            'id': test.id,
+            'title': test.title,
+            'description': test.description,
+            'grade_name': test.grade.name if test.grade else '9° ANO'
+        }
+        
+        student_data = {
+            'id': student.id,
+            'nome': student.name
+        }
+        
+        questions_data = []
+        for question in questions:
+            # Buscar disciplina da questão
+            subject = Subject.query.get(question.subject_id) if question.subject_id else None
+            
+            question_data = {
+                'id': question.id,
+                'title': question.title,
+                'text': question.text,
+                'formatted_text': question.formatted_text,
+                'alternatives': question.alternatives or [],
+                'subject': {
+                    'id': subject.id,
+                    'name': subject.name
+                } if subject else None
+            }
+            questions_data.append(question_data)
+        
+        # Obter class_test_id (usar o primeiro se houver múltiplos)
+        class_test_id = class_tests[0].id if class_tests else None
+        
+        # Usar PhysicalTestFormService para gerar formulário individual
+        form_service = PhysicalTestFormService()
+        
+        # Preparar dados
+        students_data = [{'id': student.id, 'nome': student.name}]
+        
+        with tempfile.TemporaryDirectory() as temp_dir:
+            result = form_service.generate_individual_physical_form(
+                test_id=test_id,
+                student_id=student_id,
+                output_dir=temp_dir
+            )
+            
+            if result.get('success'):
+                return jsonify({
+                    "message": "Formulário individual gerado com sucesso",
+                "test_id": test_id,
+                    "student_id": student_id,
+                    "student_name": student.name,
+                    "form_id": result.get('form_id'),
+                    "total_questions": len(questions_data),
+                    "form_type": "formularios_style"
+            }), 200
+            else:
+                return jsonify({"error": result.get('error', 'Erro ao gerar formulário individual')}), 500
+        
+    except Exception as e:
+        print(f"❌ Erro ao gerar formulário individual: {str(e)}")
         return jsonify({"error": "Erro interno do servidor"}), 500
 
 # ============================================================================
@@ -157,42 +415,35 @@ def process_physical_correction(test_id):
         if not image_data:
             return jsonify({"error": "Imagem não fornecida"}), 400
         
-        # Processar correção
-        pdf_generator = PhysicalTestPDFGenerator()
+        # Usar PhysicalTestFormService para processar correção
+        form_service = PhysicalTestFormService()
         
-        # Converter image_data para base64 string se necessário
-        if isinstance(image_data, bytes):
-            image_base64 = base64.b64encode(image_data).decode('utf-8')
-            image_data_str = f"data:image/jpeg;base64,{image_base64}"
-        else:
-            image_data_str = image_data
-        
-        # Usar função de correção por gabarito de referência
-        result = pdf_generator.processar_correcao_por_gabarito(test_id, image_data_str)
+        result = form_service.process_physical_correction(
+            test_id=test_id,
+            image_data=image_data,
+            correction_image_url=None
+        )
         
         if result.get('success'):
-            # Preparar dados de resposta
-            response_data = {
+            return jsonify({
                 "message": "Correção processada com sucesso",
-                "student_id": result['student_id'],
-                "test_id": result['test_id'],
-                "correct_answers": result['correct_answers'],
-                "total_questions": result['total_questions'],
-                "score_percentage": result['score_percentage'],
-                "grade": result['grade'],
-                "proficiency": result['proficiency'],
-                "classification": result['classification'],
-                "answers_detected": result['answers_detected'],
-                "student_answers": result['student_answers'],
+                "student_id": result.get('student_id'),
+                "test_id": test_id,
+                "correct_answers": result.get('correct_answers'),
+                "total_questions": result.get('total_questions'),
+                "score_percentage": result.get('score_percentage'),
+                "grade": result.get('grade'),
+                "proficiency": result.get('proficiency'),
+                "classification": result.get('classification'),
+                "answers_detected": result.get('answers_detected'),
+                "student_answers": result.get('student_answers'),
                 "evaluation_result_id": result.get('evaluation_result_id')
-            }
-            
-            return jsonify(response_data), 200
+            }), 200
         else:
             return jsonify({"error": result.get('error', 'Erro desconhecido na correção')}), 500
         
     except Exception as e:
-        logging.error(f"Erro ao processar correção: {str(e)}")
+        print(f"❌ Erro ao processar correção: {str(e)}")
         return jsonify({"error": "Erro interno do servidor"}), 500
 
 # ============================================================================
@@ -283,7 +534,7 @@ def batch_process_correction(test_id):
         }), 200
         
     except Exception as e:
-        logging.error(f"Erro ao processar correção em lote: {str(e)}")
+        print(f"❌ Erro ao processar correção em lote: {str(e)}")
         return jsonify({"error": "Erro interno do servidor"}), 500
 
 # ============================================================================
@@ -329,7 +580,7 @@ def list_physical_forms():
         }), 200
         
     except Exception as e:
-        logging.error(f"Erro ao listar formulários: {str(e)}")
+        print(f"❌ Erro ao listar formulários: {str(e)}")
         return jsonify({"error": "Erro interno do servidor"}), 500
 
 @bp.route('/forms/<string:form_id>', methods=['GET'])
@@ -356,5 +607,331 @@ def get_physical_form(form_id):
         }), 200
         
     except Exception as e:
-        logging.error(f"Erro ao obter formulário: {str(e)}")
+        print(f"❌ Erro ao obter formulário: {str(e)}")
+        return jsonify({"error": "Erro interno do servidor"}), 500
+
+@bp.route('/test/<string:test_id>/status', methods=['GET'])
+@jwt_required()
+@role_required("admin", "professor", "coordenador", "diretor")
+def get_physical_test_status(test_id):
+    """
+    Verifica status de aplicação da prova para formulários físicos
+    
+    Returns:
+        - Status da aplicação
+        - Informações sobre turmas aplicadas
+    """
+    try:
+        user = get_current_user_from_token()
+        if not user:
+            return jsonify({"error": "User not found or token invalid"}), 401
+        
+        # Verificar se a prova existe
+        test = Test.query.get(test_id)
+        if not test:
+            return jsonify({"error": "Prova não encontrada"}), 404
+        
+        # Verificar permissões do professor
+        if user['role'] == 'professor' and test.created_by != user['id']:
+            return jsonify({"error": "Você só pode ver status de suas próprias provas"}), 403
+        
+        # Buscar aplicações da prova
+        class_tests = ClassTest.query.filter_by(test_id=test_id).all()
+        
+        if not class_tests:
+            return jsonify({
+                "can_generate_forms": False,
+                "reason": "A prova não foi aplicada em nenhuma turma",
+                "class_tests": []
+            }), 200
+        
+        # Para formulários físicos, consideramos aplicada se existe class_test
+        # O status 'agendada' indica que a prova foi aplicada e está disponível
+        applied_tests = class_tests
+        
+        can_generate = len(applied_tests) > 0
+        
+        class_tests_info = []
+        for ct in class_tests:
+            class_tests_info.append({
+                "id": ct.id,
+                "class_id": ct.class_id,
+                "status": ct.status,
+                "application": ct.application,
+                "expiration": ct.expiration
+            })
+        
+        return jsonify({
+            "can_generate_forms": can_generate,
+            "reason": "A prova foi aplicada" if can_generate else "A prova precisa ser aplicada primeiro",
+            "class_tests": class_tests_info,
+            "total_applications": len(class_tests),
+            "applied_applications": len(applied_tests)
+        }), 200
+        
+    except Exception as e:
+        print(f"❌ Erro ao verificar status da prova: {str(e)}")
+        return jsonify({"error": "Erro interno do servidor"}), 500
+
+@bp.route('/test/<string:test_id>/forms', methods=['GET'])
+@jwt_required()
+@role_required("admin", "professor", "coordenador", "diretor")
+def get_physical_forms(test_id):
+    """
+    Lista formulários físicos de uma prova
+    
+    Por padrão, retorna TODOS os formulários físicos da prova, incluindo:
+    - Formulários combinados (PDF único com todas as provas)
+    - Formulários individuais (um PDF por aluno)
+    
+    Query params:
+        - student_id (opcional): Filtrar por aluno específico
+    
+    Returns:
+        - Lista de formulários físicos (todos ou filtrados por aluno)
+    """
+    try:
+        user = get_current_user_from_token()
+        if not user:
+            return jsonify({"error": "User not found or token invalid"}), 401
+        
+        # Verificar se a prova existe
+        test = Test.query.get(test_id)
+        if not test:
+            return jsonify({"error": "Prova não encontrada"}), 404
+        
+        # Verificar permissões do professor
+        if user['role'] == 'professor' and test.created_by != user['id']:
+            return jsonify({"error": "Você só pode ver formulários de suas próprias provas"}), 403
+        
+        # Filtrar por aluno se especificado
+        student_id = request.args.get('student_id')
+        
+        if student_id:
+            # Buscar formulário específico do aluno
+            form = PhysicalTestForm.query.filter_by(
+                test_id=test_id,
+                student_id=student_id
+            ).first()
+            
+            if form:
+                return jsonify({
+                    "form": form.to_dict()
+                }), 200
+            else:
+                return jsonify({"error": "Formulário não encontrado para este aluno"}), 404
+        else:
+            # Usar PhysicalTestFormService para buscar formulários
+            form_service = PhysicalTestFormService()
+            forms = form_service.get_physical_forms_by_test(test_id)
+            
+            # forms já é uma lista de dicionários, não precisa chamar .to_dict()
+            return jsonify({
+                "forms": forms,
+                "total": len(forms)
+            }), 200
+            
+    except Exception as e:
+        print(f"❌ Erro ao buscar formulários físicos: {str(e)}")
+        return jsonify({"error": "Erro interno do servidor"}), 500
+
+@bp.route('/test/<string:test_id>/download/<string:form_id>', methods=['GET'])
+@jwt_required()
+@role_required("admin", "professor", "coordenador", "diretor")
+def download_physical_form(test_id, form_id):
+    """
+    Download de formulário físico específico
+    
+    Returns:
+        - Arquivo PDF do formulário
+    """
+    try:
+        user = get_current_user_from_token()
+        if not user:
+            return jsonify({"error": "User not found or token invalid"}), 401
+        
+        # Buscar formulário
+        form = PhysicalTestForm.query.filter_by(
+            id=form_id,
+            test_id=test_id
+        ).first()
+        
+        if not form:
+            return jsonify({"error": "Formulário não encontrado"}), 404
+        
+        # Verificar permissões
+        test = Test.query.get(test_id)
+        if user['role'] == 'professor' and test.created_by != user['id']:
+            return jsonify({"error": "Você não tem permissão para baixar este formulário"}), 403
+        
+        # Verificar se PDF existe no banco
+        if not form.form_pdf_data:
+            return jsonify({"error": "Arquivo PDF não encontrado no banco de dados"}), 404
+        
+        # Criar arquivo temporário em memória
+        from io import BytesIO
+        pdf_buffer = BytesIO(form.form_pdf_data)
+        pdf_buffer.seek(0)
+        
+        # Enviar arquivo do banco
+        return send_file(
+            pdf_buffer,
+            as_attachment=True,
+            download_name=f"prova_{test_id}_{form.student_id}.pdf",
+            mimetype='application/pdf'
+        )
+        
+    except Exception as e:
+        print(f"❌ Erro ao baixar formulário físico: {str(e)}")
+        return jsonify({"error": "Erro interno do servidor"}), 500
+
+@bp.route('/test/<string:test_id>/download-all', methods=['GET'])
+@jwt_required()
+@role_required("admin", "professor", "coordenador", "diretor")
+def download_all_physical_forms(test_id):
+    """
+    Download de todos os formulários físicos de uma prova em um arquivo ZIP
+    
+    Returns:
+        - Arquivo ZIP contendo todos os PDFs dos alunos
+    """
+    try:
+        import zipfile
+        from io import BytesIO
+        
+        user = get_current_user_from_token()
+        if not user:
+            return jsonify({"error": "User not found or token invalid"}), 401
+        
+        # Verificar se a prova existe
+        test = Test.query.get(test_id)
+        if not test:
+            return jsonify({"error": "Prova não encontrada"}), 404
+        
+        # Verificar permissões do professor
+        if user['role'] == 'professor' and test.created_by != user['id']:
+            return jsonify({"error": "Você não tem permissão para baixar formulários desta prova"}), 403
+        
+        # Buscar todos os formulários da prova
+        forms = PhysicalTestForm.query.filter_by(test_id=test_id).all()
+        
+        if not forms:
+            return jsonify({"error": "Nenhum formulário encontrado para esta prova"}), 404
+        
+        # Criar ZIP em memória
+        zip_buffer = BytesIO()
+        
+        with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
+            for form in forms:
+                if form.form_pdf_data:
+                    filename = f"prova_{test_id}_{form.student_id}.pdf"
+                    zip_file.writestr(filename, form.form_pdf_data)
+        
+        zip_buffer.seek(0)
+        
+        return send_file(
+            zip_buffer,
+            as_attachment=True,
+            download_name=f"provas_fisicas_{test_id}.zip",
+            mimetype='application/zip'
+        )
+        
+    except Exception as e:
+        print(f"❌ Erro ao baixar formulários físicos: {str(e)}")
+        return jsonify({"error": "Erro interno do servidor"}), 500
+
+# ============================================================================
+# ROTAS DE EXCLUSÃO
+# ============================================================================
+
+@bp.route('/form/<string:form_id>', methods=['DELETE'])
+@jwt_required()
+@role_required("admin", "professor", "coordenador", "diretor")
+def delete_physical_form(form_id):
+    """
+    Exclui um formulário físico específico
+    
+    Returns:
+        - Confirmação de exclusão
+    """
+    try:
+        user = get_current_user_from_token()
+        if not user:
+            return jsonify({"error": "User not found or token invalid"}), 401
+        
+        # Buscar formulário
+        form = PhysicalTestForm.query.get(form_id)
+        if not form:
+            return jsonify({"error": "Formulário não encontrado"}), 404
+        
+        # Verificar permissões
+        test = Test.query.get(form.test_id)
+        if user['role'] == 'professor' and test.created_by != user['id']:
+            return jsonify({"error": "Você não tem permissão para excluir este formulário"}), 403
+        
+        # Usar PhysicalTestFormService para excluir formulário
+        form_service = PhysicalTestFormService()
+        result = form_service.delete_physical_form(form_id)
+        
+        if result.get('success'):
+            return jsonify({
+                "message": "Formulário excluído com sucesso",
+                "form_id": form_id
+            }), 200
+        else:
+            return jsonify({"error": result.get('error', 'Erro ao excluir formulário')}), 500
+        
+    except Exception as e:
+        print(f"❌ Erro ao excluir formulário: {str(e)}")
+        return jsonify({"error": "Erro interno do servidor"}), 500
+
+@bp.route('/test/<string:test_id>/forms', methods=['DELETE'])
+@jwt_required()
+@role_required("admin", "professor", "coordenador", "diretor")
+def delete_all_physical_forms_by_test(test_id):
+    """
+    Exclui todos os formulários físicos de uma prova
+    
+    Returns:
+        - Confirmação de exclusão
+        - Número de formulários excluídos
+    """
+    try:
+        user = get_current_user_from_token()
+        if not user:
+            return jsonify({"error": "User not found or token invalid"}), 401
+        
+        # Verificar se a prova existe
+        test = Test.query.get(test_id)
+        if not test:
+            return jsonify({"error": "Prova não encontrada"}), 404
+        
+        # Verificar permissões
+        if user['role'] == 'professor' and test.created_by != user['id']:
+            return jsonify({"error": "Você não tem permissão para excluir formulários desta prova"}), 403
+        
+        # Buscar todos os formulários da prova
+        forms = PhysicalTestForm.query.filter_by(test_id=test_id).all()
+        
+        if not forms:
+            return jsonify({
+                "message": "Nenhum formulário encontrado para esta prova",
+                "deleted_count": 0
+            }), 200
+        
+        # Usar PhysicalTestFormService para excluir todos os formulários
+        form_service = PhysicalTestFormService()
+        result = form_service.delete_all_physical_forms_by_test(test_id)
+        
+        if result.get('success'):
+            return jsonify({
+                "message": f"{result.get('deleted_count', 0)} formulários excluídos com sucesso",
+                "test_id": test_id,
+                "deleted_count": result.get('deleted_count', 0)
+            }), 200
+        else:
+            return jsonify({"error": result.get('error', 'Erro ao excluir formulários')}), 500
+        
+    except Exception as e:
+        print(f"❌ Erro ao excluir formulários: {str(e)}")
         return jsonify({"error": "Erro interno do servidor"}), 500

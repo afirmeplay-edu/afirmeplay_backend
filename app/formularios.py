@@ -41,8 +41,25 @@ def get_arial_font(size):
             logging.warning(f"Erro ao carregar fonte {font_path}: {e}")
             continue
     
-    # Fallback para fonte padrão do sistema
+    # Fallback para fontes que suportam UTF-8
     try:
+        # Tentar fontes do sistema que suportam UTF-8
+        utf8_fonts = [
+            "arial.ttf",
+            "Arial.ttf", 
+            "DejaVuSans.ttf",
+            "LiberationSans-Regular.ttf",
+            "NotoSans-Regular.ttf"
+        ]
+        
+        for font_name in utf8_fonts:
+            try:
+                logging.warning(f"Tentando fonte UTF-8: {font_name}")
+                return ImageFont.truetype(font_name, size)
+            except (OSError, IOError):
+                continue
+        
+        # Último recurso - fonte padrão
         logging.warning("Usando fonte padrão do sistema como fallback")
         return ImageFont.load_default()
     except Exception as e:
@@ -82,8 +99,25 @@ def get_arial_bold_font(size):
             logging.warning(f"Erro ao carregar fonte {font_path}: {e}")
             continue
     
-    # Fallback para fonte padrão do sistema
+    # Fallback para fontes bold que suportam UTF-8
     try:
+        # Tentar fontes bold do sistema que suportam UTF-8
+        utf8_bold_fonts = [
+            "arialbd.ttf",
+            "Arial-Bold.ttf",
+            "DejaVuSans-Bold.ttf", 
+            "LiberationSans-Bold.ttf",
+            "NotoSans-Bold.ttf"
+        ]
+        
+        for font_name in utf8_bold_fonts:
+            try:
+                logging.warning(f"Tentando fonte UTF-8 Bold: {font_name}")
+                return ImageFont.truetype(font_name, size)
+            except (OSError, IOError):
+                continue
+        
+        # Último recurso - fonte padrão
         logging.warning("Usando fonte padrão do sistema como fallback para Arial Bold")
         return ImageFont.load_default()
     except Exception as e:
@@ -196,15 +230,15 @@ PADDING_HORIZONTAL_COL = 12 # Aumentado para melhor espaçamento
 PADDING_VERTICAL_FORM = 15  # Aumentado para melhor espaçamento
 RAIO_CIRCULO = 14           # Aumentado para melhor visibilidade
 ESPESSURA_LINHA = 3         # Aumentado para melhor definição das linhas
-TAMANHO_FONTE_NUM = 24       # Aumentado para melhor legibilidade
-TAMANHO_FONTE_ALT = 22       # Aumentado para melhor legibilidade
+TAMANHO_FONTE_NUM = 24       # Tamanho normal para números das questões
+TAMANHO_FONTE_ALT = 22       # Tamanho normal para letras das alternativas
 ALTERNATIVAS = ["A", "B", "C", "D"]
 MAX_QUESTOES_POR_COLUNA = 25  # Aumentado para suportar até 100 questões (4 colunas)
 QR_CODE_SIZE = 200           # Aumentado para melhor detecção QR
-TAMANHO_FONTE_NOME = 20      # Nome do aluno / prova
-TAMANHO_FONTE_TITULO = 22    # "CARTÃO-RESPOSTA"
-TAMANHO_FONTE_HEADER = 28    # Nome, Estado, Município, Escola
-TAMANHO_FONTE_TEXTO = 20     # Instruções
+TAMANHO_FONTE_NOME = 20      # Tamanho normal para nome do aluno
+TAMANHO_FONTE_TITULO = 22    # Tamanho normal para títulos
+TAMANHO_FONTE_HEADER = 28    # Tamanho normal para cabeçalho
+TAMANHO_FONTE_TEXTO = 20     # Tamanho normal para instruções
 PADDING_NOME_QR = 5
 PADDING_LEFT_AREA_QR = 15
 PADDING_QR_FORM = 25
@@ -597,7 +631,7 @@ def gerar_formulario_com_qrcode(aluno_id, aluno_nome, num_questoes_total, nome_a
     desenho = ImageDraw.Draw(imagem)
     coordenadas_respostas_abs = []
 
-    # Desenhar cabeçalho
+    # Desenhar cabeçalho (sem título principal - já existe na prova)
     y_atual = offset_global_y + 10
     
     # Turma será desenhada na coluna da esquerda, abaixo da escola
@@ -871,7 +905,7 @@ def gerar_formulario_com_qrcode(aluno_id, aluno_nome, num_questoes_total, nome_a
         #     (tabela_x_fim, tabela_y_fim)
         # ], outline='black', width=ESPESSURA_LINHA * 3)  # Borda 3x mais grossa
         
-        print(f"🎯 Borda grossa da tabela removida - usando borda externa do formulário")
+        print(f"Borda grossa da tabela removida - usando borda externa do formulario")
     # **********************************************************************
 
     # Calcular limites MÁXIMOS potenciais do conteúdo (absolutos)
@@ -899,7 +933,7 @@ def gerar_formulario_com_qrcode(aluno_id, aluno_nome, num_questoes_total, nome_a
 
     # ATIVADO: Borda grossa ao redor de todo o formulário para alinhamento
     desenho.rectangle([(rect_x0, rect_y0), (rect_x1, rect_y1)], outline='black', width=ESPESSURA_LINHA * 3)
-    print(f"🎯 Borda grossa adicionada ao formulário: ({rect_x0},{rect_y0}) a ({rect_x1},{rect_y1})")
+    print(f"Borda grossa adicionada ao formulario: ({rect_x0},{rect_y0}) a ({rect_x1},{rect_y1})")
 
     # ***** CONVERSÃO DAS COORDENADAS PARA RELATIVAS INTEIRAS *****
     coordenadas_respostas_relativas = []
@@ -948,20 +982,20 @@ def gerar_formulario_com_qrcode_adaptativo(student_id, student_name, num_questoe
         target_height: Altura alvo (opcional)
     """
     try:
-        print(f"🔧 Gerando formulário adaptativo...")
-        print(f"📏 Dimensões alvo: {target_width}x{target_height}")
+        print(f"Gerando formulario adaptativo...")
+        print(f"Dimensoes alvo: {target_width}x{target_height}")
         
         # Se dimensões não especificadas, usar A4 padrão
         if target_width is None or target_height is None:
             target_width = A4_PX_LARGURA
             target_height = A4_PX_ALTURA
-            print(f"📏 Usando dimensões A4 padrão: {target_width}x{target_height}")
+            print(f"Usando dimensoes A4 padrao: {target_width}x{target_height}")
         
         # Calcular proporções baseadas no tamanho alvo
         proporcao_x = target_width / A4_PX_LARGURA
         proporcao_y = target_height / A4_PX_ALTURA
         
-        print(f"📏 Proporções: X={proporcao_x:.3f}, Y={proporcao_y:.3f}")
+        print(f"Proporcoes: X={proporcao_x:.3f}, Y={proporcao_y:.3f}")
         
         # Ajustar parâmetros globais baseados na proporção
         largura_conteudo_adaptativa = int(LARGURA_CONTEUDO * proporcao_x)
@@ -1074,13 +1108,13 @@ def gerar_formulario_com_qrcode_adaptativo(student_id, student_name, num_questoe
         # Coordenadas do QR code
         qr_coords = (qr_x, qr_y, qr_size_adaptativo, qr_size_adaptativo)
         
-        print(f"✅ Formulário adaptativo gerado: {target_width}x{target_height}")
-        print(f"📊 Coordenadas: {len(coordenadas_respostas)} posições")
+        print(f"Formulario adaptativo gerado: {target_width}x{target_height}")
+        print(f"Coordenadas: {len(coordenadas_respostas)} posicoes")
         
         return imagem, coordenadas_respostas, qr_coords
         
     except Exception as e:
-        print(f"❌ Erro ao gerar formulário adaptativo: {str(e)}")
+        print(f"Erro ao gerar formulario adaptativo: {str(e)}")
         return None, None, None
 
 

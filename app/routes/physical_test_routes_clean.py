@@ -167,8 +167,8 @@ def process_physical_correction(test_id):
         else:
             image_data_str = image_data
         
-        # Usar função de correção por gabarito de referência
-        result = pdf_generator.processar_correcao_por_gabarito(test_id, image_data_str)
+        # Usar função de correção completa (nova implementação)
+        result = pdf_generator.processar_correcao_completa(test_id, image_data_str)
         
         if result.get('success'):
             # Preparar dados de resposta

@@ -435,6 +435,119 @@ def buscar_escolas_por_cidade(city_id):
         logging.error(f"Erro inesperado na rota de busca de escolas por cidade: {e}", exc_info=True)
         return jsonify({"error": "Ocorreu um erro inesperado no servidor"}), 500
 
+# GET - Buscar escolas por série/grade
+@bp.route('/by-grade/<string:grade_id>', methods=['GET'])
+@jwt_required()
+@role_required("admin", "diretor", "coordenador", "professor", "tecadm")
+def buscar_escolas_por_serie(grade_id):
+    try:
+        user = get_current_user_from_token()
+
+        if not user:
+            return jsonify({"error": "Usuário não encontrado"}), 404
+
+        # Validação do ID da série
+        if not grade_id:
+            return jsonify({"erro": "ID da série não fornecido"}), 400
+
+        # Verificar se a série existe
+        from app.models.grades import Grade
+        grade = Grade.query.get(grade_id)
+        if not grade:
+            return jsonify({"erro": "Série não encontrada"}), 404
+
+        # Query com joins para buscar escolas que têm turmas da série específica
+        query = db.session.query(
+            School,
+            City,
+            db.func.count(db.distinct(Student.id)).label('students_count'),
+            db.func.count(db.distinct(Class.id)).label('classes_count')
+        ).join(
+            City, School.city_id == City.id
+        ).join(
+            Class, School.id == Class.school_id
+        ).outerjoin(
+            Student, School.id == Student.school_id
+        ).filter(
+            Class.grade_id == grade_id
+        ).group_by(
+            School.id, City.id
+        )
+
+        # Aplicar filtros de permissão baseados na role
+        if user['role'] == "admin":
+            # Admin pode ver todas as escolas
+            schools = query.all()
+        elif user['role'] == "professor":
+            # Professor: buscar escolas onde está vinculado
+            from app.models.teacher import Teacher
+            teacher = Teacher.query.filter_by(user_id=user['id']).first()
+            
+            if not teacher:
+                return jsonify({"error": "Professor não encontrado na tabela teacher"}), 404
+            
+            # Buscar escolas onde o professor está vinculado
+            teacher_schools = SchoolTeacher.query.filter_by(teacher_id=teacher.id).all()
+            school_ids = [ts.school_id for ts in teacher_schools]
+            
+            if school_ids:
+                schools = query.filter(School.id.in_(school_ids)).all()
+            else:
+                return jsonify({"message": "Professor não está alocado em nenhuma escola"}), 404
+        elif user['role'] in ["diretor", "coordenador"]:
+            # Diretor e coordenador veem apenas sua escola
+            from app.models.manager import Manager
+            manager = Manager.query.filter_by(user_id=user['id']).first()
+            
+            if not manager:
+                return jsonify({"error": "Diretor/Coordenador não encontrado na tabela manager"}), 404
+            
+            if not manager.school_id:
+                return jsonify({"error": "Diretor/Coordenador não está vinculado a nenhuma escola"}), 400
+            
+            schools = query.filter(School.id == manager.school_id).all()
+        else:
+            # TecAdmin vê escolas do município
+            city_id = user.get('tenant_id') or user.get('city_id')
+            if not city_id:
+                return jsonify({"error": "City ID not available for this user"}), 400
+            schools = query.filter(School.city_id == city_id).all()
+
+        if not schools:
+            return jsonify({
+                "message": f"Nenhuma escola encontrada com turmas da série {grade.name}"
+            }), 404
+
+        return jsonify({
+            "grade": {
+                "id": str(grade.id),
+                "name": grade.name
+            },
+            "schools": [{
+                "id": school.id,
+                "name": school.name,
+                "domain": school.domain,
+                "address": school.address,
+                "city_id": school.city_id,
+                "created_at": school.created_at.isoformat() if school.created_at else None,
+                "students_count": students_count,
+                "classes_count": classes_count,
+                "city": {
+                    "id": city.id,
+                    "name": city.name,
+                    "state": city.state,
+                    "created_at": city.created_at.isoformat() if city.created_at else None
+                } if city else None
+            } for school, city, students_count, classes_count in schools]
+        }), 200
+
+    except SQLAlchemyError as e:
+        logging.error(f"Erro no banco de dados ao buscar escolas por série: {e}")
+        return jsonify({"error": "Erro interno do servidor ao consultar dados", "details": str(e)}), 500
+    except Exception as e:
+        logging.error(f"Erro inesperado na rota de busca de escolas por série: {e}", exc_info=True)
+        return jsonify({"error": "Ocorreu um erro inesperado no servidor"}), 500
+
 # POST - Adicionar professor a escola(s)
 @bp.route('/add-teacher', methods=['POST'])
 @jwt_required()

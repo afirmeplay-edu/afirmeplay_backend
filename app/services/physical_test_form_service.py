@@ -140,13 +140,25 @@ class PhysicalTestFormService:
     def process_physical_correction(self, test_id: str, image_data: bytes, 
                                   correction_image_url: str = None) -> Dict[str, Any]:
         """
-        Processa correção de gabarito físico
-        MÉTODO COMENTADO - USAR PhysicalTestPDFGenerator.processar_correcao_completa() DIRETAMENTE
+        Processa correção de gabarito físico usando PhysicalTestPDFGenerator
         """
-        return {
-            'success': False,
-            'error': 'Método comentado. Use PhysicalTestPDFGenerator.processar_correcao_completa() diretamente.'
-        }
+        try:
+            from app.services.physical_test_pdf_generator import PhysicalTestPDFGenerator
+            
+            # Criar instância do gerador
+            generator = PhysicalTestPDFGenerator()
+            
+            # Processar correção completa
+            result = generator.processar_correcao_completa(test_id, image_data)
+            
+            return result
+            
+        except Exception as e:
+            logging.error(f"Erro ao processar correção física: {str(e)}")
+            return {
+                'success': False,
+                'error': f'Erro interno: {str(e)}'
+            }
 
     def _get_test_questions(self, test_id: str) -> List[Dict]:
         """Busca questões da prova ordenadas com campo order"""

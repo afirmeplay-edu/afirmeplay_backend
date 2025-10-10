@@ -61,6 +61,45 @@ class PhysicalTestPDFGenerator:
     Integra com o sistema de banco de dados para buscar questões e dados dos alunos
     """
     
+    # ============================================================================
+    # CONSTANTES DE COORDENADAS - AJUSTAR AQUI PARA ALTERAR EM TODAS AS FUNÇÕES
+    # ============================================================================
+    # 
+    # FUNÇÕES ATIVAS (USADAS ATUALMENTE):
+    # ✅ processar_correcao_completa() - Função principal de correção
+    # ✅ _comparar_bolhas_adaptativo() - Detecção moderna por gabarito  
+    # ✅ _gerar_gabarito_referencia_adaptativo() - Geração moderna do gabarito
+    # ✅ processar_correcao_por_gabarito() - Método de correção por gabarito
+    #
+    # FUNÇÕES COMENTADAS (ANTIGAS/NÃO USADAS):
+    # ❌ processar_correcao_por_imagem() - Método antigo
+    # ❌ processar_correcao_projeto_style() - Método antigo do projeto.py
+    # ❌ detect_bubbles_robust_OLD() - Detecção antiga
+    # ❌ _gerar_gabarito_referencia() - Geração antiga do gabarito
+    # ❌ _detectar_bolhas_metodo_antigo() - Método antigo de detecção
+    # ============================================================================
+    # IMPORTANTE: Altere apenas estes valores para ajustar as coordenadas em todo o sistema
+    # 
+    # Coordenadas X das alternativas A, B, C, D (horizontal)
+    # Para mover para DIREITA: AUMENTE os valores
+    # Para mover para ESQUERDA: DIMINUA os valores
+    BUBBLE_X_POSITIONS = [105, 155, 205, 255]
+    
+    # Coordenadas Y das questões 1, 2, 3, 4 (vertical)  
+    # Para mover para BAIXO: AUMENTE os valores
+    # Para mover para CIMA: DIMINUA os valores
+    BUBBLE_Y_POSITIONS = [950, 1000, 1050, 1100]  # Coordenadas Y das questões
+    
+    # Dimensões padrão do formulário (para cálculos proporcionais)
+    FORM_WIDTH = 1240
+    FORM_HEIGHT = 1753
+    
+    # Raio das áreas de detecção das bolhas (em pixels)
+    # Para reduzir sobreposição: DIMINUA o valor
+    # Para aumentar área de detecção: AUMENTE o valor
+    BUBBLE_DETECTION_RADIUS = 3  # Reduzido ao mínimo para evitar sobreposição
+    # ============================================================================
+    
     def __init__(self):
         self.styles = getSampleStyleSheet()
         self._setup_custom_styles()
@@ -906,13 +945,21 @@ class PhysicalTestPDFGenerator:
             print(f"🔍 INICIANDO PROCESSAMENTO DE IMAGEM")
             print(f"📏 Tamanho da imagem base64: {len(image_data)} caracteres")
             
-            # Decodificar imagem base64
-            if ',' in image_data:
-                image_data = image_data.split(',')[1]
-                print(f"📝 Removido prefixo data:image, tamanho restante: {len(image_data)} caracteres")
-            
-            image_bytes = base64.b64decode(image_data)
-            print(f"📦 Imagem decodificada: {len(image_bytes)} bytes")
+            # Decodificar imagem base64 - CORRIGIDO para aceitar bytes
+            if isinstance(image_data, str):
+                # String base64 - pode ter prefixo data:image
+                if ',' in image_data:
+                    image_data = image_data.split(',')[1]
+                    print(f"📝 Removido prefixo data:image, tamanho restante: {len(image_data)} caracteres")
+                image_bytes = base64.b64decode(image_data)
+                print(f"📦 Imagem decodificada: {len(image_bytes)} bytes")
+            elif isinstance(image_data, bytes):
+                # Bytes já decodificados - usar diretamente
+                image_bytes = image_data
+                print(f"📦 Usando bytes já decodificados: {len(image_bytes)} bytes")
+            else:
+                print(f"❌ Tipo de dados inesperado: {type(image_data)}")
+                return {"error": "Tipo de dados inválido para imagem"}
             
             img = cv2.imdecode(np.frombuffer(image_bytes, np.uint8), cv2.IMREAD_COLOR)
             
@@ -1123,7 +1170,11 @@ class PhysicalTestPDFGenerator:
         return respostas
 
     # ===== CÓDIGO ANTIGO - COMENTADO (NÃO EXCLUIR) =====
-    def detect_bubbles_robust_OLD(self, img, expected_cols=4, debug=True):
+    # ============================================================================
+    # FUNÇÃO ANTIGA - NÃO USADA MAIS (DETECÇÃO ANTIGA)
+    # ============================================================================
+    
+    # def detect_bubbles_robust_OLD(self, img, expected_cols=4, debug=True):
         """
         Detecção de bolhas usando borda grossa da tabela como ROI
         """
@@ -1191,7 +1242,7 @@ class PhysicalTestPDFGenerator:
                 cell = bubble_region[y1:y2, x1:x2]
                 
                 # Calcular proporção de pixels pretos usando binarização
-                proportion_black = self._calcular_proporcao_pixels_pretos(cell)
+                proportion_black = self._calcular_proporcao_pixels_pretos_melhorada(cell)
                 
                 # Armazenar resultado
                 option_proportions[j] = {
@@ -1531,25 +1582,28 @@ class PhysicalTestPDFGenerator:
             # 1. Decodificar imagem original (sem processamento pesado)
             img_color = self._decode_image_direct(image_data)
             if img_color is None:
-            # 1. Decodificar imagem original (sem processamento pesado)
-                img_color = self._decode_image_direct(image_data)
-            if img_color is None:
                 return {"success": False, "error": "Erro ao decodificar imagem"}
             
             print(f"🖼️ Imagem original decodificada: {img_color.shape}")
             
             # 2. EXTRAIR QR CODE PRIMEIRO (na imagem original, sem processamento)
             print(f"🔍 ETAPA 1: DETECTANDO QR CODE NA IMAGEM ORIGINAL...")
-            student_id = self._extrair_qr_code_original(img_color)
-            print(f"🖼️ Imagem original decodificada: {img_color.shape}")
-            
-            # 2. EXTRAIR QR CODE PRIMEIRO (na imagem original, sem processamento)
-            print(f"🔍 ETAPA 1: DETECTANDO QR CODE NA IMAGEM ORIGINAL...")
-            student_id = self._extrair_qr_code_original(img_color)
-            if not student_id:
+            qr_data = self._extrair_qr_code_original(img_color)
+            if not qr_data:
                 return {"success": False, "error": "QR code não detectado ou inválido"}
             
-            print(f"✅ QR CODE DETECTADO: {student_id}")
+            # Extrair student_id do JSON do QR Code
+            try:
+                import json
+                qr_json = json.loads(qr_data)
+                student_id = qr_json.get('student_id')
+                if not student_id:
+                    return {"success": False, "error": "Student ID não encontrado no QR code"}
+            except json.JSONDecodeError:
+                return {"success": False, "error": "QR code inválido - formato JSON incorreto"}
+            
+            print(f"✅ QR CODE DETECTADO: {qr_data}")
+            print(f"✅ STUDENT ID EXTRAÍDO: {student_id}")
             
             # 3. AGORA processar imagem para detecção de bolhas (mantendo funcionalidade existente)
             print(f"🔍 ETAPA 2: PROCESSANDO IMAGEM PARA DETECÇÃO DE BOLHAS...")
@@ -1559,27 +1613,131 @@ class PhysicalTestPDFGenerator:
             
             img_gray = img_result['image_processed']
             print(f"🖼️ Imagem processada para bolhas: {img_gray.shape}")
-            print(f"✅ QR CODE DETECTADO: {student_id}")
             
-            # 3. AGORA processar imagem para detecção de bolhas (mantendo funcionalidade existente)
-            print(f"🔍 ETAPA 2: PROCESSANDO IMAGEM PARA DETECÇÃO DE BOLHAS...")
-            img_result = self.processar_imagem_formulario(image_data)
-            if img_result is None or not img_result.get('success'):
-                return {"success": False, "error": "Erro ao processar imagem para detecção de bolhas"}
+            # 4. Detectar respostas usando gabarito de referência (MÉTODO CORRETO)
+            print(f"🔍 ETAPA 3: DETECTANDO RESPOSTAS COM GABARITO DE REFERÊNCIA...")
+            # Converter imagem para base64 string para o método de correção por gabarito
+            import base64
+            import cv2
+            _, buffer = cv2.imencode('.jpg', img_color)
+            image_data_str = base64.b64encode(buffer).decode('utf-8')
             
-            img_gray = img_result['image_processed']
-            print(f"🖼️ Imagem processada para bolhas: {img_gray.shape}")
+            # Processar correção por gabarito e capturar imagens para debug
             
-            # 4. Detectar respostas usando pipeline robusto (MANTENDO FUNCIONALIDADE EXISTENTE)
-            print(f"🔍 ETAPA 3: DETECTANDO RESPOSTAS (BOLHAS)...")
-            # 4. Detectar respostas usando pipeline robusto (MANTENDO FUNCIONALIDADE EXISTENTE)
-            print(f"🔍 ETAPA 3: DETECTANDO RESPOSTAS (BOLHAS)...")
-            respostas_detectadas = self.detect_bubbles_robust(img_color, expected_cols=4, debug=True)
+            # Gerar gabarito para debug ANTES da comparação
+            debug_gabarito_image = None
+            debug_user_image = img_color  # Usar imagem original do usuário
+            
+            try:
+                # Gerar gabarito para debug
+                user_height, user_width = img_color.shape[:2]
+                debug_gabarito_image_pil, _ = self._gerar_gabarito_referencia_adaptativo(
+                    test_id, (user_width, user_height)
+                )
+                
+                # Converter PIL Image para OpenCV se necessário
+                if debug_gabarito_image_pil is not None:
+                    if hasattr(debug_gabarito_image_pil, 'mode'):  # É PIL Image
+                        debug_gabarito_image = cv2.cvtColor(np.array(debug_gabarito_image_pil), cv2.COLOR_RGB2BGR)
+                    else:
+                        debug_gabarito_image = debug_gabarito_image_pil
+                else:
+                    debug_gabarito_image = None
+                
+                print(f"✅ Gabarito de debug gerado: {debug_gabarito_image.shape if debug_gabarito_image is not None else 'None'}")
+            except Exception as e:
+                print(f"⚠️ Erro ao gerar gabarito para debug: {str(e)}")
+                debug_gabarito_image = None
+            
+            # Usar o método de comparação adaptativo que retorna imagem com áreas de detecção
+            respostas_detectadas, debug_image_with_areas = self._comparar_bolhas_adaptativo(
+                debug_gabarito_image, img_color, test_id
+            )
+            
             if not respostas_detectadas:
                 return {"success": False, "error": "Nenhuma resposta detectada"}
             
             print(f"✅ RESPOSTAS DETECTADAS: {respostas_detectadas}")
-            print(f"✅ RESPOSTAS DETECTADAS: {respostas_detectadas}")
+            
+            # 3.5. GERAR COMPARAÇÃO VISUAL DE DEBUG (TEMPORÁRIO)
+            print(f"🔍 ETAPA 3.5: GERANDO COMPARAÇÃO VISUAL DE DEBUG...")
+            try:
+                from app.services.physical_correction_visualizer import PhysicalCorrectionVisualizer
+                visualizer = PhysicalCorrectionVisualizer()
+                
+                # Buscar questões para obter respostas corretas
+                from app.models.question import Question
+                from app.models.testQuestion import TestQuestion
+                
+                test_questions = TestQuestion.query.filter_by(test_id=test_id).order_by(TestQuestion.order).all()
+                correct_answers = {}
+                for i, tq in enumerate(test_questions):
+                    question = Question.query.get(tq.question_id)
+                    if question:
+                        correct_answers[i + 1] = question.correct_answer
+                
+                # Gerar comparação visual
+                debug_file = visualizer.generate_correction_comparison(
+                    gabarito_image=debug_gabarito_image if debug_gabarito_image is not None else img_gray,
+                    user_image=debug_user_image,
+                    test_id=test_id,
+                    student_id=student_id,
+                    detected_answers=respostas_detectadas,
+                    correct_answers=correct_answers,
+                    detection_areas=debug_image_with_areas  # Imagem com áreas de detecção
+                )
+                
+                if debug_file:
+                    print(f"✅ Arquivo de debug salvo: {debug_file}")
+                else:
+                    print(f"⚠️ Erro ao gerar arquivo de debug")
+                
+                # 3.6. SALVAR BOLHAS DETECTADAS (TEMPORÁRIO)
+                print(f"🔍 ETAPA 3.6: SALVANDO BOLHAS DETECTADAS...")
+                try:
+                    # Obter coordenadas do gabarito
+                    if debug_gabarito_image is not None:
+                        # Converter gabarito para obter coordenadas
+                        if hasattr(debug_gabarito_image, 'convert'):  # PIL
+                            gabarito_array = np.array(debug_gabarito_image)
+                        else:
+                            gabarito_array = debug_gabarito_image
+                        
+                        # Calcular coordenadas (mesma lógica do detector)
+                        gabarito_h, gabarito_w = gabarito_array.shape[:2]
+                        proporcao_x = gabarito_w / 1240
+                        proporcao_y = gabarito_h / 1753
+                        
+                        # COORDENADAS CORRETAS: Usando constantes da classe
+                        x_positions = [int(x * proporcao_x) for x in self.BUBBLE_X_POSITIONS]
+                        y_positions = [int(y * proporcao_y) for y in self.BUBBLE_Y_POSITIONS]
+                        
+                        coordinates = {
+                            'x_positions': x_positions,
+                            'y_positions': y_positions
+                        }
+                        
+                        # Salvar bolhas detectadas
+                        bubbles_dir = visualizer.save_detected_bubbles(
+                            user_image=debug_user_image,
+                            coordinates=coordinates,
+                            detected_answers=respostas_detectadas,
+                            test_id=test_id,
+                            student_id=student_id
+                        )
+                        
+                        if bubbles_dir:
+                            print(f"✅ Bolhas detectadas salvas em: {bubbles_dir}")
+                        else:
+                            print(f"⚠️ Erro ao salvar bolhas detectadas")
+                    else:
+                        print(f"⚠️ Gabarito não disponível para salvar bolhas")
+                        
+                except Exception as e:
+                    print(f"⚠️ Erro ao salvar bolhas detectadas: {str(e)}")
+                    
+            except Exception as e:
+                print(f"⚠️ Erro no visualizador de debug: {str(e)}")
             
             # 4. Buscar questões da prova
             from app.models.testQuestion import TestQuestion
@@ -1659,8 +1817,9 @@ class PhysicalTestPDFGenerator:
             # 6. Calcular nota e proficiência usando EvaluationResultService
             from app.services.evaluation_result_service import EvaluationResultService
             
-            # Usar session_id None para correções físicas
-            session_id = None
+            # Gerar session_id temporário para correções físicas
+            import uuid
+            session_id = f"physical_correction_{uuid.uuid4().hex[:8]}"
             
             evaluation_result = EvaluationResultService.calculate_and_save_result(
                 test_id=test_id,
@@ -1702,20 +1861,30 @@ class PhysicalTestPDFGenerator:
     def _decode_image_direct(self, image_data):
         """
         Decodifica imagem base64 diretamente para OpenCV
+        CORRIGIDO: Aceita tanto string base64 quanto bytes já decodificados
         """
         try:
             import cv2
             import numpy as np
             import base64
             
-            # Decodificar imagem base64
-            if ',' in image_data:
-                image_data = image_data.split(',')[1]
+            # Verificar se image_data é string ou bytes
+            if isinstance(image_data, str):
+                # String base64 - pode ter prefixo data:image
+                if ',' in image_data:
+                    image_data = image_data.split(',')[1]
+                image_bytes = base64.b64decode(image_data)
+            elif isinstance(image_data, bytes):
+                # Bytes já decodificados - usar diretamente
+                image_bytes = image_data
+            else:
+                print(f"❌ Tipo de dados inesperado: {type(image_data)}")
+                return None
             
-            image_bytes = base64.b64decode(image_data)
             img = cv2.imdecode(np.frombuffer(image_bytes, np.uint8), cv2.IMREAD_COLOR)
             
             if img is None:
+                print(f"❌ Falha ao decodificar imagem com OpenCV")
                 return None
             
             return img
@@ -1945,6 +2114,19 @@ class PhysicalTestPDFGenerator:
             except Exception as e:
                 print(f"❌ Erro pyzbar ROI: {e}")
             
+            # MÉTODO FINAL: Redimensionar imagem para melhorar decodificação
+            print(f"🔍 Tentando redimensionamento final para melhorar decodificação...")
+            try:
+                # Redimensionar para 3x o tamanho original
+                resized = cv2.resize(gray, (w*3, h*3), interpolation=cv2.INTER_CUBIC)
+                data, bbox, _ = qr_detector.detectAndDecode(resized)
+                print(f"📱 Resultado redimensionado final: dados='{data}', bbox={bbox}")
+                if data and data.strip():
+                    print(f"✅ QR Code detectado (redimensionado final): {data}")
+                    return data.strip()
+            except Exception as e:
+                print(f"❌ Erro redimensionamento final: {e}")
+            
             print("❌ QR Code não detectado em nenhum método na imagem original")
             return None
                 
@@ -2173,6 +2355,19 @@ class PhysicalTestPDFGenerator:
             except Exception as e:
                 print(f"❌ Erro pyzbar ROI: {e}")
             
+            # MÉTODO FINAL: Redimensionar imagem para melhorar decodificação
+            print(f"🔍 Tentando redimensionamento final para melhorar decodificação...")
+            try:
+                # Redimensionar para 3x o tamanho original
+                resized = cv2.resize(gray, (w*3, h*3), interpolation=cv2.INTER_CUBIC)
+                data, bbox, _ = qr_detector.detectAndDecode(resized)
+                print(f"📱 Resultado redimensionado final: dados='{data}', bbox={bbox}")
+                if data and data.strip():
+                    print(f"✅ QR Code detectado (redimensionado final): {data}")
+                    return data.strip()
+            except Exception as e:
+                print(f"❌ Erro redimensionamento final: {e}")
+            
             print("❌ QR Code não detectado em nenhum método na imagem original")
             return None
                 
@@ -2382,11 +2577,18 @@ class PhysicalTestPDFGenerator:
             print(f"🧪 INICIANDO TESTE DE DETECÇÃO DE BOLHAS")
             print(f"📏 Tamanho da imagem base64: {len(image_data)} caracteres")
             
-            # Decodificar imagem base64
-            if ',' in image_data:
-                image_data = image_data.split(',')[1]
-            
-            image_bytes = base64.b64decode(image_data)
+            # Decodificar imagem base64 - CORRIGIDO para aceitar bytes
+            if isinstance(image_data, str):
+                # String base64 - pode ter prefixo data:image
+                if ',' in image_data:
+                    image_data = image_data.split(',')[1]
+                image_bytes = base64.b64decode(image_data)
+            elif isinstance(image_data, bytes):
+                # Bytes já decodificados - usar diretamente
+                image_bytes = image_data
+            else:
+                print(f"❌ Tipo de dados inesperado: {type(image_data)}")
+                return None
             img = cv2.imdecode(np.frombuffer(image_bytes, np.uint8), cv2.IMREAD_COLOR)
             
             if img is None:
@@ -2745,25 +2947,30 @@ class PhysicalTestPDFGenerator:
             logging.error(f"Erro ao processar correção física: {str(e)}")
             return {"error": f"Erro interno: {str(e)}"}
 
-    def processar_correcao_por_imagem(self, test_id: str, image_data: str) -> Dict:
-        """
-        Processa correção completa por imagem do formulário preenchido
-        
-        Args:
-            test_id: ID do teste
-            image_data: Imagem em base64 do formulário preenchido
-            
-        Returns:
-            Resultado da correção com nota e classificação
-        """
-        try:
-            from app.services.evaluation_result_service import EvaluationResultService
-            from app.models.question import Question
-            from app.models.studentAnswer import StudentAnswer
-            from app.models.testQuestion import TestQuestion
-            from app.models.test import Test
-            from app.models.classTest import ClassTest
-            from app import db
+    # ============================================================================
+    # FUNÇÕES ANTIGAS/DESNECESSÁRIAS - COMENTADAS PARA EVITAR CONFUSÃO
+    # ============================================================================
+    
+    # def processar_correcao_por_imagem(self, test_id: str, image_data: str) -> Dict:
+    #     """
+    #     FUNÇÃO ANTIGA - NÃO USADA MAIS
+    #     Processa correção completa por imagem do formulário preenchido
+    #     
+    #     Args:
+    #         test_id: ID do teste
+    #         image_data: Imagem em base64 do formulário preenchido
+    #         
+    #     Returns:
+    #         Resultado da correção com nota e classificação
+    #     """
+    #     try:
+    #         from app.services.evaluation_result_service import EvaluationResultService
+    #         from app.models.question import Question
+    #         from app.models.studentAnswer import StudentAnswer
+    #         from app.models.testQuestion import TestQuestion
+    #         from app.models.test import Test
+    #         from app.models.classTest import ClassTest
+    #         from app import db
             
             print(f"🚀 INICIANDO PROCESSAMENTO DE CORREÇÃO POR IMAGEM")
             print(f"📋 Test ID: {test_id}")
@@ -3217,8 +3424,8 @@ class PhysicalTestPDFGenerator:
         coordenadas = []
         
         # Coordenadas fixas especificadas pelo usuário
-        x_positions = [112, 162, 212, 262]  # Posições X das alternativas A, B, C, D
-        y_positions = [950, 995, 1040, 1085]  # Posições Y das questões 1, 2, 3, 4
+        x_positions = [125, 175, 225, 275]  # Posições X das alternativas A, B, C, D (CORRIGIDAS)
+        y_positions = [1000, 1050, 1100, 1150]  # Posições Y das questões 1, 2, 3, 4 (CORRIGIDAS)
         
         # Gerar coordenadas para todas as questões
         for i in range(num_questions):
@@ -3230,8 +3437,8 @@ class PhysicalTestPDFGenerator:
             
             # Gerar coordenadas para todas as alternativas (A, B, C, D)
             for j, x in enumerate(x_positions):
-                # Usar raio de 10px para as bolhas
-                radius = 10
+                # Usar raio configurável para as bolhas
+                radius = self.BUBBLE_DETECTION_RADIUS
                 coordenadas.append((x, y, radius * 2, radius * 2))
         
         return coordenadas
@@ -3298,9 +3505,9 @@ class PhysicalTestPDFGenerator:
         if not questions_data:
             return
         
-        # Coordenadas fixas especificadas pelo usuário
-        x_positions = [112, 162, 212, 262]  # Posições X das alternativas A, B, C, D
-        y_positions = [950, 995, 1040, 1085]  # Posições Y das questões 1, 2, 3, 4
+        # Coordenadas fixas usando constantes da classe
+        x_positions = self.BUBBLE_X_POSITIONS  # Posições X das alternativas A, B, C, D
+        y_positions = self.BUBBLE_Y_POSITIONS  # Posições Y das questões 1, 2, 3, 4
         
         # Desenhar cada questão usando as coordenadas fixas
         for i, question_data in enumerate(questions_data):
@@ -3603,8 +3810,8 @@ class PhysicalTestPDFGenerator:
             print(f"📏 Dimensões da imagem binária: {binary_image.shape}")
             
             # Coordenadas fixas especificadas pelo usuário (NUNCA ALTERAR)
-            x_positions = [112, 162, 212, 262]  # Posições X das alternativas A, B, C, D
-            y_positions_base = [950, 995, 1040, 1085]  # Posições Y das questões 1, 2, 3, 4
+            x_positions = [125, 175, 225, 275]  # Posições X das alternativas A, B, C, D (CORRIGIDAS)
+            y_positions_base = [1050, 1100, 1150, 1200]  # Posições Y das questões 1, 2, 3, 4 (CORRIGIDAS)
             
             # Se num_questions não foi fornecido, usar o número de questões das coordenadas base
             if num_questions is None:
@@ -3640,7 +3847,7 @@ class PhysicalTestPDFGenerator:
                 # Processar cada alternativa (sempre A, B, C, D)
                 for j, x in enumerate(x_positions):
                     alt_id = chr(65 + j)  # A, B, C, D
-                    radius = 10
+                    radius = self.BUBBLE_DETECTION_RADIUS
                     
                     print(f"    📍 Q{i+1} {alt_id}: x={x}, y={y}, radius={radius}")
                     
@@ -3731,7 +3938,11 @@ class PhysicalTestPDFGenerator:
             logging.error(f"Erro ao detectar marcação circular: {str(e)}")
             return False
     
-    def processar_correcao_projeto_style(self, test_id: str, image_data: str) -> Dict:
+    # ============================================================================
+    # FUNÇÃO ANTIGA - NÃO USADA MAIS (PROJETO STYLE)
+    # ============================================================================
+    
+    # def processar_correcao_projeto_style(self, test_id: str, image_data: str) -> Dict:
         """
         Processa correção EXATAMENTE como o projeto.py
         QR Code contém APENAS o student_id, usa coordenadas hardcoded
@@ -4194,9 +4405,9 @@ class PhysicalTestPDFGenerator:
             proporcao_x = target_width / 1240  # Proporção baseada na largura original
             proporcao_y = target_height / 1753  # Proporção baseada na altura original
             
-            # Coordenadas originais (para referência)
-            x_positions_orig = [112, 162, 212, 262]
-            y_positions_orig = [950, 995, 1040, 1085]
+            # Coordenadas originais usando constantes da classe
+            x_positions_orig = self.BUBBLE_X_POSITIONS
+            y_positions_orig = self.BUBBLE_Y_POSITIONS
             
             # Calcular coordenadas proporcionais
             x_positions = [int(x * proporcao_x) for x in x_positions_orig]
@@ -4305,13 +4516,29 @@ class PhysicalTestPDFGenerator:
             proporcao_x = gabarito_w / 1240
             proporcao_y = gabarito_h / 1753
             
-            x_positions = [int(x * proporcao_x) for x in [112, 162, 212, 262]]
-            y_positions = [int(y * proporcao_y) for y in [950, 995, 1040, 1085]]
+            # COORDENADAS CORRETAS: Usando constantes da classe
+            x_positions = [int(x * proporcao_x) for x in self.BUBBLE_X_POSITIONS]
+            y_positions = [int(y * proporcao_y) for y in self.BUBBLE_Y_POSITIONS]
             
             print(f"📊 Coordenadas finais: X={x_positions}, Y={y_positions}")
             
-            # Detectar bolhas na imagem do usuário
-            respostas_detectadas = {}
+            # DETECÇÃO REAL DAS BOLHAS (NOVA ABORDAGEM)
+            print(f"🔧 Detectando bolhas reais na imagem...")
+            linhas_bolhas = self._detectar_bolhas_reais_e_agrupar(user_gray)
+            
+            if not linhas_bolhas:
+                print(f"❌ Nenhuma bolha detectada, usando método antigo")
+                # Fallback para método antigo se não detectar bolhas
+                respostas_detectadas = self._detectar_respostas_metodo_antigo(user_gray, x_positions, y_positions)
+            else:
+                print(f"✅ {len(linhas_bolhas)} linhas de bolhas detectadas")
+                # Usar nova abordagem de análise de preenchimento
+                respostas_detectadas = self._analisar_preenchimento_bolhas(user_gray, linhas_bolhas)
+            
+            # Criar imagem de debug com áreas de detecção marcadas
+            debug_image = user_gray.copy()
+            if len(debug_image.shape) == 2:
+                debug_image = cv2.cvtColor(debug_image, cv2.COLOR_GRAY2BGR)
             
             # Buscar dados da prova
             from app.models.test import Test
@@ -4335,12 +4562,19 @@ class PhysicalTestPDFGenerator:
                     y = y_positions[i] if i < len(y_positions) else y_positions[-1]
                     
                     # Extrair região da bolha na imagem do usuário
-                    # AUMENTAR TAMANHO DA REGIÃO para capturar bolhas completas
-                    w = h = int(80 * min(proporcao_x, proporcao_y))  # Aumentado de 30 para 80
+                    # TAMANHO CORRETO: Baseado no script de debug (60 pixels)
+                    w = h = int(60 * min(proporcao_x, proporcao_y))
                     x1 = max(0, x - w//2)
                     y1 = max(0, y - h//2)
                     x2 = min(user_w, x + w//2)
                     y2 = min(user_h, y + h//2)
+                    
+                    # Desenhar área de detecção para debug
+                    cv2.rectangle(debug_image, (x1, y1), (x2, y2), (0, 0, 255), 2)
+                    
+                    # Adicionar texto com coordenadas
+                    cv2.putText(debug_image, f"Q{questao_num}{opcoes[j]}", 
+                               (x1, y1-5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
                     
                     if x2 > x1 and y2 > y1:
                         regiao_bolha = user_gray[y1:y2, x1:x2]
@@ -4349,30 +4583,52 @@ class PhysicalTestPDFGenerator:
                         proporcao = self._calcular_proporcao_pixels_pretos_melhorada(regiao_bolha, None)
                         proporcoes[opcoes[j]] = proporcao
                         
-                        # Processando alternativa
-                    else:
-                        print(f"    ❌ Região inválida para {opcoes[j]}: ({x1},{y1})-({x2},{y2})")
-                
-                # Aplicar critérios de detecção
-                if proporcoes:
-                    # Aplicando critérios de detecção
-                    resposta = self._aplicar_criterios_deteccao(proporcoes, questao_num)
-                    if resposta:
-                        respostas_detectadas[questao_num] = resposta
-                        # Questão processada
-                    else:
-                        print(f"  ❌ Questão {questao_num}: Não marcada")
+                    # Processando alternativa
                 else:
-                    print(f"  ❌ Questão {questao_num}: Sem proporções")
+                    print(f"    ❌ Região inválida para {opcoes[j]}: ({x1},{y1})-({x2},{y2})")
+            
+            # Aplicar critérios de detecção
+            if proporcoes:
+                # DEBUG: Mostrar proporções calculadas
+                print(f"  🔍 Questão {questao_num} - Proporções calculadas:")
+                for alt, prop in proporcoes.items():
+                    print(f"    {alt}: {prop:.3f}")
+                
+                # Aplicando critérios de detecção
+                resposta = self._aplicar_criterios_deteccao(proporcoes, questao_num)
+                if resposta:
+                    respostas_detectadas[questao_num] = resposta
+                    print(f"  ✅ Questão {questao_num}: {resposta} detectada")
+                else:
+                    print(f"  ❌ Questão {questao_num}: Não marcada")
+            else:
+                print(f"  ❌ Questão {questao_num}: Sem proporções")
             
             print(f"📊 RESPOSTAS DETECTADAS: {respostas_detectadas}")
-            return respostas_detectadas
+            
+            # Salvar imagem de debug com áreas de detecção
+            try:
+                import os
+                from datetime import datetime
+                debug_filename = f"debug_detection_areas_{test_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
+                debug_path = os.path.join("debug_corrections", debug_filename)
+                cv2.imwrite(debug_path, debug_image)
+                print(f"🔍 Imagem de debug com áreas de detecção salva: {debug_path}")
+            except Exception as e:
+                print(f"⚠️ Erro ao salvar imagem de debug: {str(e)}")
+            
+            # Retornar tanto as respostas quanto a imagem com áreas de detecção
+            return respostas_detectadas, debug_image
             
         except Exception as e:
             print(f"❌ Erro ao comparar bolhas adaptativo: {str(e)}")
-            return {}
+            return {}, None
 
-    def _gerar_gabarito_referencia(self, test_id):
+    # ============================================================================
+    # FUNÇÃO ANTIGA - NÃO USADA MAIS (GABARITO REFERENCIA ANTIGO)
+    # ============================================================================
+    
+    # def _gerar_gabarito_referencia(self, test_id):
         """
         Gera gabarito de referência com respostas corretas preenchidas
         """
@@ -4465,7 +4721,7 @@ class PhysicalTestPDFGenerator:
                     # Usar coordenadas fixas corretas [112, 162, 212, 262]
                     coordenadas_fixas = []
                     x_positions = [112, 162, 212, 262]
-                    y_positions = [950, 995, 1040, 1085]
+                    y_positions = [1050, 1100, 1150, 1200]  # CORRIGIDAS
                     for i in range(num_questions):
                         for j in range(4):
                             x = x_positions[j]
@@ -4490,7 +4746,7 @@ class PhysicalTestPDFGenerator:
                         # Regenerar coordenadas com o número correto usando coordenadas fixas
                         coordenadas_fixas = []
                         x_positions = [112, 162, 212, 262]
-                        y_positions = [950, 995, 1040, 1085]
+                        y_positions = [1050, 1100, 1150, 1200]  # CORRIGIDAS
                         for i in range(len(questions)):
                             for j in range(4):
                                 x = x_positions[j]
@@ -4532,7 +4788,7 @@ class PhysicalTestPDFGenerator:
             
             # COORDENADAS FIXAS ESPECIFICADAS PELO USUÁRIO (NUNCA ALTERAR)
             x_positions_fixed = [112, 162, 212, 262]  # Posições X das alternativas A, B, C, D
-            y_positions_base = [950, 995, 1040, 1085]  # Posições Y das questões 1, 2, 3, 4
+            y_positions_base = [1050, 1100, 1150, 1200]  # Posições Y das questões 1, 2, 3, 4 (CORRIGIDAS)
             
             # Se num_questions não foi fornecido, usar o número de questões das coordenadas base
             if num_questions is None:
@@ -5009,7 +5265,11 @@ class PhysicalTestPDFGenerator:
             print(f"❌ Erro ao detectar bolhas com gabarito referência: {str(e)}")
             return {}
 
-    def _detectar_bolhas_metodo_antigo(self, user_gray):
+    # ============================================================================
+    # FUNÇÃO ANTIGA - NÃO USADA MAIS (MÉTODO ANTIGO DE DETECÇÃO)
+    # ============================================================================
+    
+    # def _detectar_bolhas_metodo_antigo(self, user_gray):
         """
         Adapta o método antigo de detecção de bolhas para o novo sistema
         Detecta bolhas dinamicamente na imagem do usuário
@@ -5235,12 +5495,16 @@ class PhysicalTestPDFGenerator:
                 opcoes = ["A", "B", "C", "D"]
                 proporcoes = {}
                 
-                # Processando questão
+                print(f"🔍 PROCESSANDO QUESTÃO {questao_num}...")
                 
                 # Processar cada alternativa da questão
                 for j in range(4):
                     coord_idx = i * 4 + j
-                    print(f"    📍 Coordenada {coord_idx}: {coordenadas_bolhas[coord_idx] if coord_idx < len(coordenadas_bolhas) else 'FORA DO RANGE'}")
+                    if coord_idx < len(coordenadas_bolhas):
+                        coord = coordenadas_bolhas[coord_idx]
+                        print(f"    📍 Questão {questao_num} - {opcoes[j]}: coord={coord}")
+                    else:
+                        print(f"    ❌ Questão {questao_num} - {opcoes[j]}: FORA DO RANGE (coord_idx={coord_idx})")
                     
                     if coord_idx < len(coordenadas_bolhas):
                         x, y, w, h = coordenadas_bolhas[coord_idx]
@@ -5303,7 +5567,7 @@ class PhysicalTestPDFGenerator:
                                 if isinstance(coords, dict) and 'x' in coords and 'y' in coords:
                                     x = coords['x']
                                     y = coords['y']
-                                    radius = coords.get('radius', 8)
+                                    radius = coords.get('radius', self.BUBBLE_DETECTION_RADIUS)
                                     w = h = radius * 2
                                     coordenadas.append([x, y, w, h])
                         elif isinstance(value, list):
@@ -5333,11 +5597,11 @@ class PhysicalTestPDFGenerator:
             valores = list(proporcoes.values())
             media = sum(valores) / len(valores)
             
-            # Critérios ajustados para ser mais rigoroso e preciso
-            threshold_absoluto_min = 0.30  # 30% mínimo para considerar preenchido (aumentado de 0.25)
-            threshold_absoluto_max = 0.80  # 80% máximo (evita overfill)
-            threshold_diferenca_min = 0.15  # 15 pontos percentuais de diferença mínima (aumentado de 0.05)
-            threshold_diferenca_relativa = 0.25  # 25% de diferença relativa mínima (aumentado de 0.10)
+            # Critérios ajustados para bolhas preenchidas vs não preenchidas (MENOS RIGOROSOS)
+            threshold_absoluto_min = 0.10  # 10% mínimo para considerar preenchido (era 15%)
+            threshold_absoluto_max = 0.98  # 98% máximo (era 95%)
+            threshold_diferenca_min = 0.02  # 2 pontos percentuais de diferença mínima (era 3%)
+            threshold_diferenca_relativa = 0.03  # 3% de diferença relativa mínima (era 5%)
             
             # Aplicar critérios mais rigorosos
             if threshold_absoluto_min <= maior_valor <= threshold_absoluto_max:
@@ -5356,13 +5620,18 @@ class PhysicalTestPDFGenerator:
                 
                 # Critério 3: Empate técnico - sempre escolher o maior valor se estiver acima do mínimo
                 else:
+                    print(f"    ⚠️ Questão {questao_num}: Empate técnico - usando maior valor ({maior_valor:.3f})")
+                    print(f"    📊 Diferença absoluta: {diff_absoluta:.3f} (mín: {threshold_diferenca_min})")
+                    print(f"    📊 Diferença relativa: {diff_relativa:.1%} (mín: {threshold_diferenca_relativa:.1%})")
                     # Empate técnico detectado - escolhendo maior valor
                     return maior_alt
             else:
                 if maior_valor < threshold_absoluto_min:
-                    print(f"    ❌ Questão {questao_num}: Não marcada (proporção muito baixa: {maior_valor:.3f})")
+                    print(f"    ❌ Questão {questao_num}: Não marcada (proporção muito baixa: {maior_valor:.3f} < {threshold_absoluto_min})")
+                    print(f"    📊 Proporções detalhadas: {proporcoes}")
                 else:
-                    print(f"    ❌ Questão {questao_num}: Proporção muito alta (possível erro: {maior_valor:.3f})")
+                    print(f"    ❌ Questão {questao_num}: Proporção muito alta (possível erro: {maior_valor:.3f} > {threshold_absoluto_max})")
+                    print(f"    📊 Proporções detalhadas: {proporcoes}")
                 return None
                 
         except Exception as e:
@@ -6687,8 +6956,8 @@ class PhysicalTestPDFGenerator:
             num_questoes = len(test_questions)
             
             # COORDENADAS FIXAS baseadas no gabarito alinhado
-            x_positions = [112, 162, 212, 262]  # Posições X das alternativas A, B, C, D
-            y_positions_base = [950, 995, 1040, 1085]  # Posições Y das questões 1, 2, 3, 4
+            x_positions = [125, 175, 225, 275]  # Posições X das alternativas A, B, C, D (CORRIGIDAS)
+            y_positions_base = [1050, 1100, 1150, 1200]  # Posições Y das questões 1, 2, 3, 4 (CORRIGIDAS)
             
             # Ajustar coordenadas para o tamanho do gabarito alinhado
             scale_factor_x = gabarito_w / 1240  # Largura original do gabarito
@@ -6771,8 +7040,8 @@ class PhysicalTestPDFGenerator:
             num_questoes = len(test_questions)
             
             # COORDENADAS FIXAS baseadas no gabarito alinhado
-            x_positions = [112, 162, 212, 262]  # Posições X das alternativas A, B, C, D
-            y_positions_base = [950, 995, 1040, 1085]  # Posições Y das questões 1, 2, 3, 4
+            x_positions = [125, 175, 225, 275]  # Posições X das alternativas A, B, C, D (CORRIGIDAS)
+            y_positions_base = [1050, 1100, 1150, 1200]  # Posições Y das questões 1, 2, 3, 4 (CORRIGIDAS)
             
             # Ajustar coordenadas para o tamanho do gabarito alinhado
             scale_factor_x = gabarito_w / 1240  # Largura original do gabarito
@@ -7430,9 +7699,9 @@ class PhysicalTestPDFGenerator:
             img_pil = Image.fromarray(cv2.cvtColor(img_cv, cv2.COLOR_BGR2RGB))
             draw = ImageDraw.Draw(img_pil)
             
-            # Coordenadas fixas das bolinhas
-            x_positions = [112, 162, 212, 262]  # A, B, C, D
-            y_positions = [950, 995, 1040, 1085]  # Questões 1, 2, 3, 4
+            # Coordenadas fixas das bolinhas usando constantes da classe
+            x_positions = self.BUBBLE_X_POSITIONS  # A, B, C, D
+            y_positions = self.BUBBLE_Y_POSITIONS  # Questões 1, 2, 3, 4
             
             print(f"🎯 Preenchendo respostas nas coordenadas:")
             
@@ -7447,7 +7716,7 @@ class PhysicalTestPDFGenerator:
                         x = x_positions[alternativa_idx]
                         
                         # Desenhar círculo preenchido
-                        radius = 8
+                        radius = self.BUBBLE_DETECTION_RADIUS
                         draw.ellipse([x-radius, y-radius, x+radius, y+radius], 
                                    fill='black', outline='black', width=2)
                         
@@ -7617,9 +7886,9 @@ class PhysicalTestPDFGenerator:
                 x = x_start + i * cell_width
                 draw.line([(x, y_start), (x, y_start + 4 * cell_height)], fill='black', width=1)
             
-            # Desenhar círculos para as respostas
-            x_positions = [112, 162, 212, 262]  # Coordenadas X das alternativas
-            y_positions = [950, 995, 1040, 1085]  # Coordenadas Y das questões
+            # Desenhar círculos para as respostas usando constantes da classe
+            x_positions = self.BUBBLE_X_POSITIONS  # Coordenadas X das alternativas
+            y_positions = self.BUBBLE_Y_POSITIONS  # Coordenadas Y das questões
             
             for i in range(4):  # 4 questões
                 for j in range(4):  # 4 alternativas
@@ -7750,3 +8019,197 @@ class PhysicalTestPDFGenerator:
                 'success': False,
                 'error': f"Erro inesperado: {str(e)}"
             }
+
+    def _detectar_bolhas_reais_e_agrupar(self, user_gray):
+        """
+        Detecta bolhas reais na imagem e as agrupa por questão (linhas)
+        Retorna: lista de listas com coordenadas (x, y) agrupadas por questão
+        """
+        try:
+            import cv2
+            import numpy as np
+            
+            print(f"🔍 DETECTANDO BOLHAS REAIS NA IMAGEM...")
+            
+            # Aplicar threshold para detectar contornos
+            _, thresh = cv2.threshold(user_gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+            
+            # Encontrar contornos
+            contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            
+            # Filtrar contornos circulares (bolhas)
+            bolhas_detectadas = []
+            for contour in contours:
+                # Calcular área e perímetro
+                area = cv2.contourArea(contour)
+                perimeter = cv2.arcLength(contour, True)
+                
+                # Filtrar por área (bolhas têm tamanho específico)
+                if 50 < area < 2000:  # Área típica de bolhas
+                    # Calcular circularidade
+                    if perimeter > 0:
+                        circularity = 4 * np.pi * area / (perimeter * perimeter)
+                        if circularity > 0.3:  # Contornos circulares
+                            # Obter centro (x, y) do contorno
+                            M = cv2.moments(contour)
+                            if M["m00"] != 0:
+                                cx = int(M["m10"] / M["m00"])
+                                cy = int(M["m01"] / M["m00"])
+                                bolhas_detectadas.append((cx, cy, area))
+                                print(f"  🔵 Bolha detectada em ({cx}, {cy}), área={area:.1f}, circularidade={circularity:.3f}")
+            
+            if not bolhas_detectadas:
+                print(f"❌ Nenhuma bolha detectada")
+                return []
+            
+            print(f"📊 Total de {len(bolhas_detectadas)} bolhas detectadas")
+            
+            # Agrupar bolhas por linhas (questões) - tolerância de 15 pixels em Y
+            linhas = []
+            tolerancia_y = 15
+            
+            for cx, cy, area in bolhas_detectadas:
+                # Procurar linha existente próxima
+                linha_encontrada = False
+                for linha in linhas:
+                    if abs(linha[0][1] - cy) <= tolerancia_y:  # Comparar Y da primeira bolha da linha
+                        linha.append((cx, cy))
+                        linha_encontrada = True
+                        break
+                
+                # Se não encontrou linha próxima, criar nova linha
+                if not linha_encontrada:
+                    linhas.append([(cx, cy)])
+            
+            # Ordenar linhas por Y (de cima para baixo)
+            linhas.sort(key=lambda linha: linha[0][1])
+            
+            # Ordenar bolhas dentro de cada linha por X (da esquerda para direita)
+            linhas_ordenadas = []
+            for i, linha in enumerate(linhas):
+                linha_ordenada = sorted(linha, key=lambda bolha: bolha[0])
+                linhas_ordenadas.append(linha_ordenada)
+                print(f"  📝 Linha {i+1}: {len(linha_ordenada)} bolhas em Y≈{linha[0][1]}")
+                for j, (x, y) in enumerate(linha_ordenada):
+                    letra = chr(65 + j) if j < 4 else '?'
+                    print(f"    {letra}: ({x}, {y})")
+            
+            return linhas_ordenadas
+            
+        except Exception as e:
+            print(f"❌ Erro ao detectar bolhas reais: {str(e)}")
+            return []
+
+    def _analisar_preenchimento_bolhas(self, user_gray, linhas_bolhas):
+        """
+        Analisa o preenchimento de cada bolha e retorna as respostas detectadas
+        """
+        try:
+            import cv2
+            import numpy as np
+            
+            print(f"🔍 ANALISANDO PREENCHIMENTO DAS BOLHAS...")
+            
+            detected_answers = {}
+            letters = ['A', 'B', 'C', 'D']
+            
+            for q_index, linha in enumerate(linhas_bolhas, start=1):
+                print(f"📝 Processando Questão {q_index}...")
+                
+                fill_levels = []
+                for alt_index, (x, y) in enumerate(linha):
+                    if alt_index >= 4:  # Máximo 4 alternativas (A, B, C, D)
+                        break
+                        
+                    # Define o tamanho da área a ser recortada
+                    r = 12  # raio aproximado da bolha
+                    roi = user_gray[max(0, y - r):min(user_gray.shape[0], y + r), 
+                                   max(0, x - r):min(user_gray.shape[1], x + r)]
+                    
+                    # Garante que o recorte é válido
+                    if roi.size == 0:
+                        fill_levels.append(0)
+                        print(f"    {letters[alt_index]}: ROI inválido")
+                        continue
+                    
+                    # Aplica threshold para isolar a parte preta da bolha
+                    _, thresh = cv2.threshold(roi, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+                    
+                    # Calcula a "densidade" de pixels pretos dentro da bolha
+                    filled_ratio = np.sum(thresh == 255) / thresh.size
+                    fill_levels.append(filled_ratio)
+                    
+                    print(f"    {letters[alt_index]}: {filled_ratio:.3f} preenchimento")
+                
+                # Encontra a alternativa com maior preenchimento
+                if fill_levels:
+                    best_idx = int(np.argmax(fill_levels))
+                    best_letter = letters[best_idx]
+                    
+                    # Valida: só considera marcada se o preenchimento for forte o suficiente
+                    if fill_levels[best_idx] > 0.35:  # limite ajustável
+                        detected_answers[q_index] = best_letter
+                        print(f"  ✅ Questão {q_index}: {best_letter} detectada ({fill_levels[best_idx]:.3f})")
+                    else:
+                        detected_answers[q_index] = None
+                        print(f"  ❌ Questão {q_index}: Nenhuma marcação detectada (máximo: {fill_levels[best_idx]:.3f})")
+                else:
+                    detected_answers[q_index] = None
+                    print(f"  ❌ Questão {q_index}: Nenhuma alternativa processada")
+            
+            return detected_answers
+            
+        except Exception as e:
+            print(f"❌ Erro ao analisar preenchimento: {str(e)}")
+            return {}
+
+    def _detectar_respostas_metodo_antigo(self, user_gray, x_positions, y_positions):
+        """
+        Método antigo de detecção usando coordenadas fixas (fallback)
+        """
+        try:
+            print(f"🔧 Usando método antigo de detecção...")
+            
+            # Implementar detecção simples usando coordenadas fixas
+            respostas_detectadas = {}
+            
+            for i in range(len(y_positions)):
+                questao_num = i + 1
+                print(f"📝 Processando Questão {questao_num} (método antigo)...")
+                
+                # Processar cada alternativa
+                proporcoes = {}
+                for j, alt_letra in enumerate(['A', 'B', 'C', 'D']):
+                    if j < len(x_positions):
+                        x = x_positions[j]
+                        y = y_positions[i]
+                        
+                        # Recortar região da bolha
+                        r = self.BUBBLE_DETECTION_RADIUS
+                        roi = user_gray[max(0, y - r):min(user_gray.shape[0], y + r), 
+                                       max(0, x - r):min(user_gray.shape[1], x + r)]
+                        
+                        if roi.size > 0:
+                            # Calcular proporção de pixels pretos
+                            _, thresh = cv2.threshold(roi, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+                            filled_ratio = np.sum(thresh == 255) / thresh.size
+                            proporcoes[alt_letra] = filled_ratio
+                            print(f"    {alt_letra}: {filled_ratio:.3f}")
+                
+                # Encontrar alternativa com maior preenchimento
+                if proporcoes:
+                    melhor_alt = max(proporcoes, key=proporcoes.get)
+                    melhor_valor = proporcoes[melhor_alt]
+                    
+                    if melhor_valor > 0.35:
+                        respostas_detectadas[questao_num] = melhor_alt
+                        print(f"  ✅ Questão {questao_num}: {melhor_alt} detectada ({melhor_valor:.3f})")
+                    else:
+                        respostas_detectadas[questao_num] = None
+                        print(f"  ❌ Questão {questao_num}: Nenhuma marcação detectada")
+            
+            return respostas_detectadas
+            
+        except Exception as e:
+            print(f"❌ Erro no método antigo: {str(e)}")
+            return {}

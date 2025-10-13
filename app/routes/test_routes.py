@@ -240,6 +240,17 @@ def criar_avaliacao():
                     if question_data.get('formattedSolution'):
                         images.extend(extract_images_from_html(question_data['formattedSolution']))
                     
+                    # Normalizar skills: aceitar apenas 1 skill (UUID como string)
+                    skills_input = question_data.get('skills')
+                    skill_value = None
+                    if skills_input:
+                        if isinstance(skills_input, list):
+                            # Se vier array, pegar apenas o primeiro elemento
+                            skill_value = skills_input[0] if skills_input else None
+                        else:
+                            # Se vier string, usar diretamente
+                            skill_value = skills_input
+                    
                     question = Question(
                         number=question_data.get('number'),
                         text=question_data.get('text'),
@@ -252,7 +263,7 @@ def criar_avaliacao():
                         command=question_data.get('command'),
                         subtitle=question_data.get('subtitle'),
                         alternatives=question_data.get('options'),
-                        skill=question_data.get('skills'),
+                        skill=skill_value,
                         grade_level=grade_level,
                         difficulty_level=question_data.get('difficulty'),
                         correct_answer=question_data.get('solution'),

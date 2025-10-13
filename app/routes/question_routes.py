@@ -123,6 +123,17 @@ def create_question():
             if not any(alt.get('isCorrect') for alt in data['options']):
                 return jsonify({"error": "At least one alternative must be marked as correct"}), 400
 
+        # Normalizar skills: aceitar apenas 1 skill (UUID como string)
+        skills_input = data.get('skills')
+        skill_value = None
+        if skills_input:
+            if isinstance(skills_input, list):
+                # Se vier array, pegar apenas o primeiro elemento
+                skill_value = skills_input[0] if skills_input else None
+            else:
+                # Se vier string, usar diretamente
+                skill_value = skills_input
+        
         question = Question(
             number=data.get('number'),
             text=data.get('text'),
@@ -135,7 +146,7 @@ def create_question():
             command=data.get('command'),
             subtitle=data.get('subtitle'),
             alternatives=data.get('options'),
-            skill=data.get('skills'),
+            skill=skill_value,
             grade_level=data.get('grade'),
             difficulty_level=data.get('difficulty'),
             correct_answer=data.get('solution'),
@@ -294,6 +305,16 @@ def update_question(question_id):
         for json_key, model_attr in field_map.items():
             if json_key in data:
                 setattr(question, model_attr, data[json_key])
+        
+        # Tratar skills separadamente para normalizar (apenas 1 skill permitida)
+        if 'skills' in data:
+            skills_input = data['skills']
+            if isinstance(skills_input, list):
+                # Se vier array, pegar apenas o primeiro elemento
+                question.skill = skills_input[0] if skills_input else None
+            else:
+                # Se vier string, usar diretamente
+                question.skill = skills_input
         
         question.version += 1
 

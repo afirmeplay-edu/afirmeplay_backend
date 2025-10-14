@@ -565,6 +565,13 @@ class EvaluationResultService:
                         StudentAnswer.question_id.in_(subject_question_ids)
                     ).all()
                     
+                    # CORREÇÃO: Usar apenas questões respondidas (igual à tabela detalhada)
+                    total_respondidas = len(student_answers)
+                    
+                    # Pular alunos que não responderam nenhuma questão desta disciplina
+                    if total_respondidas == 0:
+                        continue
+                    
                     # Calcular acertos para esta disciplina
                     correct_answers_subject = 0
                     for answer in student_answers:
@@ -578,10 +585,11 @@ class EvaluationResultService:
                                 if str(answer.answer).strip().lower() == str(question.correct_answer).strip().lower():
                                     correct_answers_subject += 1
                     
-                    # CORRIGIDO: Usar EvaluationCalculator com curso e disciplina corretos
+                    # CORRIGIDO: Usar total_respondidas ao invés de len(questions_with_answer)
+                    # Isso iguala a lógica da tabela detalhada por disciplina
                     evaluation_result = EvaluationCalculator.calculate_complete_evaluation(
                         correct_answers=correct_answers_subject,
-                        total_questions=len(questions_with_answer),
+                        total_questions=total_respondidas,  # ✅ MUDANÇA: usar questões respondidas
                         course_name=course_name,
                         subject_name=subject_name
                     )
@@ -589,11 +597,11 @@ class EvaluationResultService:
                     subject_results.append({
                         'student_id': result.student_id,
                         'correct_answers': correct_answers_subject,
-                        'total_questions': len(questions_with_answer),
+                        'total_questions': total_respondidas,  # ✅ MUDANÇA: armazenar questões respondidas
                         'proficiency': evaluation_result['proficiency'],
                         'grade': evaluation_result['grade'],
                         'classification': evaluation_result['classification'],
-                        'score_percentage': round((correct_answers_subject / len(questions_with_answer)) * 100, 2) if len(questions_with_answer) > 0 else 0
+                        'score_percentage': round((correct_answers_subject / total_respondidas) * 100, 2) if total_respondidas > 0 else 0  # ✅ MUDANÇA: calcular com base em respondidas
                     })
                 
                 if subject_results:
@@ -613,7 +621,8 @@ class EvaluationResultService:
                     
                     for sr in subject_results:
                         classification = sr['classification'].lower()
-                        if 'abaixo' in classification or 'básico' in classification:
+                        # CORREÇÃO: Verificar 'abaixo' primeiro para evitar classificar 'Básico' como 'Abaixo do Básico'
+                        if 'abaixo' in classification:
                             classification_distribution['abaixo_do_basico'] += 1
                         elif 'básico' in classification or 'basico' in classification:
                             classification_distribution['basico'] += 1

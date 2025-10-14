@@ -5484,9 +5484,13 @@ def _buscar_alunos_por_escopo(escopo_calculo: dict) -> List[Student]:
             return alunos
         
         elif escopo_calculo['tipo'] == "serie":
-            # Todos os alunos da série (com filtro de avaliação se especificada)
+            # Todos os alunos da série na escola específica (com filtro de avaliação se especificada)
             query = Student.query.join(Class).join(Grade)\
                                .filter(Grade.id == escopo_calculo['serie_id'])
+            
+            # Filtrar por escola se especificada (via Class.school_id)
+            if escopo_calculo.get('escola_id'):
+                query = query.filter(Class.school_id == escopo_calculo['escola_id'])
             
             # Se há avaliação específica, filtrar apenas turmas onde foi aplicada
             if escopo_calculo.get('avaliacao_id'):
@@ -5497,7 +5501,7 @@ def _buscar_alunos_por_escopo(escopo_calculo: dict) -> List[Student]:
                     query = query.filter(Student.class_id.in_(class_ids))
             
             alunos = query.all()
-            logging.info(f"Alunos encontrados para série: {len(alunos)}")
+            logging.info(f"Alunos encontrados para série (escola_id={escopo_calculo.get('escola_id')}): {len(alunos)}")
             return alunos
         
         elif escopo_calculo['tipo'] == "turma":

@@ -450,6 +450,10 @@ def buscar_escolas_por_serie(grade_id):
         if not grade_id:
             return jsonify({"erro": "ID da série não fornecido"}), 400
 
+        # Obter parâmetros de query opcionais para filtrar por estado e município
+        state = request.args.get('state')
+        city_id = request.args.get('city_id')
+
         # Verificar se a série existe
         from app.models.grades import Grade
         grade = Grade.query.get(grade_id)
@@ -470,9 +474,18 @@ def buscar_escolas_por_serie(grade_id):
             Student, School.id == Student.school_id
         ).filter(
             Class.grade_id == grade_id
-        ).group_by(
-            School.id, City.id
         )
+
+        # Aplicar filtro por estado se fornecido
+        if state:
+            query = query.filter(City.state == state)
+
+        # Aplicar filtro por município se fornecido
+        if city_id:
+            query = query.filter(School.city_id == city_id)
+
+        # Agrupar resultados
+        query = query.group_by(School.id, City.id)
 
         # Aplicar filtros de permissão baseados na role
         if user['role'] == "admin":

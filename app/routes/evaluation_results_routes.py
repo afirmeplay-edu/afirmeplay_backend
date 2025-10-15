@@ -768,7 +768,7 @@ def listar_avaliacoes():
         total_pages = (total + per_page - 1) // per_page
         
         # Gerar opções dos próximos filtros
-        opcoes_proximos_filtros = _gerar_opcoes_proximos_filtros(scope_info, nivel_granularidade)
+        opcoes_proximos_filtros = _gerar_opcoes_proximos_filtros(scope_info, nivel_granularidade, user)
         
         # Gerar tabela detalhada por disciplina (apenas se uma avaliação específica for selecionada)
         tabela_detalhada = {}
@@ -2014,10 +2014,15 @@ def _get_nome_granularidade(nivel_granularidade, scope_info, escola_info, serie_
         return "Geral"
 
 
-def _gerar_opcoes_proximos_filtros(scope_info, nivel_granularidade):
+def _gerar_opcoes_proximos_filtros(scope_info, nivel_granularidade, user=None):
     """
     Gera as opções dos próximos filtros baseado no nível de granularidade atual
     Nova hierarquia: Estado → Município → Avaliação → Escola → Série → Turma
+    
+    Args:
+        scope_info: Informações do escopo de busca
+        nivel_granularidade: Nível de granularidade atual
+        user: Usuário logado (para aplicar filtros de permissões)
     """
     try:
         opcoes = {
@@ -2026,6 +2031,11 @@ def _gerar_opcoes_proximos_filtros(scope_info, nivel_granularidade):
             "series": [],
             "turmas": []
         }
+        
+        # Verificar permissões do usuário se fornecido
+        permissao = None
+        if user:
+            permissao = verificar_permissao_filtros(user)
         
         # Se estamos no nível de município, mostrar avaliações
         if nivel_granularidade in ["estado", "municipio"]:
@@ -2054,11 +2064,35 @@ def _gerar_opcoes_proximos_filtros(scope_info, nivel_granularidade):
                                            .join(Test, ClassTest.test_id == Test.id)\
                                            .join(City, School.city_id == City.id)\
                                            .filter(Test.id == avaliacao_id)\
-                                           .filter(City.id == municipio_id)\
-                                           .distinct()
+                                           .filter(City.id == municipio_id)
                 
-                escolas = query_escolas.all()
-                opcoes["escolas"] = [{"id": str(e[0]), "name": e[1]} for e in escolas]
+                # Aplicar filtros baseados no papel do usuário
+                if permissao and permissao.get('scope') == 'escola':
+                    # Diretor e Coordenador veem apenas sua escola
+                    from app.models.manager import Manager
+                    manager = Manager.query.filter_by(user_id=user['id']).first()
+                    if manager and manager.school_id:
+                        query_escolas = query_escolas.filter(School.id == manager.school_id)
+                    else:
+                        # Se não tem escola vinculada, não retornar nada
+                        query_escolas = None
+                elif permissao and permissao.get('scope') == 'escolas_vinculadas':
+                    # Professor vê apenas escolas onde está vinculado
+                    from app.models.teacher import Teacher
+                    teacher = Teacher.query.filter_by(user_id=user['id']).first()
+                    if teacher:
+                        school_teachers = SchoolTeacher.query.filter_by(teacher_id=teacher.id).all()
+                        school_ids = [st.school_id for st in school_teachers]
+                        if school_ids:
+                            query_escolas = query_escolas.filter(School.id.in_(school_ids))
+                        else:
+                            query_escolas = None
+                    else:
+                        query_escolas = None
+                
+                if query_escolas is not None:
+                    escolas = query_escolas.distinct().all()
+                    opcoes["escolas"] = [{"id": str(e[0]), "name": e[1]} for e in escolas]
         
         # Se estamos no nível de escola, mostrar séries onde a avaliação foi aplicada
         if nivel_granularidade in ["estado", "municipio", "avaliacao", "escola"]:
@@ -4574,14 +4608,36 @@ def obter_opcoes_filtros():
                 # Aplicar filtros baseados no papel do usuário
                 if permissao['scope'] == 'escola':
                     # Diretor e Coordenador veem apenas sua escola
-                    query_escolas = query_escolas.filter(School.id == user.get('school_id', ''))
+                    from app.models.manager import Manager
+                    manager = Manager.query.filter_by(user_id=user['id']).first()
+                    if manager and manager.school_id:
+                        query_escolas = query_escolas.filter(School.id == manager.school_id)
+                    else:
+                        # Se não tem escola vinculada, retornar lista vazia
+                        opcoes["escolas"] = []
+                        query_escolas = None
+                        
                 elif permissao['scope'] == 'escolas_vinculadas':
-                    # Professor vê todas as escolas onde a avaliação foi aplicada (filtro será por created_by)
-                    pass
+                    # Professor vê apenas escolas onde está vinculado
+                    from app.models.teacher import Teacher
+                    teacher = Teacher.query.filter_by(user_id=user['id']).first()
+                    if teacher:
+                        school_teachers = SchoolTeacher.query.filter_by(teacher_id=teacher.id).all()
+                        school_ids = [st.school_id for st in school_teachers]
+                        if school_ids:
+                            query_escolas = query_escolas.filter(School.id.in_(school_ids))
+                        else:
+                            opcoes["escolas"] = []
+                            query_escolas = None
+                    else:
+                        opcoes["escolas"] = []
+                        query_escolas = None
                 
-                escolas = query_escolas.distinct().all()
-                escolas_list = [{"id": str(e[0]), "nome": e[1]} for e in escolas]
-                opcoes["escolas"] = escolas_list
+                # Executar query apenas se houver filtro válido
+                if query_escolas is not None:
+                    escolas = query_escolas.distinct().all()
+                    escolas_list = [{"id": str(e[0]), "nome": e[1]} for e in escolas]
+                    opcoes["escolas"] = escolas_list
             else:
                 opcoes["escolas"] = []
         else:
@@ -4768,13 +4824,31 @@ def obter_escolas_municipio(municipio_id: str):
             escolas = School.query.filter_by(city_id=municipio_id).all()
         elif permissao['scope'] == 'escola':
             # Diretor e Coordenador veem apenas sua escola
-            escolas = School.query.filter(
-                School.city_id == municipio_id,
-                School.id == user.get('school_id', '')
-            ).all()
+            from app.models.manager import Manager
+            manager = Manager.query.filter_by(user_id=user['id']).first()
+            if manager and manager.school_id:
+                escolas = School.query.filter(
+                    School.city_id == municipio_id,
+                    School.id == manager.school_id
+                ).all()
+            else:
+                escolas = []
         elif permissao['scope'] == 'escolas_vinculadas':
-            # Professor vê todas as escolas do município (filtro será por created_by na avaliação)
-            escolas = School.query.filter_by(city_id=municipio_id).all()
+            # Professor vê apenas escolas onde está vinculado
+            from app.models.teacher import Teacher
+            teacher = Teacher.query.filter_by(user_id=user['id']).first()
+            if teacher:
+                school_teachers = SchoolTeacher.query.filter_by(teacher_id=teacher.id).all()
+                school_ids = [st.school_id for st in school_teachers]
+                if school_ids:
+                    escolas = School.query.filter(
+                        School.city_id == municipio_id,
+                        School.id.in_(school_ids)
+                    ).all()
+                else:
+                    escolas = []
+            else:
+                escolas = []
         else:
             escolas = []
 
@@ -4856,10 +4930,26 @@ def obter_escolas_por_avaliacao():
         # Aplicar filtros baseados no papel do usuário
         if permissao['scope'] == 'escola':
             # Diretor e Coordenador veem apenas sua escola
-            query_escolas = query_escolas.filter(School.id == user.get('school_id', ''))
+            from app.models.manager import Manager
+            manager = Manager.query.filter_by(user_id=user['id']).first()
+            if manager and manager.school_id:
+                query_escolas = query_escolas.filter(School.id == manager.school_id)
+            else:
+                return jsonify({"error": "Usuário não vinculado a uma escola"}), 403
+                
         elif permissao['scope'] == 'escolas_vinculadas':
-            # Professor vê todas as escolas onde a avaliação foi aplicada (filtro será por created_by)
-            pass
+            # Professor vê apenas escolas onde está vinculado
+            from app.models.teacher import Teacher
+            teacher = Teacher.query.filter_by(user_id=user['id']).first()
+            if teacher:
+                school_teachers = SchoolTeacher.query.filter_by(teacher_id=teacher.id).all()
+                school_ids = [st.school_id for st in school_teachers]
+                if school_ids:
+                    query_escolas = query_escolas.filter(School.id.in_(school_ids))
+                else:
+                    return jsonify({"error": "Professor não vinculado a nenhuma escola"}), 403
+            else:
+                return jsonify({"error": "Professor não vinculado a nenhuma escola"}), 403
         
         escolas = query_escolas.distinct().all()
         escolas_list = [{"id": str(e[0]), "nome": e[1]} for e in escolas]
@@ -5394,9 +5484,13 @@ def _buscar_alunos_por_escopo(escopo_calculo: dict) -> List[Student]:
             return alunos
         
         elif escopo_calculo['tipo'] == "serie":
-            # Todos os alunos da série (com filtro de avaliação se especificada)
+            # Todos os alunos da série na escola específica (com filtro de avaliação se especificada)
             query = Student.query.join(Class).join(Grade)\
                                .filter(Grade.id == escopo_calculo['serie_id'])
+            
+            # Filtrar por escola se especificada (via Class.school_id)
+            if escopo_calculo.get('escola_id'):
+                query = query.filter(Class.school_id == escopo_calculo['escola_id'])
             
             # Se há avaliação específica, filtrar apenas turmas onde foi aplicada
             if escopo_calculo.get('avaliacao_id'):
@@ -5407,7 +5501,7 @@ def _buscar_alunos_por_escopo(escopo_calculo: dict) -> List[Student]:
                     query = query.filter(Student.class_id.in_(class_ids))
             
             alunos = query.all()
-            logging.info(f"Alunos encontrados para série: {len(alunos)}")
+            logging.info(f"Alunos encontrados para série (escola_id={escopo_calculo.get('escola_id')}): {len(alunos)}")
             return alunos
         
         elif escopo_calculo['tipo'] == "turma":

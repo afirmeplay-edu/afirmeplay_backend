@@ -36,6 +36,63 @@ import dateutil.parser
 bp = Blueprint('evaluation_results', __name__, url_prefix='/evaluation-results')
 
 
+def professor_pode_ver_avaliacao(user_id: str, test_id: str) -> bool:
+    """
+    Verifica se um professor pode ver uma avaliação específica.
+    Retorna True se:
+    1. O professor criou a avaliação OU
+    2. A avaliação foi aplicada em escolas/turmas onde o professor está vinculado
+    
+    Args:
+        user_id: ID do usuário professor
+        test_id: ID da avaliação
+    
+    Returns:
+        bool: True se o professor pode ver a avaliação, False caso contrário
+    """
+    try:
+        # Buscar a avaliação
+        test = Test.query.get(test_id)
+        if not test:
+            return False
+        
+        # Critério 1: Professor criou a avaliação
+        if test.created_by == user_id:
+            return True
+        
+        # Critério 2: Avaliação foi aplicada em escolas/turmas onde professor está vinculado
+        from app.models.teacher import Teacher
+        
+        teacher = Teacher.query.filter_by(user_id=user_id).first()
+        if not teacher:
+            return False
+        
+        # Buscar escolas onde o professor está vinculado
+        school_teachers = SchoolTeacher.query.filter_by(teacher_id=teacher.id).all()
+        teacher_school_ids = [st.school_id for st in school_teachers]
+        
+        if not teacher_school_ids:
+            return False
+        
+        # Buscar turmas onde a avaliação foi aplicada
+        class_tests = ClassTest.query.filter_by(test_id=test_id).all()
+        class_ids = [ct.class_id for ct in class_tests]
+        
+        if not class_ids:
+            return False
+        
+        # Buscar turmas das escolas onde o professor está vinculado
+        classes_teacher_schools = Class.query.filter(
+            Class.id.in_(class_ids),
+            Class.school_id.in_(teacher_school_ids)
+        ).all()
+        
+        # Se há pelo menos uma turma da escola do professor onde a avaliação foi aplicada
+        return len(classes_teacher_schools) > 0
+        
+    except Exception as e:
+        logging.error(f"Erro ao verificar permissão do professor para avaliação {test_id}: {str(e)}")
+        return False
 
 
 def verificar_permissao_filtros(user: dict, scope_info: dict = None) -> Dict[str, Any]:
@@ -124,7 +181,7 @@ def verificar_permissao_filtros(user: dict, scope_info: dict = None) -> Dict[str
         }
     
     elif role == 'PROFESSOR':
-        # Professor vê avaliações que criou (simplificado)
+        # Professor vê avaliações que criou OU que foram aplicadas em suas escolas/turmas
         return {
             'permitted': True,
             'scope': 'escolas_vinculadas',
@@ -639,8 +696,40 @@ def listar_avaliacoes():
             
             # Aplicar filtros específicos baseados no papel do usuário
             if permissao['scope'] == 'escolas_vinculadas' and user['role'] == 'professor':
-                # Professor vê apenas avaliações que criou
-                query_base = query_base.filter(Test.created_by == user['id'])
+                # Professor vê avaliações que criou OU que foram aplicadas em suas escolas/turmas
+                from app.models.teacher import Teacher
+                from sqlalchemy import or_
+                
+                teacher = Teacher.query.filter_by(user_id=user['id']).first()
+                if teacher:
+                    # Buscar escolas onde o professor está vinculado
+                    school_teachers = SchoolTeacher.query.filter_by(teacher_id=teacher.id).all()
+                    teacher_school_ids = [st.school_id for st in school_teachers]
+                    
+                    # Criar filtro OR: avaliações criadas pelo professor OU aplicadas em suas escolas
+                    filters = [Test.created_by == user['id']]
+                    
+                    if teacher_school_ids:
+                        # Buscar turmas das escolas do professor
+                        teacher_classes = Class.query.filter(
+                            Class.school_id.in_(teacher_school_ids)
+                        ).with_entities(Class.id).all()
+                        teacher_class_ids = [c.id for c in teacher_classes]
+                        
+                        if teacher_class_ids:
+                            # Avaliações aplicadas em turmas das escolas do professor
+                            filters.append(
+                                Test.id.in_(
+                                    db.session.query(ClassTest.test_id).filter(
+                                        ClassTest.class_id.in_(teacher_class_ids)
+                                    )
+                                )
+                            )
+                    
+                    query_base = query_base.filter(or_(*filters))
+                else:
+                    # Se não é um professor válido, não mostrar nenhuma avaliação
+                    query_base = query_base.filter(Test.created_by == user['id']).filter(Test.id == None)
                 
         except Exception as e:
             logging.error(f"Erro ao aplicar filtros: {str(e)}")
@@ -685,7 +774,37 @@ def listar_avaliacoes():
                         if test_filter:
                             query_base = query_base.filter(Test.id == avaliacao)
                     if user['role'] == 'professor':
-                        query_base = query_base.filter(Test.created_by == user['id'])
+                        # Para professores, usar a nova lógica de permissões
+                        from app.models.teacher import Teacher
+                        from sqlalchemy import or_
+                        
+                        teacher = Teacher.query.filter_by(user_id=user['id']).first()
+                        if teacher:
+                            # Buscar escolas onde o professor está vinculado
+                            school_teachers = SchoolTeacher.query.filter_by(teacher_id=teacher.id).all()
+                            teacher_school_ids = [st.school_id for st in school_teachers]
+                            
+                            # Criar filtro OR: avaliações criadas pelo professor OU aplicadas em suas escolas
+                            filters = [Test.created_by == user['id']]
+                            
+                            if teacher_school_ids:
+                                # Buscar turmas das escolas do professor
+                                teacher_classes = Class.query.filter(
+                                    Class.school_id.in_(teacher_school_ids)
+                                ).with_entities(Class.id).all()
+                                teacher_class_ids = [c.id for c in teacher_classes]
+                                
+                                if teacher_class_ids:
+                                    # Avaliações aplicadas em turmas das escolas do professor
+                                    filters.append(
+                                        Test.id.in_(
+                                            db.session.query(ClassTest.test_id).filter(
+                                                ClassTest.class_id.in_(teacher_class_ids)
+                                            )
+                                        )
+                                    )
+                            
+                            query_base = query_base.filter(or_(*filters))
                     
                     todas_avaliacoes_escopo = query_base.all()
                     logging.info(f"Query executada com nova sessão: {len(todas_avaliacoes_escopo)} avaliações encontradas")
@@ -746,7 +865,40 @@ def listar_avaliacoes():
                         if test_filter:
                             query_base = query_base.filter(Test.id == avaliacao)
                     if permissao['scope'] == 'escolas_vinculadas' and user['role'] == 'professor':
-                        query_base = query_base.filter(Test.created_by == user['id'])
+                        # Professor vê avaliações que criou OU que foram aplicadas em suas escolas/turmas
+                        from app.models.teacher import Teacher
+                        from sqlalchemy import or_
+                        
+                        teacher = Teacher.query.filter_by(user_id=user['id']).first()
+                        if teacher:
+                            # Buscar escolas onde o professor está vinculado
+                            school_teachers = SchoolTeacher.query.filter_by(teacher_id=teacher.id).all()
+                            teacher_school_ids = [st.school_id for st in school_teachers]
+                            
+                            # Criar filtro OR: avaliações criadas pelo professor OU aplicadas em suas escolas
+                            filters = [Test.created_by == user['id']]
+                            
+                            if teacher_school_ids:
+                                # Buscar turmas das escolas do professor
+                                teacher_classes = Class.query.filter(
+                                    Class.school_id.in_(teacher_school_ids)
+                                ).with_entities(Class.id).all()
+                                teacher_class_ids = [c.id for c in teacher_classes]
+                                
+                                if teacher_class_ids:
+                                    # Avaliações aplicadas em turmas das escolas do professor
+                                    filters.append(
+                                        Test.id.in_(
+                                            db.session.query(ClassTest.test_id).filter(
+                                                ClassTest.class_id.in_(teacher_class_ids)
+                                            )
+                                        )
+                                    )
+                            
+                            query_base = query_base.filter(or_(*filters))
+                        else:
+                            # Se não é um professor válido, não mostrar nenhuma avaliação
+                            query_base = query_base.filter(Test.created_by == user['id']).filter(Test.id == None)
                     
                     total = query_base.count()
                     offset = (page - 1) * per_page
@@ -2025,6 +2177,12 @@ def _gerar_opcoes_proximos_filtros(scope_info, nivel_granularidade, user=None):
         user: Usuário logado (para aplicar filtros de permissões)
     """
     try:
+        # Importações necessárias para filtros de professores
+        from app.models.teacher import Teacher
+        from app.models.teacherClass import TeacherClass
+        from app.models.classSubject import ClassSubject
+        from app.models.schoolTeacher import SchoolTeacher
+        
         opcoes = {
             "avaliacoes": [],
             "escolas": [],
@@ -2112,6 +2270,7 @@ def _gerar_opcoes_proximos_filtros(scope_info, nivel_granularidade, user=None):
                                              .filter(School.id == escola_id)\
                                              .filter(City.id == municipio_id)\
                                              .distinct()
+                
                 else:
                     # Se escola é "all", buscar todas as séries do município onde a avaliação foi aplicada
                     query_series = Grade.query.with_entities(Grade.id, Grade.name)\
@@ -2123,6 +2282,36 @@ def _gerar_opcoes_proximos_filtros(scope_info, nivel_granularidade, user=None):
                                              .filter(Test.id == avaliacao_id)\
                                              .filter(City.id == municipio_id)\
                                              .distinct()
+                
+                # Aplicar filtros específicos para professores (para ambos os casos)
+                if permissao and permissao.get('scope') == 'escolas_vinculadas' and user and user.get('role') == 'professor':
+                    from app.models.teacher import Teacher
+                    from app.models.teacherClass import TeacherClass
+                    from app.models.classSubject import ClassSubject
+                    
+                    teacher = Teacher.query.filter_by(user_id=user['id']).first()
+                    if teacher:
+                        # Buscar turmas onde professor está vinculado
+                        teacher_class_ids = db.session.query(TeacherClass.class_id).filter(
+                            TeacherClass.teacher_id == teacher.id
+                        ).all()
+                        teacher_class_ids = [tc[0] for tc in teacher_class_ids]
+                        
+                        # Buscar turmas via ClassSubject também
+                        class_subject_ids = db.session.query(ClassSubject.class_id).filter(
+                            ClassSubject.teacher_id == teacher.id
+                        ).all()
+                        class_subject_ids = [cs[0] for cs in class_subject_ids]
+                        
+                        # Combinar todas as turmas vinculadas
+                        all_teacher_class_ids = list(set(teacher_class_ids + class_subject_ids))
+                        
+                        if all_teacher_class_ids:
+                            # Filtrar séries apenas das turmas onde professor está vinculado
+                            query_series = query_series.filter(Class.id.in_(all_teacher_class_ids))
+                        else:
+                            # Professor não está vinculado a nenhuma turma
+                            query_series = query_series.filter(Class.id == None)  # Força resultado vazio
                 
                 series = query_series.all()
                 opcoes["series"] = [{"id": str(s[0]), "name": s[1]} for s in series]
@@ -2185,6 +2374,47 @@ def _gerar_opcoes_proximos_filtros(scope_info, nivel_granularidade, user=None):
                                              .filter(City.id == municipio_id)\
                                              .distinct()
                 
+                # Aplicar filtros específicos para professores (para turmas)
+                if permissao and permissao.get('scope') == 'escolas_vinculadas' and user and user.get('role') == 'professor':
+                    
+                    teacher = Teacher.query.filter_by(user_id=user['id']).first()
+                    if teacher:
+                        # Buscar escolas onde professor está vinculado (SchoolTeacher)
+                        school_teachers = SchoolTeacher.query.filter_by(teacher_id=teacher.id).all()
+                        teacher_school_ids = [st.school_id for st in school_teachers]
+                        
+                        if not teacher_school_ids:
+                            # Professor não está vinculado a nenhuma escola
+                            query_turmas = query_turmas.filter(Class.id == None)  # Força resultado vazio
+                        else:
+                            # Buscar turmas onde professor está vinculado
+                            # 1. Via TeacherClass (vinculação direta)
+                            teacher_class_ids = db.session.query(TeacherClass.class_id).filter(
+                                TeacherClass.teacher_id == teacher.id
+                            ).all()
+                            teacher_class_ids = [tc[0] for tc in teacher_class_ids]
+                            
+                            # 2. Via ClassSubject (vinculação via disciplina)
+                            class_subject_ids = db.session.query(ClassSubject.class_id).filter(
+                                ClassSubject.teacher_id == teacher.id
+                            ).all()
+                            class_subject_ids = [cs[0] for cs in class_subject_ids]
+                            
+                            # Combinar todas as turmas vinculadas
+                            all_teacher_class_ids = list(set(teacher_class_ids + class_subject_ids))
+                            
+                            if all_teacher_class_ids:
+                                # Filtrar turmas onde professor tem AMBAS as vinculações:
+                                # 1. TeacherClass (vinculação direta à turma) E
+                                # 2. SchoolTeacher (vinculação à escola da turma)
+                                query_turmas = query_turmas.filter(
+                                    Class.id.in_(all_teacher_class_ids),
+                                    Class.school_id.in_(teacher_school_ids)
+                                )
+                            else:
+                                # Professor não está vinculado a nenhuma turma
+                                query_turmas = query_turmas.filter(Class.id == None)  # Força resultado vazio
+                
                 turmas = query_turmas.all()
                 opcoes["turmas"] = [{"id": str(t[0]), "name": t[1] or f"Turma {t[0]}"} for t in turmas]
         
@@ -2229,7 +2459,7 @@ def listar_alunos():
             return jsonify({"error": "Avaliação não encontrada"}), 404
         
         # Verificar permissões
-        if user['role'] == 'professor' and test.created_by != user['id']:
+        if user['role'] == 'professor' and not professor_pode_ver_avaliacao(user['id'], test.id):
             return jsonify({"error": "Acesso negado"}), 403
         
         # Buscar TODOS os alunos das turmas onde a avaliação foi aplicada
@@ -2333,7 +2563,7 @@ def get_evaluation_by_id(evaluation_id: str):
             return jsonify({"error": "Avaliação não encontrada"}), 404
         
         # Verificar permissões
-        if user['role'] == 'professor' and test.created_by != user['id']:
+        if user['role'] == 'professor' and not professor_pode_ver_avaliacao(user['id'], test.id):
             return jsonify({"error": "Acesso negado"}), 403
         
         # Buscar estatísticas da avaliação
@@ -2423,7 +2653,7 @@ def relatorio_detalhado(evaluation_id: str):
             return jsonify({"error": "Avaliação não encontrada"}), 404
         
         # Verificar permissões
-        if user['role'] == 'professor' and test.created_by != user['id']:
+        if user['role'] == 'professor' and not professor_pode_ver_avaliacao(user['id'], test.id):
             return jsonify({"error": "Acesso negado"}), 403
         
         # Dados da avaliação
@@ -2633,7 +2863,7 @@ def finalizar_avaliacao(test_id):
             return jsonify({"error": "Avaliação não encontrada"}), 404
         
         # Verificar permissões
-        if user['role'] == 'professor' and test.created_by != user['id']:
+        if user['role'] == 'professor' and not professor_pode_ver_avaliacao(user['id'], test.id):
             return jsonify({"error": "Você só pode finalizar avaliações que criou"}), 403
         
         # Buscar ClassTest para esta avaliação
@@ -2997,7 +3227,7 @@ def calculate_test_scores(test_id):
             return jsonify({"error": "Teste não encontrado"}), 404
             
         # Verificar permissões
-        if user['role'] == 'professor' and test.created_by != user['id']:
+        if user['role'] == 'professor' and not professor_pode_ver_avaliacao(user['id'], test.id):
             return jsonify({"error": "Você só pode calcular notas de testes que criou"}), 403
             
         # Buscar questões do teste através da tabela de associação
@@ -3153,7 +3383,7 @@ def manual_correction(test_id):
         if not test:
             return jsonify({"error": "Teste não encontrado"}), 404
             
-        if user['role'] == 'professor' and test.created_by != user['id']:
+        if user['role'] == 'professor' and not professor_pode_ver_avaliacao(user['id'], test.id):
             return jsonify({"error": "Você só pode corrigir testes que criou"}), 403
         
         # Buscar resposta do aluno
@@ -3236,7 +3466,7 @@ def get_student_test_results(test_id, student_id):
         elif user['role'] == 'professor':
             # Professor só pode ver resultados de testes que criou
             test = Test.query.get(test_id)
-            if not test or test.created_by != user['id']:
+            if not test or not professor_pode_ver_avaliacao(user['id'], test.id):
                 return jsonify({"error": "Você só pode ver resultados de testes que criou"}), 403
         
         # ✅ NOVO: Buscar resultado pré-calculado da tabela evaluation_results
@@ -3418,7 +3648,7 @@ def batch_correction(test_id):
         if not test:
             return jsonify({"error": "Teste não encontrado"}), 404
             
-        if user['role'] == 'professor' and test.created_by != user['id']:
+        if user['role'] == 'professor' and not professor_pode_ver_avaliacao(user['id'], test.id):
             return jsonify({"error": "Você só pode corrigir testes que criou"}), 403
         
         processed = 0
@@ -3524,7 +3754,7 @@ def get_pending_corrections(test_id):
         if not test:
             return jsonify({"error": "Teste não encontrado"}), 404
             
-        if user['role'] == 'professor' and test.created_by != user['id']:
+        if user['role'] == 'professor' and not professor_pode_ver_avaliacao(user['id'], test.id):
             return jsonify({"error": "Você só pode ver correções de testes que criou"}), 403
         
         # Parâmetros de filtro
@@ -3605,7 +3835,7 @@ def get_student_answers(test_id, student_id):
         elif user['role'] == 'professor':
             # Professor só pode ver respostas de testes que criou
             test = Test.query.get(test_id)
-            if not test or test.created_by != user['id']:
+            if not test or not professor_pode_ver_avaliacao(user['id'], test.id):
                 return jsonify({"error": "Você só pode ver respostas de testes que criou"}), 403
         
         # O student_id na URL pode ser user_id ou student_id real
@@ -3766,7 +3996,7 @@ def relatorio_detalhado_filtrado(evaluation_id: str):
             return jsonify({"error": "Avaliação não encontrada"}), 404
         
         # Verificar permissões
-        if user['role'] == 'professor' and test.created_by != user['id']:
+        if user['role'] == 'professor' and not professor_pode_ver_avaliacao(user['id'], test.id):
             return jsonify({"error": "Acesso negado"}), 403
         
         # Extrair parâmetros de query
@@ -4006,7 +4236,7 @@ def opcoes_filtros(evaluation_id: str):
             return jsonify({"error": "Avaliação não encontrada"}), 404
         
         # Verificar permissões específicas para professor
-        if user['role'] == 'professor' and test.created_by != user['id']:
+        if user['role'] == 'professor' and not professor_pode_ver_avaliacao(user['id'], test.id):
             return jsonify({"error": "Acesso negado"}), 403
         
         # Buscar disciplinas das questões
@@ -4251,7 +4481,7 @@ def verificar_e_atualizar_status(test_id: str):
             return jsonify({"error": "Avaliação não encontrada"}), 404
         
         # Verificar permissões
-        if user['role'] == 'professor' and test.created_by != user['id']:
+        if user['role'] == 'professor' and not professor_pode_ver_avaliacao(user['id'], test.id):
             return jsonify({"error": "Você só pode verificar avaliações que criou"}), 403
         
         # Verificar e atualizar status
@@ -4294,7 +4524,7 @@ def obter_resumo_status(test_id: str):
             return jsonify({"error": "Avaliação não encontrada"}), 404
         
         # Verificar permissões
-        if user['role'] == 'professor' and test.created_by != user['id']:
+        if user['role'] == 'professor' and not professor_pode_ver_avaliacao(user['id'], test.id):
             return jsonify({"error": "Você só pode verificar avaliações que criou"}), 403
         
         # Obter resumo
@@ -4325,8 +4555,40 @@ def verificar_todas_avaliacoes():
 
         # Buscar todas as avaliações
         if user['role'] == 'professor':
-            # Professores só veem suas próprias avaliações
-            tests = Test.query.filter_by(created_by=user['id']).all()
+            # Professores veem avaliações que criaram OU que foram aplicadas em suas escolas/turmas
+            from app.models.teacher import Teacher
+            from sqlalchemy import or_
+            
+            teacher = Teacher.query.filter_by(user_id=user['id']).first()
+            if teacher:
+                # Buscar escolas onde o professor está vinculado
+                school_teachers = SchoolTeacher.query.filter_by(teacher_id=teacher.id).all()
+                teacher_school_ids = [st.school_id for st in school_teachers]
+                
+                # Criar filtro OR: avaliações criadas pelo professor OU aplicadas em suas escolas
+                filters = [Test.created_by == user['id']]
+                
+                if teacher_school_ids:
+                    # Buscar turmas das escolas do professor
+                    teacher_classes = Class.query.filter(
+                        Class.school_id.in_(teacher_school_ids)
+                    ).with_entities(Class.id).all()
+                    teacher_class_ids = [c.id for c in teacher_classes]
+                    
+                    if teacher_class_ids:
+                        # Avaliações aplicadas em turmas das escolas do professor
+                        filters.append(
+                            Test.id.in_(
+                                db.session.query(ClassTest.test_id).filter(
+                                    ClassTest.class_id.in_(teacher_class_ids)
+                                )
+                            )
+                        )
+                
+                tests = Test.query.filter(or_(*filters)).all()
+            else:
+                # Se não é um professor válido, não mostrar nenhuma avaliação
+                tests = []
         else:
             # Admins veem todas as avaliações
             tests = Test.query.all()
@@ -4391,7 +4653,40 @@ def obter_estatisticas_status():
 
         # Buscar todas as avaliações
         if user['role'] == 'professor':
-            tests = Test.query.filter_by(created_by=user['id']).all()
+            # Professores veem avaliações que criaram OU que foram aplicadas em suas escolas/turmas
+            from app.models.teacher import Teacher
+            from sqlalchemy import or_
+            
+            teacher = Teacher.query.filter_by(user_id=user['id']).first()
+            if teacher:
+                # Buscar escolas onde o professor está vinculado
+                school_teachers = SchoolTeacher.query.filter_by(teacher_id=teacher.id).all()
+                teacher_school_ids = [st.school_id for st in school_teachers]
+                
+                # Criar filtro OR: avaliações criadas pelo professor OU aplicadas em suas escolas
+                filters = [Test.created_by == user['id']]
+                
+                if teacher_school_ids:
+                    # Buscar turmas das escolas do professor
+                    teacher_classes = Class.query.filter(
+                        Class.school_id.in_(teacher_school_ids)
+                    ).with_entities(Class.id).all()
+                    teacher_class_ids = [c.id for c in teacher_classes]
+                    
+                    if teacher_class_ids:
+                        # Avaliações aplicadas em turmas das escolas do professor
+                        filters.append(
+                            Test.id.in_(
+                                db.session.query(ClassTest.test_id).filter(
+                                    ClassTest.class_id.in_(teacher_class_ids)
+                                )
+                            )
+                        )
+                
+                tests = Test.query.filter(or_(*filters)).all()
+            else:
+                # Se não é um professor válido, não mostrar nenhuma avaliação
+                tests = []
         else:
             tests = Test.query.all()
         
@@ -4453,7 +4748,7 @@ def obter_estatisticas_por_disciplina(test_id: str):
             return jsonify({"error": "Avaliação não encontrada"}), 404
         
         # Verificar permissões específicas
-        if user['role'] == 'professor' and test.created_by != user['id']:
+        if user['role'] == 'professor' and not professor_pode_ver_avaliacao(user['id'], test.id):
             return jsonify({"error": "Verificação de permissões falhou"}), 403
         
         # Obter estatísticas por disciplina
@@ -4487,6 +4782,12 @@ def obter_opcoes_filtros():
     - turma (opcional): Turma selecionada
     """
     try:
+        # Importações necessárias para filtros de professores
+        from app.models.teacher import Teacher
+        from app.models.teacherClass import TeacherClass
+        from app.models.classSubject import ClassSubject
+        from app.models.schoolTeacher import SchoolTeacher
+        
         user = get_current_user_from_token()
         if not user:
             return jsonify({"error": "Usuário não encontrado"}), 401
@@ -4553,16 +4854,71 @@ def obter_opcoes_filtros():
                 
                 # Para educadores (professor, diretor, coordenador), retornar avaliações que criaram primeiro
                 if permissao['scope'] in ['escola', 'escolas_vinculadas']:
-                    # Para educadores, mostrar avaliações que criaram no município
-                    query_avaliacoes = Test.query.with_entities(Test.id, Test.title)\
-                                        .filter(Test.created_by == user['id'])
+                    if user['role'] == 'professor':
+                        # Para professores, mostrar avaliações que criaram OU que foram aplicadas em suas escolas
+                        from app.models.teacher import Teacher
+                        from sqlalchemy import or_
+                        
+                        teacher = Teacher.query.filter_by(user_id=user['id']).first()
+                        if teacher:
+                            # Buscar escolas onde o professor está vinculado
+                            school_teachers = SchoolTeacher.query.filter_by(teacher_id=teacher.id).all()
+                            teacher_school_ids = [st.school_id for st in school_teachers]
+                            
+                            # Criar filtro OR: avaliações criadas pelo professor OU aplicadas em suas escolas
+                            filters = [Test.created_by == user['id']]
+                            
+                            if teacher_school_ids:
+                                # Buscar turmas das escolas do professor
+                                teacher_classes = Class.query.filter(
+                                    Class.school_id.in_(teacher_school_ids)
+                                ).with_entities(Class.id).all()
+                                teacher_class_ids = [c.id for c in teacher_classes]
+                                
+                                if teacher_class_ids:
+                                    # Avaliações aplicadas em turmas das escolas do professor
+                                    filters.append(
+                                        Test.id.in_(
+                                            db.session.query(ClassTest.test_id).filter(
+                                                ClassTest.class_id.in_(teacher_class_ids)
+                                            )
+                                        )
+                                    )
+                            
+                            query_avaliacoes = Test.query.with_entities(Test.id, Test.title)\
+                                                .filter(or_(*filters))
+                        else:
+                            # Se não é um professor válido, não mostrar nenhuma avaliação
+                            query_avaliacoes = Test.query.with_entities(Test.id, Test.title)\
+                                                .filter(Test.id == None)
+                    else:
+                        # Para diretores/coordenadores, mostrar avaliações aplicadas na sua escola
+                        from app.models.manager import Manager
+                        
+                        # Buscar o manager vinculado ao usuário atual
+                        manager = Manager.query.filter_by(user_id=user['id']).first()
+                        if not manager or not manager.school_id:
+                            # Manager não encontrado ou não vinculado a escola, retornar lista vazia
+                            query_avaliacoes = Test.query.with_entities(Test.id, Test.title).filter(Test.id == None)
+                        else:
+                            # Buscar avaliações que foram aplicadas na escola do diretor/coordenador
+                            query_avaliacoes = Test.query.with_entities(Test.id, Test.title)\
+                                                .join(ClassTest, Test.id == ClassTest.test_id)\
+                                                .join(Class, ClassTest.class_id == Class.id)\
+                                                .filter(Class.school_id == manager.school_id)
                     
-                    # Aplicar joins
-                    query_avaliacoes = query_avaliacoes.join(ClassTest, Test.id == ClassTest.test_id)
-                    query_avaliacoes = query_avaliacoes.join(Class, ClassTest.class_id == Class.id)
-                    query_avaliacoes = query_avaliacoes.join(School, Class.school_id == School.id)
-                    query_avaliacoes = query_avaliacoes.join(City, School.city_id == City.id)
-                    query_avaliacoes = query_avaliacoes.filter(City.id == city.id)
+                    # Aplicar joins adicionais para professores
+                    if user['role'] == 'professor':
+                        query_avaliacoes = query_avaliacoes.join(ClassTest, Test.id == ClassTest.test_id)
+                        query_avaliacoes = query_avaliacoes.join(Class, ClassTest.class_id == Class.id)
+                        query_avaliacoes = query_avaliacoes.join(School, Class.school_id == School.id)
+                        query_avaliacoes = query_avaliacoes.join(City, School.city_id == City.id)
+                        query_avaliacoes = query_avaliacoes.filter(City.id == city.id)
+                    else:
+                        # Para diretores/coordenadores, aplicar joins adicionais
+                        query_avaliacoes = query_avaliacoes.join(School, Class.school_id == School.id)
+                        query_avaliacoes = query_avaliacoes.join(City, School.city_id == City.id)
+                        query_avaliacoes = query_avaliacoes.filter(City.id == city.id)
                     
                     # Aplicar filtros adicionais baseados no papel do usuário
                     if permissao['scope'] == 'escola':
@@ -4689,6 +5045,47 @@ def obter_opcoes_filtros():
                                          .filter(School.id == escola)\
                                          .filter(Grade.id == serie)\
                                          .filter(City.id == city.id)
+                
+                # Aplicar filtros específicos para professores
+                if permissao['scope'] == 'escolas_vinculadas' and user['role'] == 'professor':
+                    
+                    teacher = Teacher.query.filter_by(user_id=user['id']).first()
+                    if teacher:
+                        # Buscar escolas onde professor está vinculado (SchoolTeacher)
+                        school_teachers = SchoolTeacher.query.filter_by(teacher_id=teacher.id).all()
+                        teacher_school_ids = [st.school_id for st in school_teachers]
+                        
+                        if not teacher_school_ids:
+                            # Professor não está vinculado a nenhuma escola
+                            query_turmas = query_turmas.filter(Class.id == None)  # Força resultado vazio
+                        else:
+                            # Buscar turmas onde professor está vinculado
+                            # 1. Via TeacherClass (vinculação direta)
+                            teacher_class_ids = db.session.query(TeacherClass.class_id).filter(
+                                TeacherClass.teacher_id == teacher.id
+                            ).all()
+                            teacher_class_ids = [tc[0] for tc in teacher_class_ids]
+                            
+                            # 2. Via ClassSubject (vinculação via disciplina)
+                            class_subject_ids = db.session.query(ClassSubject.class_id).filter(
+                                ClassSubject.teacher_id == teacher.id
+                            ).all()
+                            class_subject_ids = [cs[0] for cs in class_subject_ids]
+                            
+                            # Combinar todas as turmas vinculadas
+                            all_teacher_class_ids = list(set(teacher_class_ids + class_subject_ids))
+                            
+                            if all_teacher_class_ids:
+                                # Filtrar turmas onde professor tem AMBAS as vinculações:
+                                # 1. TeacherClass (vinculação direta à turma) E
+                                # 2. SchoolTeacher (vinculação à escola da turma)
+                                query_turmas = query_turmas.filter(
+                                    Class.id.in_(all_teacher_class_ids),
+                                    Class.school_id.in_(teacher_school_ids)
+                                )
+                            else:
+                                # Professor não está vinculado a nenhuma turma
+                                query_turmas = query_turmas.filter(Class.id == None)  # Força resultado vazio
                 
                 turmas = query_turmas.distinct().all()
                 turmas_list = [{"id": str(t[0]), "nome": t[1] or f"Turma {t[0]}"} for t in turmas]
@@ -4915,7 +5312,7 @@ def obter_escolas_por_avaliacao():
             return jsonify({"error": "Avaliação não encontrada"}), 404
         
         # Verificar permissões específicas para professor
-        if user['role'] == 'professor' and test.created_by != user['id']:
+        if user['role'] == 'professor' and not professor_pode_ver_avaliacao(user['id'], test.id):
             return jsonify({"error": "Acesso negado"}), 403
         
         # Buscar escolas onde a avaliação foi aplicada no município
@@ -5024,7 +5421,7 @@ def obter_series():
             return jsonify({"error": "Avaliação não encontrada"}), 404
         
         # Verificar permissões específicas para professor
-        if user['role'] == 'professor' and test.created_by != user['id']:
+        if user['role'] == 'professor' and not professor_pode_ver_avaliacao(user['id'], test.id):
             return jsonify({"error": "Acesso negado"}), 403
         
         # Buscar escola
@@ -5131,7 +5528,7 @@ def obter_turmas():
             return jsonify({"error": "Avaliação não encontrada"}), 404
         
         # Verificar permissões específicas para professor
-        if user['role'] == 'professor' and test.created_by != user['id']:
+        if user['role'] == 'professor' and not professor_pode_ver_avaliacao(user['id'], test.id):
             return jsonify({"error": "Acesso negado"}), 403
         
         # Buscar escola
@@ -5163,8 +5560,59 @@ def obter_turmas():
                                  .filter(Grade.id == serie)\
                                  .filter(City.id == city.id)
         
-        turmas = query_turmas.distinct().all()
-        turmas_list = [{"id": str(t[0]), "nome": t[1] or f"Turma {t[0]}"} for t in turmas]
+        # Aplicar filtros específicos para professores
+        if user['role'] == 'professor':
+            from app.models.teacher import Teacher
+            from app.models.teacherClass import TeacherClass
+            from app.models.classSubject import ClassSubject
+            
+            # Buscar o professor
+            teacher = Teacher.query.filter_by(user_id=user['id']).first()
+            if not teacher:
+                # Se não é um professor válido, retornar lista vazia
+                turmas_list = []
+            else:
+                # Buscar escolas onde o professor está vinculado (SchoolTeacher)
+                school_teachers = SchoolTeacher.query.filter_by(teacher_id=teacher.id).all()
+                teacher_school_ids = [st.school_id for st in school_teachers]
+                
+                if not teacher_school_ids:
+                    # Professor não está vinculado a nenhuma escola
+                    turmas_list = []
+                else:
+                    # Buscar turmas onde o professor está vinculado
+                    # 1. Via TeacherClass (vinculação direta)
+                    teacher_class_ids = db.session.query(TeacherClass.class_id).filter(
+                        TeacherClass.teacher_id == teacher.id
+                    ).all()
+                    teacher_class_ids = [tc[0] for tc in teacher_class_ids]
+                    
+                    # 2. Via ClassSubject (vinculação via disciplina)
+                    class_subject_ids = db.session.query(ClassSubject.class_id).filter(
+                        ClassSubject.teacher_id == teacher.id
+                    ).all()
+                    class_subject_ids = [cs[0] for cs in class_subject_ids]
+                    
+                    # Combinar todas as turmas vinculadas
+                    all_teacher_class_ids = list(set(teacher_class_ids + class_subject_ids))
+                    
+                    if all_teacher_class_ids:
+                        # Filtrar turmas onde professor tem AMBAS as vinculações:
+                        # 1. TeacherClass (vinculação direta à turma) E
+                        # 2. SchoolTeacher (vinculação à escola da turma)
+                        query_turmas = query_turmas.filter(
+                            Class.id.in_(all_teacher_class_ids),
+                            Class.school_id.in_(teacher_school_ids)
+                        )
+                        turmas = query_turmas.distinct().all()
+                        turmas_list = [{"id": str(t[0]), "nome": t[1] or f"Turma {t[0]}"} for t in turmas]
+                    else:
+                        # Professor não está vinculado a nenhuma turma
+                        turmas_list = []
+        else:
+            # Para outros papéis, manter lógica atual
+            turmas = query_turmas.distinct().all()
+            turmas_list = [{"id": str(t[0]), "nome": t[1] or f"Turma {t[0]}"} for t in turmas]
         
         return jsonify({
             "turmas": turmas_list,
@@ -5250,9 +5698,42 @@ def obter_avaliacoes():
                                                 .join(Class, ClassTest.class_id == Class.id)\
                                                 .filter(Class.school_id == manager.school_id)
             elif permissao['scope'] == 'escolas_vinculadas':
-                # Professor vê avaliações que criou (simplificado)
-                query_avaliacoes = Test.query.with_entities(Test.id, Test.title)\
-                                            .filter(Test.created_by == user['id'])
+                # Professor vê avaliações que criou OU que foram aplicadas em suas escolas/turmas
+                from app.models.teacher import Teacher
+                from sqlalchemy import or_
+                
+                teacher = Teacher.query.filter_by(user_id=user['id']).first()
+                if teacher:
+                    # Buscar escolas onde o professor está vinculado
+                    school_teachers = SchoolTeacher.query.filter_by(teacher_id=teacher.id).all()
+                    teacher_school_ids = [st.school_id for st in school_teachers]
+                    
+                    # Criar filtro OR: avaliações criadas pelo professor OU aplicadas em suas escolas
+                    filters = [Test.created_by == user['id']]
+                    
+                    if teacher_school_ids:
+                        # Buscar turmas das escolas do professor
+                        teacher_classes = Class.query.filter(
+                            Class.school_id.in_(teacher_school_ids)
+                        ).with_entities(Class.id).all()
+                        teacher_class_ids = [c.id for c in teacher_classes]
+                        
+                        if teacher_class_ids:
+                            # Avaliações aplicadas em turmas das escolas do professor
+                            filters.append(
+                                Test.id.in_(
+                                    db.session.query(ClassTest.test_id).filter(
+                                        ClassTest.class_id.in_(teacher_class_ids)
+                                    )
+                                )
+                            )
+                    
+                    query_avaliacoes = Test.query.with_entities(Test.id, Test.title)\
+                                        .filter(or_(*filters))
+                else:
+                    # Se não é um professor válido, não mostrar nenhuma avaliação
+                    query_avaliacoes = Test.query.with_entities(Test.id, Test.title)\
+                                        .filter(Test.id == None)
                 
                 # Aplicar joins para verificar se estão aplicadas
                 query_avaliacoes = query_avaliacoes.join(ClassTest, Test.id == ClassTest.test_id)

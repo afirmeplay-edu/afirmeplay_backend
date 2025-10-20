@@ -2790,12 +2790,14 @@ def debug_test_availability(test_id):
         logging.error(f"Erro no debug de disponibilidade: {str(e)}", exc_info=True)
         return jsonify({"error": "Erro no debug", "details": str(e)}), 500
 
-@bp.route('/compare/<string:test_id_1>/vs/<string:test_id_2>', methods=['GET'])
+@bp.route('/compare', methods=['POST'])
 @jwt_required()
 @role_required("admin", "professor", "coordenador", "diretor", "tecadm")
-def comparar_avaliacoes(test_id_1, test_id_2):
+def comparar_avaliacoes():
     """
-    Compara duas avaliações e mostra a evolução entre elas.
+    Compara múltiplas avaliações e mostra a evolução sequencial entre elas.
+    Aceita IDs das avaliações no body como JSON: {"test_ids": ["id1", "id2", "id3"]}
+    Mínimo de 2 avaliações.
     Retorna comparação geral, por disciplina e por habilidade.
     """
     try:
@@ -2805,21 +2807,44 @@ def comparar_avaliacoes(test_id_1, test_id_2):
         if not user:
             return jsonify({"error": "Usuário não encontrado"}), 401
         
-        # Verificar se as avaliações existem
-        test_1 = Test.query.get(test_id_1)
-        test_2 = Test.query.get(test_id_2)
+        # Obter test_ids do body JSON
+        data = request.get_json()
+        if not data:
+            return jsonify({"error": "Body JSON é obrigatório"}), 400
         
-        if not test_1:
-            return jsonify({"error": f"Avaliação {test_id_1} não encontrada"}), 404
+        if 'test_ids' not in data:
+            return jsonify({"error": "Campo 'test_ids' é obrigatório no body JSON"}), 400
         
-        if not test_2:
-            return jsonify({"error": f"Avaliação {test_id_2} não encontrada"}), 404
+        test_ids = data['test_ids']
         
-        # Verificar permissões do usuário
+        # Validar se test_ids é uma lista
+        if not isinstance(test_ids, list):
+            return jsonify({"error": "Campo 'test_ids' deve ser uma lista de strings"}), 400
+        
+        # Filtrar IDs vazios e validar formato
+        test_ids = [test_id.strip() for test_id in test_ids if test_id and isinstance(test_id, str) and test_id.strip()]
+        
+        if len(test_ids) < 2:
+            return jsonify({"error": "Mínimo de 2 avaliações necessário para comparação"}), 400
+        
+        if len(test_ids) != len(set(test_ids)):
+            return jsonify({"error": "IDs de avaliações duplicados encontrados"}), 400
+        
+        # Buscar todas as avaliações para verificar se existem
+        tests = Test.query.filter(Test.id.in_(test_ids)).all()
+        found_test_ids = {test.id for test in tests}
+        missing_test_ids = set(test_ids) - found_test_ids
+        
+        if missing_test_ids:
+            return jsonify({"error": f"Avaliações não encontradas: {list(missing_test_ids)}"}), 404
+        
+        # Verificar permissões do usuário para todas as avaliações
         if user['role'] == 'professor':
             # Professor só pode comparar suas próprias avaliações
-            if test_1.created_by != user['id'] or test_2.created_by != user['id']:
-                return jsonify({"error": "Você só pode comparar suas próprias avaliações"}), 403
+            unauthorized_tests = [test for test in tests if test.created_by != user['id']]
+            if unauthorized_tests:
+                unauthorized_ids = [test.id for test in unauthorized_tests]
+                return jsonify({"error": f"Você só pode comparar suas próprias avaliações. IDs não autorizados: {unauthorized_ids}"}), 403
         
         elif user['role'] in ['diretor', 'coordenador']:
             # Diretor e coordenador podem comparar avaliações de escolas do seu município
@@ -2834,33 +2859,18 @@ def comparar_avaliacoes(test_id_1, test_id_2):
             if not school or not school.city_id:
                 return jsonify({"error": "Escola não encontrada ou sem município"}), 404
             
-            # Verificar se as avaliações estão relacionadas ao município do diretor/coordenador
-            # Isso é uma verificação básica - pode ser expandida conforme necessário
+            # Para diretor/coordenador, verificação básica - pode ser expandida conforme necessário
             city_id = school.city_id
-            
-            # Buscar escolas do município
-            schools_in_city = School.query.filter_by(city_id=city_id).with_entities(School.id).all()
-            school_ids = [s.id for s in schools_in_city]
-            
-            # Verificar se as avaliações têm escolas do município (simplificado)
-            # Para um controle mais rigoroso, seria necessário verificar em detail
-            if test_1.schools or test_2.schools:
-                # Implementar verificação mais detalhada se necessário
-                pass
         
-        # Verificar se há resultados para ambas as avaliações
+        # Verificar se todas as avaliações têm resultados calculados
         from app.models.evaluationResult import EvaluationResult
-        results_1 = EvaluationResult.query.filter_by(test_id=test_id_1).all()
-        results_2 = EvaluationResult.query.filter_by(test_id=test_id_2).all()
-        
-        if not results_1:
-            return jsonify({"error": f"Avaliação {test_id_1} não possui resultados calculados"}), 400
-        
-        if not results_2:
-            return jsonify({"error": f"Avaliação {test_id_2} não possui resultados calculados"}), 400
+        for test_id in test_ids:
+            results = EvaluationResult.query.filter_by(test_id=test_id).all()
+            if not results:
+                return jsonify({"error": f"Avaliação {test_id} não possui resultados calculados"}), 400
         
         # Executar comparação
-        comparison_result = EvaluationComparisonService.compare_evaluations(test_id_1, test_id_2)
+        comparison_result = EvaluationComparisonService.compare_evaluations(test_ids)
         
         if not comparison_result:
             return jsonify({"error": "Erro ao realizar comparação das avaliações"}), 500
@@ -2868,7 +2878,8 @@ def comparar_avaliacoes(test_id_1, test_id_2):
         return jsonify(comparison_result), 200
         
     except Exception as e:
-        logging.error(f"Erro ao comparar avaliações {test_id_1} vs {test_id_2}: {str(e)}", exc_info=True)
+        test_ids_for_log = test_ids if 'test_ids' in locals() else 'N/A'
+        logging.error(f"Erro ao comparar avaliações {test_ids_for_log}: {str(e)}", exc_info=True)
         return jsonify({"error": "Erro ao comparar avaliações", "details": str(e)}), 500
 
 @bp.route('/debug/comparison/<string:test_id_1>/vs/<string:test_id_2>', methods=['GET'])
@@ -2988,13 +2999,15 @@ def debug_comparison(test_id_1, test_id_2):
         logging.error(f"Erro no debug de comparação: {str(e)}", exc_info=True)
         return jsonify({"error": "Erro no debug", "details": str(e)}), 500
 
-@bp.route('/student/<string:student_id>/compare/<string:test_id_1>/vs/<string:test_id_2>', methods=['GET'])
+@bp.route('/student/<string:student_id>/compare', methods=['POST'])
 @jwt_required()
 @role_required("admin", "professor", "coordenador", "diretor", "tecadm", "aluno")
-def comparar_avaliacoes_aluno(student_id, test_id_1, test_id_2):
+def comparar_avaliacoes_aluno(student_id):
     """
-    Compara duas avaliações específicas de um aluno, mostrando evolução individual.
+    Compara múltiplas avaliações específicas de um aluno, mostrando evolução individual.
+    Aceita IDs das avaliações no body como JSON: {"test_ids": ["id1", "id2", "id3"]}
     O student_id pode ser um user_id (vai buscar o student_id correspondente) ou um student_id direto.
+    Mínimo de 2 avaliações que o aluno realizou.
     """
     try:
         from app.services.evaluation_comparison_service import EvaluationComparisonService
@@ -3016,15 +3029,36 @@ def comparar_avaliacoes_aluno(student_id, test_id_1, test_id_2):
         
         actual_student_id = student_obj.id
         
-        # Verificar se as avaliações existem
-        test_1 = Test.query.get(test_id_1)
-        test_2 = Test.query.get(test_id_2)
+        # Obter test_ids do body JSON
+        data = request.get_json()
+        if not data:
+            return jsonify({"error": "Body JSON é obrigatório"}), 400
         
-        if not test_1:
-            return jsonify({"error": f"Avaliação {test_id_1} não encontrada"}), 404
+        if 'test_ids' not in data:
+            return jsonify({"error": "Campo 'test_ids' é obrigatório no body JSON"}), 400
         
-        if not test_2:
-            return jsonify({"error": f"Avaliação {test_id_2} não encontrada"}), 404
+        test_ids = data['test_ids']
+        
+        # Validar se test_ids é uma lista
+        if not isinstance(test_ids, list):
+            return jsonify({"error": "Campo 'test_ids' deve ser uma lista de strings"}), 400
+        
+        # Filtrar IDs vazios e validar formato
+        test_ids = [test_id.strip() for test_id in test_ids if test_id and isinstance(test_id, str) and test_id.strip()]
+        
+        if len(test_ids) < 2:
+            return jsonify({"error": "Mínimo de 2 avaliações necessário para comparação"}), 400
+        
+        if len(test_ids) != len(set(test_ids)):
+            return jsonify({"error": "IDs de avaliações duplicados encontrados"}), 400
+        
+        # Buscar todas as avaliações para verificar se existem
+        tests = Test.query.filter(Test.id.in_(test_ids)).all()
+        found_test_ids = {test.id for test in tests}
+        missing_test_ids = set(test_ids) - found_test_ids
+        
+        if missing_test_ids:
+            return jsonify({"error": f"Avaliações não encontradas: {list(missing_test_ids)}"}), 404
         
         # Verificar permissões do usuário
         if user['role'] == 'aluno':
@@ -3065,38 +3099,31 @@ def comparar_avaliacoes_aluno(student_id, test_id_1, test_id_2):
             if not student_school or student_school.city_id != manager_school.city_id:
                 return jsonify({"error": "Você só pode comparar avaliações de alunos do seu município"}), 403
         
-        # Verificar se as avaliações foram aplicadas à classe do aluno
+        # Verificar se todas as avaliações foram aplicadas à classe do aluno
         class_tests = ClassTest.query.filter_by(class_id=student_obj.class_id).all()
-        applied_test_ids = [ct.test_id for ct in class_tests]
+        applied_test_ids = {ct.test_id for ct in class_tests}
         
-        if test_id_1 not in applied_test_ids:
-            return jsonify({"error": f"Avaliação {test_id_1} não foi aplicada à classe do aluno"}), 400
+        not_applied_tests = set(test_ids) - applied_test_ids
+        if not_applied_tests:
+            return jsonify({"error": f"Avaliações não aplicadas à classe do aluno: {list(not_applied_tests)}"}), 400
         
-        if test_id_2 not in applied_test_ids:
-            return jsonify({"error": f"Avaliação {test_id_2} não foi aplicada à classe do aluno"}), 400
-        
-        # Verificar se o aluno completou ambas avaliações
+        # Verificar se o aluno completou todas as avaliações
         from app.models.evaluationResult import EvaluationResult
-        result_1 = EvaluationResult.query.filter_by(
-            test_id=test_id_1, 
-            student_id=actual_student_id
-        ).first()
+        incomplete_tests = []
+        for test_id in test_ids:
+            result = EvaluationResult.query.filter_by(
+                test_id=test_id,
+                student_id=actual_student_id
+            ).first()
+            
+            if not result:
+                incomplete_tests.append(test_id)
         
-        result_2 = EvaluationResult.query.filter_by(
-            test_id=test_id_2, 
-            student_id=actual_student_id
-        ).first()
-        
-        if not result_1:
-            return jsonify({"error": f"Aluno não completou a avaliação {test_id_1}"}), 400
-        
-        if not result_2:
-            return jsonify({"error": f"Aluno não completou a avaliação {test_id_2}"}), 400
+        if incomplete_tests:
+            return jsonify({"error": f"Aluno não completou as seguintes avaliações: {incomplete_tests}"}), 400
         
         # Executar comparação
-        comparison_result = EvaluationComparisonService.compare_student_evaluations(
-            student_id, test_id_1, test_id_2
-        )
+        comparison_result = EvaluationComparisonService.compare_student_evaluations_multiple(student_id, test_ids)
         
         if not comparison_result:
             return jsonify({"error": "Erro ao realizar comparação das avaliações do aluno"}), 500
@@ -3104,5 +3131,6 @@ def comparar_avaliacoes_aluno(student_id, test_id_1, test_id_2):
         return jsonify(comparison_result), 200
         
     except Exception as e:
-        logging.error(f"Erro ao comparar avaliações do aluno {student_id} ({test_id_1} vs {test_id_2}): {str(e)}", exc_info=True)
+        test_ids_for_log = test_ids if 'test_ids' in locals() else 'N/A'
+        logging.error(f"Erro ao comparar avaliações do aluno {student_id} {test_ids_for_log}: {str(e)}", exc_info=True)
         return jsonify({"error": "Erro ao comparar avaliações do aluno", "details": str(e)}), 500

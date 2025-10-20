@@ -15,72 +15,128 @@ from datetime import datetime
 import logging
 from typing import Dict, Any, Optional, List
 import json
+import dateutil.parser
 
 class EvaluationComparisonService:
     
     @staticmethod
-    def compare_evaluations(test_id_1: str, test_id_2: str) -> Optional[Dict[str, Any]]:
+    def compare_evaluations(test_ids: List[str]) -> Optional[Dict[str, Any]]:
         """
-        Compara duas avaliações e retorna a evolução entre elas
+        Compara múltiplas avaliações e retorna a evolução sequencial entre elas
         
         Args:
-            test_id_1: ID da primeira avaliação
-            test_id_2: ID da segunda avaliação
+            test_ids: Lista de IDs das avaliações (mínimo 2)
             
         Returns:
             Dicionário com comparação completa ou None se erro
         """
         try:
-            # Buscar as duas avaliações
-            test_1 = Test.query.get(test_id_1)
-            test_2 = Test.query.get(test_id_2)
-            
-            if not test_1 or not test_2:
-                logging.error(f"Avaliações não encontradas: {test_id_1}, {test_id_2}")
+            if len(test_ids) < 2:
+                logging.error(f"Mínimo de 2 avaliações necessário. Recebido: {len(test_ids)}")
                 return None
             
-            # Verificar se há resultados para ambas
-            results_1 = EvaluationResult.query.filter_by(test_id=test_id_1).all()
-            results_2 = EvaluationResult.query.filter_by(test_id=test_id_2).all()
+            # Buscar todas as avaliações
+            tests = Test.query.filter(Test.id.in_(test_ids)).all()
             
-            if not results_1 or not results_2:
-                logging.warning(f"Uma das avaliações não possui resultados: {test_id_1}, {test_id_2}")
+            if len(tests) != len(test_ids):
+                missing_ids = set(test_ids) - {t.id for t in tests}
+                logging.error(f"Avaliações não encontradas: {missing_ids}")
                 return None
             
-            # Preparar dados básicos das avaliações
-            evaluation_1_data = {
-                "id": test_1.id,
-                "title": test_1.title,
-                "created_at": test_1.created_at.isoformat() if test_1.created_at else None
-            }
+            # Buscar datas de aplicação e ordenar cronologicamente
+            from app.models.classTest import ClassTest
+            tests_with_dates = []
             
-            evaluation_2_data = {
-                "id": test_2.id,
-                "title": test_2.title,
-                "created_at": test_2.created_at.isoformat() if test_2.created_at else None
-            }
+            for test in tests:
+                # Buscar data de aplicação mais antiga (primeira aplicação)
+                class_tests = ClassTest.query.filter_by(test_id=test.id).all()
+                application_date = None
+                
+                for ct in class_tests:
+                    if ct.application:
+                        try:
+                            parsed_date = dateutil.parser.parse(ct.application)
+                            if application_date is None or parsed_date < application_date:
+                                application_date = parsed_date
+                        except Exception as e:
+                            logging.warning(f"Erro ao parsear data de aplicação para teste {test.id}: {e}")
+                
+                # Se não encontrar data de aplicação, usar created_at como fallback
+                if application_date is None:
+                    application_date = test.created_at or datetime.min
+                
+                tests_with_dates.append({
+                    'test': test,
+                    'application_date': application_date
+                })
             
-            # Comparação geral
-            general_comparison = EvaluationComparisonService._get_general_comparison(results_1, results_2)
+            # Ordenar por data de aplicação (primeira aplicada primeiro)
+            tests_with_dates.sort(key=lambda x: x['application_date'])
+            ordered_tests = [item['test'] for item in tests_with_dates]
             
-            # Comparação por disciplina
-            subject_comparison = EvaluationComparisonService._get_subject_comparison(test_1, test_2, results_1, results_2)
-            logging.info(f"Resultado da comparação por disciplina: {subject_comparison}")
+            # Verificar se todas têm resultados
+            all_results = {}
+            for test in ordered_tests:
+                results = EvaluationResult.query.filter_by(test_id=test.id).all()
+                if not results:
+                    logging.warning(f"Avaliação {test.id} não possui resultados calculados")
+                    return None
+                all_results[test.id] = results
             
-            # Comparação por habilidade
-            skills_comparison = EvaluationComparisonService._get_skills_comparison(test_1, test_2, results_1, results_2)
-            logging.info(f"Resultado da comparação por habilidades: {skills_comparison}")
+            # Preparar dados básicos das avaliações ordenadas
+            evaluations_data = []
+            for i, item in enumerate(tests_with_dates):
+                test = item['test']
+                evaluations_data.append({
+                    "order": i + 1,
+                    "id": test.id,
+                    "title": test.title,
+                    "created_at": test.created_at.isoformat() if test.created_at else None,
+                    "application_date": item['application_date'].isoformat() if item['application_date'] else None
+                })
+            
+            # Fazer comparações sequenciais (1→2, 2→3, 3→4, etc.)
+            comparisons = []
+            for i in range(len(ordered_tests) - 1):
+                test_from = ordered_tests[i]
+                test_to = ordered_tests[i + 1]
+                results_from = all_results[test_from.id]
+                results_to = all_results[test_to.id]
+                
+                # Comparação geral
+                general_comparison = EvaluationComparisonService._get_general_comparison(results_from, results_to)
+                
+                # Comparação por disciplina
+                subject_comparison = EvaluationComparisonService._get_subject_comparison(test_from, test_to, results_from, results_to)
+                
+                # Comparação por habilidade
+                skills_comparison = EvaluationComparisonService._get_skills_comparison(test_from, test_to, results_from, results_to)
+                
+                comparisons.append({
+                    "from_evaluation": {
+                        "id": test_from.id,
+                        "title": test_from.title,
+                        "order": i + 1
+                    },
+                    "to_evaluation": {
+                        "id": test_to.id,
+                        "title": test_to.title,
+                        "order": i + 2
+                    },
+                    "general_comparison": general_comparison,
+                    "subject_comparison": subject_comparison,
+                    "skills_comparison": skills_comparison
+                })
             
             return {
-                "evaluation_1": evaluation_1_data,
-                "evaluation_2": evaluation_2_data,
-                "general_comparison": general_comparison,
-                "subject_comparison": subject_comparison,
-                "skills_comparison": skills_comparison
+                "evaluations": evaluations_data,
+                "total_evaluations": len(ordered_tests),
+                "comparisons": comparisons,
+                "total_comparisons": len(comparisons)
             }
             
         except Exception as e:
-            logging.error(f"Erro ao comparar avaliações {test_id_1} vs {test_id_2}: {str(e)}", exc_info=True)
+            logging.error(f"Erro ao comparar avaliações {test_ids}: {str(e)}", exc_info=True)
             return None
     
     @staticmethod
@@ -631,6 +687,161 @@ class EvaluationComparisonService:
                 "percentage": 0.0,
                 "direction": "stable"
             }
+    
+    @staticmethod
+    def compare_student_evaluations_multiple(student_id: str, test_ids: List[str]) -> Optional[Dict[str, Any]]:
+        """
+        Compara múltiplas avaliações de um aluno específico, mostrando evolução sequencial
+        
+        Args:
+            student_id: ID do aluno (pode ser user_id ou student_id)
+            test_ids: Lista de IDs das avaliações (mínimo 2)
+            
+        Returns:
+            Dicionário com comparação completa do aluno ou None se erro
+        """
+        try:
+            from app.models.student import Student
+            from app.models.classTest import ClassTest
+            
+            if len(test_ids) < 2:
+                logging.error(f"Mínimo de 2 avaliações necessário. Recebido: {len(test_ids)}")
+                return None
+            
+            # Resolver student_id - tentar como user_id primeiro, depois como student_id
+            student_obj = Student.query.filter_by(user_id=student_id).first()
+            if not student_obj:
+                # Fallback: assumir que é um student_id direto
+                student_obj = Student.query.get(student_id)
+            
+            if not student_obj:
+                logging.error(f"Aluno não encontrado: {student_id}")
+                return None
+            
+            actual_student_id = student_obj.id
+            logging.info(f"Aluno encontrado - user_id: {student_id}, student_id: {actual_student_id}")
+            
+            # Buscar todas as avaliações
+            tests = Test.query.filter(Test.id.in_(test_ids)).all()
+            
+            if len(tests) != len(test_ids):
+                missing_ids = set(test_ids) - {t.id for t in tests}
+                logging.error(f"Avaliações não encontradas: {missing_ids}")
+                return None
+            
+            # Verificar se todas as avaliações foram aplicadas à classe do aluno
+            class_tests = ClassTest.query.filter_by(class_id=student_obj.class_id).all()
+            applied_test_ids = {ct.test_id for ct in class_tests}
+            
+            not_applied_tests = set(test_ids) - applied_test_ids
+            if not_applied_tests:
+                logging.error(f"Avaliações não aplicadas à classe do aluno: {not_applied_tests}")
+                return None
+            
+            # Buscar datas de aplicação e ordenar cronologicamente
+            tests_with_dates = []
+            
+            for test in tests:
+                # Buscar data de aplicação mais antiga (primeira aplicação)
+                test_class_tests = ClassTest.query.filter_by(test_id=test.id).all()
+                application_date = None
+                
+                for ct in test_class_tests:
+                    if ct.application:
+                        try:
+                            parsed_date = dateutil.parser.parse(ct.application)
+                            if application_date is None or parsed_date < application_date:
+                                application_date = parsed_date
+                        except Exception as e:
+                            logging.warning(f"Erro ao parsear data de aplicação para teste {test.id}: {e}")
+                
+                # Se não encontrar data de aplicação, usar created_at como fallback
+                if application_date is None:
+                    application_date = test.created_at or datetime.min
+                
+                tests_with_dates.append({
+                    'test': test,
+                    'application_date': application_date
+                })
+            
+            # Ordenar por data de aplicação (primeira aplicada primeiro)
+            tests_with_dates.sort(key=lambda x: x['application_date'])
+            ordered_tests = [item['test'] for item in tests_with_dates]
+            
+            # Verificar se o aluno completou todas as avaliações
+            all_results = {}
+            for test in ordered_tests:
+                result = EvaluationResult.query.filter_by(
+                    test_id=test.id, 
+                    student_id=actual_student_id
+                ).first()
+                
+                if not result:
+                    logging.warning(f"Aluno {actual_student_id} não completou avaliação {test.id}")
+                    return None
+                
+                all_results[test.id] = result
+            
+            # Preparar dados básicos das avaliações ordenadas
+            evaluations_data = []
+            for i, item in enumerate(tests_with_dates):
+                test = item['test']
+                evaluations_data.append({
+                    "order": i + 1,
+                    "id": test.id,
+                    "title": test.title,
+                    "created_at": test.created_at.isoformat() if test.created_at else None,
+                    "application_date": item['application_date'].isoformat() if item['application_date'] else None
+                })
+            
+            # Fazer comparações sequenciais (1→2, 2→3, 3→4, etc.)
+            comparisons = []
+            for i in range(len(ordered_tests) - 1):
+                test_from = ordered_tests[i]
+                test_to = ordered_tests[i + 1]
+                result_from = all_results[test_from.id]
+                result_to = all_results[test_to.id]
+                
+                # Comparação geral
+                general_comparison = EvaluationComparisonService._get_student_general_comparison(result_from, result_to)
+                
+                # Comparação por disciplina
+                subject_comparison = EvaluationComparisonService._get_student_subject_comparison(actual_student_id, test_from, test_to)
+                
+                # Comparação por habilidade
+                skills_comparison = EvaluationComparisonService._get_student_skills_comparison(actual_student_id, test_from, test_to)
+                
+                comparisons.append({
+                    "from_evaluation": {
+                        "id": test_from.id,
+                        "title": test_from.title,
+                        "order": i + 1
+                    },
+                    "to_evaluation": {
+                        "id": test_to.id,
+                        "title": test_to.title,
+                        "order": i + 2
+                    },
+                    "general_comparison": general_comparison,
+                    "subject_comparison": subject_comparison,
+                    "skills_comparison": skills_comparison
+                })
+            
+            return {
+                "student": {
+                    "id": actual_student_id,
+                    "user_id": student_obj.user_id,
+                    "name": student_obj.name
+                },
+                "evaluations": evaluations_data,
+                "total_evaluations": len(ordered_tests),
+                "comparisons": comparisons,
+                "total_comparisons": len(comparisons)
+            }
+            
+        except Exception as e:
+            logging.error(f"Erro ao comparar avaliações do aluno {student_id}: {str(e)}", exc_info=True)
+            return None
     
     @staticmethod
     def compare_student_evaluations(student_id: str, test_id_1: str, test_id_2: str) -> Optional[Dict[str, Any]]:

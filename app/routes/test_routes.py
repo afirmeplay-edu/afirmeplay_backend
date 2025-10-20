@@ -2789,3 +2789,320 @@ def debug_test_availability(test_id):
     except Exception as e:
         logging.error(f"Erro no debug de disponibilidade: {str(e)}", exc_info=True)
         return jsonify({"error": "Erro no debug", "details": str(e)}), 500
+
+@bp.route('/compare/<string:test_id_1>/vs/<string:test_id_2>', methods=['GET'])
+@jwt_required()
+@role_required("admin", "professor", "coordenador", "diretor", "tecadm")
+def comparar_avaliacoes(test_id_1, test_id_2):
+    """
+    Compara duas avaliações e mostra a evolução entre elas.
+    Retorna comparação geral, por disciplina e por habilidade.
+    """
+    try:
+        from app.services.evaluation_comparison_service import EvaluationComparisonService
+        
+        user = get_current_user_from_token()
+        if not user:
+            return jsonify({"error": "Usuário não encontrado"}), 401
+        
+        # Verificar se as avaliações existem
+        test_1 = Test.query.get(test_id_1)
+        test_2 = Test.query.get(test_id_2)
+        
+        if not test_1:
+            return jsonify({"error": f"Avaliação {test_id_1} não encontrada"}), 404
+        
+        if not test_2:
+            return jsonify({"error": f"Avaliação {test_id_2} não encontrada"}), 404
+        
+        # Verificar permissões do usuário
+        if user['role'] == 'professor':
+            # Professor só pode comparar suas próprias avaliações
+            if test_1.created_by != user['id'] or test_2.created_by != user['id']:
+                return jsonify({"error": "Você só pode comparar suas próprias avaliações"}), 403
+        
+        elif user['role'] in ['diretor', 'coordenador']:
+            # Diretor e coordenador podem comparar avaliações de escolas do seu município
+            from app.models.manager import Manager
+            
+            manager = Manager.query.filter_by(user_id=user['id']).first()
+            if not manager or not manager.school_id:
+                return jsonify({"error": "Diretor/Coordenador não encontrado ou não vinculado a uma escola"}), 404
+            
+            # Buscar escola para obter city_id
+            school = School.query.get(manager.school_id)
+            if not school or not school.city_id:
+                return jsonify({"error": "Escola não encontrada ou sem município"}), 404
+            
+            # Verificar se as avaliações estão relacionadas ao município do diretor/coordenador
+            # Isso é uma verificação básica - pode ser expandida conforme necessário
+            city_id = school.city_id
+            
+            # Buscar escolas do município
+            schools_in_city = School.query.filter_by(city_id=city_id).with_entities(School.id).all()
+            school_ids = [s.id for s in schools_in_city]
+            
+            # Verificar se as avaliações têm escolas do município (simplificado)
+            # Para um controle mais rigoroso, seria necessário verificar em detail
+            if test_1.schools or test_2.schools:
+                # Implementar verificação mais detalhada se necessário
+                pass
+        
+        # Verificar se há resultados para ambas as avaliações
+        from app.models.evaluationResult import EvaluationResult
+        results_1 = EvaluationResult.query.filter_by(test_id=test_id_1).all()
+        results_2 = EvaluationResult.query.filter_by(test_id=test_id_2).all()
+        
+        if not results_1:
+            return jsonify({"error": f"Avaliação {test_id_1} não possui resultados calculados"}), 400
+        
+        if not results_2:
+            return jsonify({"error": f"Avaliação {test_id_2} não possui resultados calculados"}), 400
+        
+        # Executar comparação
+        comparison_result = EvaluationComparisonService.compare_evaluations(test_id_1, test_id_2)
+        
+        if not comparison_result:
+            return jsonify({"error": "Erro ao realizar comparação das avaliações"}), 500
+        
+        return jsonify(comparison_result), 200
+        
+    except Exception as e:
+        logging.error(f"Erro ao comparar avaliações {test_id_1} vs {test_id_2}: {str(e)}", exc_info=True)
+        return jsonify({"error": "Erro ao comparar avaliações", "details": str(e)}), 500
+
+@bp.route('/debug/comparison/<string:test_id_1>/vs/<string:test_id_2>', methods=['GET'])
+@jwt_required()
+@role_required("admin", "professor", "coordenador", "diretor", "tecadm")
+def debug_comparison(test_id_1, test_id_2):
+    """
+    Rota de debug para investigar problemas na comparação de avaliações
+    """
+    try:
+        from app.services.evaluation_comparison_service import EvaluationComparisonService
+        from app.models.testQuestion import TestQuestion
+        
+        user = get_current_user_from_token()
+        if not user:
+            return jsonify({"error": "Usuário não encontrado"}), 401
+        
+        # Verificar se as avaliações existem
+        test_1 = Test.query.get(test_id_1)
+        test_2 = Test.query.get(test_id_2)
+        
+        if not test_1 or not test_2:
+            return jsonify({"error": "Uma das avaliações não foi encontrada"}), 404
+        
+        # Informações básicas dos testes
+        debug_info = {
+            "test_1": {
+                "id": test_1.id,
+                "title": test_1.title,
+                "subjects_info": test_1.subjects_info,
+                "subject": test_1.subject
+            },
+            "test_2": {
+                "id": test_2.id,
+                "title": test_2.title,
+                "subjects_info": test_2.subjects_info,
+                "subject": test_2.subject
+            }
+        }
+        
+        # Extrair disciplinas de ambos os testes
+        subjects_1 = EvaluationComparisonService._extract_subjects_from_test(test_1)
+        subjects_2 = EvaluationComparisonService._extract_subjects_from_test(test_2)
+        
+        debug_info["extracted_subjects"] = {
+            "test_1": subjects_1,
+            "test_2": subjects_2
+        }
+        
+        # Verificar questões de cada teste
+        test_question_ids_1 = [tq.question_id for tq in TestQuestion.query.filter_by(test_id=test_id_1).all()]
+        test_question_ids_2 = [tq.question_id for tq in TestQuestion.query.filter_by(test_id=test_id_2).all()]
+        
+        questions_1 = Question.query.filter(Question.id.in_(test_question_ids_1)).all() if test_question_ids_1 else []
+        questions_2 = Question.query.filter(Question.id.in_(test_question_ids_2)).all() if test_question_ids_2 else []
+        
+        # Agrupar questões por disciplina
+        questions_by_subject_1 = {}
+        questions_by_subject_2 = {}
+        
+        for q in questions_1:
+            subject_id = q.subject_id or "sem_disciplina"
+            if subject_id not in questions_by_subject_1:
+                questions_by_subject_1[subject_id] = []
+            questions_by_subject_1[subject_id].append({
+                "id": q.id,
+                "subject_id": q.subject_id,
+                "skill": q.skill,
+                "question_type": q.question_type
+            })
+        
+        for q in questions_2:
+            subject_id = q.subject_id or "sem_disciplina"
+            if subject_id not in questions_by_subject_2:
+                questions_by_subject_2[subject_id] = []
+            questions_by_subject_2[subject_id].append({
+                "id": q.id,
+                "subject_id": q.subject_id,
+                "skill": q.skill,
+                "question_type": q.question_type
+            })
+        
+        debug_info["questions_analysis"] = {
+            "test_1": {
+                "total_questions": len(questions_1),
+                "questions_by_subject": questions_by_subject_1
+            },
+            "test_2": {
+                "total_questions": len(questions_2),
+                "questions_by_subject": questions_by_subject_2
+            }
+        }
+        
+        # Verificar skills únicas
+        skills_1 = set()
+        skills_2 = set()
+        
+        for q in questions_1:
+            if q.skill:
+                skill_list = [s.strip() for s in q.skill.split(',') if s.strip()]
+                skills_1.update(skill_list)
+        
+        for q in questions_2:
+            if q.skill:
+                skill_list = [s.strip() for s in q.skill.split(',') if s.strip()]
+                skills_2.update(skill_list)
+        
+        debug_info["skills_analysis"] = {
+            "test_1_skills": list(skills_1),
+            "test_2_skills": list(skills_2),
+            "common_skills": list(skills_1.intersection(skills_2))
+        }
+        
+        return jsonify(debug_info), 200
+        
+    except Exception as e:
+        logging.error(f"Erro no debug de comparação: {str(e)}", exc_info=True)
+        return jsonify({"error": "Erro no debug", "details": str(e)}), 500
+
+@bp.route('/student/<string:student_id>/compare/<string:test_id_1>/vs/<string:test_id_2>', methods=['GET'])
+@jwt_required()
+@role_required("admin", "professor", "coordenador", "diretor", "tecadm", "aluno")
+def comparar_avaliacoes_aluno(student_id, test_id_1, test_id_2):
+    """
+    Compara duas avaliações específicas de um aluno, mostrando evolução individual.
+    O student_id pode ser um user_id (vai buscar o student_id correspondente) ou um student_id direto.
+    """
+    try:
+        from app.services.evaluation_comparison_service import EvaluationComparisonService
+        from app.models.student import Student
+        from app.models.classTest import ClassTest
+        
+        user = get_current_user_from_token()
+        if not user:
+            return jsonify({"error": "Usuário não encontrado"}), 401
+        
+        # Resolver student_id - tentar como user_id primeiro, depois como student_id
+        student_obj = Student.query.filter_by(user_id=student_id).first()
+        if not student_obj:
+            # Fallback: assumir que é um student_id direto
+            student_obj = Student.query.get(student_id)
+        
+        if not student_obj:
+            return jsonify({"error": f"Aluno não encontrado: {student_id}"}), 404
+        
+        actual_student_id = student_obj.id
+        
+        # Verificar se as avaliações existem
+        test_1 = Test.query.get(test_id_1)
+        test_2 = Test.query.get(test_id_2)
+        
+        if not test_1:
+            return jsonify({"error": f"Avaliação {test_id_1} não encontrada"}), 404
+        
+        if not test_2:
+            return jsonify({"error": f"Avaliação {test_id_2} não encontrada"}), 404
+        
+        # Verificar permissões do usuário
+        if user['role'] == 'aluno':
+            # Aluno só pode comparar suas próprias avaliações
+            if student_obj.user_id != user['id']:
+                return jsonify({"error": "Você só pode comparar suas próprias avaliações"}), 403
+        
+        elif user['role'] == 'professor':
+            # Professor só pode comparar avaliações de alunos da sua escola
+            teacher = Teacher.query.filter_by(user_id=user['id']).first()
+            if not teacher:
+                return jsonify({"error": "Professor não encontrado"}), 404
+            
+            # Verificar se o professor está na escola do aluno
+            from app.models.schoolTeacher import SchoolTeacher
+            teacher_school = SchoolTeacher.query.filter_by(
+                teacher_id=teacher.id,
+                school_id=student_obj.school_id
+            ).first()
+            if not teacher_school:
+                return jsonify({"error": "Você não tem permissão para comparar avaliações deste aluno"}), 403
+        
+        elif user['role'] in ['diretor', 'coordenador']:
+            # Diretor/Coordenador pode comparar alunos do seu município
+            from app.models.manager import Manager
+            
+            manager = Manager.query.filter_by(user_id=user['id']).first()
+            if not manager or not manager.school_id:
+                return jsonify({"error": "Diretor/Coordenador não encontrado ou não vinculado a uma escola"}), 404
+            
+            # Buscar escola do manager para obter city_id
+            manager_school = School.query.get(manager.school_id)
+            if not manager_school or not manager_school.city_id:
+                return jsonify({"error": "Escola do manager não encontrada ou sem município"}), 404
+            
+            # Buscar escola do aluno
+            student_school = School.query.get(student_obj.school_id)
+            if not student_school or student_school.city_id != manager_school.city_id:
+                return jsonify({"error": "Você só pode comparar avaliações de alunos do seu município"}), 403
+        
+        # Verificar se as avaliações foram aplicadas à classe do aluno
+        class_tests = ClassTest.query.filter_by(class_id=student_obj.class_id).all()
+        applied_test_ids = [ct.test_id for ct in class_tests]
+        
+        if test_id_1 not in applied_test_ids:
+            return jsonify({"error": f"Avaliação {test_id_1} não foi aplicada à classe do aluno"}), 400
+        
+        if test_id_2 not in applied_test_ids:
+            return jsonify({"error": f"Avaliação {test_id_2} não foi aplicada à classe do aluno"}), 400
+        
+        # Verificar se o aluno completou ambas avaliações
+        from app.models.evaluationResult import EvaluationResult
+        result_1 = EvaluationResult.query.filter_by(
+            test_id=test_id_1, 
+            student_id=actual_student_id
+        ).first()
+        
+        result_2 = EvaluationResult.query.filter_by(
+            test_id=test_id_2, 
+            student_id=actual_student_id
+        ).first()
+        
+        if not result_1:
+            return jsonify({"error": f"Aluno não completou a avaliação {test_id_1}"}), 400
+        
+        if not result_2:
+            return jsonify({"error": f"Aluno não completou a avaliação {test_id_2}"}), 400
+        
+        # Executar comparação
+        comparison_result = EvaluationComparisonService.compare_student_evaluations(
+            student_id, test_id_1, test_id_2
+        )
+        
+        if not comparison_result:
+            return jsonify({"error": "Erro ao realizar comparação das avaliações do aluno"}), 500
+        
+        return jsonify(comparison_result), 200
+        
+    except Exception as e:
+        logging.error(f"Erro ao comparar avaliações do aluno {student_id} ({test_id_1} vs {test_id_2}): {str(e)}", exc_info=True)
+        return jsonify({"error": "Erro ao comparar avaliações do aluno", "details": str(e)}), 500

@@ -95,6 +95,72 @@ def professor_pode_ver_avaliacao(user_id: str, test_id: str) -> bool:
         return False
 
 
+def professor_pode_ver_avaliacao_turmas(user_id: str, test_id: str) -> bool:
+    """
+    Verifica se um professor pode ver uma avaliação específica baseado nas TURMAS onde está vinculado.
+    Retorna True se:
+    1. O professor criou a avaliação OU
+    2. A avaliação foi aplicada em turmas específicas onde o professor está vinculado
+    
+    Args:
+        user_id: ID do usuário professor
+        test_id: ID da avaliação
+    
+    Returns:
+        bool: True se o professor pode ver a avaliação, False caso contrário
+    """
+    try:
+        # Buscar a avaliação
+        test = Test.query.get(test_id)
+        if not test:
+            return False
+        
+        # Critério 1: Professor criou a avaliação
+        if test.created_by == user_id:
+            return True
+        
+        # Critério 2: Avaliação foi aplicada em turmas específicas onde professor está vinculado
+        from app.models.teacher import Teacher
+        from app.models.classSubject import ClassSubject
+        from app.models.teacherClass import TeacherClass
+        
+        teacher = Teacher.query.filter_by(user_id=user_id).first()
+        if not teacher:
+            return False
+        
+        # Buscar turmas onde a avaliação foi aplicada
+        class_tests = ClassTest.query.filter_by(test_id=test_id).all()
+        class_ids = [ct.class_id for ct in class_tests]
+        
+        if not class_ids:
+            return False
+        
+        # Buscar turmas onde o professor está vinculado através de ClassSubject
+        class_subjects = ClassSubject.query.filter_by(teacher_id=teacher.id).all()
+        teacher_class_ids_subjects = [cs.class_id for cs in class_subjects]
+        
+        # Buscar turmas onde o professor está vinculado através de TeacherClass
+        teacher_classes = TeacherClass.query.filter_by(teacher_id=teacher.id).all()
+        teacher_class_ids_direct = [tc.class_id for tc in teacher_classes]
+        
+        # Combinar todas as turmas onde o professor está vinculado
+        all_teacher_class_ids = list(set(teacher_class_ids_subjects + teacher_class_ids_direct))
+        
+        if not all_teacher_class_ids:
+            return False
+        
+        # Verificar se há interseção entre turmas da avaliação e turmas do professor
+        avaliacao_turmas = set(class_ids)
+        professor_turmas = set(all_teacher_class_ids)
+        
+        # Se há pelo menos uma turma em comum
+        return len(avaliacao_turmas.intersection(professor_turmas)) > 0
+        
+    except Exception as e:
+        logging.error(f"Erro ao verificar permissão do professor para avaliação {test_id}: {str(e)}")
+        return False
+
+
 def verificar_permissao_filtros(user: dict, scope_info: dict = None) -> Dict[str, Any]:
     """
     Verifica permissões do usuário para acessar filtros baseado no seu papel
@@ -3511,6 +3577,11 @@ def get_student_test_results(test_id, student_id):
                 return jsonify({"error": "Aluno não encontrado"}), 404
             actual_student_id = student_id
         
+        # Buscar o teste primeiro para usar em caso de erro
+        test = Test.query.get(test_id)
+        if not test:
+            return jsonify({"error": "Avaliação não encontrada"}), 404
+        
         # Buscar resultado pré-calculado
         evaluation_result = EvaluationResult.query.filter_by(
             test_id=test_id,
@@ -3534,7 +3605,6 @@ def get_student_test_results(test_id, student_id):
             }), 200
         
         # ✅ NOVO: Usar dados pré-calculados da tabela evaluation_results
-        test = Test.query.get(test_id)
         # Buscar questões do teste através da tabela de associação
         from app.models.testQuestion import TestQuestion
         test_question_ids = [tq.question_id for tq in TestQuestion.query.filter_by(test_id=test_id).order_by(TestQuestion.order).all()]

@@ -3614,6 +3614,11 @@ def get_student_test_results(test_id, student_id):
         if not test:
             return jsonify({"error": "Avaliação não encontrada"}), 404
         
+        # Buscar o teste primeiro para usar em caso de erro
+        test = Test.query.get(test_id)
+        if not test:
+            return jsonify({"error": "Avaliação não encontrada"}), 404
+        
         # Buscar resultado pré-calculado
         evaluation_result = EvaluationResult.query.filter_by(
             test_id=test_id,

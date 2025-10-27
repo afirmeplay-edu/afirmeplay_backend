@@ -635,12 +635,12 @@ def listar_avaliacoes():
                 from app.models.teacher import Teacher
                 
                 teacher = Teacher.query.filter_by(user_id=user['id']).first()
-            if teacher:
-                school_teachers = SchoolTeacher.query.filter_by(teacher_id=teacher.id).all()
-                teacher_school_ids = [st.school_id for st in school_teachers]
-                escola_ids = [escola.id for escola in escolas_escopo if escola.id in teacher_school_ids]
-            else:
-                escola_ids = []  # Professor não vinculado a nenhuma escola
+                if teacher:
+                    school_teachers = SchoolTeacher.query.filter_by(teacher_id=teacher.id).all()
+                    teacher_school_ids = [st.school_id for st in school_teachers]
+                    escola_ids = [escola.id for escola in escolas_escopo if escola.id in teacher_school_ids]
+                else:
+                    escola_ids = []  # Professor não vinculado a nenhuma escola
         else:
             escola_ids = []
         

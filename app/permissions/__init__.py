@@ -24,7 +24,9 @@ from .rules import (
     can_view_school,
     can_view_class,
     can_view_results,
-    get_user_permission_scope
+    get_user_permission_scope,
+    validate_professor_school_selection,
+    validate_professor_school_for_results
 )
 from .query_filters import (
     filter_schools_by_user,
@@ -51,6 +53,8 @@ __all__ = [
     'can_view_class',
     'can_view_results',
     'get_user_permission_scope',
+    'validate_professor_school_selection',
+    'validate_professor_school_for_results',
     # Query Filters
     'filter_schools_by_user',
     'filter_classes_by_user',

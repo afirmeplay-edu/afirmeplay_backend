@@ -87,6 +87,8 @@ def filter_classes_by_user(query: Query, user: dict) -> Query:
     """
     # ⚠️ ClassSubject não é usado no sistema (desconsiderado)
     from app.models.teacherClass import TeacherClass
+    from app.models.studentClass import Class as ClassModel
+    from .utils import get_teacher
     
     role = Roles.normalize(user.get('role', ''))
     
@@ -96,7 +98,6 @@ def filter_classes_by_user(query: Query, user: dict) -> Query:
     
     # Diretor e Coordenador: apenas turmas de sua escola
     elif role in [Roles.DIRETOR, Roles.COORDENADOR]:
-        from app.models.studentClass import Class as ClassModel
         school_id = get_manager_school(user['id'])
         if school_id:
             return query.filter(ClassModel.school_id == school_id)
@@ -105,8 +106,6 @@ def filter_classes_by_user(query: Query, user: dict) -> Query:
     
         # Professor: apenas turmas onde está vinculado
     elif role == Roles.PROFESSOR:
-        from .utils import get_teacher
-        from app.models.studentClass import Class as ClassModel
         teacher = get_teacher(user['id'])
         if teacher:
             # ✅ Buscar turmas via TeacherClass (ClassSubject não é usado)
@@ -119,24 +118,29 @@ def filter_classes_by_user(query: Query, user: dict) -> Query:
         return query.filter(ClassModel.id == None)
     
     # Outros roles: resultado vazio
-    from app.models.studentClass import Class as ClassModel
     return query.filter(ClassModel.id == None)
 
 
-def filter_tests_by_user(query: Query, user: dict) -> Query:
+def filter_tests_by_user(query: Query, user: dict, escola_id: str = None, require_school: bool = True) -> Query:
     """
     Aplica filtros de avaliações baseado no role do usuário.
     
-    ⚠️ IMPORTANTE: Para professor, filtra por TURMAS específicas, não por escolas!
+    ⚠️ ALTERADO: Agora permite modo flexível para listagem vs resultados
     
     Args:
         query: Query SQLAlchemy de avaliações
         user: Dicionário com informações do usuário
+        escola_id: ID da escola específica (obrigatório para professores em modo restritivo)
+        require_school: Se True, exige escola específica. Se False, permite sem escola para listagem
         
     Returns:
         Query: Query filtrada de acordo com permissões do usuário
     """
     from app.models.test import Test
+    from app.models.teacher import Teacher
+    from app.models.teacherClass import TeacherClass
+    from app.models.classTest import ClassTest
+    from app.models.studentClass import Class as ClassModel
     from sqlalchemy import or_
     
     role = Roles.normalize(user.get('role', ''))
@@ -145,11 +149,8 @@ def filter_tests_by_user(query: Query, user: dict) -> Query:
     if Roles.is_admin_role(role):
         return query
     
-    # ✅ CORRIGIDO: Professor: avaliações que criou OU aplicadas em TURMAS específicas (NÃO escolas!)
+    # ✅ ALTERADO: Professor: avaliações que criou OU aplicadas em TURMAS específicas
     elif role == Roles.PROFESSOR:
-        from app.models.teacher import Teacher
-        from app.models.teacherClass import TeacherClass
-        from app.models.classTest import ClassTest
         
         teacher = get_teacher(user['id'])
         if not teacher:
@@ -164,12 +165,35 @@ def filter_tests_by_user(query: Query, user: dict) -> Query:
         filters = [Test.created_by == user['id']]
         
         if teacher_class_ids:
-            # Buscar avaliações aplicadas nessas turmas específicas
-            class_tests = ClassTest.query.filter(ClassTest.class_id.in_(teacher_class_ids)).all()
-            test_ids_vinculadas = [ct.test_id for ct in class_tests]
-            
-            if test_ids_vinculadas:
-                filters.append(Test.id.in_(test_ids_vinculadas))
+            # Se exige escola específica, filtrar por escola
+            if require_school and escola_id and escola_id.lower() != 'all':
+                # Verificar se a escola selecionada é uma das escolas vinculadas ao professor
+                teacher_school_ids = get_teacher_schools(user['id'])
+                if escola_id not in teacher_school_ids:
+                    # Escola não vinculada ao professor, retornar resultado vazio
+                    return query.filter(Test.id == None)
+                
+                # Filtrar turmas que pertencem à escola selecionada
+                classes_escola = ClassModel.query.filter(
+                    ClassModel.id.in_(teacher_class_ids),
+                    ClassModel.school_id == escola_id
+                ).all()
+                teacher_class_ids_escola = [c.id for c in classes_escola]
+                
+                if teacher_class_ids_escola:
+                    # Buscar avaliações aplicadas nessas turmas específicas da escola
+                    class_tests = ClassTest.query.filter(ClassTest.class_id.in_(teacher_class_ids_escola)).all()
+                    test_ids_vinculadas = [ct.test_id for ct in class_tests]
+                    
+                    if test_ids_vinculadas:
+                        filters.append(Test.id.in_(test_ids_vinculadas))
+            else:
+                # Modo flexível: mostrar todas as avaliações das turmas do professor (para listagem)
+                class_tests = ClassTest.query.filter(ClassTest.class_id.in_(teacher_class_ids)).all()
+                test_ids_vinculadas = [ct.test_id for ct in class_tests]
+                
+                if test_ids_vinculadas:
+                    filters.append(Test.id.in_(test_ids_vinculadas))
         
         # Aplicar filtro OR
         return query.filter(or_(*filters))
@@ -181,11 +205,8 @@ def filter_tests_by_user(query: Query, user: dict) -> Query:
             return query.filter(Test.id == None)  # Forçar resultado vazio
         
         # Filtrar avaliações que foram aplicadas em turmas da escola
-        from app.models.classTest import ClassTest
-        from app.models.studentClass import Class
-        
         # Buscar turmas da escola
-        classes = Class.query.filter_by(school_id=school_id).all()
+        classes = ClassModel.query.filter_by(school_id=school_id).all()
         class_ids = [c.id for c in classes]
         
         if class_ids:

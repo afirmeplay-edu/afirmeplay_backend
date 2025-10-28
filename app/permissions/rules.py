@@ -306,6 +306,138 @@ def can_view_results(user: Dict[str, Any], filters: Dict[str, Any] = None) -> bo
     return Roles.has_report_access(role)
 
 
+def validate_professor_school_for_results(user: Dict[str, Any], escola_id: str = None) -> Dict[str, Any]:
+    """
+    Valida se um professor selecionou uma escola específica para visualizar resultados.
+    
+    ⚠️ NOVA FUNÇÃO: Específica para validação de resultados (sempre exige escola)
+    
+    Args:
+        user: Dicionário com informações do usuário
+        escola_id: ID da escola selecionada (obrigatório para professores)
+        
+    Returns:
+        Dict com resultado da validação:
+        {
+            'valid': bool,
+            'error': str | None,
+            'school_id': str | None
+        }
+    """
+    from .roles import Roles
+    
+    role = Roles.normalize(user.get('role', ''))
+    
+    # Apenas professores precisam validar seleção de escola para resultados
+    if role != Roles.PROFESSOR:
+        return {
+            'valid': True,
+            'error': None,
+            'school_id': escola_id
+        }
+    
+    # Professor DEVE selecionar uma escola específica para ver resultados
+    if not escola_id or escola_id.lower() == 'all':
+        return {
+            'valid': False,
+            'error': 'Para professores, é obrigatório selecionar uma escola específica para visualizar resultados',
+            'school_id': None
+        }
+    
+    # Verificar se a escola selecionada é uma das escolas vinculadas ao professor
+    teacher_school_ids = get_teacher_schools(user['id'])
+    if escola_id not in teacher_school_ids:
+        return {
+            'valid': False,
+            'error': 'Você não tem acesso a esta escola',
+            'school_id': None
+        }
+    
+    return {
+        'valid': True,
+        'error': None,
+        'school_id': escola_id
+    }
+
+
+def validate_professor_school_selection(user: Dict[str, Any], escola_id: str = None, require_school: bool = True) -> Dict[str, Any]:
+    """
+    Valida se um professor selecionou uma escola específica.
+    
+    ⚠️ ALTERADO: Agora permite modo flexível para listagem vs resultados
+    
+    Args:
+        user: Dicionário com informações do usuário
+        escola_id: ID da escola selecionada (opcional)
+        require_school: Se True, exige escola específica. Se False, permite sem escola para listagem
+        
+    Returns:
+        Dict com resultado da validação:
+        {
+            'valid': bool,
+            'error': str | None,
+            'school_id': str | None
+        }
+    """
+    from .roles import Roles
+    
+    role = Roles.normalize(user.get('role', ''))
+    
+    # Apenas professores precisam validar seleção de escola
+    if role != Roles.PROFESSOR:
+        return {
+            'valid': True,
+            'error': None,
+            'school_id': escola_id
+        }
+    
+    # Se não exige escola específica (para listagem), permitir sem escola
+    if not require_school:
+        if not escola_id or escola_id.lower() == 'all':
+            return {
+                'valid': True,
+                'error': None,
+                'school_id': None
+            }
+        else:
+            # Verificar se a escola selecionada é uma das escolas vinculadas ao professor
+            teacher_school_ids = get_teacher_schools(user['id'])
+            if escola_id not in teacher_school_ids:
+                return {
+                    'valid': False,
+                    'error': 'Você não tem acesso a esta escola',
+                    'school_id': None
+                }
+            return {
+                'valid': True,
+                'error': None,
+                'school_id': escola_id
+            }
+    
+    # Modo restritivo: Professor deve selecionar uma escola específica (para resultados)
+    if not escola_id or escola_id.lower() == 'all':
+        return {
+            'valid': False,
+            'error': 'Para professores, é obrigatório selecionar uma escola específica',
+            'school_id': None
+        }
+    
+    # Verificar se a escola selecionada é uma das escolas vinculadas ao professor
+    teacher_school_ids = get_teacher_schools(user['id'])
+    if escola_id not in teacher_school_ids:
+        return {
+            'valid': False,
+            'error': 'Você não tem acesso a esta escola',
+            'school_id': None
+        }
+    
+    return {
+        'valid': True,
+        'error': None,
+        'school_id': escola_id
+    }
+
+
 def get_user_permission_scope(user: Dict[str, Any]) -> Dict[str, Any]:
     """
     Determina o escopo de permissões de um usuário para filtros.
@@ -393,7 +525,7 @@ def get_user_permission_scope(user: Dict[str, Any]) -> Dict[str, Any]:
             'filters': {
                 'estados': 'specific',
                 'municipios': 'specific',
-                'escolas': 'vinculadas',
+                'escolas': 'obrigatorio',  # ✅ ALTERADO: Professor DEVE selecionar escola específica
                 'series': 'vinculadas',
                 'turmas': 'vinculadas',
                 'avaliacoes': 'vinculadas'
@@ -413,5 +545,7 @@ __all__ = [
     'can_view_school',
     'can_view_class',
     'can_view_results',
-    'get_user_permission_scope'
+    'get_user_permission_scope',
+    'validate_professor_school_selection',
+    'validate_professor_school_for_results'  # ✅ NOVA FUNÇÃO
 ]

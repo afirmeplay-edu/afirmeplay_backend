@@ -609,6 +609,26 @@ def listar_avaliacoes():
         if not permissao['permitted']:
             return jsonify({"error": permissao['error']}), 403
         
+        # ✅ ALTERADO: Validação flexível - só exige escola para resultados, não para listagem
+        from app.permissions import validate_professor_school_selection
+        
+        escola_param = request.args.get('escola', 'all')
+        
+        # Para listagem de avaliações, não exige escola específica
+        validation_result = validate_professor_school_selection(user, escola_param, require_school=False)
+        
+        if not validation_result['valid']:
+            return jsonify({
+                "error": validation_result['error'],
+                "code": "SCHOOL_ACCESS_DENIED"
+            }), 403
+        
+        # Usar escola validada (pode ser None para professores sem escola selecionada)
+        escola_id_validada = validation_result['school_id']
+        if escola_id_validada:
+            escola = escola_id_validada
+            logging.info(f"Escola validada para professor: {escola}")
+        
         # Buscar escolas do escopo baseado nas permissões
         escolas_escopo = scope_info.get('escolas', [])
         
@@ -713,6 +733,9 @@ def listar_avaliacoes():
             # Garantir que a sessão está limpa antes de construir a query
             db.session.rollback()
             
+            # ✅ IMPORTANTE: Importar Test aqui para estar disponível em todo o escopo
+            from app.models.test import Test
+            
             # Construir query base com filtros de permissões
             query_base = ClassTest.query.join(Test, ClassTest.test_id == Test.id)\
                                        .join(Class, ClassTest.class_id == Class.id)\
@@ -725,7 +748,7 @@ def listar_avaliacoes():
                                            joinedload(ClassTest.class_).joinedload(Class.school).joinedload(School.city)
                                        )
             
-            # Aplicar filtros baseados nas permissões do usuário
+            # ✅ ALTERADO: Aplicar filtros usando o novo módulo de permissões
             if permissao['scope'] == 'municipio':
                 # Tecadm vê apenas avaliações do seu município
                 query_base = query_base.filter(City.id == user.get('city_id'))
@@ -740,12 +763,21 @@ def listar_avaliacoes():
                     else:
                         query_base = query_base.filter(School.id == manager.school_id)
                 elif user.get('role') == 'professor':
-                    # Professor vê avaliações que criou OU que foram aplicadas em suas escolas
-                    # O filtro por escolas será aplicado mais tarde via escola_ids
-                    pass
+                    # ✅ ALTERADO: Professor usa filtro flexível - permite listagem sem escola específica
+                    from app.permissions.query_filters import filter_tests_by_user
+                    
+                    # Aplicar filtro usando modo flexível (não exige escola específica para listagem)
+                    test_query = Test.query
+                    test_query = filter_tests_by_user(test_query, user, escola_id_validada, require_school=False)
+                    
+                    # Filtrar ClassTest baseado nas avaliações permitidas
+                    test_ids_permitidas = [t.id for t in test_query.all()]
+                    if test_ids_permitidas:
+                        query_base = query_base.filter(Test.id.in_(test_ids_permitidas))
+                    else:
+                        query_base = query_base.filter(Test.id == None)  # Força resultado vazio
             
-            # Aplicar filtro por escolas do escopo (se houver)
-            # ⚠️ IMPORTANTE: Para professor, NÃO filtrar por escolas, pois ele deve ver avaliações baseado em TURMAS
+            # Aplicar filtro por escolas do escopo (apenas para não-professores)
             if user.get('role') != 'professor' and escola_ids:
                 query_base = query_base.filter(School.id.in_(escola_ids))
             elif user.get('role') != 'professor':
@@ -1963,19 +1995,10 @@ def _determinar_escopo_busca(estado, municipio, escola, serie, turma, avaliacao,
             if permissao['scope'] == 'municipio' and user.get('city_id') != municipio_id:
                 return None
             
-            # Para professores, diretores e coordenadores: definir escola padrão se não selecionada
+            # Para diretores e coordenadores: definir escola padrão se não selecionada
+            # ✅ ALTERADO: Professores NÃO têm escola padrão - devem selecionar explicitamente
             if permissao['scope'] == 'escola' and (not escola or escola.lower() == 'all'):
-                if user.get('role') == 'professor':
-                    # Professor: usar primeira escola vinculada
-                    from app.models.teacher import Teacher
-                    
-                    teacher = Teacher.query.filter_by(user_id=user['id']).first()
-                    if teacher:
-                        school_teacher = SchoolTeacher.query.filter_by(teacher_id=teacher.id).first()
-                        if school_teacher:
-                            escola = school_teacher.school_id
-                            logging.info(f"Professor: usando escola padrão {escola}")
-                elif user.get('role') in ['diretor', 'coordenador']:
+                if user.get('role') in ['diretor', 'coordenador']:
                     # Diretor/Coordenador: usar sua escola vinculada
                     from app.models.manager import Manager
                     
@@ -1983,6 +2006,9 @@ def _determinar_escopo_busca(estado, municipio, escola, serie, turma, avaliacao,
                     if manager and manager.school_id:
                         escola = manager.school_id
                         logging.info(f"Diretor/Coordenador: usando escola padrão {escola}")
+                elif user.get('role') == 'professor':
+                    # ✅ NOVO: Professor DEVE selecionar escola específica - não usar padrão
+                    logging.info("Professor: escola específica obrigatória - não usando padrão")
         
         # Buscar escolas do escopo
         escolas = []
@@ -4987,38 +5013,13 @@ def obter_opcoes_filtros():
                 # Para educadores (professor, diretor, coordenador), retornar avaliações que criaram primeiro
                 if permissao['scope'] == 'escola':
                     if user['role'] == 'professor':
-                        # Para professores, mostrar avaliações que criaram OU que foram aplicadas em suas escolas
-                        from app.models.teacher import Teacher
-                        from sqlalchemy import or_
+                        # ✅ ALTERADO: Professor pode ver avaliações sem escola específica (modo flexível)
+                        from app.permissions.query_filters import filter_tests_by_user
                         
-                        teacher = Teacher.query.filter_by(user_id=user['id']).first()
-                        if teacher:
-                            # ✅ CORRIGIDO: Criar filtro OR com TURMAS ESPECÍFICAS onde o professor está vinculado
-                            from app.models.teacherClass import TeacherClass
-                            
-                            # Criar filtro OR: avaliações criadas pelo professor OU aplicadas em suas TURMAS
-                            filters = [Test.created_by == user['id']]
-                            
-                            # ✅ Buscar TURMAS onde o professor está vinculado (via TeacherClass)
-                            teacher_classes = TeacherClass.query.filter_by(teacher_id=teacher.id).all()
-                            teacher_class_ids = [tc.class_id for tc in teacher_classes]
-                            
-                            if teacher_class_ids:
-                                # ✅ Avaliações aplicadas em TURMAS ESPECÍFICAS onde o professor está vinculado
-                                filters.append(
-                                    Test.id.in_(
-                                        db.session.query(ClassTest.test_id).filter(
-                                            ClassTest.class_id.in_(teacher_class_ids)
-                                        )
-                                    )
-                                )
-                            
-                            query_avaliacoes = Test.query.with_entities(Test.id, Test.title)\
-                                                .filter(or_(*filters))
-                        else:
-                            # Se não é um professor válido, não mostrar nenhuma avaliação
-                            query_avaliacoes = Test.query.with_entities(Test.id, Test.title)\
-                                                .filter(Test.id == None)
+                        escola_param = request.args.get('escola', 'all')
+                        test_query = Test.query.with_entities(Test.id, Test.title)
+                        test_query = filter_tests_by_user(test_query, user, escola_param, require_school=False)
+                        query_avaliacoes = test_query
                     else:
                         # Para diretores/coordenadores, mostrar avaliações aplicadas na sua escola
                         from app.models.manager import Manager
@@ -5762,7 +5763,7 @@ def obter_avaliacoes():
         
         # Para educadores (professor, diretor, coordenador), retornar avaliações que criaram e que estão aplicadas
         if permissao['scope'] == 'escola':
-            if permissao['scope'] == 'escola':
+            if user['role'] in ['diretor', 'coordenador']:
                 # Diretor e Coordenador veem apenas avaliações que criaram e que estão aplicadas na sua escola
                 from app.models.manager import Manager
                 
@@ -5778,37 +5779,14 @@ def obter_avaliacoes():
                                                 .join(ClassTest, Test.id == ClassTest.test_id)\
                                                 .join(Class, ClassTest.class_id == Class.id)\
                                                 .filter(Class.school_id == manager.school_id)
-            elif permissao['scope'] == 'escola':
-                # ✅ CORRIGIDO: Professor vê avaliações que criou OU que foram aplicadas em TURMAS específicas onde está vinculado
-                from app.models.teacher import Teacher
-                from app.models.teacherClass import TeacherClass
-                from sqlalchemy import or_
+            elif user['role'] == 'professor':
+                # ✅ ALTERADO: Professor pode ver avaliações sem escola específica (modo flexível)
+                escola_param = request.args.get('escola', 'all')
+                from app.permissions.query_filters import filter_tests_by_user
                 
-                teacher = Teacher.query.filter_by(user_id=user['id']).first()
-                if teacher:
-                    # Criar filtro OR: avaliações criadas pelo professor OU aplicadas em suas TURMAS
-                    filters = [Test.created_by == user['id']]
-                    
-                    # ✅ Buscar TURMAS onde o professor está vinculado (via TeacherClass)
-                    teacher_classes = TeacherClass.query.filter_by(teacher_id=teacher.id).all()
-                    teacher_class_ids = [tc.class_id for tc in teacher_classes]
-                    
-                    if teacher_class_ids:
-                        # ✅ Avaliações aplicadas em TURMAS ESPECÍFICAS onde o professor está vinculado
-                        filters.append(
-                            Test.id.in_(
-                                db.session.query(ClassTest.test_id).filter(
-                                    ClassTest.class_id.in_(teacher_class_ids)
-                                )
-                            )
-                        )
-                    
-                    query_avaliacoes = Test.query.with_entities(Test.id, Test.title)\
-                                        .filter(or_(*filters))
-                else:
-                    # Se não é um professor válido, não mostrar nenhuma avaliação
-                    query_avaliacoes = Test.query.with_entities(Test.id, Test.title)\
-                                        .filter(Test.id == None)
+                test_query = Test.query.with_entities(Test.id, Test.title)
+                test_query = filter_tests_by_user(test_query, user, escola_param, require_school=False)
+                query_avaliacoes = test_query
                 
                 # Aplicar joins para verificar se estão aplicadas
                 query_avaliacoes = query_avaliacoes.join(ClassTest, Test.id == ClassTest.test_id)

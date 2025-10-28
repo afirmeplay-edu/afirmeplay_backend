@@ -306,6 +306,153 @@ def can_view_results(user: Dict[str, Any], filters: Dict[str, Any] = None) -> bo
     return Roles.has_report_access(role)
 
 
+def validate_manager_school_selection(user: Dict[str, Any], escola_id: str = None, require_school: bool = True) -> Dict[str, Any]:
+    """
+    Valida se um diretor/coordenador selecionou sua escola específica.
+    
+    ⚠️ NOVA FUNÇÃO: Para diretores e coordenadores (similar aos professores)
+    
+    Args:
+        user: Dicionário com informações do usuário
+        escola_id: ID da escola selecionada (opcional)
+        require_school: Se True, exige escola específica. Se False, permite sem escola para listagem
+        
+    Returns:
+        Dict com resultado da validação:
+        {
+            'valid': bool,
+            'error': str | None,
+            'school_id': str | None
+        }
+    """
+    from .roles import Roles
+    
+    role = Roles.normalize(user.get('role', ''))
+    
+    # Apenas diretores e coordenadores precisam validar seleção de escola
+    if role not in [Roles.DIRETOR, Roles.COORDENADOR]:
+        return {
+            'valid': True,
+            'error': None,
+            'school_id': escola_id
+        }
+    
+    # Buscar a escola vinculada ao diretor/coordenador
+    manager_school_id = get_manager_school(user['id'])
+    if not manager_school_id:
+        return {
+            'valid': False,
+            'error': 'Usuário não vinculado a uma escola',
+            'school_id': None
+        }
+    
+    # Se não exige escola específica (para listagem), permitir sem escola
+    if not require_school:
+        if not escola_id or escola_id.lower() == 'all':
+            return {
+                'valid': True,
+                'error': None,
+                'school_id': None
+            }
+        else:
+            # Verificar se a escola selecionada é a escola vinculada
+            if escola_id != manager_school_id:
+                return {
+                    'valid': False,
+                    'error': 'Você não tem acesso a esta escola',
+                    'school_id': None
+                }
+            return {
+                'valid': True,
+                'error': None,
+                'school_id': escola_id
+            }
+    
+    # Modo restritivo: Diretor/Coordenador deve selecionar sua escola específica (para resultados)
+    if not escola_id or escola_id.lower() == 'all':
+        return {
+            'valid': False,
+            'error': 'Para diretores e coordenadores, é obrigatório selecionar uma escola específica para visualizar resultados',
+            'school_id': None
+        }
+    
+    # Verificar se a escola selecionada é a escola vinculada
+    if escola_id != manager_school_id:
+        return {
+            'valid': False,
+            'error': 'Você não tem acesso a esta escola',
+            'school_id': None
+        }
+    
+    return {
+        'valid': True,
+        'error': None,
+        'school_id': escola_id
+    }
+
+
+def validate_manager_school_for_results(user: Dict[str, Any], escola_id: str = None) -> Dict[str, Any]:
+    """
+    Valida se um diretor/coordenador selecionou sua escola específica para visualizar resultados.
+    
+    ⚠️ NOVA FUNÇÃO: Específica para validação de resultados (sempre exige escola)
+    
+    Args:
+        user: Dicionário com informações do usuário
+        escola_id: ID da escola selecionada (obrigatório para diretores/coordenadores)
+        
+    Returns:
+        Dict com resultado da validação:
+        {
+            'valid': bool,
+            'error': str | None,
+            'school_id': str | None
+        }
+    """
+    from .roles import Roles
+    
+    role = Roles.normalize(user.get('role', ''))
+    
+    # Apenas diretores e coordenadores precisam validar seleção de escola para resultados
+    if role not in [Roles.DIRETOR, Roles.COORDENADOR]:
+        return {
+            'valid': True,
+            'error': None,
+            'school_id': escola_id
+        }
+    
+    # Buscar a escola vinculada ao diretor/coordenador
+    manager_school_id = get_manager_school(user['id'])
+    if not manager_school_id:
+        return {
+            'valid': False,
+            'error': 'Usuário não vinculado a uma escola',
+            'school_id': None
+        }
+    
+    # Diretor/Coordenador DEVE selecionar sua escola específica para ver resultados
+    if not escola_id or escola_id.lower() == 'all':
+        return {
+            'valid': False,
+            'error': 'Para diretores e coordenadores, é obrigatório selecionar uma escola específica para visualizar resultados',
+            'school_id': None
+        }
+    
+    # Verificar se a escola selecionada é a escola vinculada
+    if escola_id != manager_school_id:
+        return {
+            'valid': False,
+            'error': 'Você não tem acesso a esta escola',
+            'school_id': None
+        }
+    
+    return {
+        'valid': True,
+        'error': None,
+        'school_id': escola_id
+    }
+
+
 def validate_professor_school_for_results(user: Dict[str, Any], escola_id: str = None) -> Dict[str, Any]:
     """
     Valida se um professor selecionou uma escola específica para visualizar resultados.
@@ -547,5 +694,7 @@ __all__ = [
     'can_view_results',
     'get_user_permission_scope',
     'validate_professor_school_selection',
-    'validate_professor_school_for_results'  # ✅ NOVA FUNÇÃO
+    'validate_professor_school_for_results',
+    'validate_manager_school_selection',  # ✅ NOVA FUNÇÃO
+    'validate_manager_school_for_results'  # ✅ NOVA FUNÇÃO
 ]

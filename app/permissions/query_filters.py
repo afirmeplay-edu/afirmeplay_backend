@@ -204,6 +204,12 @@ def filter_tests_by_user(query: Query, user: dict, escola_id: str = None, requir
         if not school_id:
             return query.filter(Test.id == None)  # Forçar resultado vazio
         
+        # Se exige escola específica, validar se é a escola vinculada
+        if require_school and escola_id and escola_id.lower() != 'all':
+            if escola_id != school_id:
+                # Escola selecionada não é a escola vinculada, retornar resultado vazio
+                return query.filter(Test.id == None)
+        
         # Filtrar avaliações que foram aplicadas em turmas da escola
         # Buscar turmas da escola
         classes = ClassModel.query.filter_by(school_id=school_id).all()

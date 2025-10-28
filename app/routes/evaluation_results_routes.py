@@ -610,12 +610,20 @@ def listar_avaliacoes():
             return jsonify({"error": permissao['error']}), 403
         
         # ✅ ALTERADO: Validação flexível - só exige escola para resultados, não para listagem
-        from app.permissions import validate_professor_school_selection
+        from app.permissions import validate_professor_school_selection, validate_manager_school_selection
         
         escola_param = request.args.get('escola', 'all')
         
-        # Para listagem de avaliações, não exige escola específica
-        validation_result = validate_professor_school_selection(user, escola_param, require_school=False)
+        # Aplicar validação baseada no role do usuário
+        if user.get('role') == 'professor':
+            # Para listagem de avaliações, não exige escola específica
+            validation_result = validate_professor_school_selection(user, escola_param, require_school=False)
+        elif user.get('role') in ['diretor', 'coordenador']:
+            # Para listagem de avaliações, não exige escola específica
+            validation_result = validate_manager_school_selection(user, escola_param, require_school=False)
+        else:
+            # Outros roles não precisam de validação específica
+            validation_result = {'valid': True, 'school_id': escola_param}
         
         if not validation_result['valid']:
             return jsonify({
@@ -623,11 +631,11 @@ def listar_avaliacoes():
                 "code": "SCHOOL_ACCESS_DENIED"
             }), 403
         
-        # Usar escola validada (pode ser None para professores sem escola selecionada)
+        # Usar escola validada (pode ser None para usuários sem escola selecionada)
         escola_id_validada = validation_result['school_id']
         if escola_id_validada:
             escola = escola_id_validada
-            logging.info(f"Escola validada para professor: {escola}")
+            logging.info(f"Escola validada para {user.get('role')}: {escola}")
         
         # Buscar escolas do escopo baseado nas permissões
         escolas_escopo = scope_info.get('escolas', [])
@@ -754,14 +762,19 @@ def listar_avaliacoes():
                 query_base = query_base.filter(City.id == user.get('city_id'))
             elif permissao['scope'] == 'escola':
                 if user.get('role') in ['diretor', 'coordenador']:
-                    # Diretor e Coordenador veem apenas avaliações da sua escola
-                    from app.models.manager import Manager
-                    manager = Manager.query.filter_by(user_id=user['id']).first()
-                    if not manager or not manager.school_id:
-                        # Se não tem manager ou escola vinculada, retornar lista vazia
-                        query_base = query_base.filter(School.id == None)  # Força resultado vazio
+                    # ✅ ALTERADO: Diretor/Coordenador usa filtro flexível - permite listagem sem escola específica
+                    from app.permissions.query_filters import filter_tests_by_user
+                    
+                    # Aplicar filtro usando modo flexível (não exige escola específica para listagem)
+                    test_query = Test.query
+                    test_query = filter_tests_by_user(test_query, user, escola_id_validada, require_school=False)
+                    
+                    # Filtrar ClassTest baseado nas avaliações permitidas
+                    test_ids_permitidas = [t.id for t in test_query.all()]
+                    if test_ids_permitidas:
+                        query_base = query_base.filter(Test.id.in_(test_ids_permitidas))
                     else:
-                        query_base = query_base.filter(School.id == manager.school_id)
+                        query_base = query_base.filter(Test.id == None)  # Força resultado vazio
                 elif user.get('role') == 'professor':
                     # ✅ ALTERADO: Professor usa filtro flexível - permite listagem sem escola específica
                     from app.permissions.query_filters import filter_tests_by_user
@@ -5020,24 +5033,20 @@ def obter_opcoes_filtros():
                         test_query = Test.query.with_entities(Test.id, Test.title)
                         test_query = filter_tests_by_user(test_query, user, escola_param, require_school=False)
                         query_avaliacoes = test_query
-                    else:
-                        # Para diretores/coordenadores, mostrar avaliações aplicadas na sua escola
-                        from app.models.manager import Manager
+                    elif user['role'] in ['diretor', 'coordenador']:
+                        # ✅ ALTERADO: Diretor/Coordenador pode ver avaliações sem escola específica (modo flexível)
+                        from app.permissions.query_filters import filter_tests_by_user
                         
-                        # Buscar o manager vinculado ao usuário atual
-                        manager = Manager.query.filter_by(user_id=user['id']).first()
-                        if not manager or not manager.school_id:
-                            # Manager não encontrado ou não vinculado a escola, retornar lista vazia
-                            query_avaliacoes = Test.query.with_entities(Test.id, Test.title).filter(Test.id == None)
-                        else:
-                            # Buscar avaliações que foram aplicadas na escola do diretor/coordenador
-                            query_avaliacoes = Test.query.with_entities(Test.id, Test.title)\
-                                                .join(ClassTest, Test.id == ClassTest.test_id)\
-                                                .join(Class, ClassTest.class_id == Class.id)\
-                                                .filter(Class.school_id == manager.school_id)
+                        escola_param = request.args.get('escola', 'all')
+                        test_query = Test.query.with_entities(Test.id, Test.title)
+                        test_query = filter_tests_by_user(test_query, user, escola_param, require_school=False)
+                        query_avaliacoes = test_query
+                    else:
+                        # Para outros roles, manter lógica atual
+                        query_avaliacoes = Test.query.with_entities(Test.id, Test.title).filter(Test.id == None)
                     
-                    # Aplicar joins adicionais para professores
-                    if user['role'] == 'professor':
+                    # Aplicar joins adicionais para professores e diretores/coordenadores
+                    if user['role'] in ['professor', 'diretor', 'coordenador']:
                         query_avaliacoes = query_avaliacoes.join(ClassTest, Test.id == ClassTest.test_id)
                         query_avaliacoes = query_avaliacoes.join(Class, ClassTest.class_id == Class.id)
                         query_avaliacoes = query_avaliacoes.join(School, Class.school_id == School.id)
@@ -5781,6 +5790,14 @@ def obter_avaliacoes():
                                                 .filter(Class.school_id == manager.school_id)
             elif user['role'] == 'professor':
                 # ✅ ALTERADO: Professor pode ver avaliações sem escola específica (modo flexível)
+                escola_param = request.args.get('escola', 'all')
+                from app.permissions.query_filters import filter_tests_by_user
+                
+                test_query = Test.query.with_entities(Test.id, Test.title)
+                test_query = filter_tests_by_user(test_query, user, escola_param, require_school=False)
+                query_avaliacoes = test_query
+            elif user['role'] in ['diretor', 'coordenador']:
+                # ✅ ALTERADO: Diretor/Coordenador pode ver avaliações sem escola específica (modo flexível)
                 escola_param = request.args.get('escola', 'all')
                 from app.permissions.query_filters import filter_tests_by_user
                 

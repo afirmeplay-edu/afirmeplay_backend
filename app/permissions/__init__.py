@@ -26,7 +26,9 @@ from .rules import (
     can_view_results,
     get_user_permission_scope,
     validate_professor_school_selection,
-    validate_professor_school_for_results
+    validate_professor_school_for_results,
+    validate_manager_school_selection,
+    validate_manager_school_for_results
 )
 from .query_filters import (
     filter_schools_by_user,
@@ -55,6 +57,8 @@ __all__ = [
     'get_user_permission_scope',
     'validate_professor_school_selection',
     'validate_professor_school_for_results',
+    'validate_manager_school_selection',
+    'validate_manager_school_for_results',
     # Query Filters
     'filter_schools_by_user',
     'filter_classes_by_user',

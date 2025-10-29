@@ -332,11 +332,13 @@ def relatorio_completo(evaluation_id: str):
             return jsonify({"error": "Avaliação não foi aplicada em nenhuma turma"}), 404
         
         # Obter dados da avaliação
+        course_name = _obter_nome_curso(test)
         avaliacao_data = {
             "id": test.id,
             "titulo": test.title,
             "descricao": test.description,
-            "disciplinas": _obter_disciplinas_avaliacao(test)
+            "disciplinas": _obter_disciplinas_avaliacao(test),
+            "course_name": course_name
         }
         
         logging.info(f"Disciplinas identificadas para avaliação {evaluation_id}: {avaliacao_data['disciplinas']}")
@@ -499,11 +501,13 @@ def relatorio_pdf(evaluation_id: str):
                 return jsonify({"error": "Avaliação não foi aplicada em nenhuma turma"}), 404
         
         # Obter dados da avaliação (mesma lógica do relatorio_completo)
+        course_name = _obter_nome_curso(test)
         avaliacao_data = {
             "id": test.id,
             "titulo": test.title,
             "descricao": test.description,
-            "disciplinas": _obter_disciplinas_avaliacao(test)
+            "disciplinas": _obter_disciplinas_avaliacao(test),
+            "course_name": course_name
         }
         
         logging.info(f"Disciplinas identificadas para avaliação {evaluation_id}: {avaliacao_data['disciplinas']}")

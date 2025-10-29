@@ -8,21 +8,446 @@ from io import BytesIO
 from datetime import datetime
 from typing import Dict, Any, List
 import logging
+import re
 
 from reportlab.lib.pagesizes import A4
-from reportlab.lib.units import mm
+from reportlab.lib.units import mm, cm
 from reportlab.lib import colors
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.enums import TA_CENTER, TA_LEFT, TA_RIGHT
 from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer, PageTemplate, Frame, PageBreak, KeepTogether
-from reportlab.platypus import BaseDocTemplate
+from reportlab.platypus import BaseDocTemplate, Image
 from reportlab.pdfgen import canvas
+
+# Matplotlib para gráficos
+import matplotlib
+matplotlib.use('Agg')  # Backend não-interativo
+import matplotlib.pyplot as plt
+import matplotlib.patches as mpatches
+from matplotlib import font_manager as fm
 
 
 def _header(canvas: canvas.Canvas, doc, logo_esq=None, logo_dir=None):
     """Função para desenhar cabeçalho com logos em todas as páginas"""
     # Por enquanto, não desenhar nada para evitar erros com logos
     pass
+
+
+def _gerar_grafico_classificacao(niveis_aprendizagem: Dict, scope_type: str, disciplina: str = None) -> BytesIO:
+    """
+    Gera gráfico de rosca (donut chart) para classificação de desempenho
+    
+    Args:
+        niveis_aprendizagem: Dados de níveis de aprendizagem
+        scope_type: Tipo de escopo ('city', 'school', 'all')
+        disciplina: Nome da disciplina (opcional, se None pega GERAL)
+        
+    Returns:
+        BytesIO com a imagem do gráfico
+    """
+    try:
+        # Se não especificar disciplina, usar GERAL
+        if disciplina is None:
+            disciplina = 'GERAL'
+        
+        # Obter dados da disciplina
+        dados_disc = niveis_aprendizagem.get(disciplina, {})
+        if not dados_disc:
+            # Criar gráfico vazio se não houver dados
+            fig, ax = plt.subplots(figsize=(8, 8), facecolor='white')
+            ax.text(0.5, 0.5, 'Dados não disponíveis', ha='center', va='center', transform=ax.transAxes)
+            ax.axis('off')
+            buffer = BytesIO()
+            plt.savefig(buffer, format='png', dpi=150, bbox_inches='tight', facecolor='white')
+            buffer.seek(0)
+            plt.close(fig)
+            return buffer
+        
+        # Obter totais (ajustar para scope_type 'city' que usa 'total_geral' ao invés de 'geral')
+        if scope_type == 'city':
+            total_disc = dados_disc.get('total_geral', {})
+        else:
+            total_disc = dados_disc.get('geral', {})
+        
+        if isinstance(total_disc, dict):
+            abaixo = total_disc.get('abaixo_do_basico', 0)
+            basico = total_disc.get('basico', 0)
+            adequado = total_disc.get('adequado', 0)
+            avancado = total_disc.get('avancado', 0)
+        else:
+            abaixo = basico = adequado = avancado = 0
+        
+        # Dados para o gráfico
+        sizes = [abaixo, basico, adequado, avancado]
+        labels = ['Abaixo do Básico', 'Básico', 'Adequado', 'Avançado']
+        colors = ['#C00000', '#FFC000', '#70AD47', '#00B050']  # Vermelho, Amarelo, Verde claro, Verde
+        
+        # Filtrar zeros
+        filtered_data = [(size, label, color) for size, label, color in zip(sizes, labels, colors) if size > 0]
+        if not filtered_data:
+            # Se todos são zero, criar gráfico vazio
+            fig, ax = plt.subplots(figsize=(8, 8), facecolor='white')
+            ax.text(0.5, 0.5, 'Sem dados para exibir', ha='center', va='center', transform=ax.transAxes)
+            ax.axis('off')
+        else:
+            sizes_filtered, labels_filtered, colors_filtered = zip(*filtered_data)
+            
+            # Criar gráfico de rosca (donut chart)
+            fig, ax = plt.subplots(figsize=(8, 8), facecolor='white')
+            
+            # Gráfico de pizza com furo no meio
+            wedges, texts, autotexts = ax.pie(
+                sizes_filtered,
+                labels=None,
+                colors=colors_filtered,
+                autopct='%1.0f',
+                startangle=90,
+                pctdistance=0.85,
+                textprops={'fontsize': 12, 'fontweight': 'bold', 'color': 'white'}
+            )
+            
+            # Criar furo no meio (donut chart)
+            centre_circle = plt.Circle((0, 0), 0.70, fc='white')
+            ax.add_artist(centre_circle)
+            
+            # Título e subtítulo
+            ax.set_title(f'{disciplina.upper()}\nDistribuição de Desempenho', 
+                        fontsize=14, fontweight='bold', pad=20)
+            
+            # Remover eixos
+            ax.axis('equal')
+            
+            # Criar legenda
+            legend_elements = []
+            for label, color in zip(['Abaixo do Básico', 'Básico', 'Adequado', 'Avançado'],
+                                   ['#C00000', '#FFC000', '#70AD47', '#00B050']):
+                legend_elements.append(mpatches.Patch(facecolor=color, edgecolor='white', linewidth=1.5))
+            
+            # Adicionar legenda abaixo do gráfico
+            ax.legend(legend_elements, ['Abaixo do Básico', 'Básico', 'Adequado', 'Avançado'],
+                     loc='center', bbox_to_anchor=(0.5, -0.1), ncol=2, frameon=False)
+        
+        # Ajustar layout
+        plt.tight_layout()
+        
+        # Salvar em BytesIO
+        buffer = BytesIO()
+        plt.savefig(buffer, format='png', dpi=150, bbox_inches='tight', facecolor='white')
+        buffer.seek(0)
+        
+        # Limpar figura
+        plt.close(fig)
+        
+        return buffer
+        
+    except Exception as e:
+        logging.error(f"Erro ao gerar gráfico de classificação: {str(e)}")
+        # Retornar gráfico vazio em caso de erro
+        fig, ax = plt.subplots(figsize=(8, 8), facecolor='white')
+        ax.text(0.5, 0.5, f'Erro ao gerar gráfico: {str(e)}', ha='center', va='center', transform=ax.transAxes)
+        ax.axis('off')
+        buffer = BytesIO()
+        plt.savefig(buffer, format='png', dpi=150, bbox_inches='tight', facecolor='white')
+        buffer.seek(0)
+        plt.close(fig)
+        return buffer
+
+
+def _gerar_grafico_proficiencia(proficiencia: Dict, scope_type: str) -> BytesIO:
+    """
+    Gera gráfico de barras verticais para proficiência (similar à imagem fornecida)
+    
+    Args:
+        proficiencia: Dados de proficiência gerais
+        scope_type: Tipo de escopo ('city', 'school', 'all')
+        
+    Returns:
+        BytesIO com a imagem do gráfico
+    """
+    try:
+        # Configurar o gráfico
+        fig, ax = plt.subplots(figsize=(10, 6), facecolor='white')
+        
+        # Obter dados de proficiência
+        prof_disciplinas = proficiencia.get('por_disciplina', {})
+        
+        if not prof_disciplinas:
+            # Criar gráfico vazio se não houver dados
+            ax.text(0.5, 0.5, 'Dados não disponíveis', ha='center', va='center', transform=ax.transAxes)
+            ax.axis('off')
+        else:
+            # Preparar categorias e valores
+            categorias = []
+            valores = []
+            
+            # Obter média geral (GERAL) primeiro
+            if 'GERAL' in prof_disciplinas:
+                dados_geral = prof_disciplinas['GERAL']
+                media_geral_total = dados_geral.get('media_geral', 0)
+                if media_geral_total > 0:
+                    categorias.append('GERAL')
+                    valores.append(media_geral_total)
+            
+            # Adicionar disciplinas individuais (dinamicamente)
+            disciplinas_ordenadas = sorted([d for d in prof_disciplinas.keys() if d != 'GERAL'])
+            
+            for disciplina in disciplinas_ordenadas:
+                dados_disc = prof_disciplinas[disciplina]
+                media_disc = dados_disc.get('media_geral', 0)
+                if media_disc > 0:
+                    categorias.append(disciplina.upper())
+                    valores.append(media_disc)
+            
+            if valores:
+                # Criar as barras
+                cores = ['#4CAF50'] * len(categorias)  # Verde para todas as barras
+                bars = ax.bar(categorias, valores, color=cores, edgecolor='#2E7D32', linewidth=1.5)
+                
+                # Configurar eixo Y - dinâmico baseado nos valores
+                max_valor = max(valores) if valores else 425
+                y_max = ((int(max_valor) // 50) + 1) * 50 if max_valor > 0 else 425  # Arredondar para múltiplo de 50
+                ax.set_ylim(0, y_max)
+                ax.set_ylabel('Proficiência', fontsize=12, fontweight='bold', rotation=90, ha='center', va='center')
+                
+                # Configurar ticks do eixo Y
+                y_ticks = [0]
+                if y_max >= 150:
+                    y_ticks.append(150)
+                if y_max >= 300:
+                    y_ticks.append(300)
+                y_ticks.append(y_max)
+                ax.set_yticks(y_ticks)
+                
+                # Configurar eixo X
+                ax.set_xlabel('', fontsize=10)
+                ax.tick_params(axis='x', labelsize=10, rotation=0)
+                
+                # Adicionar valores nas barras
+                for bar, valor in zip(bars, valores):
+                    height = bar.get_height()
+                    ax.text(bar.get_x() + bar.get_width() / 2., height,
+                           f'{valor:.1f}',
+                           ha='center', va='bottom', fontsize=11, fontweight='bold')
+                
+                # Remover bordas superior e direita
+                ax.spines['top'].set_visible(False)
+                ax.spines['right'].set_visible(False)
+                ax.spines['left'].set_visible(True)
+                ax.spines['bottom'].set_visible(True)
+                
+                # Título do gráfico
+                tipo_relatorio = "Municipal" if scope_type == 'city' else "Escola"
+                ax.set_title(f'Média de Proficiência - {tipo_relatorio}\nMédia de Proficiência (Geral + Disciplinas)', 
+                            fontsize=14, fontweight='bold', pad=20)
+        
+        # Ajustar layout para evitar cortes
+        plt.tight_layout()
+        
+        # Salvar em BytesIO
+        buffer = BytesIO()
+        plt.savefig(buffer, format='png', dpi=150, bbox_inches='tight', facecolor='white')
+        buffer.seek(0)
+        
+        # Limpar a figura para liberar memória
+        plt.close(fig)
+        
+        return buffer
+        
+    except Exception as e:
+        logging.error(f"Erro ao gerar gráfico de proficiência: {str(e)}")
+        # Retornar gráfico vazio em caso de erro
+        fig, ax = plt.subplots(figsize=(10, 6), facecolor='white')
+        ax.text(0.5, 0.5, f'Erro ao gerar gráfico: {str(e)}', ha='center', va='center', transform=ax.transAxes)
+        ax.axis('off')
+        buffer = BytesIO()
+        plt.savefig(buffer, format='png', dpi=150, bbox_inches='tight', facecolor='white')
+        buffer.seek(0)
+        plt.close(fig)
+        return buffer
+
+
+def _gerar_grafico_notas(nota_geral: Dict, scope_type: str, disciplinas_prof: List[str]) -> BytesIO:
+    """
+    Gera gráfico de barras verticais para notas (similar à imagem fornecida)
+    
+    Args:
+        nota_geral: Dados de notas gerais
+        scope_type: Tipo de escopo ('city', 'school', 'all')
+        disciplinas_prof: Lista de disciplinas
+        
+    Returns:
+        BytesIO com a imagem do gráfico
+    """
+    try:
+        # Configurar o gráfico
+        fig, ax = plt.subplots(figsize=(10, 6), facecolor='white')
+        
+        # Obter dados de notas
+        notas_disciplinas = nota_geral.get('por_disciplina', {})
+        
+        if not notas_disciplinas:
+            # Criar gráfico vazio se não houver dados
+            ax.text(0.5, 0.5, 'Dados não disponíveis', ha='center', va='center', transform=ax.transAxes)
+            ax.axis('off')
+        else:
+            # Preparar categorias e valores
+            categorias = []
+            valores = []
+            
+            # Obter média geral (GERAL) primeiro
+            if 'GERAL' in notas_disciplinas:
+                dados_geral = notas_disciplinas['GERAL']
+                media_geral_total = dados_geral.get('media_geral', 0)
+                if media_geral_total > 0:
+                    categorias.append('GERAL')
+                    valores.append(media_geral_total)
+            
+            # Adicionar disciplinas individuais (ordenadas dinamicamente)
+            disciplinas_ordenadas = sorted(disciplinas_prof)
+            
+            for disciplina in disciplinas_ordenadas:
+                if disciplina in notas_disciplinas:
+                    dados_disc = notas_disciplinas[disciplina]
+                    media_disc = dados_disc.get('media_geral', 0)
+                    if media_disc > 0:
+                        categorias.append(disciplina.upper())
+                        valores.append(media_disc)
+            
+            if valores:
+                # Criar as barras
+                cores = ['#4CAF50'] * len(categorias)  # Verde para todas as barras
+                bars = ax.bar(categorias, valores, color=cores, edgecolor='#2E7D32', linewidth=1.5)
+            
+            # Configurar eixo Y
+            ax.set_ylim(0, 10)
+            ax.set_ylabel('Nota', fontsize=12, fontweight='bold', rotation=90, ha='center', va='center')
+            
+            # Configurar eixo X
+            ax.set_xlabel('', fontsize=10)
+            ax.tick_params(axis='x', labelsize=10, rotation=0)
+            
+            # Adicionar valores nas barras
+            for i, (bar, valor) in enumerate(zip(bars, valores)):
+                height = bar.get_height()
+                ax.text(bar.get_x() + bar.get_width() / 2., height,
+                       f'{valor:.1f}',
+                       ha='center', va='bottom', fontsize=11, fontweight='bold')
+            
+            # Remover bordas superior e direita
+            ax.spines['top'].set_visible(False)
+            ax.spines['right'].set_visible(False)
+            ax.spines['left'].set_visible(True)
+            ax.spines['bottom'].set_visible(True)
+            
+            # Título do gráfico
+            tipo_relatorio = "Municipal" if scope_type == 'city' else "Escola"
+            ax.set_title(f'Média de Nota - {tipo_relatorio}\nMédia de Nota (Geral + Disciplinas)', 
+                        fontsize=14, fontweight='bold', pad=20)
+            
+            # Adicionar linhas de referência no eixo Y
+            for y in [3, 6, 10]:
+                ax.axhline(y=y, color='gray', linestyle='--', linewidth=0.5, alpha=0.3)
+        
+        # Ajustar layout para evitar cortes
+        plt.tight_layout()
+        
+        # Salvar em BytesIO
+        buffer = BytesIO()
+        plt.savefig(buffer, format='png', dpi=150, bbox_inches='tight', facecolor='white')
+        buffer.seek(0)
+        
+        # Limpar a figura para liberar memória
+        plt.close(fig)
+        
+        return buffer
+        
+    except Exception as e:
+        logging.error(f"Erro ao gerar gráfico de notas: {str(e)}")
+        # Retornar gráfico vazio em caso de erro
+        fig, ax = plt.subplots(figsize=(10, 6), facecolor='white')
+        ax.text(0.5, 0.5, f'Erro ao gerar gráfico: {str(e)}', ha='center', va='center', transform=ax.transAxes)
+        ax.axis('off')
+        buffer = BytesIO()
+        plt.savefig(buffer, format='png', dpi=150, bbox_inches='tight', facecolor='white')
+        buffer.seek(0)
+        plt.close(fig)
+        return buffer
+
+
+def _processar_texto_ia(texto: str) -> str:
+    """
+    Processa o texto da IA para preservar formatação no ReportLab
+    
+    Converte:
+    - Quebras de linha duplas em parágrafos separados
+    - Quebras de linha simples em <br/>
+    - Bullets (•) em listas HTML
+    - Títulos em negrito
+    - Números seguidos de ponto como títulos
+    """
+    if not texto:
+        return texto
+    
+    # Se não houver quebras de linha duplas, tentar detectar padrões para quebrar
+    if '\n\n' not in texto:
+        # Detectar padrões de títulos no meio do texto (ex: "Destaques e Recomendações:")
+        texto = texto.replace('Destaques e Recomendações:', '\n\nDestaques e Recomendações:')
+        # Detectar números como títulos (ex: "1. ", "2. ", "3. ")
+        texto = re.sub(r'(\d+\.\s)', r'\n\n\1', texto)
+        # Detectar títulos em maiúsculas seguidas de dois pontos (se tiverem mais de 10 caracteres)
+        texto = re.sub(r'([A-ZÁÊÔÇ][A-ZÁÊÔÇ\s]{10,}:)', r'\n\n\1', texto)
+    
+    # Dividir por quebras de linha duplas (parágrafos)
+    paragrafos = texto.split('\n\n')
+    
+    resultado = []
+    for paragrafo in paragrafos:
+        paragrafo = paragrafo.strip()
+        if not paragrafo:
+            continue
+        
+        # Verificar se é um título (maiúsculas seguidas de dois pontos, ou números como "1. ", "2. ")
+        if (len(paragrafo) > 10 and paragrafo.isupper() and paragrafo.endswith(':')) or \
+           (len(paragrafo) > 2 and paragrafo[0].isdigit() and paragrafo[1] == '.' and paragrafo[2] == ' '):
+            # É um título - converter para negrito
+            resultado.append(f'<b>{paragrafo}</b>')
+        # Verificar se começa com "Destaques e Recomendações:" ou similar
+        elif paragrafo.startswith('Destaques e Recomendações:') or \
+             paragrafo.startswith('Classificação:') or \
+             paragrafo.startswith('PARECER TÉCNICO:') or \
+             paragrafo.startswith('PARECER TÉCNICO DE PARTICIPAÇÃO:') or \
+             paragrafo.startswith('PARECER TÉCNICO: NOTA IDAV:'):
+            # É um título - converter para negrito
+            resultado.append(f'<b>{paragrafo}</b>')
+        # Verificar se contém bullets (•) - converter em lista com indentação
+        elif '•' in paragrafo:
+            # Dividir por bullets
+            partes = paragrafo.split('•')
+            primeira_parte = partes[0].strip()
+            itens_lista = [item.strip() for item in partes[1:] if item.strip()]
+            
+            if primeira_parte and itens_lista:
+                # Tem título antes da lista
+                resultado.append(f'<b>{primeira_parte}</b><br/>')
+                # Adicionar cada item da lista com indentação (usando espaço não quebrável)
+                for i, item in enumerate(itens_lista):
+                    # Usar bullet unicode com indentação
+                    separator = '<br/>' if i < len(itens_lista) - 1 else ''
+                    resultado.append(f'&nbsp;&nbsp;&nbsp;&nbsp;• {item}{separator}')
+            elif itens_lista:
+                # Só tem lista - adicionar cada item com indentação
+                for i, item in enumerate(itens_lista):
+                    separator = '<br/>' if i < len(itens_lista) - 1 else ''
+                    resultado.append(f'&nbsp;&nbsp;&nbsp;&nbsp;• {item}{separator}')
+            else:
+                # Apenas um bullet no texto, substituir por <br/> com indentação
+                resultado.append(paragrafo.replace('•', '<br/>&nbsp;&nbsp;&nbsp;&nbsp;•'))
+        else:
+            # Parágrafo normal - substituir quebras de linha simples por <br/>
+            paragrafo_processado = paragrafo.replace('\n', '<br/>')
+            resultado.append(paragrafo_processado)
+    
+    return '<br/><br/>'.join(resultado)
 
 
 def gerar_pdf_com_template_dinamico(test, total_alunos: Dict, niveis_aprendizagem: Dict, 
@@ -87,7 +512,7 @@ def gerar_pdf_com_template_dinamico(test, total_alunos: Dict, niveis_aprendizage
         _adicionar_participacao(elements, total_alunos, test.title, scope_type, ai_analysis)
         
         # ===== NÍVEIS DE APRENDIZAGEM =====
-        _adicionar_niveis_aprendizagem(elements, niveis_aprendizagem, test.title, scope_type)
+        _adicionar_niveis_aprendizagem(elements, niveis_aprendizagem, test.title, scope_type, ai_analysis)
         
         # ===== PROFICIÊNCIA E NOTAS =====
         _adicionar_proficiencia_notas(elements, proficiencia, nota_geral, test.title, scope_type, ai_analysis)
@@ -252,11 +677,11 @@ def _obter_estilos():
     paragrafo_indentado_style = ParagraphStyle(
         'ParagrafoIndentado',
         parent=styles['Normal'],
-        fontSize=11,
+        fontSize=10,
         textColor=colors.black,
         alignment=TA_LEFT,
-        spaceAfter=12,
-        spaceBefore=6,
+        spaceAfter=4,
+        spaceBefore=2,
         firstLineIndent=36,
         fontName='Helvetica',
         leading=14
@@ -600,12 +1025,16 @@ def _adicionar_participacao(elements: List, total_alunos: Dict, avaliacao_titulo
     # Análise da IA para participação
     if ai_analysis and ai_analysis.get('participacao'):
         elements.append(Spacer(1, 6))
-        elements.append(Paragraph(ai_analysis['participacao'], estilos['paragrafo_indentado_style']))
+        texto_processado = _processar_texto_ia(ai_analysis['participacao'])
+        elements.append(Paragraph(texto_processado, estilos['paragrafo_indentado_style']))
 
 
-def _adicionar_niveis_aprendizagem(elements: List, niveis_aprendizagem: Dict, avaliacao_titulo: str, scope_type: str = 'all'):
+def _adicionar_niveis_aprendizagem(elements: List, niveis_aprendizagem: Dict, avaliacao_titulo: str, scope_type: str = 'all', ai_analysis: Dict = None):
     """Adiciona a seção de níveis de aprendizagem"""
     estilos = _obter_estilos()
+    
+    # Obter análises da IA por disciplina
+    analises_niveis = ai_analysis.get('niveis_aprendizagem', {}) if ai_analysis else {}
     
     # Determinar rótulo baseado no escopo
     if scope_type == 'city':
@@ -715,15 +1144,34 @@ def _adicionar_niveis_aprendizagem(elements: List, niveis_aprendizagem: Dict, av
     else:
         resumo_niveis_geral = [Paragraph("Dados não disponíveis", estilos['resumo_style'])]
     
+    # Gerar e adicionar gráfico de classificação GERAL
+    grafico_classificacao_geral = None
+    try:
+        grafico_buffer = _gerar_grafico_classificacao(niveis_aprendizagem, scope_type, 'GERAL')
+        grafico_classificacao_geral = Image(grafico_buffer, width=12*cm, height=12*cm)  # Gráfico menor
+    except Exception as e:
+        logging.error(f"Erro ao adicionar gráfico de classificação GERAL: {str(e)}")
+    
     # Manter elementos juntos
     elementos_geral = [
         subtitulo_niveis,
         Spacer(1, 1),
         titulo_geral,
         Spacer(1, 1),
-        tabela_niveis_geral,
+        tabela_niveis_geral
+    ]
+    
+    # Adicionar gráfico se disponível
+    if grafico_classificacao_geral:
+        elementos_geral.extend([
+            Spacer(1, 2),
+            grafico_classificacao_geral
+        ])
+    
+    # Adicionar resumo
+    elementos_geral.extend([
         Spacer(1, 2)
-    ] + resumo_niveis_geral
+    ] + resumo_niveis_geral)
     
     elements.append(KeepTogether(elementos_geral))
     
@@ -807,27 +1255,55 @@ def _adicionar_niveis_aprendizagem(elements: List, niveis_aprendizagem: Dict, av
                 ('RIGHTPADDING', (0, 0), (-1, -1), 6),
             ]))
             
-            # Resumo da disciplina
-            if dados.get('geral') or dados.get('total_geral'):
-                disc_data = dados.get('geral') or dados.get('total_geral')
-                total_disc = disc_data.get('total', 0)
-                resumo_niveis_disciplina = [
-                    Paragraph(f"{disciplina.upper()} (total de {total_disc} alunos avaliados):", estilos['resumo_style']),
-                    Paragraph(f"• Abaixo do básico: {disc_data.get('abaixo_do_basico', 0)} alunos ({(disc_data.get('abaixo_do_basico', 0)/total_disc*100) if total_disc > 0 else 0:.1f}%)", estilos['resumo_style']),
-                    Paragraph(f"• Básico: {disc_data.get('basico', 0)} alunos ({(disc_data.get('basico', 0)/total_disc*100) if total_disc > 0 else 0:.1f}%)", estilos['resumo_style']),
-                    Paragraph(f"• Adequado: {disc_data.get('adequado', 0)} alunos ({(disc_data.get('adequado', 0)/total_disc*100) if total_disc > 0 else 0:.1f}%)", estilos['resumo_style']),
-                    Paragraph(f"• Avançado: {disc_data.get('avancado', 0)} alunos ({(disc_data.get('avancado', 0)/total_disc*100) if total_disc > 0 else 0:.1f}%)", estilos['resumo_style'])
+            # Análise da IA para a disciplina (substitui o resumo)
+            analise_disciplina = analises_niveis.get(disciplina, None)
+            
+            if analise_disciplina:
+                # Usar análise da IA ao invés do resumo
+                texto_processado = _processar_texto_ia(analise_disciplina)
+                elementos_analise = [
+                    Spacer(1, 2),
+                    Paragraph(texto_processado, estilos['paragrafo_indentado_style'])
                 ]
             else:
-                resumo_niveis_disciplina = [Paragraph("Dados não disponíveis", estilos['resumo_style'])]
+                # Fallback: usar resumo antigo se não houver análise da IA
+                if dados.get('geral') or dados.get('total_geral'):
+                    disc_data = dados.get('geral') or dados.get('total_geral')
+                    total_disc = disc_data.get('total', 0)
+                    elementos_analise = [
+                        Paragraph(f"{disciplina.upper()} (total de {total_disc} alunos avaliados):", estilos['resumo_style']),
+                        Paragraph(f"• Abaixo do básico: {disc_data.get('abaixo_do_basico', 0)} alunos ({(disc_data.get('abaixo_do_basico', 0)/total_disc*100) if total_disc > 0 else 0:.1f}%)", estilos['resumo_style']),
+                        Paragraph(f"• Básico: {disc_data.get('basico', 0)} alunos ({(disc_data.get('basico', 0)/total_disc*100) if total_disc > 0 else 0:.1f}%)", estilos['resumo_style']),
+                        Paragraph(f"• Adequado: {disc_data.get('adequado', 0)} alunos ({(disc_data.get('adequado', 0)/total_disc*100) if total_disc > 0 else 0:.1f}%)", estilos['resumo_style']),
+                        Paragraph(f"• Avançado: {disc_data.get('avancado', 0)} alunos ({(disc_data.get('avancado', 0)/total_disc*100) if total_disc > 0 else 0:.1f}%)", estilos['resumo_style'])
+                    ]
+                else:
+                    elementos_analise = [Paragraph("Dados não disponíveis", estilos['resumo_style'])]
+            
+            # Gerar e adicionar gráfico de classificação para esta disciplina
+            grafico_classificacao = None
+            try:
+                grafico_buffer = _gerar_grafico_classificacao(niveis_aprendizagem, scope_type, disciplina)
+                grafico_classificacao = Image(grafico_buffer, width=12*cm, height=12*cm)  # Gráfico menor
+            except Exception as e:
+                logging.error(f"Erro ao adicionar gráfico de classificação para {disciplina}: {str(e)}")
             
             # Manter elementos juntos
             elementos_disciplina = [
                 titulo_disciplina,
                 Spacer(1, 1),
-                tabela_niveis_disciplina,
-                Spacer(1, 2)
-            ] + resumo_niveis_disciplina
+                tabela_niveis_disciplina
+            ]
+            
+            # Adicionar gráfico se disponível
+            if grafico_classificacao:
+                elementos_disciplina.extend([
+                    Spacer(1, 2),
+                    grafico_classificacao
+                ])
+            
+            # Adicionar análise
+            elementos_disciplina.extend(elementos_analise)
             
             elements.append(KeepTogether(elementos_disciplina))
 
@@ -1043,10 +1519,30 @@ def _adicionar_proficiencia_notas(elements: List, proficiencia: Dict, nota_geral
     
     elements.append(KeepTogether(elementos_proficiencia))
     
-    # Análise da IA para proficiência
-    if ai_analysis and ai_analysis.get('proficiencia'):
+    # Gerar e adicionar gráfico de proficiência
+    try:
+        grafico_buffer = _gerar_grafico_proficiencia(proficiencia, scope_type)
+        grafico_imagem = Image(grafico_buffer, width=14*cm, height=8.4*cm)  # Proporção 10:6, menor
         elements.append(Spacer(1, 6))
-        elements.append(Paragraph(ai_analysis['proficiencia'], estilos['paragrafo_indentado_style']))
+        elements.append(grafico_imagem)
+    except Exception as e:
+        logging.error(f"Erro ao adicionar gráfico de proficiência ao PDF: {str(e)}")
+        # Continuar sem o gráfico se houver erro
+    
+    # Análise da IA para proficiência (por disciplina)
+    analises_proficiencia = ai_analysis.get('proficiencia', {}) if ai_analysis else {}
+    if analises_proficiencia and isinstance(analises_proficiencia, dict):
+        # Adicionar análise para cada disciplina
+        for disciplina, analise_text in analises_proficiencia.items():
+            if analise_text:
+                texto_processado = _processar_texto_ia(analise_text)
+                elements.append(Spacer(1, 6))
+                elements.append(Paragraph(texto_processado, estilos['paragrafo_indentado_style']))
+    elif ai_analysis and isinstance(ai_analysis.get('proficiencia'), str):
+        # Fallback: se vier como string (versão antiga)
+        texto_processado = _processar_texto_ia(ai_analysis['proficiencia'])
+        elements.append(Spacer(1, 6))
+        elements.append(Paragraph(texto_processado, estilos['paragrafo_indentado_style']))
     
     # ===== NOTAS =====
     elements.append(Spacer(1, 6))
@@ -1246,10 +1742,21 @@ def _adicionar_proficiencia_notas(elements: List, proficiencia: Dict, nota_geral
     
     elements.append(KeepTogether(elementos_nota))
     
+    # Gerar e adicionar gráfico de notas
+    try:
+        grafico_buffer = _gerar_grafico_notas(nota_geral, scope_type, disciplinas_prof)
+        grafico_imagem = Image(grafico_buffer, width=14*cm, height=8.4*cm)  # Proporção 10:6, menor
+        elements.append(Spacer(1, 6))
+        elements.append(grafico_imagem)
+    except Exception as e:
+        logging.error(f"Erro ao adicionar gráfico de notas ao PDF: {str(e)}")
+        # Continuar sem o gráfico se houver erro
+    
     # Análise da IA para notas
     if ai_analysis and ai_analysis.get('notas'):
         elements.append(Spacer(1, 6))
-        elements.append(Paragraph(ai_analysis['notas'], estilos['paragrafo_indentado_style']))
+        texto_processado = _processar_texto_ia(ai_analysis['notas'])
+        elements.append(Paragraph(texto_processado, estilos['paragrafo_indentado_style']))
 
 
 def _adicionar_acertos_habilidade(elements: List, acertos_habilidade: Dict, avaliacao_titulo: str, scope_type: str = 'all'):

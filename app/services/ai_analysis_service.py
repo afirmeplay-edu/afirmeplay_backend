@@ -5,7 +5,18 @@ Serviço para análise de relatórios usando OpenAI
 
 import logging
 from typing import Dict, Any, Optional
-from app.openai_config.openai_config import get_openai_client, ANALYSIS_PROMPT_BASE, CONTEXT_SETTINGS
+from app.openai_config.openai_config import (
+    get_openai_client, 
+    ANALYSIS_PROMPT_BASE, 
+    CONTEXT_SETTINGS,
+    PARTICIPATION_CLASSIFICATION_TABLE,
+    PARTICIPATION_ANALYSIS_PROMPT_TEMPLATE,
+    NIVEIS_APRENDIZAGEM_ANALYSIS_PROMPT_TEMPLATE,
+    SAEB_PROFICIENCY_REFERENCE_TABLE,
+    PROFICIENCY_ANALYSIS_PROMPT_TEMPLATE,
+    NOTA_REFERENCE_TABLE,
+    NOTA_ANALYSIS_PROMPT_TEMPLATE
+)
 
 class AIAnalysisService:
     """Serviço para análise de relatórios usando IA"""
@@ -32,13 +43,30 @@ class AIAnalysisService:
             analysis_texts = {}
             
             # Análise da página 4 - Participação
-            analysis_texts['participacao'] = self._analyze_participation(analysis_data, report_data.get('scope_type', 'all'))
+            avaliacao_titulo = report_data.get('avaliacao', {}).get('titulo', '') or report_data.get('avaliacao', {}).get('title', '')
+            analysis_texts['participacao'] = self._analyze_participation(
+                analysis_data, 
+                report_data.get('scope_type', 'all'),
+                avaliacao_titulo
+            )
             
-            # Análise da página 6 - Proficiência
-            analysis_texts['proficiencia'] = self._analyze_proficiency(analysis_data, report_data.get('scope_type', 'all'))
+            # Análise da página 6 - Proficiência (por disciplina)
+            analysis_texts['proficiencia'] = self._analyze_proficiency_disciplinas(
+                report_data,
+                avaliacao_titulo
+            )
             
             # Análise da página 6 - Notas
-            analysis_texts['notas'] = self._analyze_grades(analysis_data, report_data.get('scope_type', 'all'))
+            analysis_texts['notas'] = self._analyze_grades(
+                report_data,
+                avaliacao_titulo
+            )
+            
+            # Análise de níveis de aprendizagem por disciplina
+            analysis_texts['niveis_aprendizagem'] = self._analyze_niveis_aprendizagem_disciplinas(
+                report_data,
+                avaliacao_titulo
+            )
             
             return analysis_texts
             
@@ -97,8 +125,8 @@ class AIAnalysisService:
             self.logger.error(f"Erro ao preparar dados para análise: {str(e)}")
             return {}
     
-    def _analyze_participation(self, analysis_data: Dict[str, Any], scope_type: str) -> str:
-        """Analisa dados de participação (Página 4)"""
+    def _analyze_participation(self, analysis_data: Dict[str, Any], scope_type: str, avaliacao_titulo: str = "") -> str:
+        """Analisa dados de participação (Página 4) usando o novo template"""
         try:
             participacao = analysis_data.get('participacao', {})
             total_matriculados = participacao.get('total_matriculados', 0)
@@ -109,38 +137,90 @@ class AIAnalysisService:
             # Dados por escola/turma
             dados_detalhados = participacao.get('por_turma', []) if scope_type != 'city' else participacao.get('por_escola', [])
             
-            # Determinar contexto
+            # Determinar contexto (Entidade)
             if scope_type == 'city':
-                contexto = "município"
-                unidade = "escola"
-                unidade_plural = "escolas"
+                entidade = "Município"
+                unidade_nome = "escola"
+                unidade_label = "Escola"
             else:
-                contexto = "escola"
-                unidade = "turma"
-                unidade_plural = "turmas"
+                entidade = "Escola"
+                unidade_nome = "turma"
+                unidade_label = "Turma"
             
-            # Gerar prompt específico para participação
-            prompt = f"""
-            Analise os dados de participação de uma avaliação educacional e gere uma análise resumida e construtiva.
+            # Identificar destaques (turmas/escolas com alta participação >= 95%)
+            destaques = []
+            for item in dados_detalhados:
+                nome = item.get(unidade_nome, 'N/A')
+                avaliados = item.get('avaliados', 0)
+                matriculados = item.get('matriculados', 0)
+                percentual_item = item.get('percentual', 0)
+                
+                if percentual_item >= 95:
+                    if scope_type == 'city':
+                        destaques.append(f"A {unidade_label.lower()} {nome} merece parabéns pelo desempenho exemplar de {percentual_item:.0f}% de participação ({avaliados}/{matriculados}).")
+                    else:
+                        destaques.append(f"A turma {nome} merece parabéns pelo desempenho exemplar de {percentual_item:.0f}% de participação ({avaliados}/{matriculados}).")
             
-            DADOS:
-            - Total de alunos matriculados: {total_matriculados}
-            - Total de alunos avaliados: {total_avaliados}
-            - Total de alunos faltosos: {total_faltosos}
-            - Percentual de participação: {percentual_participacao}%
-            - Dados por {unidade}:
-            {self._format_detailed_participation_data(dados_detalhados, unidade)}
+            # Identificar pontos de atenção (turmas/escolas com baixa participação < 80% ou muitos faltosos)
+            pontos_atencao = []
+            for item in dados_detalhados:
+                nome = item.get(unidade_nome, 'N/A')
+                avaliados = item.get('avaliados', 0)
+                matriculados = item.get('matriculados', 0)
+                faltosos = item.get('faltosos', 0)
+                percentual_item = item.get('percentual', 0)
+                
+                if percentual_item < 80 or faltosos > 0:
+                    if faltosos > 0:
+                        pontos_atencao.append(f"{nome} - {percentual_item:.0f}% ({avaliados}/{matriculados}) com {faltosos} faltoso(s)")
+                    else:
+                        pontos_atencao.append(f"{nome} - {percentual_item:.0f}% ({avaliados}/{matriculados})")
             
-            CONTEXTO: Relatório de {contexto}
+            # Formatar destaques e pontos de atenção
+            destaque_str = " ".join(destaques) if destaques else "Nenhum destaque específico"
+            atencao_str = "; ".join(pontos_atencao) if pontos_atencao else "Nenhum ponto de atenção específico"
             
-            Gere uma análise RESUMIDA (máximo 5 linhas) que inclua:
-            1. Contexto geral da participação
-            2. Avaliação qualitativa da taxa de participação
-            3. Principais destaques por {unidade}
-            4. Recomendação principal para melhoria
+            # Preencher o template do prompt
+            # Primeiro inserir a tabela no template
+            prompt_base = PARTICIPATION_ANALYSIS_PROMPT_TEMPLATE.replace(
+                "{PARTICIPATION_CLASSIFICATION_TABLE}", PARTICIPATION_CLASSIFICATION_TABLE
+            )
             
-            Use um tom profissional e construtivo. Seja conciso e específico. NÃO use formatação markdown (sem ###, ####, etc).
-            """
+            # Agora substituir os placeholders específicos (ordem importa para evitar substituições indevidas)
+            prompt = prompt_base.replace(
+                "[Entidade]",
+                entidade
+            ).replace(
+                "[Avaliação]",
+                avaliacao_titulo or "Avaliação Diagnóstica"
+            ).replace(
+                "- Entidade: [Entidade: Ex. Escola Municipal X / 5º Ano Geral]",
+                f"- Entidade: {entidade}"
+            ).replace(
+                "- Avaliação: [Avaliação: Ex: Avaliação Diagnóstica 2025.1]",
+                f"- Avaliação: {avaliacao_titulo or 'Avaliação Diagnóstica'}"
+            ).replace(
+                "- Total de Alunos Matriculados: [Nº]",
+                f"- Total de Alunos Matriculados: {total_matriculados}"
+            ).replace(
+                "- Total de Alunos Avaliados: [Nº]",
+                f"- Total de Alunos Avaliados: {total_avaliados}"
+            ).replace(
+                "- Total de Faltosos: [Nº]",
+                f"- Total de Faltosos: {total_faltosos}"
+            ).replace(
+                "- Taxa de Participação Geral: [__]%",
+                f"- Taxa de Participação Geral: {percentual_participacao}%"
+            ).replace(
+                "- Destaque(s) por Turma: [Ex: 5º A - M: 95% (21/22)]",
+                f"- Destaque(s) por Turma: {destaque_str}"
+            ).replace(
+                "- Ponto(s) de Atenção por Turma: [Ex: 5º B - M: 91% (21/23) com 2 faltosos]",
+                f"- Ponto(s) de Atenção por Turma: {atencao_str}"
+            ).replace(
+                "taxa de participação de [__]%",
+                f"taxa de participação de {percentual_participacao}%"
+            )
             
             response = self._call_openai(prompt)
             return response.strip()
@@ -195,44 +275,143 @@ class AIAnalysisService:
             self.logger.error(f"Erro na análise de proficiência: {str(e)}")
             return "Análise de proficiência não disponível."
     
-    def _analyze_grades(self, analysis_data: Dict[str, Any], scope_type: str) -> str:
-        """Analisa dados de notas (Página 6)"""
-        try:
-            notas = analysis_data.get('notas', {})
+    def _analyze_grades(self, report_data: Dict[str, Any], avaliacao_titulo: str = "") -> str:
+        """
+        Analisa dados de notas usando o novo template
+        
+        Args:
+            report_data: Dados completos do relatório
+            avaliacao_titulo: Título da avaliação
             
-            if not notas:
+        Returns:
+            String com análise de notas
+        """
+        try:
+            nota_geral = report_data.get('nota_geral', {})
+            scope_type = report_data.get('scope_type', 'all')
+            
+            if not nota_geral:
                 return "Dados de notas não disponíveis para análise."
             
-            # Determinar contexto
+            notas_disciplinas = nota_geral.get('por_disciplina', {})
+            media_municipal_por_disc = nota_geral.get('media_municipal_por_disciplina', {})
+            
+            if not notas_disciplinas:
+                return "Dados de notas por disciplina não disponíveis."
+            
+            # Obter ano/série
+            ano_serie = self._obter_ano_serie(report_data)
+            
+            # Determinar entidade/nível
             if scope_type == 'city':
-                contexto = "município"
-                unidade = "escola"
-                unidade_plural = "escolas"
+                entidade_nivel = f"Município - {ano_serie}"
             else:
-                contexto = "escola"
-                unidade = "turma"
-                unidade_plural = "turmas"
+                entidade_nivel = f"Escola - {ano_serie}"
             
-            # Preparar dados de notas
-            notas_data = self._prepare_grades_data(notas, unidade)
+            # Obter média geral (GERAL)
+            dados_geral = notas_disciplinas.get('GERAL', {})
+            media_geral_total = dados_geral.get('media_geral', 0)
             
-            # Gerar prompt específico para notas
-            prompt = f"""
-            Analise os dados de NOTAS de uma avaliação educacional e gere uma análise resumida e construtiva.
+            # Obter média municipal geral
+            media_municipal_geral = media_municipal_por_disc.get('GERAL', 0)
             
-            DADOS DE NOTAS:
-            {notas_data}
+            # Preparar dados por disciplina para o prompt
+            dados_disciplinas_str = ""
+            disciplinas_para_analise = []
             
-            CONTEXTO: Relatório de {contexto}
+            # Determinar tipo de unidade baseado no scope_type
+            if scope_type == 'city':
+                tipo_unidade = "escola"
+                label_unidade = "Escola"
+            else:
+                tipo_unidade = "turma"
+                label_unidade = "Turma"
             
-            Gere uma análise RESUMIDA (máximo 5 linhas) que inclua:
-            1. Visão geral das notas por disciplina
-            2. Principais destaques entre as {unidade_plural}
-            3. Pontos fortes e fracos nas notas
-            4. Recomendação principal para melhoria das notas
+            for disciplina, dados in notas_disciplinas.items():
+                if disciplina == 'GERAL':
+                    continue
+                
+                media_disciplina = dados.get('media_geral', 0)
+                
+                # Determinar o campo correto baseado no scope_type
+                if scope_type == 'city':
+                    dados_detalhados = dados.get('por_escola', [])
+                else:
+                    dados_detalhados = dados.get('por_turma', [])
+                
+                # Mapear disciplina para sigla SAEB
+                sigla_disc = self._mapear_disciplina_para_sigla(disciplina)
+                
+                # Formatar dados detalhados
+                detalhes_str = ""
+                if dados_detalhados:
+                    detalhes_list = []
+                    for detalhe_data in dados_detalhados:
+                        nome_unidade = detalhe_data.get(tipo_unidade, 'N/A')
+                        if scope_type == 'city':
+                            # Para escolas, usar 'media' ou 'nota'
+                            nota_value = detalhe_data.get('media', detalhe_data.get('nota', 0))
+                        else:
+                            # Para turmas, usar 'nota'
+                            nota_value = detalhe_data.get('nota', 0)
+                        detalhes_list.append(f"  - {nome_unidade}: {nota_value:.2f}")
+                    detalhes_str = "\n".join(detalhes_list)
+                else:
+                    detalhes_str = f"  Nenhum dado por {tipo_unidade} disponível"
+                
+                # Adicionar linha para esta disciplina
+                media_municipal_disc = media_municipal_por_disc.get(disciplina, 0)
+                dados_disciplinas_str += f"\n{disciplina} ({sigla_disc}):\n"
+                dados_disciplinas_str += f"  - Média Geral: {media_disciplina:.2f}\n"
+                if media_municipal_disc > 0:
+                    dados_disciplinas_str += f"  - Média Municipal: {media_municipal_disc:.2f}\n"
+                dados_disciplinas_str += f"  - Notas por {label_unidade}:\n{detalhes_str}\n"
+                
+                disciplinas_para_analise.append({
+                    'nome': disciplina,
+                    'sigla': sigla_disc,
+                    'media': media_disciplina,
+                    'media_municipal': media_municipal_disc,
+                    'dados_detalhados': dados_detalhados
+                })
             
-            Use um tom profissional e construtivo. Seja conciso e específico. NÃO use formatação markdown (sem ###, ####, etc).
-            """
+            # Preencher o template do prompt
+            prompt = NOTA_ANALYSIS_PROMPT_TEMPLATE.replace(
+                "{NOTA_REFERENCE_TABLE}", NOTA_REFERENCE_TABLE
+            ).replace(
+                "[Ano/Série]",
+                ano_serie
+            ).replace(
+                "[Avaliação]",
+                avaliacao_titulo or "Avaliação Diagnóstica"
+            ).replace(
+                "- Entidade/Nível: [Entidade/Nível]",
+                f"- Entidade/Nível: {entidade_nivel}"
+            ).replace(
+                "- Avaliação: [AVALIAÇÃO: ex: Avaliação Diagnóstica 2025.1]",
+                f"- Avaliação: {avaliacao_titulo or 'Avaliação Diagnóstica'}"
+            ).replace(
+                "- Ano/Série: [Ano/Série]",
+                f"- Ano/Série: {ano_serie}"
+            ).replace(
+                "{Dados por Disciplina}",
+                dados_disciplinas_str
+            ).replace(
+                "- Média Geral (Todas as Disciplinas): [Média]",
+                f"- Média Geral (Todas as Disciplinas): {media_geral_total:.2f}"
+            ).replace(
+                "- Benchmark (Média Municipal): [Média Municipal]",
+                f"- Benchmark (Média Municipal): {media_municipal_geral:.2f}" if media_municipal_geral > 0 else "- Benchmark (Média Municipal): Não disponível"
+            ).replace(
+                "2. Análise por Disciplina e Turma",
+                f"2. Análise por Disciplina e {label_unidade}"
+            ).replace(
+                "entre disciplinas (LP vs MT) e entre turmas",
+                f"entre disciplinas (LP vs MT) e entre {label_unidade.lower()}s"
+            ).replace(
+                "onde o reforço é mais necessário",
+                "onde o reforço é mais necessário"
+            )
             
             response = self._call_openai(prompt)
             return response.strip()
@@ -240,6 +419,262 @@ class AIAnalysisService:
         except Exception as e:
             self.logger.error(f"Erro na análise de notas: {str(e)}")
             return "Análise de notas não disponível."
+    
+    def _obter_ano_serie(self, report_data: Dict[str, Any]) -> str:
+        """Obtém o ano/série da avaliação (5º Ano ou 9º Ano)"""
+        try:
+            # Tentar obter do test.course se disponível
+            avaliacao = report_data.get('avaliacao', {})
+            course_name = avaliacao.get('course_name', '') or avaliacao.get('course', '')
+            
+            # Mapear nomes comuns de cursos para ano/série
+            course_name_lower = str(course_name).lower()
+            if '5' in course_name_lower or 'quinto' in course_name_lower or 'anos iniciais' in course_name_lower:
+                return "5º Ano"
+            elif '9' in course_name_lower or 'nono' in course_name_lower or 'anos finais' in course_name_lower:
+                return "9º Ano"
+            else:
+                # Padrão: assumir 9º ano se não conseguir determinar
+                return "9º Ano"
+        except Exception as e:
+            self.logger.warning(f"Erro ao obter ano/série: {str(e)}")
+            return "9º Ano"  # Padrão
+    
+    def _mapear_disciplina_para_sigla(self, disciplina: str) -> str:
+        """Mapeia nome da disciplina para sigla SAEB (LP ou MT)"""
+        disciplina_lower = disciplina.lower()
+        if 'portugu' in disciplina_lower or 'língua' in disciplina_lower:
+            return "LP"
+        elif 'matemática' in disciplina_lower or 'matematica' in disciplina_lower:
+            return "MT"
+        else:
+            return "LP"  # Padrão
+    
+    def _analyze_proficiency_disciplinas(self, report_data: Dict[str, Any], avaliacao_titulo: str = "") -> Dict[str, str]:
+        """
+        Analisa proficiência por disciplina (exceto GERAL)
+        
+        Args:
+            report_data: Dados completos do relatório
+            avaliacao_titulo: Título da avaliação
+            
+        Returns:
+            Dict com análise por disciplina: {disciplina: análise_texto}
+        """
+        try:
+            proficiencia = report_data.get('proficiencia', {})
+            
+            if not proficiencia:
+                return {}
+            
+            prof_disciplinas = proficiencia.get('por_disciplina', {})
+            media_municipal_por_disc = proficiencia.get('media_municipal_por_disciplina', {})
+            
+            if not prof_disciplinas:
+                return {}
+            
+            # Obter scope_type para determinar se é municipal (escolas) ou escola (turmas)
+            scope_type = report_data.get('scope_type', 'all')
+            
+            # Obter ano/série
+            ano_serie = self._obter_ano_serie(report_data)
+            
+            analises_por_disciplina = {}
+            
+            # Processar cada disciplina (exceto GERAL)
+            for disciplina, dados in prof_disciplinas.items():
+                if disciplina == 'GERAL':
+                    continue
+                
+                # Obter média geral da disciplina
+                media_geral = dados.get('media_geral', 0)
+                
+                if media_geral == 0:
+                    continue
+                
+                # Obter média municipal (se disponível)
+                media_municipal = media_municipal_por_disc.get(disciplina, 0)
+                
+                # Mapear disciplina para sigla SAEB
+                sigla_disc = self._mapear_disciplina_para_sigla(disciplina)
+                
+                # Determinar o campo correto baseado no scope_type
+                if scope_type == 'city':
+                    # Relatório municipal: usar dados por escola
+                    dados_detalhados = dados.get('por_escola', [])
+                    tipo_unidade = "escola"
+                    label_unidade = "Escola"
+                else:
+                    # Relatório de escola: usar dados por turma
+                    dados_detalhados = dados.get('por_turma', [])
+                    tipo_unidade = "turma"
+                    label_unidade = "Turma"
+                
+                # Formatar dados detalhados para o prompt
+                resultados_detalhados_str = ""
+                if dados_detalhados:
+                    detalhes_list = []
+                    for detalhe_data in dados_detalhados:
+                        nome_unidade = detalhe_data.get(tipo_unidade, 'N/A')
+                        if scope_type == 'city':
+                            # Para escolas, usar 'media' ao invés de 'proficiencia'
+                            prof_value = detalhe_data.get('media', detalhe_data.get('proficiencia', 0))
+                        else:
+                            # Para turmas, usar 'proficiencia'
+                            prof_value = detalhe_data.get('proficiencia', 0)
+                        detalhes_list.append(f"  - {nome_unidade}: {prof_value:.2f}")
+                    resultados_detalhados_str = "\n".join(detalhes_list)
+                else:
+                    resultados_detalhados_str = f"  Nenhum dado por {tipo_unidade} disponível"
+                
+                # Preencher o template do prompt
+                prompt = PROFICIENCY_ANALYSIS_PROMPT_TEMPLATE.replace(
+                    "{SAEB_PROFICIENCY_REFERENCE_TABLE}", SAEB_PROFICIENCY_REFERENCE_TABLE
+                ).replace(
+                    "[Disciplina]",
+                    disciplina
+                ).replace(
+                    "[Ano/Série]",
+                    ano_serie
+                ).replace(
+                    "[Avaliação]",
+                    avaliacao_titulo or "Avaliação Diagnóstica"
+                ).replace(
+                    "- Ano/Série: [Ano/Série: 5º Ano ou 9º Ano]",
+                    f"- Ano/Série: {ano_serie}"
+                ).replace(
+                    "- Disciplina: [Disciplina: LP ou MT]",
+                    f"- Disciplina: {sigla_disc} (sigla SAEB para {disciplina})"
+                ).replace(
+                    "- Avaliação: [AVALIAÇÃO: ex: Avaliação 2025.1]",
+                    f"- Avaliação: {avaliacao_titulo or 'Avaliação Diagnóstica'}"
+                ).replace(
+                    "- Média Geral da Rede/Escola: [Média]",
+                    f"- Média Geral da Rede/Escola: {media_geral:.2f}"
+                ).replace(
+                    "- Média Municipal/Benchmark (se disponível): [Média Municipal]",
+                    f"- Média Municipal/Benchmark (se disponível): {media_municipal:.2f}" if media_municipal > 0 else "- Média Municipal/Benchmark (se disponível): Não disponível"
+                ).replace(
+                    "{Resultados por Turma}",
+                    resultados_detalhados_str
+                ).replace(
+                    "4. ANÁLISE POR TURMA",
+                    f"4. ANÁLISE POR {label_unidade.upper()}"
+                ).replace(
+                    "classificar cada uma individualmente",
+                    f"classificar cada {label_unidade.lower()} individualmente"
+                ).replace(
+                    "apontar disparidades entre elas",
+                    f"apontar disparidades entre elas"
+                )
+                
+                try:
+                    response = self._call_openai(prompt)
+                    analises_por_disciplina[disciplina] = response.strip()
+                except Exception as e:
+                    self.logger.error(f"Erro ao gerar análise de proficiência para {disciplina}: {str(e)}")
+                    analises_por_disciplina[disciplina] = f"Análise não disponível para {disciplina}."
+            
+            return analises_por_disciplina
+            
+        except Exception as e:
+            self.logger.error(f"Erro na análise de proficiência: {str(e)}")
+            return {}
+    
+    def _analyze_niveis_aprendizagem_disciplinas(self, report_data: Dict[str, Any], avaliacao_titulo: str = "") -> Dict[str, str]:
+        """
+        Analisa níveis de aprendizagem por disciplina (exceto GERAL)
+        
+        Args:
+            report_data: Dados completos do relatório
+            avaliacao_titulo: Título da avaliação
+            
+        Returns:
+            Dict com análise por disciplina: {disciplina: análise_texto}
+        """
+        try:
+            niveis_aprendizagem = report_data.get('niveis_aprendizagem', {})
+            
+            if not niveis_aprendizagem:
+                return {}
+            
+            analises_por_disciplina = {}
+            
+            # Processar cada disciplina (exceto GERAL)
+            for disciplina, dados in niveis_aprendizagem.items():
+                if disciplina == 'GERAL':
+                    continue
+                
+                # Obter dados gerais da disciplina (total)
+                disc_data = dados.get('geral') or dados.get('total_geral', {})
+                
+                if not disc_data:
+                    continue
+                
+                total_alunos = disc_data.get('total', 0)
+                
+                if total_alunos == 0:
+                    continue
+                
+                abaixo_basico = disc_data.get('abaixo_do_basico', 0)
+                basico = disc_data.get('basico', 0)
+                adequado = disc_data.get('adequado', 0)
+                avancado = disc_data.get('avancado', 0)
+                
+                # Calcular percentuais
+                perc_abaixo = (abaixo_basico / total_alunos * 100) if total_alunos > 0 else 0
+                perc_basico = (basico / total_alunos * 100) if total_alunos > 0 else 0
+                perc_adequado = (adequado / total_alunos * 100) if total_alunos > 0 else 0
+                perc_avancado = (avancado / total_alunos * 100) if total_alunos > 0 else 0
+                
+                # Preencher o template do prompt (ordem importa)
+                prompt = NIVEIS_APRENDIZAGEM_ANALYSIS_PROMPT_TEMPLATE.replace(
+                    "[DISCIPLINA]",
+                    disciplina
+                ).replace(
+                    "[Avaliação]",
+                    avaliacao_titulo or "Avaliação Diagnóstica"
+                ).replace(
+                    "[Disciplina]",
+                    disciplina
+                ).replace(
+                    "[Série/Ano]",
+                    "9º ano"  # Pode ser ajustado dinamicamente no futuro
+                ).replace(
+                    "- Disciplina: [PREENCHER DISCIPLINA: ex: Matemática / Língua Portuguesa]",
+                    f"- Disciplina: {disciplina}"
+                ).replace(
+                    "- Avaliação: [AVALIAÇÃO: ex: Avaliação Diagnóstica 2025.1]",
+                    f"- Avaliação: {avaliacao_titulo or 'Avaliação Diagnóstica'}"
+                ).replace(
+                    "- Total de alunos avaliados: [Nº]",
+                    f"- Total de alunos avaliados: {total_alunos}"
+                ).replace(
+                    "- Abaixo do Básico: [Nº] alunos ([__]%)",
+                    f"- Abaixo do Básico: {abaixo_basico} alunos ({perc_abaixo:.1f}%)"
+                ).replace(
+                    "- Básico: [Nº] alunos ([__]%)",
+                    f"- Básico: {basico} alunos ({perc_basico:.1f}%)"
+                ).replace(
+                    "- Adequado: [Nº] alunos ([__]%)",
+                    f"- Adequado: {adequado} alunos ({perc_adequado:.1f}%)"
+                ).replace(
+                    "- Avançado: [Nº] alunos ([__]%)",
+                    f"- Avançado: {avancado} alunos ({perc_avancado:.1f}%)"
+                )
+                
+                try:
+                    response = self._call_openai(prompt)
+                    analises_por_disciplina[disciplina] = response.strip()
+                except Exception as e:
+                    self.logger.error(f"Erro ao gerar análise de níveis para {disciplina}: {str(e)}")
+                    analises_por_disciplina[disciplina] = f"Análise não disponível para {disciplina}."
+            
+            return analises_por_disciplina
+            
+        except Exception as e:
+            self.logger.error(f"Erro na análise de níveis de aprendizagem: {str(e)}")
+            return {}
     
     def _format_detailed_participation_data(self, dados_detalhados: list, unidade: str) -> str:
         """Formata dados detalhados de participação para o prompt"""
@@ -434,7 +869,10 @@ e recomendações práticas para a escola.
             response = self.client.chat.completions.create(
                 model=CONTEXT_SETTINGS['model'],
                 messages=[
-                    {"role": "system", "content": "Você é um especialista em educação e análise de dados educacionais."},
+                    {
+                        "role": "system", 
+                        "content": "Você é um especialista em educação e análise de dados educacionais. Sempre gere texto humanizado e profissional, SEM usar formatação markdown (sem #, ##, *, **, etc). Use apenas parágrafos normais e títulos em maiúsculas seguidos de dois pontos."
+                    },
                     {"role": "user", "content": prompt}
                 ],
                 max_tokens=CONTEXT_SETTINGS['max_tokens'],

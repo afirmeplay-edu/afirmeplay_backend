@@ -14,3 +14,4 @@ class School(db.Model):
     city_id = db.Column(db.String, db.ForeignKey('city.id'))
     classes = db.relationship("Class", backref="school")
     school_teachers = db.relationship("SchoolTeacher", backref="school")
+    # Relacionamento com cursos vinculados (não usar backref aqui para evitar conflito)

@@ -1,6 +1,7 @@
 from .city import City
 from .school import School
 from .schoolTeacher import SchoolTeacher
+from .schoolCourse import SchoolCourse
 from .teacher import Teacher
 from .student import Student
 from .subject import Subject

@@ -1,4 +1,4 @@
-from flask import Flask, send_from_directory
+from flask import Flask, send_from_directory, request, jsonify
 from flask_sqlalchemy import SQLAlchemy
 from flask_cors import CORS
 from flask_jwt_extended import JWTManager
@@ -7,6 +7,12 @@ from flask_migrate import Migrate
 from .config import Config
 from dotenv import load_dotenv
 import os
+import logging
+import traceback
+
+# Importar configuração de logging e alertas Telegram
+from .utils.logging_config import setup_logging
+from .utils.telegram_alert import send_telegram_alert
 
 db = SQLAlchemy()
 jwt = JWTManager()
@@ -20,6 +26,9 @@ def create_app():
     load_dotenv('app/.env')
     
     app = Flask(__name__)
+    
+    # Configurar logging estruturado
+    setup_logging(app)
     
     # Configuração para não redirecionar requisições OPTIONS
     app.url_map.strict_slashes = False
@@ -129,5 +138,192 @@ def create_app():
         </body>
         </html>
         '''
+    
+    # Error handler global para capturar exceções não tratadas
+    @app.errorhandler(Exception)
+    def handle_exception(e):
+        """
+        Handler global de exceções.
+        Registra o erro com detalhes completos e envia alerta para Telegram.
+        """
+        # Obter informações do contexto da requisição
+        route = request.path if request else None
+        method = request.method if request else None
+        
+        # Tentar obter informações do usuário autenticado
+        user_id = None
+        user_email = None
+        try:
+            from app.decorators.role_required import get_current_user_from_token
+            user_info = get_current_user_from_token()
+            if user_info:
+                user_id = user_info.get('id')
+                user_email = user_info.get('email')
+        except Exception:
+            # Se falhar ao obter user_id, continua sem ele
+            pass
+        
+        # Obter stack trace completo
+        stack_trace = traceback.format_exc()
+        
+        # Informações adicionais do contexto
+        additional_info = {}
+        if request:
+            additional_info['URL Completa'] = request.url
+            additional_info['IP'] = request.remote_addr
+            additional_info['User-Agent'] = request.headers.get('User-Agent', 'N/A')
+            if request.is_json:
+                try:
+                    json_data = request.get_json(silent=True)
+                    if json_data:
+                        json_str = str(json_data)[:300]
+                        additional_info['Body JSON'] = json_str
+                except Exception:
+                    pass
+        
+        # Logar erro completo com stack trace
+        app.logger.exception(
+            f"Erro não tratado na rota {method} {route}: {str(e)}\n"
+            f"Usuário ID: {user_id}, Email: {user_email}\n"
+            f"Stack Trace:\n{stack_trace}"
+        )
+        
+        # Enviar alerta para Telegram (apenas para erros críticos)
+        # Verificar se é um erro 500 ou outro erro crítico
+        if isinstance(e, Exception):
+            send_telegram_alert(
+                error_message=str(e),
+                route=route,
+                method=method,
+                user_id=user_id,
+                stack_trace=stack_trace,
+                additional_info=additional_info if additional_info else None
+            )
+        
+        # Retornar resposta genérica (não expor detalhes internos)
+        return jsonify({
+            "error": "Erro interno no servidor",
+            "message": "Ocorreu um erro inesperado. Os administradores foram notificados."
+        }), 500
+    
+    def _get_user_info():
+        """Helper para obter informações do usuário autenticado"""
+        user_id = None
+        user_email = None
+        try:
+            from app.decorators.role_required import get_current_user_from_token
+            user_info = get_current_user_from_token()
+            if user_info:
+                user_id = user_info.get('id')
+                user_email = user_info.get('email')
+        except Exception:
+            pass
+        return user_id, user_email
+    
+    def _get_request_context():
+        """Helper para obter contexto da requisição"""
+        route = request.path if request else None
+        method = request.method if request else None
+        
+        additional_info = {}
+        if request:
+            additional_info['URL Completa'] = request.url
+            additional_info['IP'] = request.remote_addr
+            additional_info['User-Agent'] = request.headers.get('User-Agent', 'N/A')
+            if request.is_json:
+                try:
+                    json_data = request.get_json(silent=True)
+                    if json_data:
+                        json_str = str(json_data)[:300]
+                        additional_info['Body JSON'] = json_str
+                except Exception:
+                    pass
+        
+        return route, method, additional_info
+    
+    def _send_error_alert(status_code, error_message, route, method, user_id, additional_info):
+        """Helper para enviar alerta Telegram para erros"""
+        send_telegram_alert(
+            error_message=error_message,
+            route=route,
+            method=method,
+            user_id=user_id,
+            stack_trace=None,
+            additional_info=additional_info if additional_info else None
+        )
+    
+    # Error handler para 400 (Bad Request)
+    @app.errorhandler(400)
+    def handle_400(e):
+        """Handler para erros 400 (Bad Request)"""
+        route, method, additional_info = _get_request_context()
+        user_id, user_email = _get_user_info()
+        
+        error_msg = str(e) if e else "Bad Request"
+        app.logger.warning(
+            f"400 Bad Request: {method} {route} - "
+            f"Usuário: {user_email or 'N/A'} ({user_id or 'N/A'}) - "
+            f"Erro: {error_msg}"
+        )
+        
+        _send_error_alert(400, f"Bad Request: {error_msg}", route, method, user_id, additional_info)
+        return jsonify({"error": "Bad Request", "message": error_msg}), 400
+    
+    # Error handler para 401 (Unauthorized)
+    @app.errorhandler(401)
+    def handle_401(e):
+        """Handler para erros 401 (Unauthorized)"""
+        route, method, additional_info = _get_request_context()
+        user_id, user_email = _get_user_info()
+        
+        error_msg = str(e) if e else "Unauthorized"
+        app.logger.warning(
+            f"401 Unauthorized: {method} {route} - "
+            f"Usuário: {user_email or 'N/A'} ({user_id or 'N/A'}) - "
+            f"IP: {request.remote_addr if request else 'N/A'}"
+        )
+        
+        _send_error_alert(401, f"Unauthorized: {error_msg}", route, method, user_id, additional_info)
+        return jsonify({"error": "Unauthorized", "message": error_msg}), 401
+    
+    # Error handler para 403 (Forbidden)
+    @app.errorhandler(403)
+    def handle_403(e):
+        """Handler para erros 403 (Forbidden)"""
+        route, method, additional_info = _get_request_context()
+        user_id, user_email = _get_user_info()
+        
+        error_msg = str(e) if e else "Forbidden"
+        app.logger.warning(
+            f"403 Forbidden: {method} {route} - "
+            f"Usuário: {user_email or 'N/A'} ({user_id or 'N/A'}) - "
+            f"IP: {request.remote_addr if request else 'N/A'}"
+        )
+        
+        _send_error_alert(403, f"Forbidden: {error_msg}", route, method, user_id, additional_info)
+        return jsonify({"error": "Forbidden", "message": error_msg}), 403
+    
+    # Error handler para 404 (Not Found)
+    @app.errorhandler(404)
+    def handle_404(e):
+        """Handler para erros 404 (Not Found)"""
+        route, method, additional_info = _get_request_context()
+        user_id, user_email = _get_user_info()
+        
+        error_msg = str(e) if e else "Recurso não encontrado"
+        app.logger.warning(
+            f"404 Not Found: {method} {route} - "
+            f"Usuário: {user_email or 'N/A'} ({user_id or 'N/A'}) - "
+            f"IP: {request.remote_addr if request else 'N/A'}"
+        )
+        
+        _send_error_alert(404, f"Recurso não encontrado: {route}", route, method, user_id, additional_info)
+        return jsonify({"error": "Recurso não encontrado"}), 404
+    
+    # Error handler específico para 500
+    @app.errorhandler(500)
+    def handle_500(e):
+        """Handler específico para erros 500 (já coberto pelo handler genérico, mas mantido para compatibilidade)"""
+        return handle_exception(e)
 
     return app

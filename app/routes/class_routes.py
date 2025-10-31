@@ -382,6 +382,31 @@ def update_class(class_id):
         if "school_id" in data:
             class_obj.school_id = data["school_id"]
         if "grade_id" in data:
+            # Validar que o curso da série está vinculado à escola
+            from app.models.grades import Grade
+            from app.models.schoolCourse import SchoolCourse
+            
+            grade = Grade.query.get(data["grade_id"])
+            if not grade:
+                return jsonify({"error": "Série não encontrada"}), 404
+            
+            # Determinar qual escola usar (a atual ou a nova se estiver sendo atualizada)
+            school_id_to_check = data.get("school_id", class_obj.school_id)
+            
+            # Verificar se o curso (education_stage) da série está vinculado à escola
+            school_course = SchoolCourse.query.filter_by(
+                school_id=school_id_to_check,
+                education_stage_id=grade.education_stage_id
+            ).first()
+            
+            if not school_course:
+                school = School.query.get(school_id_to_check)
+                school_name = school.name if school else "escola"
+                return jsonify({
+                    "error": "Curso não vinculado à escola",
+                    "details": f"A série '{grade.name}' pertence ao curso '{grade.education_stage.name}', mas este curso não está vinculado à escola '{school_name}'. Por favor, vincule o curso à escola antes de atualizar a turma."
+                }), 400
+            
             class_obj.grade_id = data["grade_id"]
 
         db.session.commit()
@@ -394,43 +419,107 @@ def update_class(class_id):
 @bp.route('/<string:class_id>', methods=['DELETE'])
 @jwt_required()
 def delete_class(class_id):
+    """
+    Rota DELETE para excluir uma turma.
+    Inclui logging detalhado e captura de contexto completo.
+    """
+    # Obter informações do usuário autenticado para logging
+    user_info = None
     try:
-        import logging
+        user_info = get_current_user_from_token()
+    except Exception:
+        pass  # Continuar mesmo se não conseguir obter usuário
+    
+    try:
+        # Log inicial da requisição
+        logging.info(
+            f"🗑️ DELETE /classes/{class_id} - "
+            f"Usuário: {user_info.get('email', 'N/A') if user_info else 'N/A'} "
+            f"({user_info.get('id', 'N/A') if user_info else 'N/A'}) - "
+            f"IP: {request.remote_addr if request else 'N/A'}"
+        )
+        
         class_obj = Class.query.get(class_id)
         if not class_obj:
-            logging.error(f"Turma {class_id} não encontrada.")
+            logging.warning(
+                f"⚠️ Tentativa de deletar turma inexistente: {class_id} - "
+                f"Usuário: {user_info.get('email', 'N/A') if user_info else 'N/A'}"
+            )
             return jsonify({"error": "Class not found"}), 404
+
+        # Log informações da turma antes de deletar
+        logging.info(
+            f"📋 Informações da turma a ser deletada: "
+            f"ID={class_id}, Nome={class_obj.name}, "
+            f"Escola={class_obj.school_id if class_obj.school_id else 'N/A'}, "
+            f"Série={class_obj.grade_id if class_obj.grade_id else 'N/A'}"
+        )
 
         # 1. Desvincular alunos
         from app.models.student import Student
         students = Student.query.filter_by(class_id=class_id).all()
-        logging.info(f"Desvinculando {len(students)} alunos da turma {class_id}")
+        student_ids = [s.id for s in students]
+        logging.info(
+            f"👥 Desvinculando {len(students)} alunos da turma {class_id}. "
+            f"IDs dos alunos: {student_ids[:10]}{'...' if len(student_ids) > 10 else ''}"
+        )
         for student in students:
             student.class_id = None
         
         # 2. Excluir registros em ClassTest
         from app.models.classTest import ClassTest
         class_tests = ClassTest.query.filter_by(class_id=class_id).all()
-        logging.info(f"Excluindo {len(class_tests)} registros em ClassTest para turma {class_id}")
+        test_ids = [ct.test_id for ct in class_tests]
+        logging.info(
+            f"📝 Excluindo {len(class_tests)} registros em ClassTest para turma {class_id}. "
+            f"IDs dos testes: {test_ids[:10]}{'...' if len(test_ids) > 10 else ''}"
+        )
         for ct in class_tests:
             db.session.delete(ct)
         
         # 3. Excluir registros em ClassSubject
         from app.models.classSubject import ClassSubject
         class_subjects = ClassSubject.query.filter_by(class_id=class_id).all()
-        logging.info(f"Excluindo {len(class_subjects)} registros em ClassSubject para turma {class_id}")
+        subject_ids = [cs.subject_id for cs in class_subjects]
+        logging.info(
+            f"📚 Excluindo {len(class_subjects)} registros em ClassSubject para turma {class_id}. "
+            f"IDs das disciplinas: {subject_ids[:10]}{'...' if len(subject_ids) > 10 else ''}"
+        )
         for cs in class_subjects:
             db.session.delete(cs)
         
         # 4. Excluir a turma
-        logging.info(f"Excluindo turma {class_id}")
+        logging.info(f"🗑️ Excluindo turma {class_id} (nome: {class_obj.name})")
         db.session.delete(class_obj)
+        
+        # Commit com log de sucesso
         db.session.commit()
-        logging.info(f"Turma {class_id} excluída com sucesso.")
+        logging.info(
+            f"✅ Turma {class_id} excluída com sucesso. "
+            f"Usuário: {user_info.get('email', 'N/A') if user_info else 'N/A'} - "
+            f"Alunos desvinculados: {len(students)}, "
+            f"ClassTests excluídos: {len(class_tests)}, "
+            f"ClassSubjects excluídos: {len(class_subjects)}"
+        )
         return jsonify({"message": "Class deleted successfully"}), 200
+        
     except Exception as e:
         db.session.rollback()
-        logging.error(f"Error deleting class: {str(e)}", exc_info=True)
+        # Log detalhado do erro com contexto completo
+        error_context = {
+            "route": f"DELETE /classes/{class_id}",
+            "class_id": class_id,
+            "user_id": user_info.get('id') if user_info else None,
+            "user_email": user_info.get('email') if user_info else None,
+            "ip": request.remote_addr if request else None,
+            "error_type": type(e).__name__,
+            "error_message": str(e)
+        }
+        logging.error(
+            f"❌ ERRO ao deletar turma {class_id}: {str(e)} | "
+            f"Contexto: {error_context}",
+            exc_info=True
+        )
         return jsonify({"error": "Error deleting class", "details": str(e)}), 500
 
 @bp.route('', methods=['POST'])
@@ -446,6 +535,33 @@ def create_class():
         for field in required_fields:
             if field not in data:
                 return jsonify({"error": f"Missing required field: {field}"}), 400
+
+        # Validar se a escola existe
+        from app.models.school import School
+        school = School.query.get(data["school_id"])
+        if not school:
+            return jsonify({"error": "Escola não encontrada"}), 404
+
+        # Se grade_id foi fornecido, validar que o curso da série está vinculado à escola
+        if data.get("grade_id"):
+            from app.models.grades import Grade
+            from app.models.schoolCourse import SchoolCourse
+            
+            grade = Grade.query.get(data["grade_id"])
+            if not grade:
+                return jsonify({"error": "Série não encontrada"}), 404
+            
+            # Verificar se o curso (education_stage) da série está vinculado à escola
+            school_course = SchoolCourse.query.filter_by(
+                school_id=data["school_id"],
+                education_stage_id=grade.education_stage_id
+            ).first()
+            
+            if not school_course:
+                return jsonify({
+                    "error": "Curso não vinculado à escola",
+                    "details": f"A série '{grade.name}' pertence ao curso '{grade.education_stage.name}', mas este curso não está vinculado à escola '{school.name}'. Por favor, vincule o curso à escola antes de criar a turma."
+                }), 400
 
         # Create new class
         new_class = Class(

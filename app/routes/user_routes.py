@@ -4,6 +4,7 @@ from app.models.user import User, RoleEnum
 from app.decorators.role_required import role_required, get_current_user_from_token
 from flask_jwt_extended import jwt_required
 from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy import func
 import logging
 from werkzeug.security import generate_password_hash, check_password_hash
 from app import db
@@ -15,7 +16,7 @@ from app.models.teacher import Teacher
 from app.models.manager import Manager
 from sqlalchemy.orm import joinedload
 from app.utils.email_service import EmailService
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date
 from flask import current_app
 import csv
 import io
@@ -681,18 +682,33 @@ def bulk_upload_students():
         rows = [row for row in rows if all(str(row.get(col, '')).strip() for col in ['nome', 'email', 'escola', 'endereco_escola', 'estado_escola', 'municipio_escola', 'serie', 'turma'])]
         
         # Converter data de nascimento
-        def parse_date(date_str):
-            if not date_str or str(date_str).strip() == '':
+        def parse_date(date_value):
+            # Se o valor for None ou vazio, retornar None
+            if not date_value:
                 return None
+            
+            # Se o valor já for um objeto date, retornar diretamente
+            if isinstance(date_value, date):
+                return date_value
+            
+            # Se o valor for um objeto datetime.datetime, converter para date
+            if isinstance(date_value, datetime):
+                return date_value.date()
+            
+            # Se for string, fazer o parse como antes
             try:
-                date_str = str(date_str).strip()
+                date_str = str(date_value).strip()
+                if not date_str:
+                    return None
+                
                 # Tentar diferentes formatos de data
                 for fmt in ['%d/%m/%Y', '%d-%m-%Y', '%Y-%m-%d', '%d/%m/%y', '%d-%m-%y']:
                     try:
                         return datetime.strptime(date_str, fmt).date()
                     except:
                         continue
-                # Se nenhum formato funcionar, tentar parse automático
+                
+                # Se nenhum formato funcionar, tentar parse automático com YYYY-MM-DD
                 return datetime.strptime(date_str, '%Y-%m-%d').date()
             except:
                 return None
@@ -745,16 +761,37 @@ def bulk_upload_students():
                 # Verificar se email já existe
                 existing_user = User.query.filter_by(email=email).first()
                 if existing_user:
-                    results["erros"].append({
-                        "linha": index + 2,
-                        "campo": "email",
-                        "valor": email,
-                        "erro": "Email já cadastrado"
-                    })
-                    continue
+                    # Verificar se o usuário já é um aluno
+                    existing_student = Student.query.filter_by(user_id=existing_user.id).first()
+                    if existing_student:
+                        results["erros"].append({
+                            "linha": index + 2,
+                            "campo": "email",
+                            "valor": email,
+                            "erro": "Aluno já cadastrado no sistema"
+                        })
+                        continue
+                    else:
+                        results["erros"].append({
+                            "linha": index + 2,
+                            "campo": "email",
+                            "valor": email,
+                            "erro": "Email já cadastrado para outro tipo de usuário"
+                        })
+                        continue
                 
-                # Validar matrícula se fornecida
-                matricula = str(row.get('matricula', '')).strip()
+                # Validar matrícula se fornecida (opcional)
+                matricula_raw = row.get('matricula', '')
+                # Normalizar matrícula: tratar None, "None", "null", "", etc. como vazio
+                if matricula_raw is None:
+                    matricula = None
+                else:
+                    matricula = str(matricula_raw).strip()
+                    # Se após strip for vazio ou valores como "None", "null", etc., tratar como None
+                    if not matricula or matricula.lower() in ['none', 'null', 'nulo', '']:
+                        matricula = None
+                
+                # Verificar se matrícula já existe (apenas se foi fornecida)
                 if matricula and User.query.filter_by(registration=matricula).first():
                     results["erros"].append({
                         "linha": index + 2,
@@ -764,53 +801,19 @@ def bulk_upload_students():
                     })
                     continue
                 
-                # Buscar ou criar escola
+                # Buscar escola existente (busca exata case-insensitive)
                 escola_nome = str(row.get('escola', '')).strip()
-                escola = School.query.filter(School.name.ilike(f"%{escola_nome}%")).first()
+                escola_nome_normalizado = escola_nome.lower()
+                escola = School.query.filter(func.lower(School.name) == escola_nome_normalizado).first()
                 
                 if not escola:
-                    # Criar escola automaticamente
-                    try:
-                        # Buscar cidade pelo município e estado
-                        municipio_nome = str(row.get('municipio_escola', '')).strip()
-                        estado_sigla = str(row.get('estado_escola', '')).strip()
-                        
-                        # Buscar cidade existente
-                        cidade = City.query.filter(
-                            City.name.ilike(f"%{municipio_nome}%"),
-                            City.state.ilike(f"%{estado_sigla}%")
-                        ).first()
-                        
-                        if not cidade:
-                            # Criar cidade se não existir
-                            cidade = City(
-                                id=str(uuid.uuid4()),
-                                name=municipio_nome,
-                                state=estado_sigla
-                            )
-                            db.session.add(cidade)
-                            db.session.flush()  # Para obter o ID da cidade
-                        
-                        # Criar escola
-                        escola = School(
-                            id=str(uuid.uuid4()),
-                            name=escola_nome,
-                            address=str(row.get('endereco_escola', '')).strip(),
-                            city_id=cidade.id
-                        )
-                        db.session.add(escola)
-                        db.session.flush()  # Para obter o ID da escola
-                        
-                        logging.info(f"Escola criada automaticamente: {escola_nome} em {municipio_nome}, {estado_sigla}")
-                        
-                    except Exception as e:
-                        results["erros"].append({
-                            "linha": index + 2,
-                            "campo": "escola",
-                            "valor": escola_nome,
-                            "erro": f"Erro ao criar escola: {str(e)}"
-                        })
-                        continue
+                    results["erros"].append({
+                        "linha": index + 2,
+                        "campo": "escola",
+                        "valor": escola_nome,
+                        "erro": "Escola não encontrada"
+                    })
+                    continue
                 
                 # Verificar se usuário tem permissão para esta escola
                 if escola.id not in allowed_schools:
@@ -822,9 +825,10 @@ def bulk_upload_students():
                     })
                     continue
                 
-                # Buscar série
+                # Buscar série existente (busca exata case-insensitive)
                 serie_nome = str(row.get('serie', '')).strip()
-                serie = Grade.query.filter(Grade.name.ilike(f"%{serie_nome}%")).first()
+                serie_nome_normalizado = serie_nome.lower()
+                serie = Grade.query.filter(func.lower(Grade.name) == serie_nome_normalizado).first()
                 if not serie:
                     results["erros"].append({
                         "linha": index + 2,
@@ -834,10 +838,11 @@ def bulk_upload_students():
                     })
                     continue
                 
-                # Buscar turma
+                # Buscar turma existente (busca exata case-insensitive)
                 turma_nome = str(row.get('turma', '')).strip()
+                turma_nome_normalizado = turma_nome.lower()
                 turma = Class.query.filter(
-                    Class.name.ilike(f"%{turma_nome}%"),
+                    func.lower(Class.name) == turma_nome_normalizado,
                     Class.school_id == escola.id,
                     Class.grade_id == serie.id
                 ).first()
@@ -849,6 +854,21 @@ def bulk_upload_students():
                         "erro": f"Turma não encontrada na escola {escola_nome} e série {serie_nome}"
                     })
                     continue
+                
+                # Verificar se já existe aluno na mesma turma (por matrícula, se fornecida)
+                if matricula:
+                    existing_student_in_class = Student.query.filter_by(
+                        class_id=turma.id,
+                        registration=matricula
+                    ).first()
+                    if existing_student_in_class:
+                        results["erros"].append({
+                            "linha": index + 2,
+                            "campo": "matricula",
+                            "valor": matricula,
+                            "erro": f"Aluno com esta matrícula já está cadastrado na turma {turma_nome}"
+                        })
+                        continue
                 
                 # Validar data de nascimento
                 data_nascimento = row.get('data_nascimento_parsed')

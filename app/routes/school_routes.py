@@ -10,6 +10,8 @@ from app.models.city import City
 from app.models.studentClass import Class
 from app.models.student import Student
 from app.models.schoolTeacher import SchoolTeacher
+from app.models.educationStage import EducationStage
+from app.models.grades import Grade
 
 import uuid
 
@@ -687,3 +689,88 @@ def adicionar_professor_escola():
             "erro": "Erro interno do servidor",
             "detalhes": str(e)
         }), 500
+
+# GET - Buscar cursos (education stages) vinculados a uma escola específica
+@bp.route('/<string:school_id>/courses', methods=['GET'])
+@jwt_required()
+@role_required("admin", "diretor", "coordenador", "professor", "tecadm")
+def buscar_cursos_por_escola(school_id):
+    """
+    Retorna todos os cursos (education stages) vinculados a uma escola específica.
+    
+    Args:
+        school_id: ID da escola
+        
+    Returns:
+        Lista de cursos (education stages) que têm grades com classes na escola
+    """
+    try:
+        user = get_current_user_from_token()
+        
+        if not user:
+            return jsonify({"error": "Usuário não encontrado"}), 404
+        
+        # Verificar se a escola existe
+        school = School.query.get(school_id)
+        if not school:
+            return jsonify({"error": "Escola não encontrada"}), 404
+        
+        # Verificar permissões para acessar a escola
+        if user['role'] == "admin":
+            # Admin pode ver qualquer escola
+            pass
+        elif user['role'] == "professor":
+            # Professor: verificar se está vinculado à escola
+            from app.models.teacher import Teacher
+            teacher = Teacher.query.filter_by(user_id=user['id']).first()
+            
+            if not teacher:
+                return jsonify({"error": "Professor não encontrado"}), 404
+            
+            teacher_school = SchoolTeacher.query.filter_by(
+                teacher_id=teacher.id,
+                school_id=school.id
+            ).first()
+            
+            if not teacher_school:
+                return jsonify({"error": "Você não tem permissão para acessar esta escola"}), 403
+        elif user['role'] in ["diretor", "coordenador"]:
+            # Diretor e coordenador só podem ver sua escola
+            from app.models.manager import Manager
+            manager = Manager.query.filter_by(user_id=user['id']).first()
+            
+            if not manager:
+                return jsonify({"error": "Diretor/Coordenador não encontrado"}), 404
+            
+            if not manager.school_id or manager.school_id != school.id:
+                return jsonify({"error": "Você não tem permissão para acessar esta escola"}), 403
+        else:
+            # TecAdmin só pode ver escolas do seu município
+            city_id = user.get('tenant_id') or user.get('city_id')
+            if not city_id or school.city_id != city_id:
+                return jsonify({"error": "Você não tem permissão para acessar esta escola"}), 403
+        
+        # Buscar cursos (education stages) que têm grades com classes na escola
+        query = db.session.query(EducationStage).distinct().join(
+            Grade, Grade.education_stage_id == EducationStage.id
+        ).join(
+            Class, Class.grade_id == Grade.id
+        ).filter(
+            Class.school_id == school_id
+        )
+        
+        courses = query.all()
+        result = [{"id": str(c.id), "name": c.name} for c in courses]
+        
+        return jsonify({
+            "school_id": school.id,
+            "school_name": school.name,
+            "courses": result
+        }), 200
+        
+    except SQLAlchemyError as e:
+        logging.error(f"Erro no banco de dados ao buscar cursos da escola: {e}")
+        return jsonify({"error": "Erro interno do servidor ao consultar dados", "details": str(e)}), 500
+    except Exception as e:
+        logging.error(f"Erro inesperado na rota de busca de cursos por escola: {e}", exc_info=True)
+        return jsonify({"error": "Ocorreu um erro inesperado no servidor"}), 500

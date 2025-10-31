@@ -69,6 +69,21 @@ def getEducationStages():
         logging.error(f"Erro ao buscar etapas de ensino: {str(e)}", exc_info=True)
         return jsonify({"error": "Erro ao buscar etapas de ensino", "details": str(e)}), 500
 
+@bp.route("/all", methods=["GET"])
+@jwt_required()
+def getAllEducationStages():
+    """
+    Retorna todos os cursos (education stages) do sistema sem filtros ou permissões.
+    """
+    try:
+        stages = EducationStage.query.all()
+        result = [{"id": str(s.id), "name": s.name} for s in stages]
+        return jsonify(result), 200
+        
+    except Exception as e:
+        logging.error(f"Erro ao buscar todos os cursos: {str(e)}", exc_info=True)
+        return jsonify({"error": "Erro ao buscar todos os cursos", "details": str(e)}), 500
+
 @bp.route("<string:stage_id>", methods=["GET"])
 @jwt_required()
 def getGradesByEducationId(stage_id):

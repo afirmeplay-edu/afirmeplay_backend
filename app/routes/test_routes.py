@@ -28,6 +28,8 @@ from sqlalchemy.orm import joinedload, subqueryload
 from sqlalchemy import cast
 from sqlalchemy.dialects.postgresql import JSONB
 from app.models.studentAnswer import StudentAnswer
+from app.models.skill import Skill
+from app.models.subject import Subject
 
 bp = Blueprint('tests', __name__, url_prefix="/test")
 
@@ -2841,10 +2843,38 @@ def get_test_pdf_data(test_id):
             if not q:
                 continue
 
+            # Buscar skill code
+            skill_code = None
+            if q.skill:
+                skill_id_clean = q.skill.strip('{}')
+                skill_obj = None
+                try:
+                    # Tentar buscar por ID (UUID)
+                    skill_uuid = uuid.UUID(skill_id_clean)
+                    skill_obj = Skill.query.filter_by(id=str(skill_uuid)).first()
+                except (ValueError, AttributeError):
+                    pass
+                
+                # Se não encontrou por ID, tentar por código
+                if not skill_obj:
+                    skill_obj = Skill.query.filter_by(code=skill_id_clean).first()
+                
+                if skill_obj:
+                    skill_code = skill_obj.code
+            
+            # Buscar subject name
+            subject_name = None
+            if q.subject_id:
+                subject = q.subject
+                if subject:
+                    subject_name = subject.name
+
             questions_data.append({
                 "id": q.id,
                 "subject_id": q.subject_id,
+                "subject_name": subject_name,
                 "skill": q.skill,
+                "skill_code": skill_code,
                 "formatted_text": q.formatted_text,
                 "text": q.text,
                 "secondstatement": q.secondstatement,

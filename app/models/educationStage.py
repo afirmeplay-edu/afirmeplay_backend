@@ -10,3 +10,4 @@ class EducationStage(db.Model):
     name = db.Column(db.String, nullable=False)
 
     grades = db.relationship("Grade", backref="education_stage")
+    # Relacionamento com escolas vinculadas (via SchoolCourse - backref já definido)

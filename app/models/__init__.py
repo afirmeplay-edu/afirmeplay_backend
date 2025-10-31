@@ -25,3 +25,7 @@ from .physicalTestAnswer import PhysicalTestAnswer
 from .physicalTestForm import PhysicalTestForm
 from .formCoordinates import FormCoordinates
 
+from .calendar_event import CalendarEvent, CalendarVisibilityScope
+from .calendar_event_target import CalendarEventTarget, CalendarTargetType
+from .calendar_event_user import CalendarEventUser
+

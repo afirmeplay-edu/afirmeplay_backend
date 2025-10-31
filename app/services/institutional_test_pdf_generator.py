@@ -1271,20 +1271,78 @@ class InstitutionalTestPDFGenerator:
             import base64
             import requests
             from io import BytesIO
+            from PIL import Image as PILImage
             
             # Verificar se é Base64
             if text.startswith('data:image'):
                 header, data = text.split(',', 1)
                 image_data = base64.b64decode(data)
                 img_buffer = BytesIO(image_data)
-                return RLImage(img_buffer, width=200, height=150)
+                # Calcular dimensões preservando proporção
+                try:
+                    pil_img = PILImage.open(BytesIO(image_data))
+                    original_width, original_height = pil_img.size
+                except Exception:
+                    # Fallback: retornar imagem com tamanho padrão se não conseguir abrir
+                    return RLImage(img_buffer)
+
+                # Limites máximos (em pontos) – manter consistência com uso no formulário
+                max_width_cm = 16
+                max_height_cm = 24
+                max_width_pt = max_width_cm * cm
+                max_height_pt = max_height_cm * cm
+
+                # Ajuste proporcional
+                display_width = float(original_width)
+                display_height = float(original_height)
+
+                # Reduz por largura
+                if display_width > max_width_pt:
+                    scale_w = max_width_pt / display_width
+                    display_width *= scale_w
+                    display_height *= scale_w
+
+                # Reduz por altura
+                if display_height > max_height_pt:
+                    scale_h = max_height_pt / display_height
+                    display_width *= scale_h
+                    display_height *= scale_h
+
+                return RLImage(img_buffer, width=display_width, height=display_height)
             
             # Verificar se é URL
             elif text.startswith('http'):
                 response = requests.get(text, timeout=10)
                 if response.status_code == 200:
-                    img_buffer = BytesIO(response.content)
-                    return RLImage(img_buffer, width=200, height=150)
+                    img_bytes = response.content
+                    img_buffer = BytesIO(img_bytes)
+                    # Calcular dimensões preservando proporção
+                    try:
+                        pil_img = PILImage.open(BytesIO(img_bytes))
+                        original_width, original_height = pil_img.size
+                    except Exception:
+                        # Fallback: retornar imagem com tamanho original do buffer
+                        return RLImage(img_buffer)
+
+                    max_width_cm = 16
+                    max_height_cm = 24
+                    max_width_pt = max_width_cm * cm
+                    max_height_pt = max_height_cm * cm
+
+                    display_width = float(original_width)
+                    display_height = float(original_height)
+
+                    if display_width > max_width_pt:
+                        scale_w = max_width_pt / display_width
+                        display_width *= scale_w
+                        display_height *= scale_w
+
+                    if display_height > max_height_pt:
+                        scale_h = max_height_pt / display_height
+                        display_width *= scale_h
+                        display_height *= scale_h
+
+                    return RLImage(img_buffer, width=display_width, height=display_height)
             
             return None
             

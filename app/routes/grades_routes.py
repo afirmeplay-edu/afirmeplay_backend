@@ -36,6 +36,35 @@ def getEducationStages():
     
     return jsonify(result)
 
+@bp.route("/by-education-stage/<education_stage_id>", methods=["GET"])
+@jwt_required()
+@role_required("admin", "tecadm", "diretor", "coordenador", "professor", "responsavel")
+def getAllGradesByEducationStage(education_stage_id):
+    try:
+        # Verifica se a etapa de ensino existe
+        education_stage = EducationStage.query.get(education_stage_id)
+        if not education_stage:
+            return jsonify({"error": "Etapa de ensino não encontrada"}), 404
+
+        # Buscar todas as grades da etapa sem filtros
+        grades = Grade.query.filter(Grade.education_stage_id == education_stage_id).all()
+        
+        result = [{
+            "id": str(grade.id),
+            "name": grade.name,
+            "education_stage_id": str(grade.education_stage_id),
+            "education_stage": {
+                "id": str(education_stage.id),
+                "name": education_stage.name
+            }
+        } for grade in grades]
+        
+        return jsonify(result), 200
+
+    except Exception as e:
+        logging.error(f"Erro ao buscar grades: {str(e)}", exc_info=True)
+        return jsonify({"error": "Erro ao buscar grades", "details": str(e)}), 500
+
 @bp.route("/education-stage/<education_stage_id>", methods=["GET"])
 @jwt_required()
 @role_required("admin", "tecadm", "diretor", "coordenador", "professor")

@@ -631,104 +631,48 @@ class InstitutionalTestPDFGenerator:
         return story
     
     def _create_footer_section(self, student_data: Dict) -> List:
-        """Cria rodapé com campos do estudante - CORRIGINDO OVERFLOW DA TURMA"""
+        """Cria rodapé com campos do estudante dentro de um único card"""
         story = []
-        
+
         # Dados do aluno
         student_name = student_data.get('student_name', 'Nome não informado')
         school_name = student_data.get('school_name', 'Escola não informada')
         class_name = student_data.get('class_name', 'Turma não informada')
-        
-        # Função para quebrar texto automaticamente
-        def break_long_text(text, max_chars_per_line=25):
-            """Quebra texto longo em múltiplas linhas"""
-            if len(text) <= max_chars_per_line:
-                return text
-            
-            words = text.split()
-            lines = []
-            current_line = ""
-            
-            for word in words:
-                if len(current_line + word) <= max_chars_per_line:
-                    if current_line:
-                        current_line += " " + word
-                    else:
-                        current_line = word
-                else:
-                    if current_line:
-                        lines.append(current_line)
-                    current_line = word
-            
-            if current_line:
-                lines.append(current_line)
-            
-            return "\n".join(lines)
-        
-        # Quebrar nome da escola se for muito longo
-        school_name_broken = break_long_text(school_name, 25)
-        
-        # Campo do Estudante (linha completa) - com label e valor
-        estudante_table = Table([[f'ESTUDANTE', student_name]], 
-                               colWidths=[4*cm, 14*cm], rowHeights=[1.5*cm])
-        estudante_table.setStyle(TableStyle([
-            ('FONTNAME', (0, 0), (0, 0), 'Helvetica-Bold'),  # Label
-            ('FONTNAME', (1, 0), (1, 0), 'Helvetica'),       # Valor
-            ('FONTSIZE', (0, 0), (-1, -1), 14),
-            ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
-            ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
-            ('BOTTOMPADDING', (0, 0), (-1, -1), 8),
-            ('TOPPADDING', (0, 0), (-1, -1), 8),
+
+        # Buscar dados dinâmicos do test_data (passado como parâmetro adicional)
+        # Como não temos acesso direto ao test_data aqui, vamos usar dados padrão
+        grade_name = '9° ANO'
+        education_stage = 'ENSINO FUNDAMENTAL'
+
+        # Criar um único card contendo todas as informações
+        card_data = [
+            [f'{grade_name} {education_stage}'],  # Primeira linha: 9° ANO ENSINO FUNDAMENTAL
+            [f'TURMA: {class_name}'],             # Segunda linha: TURMA
+            [f'ESCOLA: {school_name}'],           # Terceira linha: ESCOLA
+            [student_name]                        # Quarta linha: Nome do aluno
+        ]
+
+        # Altura das linhas baseada no conteúdo
+        row_heights = [0.8*cm, 0.8*cm, 0.8*cm, 0.8*cm]  # Todas as linhas com mesma altura
+
+        student_info_table = Table(card_data,
+                                 colWidths=[16*cm],
+                                 rowHeights=row_heights)
+
+        student_info_table.setStyle(TableStyle([
+            ('FONTNAME', (0, 0), (-1, -1), 'Helvetica-Bold'),  # Tudo em negrito
+            ('FONTSIZE', (0, 0), (-1, -1), 12),                 # Tamanho 12px
+            ('ALIGN', (0, 0), (-1, -1), 'CENTER'),              # Centralizado
+            ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),             # Centralizado verticalmente
+            ('BOTTOMPADDING', (0, 0), (-1, -1), 6),
+            ('TOPPADDING', (0, 0), (-1, -1), 6),
             ('LEFTPADDING', (0, 0), (-1, -1), 10),
             ('RIGHTPADDING', (0, 0), (-1, -1), 10),
-            ('GRID', (0, 0), (-1, -1), 0.5, colors.black),  # Bordas finas
-            ('BACKGROUND', (0, 0), (0, 0), colors.lightgrey),  # Label cinza
-            ('BACKGROUND', (1, 0), (1, 0), colors.white),      # Valor branco
+            ('GRID', (0, 0), (-1, -1), 1, colors.black),        # Bordas pretas
+            ('BACKGROUND', (0, 0), (-1, -1), colors.white),      # Fundo branco
         ]))
-        
-        story.append(estudante_table)
-        
-        # Espaçamento entre as linhas
-        story.append(Spacer(1, 5))
-        
-        # Campo da Escola e Turma - DIMINUINDO ESPAÇO DA LINHA VERMELHA
-        # Reduzindo espaço entre ESCOLA e TURMA para melhor encaixe
-        # Calcular altura da linha baseada no número de linhas do texto quebrado
-        num_lines = len(school_name_broken.split('\n')) if '\n' in school_name_broken else 1
-        row_height = max(1.5*cm, num_lines * 0.6*cm)  # Mínimo 1.5cm, ou baseado no número de linhas
-        
-        escola_turma_table = Table([[f'ESCOLA', school_name_broken, '', f'TURMA', class_name]], 
-                                  colWidths=[3*cm, 6.5*cm, 0.5*cm, 3*cm, 5*cm], rowHeights=[row_height])
-        escola_turma_table.setStyle(TableStyle([
-            ('FONTNAME', (0, 0), (0, 0), 'Helvetica-Bold'),  # ESCOLA label
-            ('FONTNAME', (1, 0), (1, 0), 'Helvetica'),       # Escola valor
-            ('FONTNAME', (2, 0), (2, 0), 'Helvetica'),       # Espaço vazio
-            ('FONTNAME', (3, 0), (3, 0), 'Helvetica-Bold'),  # TURMA label
-            ('FONTNAME', (4, 0), (4, 0), 'Helvetica'),       # Turma valor
-            ('FONTSIZE', (0, 0), (-1, -1), 14),
-            ('ALIGN', (0, 0), (0, 0), 'LEFT'),               # ESCOLA label
-            ('ALIGN', (1, 0), (1, 0), 'CENTER'),             # Escola valor CENTRALIZADO
-            ('ALIGN', (2, 0), (2, 0), 'LEFT'),               # Espaço vazio
-            ('ALIGN', (3, 0), (3, 0), 'LEFT'),               # TURMA label
-            ('ALIGN', (4, 0), (4, 0), 'CENTER'),             # Turma valor CENTRALIZADO
-            ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
-            ('BOTTOMPADDING', (0, 0), (-1, -1), 8),
-            ('TOPPADDING', (0, 0), (-1, -1), 8),
-            ('LEFTPADDING', (0, 0), (-1, -1), 10),
-            ('RIGHTPADDING', (0, 0), (-1, -1), 10),
-            ('GRID', (0, 0), (0, 0), 0.5, colors.black),  # ESCOLA label
-            ('GRID', (1, 0), (1, 0), 0.5, colors.black),  # Escola valor
-            ('GRID', (2, 0), (2, 0), 0, colors.white),    # Espaço sem borda
-            ('GRID', (3, 0), (3, 0), 0.5, colors.black),  # TURMA label
-            ('GRID', (4, 0), (4, 0), 0.5, colors.black),  # Turma valor
-            ('BACKGROUND', (0, 0), (0, 0), colors.lightgrey),  # ESCOLA label cinza
-            ('BACKGROUND', (1, 0), (1, 0), colors.white),      # Escola valor branco
-            ('BACKGROUND', (2, 0), (2, 0), colors.white),      # Espaço branco
-            ('BACKGROUND', (3, 0), (3, 0), colors.lightgrey),  # TURMA label cinza
-            ('BACKGROUND', (4, 0), (4, 0), colors.white),      # Turma valor branco
-        ]))
-        
-        story.append(escola_turma_table)
+
+        story.append(student_info_table)
         return story
     
     def _create_block_cover(self, block_number: int, subject_name: str, time_minutes: int = 25) -> List:

@@ -1,0 +1,441 @@
+# -*- coding: utf-8 -*-
+"""
+Serviço para geração de PDFs de provas institucionais usando WeasyPrint + Jinja2
+Permite uso completo de HTML e CSS sem as limitações do ReportLab
+"""
+
+from weasyprint import HTML, CSS
+from jinja2 import Environment, FileSystemLoader, select_autoescape
+from markupsafe import Markup
+import os
+import io
+import base64
+import logging
+import json
+from datetime import datetime
+from typing import List, Dict, Any, Optional
+from PIL import Image as PILImage
+
+
+class InstitutionalTestWeasyPrintGenerator:
+    """
+    Gerador de PDFs para provas institucionais usando WeasyPrint + Jinja2
+    Suporta HTML e CSS completos, sem limitações de atributos
+    """
+
+    def __init__(self):
+        # Configurar Jinja2 para carregar templates
+        template_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'templates')
+        self.env = Environment(
+            loader=FileSystemLoader(template_dir),
+            autoescape=select_autoescape(['html', 'xml'])
+        )
+
+        # Adicionar filtros personalizados
+        self.env.filters['safe'] = lambda x: x
+
+    def generate_institutional_test_pdf(self, test_data: Dict, students_data: List[Dict],
+                                      questions_data: List[Dict], class_test_id: str = None) -> List[Dict]:
+        """
+        Gera PDFs de provas institucionais para todos os alunos usando WeasyPrint
+
+        Args:
+            test_data: Dados da prova (test_id, title, description, etc.)
+            students_data: Lista de alunos com dados (id, nome, email, etc.)
+            questions_data: Lista de questões ordenadas
+            class_test_id: ID da aplicação da prova (ClassTest)
+
+        Returns:
+            Lista com informações dos PDFs gerados e salvos no banco
+        """
+        generated_files = []
+
+        for student in students_data:
+            try:
+                # Gerar PDF individual para cada aluno
+                pdf_data = self._generate_individual_institutional_pdf_data(
+                    test_data, student, questions_data, class_test_id
+                )
+
+                if pdf_data:
+                    # Mapear coordenadas e gerar QR code (mantido para compatibilidade)
+                    coordinates = self._map_existing_form_coordinates(questions_data)
+                    qr_data, qr_code_id = self._generate_qr_code_with_metadata(
+                        student['id'], test_data['id']
+                    )
+
+                    generated_files.append({
+                        'student_id': student['id'],
+                        'student_name': student.get('name', student.get('nome', 'Nome não informado')),
+                        'pdf_data': pdf_data,
+                        'qr_code_data': json.dumps(qr_data),
+                        'qr_code_id': qr_code_id,
+                        'coordinates': coordinates,
+                        'has_pdf_data': True,
+                        'has_answer_sheet_data': False
+                    })
+
+            except Exception as e:
+                logging.error(f"Erro ao gerar PDF institucional WeasyPrint para aluno {student['id']}: {str(e)}")
+                import traceback
+                logging.error(traceback.format_exc())
+                continue
+
+        return generated_files
+
+    def _generate_individual_institutional_pdf_data(self, test_data: Dict, student: Dict,
+                                                  questions_data: List[Dict], class_test_id: str = None) -> Optional[bytes]:
+        """
+        Gera PDF individual institucional para um aluno usando WeasyPrint
+        """
+        try:
+            # Organizar questões por disciplina
+            questions_by_subject = self._organize_questions_by_subject(questions_data, test_data)
+
+            # Adicionar número sequencial às questões
+            question_counter = 1
+            for subject_name, subject_questions in questions_by_subject.items():
+                for question in subject_questions:
+                    question['question_number'] = question_counter
+                    question_counter += 1
+
+            # Gerar formulário de resposta (imagem base64)
+            answer_sheet_image = self._generate_answer_sheet_base64(
+                student, questions_data, test_data
+            )
+
+            # Preparar dados para o template
+            template_data = {
+                'test_data': test_data,
+                'student': student,
+                'questions_by_subject': questions_by_subject,
+                'answer_sheet_image': answer_sheet_image,
+                'datetime': datetime,
+                'generated_date': datetime.now().strftime('%d/%m/%Y %H:%M')
+            }
+
+            # Renderizar template HTML
+            template = self.env.get_template('institutional_test.html')
+            html_content = template.render(**template_data)
+
+            # Gerar PDF com WeasyPrint
+            pdf_buffer = io.BytesIO()
+            HTML(string=html_content).write_pdf(pdf_buffer)
+            pdf_buffer.seek(0)
+
+            return pdf_buffer.read()
+
+        except Exception as e:
+            logging.error(f"Erro ao gerar PDF individual WeasyPrint: {str(e)}")
+            import traceback
+            logging.error(traceback.format_exc())
+            return None
+
+    def _organize_questions_by_subject(self, questions_data: List[Dict], test_data: Dict) -> Dict:
+        """
+        Organiza questões por disciplina
+        """
+        try:
+            subjects = {}
+            subjects_info = test_data.get('subjects_info', {})
+
+            # Converter subjects_info para dict se for lista
+            if isinstance(subjects_info, list):
+                subjects_info_dict = {}
+                for item in subjects_info:
+                    if isinstance(item, dict) and 'id' in item:
+                        subjects_info_dict[str(item['id'])] = item
+                subjects_info = subjects_info_dict
+
+            for question in questions_data:
+                subject_id = question.get('subject_id')
+
+                if subject_id and str(subject_id) in subjects_info:
+                    subject_name = subjects_info[str(subject_id)]['name']
+                else:
+                    # Fallback: tentar pegar do objeto subject
+                    subject = question.get('subject', {})
+                    if isinstance(subject, dict):
+                        subject_name = subject.get('name', 'DISCIPLINA')
+                    else:
+                        subject_name = 'DISCIPLINA'
+
+                if subject_name not in subjects:
+                    subjects[subject_name] = []
+
+                # Processar questão para o template
+                processed_question = self._process_question_for_template(question)
+                subjects[subject_name].append(processed_question)
+
+            return subjects
+
+        except Exception as e:
+            logging.error(f"Erro ao organizar questões por disciplina: {str(e)}")
+            import traceback
+            logging.error(traceback.format_exc())
+            return {}
+
+    def _process_question_for_template(self, question: Dict) -> Dict:
+        """
+        Processa questão para uso no template Jinja2
+        Converte imagens e formata conteúdo HTML
+        Separa instrução, título e conteúdo quando necessário
+        """
+        import json
+        import re
+        processed = question.copy()
+
+        # Processar formatted_text como conteúdo principal
+        content = processed.get('formatted_text') or processed.get('text', '')
+
+        # LOG: Ver o conteúdo antes de processar
+        logging.info(f"DEBUG: Processando questão - content length: {len(content) if content else 0}")
+        logging.info(f"DEBUG: Content preview: {content[:200] if content else 'EMPTY'}")
+
+        # Separar instrução inicial, título centralizado e conteúdo
+        instruction = None
+        title = None
+        main_content = content
+
+        if content:
+            # Padrão: primeiro <p> com "Leia o texto" ou similar (instrução)
+            instruction_match = re.match(r'<p[^>]*>(Leia o texto[^<]*)</p>', content, re.IGNORECASE)
+            if instruction_match:
+                instruction = instruction_match.group(1)
+                # Remover a instrução do conteúdo
+                main_content = content[instruction_match.end():]
+
+                # Procurar título centralizado (segundo <p> com text-align: center e <strong>)
+                title_match = re.match(r'<p[^>]*text-align:\s*center[^>]*><strong>([^<]+)</strong></p>', main_content, re.IGNORECASE)
+                if title_match:
+                    title = title_match.group(1)
+                    # Remover o título do conteúdo
+                    main_content = main_content[title_match.end():]
+
+        processed['instruction'] = instruction
+        processed['title'] = title
+        processed['content'] = self._process_html_content(main_content)
+
+        # Processar secondstatement como pergunta/objetivo (aparece APÓS content e ANTES de alternatives)
+        prompt = processed.get('secondstatement', '')
+        if prompt:
+            logging.info(f"DEBUG: Prompt preview: {prompt[:200]}")
+            processed['prompt'] = self._process_html_content(prompt)
+        else:
+            processed['prompt'] = None
+
+        # Processar alternativas (podem vir como JSON string)
+        alternatives_data = processed.get('alternatives', [])
+        if isinstance(alternatives_data, str):
+            try:
+                alternatives_data = json.loads(alternatives_data)
+            except:
+                alternatives_data = []
+
+        if alternatives_data and isinstance(alternatives_data, list):
+            processed_alternatives = []
+            for i, alt in enumerate(alternatives_data):
+                # Alternativas podem ter diferentes formatos
+                if isinstance(alt, dict):
+                    alt_content = alt.get('text') or alt.get('content', '')
+                    alt_id = alt.get('id', chr(65 + i))
+                else:
+                    alt_content = str(alt)
+                    alt_id = chr(65 + i)
+
+                processed_alt = {
+                    'letter': chr(65 + i),  # A, B, C, D...
+                    'content': self._process_html_content(alt_content),
+                    'id': alt_id
+                }
+                processed_alternatives.append(processed_alt)
+            processed['alternatives'] = processed_alternatives
+        else:
+            processed['alternatives'] = []
+
+        # Processar código de habilidade
+        if 'skill' in processed and processed['skill']:
+            skill = processed['skill']
+            if isinstance(skill, dict):
+                processed['skill_code'] = skill.get('code', '')
+            else:
+                # Buscar código da skill no banco
+                try:
+                    from app.models.skill import Skill
+                    skill_obj = Skill.query.get(skill)
+                    if skill_obj:
+                        processed['skill_code'] = skill_obj.code
+                    else:
+                        processed['skill_code'] = ''
+                except:
+                    processed['skill_code'] = str(skill)
+        else:
+            processed['skill_code'] = ''
+
+        return processed
+
+    def _process_html_content(self, content: str) -> Markup:
+        """
+        Processa conteúdo HTML - WeasyPrint suporta HTML/CSS completo,
+        então não precisamos limpar atributos como no ReportLab!
+        """
+        if not content:
+            return Markup('')
+
+        # WeasyPrint aceita HTML completo!
+        # Apenas remover algumas tags que podem causar problemas de layout
+        import re
+
+        # Remover node-imageComponent e image-component spans (são wrappers desnecessários)
+        processed = re.sub(r'<span class="node-imageComponent">', '', content)
+        processed = re.sub(r'<span class="image-component">', '', processed)
+        processed = re.sub(r'</span>', '', processed)
+
+        # Mesclar múltiplos <p> em um único parágrafo para evitar quebras indesejadas
+        # Substituir </p><p> por espaço para manter texto contínuo
+        processed = re.sub(r'</p>\s*<p[^>]*>', ' ', processed)
+
+        # Remover <p> no início e </p> no final se houver
+        processed = re.sub(r'^<p[^>]*>', '', processed)
+        processed = re.sub(r'</p>$', '', processed)
+
+        # Retornar como Markup para Jinja2 não escapar HTML
+        return Markup(processed)
+
+    def _generate_answer_sheet_base64(self, student: Dict, questions_data: List[Dict],
+                                     test_data: Dict) -> str:
+        """
+        Gera imagem do formulário de resposta em base64
+        """
+        try:
+            from app.formularios import gerar_formulario_com_qrcode
+            import tempfile
+
+            # Gerar formulário usando formularios.py
+            with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
+                temp_path = tmp.name
+
+            # Preparar dados do aluno
+            student_data_complete = self._get_complete_student_data(student['id'])
+
+            # Gerar formulário
+            imagem, coordenadas_respostas, coordenadas_qr = gerar_formulario_com_qrcode(
+                student['id'],
+                student.get('name', student.get('nome', 'Nome não informado')),
+                len(questions_data),
+                temp_path,
+                student_data=student_data_complete,
+                test_data=test_data
+            )
+
+            if imagem:
+                # Converter para base64
+                img_buffer = io.BytesIO()
+                imagem.save(img_buffer, format='PNG')
+                img_buffer.seek(0)
+                img_base64 = base64.b64encode(img_buffer.read()).decode('utf-8')
+
+                # Limpar arquivo temporário
+                try:
+                    os.unlink(temp_path)
+                except:
+                    pass
+
+                return img_base64
+
+            return ''
+
+        except Exception as e:
+            logging.error(f"Erro ao gerar formulário de resposta: {str(e)}")
+            return ''
+
+    def _get_complete_student_data(self, student_id: str) -> Dict:
+        """
+        Obtém dados completos do aluno do banco de dados
+        """
+        try:
+            from app.models.student import Student
+            student = Student.query.get(student_id)
+
+            if student:
+                # Student pode não ter email, usar campos que existem
+                return {
+                    'id': str(student.id),
+                    'name': student.name,
+                    'registration': getattr(student, 'registration', ''),
+                    'class_name': getattr(student, 'class_name', ''),
+                    'class_id': str(student.class_id) if hasattr(student, 'class_id') else ''
+                }
+
+            return {}
+
+        except Exception as e:
+            logging.error(f"Erro ao buscar dados do aluno: {str(e)}")
+            import traceback
+            logging.error(traceback.format_exc())
+            return {}
+
+    def _map_existing_form_coordinates(self, questions_data: List[Dict]) -> Dict:
+        """
+        Mapeia coordenadas do formulário para compatibilidade
+        """
+        try:
+            coordinates = {
+                "subjects": {},
+                "qr_code": {
+                    "x": 10, "y": 100, "width": 100, "height": 100
+                }
+            }
+
+            # Mapear questões por disciplina
+            subjects = {}
+            for question in questions_data:
+                subject_id = question.get('subject_id')
+                if subject_id:
+                    from app.models.subject import Subject
+                    subject_obj = Subject.query.get(subject_id)
+                    if subject_obj:
+                        subject_name = subject_obj.name
+                        if subject_name not in subjects:
+                            subjects[subject_name] = []
+                        subjects[subject_name].append(question)
+
+            for subject_name, subject_questions in subjects.items():
+                subject_key = subject_name.lower().replace(' ', '_')
+                coordinates["subjects"][subject_key] = {}
+
+                for i, question in enumerate(subject_questions):
+                    question_key = f"question_{i+1}"
+                    coordinates["subjects"][subject_key][question_key] = {}
+
+                    alternatives = question.get('alternatives', [])
+                    for j, alt in enumerate(alternatives):
+                        alt_id = alt.get('id', chr(65 + j))
+                        coordinates["subjects"][subject_key][question_key][alt_id] = {
+                            "x": 112 + (j * 50), "y": 950 + (i * 45), "radius": 10
+                        }
+
+            return coordinates
+
+        except Exception as e:
+            logging.error(f"Erro ao mapear coordenadas: {str(e)}")
+            return {}
+
+    def _generate_qr_code_with_metadata(self, student_id: str, test_id: str) -> tuple:
+        """
+        Gera QR code com metadados para compatibilidade
+        """
+        try:
+            import uuid
+            qr_code_id = str(uuid.uuid4())
+            qr_data = {
+                'student_id': student_id,
+                'test_id': test_id,
+                'qr_code_id': qr_code_id,
+                'timestamp': datetime.now().isoformat()
+            }
+            return qr_data, qr_code_id
+
+        except Exception as e:
+            logging.error(f"Erro ao gerar QR code: {str(e)}")
+            return {}, ''

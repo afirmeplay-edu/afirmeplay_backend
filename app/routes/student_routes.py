@@ -2,6 +2,7 @@ from flask import Blueprint, request, jsonify
 from app.models.student import Student
 from app.models.user import User, RoleEnum
 from app.models.school import School
+from app.models.studentPasswordLog import StudentPasswordLog
 from sqlalchemy.exc import SQLAlchemyError, IntegrityError
 import logging
 from app.decorators.role_required import role_required, get_current_user_from_token
@@ -53,8 +54,22 @@ def criar_usuario_e_aluno():
             if field not in data:
                 return jsonify({"error": f"Missing required field: {field}"}), 400
 
+        # Buscar turma para determinar city_id (necessário tanto para usuário novo quanto existente)
+        class_obj = Class.query.get(data["class_id"])
+        if not class_obj:
+            return jsonify({"error": "Class not found"}), 404
+        
+        # Buscar escola da turma
+        school = School.query.get(class_obj.school_id)
+        if not school:
+            return jsonify({"error": "School not found for the specified class"}), 404
+        
+        # Determinar city_id baseado na escola
+        city_id = school.city_id
+
         # Tenta encontrar o usuário pelo email
         usuario = User.query.filter_by(email=data["email"]).first()
+        usuario_foi_criado_agora = False  # Flag para saber se criamos o usuário agora
 
         if usuario:
             logging.info(f"Usuário existente encontrado: {usuario.email}")
@@ -64,22 +79,10 @@ def criar_usuario_e_aluno():
                 return jsonify({"error": "User is already a student"}), 400
         else:
             logging.info("Usuário não encontrado, criando novo usuário.")
+            usuario_foi_criado_agora = True  # Marcar que vamos criar o usuário agora
             # Verificar se matrícula já existe (caso fornecida) - apenas para novo usuário
             if data.get("registration") and User.query.filter_by(registration=data["registration"]).first():
                 return jsonify({"error": "Registration number already exists"}), 400
-
-            # Buscar turma para determinar city_id
-            class_obj = Class.query.get(data["class_id"])
-            if not class_obj:
-                return jsonify({"error": "Class not found"}), 404
-            
-            # Buscar escola da turma
-            school = School.query.get(class_obj.school_id)
-            if not school:
-                return jsonify({"error": "School not found for the specified class"}), 404
-            
-            # Determinar city_id baseado na escola
-            city_id = school.city_id
             
             # Criar usuário (role padrão: aluno) com city_id da escola
             usuario = User(
@@ -94,8 +97,6 @@ def criar_usuario_e_aluno():
             db.session.flush() 
             print(usuario.id)
             logging.info(f"Novo usuário criado com sucesso. ID: {usuario.id}")
-
-        # class_obj já foi buscado acima, não precisa buscar novamente
 
         # Verificar formato da data de nascimento (se fornecida)
         birth_date = None
@@ -119,6 +120,25 @@ def criar_usuario_e_aluno():
             school_id=class_obj.school_id
         )
         db.session.add(novo_aluno)
+        db.session.flush()  # Flush para obter o ID do aluno
+        
+        # Salvar senha em texto plano na tabela de log apenas se criamos um novo usuário
+        # (quando o usuário já existe, não temos a senha original em texto plano)
+        if usuario_foi_criado_agora:
+            password_log = StudentPasswordLog(
+                student_name=data["name"],
+                email=data["email"],
+                password=data["password"],  # Senha em texto plano
+                registration=data.get("registration"),
+                user_id=usuario.id,
+                student_id=novo_aluno.id,
+                class_id=data["class_id"],
+                grade_id=data.get("grade_id"),
+                school_id=class_obj.school_id,
+                city_id=city_id
+            )
+            db.session.add(password_log)
+        
         db.session.commit()
 
         logging.info(f"Aluno criado com sucesso para o usuário ID: {usuario.id}")

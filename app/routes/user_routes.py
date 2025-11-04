@@ -14,6 +14,7 @@ from app.models.studentClass import Class
 from app.models.grades import Grade
 from app.models.teacher import Teacher
 from app.models.manager import Manager
+from app.models.studentPasswordLog import StudentPasswordLog
 from sqlalchemy.orm import joinedload
 from app.utils.email_service import EmailService
 from datetime import datetime, timedelta, date
@@ -881,17 +882,21 @@ def bulk_upload_students():
                     })
                     continue
                 
+                # Gerar senha aleatória antes de criptografar
+                senha_gerada = str(uuid.uuid4())
+                
                 # Criar usuário
                 novo_usuario = User(
                     id=str(uuid.uuid4()),
                     name=str(row.get('nome', '')).strip(),
                     email=email,
-                    password_hash=generate_password_hash(str(uuid.uuid4())),  # Senha aleatória
+                    password_hash=generate_password_hash(senha_gerada),  # Senha aleatória criptografada
                     registration=matricula if matricula else None,
                     role=RoleEnum.ALUNO,
                     city_id=escola.city_id
                 )
                 db.session.add(novo_usuario)
+                db.session.flush()  # Flush para obter o ID do usuário
                 
                 # Criar estudante
                 novo_aluno = Student(
@@ -906,6 +911,22 @@ def bulk_upload_students():
                     class_id=turma.id
                 )
                 db.session.add(novo_aluno)
+                db.session.flush()  # Flush para obter o ID do aluno
+                
+                # Salvar senha em texto plano na tabela de log
+                password_log = StudentPasswordLog(
+                    student_name=str(row.get('nome', '')).strip(),
+                    email=email,
+                    password=senha_gerada,  # Senha em texto plano (antes de criptografar)
+                    registration=matricula if matricula else None,
+                    user_id=novo_usuario.id,
+                    student_id=novo_aluno.id,
+                    class_id=turma.id,
+                    grade_id=serie.id,
+                    school_id=escola.id,
+                    city_id=escola.city_id
+                )
+                db.session.add(password_log)
                 
                 # Commit para esta linha
                 db.session.commit()

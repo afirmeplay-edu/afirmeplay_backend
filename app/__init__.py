@@ -146,9 +146,14 @@ def create_app():
         Handler global de exceções.
         Registra o erro com detalhes completos e envia alerta para Telegram.
         """
+        print(f"=== DEBUG handle_exception: ERRO CAPTURADO PELO HANDLER GLOBAL ===")
+        print(f"Erro: {str(e)}")
+        print(f"Tipo do erro: {type(e).__name__}")
+        
         # Obter informações do contexto da requisição
         route = request.path if request else None
         method = request.method if request else None
+        print(f"DEBUG: Rota: {route}, Método: {method}")
         
         # Tentar obter informações do usuário autenticado
         user_id = None
@@ -162,9 +167,11 @@ def create_app():
         except Exception:
             # Se falhar ao obter user_id, continua sem ele
             pass
+        print(f"DEBUG: Usuário - ID: {user_id}, Email: {user_email}")
         
         # Obter stack trace completo
         stack_trace = traceback.format_exc()
+        print(f"DEBUG: Stack Trace completo:\n{stack_trace}")
         
         # Informações adicionais do contexto
         additional_info = {}
@@ -180,6 +187,7 @@ def create_app():
                         additional_info['Body JSON'] = json_str
                 except Exception:
                     pass
+            print(f"DEBUG: Query params: {request.args.to_dict()}")
         
         # Logar erro completo com stack trace
         app.logger.exception(
@@ -201,9 +209,11 @@ def create_app():
             )
         
         # Retornar resposta genérica (não expor detalhes internos)
+        print(f"=== DEBUG handle_exception: RETORNANDO ERRO 500 ===")
         return jsonify({
             "error": "Erro interno no servidor",
-            "message": "Ocorreu um erro inesperado. Os administradores foram notificados."
+            "message": "Ocorreu um erro inesperado. Os administradores foram notificados.",
+            "details": str(e)  # Adicionar detalhes para debug
         }), 500
     
     def _get_user_info():

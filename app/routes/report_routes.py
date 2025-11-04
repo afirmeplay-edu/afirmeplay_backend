@@ -714,42 +714,92 @@ def relatorio_pdf(evaluation_id: str):
             "scope_type": scope_type,
             "scope_id": scope_id
         })
-        
-        # Preparar dados para o template Word (comentado - usando PDF)
-        # template_data = _preparar_dados_template_word(
-        #     test, total_alunos, niveis_aprendizagem, 
-        #     proficiencia, nota_geral, acertos_habilidade, ai_analysis, avaliacao_data
-        # )
-        
-        # Gerar relatório PDF usando reportlab com template dinâmico
+
+        # 7. Obter informações sobre o escopo para metadados
+        scope_name = ""
+        escola_nome = ""
+        municipio_nome = ""
+        uf = ""
+
+        if scope_type == 'school':
+            school = School.query.get(scope_id)
+            if school:
+                scope_name = school.name
+                escola_nome = school.name
+                if school.city:
+                    municipio_nome = school.city.name
+                    uf = school.city.state
+        elif scope_type == 'city':
+            city = City.query.get(scope_id)
+            if city:
+                scope_name = city.name
+                municipio_nome = city.name
+                uf = city.state
+        else:
+            scope_name = "Todas as turmas"
+            # Pegar da primeira escola disponível
+            if class_tests and class_tests[0].class_rel and class_tests[0].class_rel.school:
+                school = class_tests[0].class_rel.school
+                escola_nome = school.name
+                if school.city:
+                    municipio_nome = school.city.name
+                    uf = school.city.state
+
+        # Preparar metadados para o template
+        metadados = {
+            "escola": escola_nome or "Escola não identificada",
+            "municipio": municipio_nome or "Município",
+            "uf": uf or "Estado",
+            "logo": None  # Pode adicionar logo depois se necessário
+        }
+
+        # Preparar dados para o template Jinja2
+        template_data = {
+            "avaliacao": avaliacao_data,
+            "metadados": metadados,
+            "total_alunos": total_alunos,
+            "niveis_aprendizagem": niveis_aprendizagem,
+            "proficiencia": proficiencia,
+            "nota_geral": nota_geral,
+            "acertos_por_habilidade": acertos_habilidade,
+            "ai_analysis": ai_analysis,
+            "scope_type": scope_type,
+            "scope_name": scope_name,
+            "generated_at": datetime.now().strftime("%d/%m/%Y %H:%M"),
+        }
+
+        # Gerar relatório PDF usando WeasyPrint e Jinja2
         try:
-            from app.utils.pdf_template_generator import gerar_pdf_com_template_dinamico
-            pdf_content = gerar_pdf_com_template_dinamico(
-                test, total_alunos, niveis_aprendizagem, 
-                proficiencia, nota_geral, acertos_habilidade, ai_analysis, avaliacao_data, scope_type
-            )
-            
+            logging.info("=== GERANDO PDF COM WEASYPRINT ===")
+
+            # Renderizar template HTML com Jinja2
+            html_content = render_template('relatorio_analise.html', **template_data)
+
+            logging.info(f"Template renderizado com sucesso. Tamanho: {len(html_content)} bytes")
+
+            # Gerar PDF com WeasyPrint
+            pdf_bytes = HTML(string=html_content).write_pdf()
+
+            logging.info(f"PDF gerado com sucesso. Tamanho: {len(pdf_bytes)} bytes")
+
             # Preparar nome do arquivo com o nome da avaliação
             nome_avaliacao = test.title.replace(' ', '_').replace('/', '_').replace('\\', '_').replace(':', '_').replace('?', '_').replace('*', '_').replace('"', '_').replace('<', '_').replace('>', '_').replace('|', '_')
             nome_arquivo = f"relatorio_{nome_avaliacao}.pdf"
-            
+
             # Retornar arquivo PDF
-            from flask import Response
-            print(f"=== RETORNANDO PDF ===")
-            print(f"Tamanho do PDF: {len(pdf_content)} bytes")
-            print(f"Nome do arquivo: {nome_arquivo}")
-            print(f"Mimetype: application/pdf")
-            print(f"Content-Disposition: attachment; filename={nome_arquivo}")
-            
-            response = Response(pdf_content, mimetype='application/pdf')
+            logging.info(f"Retornando PDF: {nome_arquivo}")
+
+            response = make_response(pdf_bytes)
+            response.headers['Content-Type'] = 'application/pdf'
             response.headers['Content-Disposition'] = f'attachment; filename={nome_arquivo}'
-            
-            print(f"Response criada com sucesso")
+
             return response
-            
+
         except Exception as pdf_error:
-            logging.error(f"Erro ao gerar PDF: {str(pdf_error)}")
-            
+            logging.error(f"Erro ao gerar PDF com WeasyPrint: {str(pdf_error)}")
+            import traceback
+            logging.error(traceback.format_exc())
+
             # Fallback: retornar erro se PDF falhar
             return jsonify({"error": "Erro ao gerar relatório PDF", "details": str(pdf_error)}), 500
         

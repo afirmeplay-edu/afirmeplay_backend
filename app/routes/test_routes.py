@@ -28,6 +28,8 @@ from sqlalchemy.orm import joinedload, subqueryload
 from sqlalchemy import cast
 from sqlalchemy.dialects.postgresql import JSONB
 from app.models.studentAnswer import StudentAnswer
+from app.models.skill import Skill
+from app.models.subject import Subject
 
 bp = Blueprint('tests', __name__, url_prefix="/test")
 
@@ -2789,6 +2791,104 @@ def debug_test_availability(test_id):
     except Exception as e:
         logging.error(f"Erro no debug de disponibilidade: {str(e)}", exc_info=True)
         return jsonify({"error": "Erro no debug", "details": str(e)}), 500
+
+
+@bp.route('/<string:test_id>/pdf-data', methods=['GET'])
+@jwt_required()
+@role_required("admin", "professor", "coordenador", "diretor", "aluno", "tecadm")
+def get_test_pdf_data(test_id):
+    """
+    Retorna os dados necessários para geração do PDF institucional:
+    - test_data: metadados da avaliação (com subjects_info resolvido)
+    - questions_data: lista de questões na ordem (sem respostas corretas ou soluções)
+
+    Observação: não inclui insumos externos (logo, geração de formulário, mapeamento de coordenadas).
+    """
+    try:
+        # Carregar teste com relacionamentos essenciais
+        test = Test.query.options(
+            joinedload(Test.grade),
+            joinedload(Test.subject_rel),
+            subqueryload(Test.test_questions).subqueryload(TestQuestion.question).options(
+                joinedload(Question.subject)
+            )
+        ).get(test_id)
+
+        if not test:
+            return jsonify({"error": "Test not found"}), 404
+
+        # subjects_info com nomes resolvidos
+        subjects_info = process_subjects_for_test(test) or []
+
+        # Montar test_data com fallbacks compatíveis com o gerador
+        grade_name = test.grade.name if getattr(test, 'grade', None) and getattr(test.grade, 'name', None) else '9° ANO'
+        education_stage_name = 'ENSINO FUNDAMENTAL'
+        course_name = test.course if getattr(test, 'course', None) else 'ANOS FINAIS'
+
+        test_data = {
+            "id": test.id,
+            "title": test.title,
+            "grade_name": grade_name,
+            "education_stage_name": education_stage_name,
+            "course_name": course_name,
+            "subjects_info": subjects_info
+        }
+
+        # Ordenar questões pela ordem definida em TestQuestion
+        test_questions = sorted(test.test_questions, key=lambda tq: tq.order if getattr(tq, 'order', None) is not None else 0)
+
+        questions_data = []
+        for tq in test_questions:
+            q = tq.question
+            if not q:
+                continue
+
+            # Buscar skill code
+            skill_code = None
+            if q.skill:
+                skill_id_clean = q.skill.strip('{}')
+                skill_obj = None
+                try:
+                    # Tentar buscar por ID (UUID)
+                    skill_uuid = uuid.UUID(skill_id_clean)
+                    skill_obj = Skill.query.filter_by(id=str(skill_uuid)).first()
+                except (ValueError, AttributeError):
+                    pass
+                
+                # Se não encontrou por ID, tentar por código
+                if not skill_obj:
+                    skill_obj = Skill.query.filter_by(code=skill_id_clean).first()
+                
+                if skill_obj:
+                    skill_code = skill_obj.code
+            
+            # Buscar subject name
+            subject_name = None
+            if q.subject_id:
+                subject = q.subject
+                if subject:
+                    subject_name = subject.name
+
+            questions_data.append({
+                "id": q.id,
+                "subject_id": q.subject_id,
+                "subject_name": subject_name,
+                "skill": q.skill,
+                "skill_code": skill_code,
+                "formatted_text": q.formatted_text,
+                "text": q.text,
+                "secondstatement": q.secondstatement,
+                "alternatives": q.alternatives
+            })
+
+        return jsonify({
+            "test_data": test_data,
+            "questions_data": questions_data
+        }), 200
+
+    except Exception as e:
+        logging.error(f"Error getting test pdf data: {str(e)}", exc_info=True)
+        return jsonify({"error": "Error getting test pdf data", "details": str(e)}), 500
 
 @bp.route('/compare', methods=['POST'])
 @jwt_required()

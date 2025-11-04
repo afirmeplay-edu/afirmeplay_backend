@@ -10,6 +10,9 @@ from app.models.city import City
 from app.models.studentClass import Class
 from app.models.student import Student
 from app.models.schoolTeacher import SchoolTeacher
+from app.models.educationStage import EducationStage
+from app.models.grades import Grade
+from app.models.schoolCourse import SchoolCourse
 
 import uuid
 
@@ -687,3 +690,328 @@ def adicionar_professor_escola():
             "erro": "Erro interno do servidor",
             "detalhes": str(e)
         }), 500
+
+# GET - Buscar cursos (education stages) vinculados a uma escola específica
+@bp.route('/<string:school_id>/courses', methods=['GET'])
+@jwt_required()
+@role_required("admin", "diretor", "coordenador", "professor", "tecadm")
+def buscar_cursos_por_escola(school_id):
+    """
+    Retorna todos os cursos (education stages) vinculados a uma escola específica.
+    
+    Args:
+        school_id: ID da escola
+        
+    Returns:
+        Lista de cursos (education stages) que têm grades com classes na escola
+    """
+    try:
+        user = get_current_user_from_token()
+        
+        if not user:
+            return jsonify({"error": "Usuário não encontrado"}), 404
+        
+        # Verificar se a escola existe
+        school = School.query.get(school_id)
+        if not school:
+            return jsonify({"error": "Escola não encontrada"}), 404
+        
+        # Verificar permissões para acessar a escola
+        if user['role'] == "admin":
+            # Admin pode ver qualquer escola
+            pass
+        elif user['role'] == "professor":
+            # Professor: verificar se está vinculado à escola
+            from app.models.teacher import Teacher
+            teacher = Teacher.query.filter_by(user_id=user['id']).first()
+            
+            if not teacher:
+                return jsonify({"error": "Professor não encontrado"}), 404
+            
+            teacher_school = SchoolTeacher.query.filter_by(
+                teacher_id=teacher.id,
+                school_id=school.id
+            ).first()
+            
+            if not teacher_school:
+                return jsonify({"error": "Você não tem permissão para acessar esta escola"}), 403
+        elif user['role'] in ["diretor", "coordenador"]:
+            # Diretor e coordenador só podem ver sua escola
+            from app.models.manager import Manager
+            manager = Manager.query.filter_by(user_id=user['id']).first()
+            
+            if not manager:
+                return jsonify({"error": "Diretor/Coordenador não encontrado"}), 404
+            
+            if not manager.school_id or manager.school_id != school.id:
+                return jsonify({"error": "Você não tem permissão para acessar esta escola"}), 403
+        else:
+            # TecAdmin só pode ver escolas do seu município
+            city_id = user.get('tenant_id') or user.get('city_id')
+            if not city_id or school.city_id != city_id:
+                return jsonify({"error": "Você não tem permissão para acessar esta escola"}), 403
+        
+        # Buscar cursos vinculados diretamente à escola via school_course
+        school_courses = SchoolCourse.query.filter_by(school_id=school_id).all()
+        courses = [sc.education_stage for sc in school_courses]
+        result = [{"id": str(c.id), "name": c.name} for c in courses]
+        
+        return jsonify({
+            "school_id": school.id,
+            "school_name": school.name,
+            "courses": result
+        }), 200
+        
+    except SQLAlchemyError as e:
+        logging.error(f"Erro no banco de dados ao buscar cursos da escola: {e}")
+        return jsonify({"error": "Erro interno do servidor ao consultar dados", "details": str(e)}), 500
+    except Exception as e:
+        logging.error(f"Erro inesperado na rota de busca de cursos por escola: {e}", exc_info=True)
+        return jsonify({"error": "Ocorreu um erro inesperado no servidor"}), 500
+
+# POST - Vincular curso(s) (education stage) a uma escola
+@bp.route('/<string:school_id>/courses', methods=['POST'])
+@jwt_required()
+@role_required("admin", "diretor", "coordenador", "tecadm")
+def vincular_curso_escola(school_id):
+    """
+    Vincula um ou mais cursos (education stage) a uma escola específica.
+    
+    Body:
+    {
+        "education_stage_ids": ["uuid1", "uuid2", "uuid3"]  // Array de IDs
+    }
+    
+    Ou (compatibilidade com versão anterior):
+    {
+        "education_stage_id": "uuid"  // ID único (será convertido para array)
+    }
+    
+    Permissões:
+    - Admin: pode vincular curso a qualquer escola
+    - Tecadm: pode vincular curso a escolas do município
+    - Diretor/Coordenador: pode vincular curso apenas à sua escola
+    """
+    try:
+        user = get_current_user_from_token()
+        
+        if not user:
+            return jsonify({"error": "Usuário não encontrado"}), 404
+        
+        data = request.get_json()
+        if not data:
+            return jsonify({"error": "Dados não fornecidos"}), 400
+        
+        # Aceitar tanto array quanto ID único (compatibilidade)
+        education_stage_ids = data.get('education_stage_ids')
+        if not education_stage_ids:
+            # Se não forneceu array, verificar se forneceu ID único
+            single_id = data.get('education_stage_id')
+            if single_id:
+                education_stage_ids = [single_id]
+            else:
+                return jsonify({"error": "education_stage_ids (array) ou education_stage_id é obrigatório"}), 400
+        
+        # Garantir que é uma lista
+        if not isinstance(education_stage_ids, list):
+            return jsonify({"error": "education_stage_ids deve ser um array"}), 400
+        
+        if len(education_stage_ids) == 0:
+            return jsonify({"error": "education_stage_ids não pode ser um array vazio"}), 400
+        
+        # Verificar se a escola existe
+        school = School.query.get(school_id)
+        if not school:
+            return jsonify({"error": "Escola não encontrada"}), 404
+        
+        # Verificar permissões
+        if user['role'] == "admin":
+            # Admin pode vincular curso a qualquer escola
+            pass
+        elif user['role'] == "tecadm":
+            # TecAdmin só pode vincular cursos a escolas do município
+            city_id = user.get('tenant_id') or user.get('city_id')
+            if not city_id or school.city_id != city_id:
+                return jsonify({"error": "Você não tem permissão para vincular cursos a esta escola"}), 403
+        elif user['role'] in ["diretor", "coordenador"]:
+            # Diretor e coordenador só podem vincular cursos à sua escola
+            from app.models.manager import Manager
+            manager = Manager.query.filter_by(user_id=user['id']).first()
+            
+            if not manager:
+                return jsonify({"error": "Diretor/Coordenador não encontrado"}), 404
+            
+            if not manager.school_id or manager.school_id != school.id:
+                return jsonify({"error": "Você não tem permissão para vincular cursos a esta escola"}), 403
+        
+        # Verificar se todos os cursos existem
+        education_stages = EducationStage.query.filter(EducationStage.id.in_(education_stage_ids)).all()
+        found_ids = [str(es.id) for es in education_stages]
+        missing_ids = [eid for eid in education_stage_ids if eid not in found_ids]
+        
+        if missing_ids:
+            return jsonify({
+                "error": "Alguns cursos não foram encontrados",
+                "missing_course_ids": missing_ids
+            }), 404
+        
+        # Verificar vínculos existentes e criar novos
+        existing_links = SchoolCourse.query.filter_by(school_id=school_id).filter(
+            SchoolCourse.education_stage_id.in_(education_stage_ids)
+        ).all()
+        
+        existing_ids = [str(sc.education_stage_id) for sc in existing_links]
+        new_ids = [eid for eid in education_stage_ids if eid not in existing_ids]
+        
+        # Criar novos vínculos
+        new_links = []
+        for education_stage_id in new_ids:
+            school_course = SchoolCourse(
+                school_id=school_id,
+                education_stage_id=education_stage_id
+            )
+            new_links.append(school_course)
+        
+        try:
+            if new_links:
+                db.session.add_all(new_links)
+                db.session.commit()
+            
+            # Preparar resposta
+            all_courses = {str(es.id): es for es in education_stages}
+            linked_courses = []
+            already_linked_courses = []
+            
+            for eid in education_stage_ids:
+                course = all_courses.get(eid)
+                if course:
+                    course_info = {
+                        "course_id": str(course.id),
+                        "course_name": course.name
+                    }
+                    if eid in existing_ids:
+                        already_linked_courses.append(course_info)
+                    else:
+                        linked_courses.append(course_info)
+            
+            response = {
+                "message": f"{len(linked_courses)} curso(s) vinculado(s) com sucesso" if linked_courses else "Nenhum curso novo para vincular",
+                "school_id": school.id,
+                "school_name": school.name,
+                "linked_courses": linked_courses,
+            }
+            
+            if already_linked_courses:
+                response["already_linked_courses"] = already_linked_courses
+                response["message"] += f", {len(already_linked_courses)} curso(s) já estava(m) vinculado(s)"
+            
+            return jsonify(response), 201 if new_links else 200
+            
+        except SQLAlchemyError as e:
+            db.session.rollback()
+            logging.error(f"Erro ao vincular curso à escola: {e}")
+            return jsonify({"error": "Erro ao salvar vínculo no banco de dados", "details": str(e)}), 500
+        
+    except SQLAlchemyError as e:
+        logging.error(f"Erro no banco de dados ao vincular curso à escola: {e}")
+        return jsonify({"error": "Erro interno do servidor ao consultar dados", "details": str(e)}), 500
+    except Exception as e:
+        logging.error(f"Erro inesperado na rota de vincular curso à escola: {e}", exc_info=True)
+        return jsonify({"error": "Ocorreu um erro inesperado no servidor"}), 500
+
+# DELETE - Desvincular curso (education stage) de uma escola
+@bp.route('/<string:school_id>/courses/<string:education_stage_id>', methods=['DELETE'])
+@jwt_required()
+@role_required("admin", "diretor", "coordenador", "tecadm")
+def desvincular_curso_escola(school_id, education_stage_id):
+    """
+    Desvincula um curso (education stage) de uma escola específica.
+    
+    Permissões:
+    - Admin: pode desvincular curso de qualquer escola
+    - Tecadm: pode desvincular curso de escolas do município
+    - Diretor/Coordenador: pode desvincular curso apenas da sua escola
+    """
+    try:
+        user = get_current_user_from_token()
+        
+        if not user:
+            return jsonify({"error": "Usuário não encontrado"}), 404
+        
+        # Verificar se a escola existe
+        school = School.query.get(school_id)
+        if not school:
+            return jsonify({"error": "Escola não encontrada"}), 404
+        
+        # Verificar se o curso existe
+        education_stage = EducationStage.query.get(education_stage_id)
+        if not education_stage:
+            return jsonify({"error": "Curso não encontrado"}), 404
+        
+        # Verificar permissões
+        if user['role'] == "admin":
+            # Admin pode desvincular curso de qualquer escola
+            pass
+        elif user['role'] == "tecadm":
+            # TecAdmin só pode desvincular cursos de escolas do município
+            city_id = user.get('tenant_id') or user.get('city_id')
+            if not city_id or school.city_id != city_id:
+                return jsonify({"error": "Você não tem permissão para desvincular cursos desta escola"}), 403
+        elif user['role'] in ["diretor", "coordenador"]:
+            # Diretor e coordenador só podem desvincular cursos da sua escola
+            from app.models.manager import Manager
+            manager = Manager.query.filter_by(user_id=user['id']).first()
+            
+            if not manager:
+                return jsonify({"error": "Diretor/Coordenador não encontrado"}), 404
+            
+            if not manager.school_id or manager.school_id != school.id:
+                return jsonify({"error": "Você não tem permissão para desvincular cursos desta escola"}), 403
+        
+        # Buscar vínculo
+        school_course = SchoolCourse.query.filter_by(
+            school_id=school_id,
+            education_stage_id=education_stage_id
+        ).first()
+        
+        if not school_course:
+            return jsonify({"error": "Curso não está vinculado a esta escola"}), 404
+        
+        # Verificar se há turmas usando este curso (através de grades)
+        # Se houver turmas vinculadas a grades deste curso, não permitir desvincular
+        classes_with_course = db.session.query(Class).join(
+            Grade, Class.grade_id == Grade.id
+        ).filter(
+            Grade.education_stage_id == education_stage_id,
+            Class.school_id == school_id
+        ).first()
+        
+        if classes_with_course:
+            return jsonify({
+                "error": "Não é possível desvincular curso que possui turmas vinculadas",
+                "details": "Existem turmas que usam este curso através de suas séries"
+            }), 400
+        
+        try:
+            db.session.delete(school_course)
+            db.session.commit()
+            
+            return jsonify({
+                "message": "Curso desvinculado da escola com sucesso",
+                "school_id": school.id,
+                "school_name": school.name,
+                "course_id": str(education_stage.id),
+                "course_name": education_stage.name
+            }), 200
+            
+        except SQLAlchemyError as e:
+            db.session.rollback()
+            logging.error(f"Erro ao desvincular curso da escola: {e}")
+            return jsonify({"error": "Erro ao remover vínculo do banco de dados", "details": str(e)}), 500
+        
+    except SQLAlchemyError as e:
+        logging.error(f"Erro no banco de dados ao desvincular curso da escola: {e}")
+        return jsonify({"error": "Erro interno do servidor ao consultar dados", "details": str(e)}), 500
+    except Exception as e:
+        logging.error(f"Erro inesperado na rota de desvincular curso da escola: {e}", exc_info=True)
+        return jsonify({"error": "Ocorreu um erro inesperado no servidor"}), 500

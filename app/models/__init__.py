@@ -1,6 +1,7 @@
 from .city import City
 from .school import School
 from .schoolTeacher import SchoolTeacher
+from .schoolCourse import SchoolCourse
 from .teacher import Teacher
 from .student import Student
 from .subject import Subject
@@ -24,4 +25,8 @@ from .manager import Manager
 from .physicalTestAnswer import PhysicalTestAnswer
 from .physicalTestForm import PhysicalTestForm
 from .formCoordinates import FormCoordinates
+
+from .calendar_event import CalendarEvent, CalendarVisibilityScope
+from .calendar_event_target import CalendarEventTarget, CalendarTargetType
+from .calendar_event_user import CalendarEventUser
 

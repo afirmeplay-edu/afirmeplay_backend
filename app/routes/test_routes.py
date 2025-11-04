@@ -814,7 +814,7 @@ def obter_avaliacao(test_id):
 
 @bp.route('/<string:test_id>/details', methods=['GET'])
 @jwt_required()
-@role_required("admin", "professor", "coordenador", "diretor", "aluno")
+@role_required("admin", "professor", "coordenador", "diretor", "aluno", "tecadm")
 def get_test_details(test_id):
     """
     Alias para /test/<test_id> - Detalhes completos da avaliação

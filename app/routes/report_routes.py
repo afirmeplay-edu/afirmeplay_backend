@@ -483,37 +483,24 @@ def dados_json(evaluation_id: str):
         - proficiencia: Proficiência por disciplina
         - nota_geral: Notas gerais por disciplina
         - acertos_por_habilidade: Acertos por habilidade
-        - analise_ia: Análise gerada pela IA (obrigatória)
     """
-    print(f"=== DEBUG dados_json: INÍCIO ===")
-    print(f"evaluation_id: {evaluation_id}")
-    
     try:
         # Verificar se a avaliação existe
-        print(f"DEBUG: Buscando avaliação {evaluation_id}")
         test = Test.query.get(evaluation_id)
         if not test:
-            print(f"DEBUG: Avaliação não encontrada")
             return jsonify({"error": "Avaliação não encontrada"}), 404
-        
-        print(f"DEBUG: Avaliação encontrada: {test.title}")
         
         # Obter parâmetros de filtro
         school_id = request.args.get('school_id')
         city_id = request.args.get('city_id')
-        print(f"DEBUG: Parâmetros - school_id: {school_id}, city_id: {city_id}")
         
         # Determinar o escopo do relatório
         scope_type, scope_id = _determinar_escopo_relatorio(school_id, city_id)
-        print(f"DEBUG: Escopo determinado - scope_type: {scope_type}, scope_id: {scope_id}")
         
         # Buscar turmas baseado no escopo
-        print(f"DEBUG: Buscando turmas por escopo...")
         class_tests = _buscar_turmas_por_escopo(evaluation_id, scope_type, scope_id)
-        print(f"DEBUG: Turmas encontradas: {len(class_tests)}")
         
         if not class_tests:
-            print(f"DEBUG: Nenhuma turma encontrada")
             if scope_type == 'school':
                 return jsonify({"error": "Avaliação não foi aplicada em nenhuma turma da escola especificada"}), 404
             elif scope_type == 'city':
@@ -522,7 +509,6 @@ def dados_json(evaluation_id: str):
                 return jsonify({"error": "Avaliação não foi aplicada em nenhuma turma"}), 404
         
         # Obter dados da avaliação
-        print(f"DEBUG: Obtendo dados da avaliação...")
         course_name = _obter_nome_curso(test)
         avaliacao_data = {
             "id": test.id,
@@ -531,74 +517,39 @@ def dados_json(evaluation_id: str):
             "disciplinas": _obter_disciplinas_avaliacao(test),
             "course_name": course_name
         }
-        print(f"DEBUG: Dados da avaliação obtidos - disciplinas: {avaliacao_data['disciplinas']}")
         
         logging.info(f"Disciplinas identificadas para avaliação {evaluation_id}: {avaliacao_data['disciplinas']}")
         logging.info(f"Escopo do relatório: {scope_type} - {scope_id}")
         
         # 1. Total de alunos que realizaram a avaliação
-        print(f"DEBUG: Calculando totais de alunos...")
         total_alunos = _calcular_totais_alunos_por_escopo(evaluation_id, class_tests, scope_type)
-        print(f"DEBUG: Totais de alunos calculados")
         
         # 2. Níveis de Aprendizagem
-        print(f"DEBUG: Calculando níveis de aprendizagem...")
         niveis_aprendizagem = _calcular_niveis_aprendizagem_por_escopo(evaluation_id, class_tests, scope_type)
-        print(f"DEBUG: Níveis de aprendizagem calculados - disciplinas: {list(niveis_aprendizagem.keys())}")
         logging.info(f"Níveis de aprendizagem calculados para disciplinas: {list(niveis_aprendizagem.keys())}")
         
         # 3. Proficiência
-        print(f"DEBUG: Calculando proficiência...")
         proficiencia = _calcular_proficiencia_por_escopo(evaluation_id, class_tests, scope_type)
-        print(f"DEBUG: Proficiência calculada - disciplinas: {list(proficiencia.get('por_disciplina', {}).keys())}")
         logging.info(f"Proficiência calculada para disciplinas: {list(proficiencia.get('por_disciplina', {}).keys())}")
         
         # 4. Nota Geral
-        print(f"DEBUG: Calculando nota geral...")
         nota_geral = _calcular_nota_geral_por_escopo(evaluation_id, class_tests, scope_type)
-        print(f"DEBUG: Nota geral calculada - disciplinas: {list(nota_geral.get('por_disciplina', {}).keys())}")
         logging.info(f"Nota geral calculada para disciplinas: {list(nota_geral.get('por_disciplina', {}).keys())}")
         
         # 5. Acertos por habilidade
-        print(f"DEBUG: Calculando acertos por habilidade...")
         acertos_habilidade = _calcular_acertos_habilidade_por_escopo(evaluation_id, class_tests, scope_type)
-        print(f"DEBUG: Acertos por habilidade calculados - disciplinas: {list(acertos_habilidade.keys())}")
         logging.info(f"Acertos por habilidade calculados para disciplinas: {list(acertos_habilidade.keys())}")
         
-        # 6. Análise da IA (obrigatória)
-        print(f"DEBUG: Iniciando análise da IA...")
-        try:
-            ai_service = AIAnalysisService()
-            ai_analysis = ai_service.analyze_report_data({
-                "avaliacao": avaliacao_data,
-                "total_alunos": total_alunos,
-                "niveis_aprendizagem": niveis_aprendizagem,
-                "proficiencia": proficiencia,
-                "nota_geral": nota_geral,
-                "acertos_por_habilidade": acertos_habilidade,
-                "scope_type": scope_type,
-                "scope_id": scope_id
-            })
-            print(f"DEBUG: Análise da IA concluída")
-        except Exception as ai_error:
-            print(f"DEBUG: ERRO na análise da IA: {str(ai_error)}")
-            import traceback
-            print(f"DEBUG: Traceback da IA: {traceback.format_exc()}")
-            raise
-        
-        # 7. Obter metadados do relatório
-        print(f"DEBUG: Obtendo metadados do relatório...")
+        # 6. Obter metadados do relatório
         try:
             metadados = _obter_metadados_relatorio(test, class_tests, scope_type, scope_id)
-            print(f"DEBUG: Metadados obtidos: {metadados}")
         except Exception as meta_error:
-            print(f"DEBUG: ERRO ao obter metadados: {str(meta_error)}")
+            logging.error(f"Erro ao obter metadados: {str(meta_error)}")
             import traceback
-            print(f"DEBUG: Traceback dos metadados: {traceback.format_exc()}")
+            logging.error(f"Traceback dos metadados: {traceback.format_exc()}")
             raise
         
         # Montar resposta JSON formatada
-        print(f"DEBUG: Montando resposta JSON...")
         resposta = {
             "avaliacao": avaliacao_data,
             "metadados": metadados,
@@ -606,21 +557,14 @@ def dados_json(evaluation_id: str):
             "niveis_aprendizagem": niveis_aprendizagem,
             "proficiencia": proficiencia,
             "nota_geral": nota_geral,
-            "acertos_por_habilidade": acertos_habilidade,
-            "analise_ia": ai_analysis
+            "acertos_por_habilidade": acertos_habilidade
         }
         
-        print(f"DEBUG: Resposta montada, retornando JSON...")
-        print(f"=== DEBUG dados_json: SUCESSO ===")
         return jsonify(resposta), 200
         
     except Exception as e:
-        print(f"=== DEBUG dados_json: ERRO CAPTURADO ===")
-        print(f"Erro: {str(e)}")
-        print(f"Tipo do erro: {type(e).__name__}")
-        import traceback
-        print(f"Traceback completo:\n{traceback.format_exc()}")
         logging.error(f"Erro ao gerar dados JSON do relatório: {str(e)}")
+        import traceback
         logging.error(f"Traceback: {traceback.format_exc()}")
         return jsonify({"error": "Erro interno do servidor", "details": str(e)}), 500
 

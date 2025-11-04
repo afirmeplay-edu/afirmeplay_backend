@@ -330,6 +330,23 @@ def create_app():
         _send_error_alert(404, f"Recurso não encontrado: {route}", route, method, user_id, additional_info)
         return jsonify({"error": "Recurso não encontrado"}), 404
     
+    # Error handler para 504 (Gateway Timeout)
+    @app.errorhandler(504)
+    def handle_504(e):
+        """Handler para erros 504 (Gateway Timeout)"""
+        route, method, additional_info = _get_request_context()
+        user_id, user_email = _get_user_info()
+        
+        error_msg = str(e) if e else "Gateway Timeout"
+        app.logger.error(
+            f"504 Gateway Timeout: {method} {route} - "
+            f"Usuário: {user_email or 'N/A'} ({user_id or 'N/A'}) - "
+            f"IP: {request.remote_addr if request else 'N/A'}"
+        )
+        
+        _send_error_alert(504, f"Gateway Timeout: {error_msg}", route, method, user_id, additional_info)
+        return jsonify({"error": "Gateway Timeout", "message": error_msg}), 504
+    
     # Error handler específico para 500
     @app.errorhandler(500)
     def handle_500(e):

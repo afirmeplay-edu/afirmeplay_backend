@@ -3607,7 +3607,7 @@ def manual_correction(test_id):
 
 @bp.route('/<string:test_id>/student/<string:student_id>/results', methods=['GET'])
 @jwt_required()
-@role_required("admin", "professor", "coordenador", "diretor", "aluno")
+@role_required("admin", "professor", "coordenador", "diretor", "aluno", "tecadm")
 def get_student_test_results(test_id, student_id):
     """
     Retorna os resultados detalhados de um aluno específico em um teste
@@ -3988,7 +3988,7 @@ def get_pending_corrections(test_id):
 
 @bp.route('/<string:test_id>/student/<string:student_id>/answers', methods=['GET'])
 @jwt_required()
-@role_required("admin", "professor", "coordenador", "diretor", "aluno")
+@role_required("admin", "professor", "coordenador", "diretor", "aluno", "tecadm")
 def get_student_answers(test_id, student_id):
     """
     Retorna as respostas detalhadas de um aluno em um teste específico

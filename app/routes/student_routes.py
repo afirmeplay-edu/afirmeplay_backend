@@ -1,7 +1,8 @@
-from flask import Blueprint, request, jsonify
+from flask import Blueprint, request, jsonify, Response
 from app.models.student import Student
 from app.models.user import User, RoleEnum
 from app.models.school import School
+from app.models.studentPasswordLog import StudentPasswordLog
 from sqlalchemy.exc import SQLAlchemyError, IntegrityError
 import logging
 from app.decorators.role_required import role_required, get_current_user_from_token
@@ -15,7 +16,15 @@ from app.models.studentAnswer import StudentAnswer
 from app.models.studentClass import Class
 from app.models.grades import Grade
 from app.models.classTest import ClassTest
+from app.models.city import City
+from app.models.manager import Manager
+from app.models.teacher import Teacher
+from app.models.schoolTeacher import SchoolTeacher
+from app.models.teacherClass import TeacherClass
 from sqlalchemy.orm import joinedload
+from openpyxl import Workbook
+from openpyxl.styles import Font, PatternFill, Alignment
+from io import BytesIO
 
 bp = Blueprint('students', __name__, url_prefix="/students")
 
@@ -53,8 +62,22 @@ def criar_usuario_e_aluno():
             if field not in data:
                 return jsonify({"error": f"Missing required field: {field}"}), 400
 
+        # Buscar turma para determinar city_id (necessário tanto para usuário novo quanto existente)
+        class_obj = Class.query.get(data["class_id"])
+        if not class_obj:
+            return jsonify({"error": "Class not found"}), 404
+        
+        # Buscar escola da turma
+        school = School.query.get(class_obj.school_id)
+        if not school:
+            return jsonify({"error": "School not found for the specified class"}), 404
+        
+        # Determinar city_id baseado na escola
+        city_id = school.city_id
+
         # Tenta encontrar o usuário pelo email
         usuario = User.query.filter_by(email=data["email"]).first()
+        usuario_foi_criado_agora = False  # Flag para saber se criamos o usuário agora
 
         if usuario:
             logging.info(f"Usuário existente encontrado: {usuario.email}")
@@ -64,22 +87,10 @@ def criar_usuario_e_aluno():
                 return jsonify({"error": "User is already a student"}), 400
         else:
             logging.info("Usuário não encontrado, criando novo usuário.")
+            usuario_foi_criado_agora = True  # Marcar que vamos criar o usuário agora
             # Verificar se matrícula já existe (caso fornecida) - apenas para novo usuário
             if data.get("registration") and User.query.filter_by(registration=data["registration"]).first():
                 return jsonify({"error": "Registration number already exists"}), 400
-
-            # Buscar turma para determinar city_id
-            class_obj = Class.query.get(data["class_id"])
-            if not class_obj:
-                return jsonify({"error": "Class not found"}), 404
-            
-            # Buscar escola da turma
-            school = School.query.get(class_obj.school_id)
-            if not school:
-                return jsonify({"error": "School not found for the specified class"}), 404
-            
-            # Determinar city_id baseado na escola
-            city_id = school.city_id
             
             # Criar usuário (role padrão: aluno) com city_id da escola
             usuario = User(
@@ -94,8 +105,6 @@ def criar_usuario_e_aluno():
             db.session.flush() 
             print(usuario.id)
             logging.info(f"Novo usuário criado com sucesso. ID: {usuario.id}")
-
-        # class_obj já foi buscado acima, não precisa buscar novamente
 
         # Verificar formato da data de nascimento (se fornecida)
         birth_date = None
@@ -119,6 +128,25 @@ def criar_usuario_e_aluno():
             school_id=class_obj.school_id
         )
         db.session.add(novo_aluno)
+        db.session.flush()  # Flush para obter o ID do aluno
+        
+        # Salvar senha em texto plano na tabela de log apenas se criamos um novo usuário
+        # (quando o usuário já existe, não temos a senha original em texto plano)
+        if usuario_foi_criado_agora:
+            password_log = StudentPasswordLog(
+                student_name=data["name"],
+                email=data["email"],
+                password=data["password"],  # Senha em texto plano
+                registration=data.get("registration"),
+                user_id=usuario.id,
+                student_id=novo_aluno.id,
+                class_id=data["class_id"],
+                grade_id=data.get("grade_id"),
+                school_id=class_obj.school_id,
+                city_id=city_id
+            )
+            db.session.add(password_log)
+        
         db.session.commit()
 
         logging.info(f"Aluno criado com sucesso para o usuário ID: {usuario.id}")
@@ -859,3 +887,207 @@ def get_current_student():
     except Exception as e:
         logging.error(f"Erro ao obter dados do aluno atual: {str(e)}", exc_info=True)
         return jsonify({"error": "Erro ao obter dados do aluno", "details": str(e)}), 500
+
+@bp.route('/password-report', methods=['GET'])
+@jwt_required()
+@role_required("admin", "professor", "coordenador", "diretor", "tecadm")
+def get_password_report():
+    """
+    Retorna relatório de alunos com suas senhas em formato Excel
+    
+    Query Parameters:
+        city_id: Filtrar por cidade (opcional)
+        school_id: Filtrar por escola (opcional)
+        class_id: Filtrar por turma (opcional)
+        grade_id: Filtrar por série (opcional)
+        date_from: Data inicial (opcional, formato: YYYY-MM-DD)
+        date_to: Data final (opcional, formato: YYYY-MM-DD)
+    
+    Returns:
+        Arquivo Excel (.xlsx) com relatório de senhas
+    """
+    try:
+        # 1. Obter usuário atual
+        user = get_current_user_from_token()
+        if not user:
+            return jsonify({"error": "Usuário não encontrado"}), 401
+        
+        # 2. Construir query base
+        query = db.session.query(
+            StudentPasswordLog,
+            School,
+            City,
+            Class,
+            Grade
+        ).outerjoin(
+            School, StudentPasswordLog.school_id == School.id
+        ).outerjoin(
+            City, StudentPasswordLog.city_id == City.id
+        ).outerjoin(
+            Class, StudentPasswordLog.class_id == Class.id
+        ).outerjoin(
+            Grade, StudentPasswordLog.grade_id == Grade.id
+        )
+        
+        # 3. Aplicar filtros automáticos baseados no role
+        if user['role'] == "admin":
+            # Admin pode ver todos os alunos
+            pass
+        elif user['role'] == "tecadm":
+            # Tecadm vê apenas alunos do seu município
+            city_id = user.get('tenant_id') or user.get('city_id')
+            if not city_id:
+                return jsonify({"error": "ID da cidade não disponível para este usuário"}), 400
+            query = query.filter(StudentPasswordLog.city_id == city_id)
+        elif user['role'] in ["diretor", "coordenador"]:
+            # Diretor e coordenador veem apenas alunos da sua escola
+            manager = Manager.query.filter_by(user_id=user['id']).first()
+            if not manager:
+                return jsonify({"error": "Diretor/Coordenador não encontrado na tabela manager"}), 404
+            if not manager.school_id:
+                return jsonify({"error": "Diretor/Coordenador não está vinculado a nenhuma escola"}), 400
+            query = query.filter(StudentPasswordLog.school_id == manager.school_id)
+        elif user['role'] == "professor":
+            # Professor vê apenas alunos das escolas onde está vinculado
+            teacher = Teacher.query.filter_by(user_id=user['id']).first()
+            if not teacher:
+                return jsonify({"error": "Professor não encontrado na tabela teacher"}), 404
+            
+            # Buscar escolas onde o professor está vinculado
+            school_teachers = SchoolTeacher.query.filter_by(teacher_id=teacher.id).all()
+            school_ids = [st.school_id for st in school_teachers]
+            
+            if not school_ids:
+                return jsonify({"error": "Professor não está vinculado a nenhuma escola"}), 400
+            
+            # Aplicar filtro por escolas
+            query = query.filter(StudentPasswordLog.school_id.in_(school_ids))
+            
+            # Buscar turmas onde o professor está vinculado
+            teacher_classes = TeacherClass.query.filter_by(teacher_id=teacher.id).all()
+            class_ids = [tc.class_id for tc in teacher_classes]
+            
+            # Se professor está vinculado a turmas específicas, filtrar por elas
+            # Se não houver turmas vinculadas, mostrar todas as turmas das escolas vinculadas
+            if class_ids:
+                query = query.filter(StudentPasswordLog.class_id.in_(class_ids))
+        
+        # 4. Aplicar filtros opcionais (query parameters)
+        city_id_param = request.args.get('city_id')
+        school_id_param = request.args.get('school_id')
+        class_id_param = request.args.get('class_id')
+        grade_id_param = request.args.get('grade_id')
+        date_from = request.args.get('date_from')
+        date_to = request.args.get('date_to')
+        
+        if city_id_param:
+            query = query.filter(StudentPasswordLog.city_id == city_id_param)
+        if school_id_param:
+            query = query.filter(StudentPasswordLog.school_id == school_id_param)
+        if class_id_param:
+            query = query.filter(StudentPasswordLog.class_id == class_id_param)
+        if grade_id_param:
+            query = query.filter(StudentPasswordLog.grade_id == grade_id_param)
+        if date_from:
+            try:
+                date_from_obj = datetime.strptime(date_from, "%Y-%m-%d").date()
+                query = query.filter(StudentPasswordLog.created_at >= date_from_obj)
+            except ValueError:
+                return jsonify({"error": "Formato de data inválido para date_from. Use YYYY-MM-DD"}), 400
+        if date_to:
+            try:
+                date_to_obj = datetime.strptime(date_to, "%Y-%m-%d").date()
+                # Adicionar 23:59:59 para incluir todo o dia
+                date_to_datetime = datetime.combine(date_to_obj, datetime.max.time())
+                query = query.filter(StudentPasswordLog.created_at <= date_to_datetime)
+            except ValueError:
+                return jsonify({"error": "Formato de data inválido para date_to. Use YYYY-MM-DD"}), 400
+        
+        # 5. Ordenar por data de criação (mais recentes primeiro)
+        query = query.order_by(StudentPasswordLog.created_at.desc())
+        
+        # 6. Executar query
+        results = query.all()
+        
+        if not results:
+            return jsonify({"error": "Nenhum registro encontrado com os filtros aplicados"}), 404
+        
+        # 7. Gerar Excel
+        wb = Workbook()
+        ws = wb.active
+        ws.title = "Relatório de Senhas"
+        
+        # Criar cabeçalho
+        headers = ["Nome do Aluno", "Email", "Senha", "Matrícula", "Escola", "Cidade", "Série", "Turma", "Data de Criação"]
+        ws.append(headers)
+        
+        # Estilizar cabeçalho
+        header_fill = PatternFill(start_color="366092", end_color="366092", fill_type="solid")
+        header_font = Font(bold=True, color="FFFFFF")
+        header_alignment = Alignment(horizontal="center", vertical="center")
+        
+        for cell in ws[1]:
+            cell.fill = header_fill
+            cell.font = header_font
+            cell.alignment = header_alignment
+        
+        # Adicionar dados
+        for log, school, city, class_obj, grade in results:
+            created_at_str = ""
+            if log.created_at:
+                if isinstance(log.created_at, datetime):
+                    created_at_str = log.created_at.strftime("%d/%m/%Y %H:%M:%S")
+                else:
+                    created_at_str = str(log.created_at)
+            
+            ws.append([
+                log.student_name or "",
+                log.email or "",
+                log.password,  # Senha em texto plano
+                log.registration or "",
+                school.name if school else "",
+                city.name if city else "",
+                grade.name if grade else "",
+                class_obj.name if class_obj else "",
+                created_at_str
+            ])
+        
+        # Ajustar largura das colunas
+        column_widths = {
+            'A': 30,  # Nome do Aluno
+            'B': 30,  # Email
+            'C': 30,  # Senha
+            'D': 15,  # Matrícula
+            'E': 30,  # Escola
+            'F': 25,  # Cidade
+            'G': 15,  # Série
+            'H': 20,  # Turma
+            'I': 20   # Data de Criação
+        }
+        
+        for column, width in column_widths.items():
+            ws.column_dimensions[column].width = width
+        
+        # 8. Salvar em memória
+        buffer = BytesIO()
+        wb.save(buffer)
+        buffer.seek(0)
+        
+        # 9. Gerar nome do arquivo com timestamp
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"relatorio_senhas_alunos_{timestamp}.xlsx"
+        
+        # 10. Retornar arquivo Excel
+        response = Response(
+            buffer.getvalue(),
+            mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+        )
+        response.headers['Content-Disposition'] = f'attachment; filename={filename}'
+        
+        logging.info(f"Relatório de senhas gerado com sucesso. Total de registros: {len(results)}")
+        
+        return response
+        
+    except Exception as e:
+        logging.error(f"Erro ao gerar relatório Excel de senhas: {str(e)}", exc_info=True)
+        return jsonify({"error": "Erro ao gerar relatório", "details": str(e)}), 500

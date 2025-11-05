@@ -6,6 +6,9 @@ Integra com o banco de dados e coordena a geração e correção
 
 import os
 import logging
+import qrcode
+import base64
+from io import BytesIO
 from typing import Dict, List, Optional, Any, Tuple
 from datetime import datetime
 from app import db
@@ -16,6 +19,8 @@ from app.models.student import Student
 from app.models.classTest import ClassTest
 from app.models.studentClass import Class
 from app.models.school import School
+from app.models.city import City
+from app.models.grades import Grade
 from app.models.physicalTestForm import PhysicalTestForm
 from app.models.physicalTestAnswer import PhysicalTestAnswer
 from app.services.physical_test_pdf_generator import PhysicalTestPDFGenerator
@@ -89,12 +94,37 @@ class PhysicalTestFormService:
                 }
             
             # Preparar dados para geração
+            # Buscar nome da série/grade
+            grade_name = 'Não informado'
+            if test.grade_id:
+                grade_obj = Grade.query.get(test.grade_id)
+                if grade_obj:
+                    grade_name = grade_obj.name
+
+            # Buscar município e estado através da escola do primeiro aluno
+            municipality_name = None
+            state_name = None
+            if students:
+                first_student = students[0]
+                if first_student.class_id:
+                    class_obj = Class.query.get(first_student.class_id)
+                    if class_obj and class_obj.school_id:
+                        school_obj = School.query.get(class_obj.school_id)
+                        if school_obj and school_obj.city_id:
+                            city_obj = City.query.get(school_obj.city_id)
+                            if city_obj:
+                                municipality_name = city_obj.name
+                                state_name = city_obj.state
+
             test_data = {
                 'id': test.id,
                 'title': test.title,
                 'description': test.description,
                 'type': test.type,
-                'subjects_info': test.subjects_info  # Incluir disciplinas da avaliação
+                'subjects_info': test.subjects_info,  # Incluir disciplinas da avaliação
+                'grade_name': grade_name,  # Adicionar nome da série
+                'municipality': municipality_name,  # Adicionar município
+                'state': state_name  # Adicionar estado
             }
             
             questions_data = [self._format_question_data(q) for q in questions]
@@ -104,11 +134,11 @@ class PhysicalTestFormService:
             class_tests = ClassTest.query.filter_by(test_id=test_id).all()
             class_test_id = class_tests[0].id if class_tests else "temp-class-test-id"
             
-            # Gerar PDFs institucionais usando InstitutionalTestPDFGenerator
+            # Gerar PDFs institucionais usando WeasyPrint (suporta HTML/CSS completo)
             # Este método gera a prova completa: capa, questões, imagens, alternativas e formulário
-            from app.services.institutional_test_pdf_generator import InstitutionalTestPDFGenerator
-            institutional_generator = InstitutionalTestPDFGenerator()
-            
+            from app.services.institutional_test_weasyprint_generator import InstitutionalTestWeasyPrintGenerator
+            institutional_generator = InstitutionalTestWeasyPrintGenerator()
+
             # Gerar PDFs institucionais e salvar no banco
             generated_files = institutional_generator.generate_institutional_test_pdf(
                 test_data, students_data, questions_data, class_test_id
@@ -208,10 +238,45 @@ class PhysicalTestFormService:
 
     def _format_student_data(self, student: Student) -> Dict[str, Any]:
         """Formata dados do aluno para geração do PDF"""
+        # Buscar dados completos da turma e escola
+        class_obj = None
+        school_name = 'Não informado'
+        class_name = 'Não informado'
+
+        if student.class_id:
+            class_obj = Class.query.get(student.class_id)
+            if class_obj:
+                class_name = class_obj.name
+                if class_obj.school_id:
+                    school_obj = School.query.get(class_obj.school_id)
+                    if school_obj:
+                        school_name = school_obj.name
+
+        # Gerar QR Code com o ID do aluno
+        qr = qrcode.QRCode(
+            version=1,
+            error_correction=qrcode.constants.ERROR_CORRECT_L,
+            box_size=10,
+            border=2,
+        )
+        qr.add_data(str(student.id))
+        qr.make(fit=True)
+
+        # Criar imagem do QR Code
+        img = qr.make_image(fill_color="black", back_color="white")
+
+        # Converter para base64
+        buffered = BytesIO()
+        img.save(buffered, format="PNG")
+        qr_code_base64 = base64.b64encode(buffered.getvalue()).decode()
+
         return {
             'id': student.id,
             'name': student.name,
-            'class_id': student.class_id
+            'class_id': student.class_id,
+            'class_name': class_name,
+            'school_name': school_name,
+            'qr_code': qr_code_base64
         }
 
     def _save_physical_forms_to_db(self, test_id: str, generated_files: List[Dict], questions: List[Question]) -> List[Dict]:

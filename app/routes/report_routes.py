@@ -70,236 +70,239 @@ def _header(canvas: Canvas, doc, logo_esq=None, logo_dir=None):
 bp = Blueprint('reports', __name__, url_prefix='/reports')
 
 
-@bp.route('/test', methods=['GET'])
-def test_endpoint():
-    """Endpoint de teste para verificar se o blueprint está funcionando"""
-    return jsonify({
-        "message": "Blueprint de relatórios funcionando corretamente",
-        "status": "success"
-    }), 200
+# ROTA COMENTADA - Para exclusão manual
+# @bp.route('/test', methods=['GET'])
+# def test_endpoint():
+#     """Endpoint de teste para verificar se o blueprint está funcionando"""
+#     return jsonify({
+#         "message": "Blueprint de relatórios funcionando corretamente",
+#         "status": "success"
+#     }), 200
 
 
-@bp.route('/test-questions/<string:evaluation_id>', methods=['GET'])
-@jwt_required()
-@role_required("admin", "professor", "coordenador", "diretor","tecadm")
-def test_questions(evaluation_id: str):
-    """Endpoint para testar diretamente a propriedade questions"""
-    try:
-        from app.models.testQuestion import TestQuestion
-        from app.models.question import Question
-        
-        # Teste 1: Query direta na tabela test_questions
-        test_questions_direct = TestQuestion.query.filter_by(test_id=evaluation_id).order_by(TestQuestion.order).all()
-        
-        # Teste 2: IDs das questões
-        question_ids = [tq.question_id for tq in test_questions_direct]
-        
-        # Teste 3: Buscar questões diretamente
-        questions_direct = Question.query.filter(Question.id.in_(question_ids)).all()
-        
-        # Teste 4: Usar a propriedade questions do modelo Test
-        test = Test.query.get(evaluation_id)
-        questions_property = test.questions if test else []
-        
-        # Teste 5: Verificar se a questão de Português está na tabela
-        portugues_question = TestQuestion.query.filter_by(
-            test_id=evaluation_id,
-            question_id="4e3305a0-7221-4012-a7aa-8f958b755823"
-        ).first()
-        
-        debug_info = {
-            "avaliacao_id": evaluation_id,
-            "test_questions_direct": {
-                "total": len(test_questions_direct),
-                "registros": [
-                    {
-                        "id": tq.id,
-                        "test_id": tq.test_id,
-                        "question_id": tq.question_id,
-                        "order": tq.order
-                    } for tq in test_questions_direct
-                ]
-            },
-            "question_ids": question_ids,
-            "questions_direct": {
-                "total": len(questions_direct),
-                "questoes": [
-                    {
-                        "id": q.id,
-                        "skill": q.skill,
-                        "number": q.number
-                    } for q in questions_direct
-                ]
-            },
-            "questions_property": {
-                "total": len(questions_property),
-                "questoes": [
-                    {
-                        "id": q.id,
-                        "skill": q.skill,
-                        "number": q.number
-                    } for q in questions_property
-                ]
-            },
-            "questao_portugues_teste": {
-                "encontrada": portugues_question is not None,
-                "dados": {
-                    "id": portugues_question.id,
-                    "test_id": portugues_question.test_id,
-                    "question_id": portugues_question.question_id,
-                    "order": portugues_question.order
-                } if portugues_question else None
-            }
-        }
-        
-        return jsonify(debug_info), 200
-        
-    except Exception as e:
-        logging.error(f"Erro ao testar questions: {str(e)}")
-        return jsonify({"error": "Erro interno do servidor", "details": str(e)}), 500
+# ROTA COMENTADA - Para exclusão manual
+# @bp.route('/test-questions/<string:evaluation_id>', methods=['GET'])
+# @jwt_required()
+# @role_required("admin", "professor", "coordenador", "diretor","tecadm")
+# def test_questions(evaluation_id: str):
+#     """Endpoint para testar diretamente a propriedade questions"""
+#     try:
+#         from app.models.testQuestion import TestQuestion
+#         from app.models.question import Question
+#         
+#         # Teste 1: Query direta na tabela test_questions
+#         test_questions_direct = TestQuestion.query.filter_by(test_id=evaluation_id).order_by(TestQuestion.order).all()
+#         
+#         # Teste 2: IDs das questões
+#         question_ids = [tq.question_id for tq in test_questions_direct]
+#         
+#         # Teste 3: Buscar questões diretamente
+#         questions_direct = Question.query.filter(Question.id.in_(question_ids)).all()
+#         
+#         # Teste 4: Usar a propriedade questions do modelo Test
+#         test = Test.query.get(evaluation_id)
+#         questions_property = test.questions if test else []
+#         
+#         # Teste 5: Verificar se a questão de Português está na tabela
+#         portugues_question = TestQuestion.query.filter_by(
+#             test_id=evaluation_id,
+#             question_id="4e3305a0-7221-4012-a7aa-8f958b755823"
+#         ).first()
+#         
+#         debug_info = {
+#             "avaliacao_id": evaluation_id,
+#             "test_questions_direct": {
+#                 "total": len(test_questions_direct),
+#                 "registros": [
+#                     {
+#                         "id": tq.id,
+#                         "test_id": tq.test_id,
+#                         "question_id": tq.question_id,
+#                         "order": tq.order
+#                     } for tq in test_questions_direct
+#                 ]
+#             },
+#             "question_ids": question_ids,
+#             "questions_direct": {
+#                 "total": len(questions_direct),
+#                 "questoes": [
+#                     {
+#                         "id": q.id,
+#                         "skill": q.skill,
+#                         "number": q.number
+#                     } for q in questions_direct
+#                 ]
+#             },
+#             "questions_property": {
+#                 "total": len(questions_property),
+#                 "questoes": [
+#                     {
+#                         "id": q.id,
+#                         "skill": q.skill,
+#                         "number": q.number
+#                     } for q in questions_property
+#                 ]
+#             },
+#             "questao_portugues_teste": {
+#                 "encontrada": portugues_question is not None,
+#                 "dados": {
+#                     "id": portugues_question.id,
+#                     "test_id": portugues_question.test_id,
+#                     "question_id": portugues_question.question_id,
+#                     "order": portugues_question.order
+#                 } if portugues_question else None
+#             }
+#         }
+#         
+#         return jsonify(debug_info), 200
+#         
+#     except Exception as e:
+#         logging.error(f"Erro ao testar questions: {str(e)}")
+#         return jsonify({"error": "Erro interno do servidor", "details": str(e)}), 500
 
 
-@bp.route('/debug-disciplinas/<string:evaluation_id>', methods=['GET'])
-@jwt_required()
-@role_required("admin", "professor", "coordenador", "diretor","tecadm")
-def debug_disciplinas(evaluation_id: str):
-    """Endpoint para debug da identificação de disciplinas"""
-    try:
-        # Verificar se a avaliação existe
-        test = Test.query.get(evaluation_id)
-        if not test:
-            return jsonify({"error": "Avaliação não encontrada"}), 404
-        
-        # Obter disciplinas usando a função melhorada
-        disciplinas = _obter_disciplinas_avaliacao(test)
-        
-        # Debug detalhado
-        debug_info = {
-            "avaliacao_id": evaluation_id,
-            "titulo": test.title,
-            "disciplinas_identificadas": disciplinas,
-            "debug_details": {
-                "subject_rel": test.subject_rel.name if test.subject_rel else None,
-                "subjects_info": test.subjects_info,
-                "total_questoes": len(test.questions) if test.questions else 0,
-                "questoes_com_habilidades": 0,
-                "habilidades_unicas": set(),
-                "disciplinas_por_habilidade": {}
-            },
-            "mapeamento_questoes": {},
-            "respostas_por_questao": {},
-            "questao_portugues_debug": {}
-        }
-        
-        if test.questions:
-            from app.models.skill import Skill
-            
-            skill_ids = set()
-            for question in test.questions:
-                if question.skill and question.skill.strip() and question.skill != '{}':
-                    clean_skill_id = question.skill.replace('{', '').replace('}', '')
-                    skill_ids.add(clean_skill_id)
-                    debug_info["debug_details"]["questoes_com_habilidades"] += 1
-            
-            debug_info["debug_details"]["habilidades_unicas"] = list(skill_ids)
-            
-            if skill_ids:
-                skills = Skill.query.filter(Skill.id.in_(skill_ids)).all()
-                skills_dict = {str(skill.id): skill for skill in skills}
-                
-                for skill in skills:
-                    subject = Subject.query.get(skill.subject_id) if skill.subject_id else None
-                    debug_info["debug_details"]["disciplinas_por_habilidade"][str(skill.id)] = {
-                        "skill_code": skill.code,
-                        "skill_description": skill.description,
-                        "subject_id": skill.subject_id,
-                        "subject_name": subject.name if subject else None
-                    }
-                
-                # Mapear questões para disciplinas (mesmo processo das funções de cálculo)
-                for question in test.questions:
-                    # Questões com skill: mapear via skill.subject_id
-                    if question.skill and question.skill.strip() and question.skill != '{}':
-                        clean_skill_id = question.skill.replace('{', '').replace('}', '')
-                        skill_obj = skills_dict.get(clean_skill_id)
-                        
-                        disciplina_mapeada = "Não mapeada"
-                        if skill_obj and skill_obj.subject_id:
-                            subject = Subject.query.get(skill_obj.subject_id)
-                            if subject:
-                                disciplina_mapeada = subject.name
-                            else:
-                                disciplina_mapeada = "Disciplina Geral (subject não encontrado)"
-                        else:
-                            disciplina_mapeada = "Disciplina Geral (skill sem subject_id)"
-                        
-                        debug_info["mapeamento_questoes"][question.id] = {
-                            "numero": question.number,
-                            "skill_id": clean_skill_id,
-                            "skill_encontrada": skill_obj is not None,
-                            "disciplina_mapeada": disciplina_mapeada
-                        }
-                    else:
-                        # Questões sem skill: mapear para disciplina principal da avaliação
-                        if test.subject_rel:
-                            disciplina_mapeada = test.subject_rel.name
-                            debug_info["mapeamento_questoes"][question.id] = {
-                                "numero": question.number,
-                                "skill_id": "Sem skill",
-                                "skill_encontrada": False,
-                                "disciplina_mapeada": disciplina_mapeada
-                            }
-                        else:
-                            disciplina_mapeada = "Disciplina Geral"
-                            debug_info["mapeamento_questoes"][question.id] = {
-                                "numero": question.number,
-                                "skill_id": "Sem skill",
-                                "skill_encontrada": False,
-                                "disciplina_mapeada": disciplina_mapeada
-                            }
-                    
-                    # Verificar respostas para esta questão
-                    respostas = StudentAnswer.query.filter_by(
-                        test_id=evaluation_id, 
-                        question_id=question.id
-                    ).count()
-                    
-                    debug_info["respostas_por_questao"][question.id] = respostas
-                    
-                    # Debug específico para a questão de Português que sabemos que existe
-                    if question.id == "4e3305a0-7221-4012-a7aa-8f958b755823":
-                        if question.skill and question.skill.strip() and question.skill != '{}':
-                            clean_skill_id = question.skill.replace('{', '').replace('}', '')
-                            skill_obj = skills_dict.get(clean_skill_id)
-                            debug_info["questao_portugues_debug"] = {
-                                "questao_id": question.id,
-                                "numero": question.number,
-                                "skill_raw": question.skill,
-                                "skill_clean": clean_skill_id,
-                                "skill_encontrada": skill_obj is not None,
-                                "skill_code": skill_obj.code if skill_obj else None,
-                                "skill_subject_id": skill_obj.subject_id if skill_obj else None,
-                                "disciplina_final": disciplina_mapeada,
-                                "total_respostas": respostas
-                            }
-                        else:
-                            debug_info["questao_portugues_debug"] = {
-                                "questao_id": question.id,
-                                "numero": question.number,
-                                "skill_raw": question.skill,
-                                "skill_clean": "Sem skill",
-                                "skill_encontrada": False,
-                                "skill_code": None,
-                                "skill_subject_id": None,
-                                "disciplina_final": disciplina_mapeada,
-                                "total_respostas": respostas
-                            }
-        
-        return jsonify(debug_info), 200
-        
-    except Exception as e:
-        logging.error(f"Erro ao debug disciplinas: {str(e)}")
-        return jsonify({"error": "Erro interno do servidor", "details": str(e)}), 500
+# ROTA COMENTADA - Para exclusão manual
+# @bp.route('/debug-disciplinas/<string:evaluation_id>', methods=['GET'])
+# @jwt_required()
+# @role_required("admin", "professor", "coordenador", "diretor","tecadm")
+# def debug_disciplinas(evaluation_id: str):
+#     """Endpoint para debug da identificação de disciplinas"""
+#     try:
+#         # Verificar se a avaliação existe
+#         test = Test.query.get(evaluation_id)
+#         if not test:
+#             return jsonify({"error": "Avaliação não encontrada"}), 404
+#         
+#         # Obter disciplinas usando a função melhorada
+#         disciplinas = _obter_disciplinas_avaliacao(test)
+#         
+#         # Debug detalhado
+#         debug_info = {
+#             "avaliacao_id": evaluation_id,
+#             "titulo": test.title,
+#             "disciplinas_identificadas": disciplinas,
+#             "debug_details": {
+#                 "subject_rel": test.subject_rel.name if test.subject_rel else None,
+#                 "subjects_info": test.subjects_info,
+#                 "total_questoes": len(test.questions) if test.questions else 0,
+#                 "questoes_com_habilidades": 0,
+#                 "habilidades_unicas": set(),
+#                 "disciplinas_por_habilidade": {}
+#             },
+#             "mapeamento_questoes": {},
+#             "respostas_por_questao": {},
+#             "questao_portugues_debug": {}
+#         }
+#         
+#         if test.questions:
+#             from app.models.skill import Skill
+#             
+#             skill_ids = set()
+#             for question in test.questions:
+#                 if question.skill and question.skill.strip() and question.skill != '{}':
+#                     clean_skill_id = question.skill.replace('{', '').replace('}', '')
+#                     skill_ids.add(clean_skill_id)
+#                     debug_info["debug_details"]["questoes_com_habilidades"] += 1
+#             
+#             debug_info["debug_details"]["habilidades_unicas"] = list(skill_ids)
+#             
+#             if skill_ids:
+#                 skills = Skill.query.filter(Skill.id.in_(skill_ids)).all()
+#                 skills_dict = {str(skill.id): skill for skill in skills}
+#                 
+#                 for skill in skills:
+#                     subject = Subject.query.get(skill.subject_id) if skill.subject_id else None
+#                     debug_info["debug_details"]["disciplinas_por_habilidade"][str(skill.id)] = {
+#                         "skill_code": skill.code,
+#                         "skill_description": skill.description,
+#                         "subject_id": skill.subject_id,
+#                         "subject_name": subject.name if subject else None
+#                     }
+#                 
+#                 # Mapear questões para disciplinas (mesmo processo das funções de cálculo)
+#                 for question in test.questions:
+#                     # Questões com skill: mapear via skill.subject_id
+#                     if question.skill and question.skill.strip() and question.skill != '{}':
+#                         clean_skill_id = question.skill.replace('{', '').replace('}', '')
+#                         skill_obj = skills_dict.get(clean_skill_id)
+#                         
+#                         disciplina_mapeada = "Não mapeada"
+#                         if skill_obj and skill_obj.subject_id:
+#                             subject = Subject.query.get(skill_obj.subject_id)
+#                             if subject:
+#                                 disciplina_mapeada = subject.name
+#                             else:
+#                                 disciplina_mapeada = "Disciplina Geral (subject não encontrado)"
+#                         else:
+#                             disciplina_mapeada = "Disciplina Geral (skill sem subject_id)"
+#                         
+#                         debug_info["mapeamento_questoes"][question.id] = {
+#                             "numero": question.number,
+#                             "skill_id": clean_skill_id,
+#                             "skill_encontrada": skill_obj is not None,
+#                             "disciplina_mapeada": disciplina_mapeada
+#                         }
+#                     else:
+#                         # Questões sem skill: mapear para disciplina principal da avaliação
+#                         if test.subject_rel:
+#                             disciplina_mapeada = test.subject_rel.name
+#                             debug_info["mapeamento_questoes"][question.id] = {
+#                                 "numero": question.number,
+#                                 "skill_id": "Sem skill",
+#                                 "skill_encontrada": False,
+#                                 "disciplina_mapeada": disciplina_mapeada
+#                             }
+#                         else:
+#                             disciplina_mapeada = "Disciplina Geral"
+#                             debug_info["mapeamento_questoes"][question.id] = {
+#                                 "numero": question.number,
+#                                 "skill_id": "Sem skill",
+#                                 "skill_encontrada": False,
+#                                 "disciplina_mapeada": disciplina_mapeada
+#                             }
+#                     
+#                     # Verificar respostas para esta questão
+#                     respostas = StudentAnswer.query.filter_by(
+#                         test_id=evaluation_id, 
+#                         question_id=question.id
+#                     ).count()
+#                     
+#                     debug_info["respostas_por_questao"][question.id] = respostas
+#                     
+#                     # Debug específico para a questão de Português que sabemos que existe
+#                     if question.id == "4e3305a0-7221-4012-a7aa-8f958b755823":
+#                         if question.skill and question.skill.strip() and question.skill != '{}':
+#                             clean_skill_id = question.skill.replace('{', '').replace('}', '')
+#                             skill_obj = skills_dict.get(clean_skill_id)
+#                             debug_info["questao_portugues_debug"] = {
+#                                 "questao_id": question.id,
+#                                 "numero": question.number,
+#                                 "skill_raw": question.skill,
+#                                 "skill_clean": clean_skill_id,
+#                                 "skill_encontrada": skill_obj is not None,
+#                                 "skill_code": skill_obj.code if skill_obj else None,
+#                                 "skill_subject_id": skill_obj.subject_id if skill_obj else None,
+#                                 "disciplina_final": disciplina_mapeada,
+#                                 "total_respostas": respostas
+#                             }
+#                         else:
+#                             debug_info["questao_portugues_debug"] = {
+#                                 "questao_id": question.id,
+#                                 "numero": question.number,
+#                                 "skill_raw": question.skill,
+#                                 "skill_clean": "Sem skill",
+#                                 "skill_encontrada": False,
+#                                 "skill_code": None,
+#                                 "skill_subject_id": None,
+#                                 "disciplina_final": disciplina_mapeada,
+#                                 "total_respostas": respostas
+#                             }
+#         
+#         return jsonify(debug_info), 200
+#         
+#     except Exception as e:
+#         logging.error(f"Erro ao debug disciplinas: {str(e)}")
+#         return jsonify({"error": "Erro interno do servidor", "details": str(e)}), 500
 
 
 @bp.route('/relatorio-completo/<string:evaluation_id>', methods=['GET'])
@@ -376,18 +379,110 @@ def relatorio_completo(evaluation_id: str):
         return jsonify({"error": "Erro interno do servidor"}), 500
 
 
-@bp.route('/relatorio-com-ia/<string:evaluation_id>', methods=['GET'])
+# ROTA COMENTADA - Para exclusão manual
+# @bp.route('/relatorio-com-ia/<string:evaluation_id>', methods=['GET'])
+# @jwt_required()
+# @role_required("admin", "professor", "coordenador", "diretor","tecadm")
+# def relatorio_com_ia(evaluation_id: str):
+#     """
+#     Gera relatório completo com análise da IA
+#     
+#     Args:
+#         evaluation_id: ID da avaliação
+#     
+#     Returns:
+#         JSON com relatório completo + análise da IA
+#     """
+#     try:
+#         # Verificar se a avaliação existe
+#         test = Test.query.get(evaluation_id)
+#         if not test:
+#             return jsonify({"error": "Avaliação não encontrada"}), 404
+#         
+#         # Buscar turmas onde a avaliação foi aplicada
+#         class_tests = ClassTest.query.filter_by(test_id=evaluation_id).all()
+#         if not class_tests:
+#             return jsonify({"error": "Avaliação não foi aplicada em nenhuma turma"}), 404
+#         
+#         # Obter dados da avaliação
+#         avaliacao_data = {
+#             "id": test.id,
+#             "titulo": test.title,
+#             "descricao": test.description,
+#             "disciplinas": _obter_disciplinas_avaliacao(test),
+#             "questoes_anuladas": []  # Lista de questões anuladas se houver
+#         }
+#         
+#         logging.info(f"Disciplinas identificadas para avaliação {evaluation_id}: {avaliacao_data['disciplinas']}")
+#         
+#         # 1. Total de alunos que realizaram a avaliação
+#         total_alunos = _calcular_totais_alunos(evaluation_id, class_tests)
+#         
+#         # 2. Níveis de Aprendizagem por turma
+#         niveis_aprendizagem = _calcular_niveis_aprendizagem(evaluation_id, class_tests)
+#         
+#         # 3. Proficiência
+#         proficiencia = _calcular_proficiencia(evaluation_id, class_tests)
+#         
+#         # 4. Nota Geral por turma
+#         nota_geral = _calcular_nota_geral(evaluation_id, class_tests)
+#         
+#         # 5. Acertos por habilidade
+#         acertos_habilidade = _calcular_acertos_habilidade(evaluation_id)
+#         
+#         # Preparar dados completos para análise da IA
+#         report_data = {
+#             "avaliacao": avaliacao_data,
+#             "total_alunos": total_alunos,
+#             "niveis_aprendizagem": niveis_aprendizagem,
+#             "proficiencia": proficiencia,
+#             "nota_geral": nota_geral,
+#             "acertos_por_habilidade": acertos_habilidade
+#         }
+#         
+#         # 6. Análise da IA
+#         ai_service = AIAnalysisService()
+#         ai_analysis = ai_service.analyze_report_data(report_data)
+#         
+#         return jsonify({
+#             "avaliacao": avaliacao_data,
+#             "total_alunos": total_alunos,
+#             "niveis_aprendizagem": niveis_aprendizagem,
+#             "proficiencia": proficiencia,
+#             "nota_geral": nota_geral,
+#             "acertos_por_habilidade": acertos_habilidade,
+#             "analise_ia": ai_analysis
+#         }), 200
+#         
+#     except Exception as e:
+#         logging.error(f"Erro ao gerar relatório com IA: {str(e)}")
+#         return jsonify({"error": "Erro interno do servidor", "details": str(e)}), 500
+
+
+@bp.route('/dados-json/<string:evaluation_id>', methods=['GET'])
 @jwt_required()
 @role_required("admin", "professor", "coordenador", "diretor","tecadm")
-def relatorio_com_ia(evaluation_id: str):
+def dados_json(evaluation_id: str):
     """
-    Gera relatório completo com análise da IA
+    Retorna os dados do relatório em JSON formatado para o frontend
     
     Args:
         evaluation_id: ID da avaliação
     
+    Query Parameters:
+        school_id: ID da escola (opcional) - filtra dados por escola específica
+        city_id: ID do município (opcional) - filtra dados por município
+        Se nenhum parâmetro for fornecido, retorna dados de todas as turmas da avaliação
+    
     Returns:
-        JSON com relatório completo + análise da IA
+        JSON com todos os dados do relatório formatados para o frontend:
+        - avaliacao: Informações da avaliação
+        - metadados: Metadados do relatório (escola, município, UF, período, escopo)
+        - total_alunos: Dados de participação
+        - niveis_aprendizagem: Níveis de aprendizagem por disciplina
+        - proficiencia: Proficiência por disciplina
+        - nota_geral: Notas gerais por disciplina
+        - acertos_por_habilidade: Acertos por habilidade
     """
     try:
         # Verificar se a avaliação existe
@@ -395,40 +490,69 @@ def relatorio_com_ia(evaluation_id: str):
         if not test:
             return jsonify({"error": "Avaliação não encontrada"}), 404
         
-        # Buscar turmas onde a avaliação foi aplicada
-        class_tests = ClassTest.query.filter_by(test_id=evaluation_id).all()
+        # Obter parâmetros de filtro
+        school_id = request.args.get('school_id')
+        city_id = request.args.get('city_id')
+        
+        # Determinar o escopo do relatório
+        scope_type, scope_id = _determinar_escopo_relatorio(school_id, city_id)
+        
+        # Buscar turmas baseado no escopo
+        class_tests = _buscar_turmas_por_escopo(evaluation_id, scope_type, scope_id)
+        
         if not class_tests:
-            return jsonify({"error": "Avaliação não foi aplicada em nenhuma turma"}), 404
+            if scope_type == 'school':
+                return jsonify({"error": "Avaliação não foi aplicada em nenhuma turma da escola especificada"}), 404
+            elif scope_type == 'city':
+                return jsonify({"error": "Avaliação não foi aplicada em nenhuma turma do município especificado"}), 404
+            else:
+                return jsonify({"error": "Avaliação não foi aplicada em nenhuma turma"}), 404
         
         # Obter dados da avaliação
+        course_name = _obter_nome_curso(test)
         avaliacao_data = {
             "id": test.id,
             "titulo": test.title,
             "descricao": test.description,
             "disciplinas": _obter_disciplinas_avaliacao(test),
-            "questoes_anuladas": []  # Lista de questões anuladas se houver
+            "course_name": course_name
         }
         
         logging.info(f"Disciplinas identificadas para avaliação {evaluation_id}: {avaliacao_data['disciplinas']}")
+        logging.info(f"Escopo do relatório: {scope_type} - {scope_id}")
         
         # 1. Total de alunos que realizaram a avaliação
-        total_alunos = _calcular_totais_alunos(evaluation_id, class_tests)
+        total_alunos = _calcular_totais_alunos_por_escopo(evaluation_id, class_tests, scope_type)
         
-        # 2. Níveis de Aprendizagem por turma
-        niveis_aprendizagem = _calcular_niveis_aprendizagem(evaluation_id, class_tests)
+        # 2. Níveis de Aprendizagem
+        niveis_aprendizagem = _calcular_niveis_aprendizagem_por_escopo(evaluation_id, class_tests, scope_type)
+        logging.info(f"Níveis de aprendizagem calculados para disciplinas: {list(niveis_aprendizagem.keys())}")
         
         # 3. Proficiência
-        proficiencia = _calcular_proficiencia(evaluation_id, class_tests)
+        proficiencia = _calcular_proficiencia_por_escopo(evaluation_id, class_tests, scope_type)
+        logging.info(f"Proficiência calculada para disciplinas: {list(proficiencia.get('por_disciplina', {}).keys())}")
         
-        # 4. Nota Geral por turma
-        nota_geral = _calcular_nota_geral(evaluation_id, class_tests)
+        # 4. Nota Geral
+        nota_geral = _calcular_nota_geral_por_escopo(evaluation_id, class_tests, scope_type)
+        logging.info(f"Nota geral calculada para disciplinas: {list(nota_geral.get('por_disciplina', {}).keys())}")
         
         # 5. Acertos por habilidade
-        acertos_habilidade = _calcular_acertos_habilidade(evaluation_id)
+        acertos_habilidade = _calcular_acertos_habilidade_por_escopo(evaluation_id, class_tests, scope_type)
+        logging.info(f"Acertos por habilidade calculados para disciplinas: {list(acertos_habilidade.keys())}")
         
-        # Preparar dados completos para análise da IA
-        report_data = {
+        # 6. Obter metadados do relatório
+        try:
+            metadados = _obter_metadados_relatorio(test, class_tests, scope_type, scope_id)
+        except Exception as meta_error:
+            logging.error(f"Erro ao obter metadados: {str(meta_error)}")
+            import traceback
+            logging.error(f"Traceback dos metadados: {traceback.format_exc()}")
+            raise
+        
+        # Montar resposta JSON formatada
+        resposta = {
             "avaliacao": avaliacao_data,
+            "metadados": metadados,
             "total_alunos": total_alunos,
             "niveis_aprendizagem": niveis_aprendizagem,
             "proficiencia": proficiencia,
@@ -436,22 +560,12 @@ def relatorio_com_ia(evaluation_id: str):
             "acertos_por_habilidade": acertos_habilidade
         }
         
-        # 6. Análise da IA
-        ai_service = AIAnalysisService()
-        ai_analysis = ai_service.analyze_report_data(report_data)
-        
-        return jsonify({
-            "avaliacao": avaliacao_data,
-            "total_alunos": total_alunos,
-            "niveis_aprendizagem": niveis_aprendizagem,
-            "proficiencia": proficiencia,
-            "nota_geral": nota_geral,
-            "acertos_por_habilidade": acertos_habilidade,
-            "analise_ia": ai_analysis
-        }), 200
+        return jsonify(resposta), 200
         
     except Exception as e:
-        logging.error(f"Erro ao gerar relatório com IA: {str(e)}")
+        logging.error(f"Erro ao gerar dados JSON do relatório: {str(e)}")
+        import traceback
+        logging.error(f"Traceback: {traceback.format_exc()}")
         return jsonify({"error": "Erro interno do servidor", "details": str(e)}), 500
 
 
@@ -544,42 +658,92 @@ def relatorio_pdf(evaluation_id: str):
             "scope_type": scope_type,
             "scope_id": scope_id
         })
-        
-        # Preparar dados para o template Word (comentado - usando PDF)
-        # template_data = _preparar_dados_template_word(
-        #     test, total_alunos, niveis_aprendizagem, 
-        #     proficiencia, nota_geral, acertos_habilidade, ai_analysis, avaliacao_data
-        # )
-        
-        # Gerar relatório PDF usando reportlab com template dinâmico
+
+        # 7. Obter informações sobre o escopo para metadados
+        scope_name = ""
+        escola_nome = ""
+        municipio_nome = ""
+        uf = ""
+
+        if scope_type == 'school':
+            school = School.query.get(scope_id)
+            if school:
+                scope_name = school.name
+                escola_nome = school.name
+                if school.city:
+                    municipio_nome = school.city.name
+                    uf = school.city.state
+        elif scope_type == 'city':
+            city = City.query.get(scope_id)
+            if city:
+                scope_name = city.name
+                municipio_nome = city.name
+                uf = city.state
+        else:
+            scope_name = "Todas as turmas"
+            # Pegar da primeira escola disponível
+            if class_tests and class_tests[0].class_rel and class_tests[0].class_rel.school:
+                school = class_tests[0].class_rel.school
+                escola_nome = school.name
+                if school.city:
+                    municipio_nome = school.city.name
+                    uf = school.city.state
+
+        # Preparar metadados para o template
+        metadados = {
+            "escola": escola_nome or "Escola não identificada",
+            "municipio": municipio_nome or "Município",
+            "uf": uf or "Estado",
+            "logo": None  # Pode adicionar logo depois se necessário
+        }
+
+        # Preparar dados para o template Jinja2
+        template_data = {
+            "avaliacao": avaliacao_data,
+            "metadados": metadados,
+            "total_alunos": total_alunos,
+            "niveis_aprendizagem": niveis_aprendizagem,
+            "proficiencia": proficiencia,
+            "nota_geral": nota_geral,
+            "acertos_por_habilidade": acertos_habilidade,
+            "ai_analysis": ai_analysis,
+            "scope_type": scope_type,
+            "scope_name": scope_name,
+            "generated_at": datetime.now().strftime("%d/%m/%Y %H:%M"),
+        }
+
+        # Gerar relatório PDF usando WeasyPrint e Jinja2
         try:
-            from app.utils.pdf_template_generator import gerar_pdf_com_template_dinamico
-            pdf_content = gerar_pdf_com_template_dinamico(
-                test, total_alunos, niveis_aprendizagem, 
-                proficiencia, nota_geral, acertos_habilidade, ai_analysis, avaliacao_data, scope_type
-            )
-            
+            logging.info("=== GERANDO PDF COM WEASYPRINT ===")
+
+            # Renderizar template HTML com Jinja2
+            html_content = render_template('relatorio_analise.html', **template_data)
+
+            logging.info(f"Template renderizado com sucesso. Tamanho: {len(html_content)} bytes")
+
+            # Gerar PDF com WeasyPrint
+            pdf_bytes = HTML(string=html_content).write_pdf()
+
+            logging.info(f"PDF gerado com sucesso. Tamanho: {len(pdf_bytes)} bytes")
+
             # Preparar nome do arquivo com o nome da avaliação
             nome_avaliacao = test.title.replace(' ', '_').replace('/', '_').replace('\\', '_').replace(':', '_').replace('?', '_').replace('*', '_').replace('"', '_').replace('<', '_').replace('>', '_').replace('|', '_')
             nome_arquivo = f"relatorio_{nome_avaliacao}.pdf"
-            
+
             # Retornar arquivo PDF
-            from flask import Response
-            print(f"=== RETORNANDO PDF ===")
-            print(f"Tamanho do PDF: {len(pdf_content)} bytes")
-            print(f"Nome do arquivo: {nome_arquivo}")
-            print(f"Mimetype: application/pdf")
-            print(f"Content-Disposition: attachment; filename={nome_arquivo}")
-            
-            response = Response(pdf_content, mimetype='application/pdf')
+            logging.info(f"Retornando PDF: {nome_arquivo}")
+
+            response = make_response(pdf_bytes)
+            response.headers['Content-Type'] = 'application/pdf'
             response.headers['Content-Disposition'] = f'attachment; filename={nome_arquivo}'
-            
-            print(f"Response criada com sucesso")
+
             return response
-            
+
         except Exception as pdf_error:
-            logging.error(f"Erro ao gerar PDF: {str(pdf_error)}")
-            
+            logging.error(f"Erro ao gerar PDF com WeasyPrint: {str(pdf_error)}")
+            import traceback
+            logging.error(traceback.format_exc())
+
             # Fallback: retornar erro se PDF falhar
             return jsonify({"error": "Erro ao gerar relatório PDF", "details": str(pdf_error)}), 500
         
@@ -588,68 +752,69 @@ def relatorio_pdf(evaluation_id: str):
         return jsonify({"error": "Erro interno do servidor", "details": str(e)}), 500
 
 
-@bp.route('/test-html/<string:evaluation_id>', methods=['GET'])
-@jwt_required()
-@role_required("admin", "professor", "coordenador", "diretor","tecadm")
-def test_html_template(evaluation_id: str):
-    """Endpoint para testar o template HTML renderizado"""
-    try:
-        # Verificar se a avaliação existe
-        test = Test.query.get(evaluation_id)
-        if not test:
-            return jsonify({"error": "Avaliação não encontrada"}), 404
-        
-        # Buscar turmas onde a avaliação foi aplicada
-        class_tests = ClassTest.query.filter_by(test_id=evaluation_id).all()
-        if not class_tests:
-            return jsonify({"error": "Avaliação não foi aplicada em nenhuma turma"}), 404
-        
-        # Obter dados da avaliação usando as funções existentes
-        avaliacao_data = {
-            "id": test.id,
-            "titulo": test.title,
-            "descricao": test.description,
-            "disciplinas": _obter_disciplinas_avaliacao(test)
-        }
-        
-        # 1. Total de alunos que realizaram a avaliação
-        total_alunos = _calcular_totais_alunos(evaluation_id, class_tests)
-        
-        # 2. Níveis de Aprendizagem por turma
-        niveis_aprendizagem = _calcular_niveis_aprendizagem(evaluation_id, class_tests)
-        
-        # 3. Proficiência
-        proficiencia = _calcular_proficiencia(evaluation_id, class_tests)
-        
-        # 4. Nota Geral por turma
-        nota_geral = _calcular_nota_geral(evaluation_id, class_tests)
-        
-        # 5. Acertos por habilidade
-        acertos_habilidade = _calcular_acertos_habilidade(evaluation_id)
-        
-        # Preparar dados para o template
-        template_data = _preparar_dados_template(
-            test, total_alunos, niveis_aprendizagem, 
-            proficiencia, nota_geral, acertos_habilidade
-        )
-        
-        # Ler o template HTML
-        template_path = os.path.join(os.path.dirname(__file__), '..', 'templates', 'relatorio_avaliacao.html')
-        with open(template_path, 'r', encoding='utf-8') as f:
-            template_content = f.read()
-        
-        # Renderizar o template
-        template = Template(template_content)
-        html_content = template.render(**template_data)
-        
-        # Retornar HTML para teste
-        from flask import Response
-        response = Response(html_content, mimetype='text/html')
-        return response
-        
-    except Exception as e:
-        logging.error(f"Erro ao testar template HTML: {str(e)}")
-        return jsonify({"error": "Erro interno do servidor", "details": str(e)}), 500
+# ROTA COMENTADA - Para exclusão manual
+# @bp.route('/test-html/<string:evaluation_id>', methods=['GET'])
+# @jwt_required()
+# @role_required("admin", "professor", "coordenador", "diretor","tecadm")
+# def test_html_template(evaluation_id: str):
+#     """Endpoint para testar o template HTML renderizado"""
+#     try:
+#         # Verificar se a avaliação existe
+#         test = Test.query.get(evaluation_id)
+#         if not test:
+#             return jsonify({"error": "Avaliação não encontrada"}), 404
+#         
+#         # Buscar turmas onde a avaliação foi aplicada
+#         class_tests = ClassTest.query.filter_by(test_id=evaluation_id).all()
+#         if not class_tests:
+#             return jsonify({"error": "Avaliação não foi aplicada em nenhuma turma"}), 404
+#         
+#         # Obter dados da avaliação usando as funções existentes
+#         avaliacao_data = {
+#             "id": test.id,
+#             "titulo": test.title,
+#             "descricao": test.description,
+#             "disciplinas": _obter_disciplinas_avaliacao(test)
+#         }
+#         
+#         # 1. Total de alunos que realizaram a avaliação
+#         total_alunos = _calcular_totais_alunos(evaluation_id, class_tests)
+#         
+#         # 2. Níveis de Aprendizagem por turma
+#         niveis_aprendizagem = _calcular_niveis_aprendizagem(evaluation_id, class_tests)
+#         
+#         # 3. Proficiência
+#         proficiencia = _calcular_proficiencia(evaluation_id, class_tests)
+#         
+#         # 4. Nota Geral por turma
+#         nota_geral = _calcular_nota_geral(evaluation_id, class_tests)
+#         
+#         # 5. Acertos por habilidade
+#         acertos_habilidade = _calcular_acertos_habilidade(evaluation_id)
+#         
+#         # Preparar dados para o template
+#         template_data = _preparar_dados_template(
+#             test, total_alunos, niveis_aprendizagem, 
+#             proficiencia, nota_geral, acertos_habilidade
+#         )
+#         
+#         # Ler o template HTML
+#         template_path = os.path.join(os.path.dirname(__file__), '..', 'templates', 'relatorio_avaliacao.html')
+#         with open(template_path, 'r', encoding='utf-8') as f:
+#             template_content = f.read()
+#         
+#         # Renderizar o template
+#         template = Template(template_content)
+#         html_content = template.render(**template_data)
+#         
+#         # Retornar HTML para teste
+#         from flask import Response
+#         response = Response(html_content, mimetype='text/html')
+#         return response
+#         
+#     except Exception as e:
+#         logging.error(f"Erro ao testar template HTML: {str(e)}")
+#         return jsonify({"error": "Erro interno do servidor", "details": str(e)}), 500
 
 
 def _preparar_dados_template(test: Test, total_alunos: Dict, niveis_aprendizagem: Dict, 
@@ -2171,6 +2336,82 @@ def _obter_disciplinas_avaliacao(test: Test) -> List[str]:
     logging.info(f"Disciplinas finais identificadas: {disciplinas_finais}")
     
     return disciplinas_finais
+
+
+def _obter_metadados_relatorio(test: Test, class_tests: List[ClassTest], scope_type: str, scope_id: Optional[str] = None) -> Dict[str, Any]:
+    """
+    Obtém metadados do relatório (escola, município, UF, período, escopo)
+    
+    Args:
+        test: Objeto Test da avaliação
+        class_tests: Lista de turmas onde a avaliação foi aplicada
+        scope_type: Tipo de escopo ('school', 'city', 'all')
+        scope_id: ID do escopo quando aplicável (ID da escola ou município)
+    
+    Returns:
+        Dict com metadados do relatório
+    """
+    escola_nome = "Escola não identificada"
+    escola_id = None
+    municipio_nome = "Município não identificado"
+    municipio_id = None
+    uf = "AL"
+    
+    try:
+        # Buscar primeira turma para obter escola e município
+        if class_tests:
+            first_class_test = class_tests[0]
+            first_class = Class.query.get(first_class_test.class_id)
+            
+            if first_class and first_class.school:
+                escola_nome = first_class.school.name
+                escola_id = first_class.school.id
+                
+                if first_class.school.city:
+                    municipio_nome = first_class.school.city.name
+                    municipio_id = first_class.school.city.id
+                    uf = first_class.school.city.state or "AL"
+                
+                # Se for escopo por escola, usar nome da escola específica
+                if scope_type == 'school' and scope_id:
+                    escola_obj = School.query.get(scope_id)
+                    if escola_obj:
+                        escola_nome = escola_obj.name
+                        escola_id = escola_obj.id
+                        if escola_obj.city:
+                            municipio_nome = escola_obj.city.name
+                            municipio_id = escola_obj.city.id
+                            uf = escola_obj.city.state or "AL"
+                
+                # Se for escopo por município, usar nome do município específico
+                if scope_type == 'city' and scope_id:
+                    municipio_obj = City.query.get(scope_id)
+                    if municipio_obj:
+                        municipio_nome = municipio_obj.name
+                        municipio_id = municipio_obj.id
+                        uf = municipio_obj.state or "AL"
+    except Exception as e:
+        logging.warning(f"Erro ao obter dados da escola/município: {str(e)}")
+    
+    # Determinar período atual
+    from datetime import datetime
+    now = datetime.now()
+    mes_atual = now.strftime("%B").upper()
+    ano_atual = now.year
+    periodo = f"{ano_atual}.1"
+    
+    return {
+        "escola": escola_nome,
+        "escola_id": escola_id,
+        "municipio": municipio_nome,
+        "municipio_id": municipio_id,
+        "uf": uf,
+        "periodo": periodo,
+        "mes": mes_atual,
+        "ano": ano_atual,
+        "scope_type": scope_type,
+        "scope_id": scope_id
+    }
 
 
 def _calcular_totais_alunos_por_escopo(evaluation_id: str, class_tests: List[ClassTest], scope_type: str) -> Dict[str, Any]:
@@ -4544,5 +4785,11 @@ def _gerar_analise_habilidades(template_data: Dict) -> str:
 @bp.errorhandler(Exception)
 def handle_error(error):
     """Handler de erros para o blueprint"""
+    print(f"=== DEBUG handle_error: ERRO CAPTURADO PELO ERROR HANDLER ===")
+    print(f"Erro: {str(error)}")
+    print(f"Tipo do erro: {type(error).__name__}")
+    import traceback
+    print(f"Traceback completo:\n{traceback.format_exc()}")
     logging.error(f"Erro no blueprint de relatórios: {str(error)}")
-    return jsonify({"error": "Erro interno do servidor"}), 500
+    logging.error(f"Traceback: {traceback.format_exc()}")
+    return jsonify({"error": "Erro interno do servidor", "details": str(error)}), 500

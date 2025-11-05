@@ -30,10 +30,10 @@ def handle_generic_error(error):
     logging.error(f"Unexpected error: {str(error)}", exc_info=True)
     return jsonify({"error": "An unexpected error occurred", "details": str(error)}), 500
 
-# POST - Criar manager (diretor, coordenador, tecadm)
+# POST - Criar manager (diretor, coordenador, tecadm, admin)
 @bp.route('', methods=['POST'])
 @jwt_required()
-@role_required("admin", "tecadm")
+@role_required("admin", "tecadm", "diretor", "coordenador")
 def create_manager():
     try:
         data = request.get_json()
@@ -45,10 +45,37 @@ def create_manager():
             if field not in data:
                 return jsonify({"error": f"Missing required field: {field}"}), 400
 
-        # Validar role
-        valid_roles = ["diretor", "coordenador", "tecadm"]
+        # Validar role (roles válidas para criação nesta rota)
+        valid_roles = ["diretor", "coordenador", "tecadm", "admin"]
         if data["role"] not in valid_roles:
             return jsonify({"error": f"Invalid role. Must be one of: {valid_roles}"}), 400
+
+        # Obter usuário atual para verificar permissões
+        current_user = get_current_user_from_token()
+        if not current_user:
+            return jsonify({"error": "User not found"}), 404
+
+        # Validar permissões baseadas na role do usuário atual
+        current_role = current_user['role']
+        role_to_create = data["role"]
+        
+        if current_role == "diretor" or current_role == "coordenador":
+            # Diretor e Coordenador só podem criar diretores e coordenadores
+            if role_to_create not in ["diretor", "coordenador"]:
+                return jsonify({
+                    "error": f"{current_role.capitalize()} can only create diretor or coordenador roles"
+                }), 403
+        elif current_role == "tecadm":
+            # Tecadm pode criar diretores, coordenadores e outros tecadms
+            if role_to_create not in ["diretor", "coordenador", "tecadm"]:
+                return jsonify({
+                    "error": "tecadm can only create diretor, coordenador or tecadm roles"
+                }), 403
+        elif current_role == "admin":
+            # Admin pode criar todos os roles
+            pass
+        else:
+            return jsonify({"error": "Unauthorized role"}), 403
 
         # Verificar se email já existe
         if User.query.filter_by(email=data["email"]).first():
@@ -58,11 +85,6 @@ def create_manager():
         if data.get("registration") and User.query.filter_by(registration=data["registration"]).first():
             return jsonify({"error": "Registration number already exists"}), 400
 
-        # Obter usuário atual para verificar permissões
-        current_user = get_current_user_from_token()
-        if not current_user:
-            return jsonify({"error": "User not found"}), 404
-
         # Determinar city_id baseado na role do usuário atual
         city_id = None
         if current_user['role'] == "admin":
@@ -71,7 +93,7 @@ def create_manager():
             if not city_id:
                 return jsonify({"error": "city_id is required for admin creating managers"}), 400
         else:
-            # Tecadm usa seu próprio city_id para criar diretores/coordenadores
+            # Tecadm, Diretor e Coordenador usam seu próprio city_id
             city_id = current_user.get("city_id")
             
             # Verificação adicional: buscar city_id diretamente do banco

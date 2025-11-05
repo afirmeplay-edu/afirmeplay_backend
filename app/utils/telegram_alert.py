@@ -88,6 +88,9 @@ def send_telegram_alert(
     elif ("bad request" in error_lower or "400" in error_message):
         emoji = "❌"  # Emoji para bad request (400)
         error_type = "BAD REQUEST"
+    elif ("gateway timeout" in error_lower or "504" in error_message):
+        emoji = "⏱️"  # Emoji para timeout (504)
+        error_type = "GATEWAY TIMEOUT"
     else:
         emoji = "🚨"  # Emoji padrão para erro crítico (500)
         error_type = "ERRO CRÍTICO"

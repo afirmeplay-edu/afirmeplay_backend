@@ -612,7 +612,7 @@ def get_physical_form(form_id):
 
 @bp.route('/test/<string:test_id>/status', methods=['GET'])
 @jwt_required()
-@role_required("admin", "professor", "coordenador", "diretor")
+@role_required("admin", "professor", "coordenador", "diretor", "tecadm")
 def get_physical_test_status(test_id):
     """
     Verifica status de aplicação da prova para formulários físicos
@@ -675,7 +675,7 @@ def get_physical_test_status(test_id):
 
 @bp.route('/test/<string:test_id>/forms', methods=['GET'])
 @jwt_required()
-@role_required("admin", "professor", "coordenador", "diretor")
+@role_required("admin", "professor", "coordenador", "diretor", "tecadm")
 def get_physical_forms(test_id):
     """
     Lista formulários físicos de uma prova

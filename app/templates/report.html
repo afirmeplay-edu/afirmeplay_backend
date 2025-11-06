@@ -9,12 +9,12 @@
 
       @page:first {
         size: A4;
-        margin: 2cm;
+        margin: 1cm;
       }
       
       @page {
         size: A4;
-        margin: 2cm;
+        margin: 1cm;
         @bottom-left {
           content: "InnovPlay: Sistema de Ensino e Avaliação";
           font-size: 8pt;
@@ -251,7 +251,7 @@
         font-weight: 700;
         letter-spacing: 0.03em;
         font-size: 10pt;
-        padding: 14px 16px;
+        padding: 8px 16px;
         text-transform: uppercase;
       }
       /* Título da tabela como primeira linha */
@@ -259,9 +259,15 @@
         background: #e5e7eb;
         color: #1e293b;
         font-size: 11pt;
-        padding: 10px 16px;
+        padding: 6px 16px;
         text-transform: none;
         border-bottom: none;
+        text-align: center;
+      }
+      /* Primeira coluna do cabeçalho (ESCOLA/SÉRIE/TURNO) alinhada à esquerda - exceto table-title */
+      .data-table thead tr:not(:first-child) th:first-child,
+      .data-table thead th:first-child:not(.table-title) {
+        text-align: left;
       }
       .data-table tbody td {
         padding: 12px 16px;
@@ -269,6 +275,68 @@
         border-top: 1px solid #f1f5f9;
         color: #334155;
         text-align: center;
+      }
+      
+      /* Estilos específicos para tabela de Acertos por Habilidade */
+      .data-table.acertos-habilidade-table tbody td {
+        padding: 10px 12px;
+        font-size: 9.5pt;
+      }
+      .data-table.acertos-habilidade-table thead th {
+        font-size: 9.5pt;
+        padding: 6px 10px;
+      }
+      /* Coluna de descrição com melhor distribuição de texto - apenas para tabela de acertos */
+      .data-table.acertos-habilidade-table tbody td:nth-child(3) {
+        text-align: left;
+        width: 32%;
+        word-wrap: break-word;
+        word-break: normal;
+        hyphens: auto;
+        line-height: 1.6;
+        padding: 10px 12px;
+      }
+      .data-table.acertos-habilidade-table thead th:nth-child(3) {
+        text-align: center;
+        width: 32%;
+        padding: 6px 10px;
+      }
+      /* Ajustar largura das outras colunas para balancear - apenas para tabela de acertos */
+      .data-table.acertos-habilidade-table tbody td:nth-child(1),
+      .data-table.acertos-habilidade-table thead th:nth-child(1) {
+        width: 5%;
+        padding: 10px 8px;
+      }
+      .data-table.acertos-habilidade-table tbody td:nth-child(2),
+      .data-table.acertos-habilidade-table thead th:nth-child(2) {
+        width: 8%;
+        padding: 10px 8px;
+      }
+      .data-table.acertos-habilidade-table tbody td:nth-child(4),
+      .data-table.acertos-habilidade-table thead th:nth-child(4),
+      .data-table.acertos-habilidade-table tbody td:nth-child(5),
+      .data-table.acertos-habilidade-table thead th:nth-child(5) {
+        width: 7%;
+        padding: 10px 8px;
+      }
+      .data-table.acertos-habilidade-table tbody td:nth-child(6),
+      .data-table.acertos-habilidade-table thead th:nth-child(6) {
+        width: 6%;
+        padding: 10px 8px;
+      }
+      .data-table.acertos-habilidade-table tbody td:nth-child(7),
+      .data-table.acertos-habilidade-table thead th:nth-child(7) {
+        width: 15%;
+        padding: 10px 10px;
+      }
+      /* Ajustar padding do cabeçalho também - apenas para tabela de acertos */
+      .data-table.acertos-habilidade-table thead th:nth-child(1),
+      .data-table.acertos-habilidade-table thead th:nth-child(2),
+      .data-table.acertos-habilidade-table thead th:nth-child(4),
+      .data-table.acertos-habilidade-table thead th:nth-child(5),
+      .data-table.acertos-habilidade-table thead th:nth-child(6),
+      .data-table.acertos-habilidade-table thead th:nth-child(7) {
+        padding: 6px 8px;
       }
       .data-table tbody tr:nth-child(even) {
         background: #f8fafc;
@@ -280,8 +348,12 @@
         background: #e5e7eb;
         font-weight: 700;
         color: #1e293b;
-        padding: 12px 16px;
+        padding: 6px 16px;
         text-align: center;
+      }
+      /* Primeira célula th no tbody (MUNICIPAL GERAL/9º GERAL) alinhada à esquerda */
+      .data-table tbody tr th:first-child {
+        text-align: left;
       }
       
       /* Estilos para cabeçalhos coloridos dos níveis de aprendizagem */
@@ -290,7 +362,7 @@
         color: #ffffff !important;
       }
       .data-table thead th.header-orange {
-        background: #F59E0B !important;
+        background: #EAB308 !important;
         color: #ffffff !important;
       }
       .data-table thead th.header-light-green {
@@ -460,7 +532,7 @@
         background: #DC2626;
       }
       .bar-fill.bar-orange {
-        background: #F59E0B;
+        background: #EAB308;
       }
       .bar-fill.bar-light-green {
         background: #84CC16;
@@ -520,7 +592,7 @@
         color: #1e293b;
         font-weight: 700;
         font-size: 12pt;
-        padding: 10px 16px;
+        padding: 6px 16px;
         text-align: center;
         text-transform: uppercase;
         border: 1px solid #e2e8f0;
@@ -570,13 +642,38 @@
       }
       .skills-discipline-title {
         background: #e5e7eb;
-        padding: 10px 16px;
+        padding: 6px 16px;
         text-align: center;
         font-weight: 700;
         font-size: 12pt;
         color: #1e293b;
         margin: 24px 0 16px 0;
         text-transform: uppercase;
+      }
+      
+      /* Badges de classificação */
+      .classification-badge {
+        display: inline-block;
+        padding: 4px 12px;
+        border-radius: 12px;
+        font-size: 7.5pt;
+        font-weight: 700;
+        text-align: center;
+        text-transform: uppercase;
+        letter-spacing: 0.03em;
+        white-space: nowrap;
+      }
+      .classification-badge.revisar {
+        background: #DC2626;
+        color: #ffffff;
+      }
+      .classification-badge.reaplicar {
+        background: #F59E0B;
+        color: #ffffff;
+      }
+      .classification-badge.concluido {
+        background: #22C55E;
+        color: #ffffff;
       }
     </style>
   </head>
@@ -749,7 +846,7 @@
           {% endfor %}
           {% if total_alunos.total_geral %}
           <tr>
-            <th>9º GERAL</th>
+            <th>{% if metadados.scope_type == 'school' %}9º GERAL{% else %}MUNICIPAL GERAL{% endif %}</th>
             <th>{{ total_alunos.total_geral.matriculados }}</th>
             <th>{{ total_alunos.total_geral.avaliados }}</th>
             <th>{{ '%.0f' % (total_alunos.total_geral.percentual or 0) }}%</th>
@@ -825,7 +922,7 @@
           {% endif %}
           {% if bloco.geral or bloco.total_geral %}
           <tr>
-            <th>{% if metadados.scope_type == 'school' %}9º GERAL{% else %}TOTAL MUNICIPAL{% endif %}</th>
+            <th>{% if metadados.scope_type == 'school' %}9º GERAL{% else %}MUNICIPAL GERAL{% endif %}</th>
             <th>{{ (bloco.geral.abaixo_do_basico if bloco.geral else bloco.total_geral.abaixo_do_basico) }}</th>
             <th>{{ (bloco.geral.basico if bloco.geral else bloco.total_geral.basico) }}</th>
             <th>{{ (bloco.geral.adequado if bloco.geral else bloco.total_geral.adequado) }}</th>
@@ -1065,7 +1162,7 @@
           {% endif %}
 
           <tr>
-            <th style="text-align: left;">9º GERAL</th>
+            <th style="text-align: left;">{% if metadados.scope_type == 'school' %}9º GERAL{% else %}MUNICIPAL GERAL{% endif %}</th>
             <th>{{ ('%.2f' % media_pt_geral).replace('.', ',') }}</th>
             <th>{{ ('%.2f' % media_mat_geral).replace('.', ',') }}</th>
             <th>{{ ('%.2f' % media_geral_proficiencia).replace('.', ',') }}</th>
@@ -1095,7 +1192,7 @@
       
       <div class="bar-chart-card">
         <div class="analysis-text" style="margin-top: 0; margin-bottom: 8px;">
-          <strong>Proficiência Geral (9º GERAL)</strong>
+          <strong>Proficiência Geral ({% if metadados.scope_type == 'school' %}9º GERAL{% else %}MUNICIPAL GERAL{% endif %})</strong>
         </div>
         <div class="bar-chart-container">
           <div class="bar-item">
@@ -1447,7 +1544,7 @@
         
         {# Tabela vertical original #}
         <div style="margin-top: 24px;">
-          <table class="data-table">
+          <table class="data-table acertos-habilidade-table">
             <thead>
               <tr>
                 <th>Questão</th>
@@ -1456,17 +1553,32 @@
                 <th>Acertos</th>
                 <th>Total</th>
                 <th>%</th>
+                <th>Classificação</th>
               </tr>
             </thead>
             <tbody>
               {% for q in bloco.questoes %}
+              {% set percent = q.percentual or 0 %}
+              {% if percent <= 50 %}
+                {% set classificacao = 'revisar' %}
+                {% set texto_classificacao = 'Revisar e Reavaliar' %}
+              {% elif percent <= 80 %}
+                {% set classificacao = 'reaplicar' %}
+                {% set texto_classificacao = 'Reavaliar' %}
+              {% else %}
+                {% set classificacao = 'concluido' %}
+                {% set texto_classificacao = 'Concluído' %}
+              {% endif %}
               <tr>
                 <td>{{ q.numero_questao }}</td>
                 <td>{{ q.codigo }}</td>
                 <td>{{ q.descricao }}</td>
                 <td>{{ q.acertos }}</td>
                 <td>{{ q.total }}</td>
-                <td>{{ '%.1f' % (q.percentual or 0) }}%</td>
+                <td>{{ '%.1f' % percent }}%</td>
+                <td>
+                  <span class="classification-badge {{ classificacao }}">{{ texto_classificacao }}</span>
+                </td>
               </tr>
               {% endfor %}
             </tbody>

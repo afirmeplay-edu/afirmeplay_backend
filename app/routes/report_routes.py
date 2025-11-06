@@ -573,6 +573,99 @@ def dados_json(evaluation_id: str):
         return jsonify({"error": "Erro interno do servidor", "details": str(e)}), 500
 
 
+def _montar_resposta_relatorio(evaluation_id: str, school_id: str = None, city_id: str = None) -> dict:
+    """
+    Monta a resposta completa do relatório a partir do ID da avaliação e filtros opcionais.
+    Reutilizada pelos endpoints que retornam JSON e PDF.
+    """
+    test = Test.query.get(evaluation_id)
+    if not test:
+        raise ValueError("Avaliação não encontrada")
+
+    scope_type, scope_id = _determinar_escopo_relatorio(school_id, city_id)
+    class_tests = _buscar_turmas_por_escopo(evaluation_id, scope_type, scope_id)
+    if not class_tests:
+        if scope_type == 'school':
+            raise LookupError("Avaliação não foi aplicada em nenhuma turma da escola especificada")
+        elif scope_type == 'city':
+            raise LookupError("Avaliação não foi aplicada em nenhuma turma do município especificado")
+        else:
+            raise LookupError("Avaliação não foi aplicada em nenhuma turma")
+
+    total_alunos = _calcular_totais_alunos_por_escopo(evaluation_id, class_tests, scope_type)
+    niveis_aprendizagem = _calcular_niveis_aprendizagem_por_escopo(evaluation_id, class_tests, scope_type)
+    proficiencia = _calcular_proficiencia_por_escopo(evaluation_id, class_tests, scope_type)
+    nota_geral = _calcular_nota_geral_por_escopo(evaluation_id, class_tests, scope_type)
+    acertos_habilidade = _calcular_acertos_habilidade_por_escopo(evaluation_id, class_tests, scope_type)
+
+    avaliacao_data = {
+        "id": str(test.id),
+        "titulo": test.title,
+        "descricao": getattr(test, 'description', None),
+        "course_name": _obter_nome_curso(test),
+        "disciplinas": _obter_disciplinas_avaliacao(test)
+    }
+
+    from datetime import datetime
+    now = datetime.now()
+    mes_atual = now.strftime("%B").capitalize()
+    ano_atual = now.year
+    data_geracao = now.strftime("%d/%m/%Y %H:%M")
+
+    metadados = {
+        "scope_type": scope_type,
+        "scope_id": scope_id,
+        "mes": mes_atual,
+        "ano": ano_atual,
+        "data_geracao": data_geracao
+    }
+
+    try:
+        if scope_type == 'school' and scope_id:
+            school = School.query.get(scope_id)
+            if school:
+                metadados.update({
+                    "escola": school.name,
+                    "escola_id": str(school.id),
+                    "municipio": school.city.name if school.city else None,
+                    "municipio_id": str(school.city.id) if school.city else None,
+                    "uf": school.city.state if school.city else None
+                })
+        elif scope_type == 'city' and scope_id:
+            city = City.query.get(scope_id)
+            if city:
+                metadados.update({
+                    "municipio": city.name,
+                    "municipio_id": str(city.id),
+                    "uf": city.state
+                })
+    except Exception:
+        pass
+
+    ai_service = AIAnalysisService()
+    analise_ia = ai_service.analyze_report_data({
+        "avaliacao": avaliacao_data,
+        "total_alunos": total_alunos,
+        "niveis_aprendizagem": niveis_aprendizagem,
+        "proficiencia": proficiencia,
+        "nota_geral": nota_geral,
+        "acertos_por_habilidade": acertos_habilidade,
+        "scope_type": scope_type,
+        "scope_id": scope_id
+    })
+
+    return {
+        "acertos_por_habilidade": acertos_habilidade,
+        "analise_ia": analise_ia,
+        "avaliacao": avaliacao_data,
+        "metadados": metadados,
+        "niveis_aprendizagem": niveis_aprendizagem,
+        "nota_geral": nota_geral,
+        "proficiencia": proficiencia,
+        "total_alunos": total_alunos
+    }
+
+
 @bp.route('/relatorio-pdf/<string:evaluation_id>', methods=['GET'])
 @jwt_required()
 @role_required("admin", "professor", "coordenador", "diretor","tecadm")
@@ -592,112 +685,57 @@ def relatorio_pdf(evaluation_id: str):
         Arquivo PDF do relatório para download
     """
     try:
-        # Verificar se docxtpl está disponível (comentado - usando PDF)
-        # if not DOCXTPL_AVAILABLE:
-        #     return jsonify({"error": "docxtpl não está disponível. Instale com: pip install docxtpl"}), 500
-        
-        # Verificar se a avaliação existe
-        test = Test.query.get(evaluation_id)
-        if not test:
-            return jsonify({"error": "Avaliação não encontrada"}), 404
-        
-        # Obter parâmetros de filtro
         school_id = request.args.get('school_id')
         city_id = request.args.get('city_id')
         
-        # Determinar o escopo do relatório
-        scope_type, scope_id = _determinar_escopo_relatorio(school_id, city_id)
-        
-        # Buscar turmas baseado no escopo
-        class_tests = _buscar_turmas_por_escopo(evaluation_id, scope_type, scope_id)
-        if not class_tests:
-            if scope_type == 'school':
-                return jsonify({"error": "Avaliação não foi aplicada em nenhuma turma da escola especificada"}), 404
-            elif scope_type == 'city':
-                return jsonify({"error": "Avaliação não foi aplicada em nenhuma turma do município especificado"}), 404
-            else:
-                return jsonify({"error": "Avaliação não foi aplicada em nenhuma turma"}), 404
-        
-        # Obter dados da avaliação (mesma lógica do relatorio_completo)
-        course_name = _obter_nome_curso(test)
-        avaliacao_data = {
-            "id": test.id,
-            "titulo": test.title,
-            "descricao": test.description,
-            "disciplinas": _obter_disciplinas_avaliacao(test),
-            "course_name": course_name
-        }
-        
-        logging.info(f"Disciplinas identificadas para avaliação {evaluation_id}: {avaliacao_data['disciplinas']}")
-        logging.info(f"Escopo do relatório: {scope_type} - {scope_id}")
-        
-        # 1. Total de alunos que realizaram a avaliação
-        total_alunos = _calcular_totais_alunos_por_escopo(evaluation_id, class_tests, scope_type)
-        
-        # 2. Níveis de Aprendizagem
-        niveis_aprendizagem = _calcular_niveis_aprendizagem_por_escopo(evaluation_id, class_tests, scope_type)
-        logging.info(f"Níveis de aprendizagem calculados para disciplinas: {list(niveis_aprendizagem.keys())}")
-        
-        # 3. Proficiência
-        proficiencia = _calcular_proficiencia_por_escopo(evaluation_id, class_tests, scope_type)
-        logging.info(f"Proficiência calculada para disciplinas: {list(proficiencia.get('por_disciplina', {}).keys())}")
-        
-        # 4. Nota Geral
-        nota_geral = _calcular_nota_geral_por_escopo(evaluation_id, class_tests, scope_type)
-        logging.info(f"Nota geral calculada para disciplinas: {list(nota_geral.get('por_disciplina', {}).keys())}")
-        
-        # 5. Acertos por habilidade
-        acertos_habilidade = _calcular_acertos_habilidade_por_escopo(evaluation_id, class_tests, scope_type)
-        logging.info(f"Acertos por habilidade calculados para disciplinas: {list(acertos_habilidade.keys())}")
-        
-        # 6. Análise da IA
-        ai_service = AIAnalysisService()
-        ai_analysis = ai_service.analyze_report_data({
-            "avaliacao": avaliacao_data,
-            "total_alunos": total_alunos,
-            "niveis_aprendizagem": niveis_aprendizagem,
-            "proficiencia": proficiencia,
-            "nota_geral": nota_geral,
-            "acertos_por_habilidade": acertos_habilidade,
-            "scope_type": scope_type,
-            "scope_id": scope_id
-        })
-        
-        # Preparar dados para o template Word (comentado - usando PDF)
-        # template_data = _preparar_dados_template_word(
-        #     test, total_alunos, niveis_aprendizagem, 
-        #     proficiencia, nota_geral, acertos_habilidade, ai_analysis, avaliacao_data
-        # )
-        
-        # Gerar relatório PDF usando reportlab com template dinâmico
-        try:
-            from app.utils.pdf_template_generator import gerar_pdf_com_template_dinamico
-            pdf_content = gerar_pdf_com_template_dinamico(
-                test, total_alunos, niveis_aprendizagem, 
-                proficiencia, nota_geral, acertos_habilidade, ai_analysis, avaliacao_data, scope_type
-            )
-            
-            # Preparar nome do arquivo com o nome da avaliação
-            nome_avaliacao = test.title.replace(' ', '_').replace('/', '_').replace('\\', '_').replace(':', '_').replace('?', '_').replace('*', '_').replace('"', '_').replace('<', '_').replace('>', '_').replace('|', '_')
-            nome_arquivo = f"relatorio_{nome_avaliacao}.pdf"
+        context = _montar_resposta_relatorio(evaluation_id, school_id, city_id)
 
-            # Retornar arquivo PDF
-            logging.info(f"Retornando PDF: {nome_arquivo}")
+        templates_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'templates')
+        env = Environment(loader=FileSystemLoader(templates_dir), autoescape=select_autoescape(['html', 'xml']))
 
-            response = make_response(pdf_content)
-            response.headers['Content-Type'] = 'application/pdf'
-            response.headers['Content-Disposition'] = f'attachment; filename={nome_arquivo}'
+        import math
 
-            return response
+        def sum_values(items, attr='value'):
+            try:
+                return sum(item.get(attr, 0) if isinstance(item, dict) else getattr(item, attr, 0) for item in items)
+            except (TypeError, AttributeError):
+                return 0
 
-        except Exception as pdf_error:
-            logging.error(f"Erro ao gerar PDF com WeasyPrint: {str(pdf_error)}")
-            import traceback
-            logging.error(traceback.format_exc())
+        def cos_filter(value):
+            try:
+                return math.cos(float(value))
+            except (TypeError, ValueError):
+                return 0
 
-            # Fallback: retornar erro se PDF falhar
-            return jsonify({"error": "Erro ao gerar relatório PDF", "details": str(pdf_error)}), 500
-        
+        def sin_filter(value):
+            try:
+                return math.sin(float(value))
+            except (TypeError, ValueError):
+                return 0
+
+        env.filters['sum_values'] = sum_values
+        env.filters['cos'] = cos_filter
+        env.filters['sin'] = sin_filter
+
+        template = env.get_template('report.html')
+        html_content = template.render(**context)
+
+        pdf_content = HTML(string=html_content, base_url=templates_dir).write_pdf()
+
+        test = Test.query.get(evaluation_id)
+        nome_avaliacao = (test.title if test else 'relatorio')
+        nome_avaliacao = nome_avaliacao.replace(' ', '_').replace('/', '_').replace('\\', '_') \
+                                       .replace(':', '_').replace('?', '_').replace('*', '_') \
+                                       .replace('"', '_').replace('<', '_').replace('>', '_').replace('|', '_')
+        nome_arquivo = f"relatorio_{nome_avaliacao}.pdf"
+
+        response = make_response(pdf_content)
+        response.headers['Content-Type'] = 'application/pdf'
+        response.headers['Content-Disposition'] = f'attachment; filename={nome_arquivo}'
+        return response
+
+    except (ValueError, LookupError) as e:
+        return jsonify({"error": str(e)}), 404
     except Exception as e:
         import traceback
         traceback_str = traceback.format_exc()
@@ -2461,8 +2499,6 @@ def _calcular_totais_alunos_por_municipio(evaluation_id: str, class_tests: List[
 
 def _calcular_totais_alunos(evaluation_id: str, class_tests: List[ClassTest]) -> Dict[str, Any]:
     """Calcula totais de alunos por turma e geral"""
-    from app.models.studentClass import Class
-
     class_ids = [ct.class_id for ct in class_tests]
 
     # Buscar todos os alunos das turmas onde a avaliação foi aplicada
@@ -2494,7 +2530,6 @@ def _calcular_totais_alunos(evaluation_id: str, class_tests: List[ClassTest]) ->
             turma_nome = class_students[0].class_.name
         else:
             # Se não há alunos, buscar nome da turma diretamente
-            from app.models.studentClass import Class
             turma_obj = Class.query.get(class_id)
             if turma_obj:
                 turma_nome = turma_obj.name
@@ -2868,7 +2903,6 @@ def _calcular_niveis_aprendizagem(evaluation_id: str, class_tests: List[ClassTes
             turma_nome = class_results[0].student.class_.name
         else:
             # Se não há resultados, buscar nome da turma diretamente
-            from app.models.studentClass import Class
             turma_obj = Class.query.get(class_id)
             if turma_obj:
                 turma_nome = turma_obj.name
@@ -3437,7 +3471,6 @@ def _calcular_proficiencia(evaluation_id: str, class_tests: List[ClassTest]) -> 
             turma_nome = class_results[0].student.class_.name
         else:
             # Se não há resultados, buscar nome da turma diretamente
-            from app.models.studentClass import Class
             turma_obj = Class.query.get(class_id)
             if turma_obj:
                 turma_nome = turma_obj.name
@@ -3981,7 +4014,6 @@ def _calcular_nota_geral(evaluation_id: str, class_tests: List[ClassTest]) -> Di
             turma_nome = class_results[0].student.class_.name
         else:
             # Se não há resultados, buscar nome da turma diretamente
-            from app.models.studentClass import Class
             turma_obj = Class.query.get(class_id)
             if turma_obj:
                 turma_nome = turma_obj.name

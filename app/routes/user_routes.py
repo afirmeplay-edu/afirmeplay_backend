@@ -26,8 +26,20 @@ from werkzeug.utils import secure_filename
 import os
 from openpyxl import load_workbook
 from xlrd import open_workbook
+import re
 
 bp = Blueprint('users', __name__, url_prefix='/users')
+
+def normalizar_nome_para_busca(nome):
+    """
+    Normaliza um nome para busca, removendo espaços extras e convertendo para minúsculas.
+    Remove espaços no início/fim e normaliza espaços múltiplos para um único espaço.
+    """
+    if not nome:
+        return ""
+    # Converter para string, remover espaços no início/fim e normalizar espaços múltiplos
+    nome_normalizado = re.sub(r'\s+', ' ', str(nome).strip())
+    return nome_normalizado.lower()
 
 def format_student_details(student):
     user_details = None
@@ -666,7 +678,7 @@ def bulk_upload_students():
             return jsonify({"erro": f"Erro ao ler arquivo: {str(e)}"}), 400
         
         # Verificar colunas obrigatórias
-        required_columns = ['nome', 'email', 'data_nascimento', 'escola', 'endereco_escola', 'estado_escola', 'municipio_escola', 'serie', 'turma']
+        required_columns = ['nome', 'email', 'senha', 'data_nascimento', 'escola', 'endereco_escola', 'estado_escola', 'municipio_escola', 'serie', 'turma']
         if rows:
             missing_columns = [col for col in required_columns if col not in rows[0].keys()]
         else:
@@ -802,10 +814,18 @@ def bulk_upload_students():
                     })
                     continue
                 
-                # Buscar escola existente (busca exata case-insensitive)
+                # Buscar escola existente (busca normalizada - case-insensitive e espaços normalizados)
                 escola_nome = str(row.get('escola', '')).strip()
-                escola_nome_normalizado = escola_nome.lower()
-                escola = School.query.filter(func.lower(School.name) == escola_nome_normalizado).first()
+                escola_nome_normalizado = normalizar_nome_para_busca(escola_nome)
+                
+                # Buscar todas as escolas e comparar com normalização
+                todas_escolas = School.query.all()
+                escola = None
+                for escola_candidata in todas_escolas:
+                    nome_escola_normalizado = normalizar_nome_para_busca(escola_candidata.name)
+                    if nome_escola_normalizado == escola_nome_normalizado:
+                        escola = escola_candidata
+                        break
                 
                 if not escola:
                     results["erros"].append({
@@ -826,10 +846,19 @@ def bulk_upload_students():
                     })
                     continue
                 
-                # Buscar série existente (busca exata case-insensitive)
+                # Buscar série existente (busca normalizada - case-insensitive e espaços normalizados)
                 serie_nome = str(row.get('serie', '')).strip()
-                serie_nome_normalizado = serie_nome.lower()
-                serie = Grade.query.filter(func.lower(Grade.name) == serie_nome_normalizado).first()
+                serie_nome_normalizado = normalizar_nome_para_busca(serie_nome)
+                
+                # Buscar todas as séries e comparar com normalização
+                todas_series = Grade.query.all()
+                serie = None
+                for serie_candidata in todas_series:
+                    nome_serie_normalizado = normalizar_nome_para_busca(serie_candidata.name)
+                    if nome_serie_normalizado == serie_nome_normalizado:
+                        serie = serie_candidata
+                        break
+                
                 if not serie:
                     results["erros"].append({
                         "linha": index + 2,
@@ -839,14 +868,23 @@ def bulk_upload_students():
                     })
                     continue
                 
-                # Buscar turma existente (busca exata case-insensitive)
+                # Buscar turma existente (busca normalizada - case-insensitive e espaços normalizados)
                 turma_nome = str(row.get('turma', '')).strip()
-                turma_nome_normalizado = turma_nome.lower()
-                turma = Class.query.filter(
-                    func.lower(Class.name) == turma_nome_normalizado,
+                turma_nome_normalizado = normalizar_nome_para_busca(turma_nome)
+                
+                # Buscar turmas da escola e série, e comparar com normalização
+                turmas_candidatas = Class.query.filter(
                     Class.school_id == escola.id,
                     Class.grade_id == serie.id
-                ).first()
+                ).all()
+                
+                turma = None
+                for turma_candidata in turmas_candidatas:
+                    nome_turma_normalizado = normalizar_nome_para_busca(turma_candidata.name)
+                    if nome_turma_normalizado == turma_nome_normalizado:
+                        turma = turma_candidata
+                        break
+                
                 if not turma:
                     results["erros"].append({
                         "linha": index + 2,
@@ -882,15 +920,23 @@ def bulk_upload_students():
                     })
                     continue
                 
-                # Gerar senha aleatória antes de criptografar
-                senha_gerada = str(uuid.uuid4())
+                # Validar senha (obrigatória)
+                senha = str(row.get('senha', '')).strip()
+                if not senha:
+                    results["erros"].append({
+                        "linha": index + 2,
+                        "campo": "senha",
+                        "valor": "",
+                        "erro": "Senha não fornecida"
+                    })
+                    continue
                 
-                # Criar usuário
+                # Criar usuário com senha do Excel (criptografada)
                 novo_usuario = User(
                     id=str(uuid.uuid4()),
                     name=str(row.get('nome', '')).strip(),
                     email=email,
-                    password_hash=generate_password_hash(senha_gerada),  # Senha aleatória criptografada
+                    password_hash=generate_password_hash(senha),  # Senha do Excel criptografada
                     registration=matricula if matricula else None,
                     role=RoleEnum.ALUNO,
                     city_id=escola.city_id
@@ -913,11 +959,11 @@ def bulk_upload_students():
                 db.session.add(novo_aluno)
                 db.session.flush()  # Flush para obter o ID do aluno
                 
-                # Salvar senha em texto plano na tabela de log
+                # Salvar senha em texto plano na tabela de log (sem hash)
                 password_log = StudentPasswordLog(
                     student_name=str(row.get('nome', '')).strip(),
                     email=email,
-                    password=senha_gerada,  # Senha em texto plano (antes de criptografar)
+                    password=senha,  # Senha em texto plano (do Excel, sem hash)
                     registration=matricula if matricula else None,
                     user_id=novo_usuario.id,
                     student_id=novo_aluno.id,

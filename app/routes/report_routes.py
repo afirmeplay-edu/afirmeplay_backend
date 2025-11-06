@@ -4,9 +4,9 @@ Rotas especializadas para relatórios de avaliações
 Endpoint para geração de relatórios completos com estatísticas detalhadas
 """
 
-from flask import Blueprint, request, jsonify, render_template_string, send_file
+from flask import Blueprint, request, jsonify, render_template_string, send_file, make_response
 from flask_jwt_extended import jwt_required
-from app.decorators.role_required import role_required, get_current_user_from_token
+from app.permissions import role_required, get_current_user_from_token
 from app.models.test import Test
 from app.models.student import Student
 from app.models.studentAnswer import StudentAnswer
@@ -28,6 +28,7 @@ from sqlalchemy.orm import joinedload
 from collections import defaultdict
 import os
 from jinja2 import Template
+from jinja2 import Environment, FileSystemLoader, select_autoescape
 import tempfile
 from reportlab.lib.pagesizes import A4
 from reportlab.platypus import BaseDocTemplate, PageTemplate, Frame, Paragraph, Spacer, Table, TableStyle, PageBreak, KeepTogether, Image
@@ -39,6 +40,7 @@ from reportlab.pdfgen.canvas import Canvas
 from io import BytesIO
 from app.services.ai_analysis_service import AIAnalysisService
 from app.services.evaluation_result_service import EvaluationResultService
+from weasyprint import HTML
 
 # Importar docxtpl para template Word (comentado - usando PDF agora)
 # try:
@@ -375,7 +377,9 @@ def relatorio_completo(evaluation_id: str):
         }), 200
         
     except Exception as e:
-        logging.error(f"Erro ao gerar relatório completo: {str(e)}")
+        import traceback
+        traceback_str = traceback.format_exc()
+        logging.error(f"Erro ao gerar relatório completo: {str(e)}\n{traceback_str}")
         return jsonify({"error": "Erro interno do servidor"}), 500
 
 
@@ -658,74 +662,21 @@ def relatorio_pdf(evaluation_id: str):
             "scope_type": scope_type,
             "scope_id": scope_id
         })
-
-        # 7. Obter informações sobre o escopo para metadados
-        scope_name = ""
-        escola_nome = ""
-        municipio_nome = ""
-        uf = ""
-
-        if scope_type == 'school':
-            school = School.query.get(scope_id)
-            if school:
-                scope_name = school.name
-                escola_nome = school.name
-                if school.city:
-                    municipio_nome = school.city.name
-                    uf = school.city.state
-        elif scope_type == 'city':
-            city = City.query.get(scope_id)
-            if city:
-                scope_name = city.name
-                municipio_nome = city.name
-                uf = city.state
-        else:
-            scope_name = "Todas as turmas"
-            # Pegar da primeira escola disponível
-            if class_tests and class_tests[0].class_rel and class_tests[0].class_rel.school:
-                school = class_tests[0].class_rel.school
-                escola_nome = school.name
-                if school.city:
-                    municipio_nome = school.city.name
-                    uf = school.city.state
-
-        # Preparar metadados para o template
-        metadados = {
-            "escola": escola_nome or "Escola não identificada",
-            "municipio": municipio_nome or "Município",
-            "uf": uf or "Estado",
-            "logo": None  # Pode adicionar logo depois se necessário
-        }
-
-        # Preparar dados para o template Jinja2
-        template_data = {
-            "avaliacao": avaliacao_data,
-            "metadados": metadados,
-            "total_alunos": total_alunos,
-            "niveis_aprendizagem": niveis_aprendizagem,
-            "proficiencia": proficiencia,
-            "nota_geral": nota_geral,
-            "acertos_por_habilidade": acertos_habilidade,
-            "ai_analysis": ai_analysis,
-            "scope_type": scope_type,
-            "scope_name": scope_name,
-            "generated_at": datetime.now().strftime("%d/%m/%Y %H:%M"),
-        }
-
-        # Gerar relatório PDF usando WeasyPrint e Jinja2
+        
+        # Preparar dados para o template Word (comentado - usando PDF)
+        # template_data = _preparar_dados_template_word(
+        #     test, total_alunos, niveis_aprendizagem, 
+        #     proficiencia, nota_geral, acertos_habilidade, ai_analysis, avaliacao_data
+        # )
+        
+        # Gerar relatório PDF usando reportlab com template dinâmico
         try:
-            logging.info("=== GERANDO PDF COM WEASYPRINT ===")
-
-            # Renderizar template HTML com Jinja2
-            html_content = render_template('relatorio_analise.html', **template_data)
-
-            logging.info(f"Template renderizado com sucesso. Tamanho: {len(html_content)} bytes")
-
-            # Gerar PDF com WeasyPrint
-            pdf_bytes = HTML(string=html_content).write_pdf()
-
-            logging.info(f"PDF gerado com sucesso. Tamanho: {len(pdf_bytes)} bytes")
-
+            from app.utils.pdf_template_generator import gerar_pdf_com_template_dinamico
+            pdf_content = gerar_pdf_com_template_dinamico(
+                test, total_alunos, niveis_aprendizagem, 
+                proficiencia, nota_geral, acertos_habilidade, ai_analysis, avaliacao_data, scope_type
+            )
+            
             # Preparar nome do arquivo com o nome da avaliação
             nome_avaliacao = test.title.replace(' ', '_').replace('/', '_').replace('\\', '_').replace(':', '_').replace('?', '_').replace('*', '_').replace('"', '_').replace('<', '_').replace('>', '_').replace('|', '_')
             nome_arquivo = f"relatorio_{nome_avaliacao}.pdf"
@@ -733,7 +684,7 @@ def relatorio_pdf(evaluation_id: str):
             # Retornar arquivo PDF
             logging.info(f"Retornando PDF: {nome_arquivo}")
 
-            response = make_response(pdf_bytes)
+            response = make_response(pdf_content)
             response.headers['Content-Type'] = 'application/pdf'
             response.headers['Content-Disposition'] = f'attachment; filename={nome_arquivo}'
 
@@ -748,73 +699,74 @@ def relatorio_pdf(evaluation_id: str):
             return jsonify({"error": "Erro ao gerar relatório PDF", "details": str(pdf_error)}), 500
         
     except Exception as e:
-        logging.error(f"Erro ao gerar relatório PDF: {str(e)}")
+        import traceback
+        traceback_str = traceback.format_exc()
+        logging.error(f"Erro ao gerar relatório PDF: {str(e)}\n{traceback_str}")
         return jsonify({"error": "Erro interno do servidor", "details": str(e)}), 500
 
 
-# ROTA COMENTADA - Para exclusão manual
-# @bp.route('/test-html/<string:evaluation_id>', methods=['GET'])
-# @jwt_required()
-# @role_required("admin", "professor", "coordenador", "diretor","tecadm")
-# def test_html_template(evaluation_id: str):
-#     """Endpoint para testar o template HTML renderizado"""
-#     try:
-#         # Verificar se a avaliação existe
-#         test = Test.query.get(evaluation_id)
-#         if not test:
-#             return jsonify({"error": "Avaliação não encontrada"}), 404
-#         
-#         # Buscar turmas onde a avaliação foi aplicada
-#         class_tests = ClassTest.query.filter_by(test_id=evaluation_id).all()
-#         if not class_tests:
-#             return jsonify({"error": "Avaliação não foi aplicada em nenhuma turma"}), 404
-#         
-#         # Obter dados da avaliação usando as funções existentes
-#         avaliacao_data = {
-#             "id": test.id,
-#             "titulo": test.title,
-#             "descricao": test.description,
-#             "disciplinas": _obter_disciplinas_avaliacao(test)
-#         }
-#         
-#         # 1. Total de alunos que realizaram a avaliação
-#         total_alunos = _calcular_totais_alunos(evaluation_id, class_tests)
-#         
-#         # 2. Níveis de Aprendizagem por turma
-#         niveis_aprendizagem = _calcular_niveis_aprendizagem(evaluation_id, class_tests)
-#         
-#         # 3. Proficiência
-#         proficiencia = _calcular_proficiencia(evaluation_id, class_tests)
-#         
-#         # 4. Nota Geral por turma
-#         nota_geral = _calcular_nota_geral(evaluation_id, class_tests)
-#         
-#         # 5. Acertos por habilidade
-#         acertos_habilidade = _calcular_acertos_habilidade(evaluation_id)
-#         
-#         # Preparar dados para o template
-#         template_data = _preparar_dados_template(
-#             test, total_alunos, niveis_aprendizagem, 
-#             proficiencia, nota_geral, acertos_habilidade
-#         )
-#         
-#         # Ler o template HTML
-#         template_path = os.path.join(os.path.dirname(__file__), '..', 'templates', 'relatorio_avaliacao.html')
-#         with open(template_path, 'r', encoding='utf-8') as f:
-#             template_content = f.read()
-#         
-#         # Renderizar o template
-#         template = Template(template_content)
-#         html_content = template.render(**template_data)
-#         
-#         # Retornar HTML para teste
-#         from flask import Response
-#         response = Response(html_content, mimetype='text/html')
-#         return response
-#         
-#     except Exception as e:
-#         logging.error(f"Erro ao testar template HTML: {str(e)}")
-#         return jsonify({"error": "Erro interno do servidor", "details": str(e)}), 500
+@bp.route('/test-html/<string:evaluation_id>', methods=['GET'])
+@jwt_required()
+@role_required("admin", "professor", "coordenador", "diretor","tecadm")
+def test_html_template(evaluation_id: str):
+    """Endpoint para testar o template HTML renderizado"""
+    try:
+        # Verificar se a avaliação existe
+        test = Test.query.get(evaluation_id)
+        if not test:
+            return jsonify({"error": "Avaliação não encontrada"}), 404
+        
+        # Buscar turmas onde a avaliação foi aplicada
+        class_tests = ClassTest.query.filter_by(test_id=evaluation_id).all()
+        if not class_tests:
+            return jsonify({"error": "Avaliação não foi aplicada em nenhuma turma"}), 404
+        
+        # Obter dados da avaliação usando as funções existentes
+        avaliacao_data = {
+            "id": test.id,
+            "titulo": test.title,
+            "descricao": test.description,
+            "disciplinas": _obter_disciplinas_avaliacao(test)
+        }
+        
+        # 1. Total de alunos que realizaram a avaliação
+        total_alunos = _calcular_totais_alunos(evaluation_id, class_tests)
+        
+        # 2. Níveis de Aprendizagem por turma
+        niveis_aprendizagem = _calcular_niveis_aprendizagem(evaluation_id, class_tests)
+        
+        # 3. Proficiência
+        proficiencia = _calcular_proficiencia(evaluation_id, class_tests)
+        
+        # 4. Nota Geral por turma
+        nota_geral = _calcular_nota_geral(evaluation_id, class_tests)
+        
+        # 5. Acertos por habilidade
+        acertos_habilidade = _calcular_acertos_habilidade(evaluation_id)
+        
+        # Preparar dados para o template
+        template_data = _preparar_dados_template(
+            test, total_alunos, niveis_aprendizagem, 
+            proficiencia, nota_geral, acertos_habilidade
+        )
+        
+        # Ler o template HTML
+        template_path = os.path.join(os.path.dirname(__file__), '..', 'templates', 'relatorio_avaliacao.html')
+        with open(template_path, 'r', encoding='utf-8') as f:
+            template_content = f.read()
+        
+        # Renderizar o template
+        template = Template(template_content)
+        html_content = template.render(**template_data)
+        
+        # Retornar HTML para teste
+        from flask import Response
+        response = Response(html_content, mimetype='text/html')
+        return response
+        
+    except Exception as e:
+        logging.error(f"Erro ao testar template HTML: {str(e)}")
+        return jsonify({"error": "Erro interno do servidor", "details": str(e)}), 500
 
 
 def _preparar_dados_template(test: Test, total_alunos: Dict, niveis_aprendizagem: Dict, 
@@ -2509,8 +2461,10 @@ def _calcular_totais_alunos_por_municipio(evaluation_id: str, class_tests: List[
 
 def _calcular_totais_alunos(evaluation_id: str, class_tests: List[ClassTest]) -> Dict[str, Any]:
     """Calcula totais de alunos por turma e geral"""
+    from app.models.studentClass import Class
+
     class_ids = [ct.class_id for ct in class_tests]
-    
+
     # Buscar todos os alunos das turmas onde a avaliação foi aplicada
     students = Student.query.options(
         joinedload(Student.class_).joinedload(Class.grade)
@@ -2525,28 +2479,47 @@ def _calcular_totais_alunos(evaluation_id: str, class_tests: List[ClassTest]) ->
     for student in students:
         students_by_class[student.class_id].append(student)
     
-    # Calcular estatísticas por turma
-    por_turma = []
+    # Calcular estatísticas por turma (agrupando por nome de turma)
+    dados_por_nome_turma = defaultdict(lambda: {"matriculados": 0, "avaliados": 0})
     total_matriculados = 0
     total_avaliados = 0
-    
+
     for class_test in class_tests:
         class_id = class_test.class_id
         class_students = students_by_class[class_id]
-        
-        # Matriculados = Alunos da turma onde a avaliação foi aplicada
-        matriculados = len(class_students)
-        # Avaliados = Alunos que realmente realizaram a avaliação (têm resultado)
-        avaliados = sum(1 for s in class_students if s.id in results_by_student)
-        percentual = (avaliados / matriculados * 100) if matriculados > 0 else 0
-        # Faltosos = Matriculados que não realizaram
-        faltosos = matriculados - avaliados
-        
+
         # Obter nome da turma
         turma_nome = "Turma Desconhecida"
         if class_students and class_students[0].class_:
             turma_nome = class_students[0].class_.name
-        
+        else:
+            # Se não há alunos, buscar nome da turma diretamente
+            from app.models.studentClass import Class
+            turma_obj = Class.query.get(class_id)
+            if turma_obj:
+                turma_nome = turma_obj.name
+
+        # Matriculados = Alunos da turma onde a avaliação foi aplicada
+        matriculados = len(class_students)
+        # Avaliados = Alunos que realmente realizaram a avaliação (têm resultado)
+        avaliados = sum(1 for s in class_students if s.id in results_by_student)
+
+        # Agregar por nome de turma (pode haver múltiplas turmas com mesmo nome)
+        dados_por_nome_turma[turma_nome]["matriculados"] += matriculados
+        dados_por_nome_turma[turma_nome]["avaliados"] += avaliados
+
+        total_matriculados += matriculados
+        total_avaliados += avaliados
+
+    # Criar lista final agrupada por nome de turma
+    por_turma = []
+    for turma_nome in sorted(dados_por_nome_turma.keys()):
+        dados = dados_por_nome_turma[turma_nome]
+        matriculados = dados["matriculados"]
+        avaliados = dados["avaliados"]
+        percentual = (avaliados / matriculados * 100) if matriculados > 0 else 0
+        faltosos = matriculados - avaliados
+
         por_turma.append({
             "turma": turma_nome,
             "matriculados": matriculados,
@@ -2554,9 +2527,6 @@ def _calcular_totais_alunos(evaluation_id: str, class_tests: List[ClassTest]) ->
             "percentual": round(percentual, 1),
             "faltosos": faltosos
         })
-        
-        total_matriculados += matriculados
-        total_avaliados += avaliados
     
     # Calcular totais gerais
     total_percentual = (total_avaliados / total_matriculados * 100) if total_matriculados > 0 else 0
@@ -2912,10 +2882,11 @@ def _calcular_niveis_aprendizagem(evaluation_id: str, class_tests: List[ClassTes
             if student_id in student_discipline_results:
                 disciplinas_turma.update(student_discipline_results[student_id].keys())
         
-        # Se não há disciplinas encontradas (turma sem resultados), pular esta turma
+        # Se não há disciplinas encontradas nesta turma, usar todas as disciplinas identificadas
+        # (para incluir turmas sem resultados, mostrando zeros)
         if not disciplinas_turma:
-            logging.info(f"Turma {turma_nome} não tem resultados - pulando")
-            continue
+            disciplinas_turma = disciplinas_identificadas
+            logging.info(f"Turma {turma_nome} não tem resultados - usando todas as disciplinas disponíveis")
         
         logging.info(f"Disciplinas encontradas na turma {turma_nome}: {disciplinas_turma}")
         
@@ -3034,11 +3005,41 @@ def _calcular_niveis_aprendizagem(evaluation_id: str, class_tests: List[ClassTes
                     dados_gerais_total[classification_geral] += 1
                 dados_gerais_total["total"] += 1
     
-    # Organizar resultado final
+    # Organizar resultado final agregando turmas com mesmo nome
     resultado_final = {}
     for disciplina, dados in disciplinas_resultado.items():
+        # Agregar turmas com mesmo nome
+        turmas_agregadas = defaultdict(lambda: {
+            "abaixo_do_basico": 0,
+            "basico": 0,
+            "adequado": 0,
+            "avancado": 0,
+            "total": 0
+        })
+
+        for turma_data in dados["por_turma"]:
+            turma_nome = turma_data["turma"]
+            turmas_agregadas[turma_nome]["abaixo_do_basico"] += turma_data["abaixo_do_basico"]
+            turmas_agregadas[turma_nome]["basico"] += turma_data["basico"]
+            turmas_agregadas[turma_nome]["adequado"] += turma_data["adequado"]
+            turmas_agregadas[turma_nome]["avancado"] += turma_data["avancado"]
+            turmas_agregadas[turma_nome]["total"] += turma_data["total"]
+
+        # Converter para lista ordenada
+        por_turma_lista = []
+        for turma_nome in sorted(turmas_agregadas.keys()):
+            dados_turma = turmas_agregadas[turma_nome]
+            por_turma_lista.append({
+                "turma": turma_nome,
+                "abaixo_do_basico": dados_turma["abaixo_do_basico"],
+                "basico": dados_turma["basico"],
+                "adequado": dados_turma["adequado"],
+                "avancado": dados_turma["avancado"],
+                "total": dados_turma["total"]
+            })
+
         resultado_final[disciplina] = {
-            "por_turma": dados["por_turma"],
+            "por_turma": por_turma_lista,
             "geral": {
                 "abaixo_do_basico": dados["geral"]["Abaixo do Básico"],
                 "basico": dados["geral"]["Básico"],
@@ -3049,17 +3050,39 @@ def _calcular_niveis_aprendizagem(evaluation_id: str, class_tests: List[ClassTes
         }
     
     # Adicionar dados gerais que englobam todas as disciplinas
+    # Garantir que TODAS as turmas sejam incluídas, mesmo que com valores zerados
     dados_gerais_por_turma_lista = []
-    for turma, dados in dados_gerais_por_turma.items():
-        dados_gerais_por_turma_lista.append({
-            "turma": turma,
-            "abaixo_do_basico": dados["Abaixo do Básico"],
-            "basico": dados["Básico"],
-            "adequado": dados["Adequado"],
-            "avancado": dados["Avançado"],
-            "total": dados["total"]
-        })
-    
+
+    # Obter lista de TODAS as turmas de class_tests, não apenas as que têm dados
+    todas_turmas = set()
+    for class_test in class_tests:
+        turma_obj = Class.query.get(class_test.class_id)
+        if turma_obj:
+            todas_turmas.add(turma_obj.name)
+
+    # Criar entrada para cada turma, mesmo que não tenha dados gerais
+    for turma_nome in sorted(todas_turmas):
+        if turma_nome in dados_gerais_por_turma:
+            dados = dados_gerais_por_turma[turma_nome]
+            dados_gerais_por_turma_lista.append({
+                "turma": turma_nome,
+                "abaixo_do_basico": dados["Abaixo do Básico"],
+                "basico": dados["Básico"],
+                "adequado": dados["Adequado"],
+                "avancado": dados["Avançado"],
+                "total": dados["total"]
+            })
+        else:
+            # Turma sem dados gerais - adicionar com zeros
+            dados_gerais_por_turma_lista.append({
+                "turma": turma_nome,
+                "abaixo_do_basico": 0,
+                "basico": 0,
+                "adequado": 0,
+                "avancado": 0,
+                "total": 0
+            })
+
     resultado_final["GERAL"] = {
         "por_turma": dados_gerais_por_turma_lista,
         "geral": {
@@ -3149,7 +3172,7 @@ def _calcular_proficiencia_por_municipio(evaluation_id: str, class_tests: List[C
             else:
                 question_disciplines[question.id] = "Disciplina Geral"
                 disciplinas_identificadas.add("Disciplina Geral")
-    
+
     # Buscar resultados da avaliação
     from sqlalchemy.orm import joinedload as jl
     evaluation_results = EvaluationResult.query.options(
@@ -3157,22 +3180,35 @@ def _calcular_proficiencia_por_municipio(evaluation_id: str, class_tests: List[C
         jl(EvaluationResult.student, Student.class_),
         jl(EvaluationResult.student, Student.class_, Class.school)
     ).filter_by(test_id=evaluation_id).all()
-    
+
+    # Buscar respostas dos alunos
+    student_answers = StudentAnswer.query.filter_by(test_id=evaluation_id).all()
+
+    # Agrupar respostas por aluno e disciplina
+    student_discipline_results = defaultdict(lambda: defaultdict(list))
+    for answer in student_answers:
+        if answer.question_id in question_disciplines:
+            disciplina = question_disciplines[answer.question_id]
+            student_discipline_results[answer.student_id][disciplina].append(answer)
+
     # Agrupar por escola
     class_ids = [ct.class_id for ct in class_tests]
     results_by_school = defaultdict(list)
-    
+
     for result in evaluation_results:
         if result.student.class_id in class_ids and result.student.class_ and result.student.class_.school:
             school_id = result.student.class_.school.id
             results_by_school[school_id].append(result)
-    
+
     # Agrupar resultados por turma dentro de cada escola
     results_by_class = defaultdict(list)
     for result in evaluation_results:
         if result.student.class_id in class_ids:
             results_by_class[result.student.class_id].append(result)
-    
+
+    # Obter nome do curso
+    course_name = _obter_nome_curso(test)
+
     # Calcular proficiência por escola e disciplina
     proficiencia_por_disciplina = {}
     
@@ -3203,17 +3239,43 @@ def _calcular_proficiencia_por_municipio(evaluation_id: str, class_tests: List[C
             # Calcular proficiência por turma e depois média das turmas
             proficiencias_turmas = []
             total_alunos = 0
-            
+
             for turma_id in turmas_da_escola:
                 turma_results = results_by_class[turma_id]
                 if turma_results:
-                    # Calcular proficiência média da turma para esta disciplina
+                    # Calcular proficiência média da turma para esta disciplina específica
                     proficiencias_alunos_turma = []
                     for result in turma_results:
-                        # Usar o resultado geral do aluno (já calculado)
-                        proficiencias_alunos_turma.append(result.proficiency)
-                        total_alunos += 1
-                    
+                        student_id = result.student_id
+                        # Calcular proficiência específica desta disciplina para este aluno
+                        if student_id in student_discipline_results and disciplina in student_discipline_results[student_id]:
+                            disciplina_answers = student_discipline_results[student_id][disciplina]
+                            disciplina_questions = [q for q in test.questions if question_disciplines.get(q.id) == disciplina]
+
+                            # Calcular acertos específicos para esta disciplina
+                            correct_answers_disciplina = 0
+                            for answer in disciplina_answers:
+                                question = next((q for q in disciplina_questions if q.id == answer.question_id), None)
+                                if question:
+                                    if question.question_type == 'multiple_choice':
+                                        is_correct = EvaluationResultService.check_multiple_choice_answer(answer.answer, question.correct_answer)
+                                        if is_correct:
+                                            correct_answers_disciplina += 1
+                                    elif question.correct_answer:
+                                        if str(answer.answer).strip().lower() == str(question.correct_answer).strip().lower():
+                                            correct_answers_disciplina += 1
+
+                            # Calcular proficiência específica para esta disciplina
+                            if len(disciplina_questions) > 0:
+                                proficiency_disciplina = EvaluationCalculator.calculate_proficiency(
+                                    correct_answers=correct_answers_disciplina,
+                                    total_questions=len(disciplina_questions),
+                                    course_name=course_name,
+                                    subject_name=disciplina
+                                )
+                                proficiencias_alunos_turma.append(proficiency_disciplina)
+                                total_alunos += 1
+
                     if proficiencias_alunos_turma:
                         media_turma = sum(proficiencias_alunos_turma) / len(proficiencias_alunos_turma)
                         proficiencias_turmas.append(media_turma)
@@ -3226,7 +3288,7 @@ def _calcular_proficiencia_por_municipio(evaluation_id: str, class_tests: List[C
             
             proficiencia_por_disciplina[disciplina]['por_escola'].append({
                 'escola': escola_nome,
-                'media': round(media_escola, 2),
+                'proficiencia': round(media_escola, 2),
                 'total_alunos': total_alunos
             })
             
@@ -3254,7 +3316,7 @@ def _calcular_proficiencia_por_municipio(evaluation_id: str, class_tests: List[C
                 dados_gerais_por_escola_lista.append(escola_existente)
             
             # Somar a proficiência desta disciplina para esta escola
-            escola_existente['proficiencia'] += escola_data['media']
+            escola_existente['proficiencia'] += escola_data.get('proficiencia', escola_data.get('media', 0))
             escola_existente['total_alunos'] += escola_data['total_alunos']
     
     # Calcular média geral por escola
@@ -3277,12 +3339,12 @@ def _calcular_proficiencia(evaluation_id: str, class_tests: List[ClassTest]) -> 
     """Calcula proficiência por turma e disciplina"""
     from app.models.skill import Skill
     from app.services.evaluation_calculator import EvaluationCalculator
-    
+
     # Buscar questões da avaliação para identificar disciplinas
     test = Test.query.get(evaluation_id)
     if not test or not test.questions:
         return {}
-    
+
     # Buscar todas as habilidades para mapear ID -> disciplina
     skills_dict = {}
     skill_ids = set()
@@ -3290,35 +3352,41 @@ def _calcular_proficiencia(evaluation_id: str, class_tests: List[ClassTest]) -> 
         if question.skill and question.skill.strip() and question.skill != '{}':
             clean_skill_id = question.skill.replace('{', '').replace('}', '')
             skill_ids.add(clean_skill_id)
-    
+
     if skill_ids:
         skills = Skill.query.filter(Skill.id.in_(skill_ids)).all()
         skills_dict = {str(skill.id): skill for skill in skills}
-    
+
     # Mapear questões para disciplinas
     question_disciplines = {}
+    disciplinas_identificadas = set()
     for question in test.questions:
         # Questões com skill: mapear via skill.subject_id
         if question.skill and question.skill.strip() and question.skill != '{}':
             clean_skill_id = question.skill.replace('{', '').replace('}', '')
             skill_obj = skills_dict.get(clean_skill_id)
-            
+
             if skill_obj and skill_obj.subject_id:
                 subject = Subject.query.get(skill_obj.subject_id)
                 if subject:
                     question_disciplines[question.id] = subject.name
+                    disciplinas_identificadas.add(subject.name)
                 else:
                     question_disciplines[question.id] = "Disciplina Geral"
+                    disciplinas_identificadas.add("Disciplina Geral")
             else:
                 question_disciplines[question.id] = "Disciplina Geral"
-        
+                disciplinas_identificadas.add("Disciplina Geral")
+
         # Questões sem skill: mapear para disciplina principal da avaliação
         else:
             if test.subject_rel:
                 question_disciplines[question.id] = test.subject_rel.name
+                disciplinas_identificadas.add(test.subject_rel.name)
             else:
                 question_disciplines[question.id] = "Disciplina Geral"
-    
+                disciplinas_identificadas.add("Disciplina Geral")
+
     # Buscar respostas dos alunos
     student_answers = StudentAnswer.query.filter_by(test_id=evaluation_id).all()
     
@@ -3381,10 +3449,11 @@ def _calcular_proficiencia(evaluation_id: str, class_tests: List[ClassTest]) -> 
             if student_id in student_discipline_results:
                 disciplinas_turma.update(student_discipline_results[student_id].keys())
         
-        # Se não há disciplinas encontradas (turma sem resultados), pular esta turma
+        # Se não há disciplinas encontradas nesta turma, usar todas as disciplinas identificadas
+        # (para incluir turmas sem resultados, mostrando zeros)
         if not disciplinas_turma:
-            logging.info(f"Turma {turma_nome} não tem resultados - pulando")
-            continue
+            disciplinas_turma = disciplinas_identificadas
+            logging.info(f"Turma {turma_nome} não tem resultados - usando todas as disciplinas disponíveis")
         
         for disciplina in disciplinas_turma:
             # Calcular proficiência específica para esta disciplina e turma
@@ -3478,27 +3547,86 @@ def _calcular_proficiencia(evaluation_id: str, class_tests: List[ClassTest]) -> 
             dados_gerais_total_proficiencia += sum(proficiencias_gerais_turma)
             dados_gerais_total_alunos += len(proficiencias_gerais_turma)
     
+    # Obter lista de TODAS as turmas de class_tests PRIMEIRO
+    todas_turmas_prof = set()
+    for class_test in class_tests:
+        turma_obj = Class.query.get(class_test.class_id)
+        if turma_obj:
+            todas_turmas_prof.add(turma_obj.name)
+
     # Organizar resultado final
     resultado_final = {}
     for disciplina, dados in disciplinas_proficiencia.items():
         media_geral_disciplina = dados["total_proficiencia"] / dados["total_alunos"] if dados["total_alunos"] > 0 else 0
-        
+
+        # Agregar turmas com mesmo nome (somando proficiências e contando alunos)
+        turmas_agregadas = defaultdict(lambda: {"total_proficiencia": 0, "total_alunos": 0})
+        for t in dados["por_turma"]:
+            turma_nome = t["turma"]
+            proficiencia = t["proficiencia"]
+            # Assumindo que cada entrada representa a média de alunos, precisamos pesar igualmente
+            # Na verdade, precisamos acumular as proficiências e recalcular a média
+            turmas_agregadas[turma_nome]["total_proficiencia"] += proficiencia
+            turmas_agregadas[turma_nome]["total_alunos"] += 1  # Conta quantas vezes esta turma apareceu
+
+        # Garantir que TODAS as turmas apareçam, mesmo sem dados
+        turmas_disciplina_lista = []
+        for turma_nome in sorted(todas_turmas_prof):
+            if turma_nome in turmas_agregadas:
+                dados_turma = turmas_agregadas[turma_nome]
+                # Média das proficiências agregadas
+                media_prof = dados_turma["total_proficiencia"] / dados_turma["total_alunos"] if dados_turma["total_alunos"] > 0 else 0
+                turmas_disciplina_lista.append({
+                    "turma": turma_nome,
+                    "proficiencia": round(media_prof, 2)
+                })
+            else:
+                turmas_disciplina_lista.append({
+                    "turma": turma_nome,
+                    "proficiencia": 0
+                })
+
         resultado_final[disciplina] = {
-            "por_turma": sorted(dados["por_turma"], key=lambda x: x["turma"]),
+            "por_turma": turmas_disciplina_lista,
             "media_geral": round(media_geral_disciplina, 2)
         }
-    
+
     # Adicionar dados gerais que englobam todas as disciplinas
+    # Garantir que TODAS as turmas sejam incluídas, mesmo que com valores zerados
     media_geral_total = dados_gerais_total_proficiencia / dados_gerais_total_alunos if dados_gerais_total_alunos > 0 else 0
-    
+
+    # Agregar dados gerais por nome de turma
+    turmas_gerais_agregadas = defaultdict(lambda: {"total_proficiencia": 0, "total_ocorrencias": 0})
+    for dados_list in dados_gerais_por_turma.values():
+        for dados in dados_list:
+            turma_nome = dados["turma"]
+            turmas_gerais_agregadas[turma_nome]["total_proficiencia"] += dados["proficiencia"]
+            turmas_gerais_agregadas[turma_nome]["total_ocorrencias"] += 1
+
+    # Criar entrada para cada turma, mesmo que não tenha dados gerais
+    dados_gerais_lista = []
+    for turma_nome in sorted(todas_turmas_prof):
+        if turma_nome in turmas_gerais_agregadas:
+            dados_turma = turmas_gerais_agregadas[turma_nome]
+            media_prof = dados_turma["total_proficiencia"] / dados_turma["total_ocorrencias"] if dados_turma["total_ocorrencias"] > 0 else 0
+            dados_gerais_lista.append({
+                "turma": turma_nome,
+                "proficiencia": round(media_prof, 2)
+            })
+        else:
+            dados_gerais_lista.append({
+                "turma": turma_nome,
+                "proficiencia": 0
+            })
+
     resultado_final["GERAL"] = {
-        "por_turma": sorted([dados for dados_list in dados_gerais_por_turma.values() for dados in dados_list], key=lambda x: x["turma"]),
+        "por_turma": dados_gerais_lista,
         "media_geral": round(media_geral_total, 2)
     }
-    
+
     # Calcular média municipal por disciplina
     media_municipal_por_disciplina = _calcular_media_municipal_por_disciplina(evaluation_id, question_disciplines)
-    
+
     return {
         "por_disciplina": resultado_final,
         "media_municipal_por_disciplina": media_municipal_por_disciplina
@@ -3586,22 +3714,36 @@ def _calcular_nota_geral_por_municipio(evaluation_id: str, class_tests: List[Cla
         jl(EvaluationResult.student, Student.class_),
         jl(EvaluationResult.student, Student.class_, Class.school)
     ).filter_by(test_id=evaluation_id).all()
-    
+
+    # Buscar respostas dos alunos
+    student_answers = StudentAnswer.query.filter_by(test_id=evaluation_id).all()
+
+    # Agrupar respostas por aluno e disciplina
+    student_discipline_results = defaultdict(lambda: defaultdict(list))
+    for answer in student_answers:
+        if answer.question_id in question_disciplines:
+            disciplina = question_disciplines[answer.question_id]
+            student_discipline_results[answer.student_id][disciplina].append(answer)
+
     # Agrupar por escola
     class_ids = [ct.class_id for ct in class_tests]
     results_by_school = defaultdict(list)
-    
+
     for result in evaluation_results:
         if result.student.class_id in class_ids and result.student.class_ and result.student.class_.school:
             school_id = result.student.class_.school.id
             results_by_school[school_id].append(result)
-    
+
     # Agrupar resultados por turma dentro de cada escola
     results_by_class = defaultdict(list)
     for result in evaluation_results:
         if result.student.class_id in class_ids:
             results_by_class[result.student.class_id].append(result)
-    
+
+    # Obter informações para cálculo
+    course_name = _obter_nome_curso(test)
+    use_simple_calculation = test.grade_calculation_type == 'simple'
+
     # Calcular nota geral por escola e disciplina
     nota_por_disciplina = {}
     
@@ -3632,26 +3774,64 @@ def _calcular_nota_geral_por_municipio(evaluation_id: str, class_tests: List[Cla
             # Calcular nota por turma e depois SOMAR as turmas
             soma_notas_turmas = 0.0
             total_alunos = 0
-            
+
             for turma_id in turmas_da_escola:
                 turma_results = results_by_class[turma_id]
                 if turma_results:
-                    # Calcular nota média da turma
+                    # Calcular nota média da turma para esta disciplina específica
                     notas_alunos_turma = []
                     for result in turma_results:
-                        notas_alunos_turma.append(result.grade)
-                        total_alunos += 1
-                    
+                        student_id = result.student_id
+                        # Calcular nota específica desta disciplina para este aluno
+                        if student_id in student_discipline_results and disciplina in student_discipline_results[student_id]:
+                            disciplina_answers = student_discipline_results[student_id][disciplina]
+                            disciplina_questions = [q for q in test.questions if question_disciplines.get(q.id) == disciplina]
+
+                            # Calcular acertos específicos para esta disciplina
+                            correct_answers_disciplina = 0
+                            for answer in disciplina_answers:
+                                question = next((q for q in disciplina_questions if q.id == answer.question_id), None)
+                                if question:
+                                    if question.question_type == 'multiple_choice':
+                                        is_correct = EvaluationResultService.check_multiple_choice_answer(answer.answer, question.correct_answer)
+                                        if is_correct:
+                                            correct_answers_disciplina += 1
+                                    elif question.correct_answer:
+                                        if str(answer.answer).strip().lower() == str(question.correct_answer).strip().lower():
+                                            correct_answers_disciplina += 1
+
+                            # Calcular nota específica para esta disciplina
+                            if len(disciplina_questions) > 0:
+                                proficiency_disciplina = EvaluationCalculator.calculate_proficiency(
+                                    correct_answers=correct_answers_disciplina,
+                                    total_questions=len(disciplina_questions),
+                                    course_name=course_name,
+                                    subject_name=disciplina
+                                )
+                                grade_disciplina = EvaluationCalculator.calculate_grade(
+                                    proficiency=proficiency_disciplina,
+                                    course_name=course_name,
+                                    subject_name=disciplina,
+                                    use_simple_calculation=use_simple_calculation,
+                                    correct_answers=correct_answers_disciplina,
+                                    total_questions=len(disciplina_questions)
+                                )
+                                notas_alunos_turma.append(grade_disciplina)
+                                total_alunos += 1
+
                     if notas_alunos_turma:
                         media_turma = sum(notas_alunos_turma) / len(notas_alunos_turma)
-                        soma_notas_turmas += media_turma  # SOMAR as notas das turmas
-            
-            # A nota da escola é a SOMA das notas das turmas
-            nota_escola = soma_notas_turmas
+                        soma_notas_turmas += media_turma  # Somar as médias das turmas para depois calcular a média geral
+
+            # A nota da escola é a média das notas das turmas (não a soma)
+            if len(turmas_da_escola) > 0 and soma_notas_turmas > 0:
+                nota_escola = soma_notas_turmas / len(turmas_da_escola)
+            else:
+                nota_escola = 0.0
             
             nota_por_disciplina[disciplina]['por_escola'].append({
                 'escola': escola_nome,
-                'media': round(nota_escola, 2),
+                'nota': round(nota_escola, 2),
                 'total_alunos': total_alunos
             })
             
@@ -3679,7 +3859,7 @@ def _calcular_nota_geral_por_municipio(evaluation_id: str, class_tests: List[Cla
                 dados_gerais_por_escola_lista.append(escola_existente)
             
             # Somar a nota desta disciplina para esta escola
-            escola_existente['nota'] += escola_data['media']
+            escola_existente['nota'] += escola_data.get('nota', escola_data.get('media', 0))
             escola_existente['total_alunos'] += escola_data['total_alunos']
     
     # Calcular média geral por escola
@@ -3722,6 +3902,7 @@ def _calcular_nota_geral(evaluation_id: str, class_tests: List[ClassTest]) -> Di
     
     # Mapear questões para disciplinas
     question_disciplines = {}
+    disciplinas_identificadas = set()
     for question in test.questions:
         # Questões com skill: mapear via skill.subject_id
         if question.skill and question.skill.strip() and question.skill != '{}':
@@ -3732,17 +3913,22 @@ def _calcular_nota_geral(evaluation_id: str, class_tests: List[ClassTest]) -> Di
                 subject = Subject.query.get(skill_obj.subject_id)
                 if subject:
                     question_disciplines[question.id] = subject.name
+                    disciplinas_identificadas.add(subject.name)
                 else:
                     question_disciplines[question.id] = "Disciplina Geral"
+                    disciplinas_identificadas.add("Disciplina Geral")
             else:
                 question_disciplines[question.id] = "Disciplina Geral"
+                disciplinas_identificadas.add("Disciplina Geral")
         
         # Questões sem skill: mapear para disciplina principal da avaliação
         else:
             if test.subject_rel:
                 question_disciplines[question.id] = test.subject_rel.name
+                disciplinas_identificadas.add(test.subject_rel.name)
             else:
                 question_disciplines[question.id] = "Disciplina Geral"
+                disciplinas_identificadas.add("Disciplina Geral")
     
     # Buscar respostas dos alunos
     student_answers = StudentAnswer.query.filter_by(test_id=evaluation_id).all()
@@ -3807,10 +3993,11 @@ def _calcular_nota_geral(evaluation_id: str, class_tests: List[ClassTest]) -> Di
             if student_id in student_discipline_results:
                 disciplinas_turma.update(student_discipline_results[student_id].keys())
         
-        # Se não há disciplinas encontradas (turma sem resultados), pular esta turma
+        # Se não há disciplinas encontradas nesta turma, usar todas as disciplinas identificadas
+        # (para incluir turmas sem resultados, mostrando zeros)
         if not disciplinas_turma:
-            logging.info(f"Turma {turma_nome} não tem resultados - pulando")
-            continue
+            disciplinas_turma = disciplinas_identificadas
+            logging.info(f"Turma {turma_nome} não tem resultados - usando todas as disciplinas disponíveis")
         
         for disciplina in disciplinas_turma:
             # Calcular nota específica para esta disciplina e turma
@@ -3926,27 +4113,84 @@ def _calcular_nota_geral(evaluation_id: str, class_tests: List[ClassTest]) -> Di
             dados_gerais_total_notas += sum(notas_gerais_turma)
             dados_gerais_total_alunos += len(notas_gerais_turma)
     
+    # Obter lista de TODAS as turmas de class_tests PRIMEIRO
+    todas_turmas_nota = set()
+    for class_test in class_tests:
+        turma_obj = Class.query.get(class_test.class_id)
+        if turma_obj:
+            todas_turmas_nota.add(turma_obj.name)
+
     # Organizar resultado final
     resultado_final = {}
     for disciplina, dados in disciplinas_notas.items():
         media_geral_disciplina = dados["total_notas"] / dados["total_alunos"] if dados["total_alunos"] > 0 else 0
-        
+
+        # Agregar turmas com mesmo nome (somando notas e contando alunos)
+        turmas_agregadas = defaultdict(lambda: {"total_notas": 0, "total_alunos": 0})
+        for t in dados["por_turma"]:
+            turma_nome = t["turma"]
+            nota = t["nota"]
+            turmas_agregadas[turma_nome]["total_notas"] += nota
+            turmas_agregadas[turma_nome]["total_alunos"] += 1  # Conta quantas vezes esta turma apareceu
+
+        # Garantir que TODAS as turmas apareçam, mesmo sem dados
+        turmas_disciplina_lista = []
+        for turma_nome in sorted(todas_turmas_nota):
+            if turma_nome in turmas_agregadas:
+                dados_turma = turmas_agregadas[turma_nome]
+                # Média das notas agregadas
+                media_nota = dados_turma["total_notas"] / dados_turma["total_alunos"] if dados_turma["total_alunos"] > 0 else 0
+                turmas_disciplina_lista.append({
+                    "turma": turma_nome,
+                    "nota": round(media_nota, 2)
+                })
+            else:
+                turmas_disciplina_lista.append({
+                    "turma": turma_nome,
+                    "nota": 0
+                })
+
         resultado_final[disciplina] = {
-            "por_turma": sorted(dados["por_turma"], key=lambda x: x["turma"]),
+            "por_turma": turmas_disciplina_lista,
             "media_geral": round(media_geral_disciplina, 2)
         }
-    
+
     # Adicionar dados gerais que englobam todas as disciplinas
+    # Garantir que TODAS as turmas sejam incluídas, mesmo que com valores zerados
     media_geral_total = dados_gerais_total_notas / dados_gerais_total_alunos if dados_gerais_total_alunos > 0 else 0
-    
+
+    # Agregar dados gerais por nome de turma
+    turmas_gerais_agregadas = defaultdict(lambda: {"total_notas": 0, "total_ocorrencias": 0})
+    for dados_list in dados_gerais_por_turma.values():
+        for dados in dados_list:
+            turma_nome = dados["turma"]
+            turmas_gerais_agregadas[turma_nome]["total_notas"] += dados["nota"]
+            turmas_gerais_agregadas[turma_nome]["total_ocorrencias"] += 1
+
+    # Criar entrada para cada turma, mesmo que não tenha dados gerais
+    dados_gerais_notas_lista = []
+    for turma_nome in sorted(todas_turmas_nota):
+        if turma_nome in turmas_gerais_agregadas:
+            dados_turma = turmas_gerais_agregadas[turma_nome]
+            media_nota = dados_turma["total_notas"] / dados_turma["total_ocorrencias"] if dados_turma["total_ocorrencias"] > 0 else 0
+            dados_gerais_notas_lista.append({
+                "turma": turma_nome,
+                "nota": round(media_nota, 2)
+            })
+        else:
+            dados_gerais_notas_lista.append({
+                "turma": turma_nome,
+                "nota": 0
+            })
+
     resultado_final["GERAL"] = {
-        "por_turma": sorted([dados for dados_list in dados_gerais_por_turma.values() for dados in dados_list], key=lambda x: x["turma"]),
+        "por_turma": dados_gerais_notas_lista,
         "media_geral": round(media_geral_total, 2)
     }
-    
+
     # Calcular média municipal por disciplina
     media_municipal_por_disciplina = _calcular_media_municipal_nota_por_disciplina(evaluation_id, question_disciplines)
-    
+
     return {
         "por_disciplina": resultado_final,
         "media_municipal_por_disciplina": media_municipal_por_disciplina
@@ -4003,10 +4247,10 @@ def _calcular_acertos_habilidade_por_municipio(evaluation_id: str, class_tests: 
         skills_dict = {str(skill.id): skill for skill in skills}
     
     # Calcular acertos por habilidade e disciplina
-    disciplinas_habilidades = defaultdict(lambda: defaultdict(lambda: {"total": 0, "acertos": 0, "questoes": []}))
-    
+    disciplinas_habilidades = defaultdict(lambda: defaultdict(lambda: {"total": 0, "acertos": 0, "questoes": [], "descricao": ""}))
+
     # Dados gerais que englobam todas as disciplinas
-    habilidades_gerais = defaultdict(lambda: {"total": 0, "acertos": 0, "questoes": []})
+    habilidades_gerais = defaultdict(lambda: {"total": 0, "acertos": 0, "questoes": [], "descricao": ""})
     
     for question in test.questions:
         # Questões com skill: mapear via skill.subject_id
@@ -4018,9 +4262,11 @@ def _calcular_acertos_habilidade_por_municipio(evaluation_id: str, class_tests: 
             # Se não encontrou a habilidade na tabela Skill, usar o ID como código
             if not skill_obj:
                 skill_code = clean_skill_id
+                skill_description = f"Habilidade {clean_skill_id}"
                 disciplina = "Disciplina Geral"
             else:
                 skill_code = skill_obj.code
+                skill_description = skill_obj.description if hasattr(skill_obj, 'description') and skill_obj.description else f"Habilidade {skill_code}"
                 # Obter disciplina da habilidade
                 if skill_obj.subject_id:
                     # Buscar a disciplina pelo subject_id
@@ -4037,9 +4283,11 @@ def _calcular_acertos_habilidade_por_municipio(evaluation_id: str, class_tests: 
             if test.subject_rel:
                 disciplina = test.subject_rel.name
                 skill_code = f"Questão {question.number or 'N/A'}"
+                skill_description = f"Questão {question.number or 'N/A'}"
             else:
                 disciplina = "Disciplina Geral"
                 skill_code = f"Questão {question.number or 'N/A'}"
+                skill_description = f"Questão {question.number or 'N/A'}"
         
         answers = answers_by_question.get(question.id, [])
         
@@ -4059,6 +4307,8 @@ def _calcular_acertos_habilidade_por_municipio(evaluation_id: str, class_tests: 
         
         disciplinas_habilidades[disciplina][skill_code]["total"] += total_respostas
         disciplinas_habilidades[disciplina][skill_code]["acertos"] += acertos
+        if not disciplinas_habilidades[disciplina][skill_code]["descricao"]:
+            disciplinas_habilidades[disciplina][skill_code]["descricao"] = skill_description
         disciplinas_habilidades[disciplina][skill_code]["questoes"].append({
             "numero": question.number or 1,
             "acertos": acertos,
@@ -4068,6 +4318,8 @@ def _calcular_acertos_habilidade_por_municipio(evaluation_id: str, class_tests: 
         # Adicionar aos dados gerais
         habilidades_gerais[skill_code]["total"] += total_respostas
         habilidades_gerais[skill_code]["acertos"] += acertos
+        if not habilidades_gerais[skill_code]["descricao"]:
+            habilidades_gerais[skill_code]["descricao"] = skill_description
         habilidades_gerais[skill_code]["questoes"].append({
             "numero": question.number or 1,
             "acertos": acertos,
@@ -4096,7 +4348,7 @@ def _calcular_acertos_habilidade_por_municipio(evaluation_id: str, class_tests: 
                         "disciplina": disciplina,
                         "numero_questao": numero_questao_global,
                         "codigo": skill_code,
-                        "descricao": f"Habilidade {skill_code}",
+                        "descricao": dados["descricao"] if dados.get("descricao") else f"Habilidade {skill_code}",
                         "acertos": questao_data["acertos"],
                         "total": questao_data["total"],
                         "percentual": round(percentual, 1)
@@ -4187,10 +4439,10 @@ def _calcular_acertos_habilidade(evaluation_id: str) -> Dict[str, Any]:
             logging.warning(f"Skill IDs não encontrados: {not_found}")
     
     # Calcular acertos por habilidade e disciplina
-    disciplinas_habilidades = defaultdict(lambda: defaultdict(lambda: {"total": 0, "acertos": 0, "questoes": []}))
+    disciplinas_habilidades = defaultdict(lambda: defaultdict(lambda: {"total": 0, "acertos": 0, "questoes": [], "descricao": ""}))
     
     # Dados gerais que englobam todas as disciplinas
-    habilidades_gerais = defaultdict(lambda: {"total": 0, "acertos": 0, "questoes": []})
+    habilidades_gerais = defaultdict(lambda: {"total": 0, "acertos": 0, "questoes": [], "descricao": ""})
     
     for question in test.questions:
         # Questões com skill: mapear via skill.subject_id
@@ -4202,10 +4454,12 @@ def _calcular_acertos_habilidade(evaluation_id: str) -> Dict[str, Any]:
             # Se não encontrou a habilidade na tabela Skill, usar o ID como código
             if not skill_obj:
                 skill_code = clean_skill_id
+                skill_description = f"Habilidade {clean_skill_id}"
                 disciplina = "Disciplina Geral"
                 logging.warning(f"Habilidade não encontrada na tabela Skill: {clean_skill_id}")
             else:
                 skill_code = skill_obj.code
+                skill_description = skill_obj.description if hasattr(skill_obj, 'description') and skill_obj.description else f"Habilidade {skill_code}"
                 # Obter disciplina da habilidade
                 if skill_obj.subject_id:
                     # Buscar a disciplina pelo subject_id
@@ -4222,10 +4476,12 @@ def _calcular_acertos_habilidade(evaluation_id: str) -> Dict[str, Any]:
             if test.subject_rel:
                 disciplina = test.subject_rel.name
                 skill_code = f"Questão {question.number or 'N/A'}"
+                skill_description = f"Questão {question.number or 'N/A'}"
                 logging.info(f"Questão {question.id} sem skill mapeada para disciplina principal: {test.subject_rel.name}")
             else:
                 disciplina = "Disciplina Geral"
                 skill_code = f"Questão {question.number or 'N/A'}"
+                skill_description = f"Questão {question.number or 'N/A'}"
                 logging.warning(f"Questão {question.id} sem skill e avaliação sem disciplina principal")
         
         answers = answers_by_question.get(question.id, [])
@@ -4246,6 +4502,8 @@ def _calcular_acertos_habilidade(evaluation_id: str) -> Dict[str, Any]:
         
         disciplinas_habilidades[disciplina][skill_code]["total"] += total_respostas
         disciplinas_habilidades[disciplina][skill_code]["acertos"] += acertos
+        if not disciplinas_habilidades[disciplina][skill_code]["descricao"]:
+            disciplinas_habilidades[disciplina][skill_code]["descricao"] = skill_description
         disciplinas_habilidades[disciplina][skill_code]["questoes"].append({
             "numero": question.number or 1,
             "acertos": acertos,
@@ -4255,6 +4513,8 @@ def _calcular_acertos_habilidade(evaluation_id: str) -> Dict[str, Any]:
         # Adicionar aos dados gerais
         habilidades_gerais[skill_code]["total"] += total_respostas
         habilidades_gerais[skill_code]["acertos"] += acertos
+        if not habilidades_gerais[skill_code]["descricao"]:
+            habilidades_gerais[skill_code]["descricao"] = skill_description
         habilidades_gerais[skill_code]["questoes"].append({
             "numero": question.number or 1,
             "acertos": acertos,
@@ -4283,7 +4543,7 @@ def _calcular_acertos_habilidade(evaluation_id: str) -> Dict[str, Any]:
                         "disciplina": disciplina,
                         "numero_questao": numero_questao_global,
                         "codigo": skill_code,
-                        "descricao": f"Habilidade {skill_code}",
+                        "descricao": dados["descricao"] if dados.get("descricao") else f"Habilidade {skill_code}",
                         "acertos": questao_data["acertos"],
                         "total": questao_data["total"],
                         "percentual": round(percentual, 1)
@@ -4468,22 +4728,50 @@ def _calcular_media_municipal_por_disciplina(evaluation_id: str, question_discip
                 disciplina = question_disciplines[answer.question_id]
                 student_discipline_results[answer.student_id][disciplina].append(answer)
         
-        # Calcular média por disciplina
+        # Calcular média por disciplina (calculando proficiência específica de cada disciplina)
+        from app.services.evaluation_calculator import EvaluationCalculator
+
         disciplinas_proficiencia = defaultdict(list)
-        
+        course_name = _obter_nome_curso(test)
+
         for result in municipal_results:
             student_id = result.student_id
-            if student_id in student_discipline_results and result.proficiency is not None:
-                for disciplina in student_discipline_results[student_id].keys():
-                    disciplinas_proficiencia[disciplina].append(result.proficiency)
-        
+            if student_id in student_discipline_results:
+                # Calcular proficiência específica para cada disciplina
+                for disciplina, answers in student_discipline_results[student_id].items():
+                    # Buscar questões desta disciplina
+                    disciplina_questions = [q for q in test.questions if question_disciplines.get(q.id) == disciplina]
+
+                    # Calcular acertos específicos para esta disciplina
+                    correct_answers_disciplina = 0
+                    for answer in answers:
+                        question = next((q for q in disciplina_questions if q.id == answer.question_id), None)
+                        if question:
+                            if question.question_type == 'multiple_choice':
+                                is_correct = EvaluationResultService.check_multiple_choice_answer(answer.answer, question.correct_answer)
+                                if is_correct:
+                                    correct_answers_disciplina += 1
+                            elif question.correct_answer:
+                                if str(answer.answer).strip().lower() == str(question.correct_answer).strip().lower():
+                                    correct_answers_disciplina += 1
+
+                    # Calcular proficiência específica para esta disciplina
+                    if len(disciplina_questions) > 0:
+                        proficiency_disciplina = EvaluationCalculator.calculate_proficiency(
+                            correct_answers=correct_answers_disciplina,
+                            total_questions=len(disciplina_questions),
+                            course_name=course_name,
+                            subject_name=disciplina
+                        )
+                        disciplinas_proficiencia[disciplina].append(proficiency_disciplina)
+
         # Calcular média para cada disciplina
         medias_por_disciplina = {}
         for disciplina, proficiencias in disciplinas_proficiencia.items():
             if proficiencias:
                 media = sum(proficiencias) / len(proficiencias)
                 medias_por_disciplina[disciplina] = round(media, 2)
-        
+
         return medias_por_disciplina
         
     except Exception as e:
@@ -4541,22 +4829,59 @@ def _calcular_media_municipal_nota_por_disciplina(evaluation_id: str, question_d
                 disciplina = question_disciplines[answer.question_id]
                 student_discipline_results[answer.student_id][disciplina].append(answer)
         
-        # Calcular média por disciplina
+        # Calcular média por disciplina (calculando nota específica de cada disciplina)
+        from app.services.evaluation_calculator import EvaluationCalculator
+
         disciplinas_notas = defaultdict(list)
-        
+        course_name = _obter_nome_curso(test)
+        use_simple_calculation = test.grade_calculation_type == 'simple'
+
         for result in municipal_results:
             student_id = result.student_id
-            if student_id in student_discipline_results and result.grade is not None:
-                for disciplina in student_discipline_results[student_id].keys():
-                    disciplinas_notas[disciplina].append(result.grade)
-        
+            if student_id in student_discipline_results:
+                # Calcular nota específica para cada disciplina
+                for disciplina, answers in student_discipline_results[student_id].items():
+                    # Buscar questões desta disciplina
+                    disciplina_questions = [q for q in test.questions if question_disciplines.get(q.id) == disciplina]
+
+                    # Calcular acertos específicos para esta disciplina
+                    correct_answers_disciplina = 0
+                    for answer in answers:
+                        question = next((q for q in disciplina_questions if q.id == answer.question_id), None)
+                        if question:
+                            if question.question_type == 'multiple_choice':
+                                is_correct = EvaluationResultService.check_multiple_choice_answer(answer.answer, question.correct_answer)
+                                if is_correct:
+                                    correct_answers_disciplina += 1
+                            elif question.correct_answer:
+                                if str(answer.answer).strip().lower() == str(question.correct_answer).strip().lower():
+                                    correct_answers_disciplina += 1
+
+                    # Calcular nota específica para esta disciplina
+                    if len(disciplina_questions) > 0:
+                        proficiency_disciplina = EvaluationCalculator.calculate_proficiency(
+                            correct_answers=correct_answers_disciplina,
+                            total_questions=len(disciplina_questions),
+                            course_name=course_name,
+                            subject_name=disciplina
+                        )
+                        grade_disciplina = EvaluationCalculator.calculate_grade(
+                            proficiency=proficiency_disciplina,
+                            course_name=course_name,
+                            subject_name=disciplina,
+                            use_simple_calculation=use_simple_calculation,
+                            correct_answers=correct_answers_disciplina,
+                            total_questions=len(disciplina_questions)
+                        )
+                        disciplinas_notas[disciplina].append(grade_disciplina)
+
         # Calcular média para cada disciplina
         medias_por_disciplina = {}
         for disciplina, notas in disciplinas_notas.items():
             if notas:
                 media = sum(notas) / len(notas)
                 medias_por_disciplina[disciplina] = round(media, 2)
-        
+
         return medias_por_disciplina
         
     except Exception as e:

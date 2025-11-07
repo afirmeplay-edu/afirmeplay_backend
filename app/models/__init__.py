@@ -26,6 +26,7 @@ from .physicalTestAnswer import PhysicalTestAnswer
 from .physicalTestForm import PhysicalTestForm
 from .formCoordinates import FormCoordinates
 from .studentPasswordLog import StudentPasswordLog
+from .user_settings import UserSettings
 
 from .calendar_event import CalendarEvent, CalendarVisibilityScope
 from .calendar_event_target import CalendarEventTarget, CalendarTargetType

@@ -15,6 +15,7 @@ from app.models.grades import Grade
 from app.models.teacher import Teacher
 from app.models.manager import Manager
 from app.models.studentPasswordLog import StudentPasswordLog
+from app.models.user_settings import UserSettings
 from sqlalchemy.orm import joinedload
 from app.utils.email_service import EmailService
 from datetime import datetime, timedelta, date
@@ -82,6 +83,14 @@ def format_student_details(student):
         "school": school_details,
         "class": class_details,
         "grade": grade_details
+    }
+
+
+def format_user_settings(settings_instance):
+    return {
+        "theme": settings_instance.theme if settings_instance else None,
+        "fontFamily": settings_instance.font_family if settings_instance else None,
+        "fontSize": settings_instance.font_size if settings_instance else None
     }
 
 @bp.route('/list', methods=['GET'])
@@ -603,6 +612,91 @@ def delete_user(user_id):
     except Exception as e:
         logging.error(f"Erro inesperado ao deletar usuário: {e}", exc_info=True)
         return jsonify({"erro": "Erro interno do servidor"}), 500 
+
+@bp.route('/user-settings/<string:user_id>', methods=['POST'])
+@jwt_required()
+@role_required("admin", "tecadm", "diretor", "coordenador", "professor", "aluno")
+def save_user_settings(user_id):
+    try:
+        current_user = get_current_user_from_token()
+        if not current_user:
+            return jsonify({"erro": "Usuário não encontrado"}), 404
+
+        if current_user['id'] != user_id and current_user['role'] not in ["admin", "tecadm"]:
+            return jsonify({"erro": "Sem permissão para atualizar preferências de outro usuário"}), 403
+
+        user = User.query.get(user_id)
+        if not user:
+            return jsonify({"erro": "Usuário não encontrado"}), 404
+
+        payload = request.get_json()
+        if not payload or 'settings' not in payload:
+            return jsonify({"erro": "Objeto settings é obrigatório"}), 400
+
+        settings_data = payload.get('settings')
+        if not isinstance(settings_data, dict):
+            return jsonify({"erro": "Objeto settings deve ser um dicionário"}), 400
+
+        theme = settings_data.get('theme')
+        font_family = settings_data.get('fontFamily')
+        font_size = settings_data.get('fontSize')
+
+        if font_size is not None:
+            try:
+                font_size = int(font_size)
+            except (ValueError, TypeError):
+                return jsonify({"erro": "fontSize deve ser um número inteiro"}), 400
+
+        user_settings = UserSettings.query.filter_by(user_id=user_id).first()
+        if not user_settings:
+            user_settings = UserSettings(user_id=user_id)
+            db.session.add(user_settings)
+
+        user_settings.theme = theme
+        user_settings.font_family = font_family
+        user_settings.font_size = font_size
+
+        db.session.commit()
+
+        return jsonify({"settings": format_user_settings(user_settings)}), 200
+
+    except SQLAlchemyError as e:
+        db.session.rollback()
+        logging.error(f"Erro no banco de dados ao salvar preferências do usuário {user_id}: {str(e)}")
+        return jsonify({"erro": "Erro ao salvar preferências", "detalhes": str(e)}), 500
+    except Exception as e:
+        db.session.rollback()
+        logging.error(f"Erro inesperado ao salvar preferências do usuário {user_id}: {str(e)}", exc_info=True)
+        return jsonify({"erro": "Erro interno do servidor"}), 500
+
+
+@bp.route('/user-settings/<string:user_id>', methods=['GET'])
+@jwt_required()
+@role_required("admin", "tecadm", "diretor", "coordenador", "professor", "aluno")
+def get_user_settings(user_id):
+    try:
+        current_user = get_current_user_from_token()
+        if not current_user:
+            return jsonify({"erro": "Usuário não encontrado"}), 404
+
+        if current_user['id'] != user_id and current_user['role'] not in ["admin", "tecadm"]:
+            return jsonify({"erro": "Sem permissão para visualizar preferências de outro usuário"}), 403
+
+        user = User.query.get(user_id)
+        if not user:
+            return jsonify({"erro": "Usuário não encontrado"}), 404
+
+        user_settings = UserSettings.query.filter_by(user_id=user_id).first()
+
+        return jsonify({"settings": format_user_settings(user_settings)}), 200
+
+    except SQLAlchemyError as e:
+        logging.error(f"Erro no banco de dados ao buscar preferências do usuário {user_id}: {str(e)}")
+        return jsonify({"erro": "Erro ao buscar preferências", "detalhes": str(e)}), 500
+    except Exception as e:
+        logging.error(f"Erro inesperado ao buscar preferências do usuário {user_id}: {str(e)}", exc_info=True)
+        return jsonify({"erro": "Erro interno do servidor"}), 500
+
 
 @bp.route('/bulk-upload-students', methods=['POST'])
 @jwt_required()

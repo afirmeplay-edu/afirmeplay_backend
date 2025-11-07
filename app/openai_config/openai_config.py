@@ -7,7 +7,7 @@ import os
 from openai import OpenAI
 
 # Configuração da API Key
-OPENAI_API_KEY = "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"
+OPENAI_API_KEY = "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"
 
 # Configurações do modelo
 OPENAI_MODEL = "gpt-4o-mini"  # Modelo mais econômico e eficiente

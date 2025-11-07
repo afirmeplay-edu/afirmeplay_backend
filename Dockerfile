@@ -1,5 +1,20 @@
 FROM python:3.13.5-slim
 
+# Instalar dependências de sistema necessárias pro WeasyPrint
+RUN apt-get update && apt-get install -y \
+    build-essential \
+    libcairo2 \
+    pango1.0-tools \
+    libpango-1.0-0 \
+    libpangoft2-1.0-0 \
+    libpango1.0-dev \
+    libgdk-pixbuf2.0-0 \
+    libffi-dev \
+    libfreetype-dev \
+    shared-mime-info \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
+
 # Instalar dependências do sistema necessárias para compilar pacotes Python
 RUN apt-get update && apt-get install -y \
     build-essential \

@@ -15,6 +15,7 @@ from app.models.grades import Grade
 from app.models.teacher import Teacher
 from app.models.manager import Manager
 from app.models.studentPasswordLog import StudentPasswordLog
+from app.models.user_settings import UserSettings
 from sqlalchemy.orm import joinedload
 from app.utils.email_service import EmailService
 from datetime import datetime, timedelta, date
@@ -82,6 +83,14 @@ def format_student_details(student):
         "school": school_details,
         "class": class_details,
         "grade": grade_details
+    }
+
+
+def format_user_settings(settings_instance):
+    return {
+        "theme": settings_instance.theme if settings_instance else None,
+        "fontFamily": settings_instance.font_family if settings_instance else None,
+        "fontSize": settings_instance.font_size if settings_instance else None
     }
 
 @bp.route('/list', methods=['GET'])
@@ -245,6 +254,26 @@ def create_user():
         logging.error(f"Error creating user: {str(e)}", exc_info=True)
         return jsonify({"error": "Error creating user", "details": str(e)}), 500
 
+def serialize_user(user):
+    return {
+        "id": user.id,
+        "name": user.name,
+        "email": user.email,
+        "registration": user.registration,
+        "role": user.role.value if user.role else None,
+        "city_id": user.city_id,
+        "birth_date": user.birth_date.isoformat() if user.birth_date else None,
+        "nationality": user.nationality,
+        "phone": user.phone,
+        "gender": user.gender,
+        "traits": user.traits,
+        "avatar_config": user.avatar_config,
+        "address": user.address,
+        "created_at": user.created_at.isoformat() if user.created_at else None,
+        "updated_at": user.updated_at.isoformat() if user.updated_at else None
+    }
+
+
 @bp.route('/<string:user_id>', methods=['GET'])
 @jwt_required()
 @role_required("admin", "tecadm", "diretor", "coordenador", "professor", "aluno")
@@ -258,16 +287,7 @@ def get_user_by_id(user_id):
             logging.warning(f"User not found with ID: {user_id}")
             return jsonify({"message": "User not found"}), 404
 
-        user_data = {
-            "id": user.id,
-            "name": user.name,
-            "email": user.email,
-            "registration": user.registration,
-            "role": user.role.value,
-            "city_id": user.city_id,
-            "created_at": user.created_at.isoformat() if user.created_at else None,
-            "updated_at": user.updated_at.isoformat() if user.updated_at else None
-        }
+        user_data = serialize_user(user)
 
         if user.role == RoleEnum.ALUNO:
             student = Student.query.options(
@@ -502,6 +522,93 @@ def validate_reset_token():
         logging.error(f"Erro inesperado ao validar token: {e}", exc_info=True)
         return jsonify({"erro": "Erro interno do servidor"}), 500 
 
+@bp.route('/<string:user_id>', methods=['PUT'])
+@jwt_required()
+@role_required("admin", "tecadm", "diretor", "coordenador", "professor", "aluno")
+def update_user(user_id):
+    try:
+        current_user = get_current_user_from_token()
+        if not current_user:
+            return jsonify({"erro": "Usuário não encontrado"}), 404
+
+        if current_user['id'] != user_id and current_user['role'] not in ["admin", "tecadm"]:
+            return jsonify({"erro": "Sem permissão para atualizar este usuário"}), 403
+
+        user = User.query.get(user_id)
+        if not user:
+            return jsonify({"erro": "Usuário não encontrado"}), 404
+
+        data = request.get_json() or {}
+
+        birth_date_value = data.get('birth_date')
+        if birth_date_value:
+            try:
+                if isinstance(birth_date_value, str):
+                    user.birth_date = datetime.strptime(birth_date_value, '%Y-%m-%d').date()
+                elif isinstance(birth_date_value, date):
+                    user.birth_date = birth_date_value
+                else:
+                    return jsonify({"erro": "birth_date deve estar no formato YYYY-MM-DD"}), 400
+            except ValueError:
+                return jsonify({"erro": "birth_date deve estar no formato YYYY-MM-DD"}), 400
+        elif birth_date_value is None:
+            user.birth_date = None
+
+        nationality = data.get('nationality')
+        user.nationality = nationality.strip() if isinstance(nationality, str) and nationality.strip() else None
+
+        phone = data.get('phone')
+        if phone:
+            phone_digits = re.sub(r'\D', '', str(phone))
+            if phone_digits and not phone_digits.isdigit():
+                return jsonify({"erro": "phone deve conter apenas dígitos"}), 400
+            user.phone = phone_digits if phone_digits else None
+        elif phone is None:
+            user.phone = None
+
+        gender = data.get('gender')
+        allowed_genders = {"masculino", "feminino", "outro", "prefiro_nao_informar"}
+        if gender:
+            gender_value = gender.strip().lower()
+            if gender_value not in allowed_genders:
+                return jsonify({"erro": "gender inválido"}), 400
+            user.gender = gender_value
+        elif gender is None:
+            user.gender = None
+
+        traits = data.get('traits')
+        if traits is not None:
+            if traits == "" or traits == []:
+                user.traits = None
+            elif isinstance(traits, list) and all(isinstance(item, str) for item in traits):
+                user.traits = traits
+            else:
+                return jsonify({"erro": "traits deve ser uma lista de strings ou null"}), 400
+
+        avatar_config = data.get('avatar_config')
+        if avatar_config is not None:
+            if isinstance(avatar_config, dict):
+                user.avatar_config = avatar_config
+            else:
+                return jsonify({"erro": "avatar_config deve ser um objeto"}), 400
+
+        address = data.get('address')
+        user.address = address.strip() if isinstance(address, str) and address.strip() else None
+
+        db.session.commit()
+
+        return jsonify({"user": serialize_user(user)}), 200
+
+    except SQLAlchemyError as e:
+        db.session.rollback()
+        logging.error(f"Erro no banco de dados ao atualizar usuário {user_id}: {str(e)}")
+        return jsonify({"erro": "Erro ao atualizar usuário", "detalhes": str(e)}), 500
+    except Exception as e:
+        db.session.rollback()
+        logging.error(f"Erro inesperado ao atualizar usuário {user_id}: {str(e)}", exc_info=True)
+        return jsonify({"erro": "Erro interno do servidor"}), 500
+
+
 @bp.route('/<string:user_id>', methods=['DELETE'])
 @jwt_required()
 @role_required("admin", "tecadm")
@@ -603,6 +710,91 @@ def delete_user(user_id):
     except Exception as e:
         logging.error(f"Erro inesperado ao deletar usuário: {e}", exc_info=True)
         return jsonify({"erro": "Erro interno do servidor"}), 500 
+
+@bp.route('/user-settings/<string:user_id>', methods=['POST'])
+@jwt_required()
+@role_required("admin", "tecadm", "diretor", "coordenador", "professor", "aluno")
+def save_user_settings(user_id):
+    try:
+        current_user = get_current_user_from_token()
+        if not current_user:
+            return jsonify({"erro": "Usuário não encontrado"}), 404
+
+        if current_user['id'] != user_id and current_user['role'] not in ["admin", "tecadm"]:
+            return jsonify({"erro": "Sem permissão para atualizar preferências de outro usuário"}), 403
+
+        user = User.query.get(user_id)
+        if not user:
+            return jsonify({"erro": "Usuário não encontrado"}), 404
+
+        payload = request.get_json()
+        if not payload or 'settings' not in payload:
+            return jsonify({"erro": "Objeto settings é obrigatório"}), 400
+
+        settings_data = payload.get('settings')
+        if not isinstance(settings_data, dict):
+            return jsonify({"erro": "Objeto settings deve ser um dicionário"}), 400
+
+        theme = settings_data.get('theme')
+        font_family = settings_data.get('fontFamily')
+        font_size = settings_data.get('fontSize')
+
+        if font_size is not None:
+            try:
+                font_size = int(font_size)
+            except (ValueError, TypeError):
+                return jsonify({"erro": "fontSize deve ser um número inteiro"}), 400
+
+        user_settings = UserSettings.query.filter_by(user_id=user_id).first()
+        if not user_settings:
+            user_settings = UserSettings(user_id=user_id)
+            db.session.add(user_settings)
+
+        user_settings.theme = theme
+        user_settings.font_family = font_family
+        user_settings.font_size = font_size
+
+        db.session.commit()
+
+        return jsonify({"settings": format_user_settings(user_settings)}), 200
+
+    except SQLAlchemyError as e:
+        db.session.rollback()
+        logging.error(f"Erro no banco de dados ao salvar preferências do usuário {user_id}: {str(e)}")
+        return jsonify({"erro": "Erro ao salvar preferências", "detalhes": str(e)}), 500
+    except Exception as e:
+        db.session.rollback()
+        logging.error(f"Erro inesperado ao salvar preferências do usuário {user_id}: {str(e)}", exc_info=True)
+        return jsonify({"erro": "Erro interno do servidor"}), 500
+
+
+@bp.route('/user-settings/<string:user_id>', methods=['GET'])
+@jwt_required()
+@role_required("admin", "tecadm", "diretor", "coordenador", "professor", "aluno")
+def get_user_settings(user_id):
+    try:
+        current_user = get_current_user_from_token()
+        if not current_user:
+            return jsonify({"erro": "Usuário não encontrado"}), 404
+
+        if current_user['id'] != user_id and current_user['role'] not in ["admin", "tecadm"]:
+            return jsonify({"erro": "Sem permissão para visualizar preferências de outro usuário"}), 403
+
+        user = User.query.get(user_id)
+        if not user:
+            return jsonify({"erro": "Usuário não encontrado"}), 404
+
+        user_settings = UserSettings.query.filter_by(user_id=user_id).first()
+
+        return jsonify({"settings": format_user_settings(user_settings)}), 200
+
+    except SQLAlchemyError as e:
+        logging.error(f"Erro no banco de dados ao buscar preferências do usuário {user_id}: {str(e)}")
+        return jsonify({"erro": "Erro ao buscar preferências", "detalhes": str(e)}), 500
+    except Exception as e:
+        logging.error(f"Erro inesperado ao buscar preferências do usuário {user_id}: {str(e)}", exc_info=True)
+        return jsonify({"erro": "Erro interno do servidor"}), 500
+
 
 @bp.route('/bulk-upload-students', methods=['POST'])
 @jwt_required()

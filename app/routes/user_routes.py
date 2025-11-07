@@ -254,6 +254,26 @@ def create_user():
         logging.error(f"Error creating user: {str(e)}", exc_info=True)
         return jsonify({"error": "Error creating user", "details": str(e)}), 500
 
+def serialize_user(user):
+    return {
+        "id": user.id,
+        "name": user.name,
+        "email": user.email,
+        "registration": user.registration,
+        "role": user.role.value if user.role else None,
+        "city_id": user.city_id,
+        "birth_date": user.birth_date.isoformat() if user.birth_date else None,
+        "nationality": user.nationality,
+        "phone": user.phone,
+        "gender": user.gender,
+        "traits": user.traits,
+        "avatar_config": user.avatar_config,
+        "address": user.address,
+        "created_at": user.created_at.isoformat() if user.created_at else None,
+        "updated_at": user.updated_at.isoformat() if user.updated_at else None
+    }
+
+
 @bp.route('/<string:user_id>', methods=['GET'])
 @jwt_required()
 @role_required("admin", "tecadm", "diretor", "coordenador", "professor", "aluno")
@@ -267,16 +287,7 @@ def get_user_by_id(user_id):
             logging.warning(f"User not found with ID: {user_id}")
             return jsonify({"message": "User not found"}), 404
 
-        user_data = {
-            "id": user.id,
-            "name": user.name,
-            "email": user.email,
-            "registration": user.registration,
-            "role": user.role.value,
-            "city_id": user.city_id,
-            "created_at": user.created_at.isoformat() if user.created_at else None,
-            "updated_at": user.updated_at.isoformat() if user.updated_at else None
-        }
+        user_data = serialize_user(user)
 
         if user.role == RoleEnum.ALUNO:
             student = Student.query.options(
@@ -510,6 +521,93 @@ def validate_reset_token():
     except Exception as e:
         logging.error(f"Erro inesperado ao validar token: {e}", exc_info=True)
         return jsonify({"erro": "Erro interno do servidor"}), 500 
+
+@bp.route('/<string:user_id>', methods=['PUT'])
+@jwt_required()
+@role_required("admin", "tecadm", "diretor", "coordenador", "professor", "aluno")
+def update_user(user_id):
+    try:
+        current_user = get_current_user_from_token()
+        if not current_user:
+            return jsonify({"erro": "Usuário não encontrado"}), 404
+
+        if current_user['id'] != user_id and current_user['role'] not in ["admin", "tecadm"]:
+            return jsonify({"erro": "Sem permissão para atualizar este usuário"}), 403
+
+        user = User.query.get(user_id)
+        if not user:
+            return jsonify({"erro": "Usuário não encontrado"}), 404
+
+        data = request.get_json() or {}
+
+        birth_date_value = data.get('birth_date')
+        if birth_date_value:
+            try:
+                if isinstance(birth_date_value, str):
+                    user.birth_date = datetime.strptime(birth_date_value, '%Y-%m-%d').date()
+                elif isinstance(birth_date_value, date):
+                    user.birth_date = birth_date_value
+                else:
+                    return jsonify({"erro": "birth_date deve estar no formato YYYY-MM-DD"}), 400
+            except ValueError:
+                return jsonify({"erro": "birth_date deve estar no formato YYYY-MM-DD"}), 400
+        elif birth_date_value is None:
+            user.birth_date = None
+
+        nationality = data.get('nationality')
+        user.nationality = nationality.strip() if isinstance(nationality, str) and nationality.strip() else None
+
+        phone = data.get('phone')
+        if phone:
+            phone_digits = re.sub(r'\D', '', str(phone))
+            if phone_digits and not phone_digits.isdigit():
+                return jsonify({"erro": "phone deve conter apenas dígitos"}), 400
+            user.phone = phone_digits if phone_digits else None
+        elif phone is None:
+            user.phone = None
+
+        gender = data.get('gender')
+        allowed_genders = {"masculino", "feminino", "outro", "prefiro_nao_informar"}
+        if gender:
+            gender_value = gender.strip().lower()
+            if gender_value not in allowed_genders:
+                return jsonify({"erro": "gender inválido"}), 400
+            user.gender = gender_value
+        elif gender is None:
+            user.gender = None
+
+        traits = data.get('traits')
+        if traits is not None:
+            if traits == "" or traits == []:
+                user.traits = None
+            elif isinstance(traits, list) and all(isinstance(item, str) for item in traits):
+                user.traits = traits
+            else:
+                return jsonify({"erro": "traits deve ser uma lista de strings ou null"}), 400
+
+        avatar_config = data.get('avatar_config')
+        if avatar_config is not None:
+            if isinstance(avatar_config, dict):
+                user.avatar_config = avatar_config
+            else:
+                return jsonify({"erro": "avatar_config deve ser um objeto"}), 400
+
+        address = data.get('address')
+        user.address = address.strip() if isinstance(address, str) and address.strip() else None
+
+        db.session.commit()
+
+        return jsonify({"user": serialize_user(user)}), 200
+
+    except SQLAlchemyError as e:
+        db.session.rollback()
+        logging.error(f"Erro no banco de dados ao atualizar usuário {user_id}: {str(e)}")
+        return jsonify({"erro": "Erro ao atualizar usuário", "detalhes": str(e)}), 500
+    except Exception as e:
+        db.session.rollback()
+        logging.error(f"Erro inesperado ao atualizar usuário {user_id}: {str(e)}", exc_info=True)
+        return jsonify({"erro": "Erro interno do servidor"}), 500
+
 
 @bp.route('/<string:user_id>', methods=['DELETE'])
 @jwt_required()

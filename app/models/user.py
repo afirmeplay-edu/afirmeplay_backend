@@ -2,7 +2,7 @@ from enum import Enum
 from flask_sqlalchemy import SQLAlchemy
 from app import db
 import uuid
-from datetime import datetime
+from datetime import datetime, date
 
 
 class RoleEnum(Enum):
@@ -28,6 +28,14 @@ class User(db.Model):
     # Campos para reset de senha
     reset_token = db.Column(db.String(255), unique=True, nullable=True)
     reset_token_expires = db.Column(db.TIMESTAMP, nullable=True)
+
+    birth_date = db.Column(db.Date, nullable=True)
+    nationality = db.Column(db.String(100), nullable=True)
+    phone = db.Column(db.String(20), nullable=True)
+    gender = db.Column(db.String(30), nullable=True)
+    traits = db.Column(db.JSON, nullable=True)
+    avatar_config = db.Column(db.JSON, nullable=True)
+    address = db.Column(db.String(255), nullable=True)
 
     student = db.relationship("Student", backref="users", uselist=False)
     teacher = db.relationship("Teacher", backref="users", uselist=False)

@@ -11,7 +11,7 @@ from sqlalchemy.exc import SQLAlchemyError, IntegrityError
 import logging
 from datetime import datetime
 
-bp = Blueprint('managers', __name__, url_prefix="/managers")
+bp = Blueprint('manager', __name__, url_prefix="/manager")
 
 @bp.errorhandler(SQLAlchemyError)
 def handle_db_error(error):

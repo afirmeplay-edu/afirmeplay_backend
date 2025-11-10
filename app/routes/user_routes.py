@@ -14,6 +14,7 @@ from app.models.studentClass import Class
 from app.models.grades import Grade
 from app.models.teacher import Teacher
 from app.models.manager import Manager
+from app.models.city import City
 from app.models.studentPasswordLog import StudentPasswordLog
 from app.models.user_settings import UserSettings
 from sqlalchemy.orm import joinedload
@@ -539,6 +540,82 @@ def update_user(user_id):
             return jsonify({"erro": "Usuário não encontrado"}), 404
 
         data = request.get_json() or {}
+
+        # Atualização de campos básicos
+        name = data.get('name')
+        if name is not None:
+            if isinstance(name, str) and name.strip():
+                user.name = name.strip()
+            else:
+                return jsonify({"erro": "name deve ser uma string não vazia"}), 400
+
+        email = data.get('email')
+        if email is not None:
+            if not isinstance(email, str) or not email.strip():
+                return jsonify({"erro": "email deve ser uma string não vazia"}), 400
+            email_clean = email.strip()
+            if "@" not in email_clean:
+                return jsonify({"erro": "email inválido"}), 400
+            existing_email = User.query.filter(
+                func.lower(User.email) == email_clean.lower(),
+                User.id != user.id
+            ).first()
+            if existing_email:
+                return jsonify({"erro": "Email já cadastrado"}), 400
+            user.email = email_clean
+
+        password = data.get('password')
+        if password is not None:
+            if not isinstance(password, str) or len(password) < 8:
+                return jsonify({"erro": "password deve conter ao menos 8 caracteres"}), 400
+            user.password_hash = generate_password_hash(password)
+
+        registration = data.get('registration')
+        if registration is not None:
+            registration_clean = str(registration).strip() if registration else None
+            if registration_clean:
+                existing_registration = User.query.filter(
+                    User.registration == registration_clean,
+                    User.id != user.id
+                ).first()
+                if existing_registration:
+                    return jsonify({"erro": "registration já cadastrada"}), 400
+                user.registration = registration_clean
+            else:
+                user.registration = None
+
+        city_id_value = data.get('city_id')
+        if city_id_value is not None:
+            if current_user['role'] not in ["admin", "tecadm"]:
+                return jsonify({"erro": "Sem permissão para alterar city_id"}), 403
+
+            if city_id_value:
+                city = City.query.get(city_id_value)
+                if not city:
+                    return jsonify({"erro": "city_id inválido"}), 400
+            else:
+                city = None
+
+            if current_user['role'] == "tecadm":
+                current_city_id = current_user.get('tenant_id') or current_user.get('city_id')
+                if city and city.id != current_city_id:
+                    return jsonify({"erro": "Tecadm só pode atribuir usuários ao seu município"}), 403
+
+            user.city_id = city.id if city else None
+
+        role_value = data.get('role')
+        if role_value is not None:
+            if current_user['role'] not in ["admin", "tecadm"]:
+                return jsonify({"erro": "Sem permissão para alterar role"}), 403
+            try:
+                new_role = RoleEnum(role_value)
+            except ValueError:
+                return jsonify({"erro": "role inválido"}), 400
+
+            if current_user['role'] == "tecadm" and new_role == RoleEnum.ADMIN:
+                return jsonify({"erro": "Tecadm não pode atribuir role admin"}), 403
+
+            user.role = new_role
 
         birth_date_value = data.get('birth_date')
         if birth_date_value:

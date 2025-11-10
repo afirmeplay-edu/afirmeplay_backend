@@ -5373,6 +5373,8 @@ responses:
             properties:
               message:
                 type: string
+                description: Mensagem explicando o motivo da falha de autenticação.
+                example: Token inválido ou expirado.
     ForbiddenError:
       description: User does not have the necessary permissions
       content:
@@ -5382,6 +5384,8 @@ responses:
             properties:
               message:
                 type: string
+                description: Mensagem indicando que o usuário não tem permissão.
+                example: Acesso negado para o recurso solicitado.
     NotFoundError:
       description: Resource not found
       content:
@@ -5391,6 +5395,8 @@ responses:
             properties:
               error:
                 type: string
+                description: Mensagem sobre o recurso não encontrado.
+                example: Recurso solicitado não foi encontrado.
     BadRequestError:
       description: Invalid request payload or parameters
       content:
@@ -5400,8 +5406,14 @@ responses:
             properties:
               error:
                 type: string
+                description: Mensagem descrevendo o erro de validação.
+                example: Dados inválidos enviados na requisição.
               details:
                 type: object # Can be a string or a more detailed object
+                description: Detalhes adicionais sobre o erro.
+                example:
+                  campo: email
+                  problema: Formato inválido.
     InternalServerError:
       description: Unexpected server error
       content:
@@ -5411,5 +5423,9 @@ responses:
             properties:
               error:
                 type: string
+                description: Mensagem genérica de erro.
+                example: Ocorreu um erro inesperado.
               details:
                 type: string
+                description: Descrição detalhada do erro para depuração.
+                example: Consulte os logs do servidor para mais informações.

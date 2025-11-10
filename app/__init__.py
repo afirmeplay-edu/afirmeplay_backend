@@ -18,8 +18,8 @@ db = SQLAlchemy()
 jwt = JWTManager()
 migrate = Migrate()
 
-# Configuração do Swagger
-API_URL = '/swagger.yaml' # URL where our Swagger spec will be served
+# Configuração da documentação OpenAPI
+OPENAPI_SPEC_URL = '/swagger.yaml'  # Caminho onde o arquivo OpenAPI será servido
 
 def create_app():
     # Carregar variáveis de ambiente do arquivo .env da pasta app/
@@ -99,42 +99,26 @@ def create_app():
     def serve_swagger_yaml():
         return send_from_directory(os.path.dirname(app.root_path), 'swagger.yaml')
     
-    # Rota para redirecionar a raiz para o Swagger
+    # Rota para disponibilizar a documentação via Redoc
     @app.route('/')
     def root():
         return '''
         <!DOCTYPE html>
         <html>
         <head>
-            <title>InvaPlay Backend API Documentation</title>
-            <link rel="stylesheet" type="text/css" href="https://unpkg.com/swagger-ui-dist@5.9.0/swagger-ui.css" />
+            <meta charset="UTF-8" />
+            <title>Backend Innovaplay API Documentation</title>
             <style>
-                html { box-sizing: border-box; overflow: -moz-scrollbars-vertical; overflow-y: scroll; }
-                *, *:before, *:after { box-sizing: inherit; }
-                body { margin:0; background: #fafafa; }
+                html, body { margin: 0; padding: 0; height: 100%; }
+                body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; overflow-y: auto; }
+                .redoc-wrap { min-height: 100vh; }
             </style>
         </head>
         <body>
-            <div id="swagger-ui"></div>
-            <script src="https://unpkg.com/swagger-ui-dist@5.9.0/swagger-ui-bundle.js"></script>
-            <script src="https://unpkg.com/swagger-ui-dist@5.9.0/swagger-ui-standalone-preset.js"></script>
-            <script>
-                window.onload = function() {
-                    const ui = SwaggerUIBundle({
-                        url: '/swagger.yaml',
-                        dom_id: '#swagger-ui',
-                        deepLinking: true,
-                        presets: [
-                            SwaggerUIBundle.presets.apis,
-                            SwaggerUIStandalonePreset
-                        ],
-                        plugins: [
-                            SwaggerUIBundle.plugins.DownloadUrl
-                        ],
-                        layout: "BaseLayout"
-                    });
-                };
-            </script>
+            <div class="redoc-wrap">
+                <redoc spec-url="/swagger.yaml"></redoc>
+            </div>
+            <script src="https://cdn.jsdelivr.net/npm/redoc@next/bundles/redoc.standalone.js"></script>
         </body>
         </html>
         '''

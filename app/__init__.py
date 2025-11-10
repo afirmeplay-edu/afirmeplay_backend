@@ -116,7 +116,7 @@ def create_app():
         </head>
         <body>
             <div class="redoc-wrap">
-                <redoc spec-url="/swagger.yaml"></redoc>
+                <redoc spec-url="/api/swagger.yaml"></redoc>
             </div>
             <script src="https://cdn.jsdelivr.net/npm/redoc@next/bundles/redoc.standalone.js"></script>
         </body>

@@ -44,8 +44,12 @@ def criar_escola():
         if not isinstance(data['name'], str) or len(data['name'].strip()) == 0:
             return jsonify({"erro": "Nome da escola inválido"}), 400
             
-        if not isinstance(data['city_id'], str):
+        if not isinstance(data['city_id'], str) or not data['city_id'].strip():
             return jsonify({"erro": "ID da cidade inválido"}), 400
+
+        cidade = City.query.get(data['city_id'])
+        if not cidade:
+            return jsonify({"erro": "city_id não encontrado"}), 400
 
         nova_escola = School(
             name=data['name'],

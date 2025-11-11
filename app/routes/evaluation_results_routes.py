@@ -15,6 +15,7 @@ from app.services.evaluation_calculator import EvaluationCalculator
 from app.services.evaluation_filters import EvaluationFilters
 from app.services.evaluation_aggregator import EvaluationAggregator
 from app.services.evaluation_result_service import EvaluationResultService
+from app.services.report_aggregate_service import ReportAggregateService
 from app.models.test import Test
 from app.models.student import Student
 from app.models.studentAnswer import StudentAnswer
@@ -3004,6 +3005,101 @@ def recalcular_avaliacao():
     except Exception as e:
         logging.error(f"Erro ao recalcular avaliação: {str(e)}", exc_info=True)
         return jsonify({"error": "Erro ao recalcular avaliação", "details": str(e)}), 500
+
+
+@bp.route('/<string:test_id>/rebuild-cache', methods=['POST'])
+@jwt_required()
+@role_required("admin", "professor", "coordenador", "diretor", "tecadm")
+def rebuild_report_cache(test_id: str):
+    """
+    Regera e persiste os agregados de relatório para uma avaliação.
+
+    Permite reconstruir dados consolidados para relatórios PDF/JSON por escopo.
+    """
+    try:
+        test = Test.query.get(test_id)
+        if not test:
+            return jsonify({"error": "Avaliação não encontrada"}), 404
+
+        payload = request.get_json(silent=True) or {}
+        rebuild_all = bool(payload.get('rebuild_all', False))
+        requested_scope_type = payload.get('scope_type')
+        requested_scope_id = payload.get('scope_id')
+
+        from app.routes.report_routes import _montar_resposta_relatorio
+
+        processed_scopes = []
+
+        def build_and_save(scope_type: str, scope_id: Optional[str]):
+            school_id = scope_id if scope_type == 'school' else None
+            city_id = scope_id if scope_type == 'city' else None
+            context = _montar_resposta_relatorio(test_id, school_id, city_id)
+            student_count = (
+                context
+                .get('total_alunos', {})
+                .get('total_geral', {})
+                .get('avaliados', 0)
+            )
+            ReportAggregateService.save_payload(
+                test_id=test_id,
+                scope_type=scope_type,
+                scope_id=scope_id if scope_type != 'overall' else None,
+                payload=context,
+                student_count=student_count or 0,
+                commit=False,
+            )
+            processed_scopes.append({
+                "scope_type": scope_type,
+                "scope_id": scope_id,
+                "student_count": student_count,
+            })
+
+        if rebuild_all:
+            # Geral
+            build_and_save('overall', None)
+
+            # Identificar escolas e municípios ligados à avaliação
+            class_tests = ClassTest.query.filter_by(test_id=test_id).all()
+            school_ids = set()
+            city_ids = set()
+
+            for class_test in class_tests:
+                turma = Class.query.get(class_test.class_id)
+                if turma and turma.school_id:
+                    school_ids.add(turma.school_id)
+                    escola = School.query.get(turma.school_id)
+                    if escola and escola.city_id:
+                        city_ids.add(escola.city_id)
+
+            for school_id in school_ids:
+                build_and_save('school', school_id)
+
+            for city_id in city_ids:
+                build_and_save('city', city_id)
+        else:
+            scope_type = (requested_scope_type or 'overall').lower()
+            if scope_type not in {'overall', 'school', 'city'}:
+                return jsonify({"error": "scope_type inválido. Use overall, school ou city."}), 400
+
+            scope_id = requested_scope_id if scope_type in {'school', 'city'} else None
+            if scope_type in {'school', 'city'} and not scope_id:
+                return jsonify({"error": "scope_id é obrigatório para escopos school ou city"}), 400
+
+            build_and_save(scope_type, scope_id)
+
+        db.session.commit()
+
+        return jsonify({
+            "message": "Cache de relatório regenerado com sucesso",
+            "test_id": test_id,
+            "rebuild_all": rebuild_all,
+            "processed_scopes": processed_scopes
+        }), 200
+
+    except Exception as e:
+        logging.error(f"Erro ao reconstruir cache da avaliação {test_id}: {str(e)}", exc_info=True)
+        db.session.rollback()
+        return jsonify({"error": "Erro ao reconstruir cache", "details": str(e)}), 500
 
 
 # ==================== ENDPOINT 5: PATCH /avaliacoes/<test_id>/finalizar ====================

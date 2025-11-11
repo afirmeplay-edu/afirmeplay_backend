@@ -6,8 +6,12 @@ from app import db
 from app.models.evaluationResult import EvaluationResult
 from app.models.test import Test
 from app.models.question import Question
+from app.models.student import Student
+from app.models.school import School
+from app.models.studentClass import Class
 from app.models.studentAnswer import StudentAnswer
 from app.services.evaluation_calculator import EvaluationCalculator
+from app.services.report_aggregate_service import ReportAggregateService
 from datetime import datetime
 import logging
 from typing import Dict, Any, Optional, List
@@ -308,6 +312,30 @@ class EvaluationResultService:
                     classification=result['classification']
                 )
                 db.session.add(evaluation_result)
+
+            # Marcar agregados como desatualizados antes do commit
+            scope_school_id = None
+            scope_city_id = None
+            student_obj = Student.query.get(student_id)
+            if student_obj:
+                scope_school_id = getattr(student_obj, 'school_id', None)
+                class_identifier = getattr(student_obj, 'class_id', None)
+                if not scope_school_id and class_identifier:
+                    class_obj = Class.query.get(class_identifier)
+                    if class_obj and getattr(class_obj, 'school_id', None):
+                        scope_school_id = class_obj.school_id
+                if scope_school_id:
+                    school_obj = School.query.get(scope_school_id)
+                    if school_obj and getattr(school_obj, 'city_id', None):
+                        scope_city_id = school_obj.city_id
+                    else:
+                        scope_city_id = None
+
+            ReportAggregateService.mark_dirty(test_id, 'overall', None, commit=False)
+            if scope_school_id:
+                ReportAggregateService.mark_dirty(test_id, 'school', scope_school_id, commit=False)
+            if scope_city_id:
+                ReportAggregateService.mark_dirty(test_id, 'city', scope_city_id, commit=False)
             
             db.session.commit()
             

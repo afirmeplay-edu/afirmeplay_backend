@@ -40,6 +40,7 @@ from reportlab.pdfgen.canvas import Canvas
 from io import BytesIO
 from app.services.ai_analysis_service import AIAnalysisService
 from app.services.evaluation_result_service import EvaluationResultService
+from app.services.report_aggregate_service import ReportAggregateService
 from weasyprint import HTML
 
 # Importar docxtpl para template Word (comentado - usando PDF agora)
@@ -497,72 +498,39 @@ def dados_json(evaluation_id: str):
         # Obter parâmetros de filtro
         school_id = request.args.get('school_id')
         city_id = request.args.get('city_id')
-        
-        # Determinar o escopo do relatório
-        scope_type, scope_id = _determinar_escopo_relatorio(school_id, city_id)
-        
-        # Buscar turmas baseado no escopo
-        class_tests = _buscar_turmas_por_escopo(evaluation_id, scope_type, scope_id)
-        
-        if not class_tests:
-            if scope_type == 'school':
-                return jsonify({"error": "Avaliação não foi aplicada em nenhuma turma da escola especificada"}), 404
-            elif scope_type == 'city':
-                return jsonify({"error": "Avaliação não foi aplicada em nenhuma turma do município especificado"}), 404
-            else:
-                return jsonify({"error": "Avaliação não foi aplicada em nenhuma turma"}), 404
-        
-        # Obter dados da avaliação
-        course_name = _obter_nome_curso(test)
-        avaliacao_data = {
-            "id": test.id,
-            "titulo": test.title,
-            "descricao": test.description,
-            "disciplinas": _obter_disciplinas_avaliacao(test),
-            "course_name": course_name
-        }
-        
-        logging.info(f"Disciplinas identificadas para avaliação {evaluation_id}: {avaliacao_data['disciplinas']}")
-        logging.info(f"Escopo do relatório: {scope_type} - {scope_id}")
-        
-        # 1. Total de alunos que realizaram a avaliação
-        total_alunos = _calcular_totais_alunos_por_escopo(evaluation_id, class_tests, scope_type)
-        
-        # 2. Níveis de Aprendizagem
-        niveis_aprendizagem = _calcular_niveis_aprendizagem_por_escopo(evaluation_id, class_tests, scope_type)
-        logging.info(f"Níveis de aprendizagem calculados para disciplinas: {list(niveis_aprendizagem.keys())}")
-        
-        # 3. Proficiência
-        proficiencia = _calcular_proficiencia_por_escopo(evaluation_id, class_tests, scope_type)
-        logging.info(f"Proficiência calculada para disciplinas: {list(proficiencia.get('por_disciplina', {}).keys())}")
-        
-        # 4. Nota Geral
-        nota_geral = _calcular_nota_geral_por_escopo(evaluation_id, class_tests, scope_type)
-        logging.info(f"Nota geral calculada para disciplinas: {list(nota_geral.get('por_disciplina', {}).keys())}")
-        
-        # 5. Acertos por habilidade
-        acertos_habilidade = _calcular_acertos_habilidade_por_escopo(evaluation_id, class_tests, scope_type)
-        logging.info(f"Acertos por habilidade calculados para disciplinas: {list(acertos_habilidade.keys())}")
-        
-        # 6. Obter metadados do relatório
+
+        if school_id:
+            scope_type = 'school'
+            scope_ref_id = school_id
+        elif city_id:
+            scope_type = 'city'
+            scope_ref_id = city_id
+        else:
+            scope_type = 'overall'
+            scope_ref_id = None
+
+        def build_payload():
+            contexto = _montar_resposta_relatorio(evaluation_id, school_id, city_id)
+            student_count = (
+                contexto
+                .get('total_alunos', {})
+                .get('total_geral', {})
+                .get('avaliados', 0)
+            )
+            return contexto, student_count
+
         try:
-            metadados = _obter_metadados_relatorio(test, class_tests, scope_type, scope_id)
-        except Exception as meta_error:
-            logging.error(f"Erro ao obter metadados: {str(meta_error)}")
-            import traceback
-            logging.error(f"Traceback dos metadados: {traceback.format_exc()}")
-            raise
-        
-        # Montar resposta JSON formatada
-        resposta = {
-            "avaliacao": avaliacao_data,
-            "metadados": metadados,
-            "total_alunos": total_alunos,
-            "niveis_aprendizagem": niveis_aprendizagem,
-            "proficiencia": proficiencia,
-            "nota_geral": nota_geral,
-            "acertos_por_habilidade": acertos_habilidade
-        }
+            resposta = ReportAggregateService.ensure_payload(
+                evaluation_id,
+                scope_type,
+                scope_ref_id,
+                build_payload,
+            )
+        except LookupError as lookup_error:
+            # Reproduzir mensagens de não encontrado semelhantes às tratadas anteriormente
+            return jsonify({"error": str(lookup_error)}), 404
+        except ValueError as value_error:
+            return jsonify({"error": str(value_error)}), 404
         
         return jsonify(resposta), 200
         
@@ -687,8 +655,33 @@ def relatorio_pdf(evaluation_id: str):
     try:
         school_id = request.args.get('school_id')
         city_id = request.args.get('city_id')
-        
-        context = _montar_resposta_relatorio(evaluation_id, school_id, city_id)
+
+        if school_id:
+            scope_type = 'school'
+            scope_ref_id = school_id
+        elif city_id:
+            scope_type = 'city'
+            scope_ref_id = city_id
+        else:
+            scope_type = 'overall'
+            scope_ref_id = None
+
+        def build_payload():
+            contexto = _montar_resposta_relatorio(evaluation_id, school_id, city_id)
+            student_count = (
+                contexto
+                .get('total_alunos', {})
+                .get('total_geral', {})
+                .get('avaliados', 0)
+            )
+            return contexto, student_count
+
+        context = ReportAggregateService.ensure_payload(
+            evaluation_id,
+            scope_type,
+            scope_ref_id,
+            build_payload,
+        )
 
         templates_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'templates')
         env = Environment(loader=FileSystemLoader(templates_dir), autoescape=select_autoescape(['html', 'xml']))

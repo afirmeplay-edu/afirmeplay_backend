@@ -117,6 +117,9 @@ def criar_usuario_e_aluno():
                     db.session.rollback()
                 return jsonify({"error": "Invalid birth date format. Use YYYY-MM-DD"}), 400
 
+        # Determinar grade_id (série) com fallback da turma
+        grade_id = data.get("grade_id") or class_obj.grade_id
+
         # Criar aluno
         novo_aluno = Student(
             name=usuario.name,
@@ -124,7 +127,7 @@ def criar_usuario_e_aluno():
             registration=usuario.registration,
             birth_date=birth_date,
             class_id=data["class_id"],
-            grade_id=data.get("grade_id"),
+            grade_id=grade_id,
             school_id=class_obj.school_id
         )
         db.session.add(novo_aluno)
@@ -141,7 +144,7 @@ def criar_usuario_e_aluno():
                 user_id=usuario.id,
                 student_id=novo_aluno.id,
                 class_id=data["class_id"],
-                grade_id=data.get("grade_id"),
+                grade_id=grade_id,
                 school_id=class_obj.school_id,
                 city_id=city_id
             )

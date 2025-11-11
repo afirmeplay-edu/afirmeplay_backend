@@ -6,6 +6,10 @@ from app.models.studentClass import Class
 from app.models.grades import Grade
 from app.models.evaluationResult import EvaluationResult
 from app.models.test import Test
+from app.models.question import Question
+from app.models.studentAnswer import StudentAnswer
+from app.models.testQuestion import TestQuestion
+from app.models.educationStage import EducationStage
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy import func, case, desc
 from sqlalchemy.orm import joinedload
@@ -14,6 +18,8 @@ from app.decorators.role_required import role_required, get_current_user_from_to
 from flask_jwt_extended import jwt_required
 from app import db
 from typing import Dict, List, Optional, Any
+from app.services.evaluation_result_service import EvaluationResultService
+import uuid
 
 bp = Blueprint('student_grades', __name__, url_prefix="/students")
 
@@ -445,6 +451,56 @@ def get_student_evaluation_grades(user_id, evaluation_id):
         # Calcular rankings específicos da avaliação
         rankings = _calculate_student_rankings(student.id, evaluation_id)
         
+        # Buscar resultados detalhados por disciplina (quando aplicável)
+        subject_results: List[Dict[str, Any]] = []
+        try:
+            # Verificar se há informações de disciplinas
+            has_subjects_info = isinstance(test.subjects_info, list) and len(test.subjects_info) > 0
+            if has_subjects_info:
+                # Buscar questões ordenadas da avaliação
+                test_question_ids = [
+                    tq.question_id for tq in TestQuestion.query.filter_by(
+                        test_id=evaluation_id
+                    ).order_by(TestQuestion.order).all()
+                ]
+
+                questions = Question.query.filter(Question.id.in_(test_question_ids)).all() if test_question_ids else []
+
+                if questions:
+                    # Buscar respostas do aluno
+                    answers = StudentAnswer.query.filter_by(
+                        test_id=evaluation_id,
+                        student_id=student.id
+                    ).all()
+
+                    if answers:
+                        # Determinar nome do curso (replicando lógica do serviço)
+                        course_name = "Anos Iniciais"
+                        if test.course:
+                            try:
+                                course_uuid = uuid.UUID(str(test.course))
+                                course_obj = EducationStage.query.get(course_uuid)
+                                if course_obj:
+                                    course_name = course_obj.name
+                            except Exception:
+                                course_obj = EducationStage.query.get(str(test.course))
+                                if course_obj:
+                                    course_name = course_obj.name
+
+                        subject_results = EvaluationResultService._calculate_subject_specific_results(
+                            test_id=evaluation_id,
+                            student_id=student.id,
+                            questions=questions,
+                            answers=answers,
+                            course_name=course_name
+                        )
+        except Exception as subject_err:
+            logging.error(
+                f"Erro ao montar resultados por disciplina para aluno {student.id} na avaliação {evaluation_id}: {subject_err}",
+                exc_info=True
+            )
+            subject_results = []
+
         # Buscar dados relacionados
         school = School.query.get(student.school_id) if student.school_id else None
         class_obj = Class.query.get(student.class_id) if student.class_id else None
@@ -459,7 +515,8 @@ def get_student_evaluation_grades(user_id, evaluation_id):
             "class_name": class_obj.name if class_obj else None,
             "evaluation_name": test.title,
             **evaluation_stats,
-            "rankings": rankings
+            "rankings": rankings,
+            "subject_results": subject_results
         }
         
         return jsonify({

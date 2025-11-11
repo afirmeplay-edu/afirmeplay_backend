@@ -510,7 +510,7 @@ def dados_json(evaluation_id: str):
             scope_ref_id = None
 
         def build_payload():
-            contexto = _montar_resposta_relatorio(evaluation_id, school_id, city_id)
+            contexto = _montar_resposta_relatorio(evaluation_id, school_id, city_id, include_ai=False)
             student_count = (
                 contexto
                 .get('total_alunos', {})
@@ -541,7 +541,12 @@ def dados_json(evaluation_id: str):
         return jsonify({"error": "Erro interno do servidor", "details": str(e)}), 500
 
 
-def _montar_resposta_relatorio(evaluation_id: str, school_id: str = None, city_id: str = None) -> dict:
+def _montar_resposta_relatorio(
+    evaluation_id: str,
+    school_id: str = None,
+    city_id: str = None,
+    include_ai: bool = True
+) -> dict:
     """
     Monta a resposta completa do relatório a partir do ID da avaliação e filtros opcionais.
     Reutilizada pelos endpoints que retornam JSON e PDF.
@@ -560,7 +565,47 @@ def _montar_resposta_relatorio(evaluation_id: str, school_id: str = None, city_i
         else:
             raise LookupError("Avaliação não foi aplicada em nenhuma turma")
 
+    # Identificar séries/anos das turmas envolvidas
+    class_ids = [ct.class_id for ct in class_tests if getattr(ct, "class_id", None)]
+    unique_class_ids = list(dict.fromkeys(class_ids))
+    series_ordered: List[str] = []
+    seen_series = set()
+    if unique_class_ids:
+        classes = Class.query.options(joinedload(Class.grade)).filter(Class.id.in_(unique_class_ids)).all()
+        class_map = {cls.id: cls for cls in classes}
+        for class_id in unique_class_ids:
+            cls = class_map.get(class_id)
+            if not cls:
+                continue
+            serie_name = None
+            if getattr(cls, "grade", None) and getattr(cls.grade, "name", None):
+                serie_name = cls.grade.name.strip()
+            elif getattr(cls, "name", None):
+                serie_name = cls.name.strip()
+            if serie_name and serie_name not in seen_series:
+                seen_series.add(serie_name)
+                series_ordered.append(serie_name)
+
     total_alunos = _calcular_totais_alunos_por_escopo(evaluation_id, class_tests, scope_type)
+
+    # Fallback: utilizar nomes das turmas da agregação quando não encontrar séries
+    if scope_type == 'school' and not series_ordered:
+        turmas_info = (total_alunos or {}).get('por_turma', [])
+        for turma_data in turmas_info:
+            turma_nome = turma_data.get('turma')
+            if turma_nome:
+                turma_nome = str(turma_nome).strip()
+                if turma_nome and turma_nome not in seen_series:
+                    seen_series.add(turma_nome)
+                    series_ordered.append(turma_nome)
+
+    series_label = ", ".join(series_ordered) if series_ordered else None
+    if scope_type == 'school':
+        general_label = f"{series_label} - Geral" if series_label else "Geral"
+    elif scope_type == 'city':
+        general_label = "Municipal Geral"
+    else:
+        general_label = "Geral"
     niveis_aprendizagem = _calcular_niveis_aprendizagem_por_escopo(evaluation_id, class_tests, scope_type)
     proficiencia = _calcular_proficiencia_por_escopo(evaluation_id, class_tests, scope_type)
     nota_geral = _calcular_nota_geral_por_escopo(evaluation_id, class_tests, scope_type)
@@ -571,7 +616,9 @@ def _montar_resposta_relatorio(evaluation_id: str, school_id: str = None, city_i
         "titulo": test.title,
         "descricao": getattr(test, 'description', None),
         "course_name": _obter_nome_curso(test),
-        "disciplinas": _obter_disciplinas_avaliacao(test)
+        "disciplinas": _obter_disciplinas_avaliacao(test),
+        "series": series_ordered,
+        "series_label": series_label
     }
 
     from datetime import datetime
@@ -585,7 +632,10 @@ def _montar_resposta_relatorio(evaluation_id: str, school_id: str = None, city_i
         "scope_id": scope_id,
         "mes": mes_atual,
         "ano": ano_atual,
-        "data_geracao": data_geracao
+        "data_geracao": data_geracao,
+        "series": series_ordered,
+        "series_label": series_label,
+        "general_label": general_label
     }
 
     try:
@@ -610,17 +660,19 @@ def _montar_resposta_relatorio(evaluation_id: str, school_id: str = None, city_i
     except Exception:
         pass
 
-    ai_service = AIAnalysisService()
-    analise_ia = ai_service.analyze_report_data({
-        "avaliacao": avaliacao_data,
-        "total_alunos": total_alunos,
-        "niveis_aprendizagem": niveis_aprendizagem,
-        "proficiencia": proficiencia,
-        "nota_geral": nota_geral,
-        "acertos_por_habilidade": acertos_habilidade,
-        "scope_type": scope_type,
-        "scope_id": scope_id
-    })
+    analise_ia = {}
+    if include_ai:
+        ai_service = AIAnalysisService()
+        analise_ia = ai_service.analyze_report_data({
+            "avaliacao": avaliacao_data,
+            "total_alunos": total_alunos,
+            "niveis_aprendizagem": niveis_aprendizagem,
+            "proficiencia": proficiencia,
+            "nota_geral": nota_geral,
+            "acertos_por_habilidade": acertos_habilidade,
+            "scope_type": scope_type,
+            "scope_id": scope_id
+        })
 
     return {
         "acertos_por_habilidade": acertos_habilidade,
@@ -1551,7 +1603,7 @@ def _gerar_pdf_com_reportlab(test: Test, total_alunos: Dict, niveis_aprendizagem
             for turma_data in proficiencia['por_disciplina']['GERAL']['por_turma']:
                 data.append([
                     turma_data.get("turma", ""),
-                    f"{turma_data.get('proficiencia', 0):.2f}"
+                    f"{turma_data.get('proficiencia', 0):.1f}"
                 ])
             
             if data:

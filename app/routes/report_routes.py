@@ -4,7 +4,7 @@ Rotas especializadas para relatórios de avaliações
 Endpoint para geração de relatórios completos com estatísticas detalhadas
 """
 
-from flask import Blueprint, request, jsonify, render_template_string, send_file
+from flask import Blueprint, request, jsonify, render_template_string, render_template, send_file, current_app, Response
 from flask_jwt_extended import jwt_required
 from app.decorators.role_required import role_required, get_current_user_from_token
 from app.models.test import Test
@@ -21,7 +21,9 @@ from app.models.classTest import ClassTest
 from app.models.evaluationResult import EvaluationResult
 from app import db
 import logging
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Union
+import math
+import unicodedata
 from sqlalchemy import func, case, desc
 from datetime import datetime
 from sqlalchemy.orm import joinedload
@@ -63,6 +65,146 @@ RED = colors.HexColor("#e53935")
 YELLOW = colors.HexColor("#f1c232")
 ADEQ = colors.HexColor("#6aa84f")
 GREEN = colors.HexColor("#00a651")
+
+
+PROFICIENCY_BADGE_STYLES = {
+    "Abaixo do Básico": {"bg": "#fee2e2", "text": "#991b1b"},
+    "Básico": {"bg": "#fef3c7", "text": "#92400e"},
+    "Adequado": {"bg": "#dcfce7", "text": "#166534"},
+    "Avançado": {"bg": "#d1fae5", "text": "#065f46"},
+}
+
+DEFAULT_DONUT_LEVELS = [
+    {"label": "Abaixo do Básico", "aliases": ["abaixo"], "color": "#DC2626"},
+    {"label": "Básico", "aliases": ["basico"], "color": "#F59E0B"},
+    {"label": "Adequado", "aliases": ["adequado"], "color": "#4ADE80"},
+    {"label": "Avançado", "aliases": ["avanc"], "color": "#16A34A"},
+]
+
+
+def _normalize_label(value: Optional[str]) -> str:
+    if not value:
+        return ""
+    normalized = unicodedata.normalize('NFD', value)
+    return ''.join(ch for ch in normalized if unicodedata.category(ch) != 'Mn').lower()
+
+
+def _format_decimal(value: Optional[float], decimals: int = 1) -> str:
+    if value is None:
+        return "--"
+    try:
+        return f"{float(value):.{decimals}f}"
+    except (TypeError, ValueError):
+        return "--"
+
+
+def _format_percentage(value: Optional[float], decimals: int = 1) -> str:
+    if value is None:
+        return "--"
+    try:
+        return f"{float(value):.{decimals}f}%"
+    except (TypeError, ValueError):
+        return "--"
+
+
+def _format_integer(value: Optional[float]) -> str:
+    if value is None:
+        return "--"
+    try:
+        return f"{int(round(float(value)))}"
+    except (TypeError, ValueError):
+        return "--"
+
+
+def _to_number(value: Any, as_int: bool = False) -> Union[int, float]:
+    if isinstance(value, (int, float)):
+        number = float(value)
+    elif isinstance(value, str):
+        stripped = ''.join(ch for ch in value if ch.isdigit() or ch in ',.-')
+        if not stripped or stripped in ('-', '.', ','):
+            number = 0.0
+        else:
+            try:
+                number = float(stripped.replace(',', '.'))
+            except ValueError:
+                number = 0.0
+    else:
+        number = 0.0
+
+    if as_int:
+        return int(round(number))
+    return number
+
+
+def _polar_to_cartesian(cx: float, cy: float, radius: float, angle_deg: float) -> Dict[str, float]:
+    angle_rad = math.radians(angle_deg - 90)
+    return {
+        "x": cx + (radius * math.cos(angle_rad)),
+        "y": cy + (radius * math.sin(angle_rad))
+    }
+
+
+def _describe_arc(cx: float, cy: float, radius: float, start_angle: float, end_angle: float) -> str:
+    start = _polar_to_cartesian(cx, cy, radius, end_angle)
+    end = _polar_to_cartesian(cx, cy, radius, start_angle)
+    large_arc_flag = 1 if end_angle - start_angle > 180 else 0
+    return f"M {start['x']:.3f} {start['y']:.3f} A {radius:.1f} {radius:.1f} 0 {large_arc_flag} 1 {end['x']:.3f} {end['y']:.3f}"
+
+
+def _build_donut_segments(segments: List[Dict[str, Any]]) -> Dict[str, Any]:
+    total = sum(segment.get('value', 0) for segment in segments) or 0
+    radius = 52
+    circumference = 2 * math.pi * radius
+    arcs = []
+    legend = []
+
+    if total <= 0:
+        # Retorna segmentos vazios com cores padrão para manter a legenda visual
+        for segment in segments:
+            legend.append({
+                "label": segment.get('label', ''),
+                "value": 0,
+                "percentage": 0.0,
+                "color": segment.get('color', '#6b7280')
+            })
+        return {
+            "total": 0,
+            "arcs": [],
+            "legend": legend,
+            "legend_columns": len(segments)
+        }
+
+    dash_offset = 0.0
+
+    for segment in segments:
+        value = segment.get('value', 0)
+        percentage = (value / total) * 100 if total else 0
+
+        if value > 0:
+            segment_length = (value / total) * circumference
+            arcs.append({
+                "color": segment.get('color', '#6b7280'),
+                "label": segment.get('label', ''),
+                "value": value,
+                "percentage": round(percentage, 1),
+                "dasharray": f"{segment_length:.2f} {circumference - segment_length:.2f}",
+                "dashoffset": f"{dash_offset:.2f}"
+            })
+            dash_offset -= segment_length
+
+        legend.append({
+            "label": segment.get('label', ''),
+            "value": value,
+            "percentage": round(percentage, 1),
+            "color": segment.get('color', '#6b7280')
+        })
+
+    return {
+        "total": total,
+        "arcs": arcs,
+        "legend": legend,
+        "legend_columns": len(segments)
+    }
 
 def _header(canvas: Canvas, doc, logo_esq=None, logo_dir=None):
     """Função para desenhar cabeçalho com logos em todas as páginas"""
@@ -328,10 +470,20 @@ def relatorio_completo(evaluation_id: str):
         if not test:
             return jsonify({"error": "Avaliação não encontrada"}), 404
         
-        # Buscar turmas onde a avaliação foi aplicada
-        class_tests = ClassTest.query.filter_by(test_id=evaluation_id).all()
+        # Determinar escopo a partir dos parâmetros de query
+        school_id = request.args.get('school_id')
+        city_id = request.args.get('city_id')
+        scope_type, scope_id = _determinar_escopo_relatorio(school_id, city_id)
+
+        # Buscar turmas conforme o escopo selecionado
+        class_tests = _buscar_turmas_por_escopo(evaluation_id, scope_type, scope_id)
         if not class_tests:
-            return jsonify({"error": "Avaliação não foi aplicada em nenhuma turma"}), 404
+            if scope_type == 'school':
+                return jsonify({"error": "Avaliação não foi aplicada em nenhuma turma da escola especificada"}), 404
+            elif scope_type == 'city':
+                return jsonify({"error": "Avaliação não foi aplicada em nenhuma turma do município especificado"}), 404
+            else:
+                return jsonify({"error": "Avaliação não foi aplicada em nenhuma turma"}), 404
         
         # Obter dados da avaliação
         course_name = _obter_nome_curso(test)
@@ -346,22 +498,22 @@ def relatorio_completo(evaluation_id: str):
         logging.info(f"Disciplinas identificadas para avaliação {evaluation_id}: {avaliacao_data['disciplinas']}")
         
         # 1. Total de alunos que realizaram a avaliação
-        total_alunos = _calcular_totais_alunos(evaluation_id, class_tests)
+        total_alunos = _calcular_totais_alunos_por_escopo(evaluation_id, class_tests, scope_type)
         
-        # 2. Níveis de Aprendizagem por turma
-        niveis_aprendizagem = _calcular_niveis_aprendizagem(evaluation_id, class_tests)
+        # 2. Níveis de Aprendizagem por escopo
+        niveis_aprendizagem = _calcular_niveis_aprendizagem_por_escopo(evaluation_id, class_tests, scope_type)
         logging.info(f"Níveis de aprendizagem calculados para disciplinas: {list(niveis_aprendizagem.keys())}")
         
         # 3. Proficiência
-        proficiencia = _calcular_proficiencia(evaluation_id, class_tests)
+        proficiencia = _calcular_proficiencia_por_escopo(evaluation_id, class_tests, scope_type)
         logging.info(f"Proficiência calculada para disciplinas: {list(proficiencia.get('por_disciplina', {}).keys())}")
         
-        # 4. Nota Geral por turma
-        nota_geral = _calcular_nota_geral(evaluation_id, class_tests)
+        # 4. Nota Geral
+        nota_geral = _calcular_nota_geral_por_escopo(evaluation_id, class_tests, scope_type)
         logging.info(f"Nota geral calculada para disciplinas: {list(nota_geral.get('por_disciplina', {}).keys())}")
         
         # 5. Acertos por habilidade
-        acertos_habilidade = _calcular_acertos_habilidade(evaluation_id)
+        acertos_habilidade = _calcular_acertos_habilidade_por_escopo(evaluation_id, class_tests, scope_type)
         logging.info(f"Acertos por habilidade calculados para disciplinas: {list(acertos_habilidade.keys())}")
         
         return jsonify({
@@ -370,7 +522,13 @@ def relatorio_completo(evaluation_id: str):
             "niveis_aprendizagem": niveis_aprendizagem,
             "proficiencia": proficiencia,
             "nota_geral": nota_geral,
-            "acertos_por_habilidade": acertos_habilidade
+            "acertos_por_habilidade": acertos_habilidade,
+            "escopo": {
+                "tipo": scope_type,
+                "id": scope_id,
+                "school_id": school_id,
+                "city_id": city_id
+            }
         }), 200
         
     except Exception as e:
@@ -665,6 +823,268 @@ def relatorio_pdf(evaluation_id: str):
         traceback_str = traceback.format_exc()
         logging.error(f"Erro ao gerar relatório PDF: {str(e)}\n{traceback_str}")
         return jsonify({"error": "Erro interno do servidor", "details": str(e)}), 500
+
+
+@bp.route('/relatorios/relatorio-escolar-pdf', methods=['POST'])
+@jwt_required()
+@role_required("admin", "professor", "coordenador", "diretor","tecadm")
+def relatorio_escolar_pdf_custom():
+    try:
+        payload = request.get_json(silent=True) or {}
+
+        if not payload:
+            return jsonify({"error": "Payload inválido"}), 400
+
+        evaluation = payload.get('evaluation', {}) or {}
+        summary_input = payload.get('summary') or {}
+        totals_input = payload.get('totals') or {}
+        classes_input = payload.get('classes') or []
+        charts_input = payload.get('charts') or []
+        metadata = payload.get('metadata') or {}
+
+        summary = None
+        if summary_input:
+            badge_label = summary_input.get('proficiency_label')
+            badge_style = PROFICIENCY_BADGE_STYLES.get(badge_label, {"bg": "#e5e7eb", "text": "#374151"}) if badge_label else None
+            summary = {
+                "media_lp": _format_decimal(summary_input.get('media_lp')),
+                "media_mat": _format_decimal(summary_input.get('media_mat')),
+                "media_geral": _format_decimal(summary_input.get('media_geral')),
+                "proficiencia_media": _format_integer(summary_input.get('proficiencia_media')),
+                "comparecimento": _format_percentage(summary_input.get('comparecimento')),
+                "total_matriculados": _format_integer(summary_input.get('total_matriculados')),
+                "total_avaliados": _format_integer(summary_input.get('total_avaliados')),
+                "badge": {
+                    "label": badge_label,
+                    "bg": badge_style["bg"],
+                    "text": badge_style["text"]
+                } if badge_label else None
+            }
+
+        totals = {
+            "matriculados": _format_integer(totals_input.get('matriculados')),
+            "avaliados": _format_integer(totals_input.get('avaliados')),
+            "percentual": _format_percentage(totals_input.get('percentual'))
+        }
+
+        class_rows = []
+        for row in classes_input:
+            badge_label = row.get('proficiency_label')
+            badge_style = PROFICIENCY_BADGE_STYLES.get(badge_label, {"bg": "#e5e7eb", "text": "#374151"}) if badge_label else None
+            class_rows.append({
+                "turma": row.get('turma', '--'),
+                "media_lp": _format_decimal(row.get('media_lp')),
+                "media_mat": _format_decimal(row.get('media_mat')),
+                "media_geral": _format_decimal(row.get('media_geral')),
+                "comparecimento": _format_percentage(row.get('comparecimento')),
+                "proficiencia_media": _format_integer(row.get('proficiencia_media')),
+                "badge": {
+                    "label": badge_label,
+                    "bg": badge_style["bg"],
+                    "text": badge_style["text"]
+                } if badge_label else None
+            })
+
+        total_row = None
+        if summary:
+            total_row = {
+                "turma": "Total Escola",
+                "media_lp": summary["media_lp"],
+                "media_mat": summary["media_mat"],
+                "media_geral": summary["media_geral"],
+                "comparecimento": summary["comparecimento"],
+                "proficiencia_media": summary["proficiencia_media"],
+                "badge": summary.get('badge')
+            }
+
+        charts = []
+        for chart in charts_input:
+            logging.info(f"[Relatório Escolar] Chart recebido: {chart}")
+            segments_input = chart.get('segments') or []
+            chart_total = _to_number(chart.get('total'), as_int=True)
+
+            # Criar mapa de segmentos normalizados para facilitar busca
+            segment_map: Dict[str, Dict[str, Any]] = {}
+            for seg in segments_input:
+                normalized_label = _normalize_label(seg.get('label', ''))
+                segment_map[normalized_label] = {
+                    "value": _to_number(seg.get('value'), as_int=True),
+                    "percentage": _to_number(seg.get('percentage')) if seg.get('percentage') is not None else None,
+                    "color": seg.get('color')
+                }
+
+            legend = []
+            for level in DEFAULT_DONUT_LEVELS:
+                level_key = _normalize_label(level['label'])
+                segment_data = segment_map.get(level_key, {})
+
+                value = segment_data.get('value', 0)
+                percentage = segment_data.get('percentage')
+                color = segment_data.get('color') or level['color']
+
+                legend.append({
+                    "label": level['label'],
+                    "value": value,
+                    "percentage": percentage,
+                    "color": color
+                })
+
+            if chart_total <= 0:
+                chart_total = sum(item['value'] for item in legend)
+
+            final_total = chart_total if chart_total > 0 else sum(item['value'] for item in legend)
+            for item in legend:
+                if item['percentage'] is None:
+                    item['percentage'] = round((item['value'] / final_total) * 100, 1) if final_total else 0.0
+                else:
+                    item['percentage'] = round(item['percentage'], 1)
+
+            logging.info(f"[Relatório Escolar] Chart processado: total={chart_total}, legend={legend}")
+
+            charts.append({
+                "title": chart.get('title', ''),
+                "total": chart_total,
+                "arcs": [],
+                "legend": legend,
+                "legend_columns": len(legend)
+            })
+
+        # Dados fictícios temporários para gráficos adicionais de níveis
+        scope_label = "Total Município" if metadata.get("scope") == "municipio" else "Total Escola"
+
+        sample_distributions = [
+            {
+                "title": "Distribuição percentual dos estudantes por Nível de Proficiência - Língua Portuguesa",
+                "color": "#16A34A",
+                "columns": [f"Nível {i}" for i in range(9)],
+                "rows": [
+                    {"label": scope_label, "data": [7.30, 8.56, 15.31, 19.38, 21.22, 15.06, 10.13, 2.85, 0.20]},
+                ],
+                "bars": [
+                    {"label": "Nível 0", "value": 7.15},
+                    {"label": "Nível 1", "value": 9.47},
+                    {"label": "Nível 2", "value": 16.25},
+                    {"label": "Nível 3", "value": 16.60},
+                    {"label": "Nível 4", "value": 20.84},
+                    {"label": "Nível 5", "value": 15.64},
+                    {"label": "Nível 6", "value": 11.24},
+                    {"label": "Nível 7", "value": 3.60},
+                    {"label": "Nível 8", "value": 0.0},
+                ]
+            },
+            {
+                "title": "Distribuição percentual dos estudantes por Nível de Proficiência - Matemática",
+                "color": "#1D4ED8",
+                "columns": [f"Nível {i}" for i in range(10)],
+                "rows": [
+                    {"label": scope_label, "data": [6.53, 9.38, 16.59, 19.99, 23.12, 13.80, 5.54, 3.31, 1.73, 0.35]},
+                ],
+                "bars": [
+                    {"label": "Nível 0", "value": 5.70},
+                    {"label": "Nível 1", "value": 6.40},
+                    {"label": "Nível 2", "value": 12.87},
+                    {"label": "Nível 3", "value": 21.95},
+                    {"label": "Nível 4", "value": 27.18},
+                    {"label": "Nível 5", "value": 17.39},
+                    {"label": "Nível 6", "value": 5.60},
+                    {"label": "Nível 7", "value": 2.91},
+                    {"label": "Nível 8", "value": 0.0},
+                    {"label": "Nível 9", "value": 0.0},
+                ]
+            }
+        ]
+
+        proficiency_distributions = []
+        for dist in sample_distributions:
+            bars = dist.get("bars", [])
+            max_value = max((bar.get("value", 0) for bar in bars), default=0) or 1
+            scaled_bars = []
+            for bar in bars:
+                value = bar.get("value", 0)
+                height = int(round((value / max_value) * 140)) if value > 0 else 0
+                scaled_bars.append({
+                    "label": bar.get("label", ""),
+                    "value": value,
+                    "height": height
+                })
+            proficiency_distributions.append({
+                "title": dist.get("title", ""),
+                "color": dist.get("color", "#2563eb"),
+                "columns": dist.get("columns", []),
+                "rows": dist.get("rows", []),
+                "bars": scaled_bars
+            })
+
+        scope = metadata.get('scope', 'escola')
+        scope_label = 'Município (todas as escolas)' if scope == 'municipio' else 'Escola selecionada'
+
+        generated_at = datetime.now().strftime('%d/%m/%Y %H:%M')
+
+        # Obter informações de município, estado e escola a partir dos IDs
+        municipality_name = 'MUNICÍPIO'
+        state_name = 'UF'
+        school_name = metadata.get('school_name')
+        if school_name:
+            school_name = school_name.upper()
+        else:
+            school_name = 'ESCOLA'
+
+        try:
+            # Buscar informações pelo ID da escola
+            school_id = metadata.get('school_id')
+            if school_id and school_id != 'all':
+                school = School.query.get(school_id)
+                if school:
+                    school_name = school.name.upper()
+                    if school.city:
+                        municipality_name = school.city.name.upper()
+                        state_name = school.city.state.upper()
+            # Se não tem escola, buscar pelo município
+            elif metadata.get('municipality_id'):
+                municipality_id = metadata.get('municipality_id')
+                city = City.query.get(municipality_id)
+                if city:
+                    municipality_name = city.name.upper()
+                    state_name = city.state.upper()
+        except Exception as e:
+            logging.warning(f"Erro ao buscar informações de localização: {str(e)}")
+
+        context = {
+            "evaluation": {
+                "title": evaluation.get('title'),
+                "description": evaluation.get('description')
+            },
+            "summary": summary,
+            "totals": totals,
+            "class_rows": class_rows,
+            "total_row": total_row,
+            "charts": charts,
+            "proficiency_distributions": proficiency_distributions,
+            "metadata": {
+                "scope": scope,
+                "scope_label": scope_label
+            },
+            "generated_at": generated_at,
+            "municipality": municipality_name,
+            "state": state_name,
+            "school_name": school_name
+        }
+
+        templates_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'templates')
+        html_content = render_template('relatorio_escolar_pdf.html', **context)
+        pdf_bytes = HTML(string=html_content, base_url=templates_dir).write_pdf()
+
+        file_title = evaluation.get('title') or 'relatorio_escolar'
+        sanitized_name = ''.join(ch for ch in file_title if ch.isalnum() or ch in (' ', '_')).strip().replace(' ', '_') or 'relatorio_escolar'
+        file_name = f"{sanitized_name.lower()}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf"
+
+        response = Response(pdf_bytes, mimetype='application/pdf')
+        response.headers['Content-Disposition'] = f'attachment; filename={file_name}'
+        return response
+
+    except Exception as e:
+        logging.error(f"Erro ao gerar relatório escolar personalizado: {str(e)}")
+        return jsonify({"error": "Erro ao gerar relatório escolar", "details": str(e)}), 500
 
 
 # ===== WeasyPrint + Jinja2 e JSON unificado =====

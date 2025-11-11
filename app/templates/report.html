@@ -766,14 +766,14 @@
             <span class="cover-info-label">MUNICÍPIO:</span>
             <span class="cover-info-value">{{ metadados.municipio }}</span>
           </div>
-          {% endif %}
+        {% endif %}
           {% if avaliacao.serie or metadados.serie %}
           <div class="cover-info-item">
             <span class="cover-info-label">SÉRIE:</span>
             <span class="cover-info-value">{{ avaliacao.serie or metadados.serie or '9º Ano' }}</span>
           </div>
-          {% endif %}
-        </div>
+        {% endif %}
+      </div>
       </div>
     </div>
 
@@ -812,7 +812,7 @@
       </div>
       <div class="justified" style="margin-top:8px;">
         Foram constatadas algumas inconsistências em algumas questões. Para conhecimento:
-      </div>
+        </div>
       <div class="justified" style="margin-top:8px;">
         A necessidade de anulação de duas questões de <strong>Matemática</strong> direcionadas ao <strong>9º ano</strong>. As questões (<strong>nº 10</strong> e <strong>nº 11</strong> do material da <strong>SEMED</strong>), referentes a <strong>36º</strong> e <strong>37º</strong> na avaliação <strong>InnovPlay</strong> foram enviadas com possíveis erros pela equipe responsável pela elaboração da SEMED, por este motivo havendo a necessidade de anular.
       </div>
@@ -820,7 +820,7 @@
 
     <section class="section page-break">
       <h2>1. PARTICIPAÇÃO DA REDE NO PROCESSO DE AVALIAÇÃO DIAGNÓSTICA</h2>
-      
+
       <table class="data-table">
         <thead>
           <tr>
@@ -860,7 +860,7 @@
       {% if analise_ia and analise_ia.participacao %}
       <div class="analysis-text" style="white-space: pre-line;">
         {{ analise_ia.participacao }}
-      </div>
+        </div>
       {% elif total_alunos.total_geral %}
       <div class="analysis-text">
         A escola avaliou <strong>{{ total_alunos.total_geral.avaliados }} alunos</strong> do 9º ano, o que representa <strong>{{ '%.0f' % (total_alunos.total_geral.percentual or 0) }}%</strong> do total de <strong>{{ total_alunos.total_geral.matriculados }}</strong> alunos matriculados. Registrou-se um total de <strong>{{ total_alunos.total_geral.faltosos }}</strong> alunos faltosos. A taxa de participação de <strong>{{ '%.0f' % (total_alunos.total_geral.percentual or 0) }}%</strong> é boa, indicando um bom engajamento geral. Contudo, a ausência de <strong>{{ total_alunos.total_geral.faltosos }}</strong> alunos é um número considerável. Recomenda-se a investigação das causas dessas ausências, um contato proativo com as famílias para elevar a participação em futuras avaliações e o planejamento de uma reposição diagnóstica para os alunos faltosos, visando obter um panorama mais completo da aprendizagem na série.
@@ -877,7 +877,7 @@
         {% set disc_nome = 'MATEMÁTICA' %}
       {% endif %}
       <div style="page-break-before: {% if loop.first %}auto{% else %}always{% endif %}; page-break-inside: avoid;">
-        <table class="data-table">
+      <table class="data-table">
         <thead>
           <tr>
             <th class="table-title" colspan="5">
@@ -899,15 +899,15 @@
         <tbody>
           {% if metadados.scope_type == 'school' %}
             {# Relatório por escola: mostrar turmas #}
-            {% for t in (bloco.por_turma or []) %}
-            <tr>
+          {% for t in (bloco.por_turma or []) %}
+          <tr>
               <td>{{ t.turma }}</td>
-              <td>{{ t.abaixo_do_basico }}</td>
-              <td>{{ t.basico }}</td>
-              <td>{{ t.adequado }}</td>
-              <td>{{ t.avancado }}</td>
-            </tr>
-            {% endfor %}
+            <td>{{ t.abaixo_do_basico }}</td>
+            <td>{{ t.basico }}</td>
+            <td>{{ t.adequado }}</td>
+            <td>{{ t.avancado }}</td>
+          </tr>
+          {% endfor %}
           {% else %}
             {# Relatório municipal: mostrar escolas #}
             {% for e in (bloco.por_escola or []) %}
@@ -1031,9 +1031,9 @@
         {% endif %}
       {% endif %}
 
-      <table class="data-table">
-        <thead>
-          <tr>
+        <table class="data-table">
+          <thead>
+            <tr>
             <th class="table-title" colspan="5">
               {% if metadados.scope_type == 'school' %}
               PROFICIÊNCIA POR TURMA/GERAL – {{ avaliacao.titulo or 'AVALIAÇÃO DIAGNÓSTICA' }}
@@ -1048,9 +1048,9 @@
             <th>MATEMÁTICA</th>
             <th>MÉDIA</th>
             <th>MÉDIA MUNICIPAL</th>
-          </tr>
-        </thead>
-        <tbody>
+            </tr>
+          </thead>
+          <tbody>
           {# Iterar sobre turmas ou escolas dependendo do escopo #}
           {% if metadados.scope_type == 'school' %}
             {% set lista_entidades = total_alunos.por_turma or [] %}
@@ -1145,8 +1145,8 @@
             {% set count_entidades = lista_entidades|length %}
             <td rowspan="{{ count_entidades }}" style="vertical-align: middle; font-weight: 700;">{{ ('%.2f' % media_municipal).replace('.', ',') }}</td>
             {% endif %}
-          </tr>
-          {% endfor %}
+            </tr>
+            {% endfor %}
           {% endif %}
 
           {# Linha de média geral #}
@@ -1167,9 +1167,9 @@
             <th>{{ ('%.2f' % media_mat_geral).replace('.', ',') }}</th>
             <th>{{ ('%.2f' % media_geral_proficiencia).replace('.', ',') }}</th>
             <th>{{ ('%.2f' % media_municipal).replace('.', ',') }}</th>
-          </tr>
-        </tbody>
-      </table>
+            </tr>
+          </tbody>
+        </table>
       
       {# Gráfico de barras para proficiência #}
       {% set max_prof = media_pt_geral %}
@@ -1193,7 +1193,7 @@
       <div class="bar-chart-card">
         <div class="analysis-text" style="margin-top: 0; margin-bottom: 8px;">
           <strong>Proficiência Geral ({% if metadados.scope_type == 'school' %}9º GERAL{% else %}MUNICIPAL GERAL{% endif %})</strong>
-        </div>
+      </div>
         <div class="bar-chart-container">
           <div class="bar-item">
             <div class="bar-wrapper">
@@ -1285,9 +1285,9 @@
         {% endif %}
       {% endif %}
 
-      <table class="data-table">
-        <thead>
-          <tr>
+        <table class="data-table">
+          <thead>
+            <tr>
             <th class="table-title" colspan="5">
               {% if metadados.scope_type == 'school' %}
               NOTA POR TURMA/GERAL – {{ avaliacao.titulo or 'AVALIAÇÃO DIAGNÓSTICA' }}
@@ -1302,9 +1302,9 @@
             <th>MATEMÁTICA</th>
             <th>MÉDIA</th>
             <th>MÉDIA MUNICIPAL</th>
-          </tr>
-        </thead>
-        <tbody>
+            </tr>
+          </thead>
+          <tbody>
           {# Iterar sobre turmas ou escolas dependendo do escopo #}
           {% if metadados.scope_type == 'school' %}
             {% set lista_entidades = total_alunos.por_turma or [] %}
@@ -1399,8 +1399,8 @@
             {% set count_entidades_nota = lista_entidades|length %}
             <td rowspan="{{ count_entidades_nota + 1 }}" style="vertical-align: middle; font-weight: 700;">{{ ('%.1f' % nota_media_municipal).replace('.', ',') }}</td>
             {% endif %}
-          </tr>
-          {% endfor %}
+            </tr>
+            {% endfor %}
           {% endif %}
 
           {# Linha de média geral #}
@@ -1421,9 +1421,9 @@
             <th>{{ ('%.1f' % nota_media_mat_geral).replace('.', ',') }}</th>
             <th>{{ ('%.1f' % nota_media_geral).replace('.', ',') }}</th>
             {# A célula de MÉDIA MUNICIPAL já foi adicionada com rowspan na primeira linha #}
-          </tr>
-        </tbody>
-      </table>
+            </tr>
+          </tbody>
+        </table>
       
       {# Gráfico de barras para nota - Língua Portuguesa, Matemática e Média Geral #}
       {% set max_nota = 10 %}
@@ -1434,7 +1434,7 @@
       <div class="bar-chart-card">
         <div class="analysis-text" style="margin-top: 0; margin-bottom: 8px;">
           <strong>Média Geral</strong>
-        </div>
+      </div>
         <div class="bar-chart-container">
           <div class="bar-item">
             <div class="bar-wrapper">
@@ -1545,18 +1545,18 @@
         {# Tabela vertical original #}
         <div style="margin-top: 24px;">
           <table class="data-table acertos-habilidade-table">
-            <thead>
-              <tr>
-                <th>Questão</th>
-                <th>Código</th>
-                <th>Descrição</th>
-                <th>Acertos</th>
-                <th>Total</th>
-                <th>%</th>
+          <thead>
+            <tr>
+              <th>Questão</th>
+              <th>Código</th>
+              <th>Descrição</th>
+              <th>Acertos</th>
+              <th>Total</th>
+              <th>%</th>
                 <th>Classificação</th>
-              </tr>
-            </thead>
-            <tbody>
+            </tr>
+          </thead>
+          <tbody>
               {% for q in bloco.questoes %}
               {% set percent = q.percentual or 0 %}
               {% if percent <= 50 %}
@@ -1569,20 +1569,20 @@
                 {% set classificacao = 'concluido' %}
                 {% set texto_classificacao = 'Concluído' %}
               {% endif %}
-              <tr>
-                <td>{{ q.numero_questao }}</td>
-                <td>{{ q.codigo }}</td>
-                <td>{{ q.descricao }}</td>
-                <td>{{ q.acertos }}</td>
-                <td>{{ q.total }}</td>
+            <tr>
+              <td>{{ q.numero_questao }}</td>
+              <td>{{ q.codigo }}</td>
+              <td>{{ q.descricao }}</td>
+              <td>{{ q.acertos }}</td>
+              <td>{{ q.total }}</td>
                 <td>{{ '%.1f' % percent }}%</td>
                 <td>
                   <span class="classification-badge {{ classificacao }}">{{ texto_classificacao }}</span>
                 </td>
-              </tr>
-              {% endfor %}
-            </tbody>
-          </table>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
         </div>
         {% endif %}
         

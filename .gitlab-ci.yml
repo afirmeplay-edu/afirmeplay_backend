@@ -6,8 +6,10 @@ variables:
     CONTAINER_NAME: "$APP"
     HOST_PORT: 5000
     CONTAINER_PORT: 5000
+    DOCKER_API_VERSION: "1.41"
+
 default:
-    image: docker:24.0
+    image: docker:20.10
 
 workflow:
     rules:

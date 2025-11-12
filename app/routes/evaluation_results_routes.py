@@ -15,6 +15,7 @@ from app.services.evaluation_calculator import EvaluationCalculator
 from app.services.evaluation_filters import EvaluationFilters
 from app.services.evaluation_aggregator import EvaluationAggregator
 from app.services.evaluation_result_service import EvaluationResultService
+from app.services.student_ranking_service import StudentRankingService
 from app.services.report_aggregate_service import ReportAggregateService
 from app.models.test import Test
 from app.models.student import Student
@@ -3848,6 +3849,8 @@ def get_student_test_results(test_id, student_id):
                 
                 detailed_answers.append(answer_detail)
         
+        rankings = StudentRankingService.get_rankings(actual_student_id, test_id)
+
         result = {
             "test_id": test_id,
             "student_id": student_id,  # user_id
@@ -3862,7 +3865,8 @@ def get_student_test_results(test_id, student_id):
             "proficiencia": format_decimal_two_places(proficiency_original),
             "classificacao": classification,
             "calculated_at": evaluation_result.calculated_at.isoformat() if evaluation_result.calculated_at else None,
-            "answers": detailed_answers if request.args.get('include_answers', 'false').lower() == 'true' else []
+            "answers": detailed_answers if request.args.get('include_answers', 'false').lower() == 'true' else [],
+            "rankings": rankings
         }
         
         return jsonify(result), 200

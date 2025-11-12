@@ -496,21 +496,42 @@ def dados_json(evaluation_id: str):
             return jsonify({"error": "Avaliação não encontrada"}), 404
         
         # Obter parâmetros de filtro
-        school_id = request.args.get('school_id')
+        school_id_raw = request.args.get('school_id')
         city_id = request.args.get('city_id')
 
-        if school_id:
-            scope_type = 'school'
-            scope_ref_id = school_id
-        elif city_id:
+        if not school_id_raw and not city_id:
+            return jsonify({"error": "Informe school_id ou city_id"}), 400
+
+        scope_type = None
+        scope_ref_id = None
+        school_id = None
+
+        if school_id_raw:
+            if school_id_raw.strip().lower() == "all":
+                if not city_id:
+                    return jsonify({"error": "city_id é obrigatório quando school_id=all"}), 400
+                scope_type = 'city'
+                scope_ref_id = city_id
+            else:
+                if city_id and city_id != "":
+                    return jsonify({"error": "Não informe city_id quando school_id específico for utilizado"}), 400
+                scope_type = 'school'
+                scope_ref_id = school_id_raw
+                school_id = school_id_raw
+        else:
             scope_type = 'city'
             scope_ref_id = city_id
-        else:
-            scope_type = 'overall'
-            scope_ref_id = None
+
+        if scope_type is None or scope_ref_id is None:
+            return jsonify({"error": "Não foi possível determinar o escopo do relatório"}), 400
 
         def build_payload():
-            contexto = _montar_resposta_relatorio(evaluation_id, school_id, city_id, include_ai=False)
+            contexto = _montar_resposta_relatorio(
+                evaluation_id,
+                school_id=school_id,
+                city_id=city_id if scope_type == 'city' else None,
+                include_ai=False
+            )
             student_count = (
                 contexto
                 .get('total_alunos', {})
@@ -2773,49 +2794,98 @@ def _calcular_niveis_aprendizagem_por_municipio(evaluation_id: str, class_tests:
             'total': total_geral
         }
     
-    # Adicionar dados gerais que englobam todas as disciplinas (média das escolas)
+    def _normalize_classification(label: str) -> Optional[str]:
+        if not label:
+            return None
+        label_lower = label.lower()
+        if "abaixo" in label_lower:
+            return "abaixo_do_basico"
+        if "básico" in label_lower or "basico" in label_lower:
+            return "basico"
+        if "adequado" in label_lower:
+            return "adequado"
+        if "avançado" in label_lower or "avancado" in label_lower:
+            return "avancado"
+        return None
+
+    # Mapear escolas presentes no escopo (inclusive as sem resultados) para garantir entradas com zero
+    escolas_no_escopo: Dict[str, School] = {}
+    class_ids_escopo = [ct.class_id for ct in class_tests if getattr(ct, "class_id", None)]
+    if class_ids_escopo:
+        classes = Class.query.options(joinedload(Class.school)).filter(Class.id.in_(class_ids_escopo)).all()
+        for cls in classes:
+            if cls and cls.school:
+                escolas_no_escopo[str(cls.school.id)] = cls.school
+
     dados_gerais_por_escola_lista = []
-    for disciplina, dados in niveis_por_disciplina.items():
-        for escola_data in dados['por_escola']:
-            escola_nome = escola_data['escola']
-            
-            # Buscar ou criar entrada para esta escola nos dados gerais
-            escola_existente = next((item for item in dados_gerais_por_escola_lista if item['escola'] == escola_nome), None)
-            if not escola_existente:
-                escola_existente = {
-                    'escola': escola_nome,
-                    'abaixo_do_basico': 0,
-                    'basico': 0,
-                    'adequado': 0,
-                    'avancado': 0,
-                    'total': 0
-                }
-                dados_gerais_por_escola_lista.append(escola_existente)
-            
-            # Somar os dados desta disciplina para esta escola
-            escola_existente['abaixo_do_basico'] += escola_data['abaixo_do_basico']
-            escola_existente['basico'] += escola_data['basico']
-            escola_existente['adequado'] += escola_data['adequado']
-            escola_existente['avancado'] += escola_data['avancado']
-            escola_existente['total'] += escola_data['total']
-    
-    # Calcular totais gerais
-    total_geral_abaixo = sum(item['abaixo_do_basico'] for item in dados_gerais_por_escola_lista)
-    total_geral_basico = sum(item['basico'] for item in dados_gerais_por_escola_lista)
-    total_geral_adequado = sum(item['adequado'] for item in dados_gerais_por_escola_lista)
-    total_geral_avancado = sum(item['avancado'] for item in dados_gerais_por_escola_lista)
-    total_geral_total = sum(item['total'] for item in dados_gerais_por_escola_lista)
-    
-    # Adicionar seção GERAL
+    total_geral_acumulado = {
+        "abaixo_do_basico": 0,
+        "basico": 0,
+        "adequado": 0,
+        "avancado": 0,
+        "total": 0
+    }
+
+    for school_id, school in escolas_no_escopo.items():
+        escola_nome = school.name if school else "Escola Desconhecida"
+        contagem_escola = {
+            "escola": escola_nome,
+            "abaixo_do_basico": 0,
+            "basico": 0,
+            "adequado": 0,
+            "avancado": 0,
+            "total": 0
+        }
+
+        for resultado in results_by_school.get(school_id, []):
+            categoria = _normalize_classification(resultado.classification)
+            if not categoria:
+                continue
+            contagem_escola[categoria] += 1
+            contagem_escola["total"] += 1
+
+        total_geral_acumulado["abaixo_do_basico"] += contagem_escola["abaixo_do_basico"]
+        total_geral_acumulado["basico"] += contagem_escola["basico"]
+        total_geral_acumulado["adequado"] += contagem_escola["adequado"]
+        total_geral_acumulado["avancado"] += contagem_escola["avancado"]
+        total_geral_acumulado["total"] += contagem_escola["total"]
+
+        dados_gerais_por_escola_lista.append(contagem_escola)
+
+    # Caso não haja escolas identificadas (por segurança), construir a partir dos resultados disponíveis
+    if not dados_gerais_por_escola_lista and results_by_school:
+        for school_id, school_results in results_by_school.items():
+            escola_nome = "Escola Desconhecida"
+            if school_results and school_results[0].student and school_results[0].student.class_ and school_results[0].student.class_.school:
+                escola_nome = school_results[0].student.class_.school.name
+
+            contagem_escola = {
+                "escola": escola_nome,
+                "abaixo_do_basico": 0,
+                "basico": 0,
+                "adequado": 0,
+                "avancado": 0,
+                "total": 0
+            }
+
+            for resultado in school_results:
+                categoria = _normalize_classification(resultado.classification)
+                if not categoria:
+                    continue
+                contagem_escola[categoria] += 1
+                contagem_escola["total"] += 1
+
+            total_geral_acumulado["abaixo_do_basico"] += contagem_escola["abaixo_do_basico"]
+            total_geral_acumulado["basico"] += contagem_escola["basico"]
+            total_geral_acumulado["adequado"] += contagem_escola["adequado"]
+            total_geral_acumulado["avancado"] += contagem_escola["avancado"]
+            total_geral_acumulado["total"] += contagem_escola["total"]
+
+            dados_gerais_por_escola_lista.append(contagem_escola)
+
     niveis_por_disciplina["GERAL"] = {
         "por_escola": dados_gerais_por_escola_lista,
-        "total_geral": {
-            "abaixo_do_basico": total_geral_abaixo,
-            "basico": total_geral_basico,
-            "adequado": total_geral_adequado,
-            "avancado": total_geral_avancado,
-            "total": total_geral_total
-        }
+        "total_geral": total_geral_acumulado
     }
     
     return niveis_por_disciplina

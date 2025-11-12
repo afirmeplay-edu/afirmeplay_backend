@@ -60,7 +60,7 @@ def create_app():
     migrate.init_app(app, db)
     
     # Importar rotas
-    from .routes import school_routes, test_routes, question_routes, login, logout, admin_route, educationStage_routes, grades_routes, persistUser_routes, city_routes, student_routes, user_routes, class_routes, schoolTeacher, teacherClass, professor_route, subject_routes, skill_routes,student_answer_routes, userQuickLinks_routes, evaluation_results_routes, basic_endpoints, evaluation_routes, game_routes, manager_routes, report_routes, physical_test_routes, student_grades_routes, calendar_routes
+    from .routes import school_routes, test_routes, question_routes, login, logout, admin_route, educationStage_routes, grades_routes, persistUser_routes, city_routes, student_routes, user_routes, class_routes, schoolTeacher, teacherClass, professor_route, subject_routes, skill_routes,student_answer_routes, userQuickLinks_routes, evaluation_results_routes, basic_endpoints, evaluation_routes, game_routes, manager_routes, report_routes, physical_test_routes, student_grades_routes, calendar_routes, dashboard_routes
     
     app.register_blueprint(school_routes.bp)
     app.register_blueprint(test_routes.bp)
@@ -91,6 +91,7 @@ def create_app():
     app.register_blueprint(physical_test_routes.bp)
     app.register_blueprint(student_grades_routes.bp)
     app.register_blueprint(calendar_routes.bp)
+    app.register_blueprint(dashboard_routes.bp)
     # Importar modelos para garantir que as tabelas sejam criadas
     from .models import City, School, SchoolTeacher, Teacher, Student, Subject, Class, ClassSubject, ClassTest, Test, EducationStage, Grade, Skill, Question, StudentAnswer, UserQuickLinks, TeacherClass, User, Manager
 
@@ -115,10 +116,34 @@ def create_app():
             </style>
         </head>
         <body>
-            <div class="redoc-wrap">
-                <redoc spec-url="/api/swagger.yaml"></redoc>
-            </div>
-            <script src="https://cdn.jsdelivr.net/npm/redoc@next/bundles/redoc.standalone.js"></script>
+            <div class="redoc-wrap" id="redoc-container"></div>
+            <script src="https://cdn.jsdelivr.net/npm/redoc@2.1.3/bundles/redoc.standalone.js"></script>
+            <script>
+                (async function() {
+                    const container = document.getElementById('redoc-container');
+                    const candidates = ['/api/swagger.yaml', '/swagger.yaml'];
+                    let specUrl = null;
+
+                    for (const url of candidates) {
+                        try {
+                            const resp = await fetch(url, { method: 'HEAD' });
+                            if (resp.ok) {
+                                specUrl = url;
+                                break;
+                            }
+                        } catch (err) {
+                            console.warn('Tentativa de carregar spec falhou para', url, err);
+                        }
+                    }
+
+                    if (!specUrl) {
+                        container.innerHTML = '<p style="padding:16px;font-family:sans-serif;">Não foi possível localizar o arquivo swagger.yaml. Verifique se o backend está servindo o endpoint correto.</p>';
+                        return;
+                    }
+
+                    Redoc.init(specUrl, {}, container);
+                })();
+            </script>
         </body>
         </html>
         '''

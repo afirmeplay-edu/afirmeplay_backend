@@ -11,7 +11,7 @@ from app.models.studentAnswer import StudentAnswer
 from app.models.testQuestion import TestQuestion
 from app.models.educationStage import EducationStage
 from sqlalchemy.exc import SQLAlchemyError
-from sqlalchemy import func, case, desc
+from sqlalchemy import func, case
 from sqlalchemy.orm import joinedload
 import logging
 from app.decorators.role_required import role_required, get_current_user_from_token
@@ -19,6 +19,7 @@ from flask_jwt_extended import jwt_required
 from app import db
 from typing import Dict, List, Optional, Any
 from app.services.evaluation_result_service import EvaluationResultService
+from app.services.student_ranking_service import StudentRankingService
 import uuid
 
 bp = Blueprint('student_grades', __name__, url_prefix="/students")
@@ -85,179 +86,9 @@ def _get_student_general_stats(student_id: str) -> Dict[str, Any]:
         return {}
 
 def _calculate_student_rankings(student_id: str, evaluation_id: Optional[str] = None) -> Dict[str, Any]:
-    """Calcula ranking do aluno na escola, turma e município"""
+    """Wrapper temporário para manter compatibilidade com chamadas existentes."""
     try:
-        # Buscar dados do aluno
-        student = Student.query.get(student_id)
-        
-        if not student:
-            return {}
-        
-        rankings = {}
-        
-        # Ranking na escola
-        if student.school_id:
-            school_students = Student.query.filter_by(school_id=student.school_id).all()
-            school_student_ids = [s.id for s in school_students]
-            
-            if evaluation_id:
-                # Ranking específico da avaliação na escola
-                school_results = db.session.query(
-                    EvaluationResult.student_id,
-                    EvaluationResult.proficiency,
-                    Student.name
-                ).join(
-                    Student, EvaluationResult.student_id == Student.id
-                ).filter(
-                    EvaluationResult.student_id.in_(school_student_ids),
-                    EvaluationResult.test_id == evaluation_id
-                ).order_by(desc(EvaluationResult.proficiency)).all()
-            else:
-                # Ranking geral na escola (média de proficiências)
-                school_results = db.session.query(
-                    EvaluationResult.student_id,
-                    func.avg(EvaluationResult.proficiency).label('avg_proficiency'),
-                    Student.name
-                ).join(
-                    Student, EvaluationResult.student_id == Student.id
-                ).filter(
-                    EvaluationResult.student_id.in_(school_student_ids)
-                ).group_by(EvaluationResult.student_id, Student.name).order_by(
-                    desc('avg_proficiency')
-                ).all()
-            
-            # Encontrar posição do aluno e montar ranking completo
-            position = 1
-            ranking_list = []
-            for result in school_results:
-                ranking_list.append({
-                    "position": position,
-                    "student_id": result.student_id,
-                    "student_name": result.name,
-                    "proficiency": result.proficiency if evaluation_id else result.avg_proficiency
-                })
-                if result.student_id == student_id:
-                    student_position = position
-                position += 1
-            
-            rankings["school"] = {
-                "position": student_position,
-                "total_students": len(school_results),
-                "ranking": ranking_list
-            }
-        
-        # Ranking na turma
-        if student.class_id:
-            class_students = Student.query.filter_by(class_id=student.class_id).all()
-            class_student_ids = [s.id for s in class_students]
-            
-            if evaluation_id:
-                # Ranking específico da avaliação na turma
-                class_results = db.session.query(
-                    EvaluationResult.student_id,
-                    EvaluationResult.proficiency,
-                    Student.name
-                ).join(
-                    Student, EvaluationResult.student_id == Student.id
-                ).filter(
-                    EvaluationResult.student_id.in_(class_student_ids),
-                    EvaluationResult.test_id == evaluation_id
-                ).order_by(desc(EvaluationResult.proficiency)).all()
-            else:
-                # Ranking geral na turma (média de proficiências)
-                class_results = db.session.query(
-                    EvaluationResult.student_id,
-                    func.avg(EvaluationResult.proficiency).label('avg_proficiency'),
-                    Student.name
-                ).join(
-                    Student, EvaluationResult.student_id == Student.id
-                ).filter(
-                    EvaluationResult.student_id.in_(class_student_ids)
-                ).group_by(EvaluationResult.student_id, Student.name).order_by(
-                    desc('avg_proficiency')
-                ).all()
-            
-            # Encontrar posição do aluno e montar ranking completo
-            position = 1
-            ranking_list = []
-            for result in class_results:
-                ranking_list.append({
-                    "position": position,
-                    "student_id": result.student_id,
-                    "student_name": result.name,
-                    "proficiency": result.proficiency if evaluation_id else result.avg_proficiency
-                })
-                if result.student_id == student_id:
-                    student_position = position
-                position += 1
-            
-            rankings["class"] = {
-                "position": student_position,
-                "total_students": len(class_results),
-                "ranking": ranking_list
-            }
-        
-        # Ranking no município
-        school = School.query.get(student.school_id) if student.school_id else None
-        if school and school.city_id:
-            # Buscar todas as escolas do município
-            municipality_schools = School.query.filter_by(city_id=school.city_id).all()
-            municipality_school_ids = [s.id for s in municipality_schools]
-            
-            # Buscar todos os alunos do município
-            municipality_students = Student.query.filter(
-                Student.school_id.in_(municipality_school_ids)
-            ).all()
-            municipality_student_ids = [s.id for s in municipality_students]
-            
-            if evaluation_id:
-                # Ranking específico da avaliação no município
-                municipality_results = db.session.query(
-                    EvaluationResult.student_id,
-                    EvaluationResult.proficiency,
-                    Student.name
-                ).join(
-                    Student, EvaluationResult.student_id == Student.id
-                ).filter(
-                    EvaluationResult.student_id.in_(municipality_student_ids),
-                    EvaluationResult.test_id == evaluation_id
-                ).order_by(desc(EvaluationResult.proficiency)).all()
-            else:
-                # Ranking geral no município (média de proficiências)
-                municipality_results = db.session.query(
-                    EvaluationResult.student_id,
-                    func.avg(EvaluationResult.proficiency).label('avg_proficiency'),
-                    Student.name
-                ).join(
-                    Student, EvaluationResult.student_id == Student.id
-                ).filter(
-                    EvaluationResult.student_id.in_(municipality_student_ids)
-                ).group_by(EvaluationResult.student_id, Student.name).order_by(
-                    desc('avg_proficiency')
-                ).all()
-            
-            # Encontrar posição do aluno e montar ranking completo
-            position = 1
-            ranking_list = []
-            for result in municipality_results:
-                ranking_list.append({
-                    "position": position,
-                    "student_id": result.student_id,
-                    "student_name": result.name,
-                    "proficiency": result.proficiency if evaluation_id else result.avg_proficiency
-                })
-                if result.student_id == student_id:
-                    student_position = position
-                position += 1
-            
-            rankings["municipality"] = {
-                "position": student_position,
-                "total_students": len(municipality_results),
-                "ranking": ranking_list
-            }
-        
-        return rankings
-        
+        return StudentRankingService.get_rankings(student_id, evaluation_id)
     except Exception as e:
         logging.error(f"Erro ao calcular rankings do aluno {student_id}: {str(e)}")
         return {}

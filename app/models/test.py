@@ -25,6 +25,7 @@ class Test(db.Model):
     # Novos campos
     municipalities = db.Column(JSON)  # Lista de municípios
     schools = db.Column(JSON)  # Lista de escolas
+    classes = db.Column(JSON)  # Lista de classes específicas
     course = db.Column(db.String(100))  # Curso (Ensino Fundamental, etc)
     model = db.Column(db.String(50))  # SAEB, PROVA, etc
     subjects_info = db.Column(JSON)  # Informações sobre as disciplinas e quantidade de questões

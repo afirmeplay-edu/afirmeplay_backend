@@ -181,6 +181,7 @@ def criar_avaliacao():
             # Se turmas foram especificadas, extrair as escolas das turmas
             school_ids_from_classes = list(set([c.school_id for c in existing_classes]))
             data['schools'] = school_ids_from_classes
+            data['classes'] = class_ids  # Salvar as classes específicas
 
         logging.info("Criando nova avaliação com os dados fornecidos")
         print(data)
@@ -199,6 +200,7 @@ def criar_avaliacao():
             created_by=data.get('created_by'),
             municipalities=data.get('municipalities'),
             schools=data.get('schools'),
+            classes=data.get('classes'),  # Salvar as classes específicas
             course=data.get('course'),
             model=data.get('model'),
             subjects_info=data.get('subjects') or data.get('subjects_info'),  # Aceita tanto 'subjects' quanto 'subjects_info'
@@ -849,11 +851,28 @@ def atualizar_avaliacao(test_id):
                     logging.error("Disciplina ou disciplinas ausentes para tipo AVALIACAO")
                     return jsonify({"error": "Subject or subjects array is required for AVALIACAO type"}), 400
 
+        # Validação de turmas se fornecidas
+        if 'classes' in data and data.get('classes'):
+            if isinstance(data['classes'], list):
+                class_ids = [c.get('id') if isinstance(c, dict) else c for c in data['classes']]
+            else:
+                class_ids = [data['classes']]
+            
+            # Verificar se todas as turmas existem
+            existing_classes = Class.query.filter(Class.id.in_(class_ids)).all()
+            if len(existing_classes) != len(class_ids):
+                return jsonify({"error": "Uma ou mais turmas não foram encontradas"}), 400
+            
+            # Se turmas foram especificadas, extrair as escolas das turmas
+            school_ids_from_classes = list(set([c.school_id for c in existing_classes]))
+            data['schools'] = school_ids_from_classes
+            data['classes'] = class_ids  # Salvar as classes específicas
+
         # Campos que podem ser atualizados
         campos = [
             'title', 'description', 'type', 'subject', 'grade_id',
             'max_score', 'time_limit', 'end_time', 'duration', 'evaluation_mode', 'intructions', 'municipalities',
-            'schools', 'course', 'model', 'subjects_info'
+            'schools', 'classes', 'course', 'model', 'subjects_info'
         ]
 
         for campo in campos:
@@ -1326,7 +1345,59 @@ def listar_classes_avaliacao(test_id):
                         "status": "applied"  # Indica que foi aplicada
                     })
         
-        # Segunda prioridade: usar schools (quando a avaliação foi criada mas não aplicada)
+        # Segunda prioridade: usar classes específicas salvas na criação
+        elif test.classes:
+            logging.info(f"Nenhuma aplicação encontrada, buscando classes específicas do campo classes: {test.classes}")
+            
+            # Converter classes para lista se for string
+            if isinstance(test.classes, str):
+                import json
+                try:
+                    class_ids = json.loads(test.classes)
+                    if not isinstance(class_ids, list):
+                        class_ids = [class_ids]
+                except:
+                    class_ids = [test.classes]
+            elif isinstance(test.classes, list):
+                class_ids = test.classes
+            else:
+                class_ids = []
+            
+            logging.info(f"Class IDs para buscar: {class_ids}")
+            
+            # Buscar apenas as classes específicas
+            if class_ids:
+                specific_classes = Class.query.filter(Class.id.in_(class_ids)).all()
+                logging.info(f"Encontradas {len(specific_classes)} classes específicas")
+                
+                for class_obj in specific_classes:
+                    school_obj = School.query.get(class_obj.school_id)
+                    grade_obj = Grade.query.get(class_obj.grade_id)
+                    
+                    # Contar alunos na turma
+                    students_count = len(class_obj.students) if class_obj.students else 0
+                    
+                    classes_info.append({
+                        "class_test_id": None,  # Não há registro em ClassTest ainda
+                        "class": {
+                            "id": class_obj.id,
+                            "name": class_obj.name,
+                            "school": {
+                                "id": school_obj.id,
+                                "name": school_obj.name
+                            } if school_obj else None,
+                            "grade": {
+                                "id": grade_obj.id,
+                                "name": grade_obj.name
+                            } if grade_obj else None
+                        },
+                        "students_count": students_count,
+                        "application": None,  # Não foi aplicada ainda
+                        "expiration": None,   # Não foi aplicada ainda
+                        "status": "configured"  # Indica que foi configurada mas não aplicada
+                    })
+        
+        # Terceira prioridade (fallback): usar schools quando não há class_tests nem classes específicas
         elif test.schools:
             logging.info(f"Nenhuma aplicação encontrada, buscando turmas do campo schools: {test.schools}")
             

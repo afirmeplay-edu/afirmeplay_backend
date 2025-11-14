@@ -270,6 +270,47 @@ def format_test_response(test):
             logging.warning(f"Erro ao buscar escolas: {str(e)}")
             schools_list = []
 
+    # Buscar informações completas das classes específicas (campo classes)
+    classes_info = []
+    if test.classes:
+        try:
+            class_ids = []
+            if isinstance(test.classes, list):
+                class_ids = test.classes
+            elif isinstance(test.classes, str):
+                class_ids = [test.classes]
+            
+            if class_ids:
+                specific_classes = Class.query.filter(Class.id.in_(class_ids)).all()
+                
+                for class_obj in specific_classes:
+                    try:
+                        school_obj = School.query.get(class_obj.school_id)
+                        grade_obj = Grade.query.get(class_obj.grade_id)
+                        
+                        # Contar alunos na turma
+                        students_count = len(class_obj.students) if class_obj.students else 0
+                        
+                        classes_info.append({
+                            "id": class_obj.id,
+                            "name": class_obj.name,
+                            "students_count": students_count,
+                            "school": {
+                                "id": school_obj.id,
+                                "name": school_obj.name
+                            } if school_obj else None,
+                            "grade": {
+                                "id": grade_obj.id,
+                                "name": grade_obj.name
+                            } if grade_obj else None
+                        })
+                    except Exception as e:
+                        logging.warning(f"Erro ao processar classe {class_obj.id}: {str(e)}")
+                        continue
+        except Exception as e:
+            logging.warning(f"Erro ao buscar classes específicas: {str(e)}")
+            classes_info = []
+    
     # Buscar informações sobre as classes onde a avaliação foi aplicada
     applied_classes_info = []
     total_students = 0
@@ -397,6 +438,8 @@ def format_test_response(test):
         'schools_count': len(schools_list),
         # Para compatibilidade com o front-end, adicionar também school como primeiro da lista
         'school': schools_list[0] if schools_list else None,
+        'classes': classes_info,  # Array com informações completas das classes específicas
+        'classes_count': len(classes_info),  # Contagem de classes
         'model': test.model,
         'subjects_info': test.subjects_info,  # Manter o campo original para compatibilidade
         'status': test.status,

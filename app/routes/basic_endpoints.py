@@ -2485,4 +2485,74 @@ def export_all_results():
         return jsonify({
             "error": "Erro ao exportar todos os resultados",
             "details": str(e)
-        }), 500 
+        }), 500
+
+
+@bp.route('/scheduler/status', methods=['GET'])
+@jwt_required()
+@role_required("admin", "tecadm")
+def get_scheduler_status():
+    """
+    Retorna o status do scheduler de tarefas agendadas
+    Útil para verificar se o cronjob está funcionando
+    
+    Returns:
+        {
+            "running": true/false,
+            "jobs": [
+                {
+                    "id": "check_expired_evaluations",
+                    "name": "Verificar avaliações expiradas",
+                    "next_run_time": "2024-01-01T10:05:00"
+                }
+            ]
+        }
+    """
+    try:
+        from app.services.scheduled_tasks import get_scheduler_status
+        
+        status = get_scheduler_status()
+        return jsonify({
+            "message": "Status do scheduler obtido com sucesso",
+            "scheduler": status
+        }), 200
+        
+    except Exception as e:
+        logging.error(f"Erro ao obter status do scheduler: {str(e)}", exc_info=True)
+        return jsonify({
+            "error": "Erro ao obter status do scheduler",
+            "details": str(e)
+        }), 500
+
+
+@bp.route('/scheduler/check-expired', methods=['POST'])
+@jwt_required()
+@role_required("admin", "tecadm")
+def manual_check_expired():
+    """
+    Executa manualmente a verificação de avaliações expiradas
+    Útil para testes ou execução manual
+    
+    Returns:
+        {
+            "message": "Verificação executada com sucesso",
+            "updated_count": 5,
+            "expired_sessions_count": 10
+        }
+    """
+    try:
+        from app.services.scheduled_tasks import check_expired_evaluations
+        
+        # Executar verificação
+        check_expired_evaluations()
+        
+        return jsonify({
+            "message": "Verificação de avaliações expiradas executada com sucesso"
+        }), 200
+        
+    except Exception as e:
+        logging.error(f"Erro ao executar verificação manual: {str(e)}", exc_info=True)
+        return jsonify({
+            "error": "Erro ao executar verificação",
+            "details": str(e)
+        }), 500

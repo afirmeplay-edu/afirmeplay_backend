@@ -4529,6 +4529,80 @@ paths:
         '500':
           $ref: '#/responses/InternalServerError'
 
+  # ==================== SCHEDULER ENDPOINTS ====================
+
+  /scheduler/status:
+    get:
+      tags: [Scheduler]
+      summary: Get scheduler status
+      description: Retorna o status do scheduler de tarefas agendadas. Útil para verificar se o cronjob está funcionando.
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: Status do scheduler obtido com sucesso
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                    example: Status do scheduler obtido com sucesso
+                  scheduler:
+                    type: object
+                    properties:
+                      running:
+                        type: boolean
+                        description: Indica se o scheduler está em execução
+                      jobs:
+                        type: array
+                        items:
+                          type: object
+                          properties:
+                            id:
+                              type: string
+                              example: check_expired_evaluations
+                            name:
+                              type: string
+                              example: Verificar avaliações expiradas
+                            next_run_time:
+                              type: string
+                              format: date-time
+                              nullable: true
+                              description: Próxima execução agendada
+        '401':
+          $ref: '#/responses/UnauthorizedError'
+        '403':
+          $ref: '#/responses/ForbiddenError'
+        '500':
+          $ref: '#/responses/InternalServerError'
+
+  /scheduler/check-expired:
+    post:
+      tags: [Scheduler]
+      summary: Manually check expired evaluations
+      description: Executa manualmente a verificação de avaliações expiradas. Útil para testes ou execução manual.
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: Verificação executada com sucesso
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                    example: Verificação de avaliações expiradas executada com sucesso
+        '401':
+          $ref: '#/responses/UnauthorizedError'
+        '403':
+          $ref: '#/responses/ForbiddenError'
+        '500':
+          $ref: '#/responses/InternalServerError'
+
   /test-sessions/submitted:
     get:
       summary: Get submitted test sessions
@@ -5961,6 +6035,12 @@ schemas:
           $ref: '#/schemas/DashboardMeta'
         error_recovery:
           $ref: '#/schemas/DashboardErrorRecovery'
+
+tags:
+  - name: Dashboard
+    description: Endpoints relacionados ao dashboard e estatísticas
+  - name: Scheduler
+    description: Endpoints para gerenciamento e monitoramento do scheduler de tarefas agendadas
 
 responses:
     UnauthorizedError:

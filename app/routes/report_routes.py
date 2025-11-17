@@ -539,14 +539,62 @@ def dados_json(evaluation_id: str):
                 .get('avaliados', 0)
             )
             return contexto, student_count
+        
+        def build_ai_analysis():
+            """Callback para gerar análise de IA"""
+            # Buscar payload base (sem role) para análise de IA
+            base_payload = _montar_resposta_relatorio(
+                evaluation_id,
+                school_id=school_id,
+                city_id=city_id if scope_type == 'city' else None,
+                include_ai=False
+            )
+            
+            from app.services.ai_analysis_service import AIAnalysisService
+            ai_service = AIAnalysisService()
+            return ai_service.analyze_report_data({
+                "avaliacao": base_payload.get('avaliacao', {}),
+                "total_alunos": base_payload.get('total_alunos', {}),
+                "niveis_aprendizagem": base_payload.get('niveis_aprendizagem', {}),
+                "proficiencia": base_payload.get('proficiencia', {}),
+                "nota_geral": base_payload.get('nota_geral', {}),
+                "acertos_por_habilidade": base_payload.get('acertos_por_habilidade', {}),
+                "scope_type": scope_type,
+                "scope_id": scope_ref_id
+            })
 
+        # Obter usuário atual para filtrar por role
+        user = get_current_user_from_token()
+        user_role = user.get('role', '').lower() if user else None
+        
         try:
+            # Buscar payload (com cache)
             resposta = ReportAggregateService.ensure_payload(
                 evaluation_id,
                 scope_type,
                 scope_ref_id,
                 build_payload,
             )
+            
+            # Filtrar por role se necessário
+            if user_role == 'professor':
+                from app.permissions.utils import get_teacher_classes
+                teacher_class_ids = get_teacher_classes(user.get('id'))
+                if teacher_class_ids:
+                    resposta = _filtrar_payload_por_turmas_professor(resposta, teacher_class_ids)
+            
+            # Buscar análise de IA (compartilhada entre roles)
+            analise_ia = ReportAggregateService.ensure_ai_analysis(
+                evaluation_id,
+                scope_type,
+                scope_ref_id,
+                build_ai_analysis,
+                commit=True
+            )
+            
+            # Adicionar análise de IA ao payload
+            resposta['analise_ia'] = analise_ia
+            
         except LookupError as lookup_error:
             # Reproduzir mensagens de não encontrado semelhantes às tratadas anteriormente
             return jsonify({"error": str(lookup_error)}), 404
@@ -740,7 +788,12 @@ def relatorio_pdf(evaluation_id: str):
             scope_ref_id = None
 
         def build_payload():
-            contexto = _montar_resposta_relatorio(evaluation_id, school_id, city_id)
+            contexto = _montar_resposta_relatorio(
+                evaluation_id,
+                school_id=school_id,
+                city_id=city_id,
+                include_ai=False
+            )
             student_count = (
                 contexto
                 .get('total_alunos', {})
@@ -748,13 +801,59 @@ def relatorio_pdf(evaluation_id: str):
                 .get('avaliados', 0)
             )
             return contexto, student_count
+        
+        def build_ai_analysis():
+            """Callback para gerar análise de IA"""
+            base_payload = _montar_resposta_relatorio(
+                evaluation_id,
+                school_id=school_id,
+                city_id=city_id,
+                include_ai=False
+            )
+            
+            from app.services.ai_analysis_service import AIAnalysisService
+            ai_service = AIAnalysisService()
+            return ai_service.analyze_report_data({
+                "avaliacao": base_payload.get('avaliacao', {}),
+                "total_alunos": base_payload.get('total_alunos', {}),
+                "niveis_aprendizagem": base_payload.get('niveis_aprendizagem', {}),
+                "proficiencia": base_payload.get('proficiencia', {}),
+                "nota_geral": base_payload.get('nota_geral', {}),
+                "acertos_por_habilidade": base_payload.get('acertos_por_habilidade', {}),
+                "scope_type": scope_type,
+                "scope_id": scope_ref_id
+            })
 
+        # Obter usuário atual para filtrar por role
+        user = get_current_user_from_token()
+        user_role = user.get('role', '').lower() if user else None
+        
+        # Buscar payload (com cache)
         context = ReportAggregateService.ensure_payload(
             evaluation_id,
             scope_type,
             scope_ref_id,
             build_payload,
         )
+        
+        # Filtrar por role se necessário
+        if user_role == 'professor':
+            from app.permissions.utils import get_teacher_classes
+            teacher_class_ids = get_teacher_classes(user.get('id'))
+            if teacher_class_ids:
+                context = _filtrar_payload_por_turmas_professor(context, teacher_class_ids)
+        
+        # Buscar análise de IA (compartilhada entre roles)
+        analise_ia = ReportAggregateService.ensure_ai_analysis(
+            evaluation_id,
+            scope_type,
+            scope_ref_id,
+            build_ai_analysis,
+            commit=True
+        )
+        
+        # Adicionar análise de IA ao contexto
+        context['analise_ia'] = analise_ia
 
         templates_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'templates')
         env = Environment(loader=FileSystemLoader(templates_dir), autoescape=select_autoescape(['html', 'xml']))
@@ -1250,6 +1349,171 @@ def _buscar_turmas_por_escopo(evaluation_id: str, scope_type: str, scope_id: str
     # Se scope_type == 'all', não aplicar filtros adicionais
     
     return query.all()
+
+
+def _filtrar_payload_por_turmas_professor(payload: Dict[str, Any], teacher_class_ids: List[str]) -> Dict[str, Any]:
+    """
+    Filtra o payload do relatório para mostrar apenas as turmas do professor.
+    
+    Args:
+        payload: Payload completo do relatório
+        teacher_class_ids: Lista de IDs das turmas do professor
+        
+    Returns:
+        Payload filtrado contendo apenas dados das turmas do professor
+    """
+    if not teacher_class_ids:
+        # Se não há turmas, retornar payload vazio
+        return {
+            "acertos_por_habilidade": {},
+            "analise_ia": payload.get("analise_ia", {}),
+            "avaliacao": payload.get("avaliacao", {}),
+            "metadados": payload.get("metadados", {}),
+            "niveis_aprendizagem": {},
+            "nota_geral": {},
+            "proficiencia": {},
+            "total_alunos": {
+                "por_turma": [],
+                "total_geral": {
+                    "matriculados": 0,
+                    "avaliados": 0,
+                    "percentual": 0,
+                    "faltosos": 0
+                }
+            }
+        }
+    
+    # Mapear IDs de turmas para nomes de turmas
+    classes = Class.query.filter(Class.id.in_(teacher_class_ids)).all()
+    teacher_class_names = {cls.name for cls in classes}
+    
+    # Criar payload filtrado
+    filtered_payload = {
+        "acertos_por_habilidade": payload.get("acertos_por_habilidade", {}),
+        "analise_ia": payload.get("analise_ia", {}),
+        "avaliacao": payload.get("avaliacao", {}),
+        "metadados": payload.get("metadados", {}),
+        "niveis_aprendizagem": {},
+        "nota_geral": {},
+        "proficiencia": {},
+        "total_alunos": {
+            "por_turma": [],
+            "total_geral": {
+                "matriculados": 0,
+                "avaliados": 0,
+                "percentual": 0,
+                "faltosos": 0
+            }
+        }
+    }
+    
+    # Filtrar total_alunos
+    total_alunos = payload.get("total_alunos", {})
+    por_turma = total_alunos.get("por_turma", [])
+    filtered_por_turma = [
+        turma for turma in por_turma 
+        if turma.get("turma") in teacher_class_names
+    ]
+    
+    # Recalcular totais gerais
+    total_matriculados = sum(t.get("matriculados", 0) for t in filtered_por_turma)
+    total_avaliados = sum(t.get("avaliados", 0) for t in filtered_por_turma)
+    total_faltosos = total_matriculados - total_avaliados
+    total_percentual = (total_avaliados / total_matriculados * 100) if total_matriculados > 0 else 0
+    
+    filtered_payload["total_alunos"]["por_turma"] = filtered_por_turma
+    filtered_payload["total_alunos"]["total_geral"] = {
+        "matriculados": total_matriculados,
+        "avaliados": total_avaliados,
+        "percentual": round(total_percentual, 1),
+        "faltosos": total_faltosos
+    }
+    
+    # Filtrar niveis_aprendizagem
+    niveis_aprendizagem = payload.get("niveis_aprendizagem", {})
+    for disciplina, dados in niveis_aprendizagem.items():
+        por_turma_niveis = dados.get("por_turma", [])
+        filtered_por_turma_niveis = [
+            turma for turma in por_turma_niveis
+            if turma.get("turma") in teacher_class_names
+        ]
+        
+        # Recalcular geral
+        geral = dados.get("geral", {})
+        total_geral = sum(t.get("total", 0) for t in filtered_por_turma_niveis)
+        abaixo_basico = sum(t.get("abaixo_do_basico", 0) for t in filtered_por_turma_niveis)
+        basico = sum(t.get("basico", 0) for t in filtered_por_turma_niveis)
+        adequado = sum(t.get("adequado", 0) for t in filtered_por_turma_niveis)
+        avancado = sum(t.get("avancado", 0) for t in filtered_por_turma_niveis)
+        
+        filtered_payload["niveis_aprendizagem"][disciplina] = {
+            "por_turma": filtered_por_turma_niveis,
+            "geral": {
+                "abaixo_do_basico": abaixo_basico,
+                "basico": basico,
+                "adequado": adequado,
+                "avancado": avancado,
+                "total": total_geral
+            }
+        }
+    
+    # Filtrar proficiencia
+    proficiencia = payload.get("proficiencia", {})
+    por_disciplina_prof = proficiencia.get("por_disciplina", {})
+    filtered_por_disciplina_prof = {}
+    
+    for disciplina, dados in por_disciplina_prof.items():
+        por_turma_prof = dados.get("por_turma", [])
+        filtered_por_turma_prof = [
+            turma for turma in por_turma_prof
+            if turma.get("turma") in teacher_class_names
+        ]
+        
+        # Recalcular média geral
+        if filtered_por_turma_prof:
+            media_geral = sum(t.get("proficiencia", t.get("media", 0)) for t in filtered_por_turma_prof) / len(filtered_por_turma_prof)
+        else:
+            media_geral = 0
+        
+        filtered_por_disciplina_prof[disciplina] = {
+            "por_turma": filtered_por_turma_prof,
+            "media_geral": round(media_geral, 2)
+        }
+    
+    filtered_payload["proficiencia"] = {
+        "por_disciplina": filtered_por_disciplina_prof,
+        "media_municipal_por_disciplina": proficiencia.get("media_municipal_por_disciplina", {})
+    }
+    
+    # Filtrar nota_geral
+    nota_geral = payload.get("nota_geral", {})
+    por_disciplina_nota = nota_geral.get("por_disciplina", {})
+    filtered_por_disciplina_nota = {}
+    
+    for disciplina, dados in por_disciplina_nota.items():
+        por_turma_nota = dados.get("por_turma", [])
+        filtered_por_turma_nota = [
+            turma for turma in por_turma_nota
+            if turma.get("turma") in teacher_class_names
+        ]
+        
+        # Recalcular média geral
+        if filtered_por_turma_nota:
+            media_geral = sum(t.get("nota", t.get("media", 0)) for t in filtered_por_turma_nota) / len(filtered_por_turma_nota)
+        else:
+            media_geral = 0
+        
+        filtered_por_disciplina_nota[disciplina] = {
+            "por_turma": filtered_por_turma_nota,
+            "media_geral": round(media_geral, 2)
+        }
+    
+    filtered_payload["nota_geral"] = {
+        "por_disciplina": filtered_por_disciplina_nota,
+        "media_municipal_por_disciplina": nota_geral.get("media_municipal_por_disciplina", {})
+    }
+    
+    return filtered_payload
 
 
 def _preparar_dados_ia(ai_analysis: Dict, template_data: Dict) -> Dict[str, Any]:

@@ -40,6 +40,16 @@ class ReportAggregateService:
         if not aggregate or aggregate.is_dirty:
             return None
         return aggregate.payload or {}
+    
+    @classmethod
+    def get_ai_analysis(
+        cls, test_id: str, scope_type: str = "overall", scope_id: Optional[str] = None
+    ) -> Optional[Dict[str, Any]]:
+        """Busca análise de IA cacheada"""
+        aggregate = cls.get(test_id, scope_type, scope_id)
+        if not aggregate or aggregate.ai_analysis_is_dirty or not aggregate.ai_analysis:
+            return None
+        return aggregate.ai_analysis or {}
 
     @classmethod
     def save_payload(
@@ -66,6 +76,33 @@ class ReportAggregateService:
         if commit:
             cls._safe_commit()
         return aggregate
+    
+    @classmethod
+    def save_ai_analysis(
+        cls,
+        test_id: str,
+        scope_type: str,
+        scope_id: Optional[str],
+        ai_analysis: Dict[str, Any],
+        commit: bool = True,
+    ) -> ReportAggregate:
+        """Salva análise de IA"""
+        scope_type, scope_id = cls._normalize_scope(scope_type, scope_id)
+        
+        aggregate = cls.get(test_id, scope_type, scope_id)
+        if not aggregate:
+            # Se não existe, criar apenas para análise de IA
+            aggregate = ReportAggregate(
+                test_id=test_id,
+                scope_type=scope_type,
+                scope_id=scope_id,
+            )
+            db.session.add(aggregate)
+        
+        aggregate.update_ai_analysis(ai_analysis or {})
+        if commit:
+            cls._safe_commit()
+        return aggregate
 
     @classmethod
     def mark_dirty(
@@ -84,14 +121,65 @@ class ReportAggregateService:
             cls._safe_commit()
 
     @classmethod
+    def mark_ai_dirty(
+        cls,
+        test_id: str,
+        scope_type: str,
+        scope_id: Optional[str],
+        commit: bool = True,
+    ) -> None:
+        """Marca análise de IA como dirty"""
+        scope_type, scope_id = cls._normalize_scope(scope_type, scope_id)
+        aggregate = cls.get(test_id, scope_type, scope_id)
+        if not aggregate:
+            return
+        aggregate.mark_ai_dirty()
+        if commit:
+            cls._safe_commit()
+    
+    @classmethod
     def mark_all_dirty_for_test(cls, test_id: str, commit: bool = True) -> None:
         aggregates = ReportAggregate.query.filter_by(test_id=test_id).all()
         if not aggregates:
             return
         for aggregate in aggregates:
             aggregate.mark_dirty()
+            aggregate.mark_ai_dirty()
         if commit:
             cls._safe_commit()
+    
+    @classmethod
+    def ensure_ai_analysis(
+        cls,
+        test_id: str,
+        scope_type: str,
+        scope_id: Optional[str],
+        build_ai_callback,
+        commit: bool = True,
+    ) -> Dict[str, Any]:
+        """
+        Garante que análise de IA existe.
+        Análise de IA é compartilhada entre todos os roles do mesmo escopo.
+        """
+        scope_type, scope_id = cls._normalize_scope(scope_type, scope_id)
+        aggregate = cls.get(test_id, scope_type, scope_id)
+        
+        if aggregate and not aggregate.ai_analysis_is_dirty and aggregate.ai_analysis:
+            logging.info(f"Análise IA cache HIT para {scope_type}:{scope_id}")
+            return aggregate.ai_analysis
+        
+        # Não encontrou - gerar análise de IA
+        logging.info(f"Análise IA cache MISS - gerando para {scope_type}:{scope_id}")
+        ai_analysis = build_ai_callback()
+        
+        # Salvar análise de IA
+        cls.save_ai_analysis(
+            test_id, scope_type, scope_id,
+            ai_analysis,
+            commit=commit
+        )
+        
+        return ai_analysis
 
     @classmethod
     def ensure_payload(

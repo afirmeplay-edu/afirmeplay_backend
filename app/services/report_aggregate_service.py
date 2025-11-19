@@ -18,7 +18,7 @@ class ReportAggregateService:
     @staticmethod
     def _normalize_scope(scope_type: str, scope_id: Optional[str]) -> tuple[str, Optional[str]]:
         scope_type = (scope_type or "overall").lower()
-        if scope_type not in {"overall", "city", "school"}:
+        if scope_type not in {"overall", "city", "school", "teacher"}:
             logging.warning("Scope type inválido recebido: %s. Usando 'overall'.", scope_type)
             scope_type = "overall"
         return scope_type, scope_id if scope_type != "overall" else None

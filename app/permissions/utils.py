@@ -100,9 +100,7 @@ def get_teacher_classes(user_id: str) -> List[str]:
     
     ⚠️ Substitui lógica espalhada em várias rotas que faziam:
         teacher = Teacher.query.filter_by(user_id=user_id).first()
-        # Via ClassSubject
-        class_subjects = ClassSubject.query.filter_by(teacher_id=teacher.id).all()
-        # Via TeacherClass
+        # Via TeacherClass (ClassSubject não é usado no sistema)
         teacher_classes = TeacherClass.query.filter_by(teacher_id=teacher.id).all()
     
     Args:
@@ -116,18 +114,11 @@ def get_teacher_classes(user_id: str) -> List[str]:
         if not teacher:
             return []
         
-        # Buscar turmas via ClassSubject
-        class_subjects = ClassSubject.query.filter_by(teacher_id=teacher.id).all()
-        class_ids_subjects = [cs.class_id for cs in class_subjects]
-        
-        # Buscar turmas via TeacherClass
+        # ✅ CORRIGIDO: Buscar turmas apenas via TeacherClass (ClassSubject não é usado)
         teacher_classes = TeacherClass.query.filter_by(teacher_id=teacher.id).all()
-        class_ids_direct = [tc.class_id for tc in teacher_classes]
+        class_ids = [tc.class_id for tc in teacher_classes]
         
-        # Combinar todas as turmas (remover duplicatas)
-        all_class_ids = list(set(class_ids_subjects + class_ids_direct))
-        
-        return all_class_ids
+        return class_ids
     except Exception:
         return []
 

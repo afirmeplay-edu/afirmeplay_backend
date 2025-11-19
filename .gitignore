@@ -2,6 +2,9 @@
 __pycache__/
 *.py[cod]
 *$py.class
+debug_corrections/
+debug_bubbles/
+generated_pdfs/
 
 # C extensions
 *.so

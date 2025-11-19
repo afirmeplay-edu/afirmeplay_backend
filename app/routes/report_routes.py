@@ -495,77 +495,120 @@ def dados_json(evaluation_id: str):
         if not test:
             return jsonify({"error": "Avaliação não encontrada"}), 404
         
-        # Obter parâmetros de filtro
+        # Obter usuário atual
+        user = get_current_user_from_token()
+        if not user:
+            return jsonify({"error": "Usuário não autenticado"}), 401
+        
+        # Obter parâmetros de filtro (usados apenas para admin)
         school_id_raw = request.args.get('school_id')
         city_id = request.args.get('city_id')
-
-        if not school_id_raw and not city_id:
-            return jsonify({"error": "Informe school_id ou city_id"}), 400
-
-        scope_type = None
-        scope_ref_id = None
-        school_id = None
-
-        if school_id_raw:
-            if school_id_raw.strip().lower() == "all":
-                if not city_id:
-                    return jsonify({"error": "city_id é obrigatório quando school_id=all"}), 400
-                scope_type = 'city'
-                scope_ref_id = city_id
-            else:
-                if city_id and city_id != "":
-                    return jsonify({"error": "Não informe city_id quando school_id específico for utilizado"}), 400
-                scope_type = 'school'
-                scope_ref_id = school_id_raw
-                school_id = school_id_raw
-        else:
-            scope_type = 'city'
-            scope_ref_id = city_id
-
-        if scope_type is None or scope_ref_id is None:
-            return jsonify({"error": "Não foi possível determinar o escopo do relatório"}), 400
-
-        def build_payload():
-            contexto = _montar_resposta_relatorio(
-                evaluation_id,
-                school_id=school_id,
-                city_id=city_id if scope_type == 'city' else None,
-                include_ai=False
-            )
-            student_count = (
-                contexto
-                .get('total_alunos', {})
-                .get('total_geral', {})
-                .get('avaliados', 0)
-            )
-            return contexto, student_count
         
-        def build_ai_analysis():
-            """Callback para gerar análise de IA"""
-            # Buscar payload base (sem role) para análise de IA
-            base_payload = _montar_resposta_relatorio(
-                evaluation_id,
-                school_id=school_id,
-                city_id=city_id if scope_type == 'city' else None,
-                include_ai=False
-            )
+        # Determinar escopo baseado no role do usuário
+        try:
+            scope_type, scope_ref_id = _determinar_escopo_por_role(user, school_id_raw, city_id)
+        except ValueError as e:
+            return jsonify({"error": str(e)}), 400
+        
+        # Para professores, buscar turmas específicas
+        if scope_type == 'teacher':
+            from app.permissions.utils import get_teacher_classes
             
-            from app.services.ai_analysis_service import AIAnalysisService
-            ai_service = AIAnalysisService()
-            return ai_service.analyze_report_data({
-                "avaliacao": base_payload.get('avaliacao', {}),
-                "total_alunos": base_payload.get('total_alunos', {}),
-                "niveis_aprendizagem": base_payload.get('niveis_aprendizagem', {}),
-                "proficiencia": base_payload.get('proficiencia', {}),
-                "nota_geral": base_payload.get('nota_geral', {}),
-                "acertos_por_habilidade": base_payload.get('acertos_por_habilidade', {}),
-                "scope_type": scope_type,
-                "scope_id": scope_ref_id
-            })
-
-        # Obter usuário atual para filtrar por role
-        user = get_current_user_from_token()
-        user_role = user.get('role', '').lower() if user else None
+            # ✅ CORRIGIDO: Professor só vê avaliações que CRIOU E foram aplicadas nas turmas dele
+            professor_criou_avaliacao = test.created_by == user.get('id')
+            
+            if not professor_criou_avaliacao:
+                return jsonify({"error": "Acesso negado: você não criou esta avaliação"}), 403
+            
+            # Verificar se foi aplicada nas turmas do professor
+            teacher_class_ids = get_teacher_classes(user.get('id'))
+            if not teacher_class_ids:
+                return jsonify({"error": "Professor não vinculado a nenhuma turma"}), 404
+            
+            # Buscar class_tests APENAS das turmas do professor
+            class_tests = ClassTest.query.filter(
+                ClassTest.test_id == evaluation_id,
+                ClassTest.class_id.in_(teacher_class_ids)
+            ).all()
+            
+            if not class_tests:
+                return jsonify({"error": "Avaliação não foi aplicada em nenhuma turma do professor"}), 404
+            
+            def build_payload():
+                contexto = _montar_resposta_relatorio_por_turmas(
+                    evaluation_id,
+                    class_tests,
+                    include_ai=False
+                )
+                student_count = (
+                    contexto
+                    .get('total_alunos', {})
+                    .get('total_geral', {})
+                    .get('avaliados', 0)
+                )
+                return contexto, student_count
+            
+            def build_ai_analysis():
+                """Callback para gerar análise de IA para professor"""
+                base_payload = _montar_resposta_relatorio_por_turmas(
+                    evaluation_id,
+                    class_tests,
+                    include_ai=False
+                )
+                
+                from app.services.ai_analysis_service import AIAnalysisService
+                ai_service = AIAnalysisService()
+                return ai_service.analyze_report_data({
+                    "avaliacao": base_payload.get('avaliacao', {}),
+                    "total_alunos": base_payload.get('total_alunos', {}),
+                    "niveis_aprendizagem": base_payload.get('niveis_aprendizagem', {}),
+                    "proficiencia": base_payload.get('proficiencia', {}),
+                    "nota_geral": base_payload.get('nota_geral', {}),
+                    "acertos_por_habilidade": base_payload.get('acertos_por_habilidade', {}),
+                    "scope_type": scope_type,
+                    "scope_id": scope_ref_id
+                })
+        else:
+            # Para outros roles, usar lógica existente
+            school_id = school_id_raw if scope_type == 'school' else None
+            city_id_scope = scope_ref_id if scope_type == 'city' else None
+            
+            def build_payload():
+                contexto = _montar_resposta_relatorio(
+                    evaluation_id,
+                    school_id=school_id,
+                    city_id=city_id_scope,
+                    include_ai=False
+                )
+                student_count = (
+                    contexto
+                    .get('total_alunos', {})
+                    .get('total_geral', {})
+                    .get('avaliados', 0)
+                )
+                return contexto, student_count
+            
+            def build_ai_analysis():
+                """Callback para gerar análise de IA"""
+                base_payload = _montar_resposta_relatorio(
+                    evaluation_id,
+                    school_id=school_id,
+                    city_id=city_id_scope,
+                    include_ai=False
+                )
+                
+                from app.services.ai_analysis_service import AIAnalysisService
+                ai_service = AIAnalysisService()
+                return ai_service.analyze_report_data({
+                    "avaliacao": base_payload.get('avaliacao', {}),
+                    "total_alunos": base_payload.get('total_alunos', {}),
+                    "niveis_aprendizagem": base_payload.get('niveis_aprendizagem', {}),
+                    "proficiencia": base_payload.get('proficiencia', {}),
+                    "nota_geral": base_payload.get('nota_geral', {}),
+                    "acertos_por_habilidade": base_payload.get('acertos_por_habilidade', {}),
+                    "scope_type": scope_type,
+                    "scope_id": scope_ref_id
+                })
         
         try:
             # Buscar payload (com cache)
@@ -575,13 +618,6 @@ def dados_json(evaluation_id: str):
                 scope_ref_id,
                 build_payload,
             )
-            
-            # Filtrar por role se necessário
-            if user_role == 'professor':
-                from app.permissions.utils import get_teacher_classes
-                teacher_class_ids = get_teacher_classes(user.get('id'))
-                if teacher_class_ids:
-                    resposta = _filtrar_payload_por_turmas_professor(resposta, teacher_class_ids)
             
             # Buscar análise de IA (compartilhada entre roles)
             analise_ia = ReportAggregateService.ensure_ai_analysis(
@@ -755,6 +791,132 @@ def _montar_resposta_relatorio(
     }
 
 
+def _montar_resposta_relatorio_por_turmas(
+    evaluation_id: str,
+    class_tests: List[ClassTest],
+    include_ai: bool = True
+) -> dict:
+    """
+    Monta resposta do relatório para um conjunto específico de turmas.
+    Usado principalmente para professores que veem apenas suas turmas.
+    
+    Args:
+        evaluation_id: ID da avaliação
+        class_tests: Lista de ClassTest das turmas específicas
+        include_ai: Se deve incluir análise de IA
+    
+    Returns:
+        dict: Dicionário com todos os dados do relatório
+    """
+    test = Test.query.get(evaluation_id)
+    if not test:
+        raise ValueError("Avaliação não encontrada")
+    
+    if not class_tests:
+        raise LookupError("Nenhuma turma fornecida")
+    
+    # Identificar séries/anos das turmas envolvidas
+    class_ids = [ct.class_id for ct in class_tests if getattr(ct, "class_id", None)]
+    unique_class_ids = list(dict.fromkeys(class_ids))
+    series_ordered: List[str] = []
+    seen_series = set()
+    if unique_class_ids:
+        classes = Class.query.options(joinedload(Class.grade)).filter(Class.id.in_(unique_class_ids)).all()
+        class_map = {cls.id: cls for cls in classes}
+        for class_id in unique_class_ids:
+            cls = class_map.get(class_id)
+            if not cls:
+                continue
+            serie_name = None
+            if getattr(cls, "grade", None) and getattr(cls.grade, "name", None):
+                serie_name = cls.grade.name.strip()
+            elif getattr(cls, "name", None):
+                serie_name = cls.name.strip()
+            if serie_name and serie_name not in seen_series:
+                seen_series.add(serie_name)
+                series_ordered.append(serie_name)
+    
+    # Calcular dados usando as turmas específicas
+    total_alunos = _calcular_totais_alunos(evaluation_id, class_tests)
+    niveis_aprendizagem = _calcular_niveis_aprendizagem(evaluation_id, class_tests)
+    proficiencia = _calcular_proficiencia(evaluation_id, class_tests)
+    nota_geral = _calcular_nota_geral(evaluation_id, class_tests)
+    acertos_habilidade = _calcular_acertos_habilidade(evaluation_id)
+    
+    series_label = ", ".join(series_ordered) if series_ordered else None
+    general_label = f"{series_label} - Geral" if series_label else "Geral"
+    
+    avaliacao_data = {
+        "id": str(test.id),
+        "titulo": test.title,
+        "descricao": getattr(test, 'description', None),
+        "course_name": _obter_nome_curso(test),
+        "disciplinas": _obter_disciplinas_avaliacao(test),
+        "series": series_ordered,
+        "series_label": series_label
+    }
+    
+    from datetime import datetime
+    now = datetime.now()
+    mes_atual = now.strftime("%B").capitalize()
+    ano_atual = now.year
+    data_geracao = now.strftime("%d/%m/%Y %H:%M")
+    
+    # Obter informações da escola (primeira turma)
+    metadados = {
+        "scope_type": "teacher",
+        "scope_id": None,
+        "mes": mes_atual,
+        "ano": ano_atual,
+        "data_geracao": data_geracao,
+        "series": series_ordered,
+        "series_label": series_label,
+        "general_label": general_label
+    }
+    
+    # Tentar obter informações da escola e município da primeira turma
+    try:
+        if unique_class_ids:
+            first_class = Class.query.get(unique_class_ids[0])
+            if first_class and first_class.school_id:
+                school = School.query.get(first_class.school_id)
+                if school:
+                    metadados.update({
+                        "escola": school.name,
+                        "escola_id": str(school.id),
+                        "municipio": school.city.name if school.city else None,
+                        "municipio_id": str(school.city.id) if school.city else None,
+                        "uf": school.city.state if school.city else None
+                    })
+    except Exception:
+        pass
+    
+    analise_ia = {}
+    if include_ai:
+        ai_service = AIAnalysisService()
+        analise_ia = ai_service.analyze_report_data({
+            "avaliacao": avaliacao_data,
+            "total_alunos": total_alunos,
+            "niveis_aprendizagem": niveis_aprendizagem,
+            "proficiencia": proficiencia,
+            "nota_geral": nota_geral,
+            "acertos_por_habilidade": acertos_habilidade,
+            "scope_type": "teacher",
+            "scope_id": None
+        })
+    
+    return {
+        "acertos_por_habilidade": acertos_habilidade,
+        "analise_ia": analise_ia,
+        "avaliacao": avaliacao_data,
+        "metadados": metadados,
+        "niveis_aprendizagem": niveis_aprendizagem,
+        "nota_geral": nota_geral,
+        "proficiencia": proficiencia,
+        "total_alunos": total_alunos
+    }
+
+
 @bp.route('/relatorio-pdf/<string:evaluation_id>', methods=['GET'])
 @jwt_required()
 @role_required("admin", "professor", "coordenador", "diretor","tecadm")
@@ -774,59 +936,125 @@ def relatorio_pdf(evaluation_id: str):
         Arquivo PDF do relatório para download
     """
     try:
-        school_id = request.args.get('school_id')
-        city_id = request.args.get('city_id')
-
-        if school_id:
-            scope_type = 'school'
-            scope_ref_id = school_id
-        elif city_id:
-            scope_type = 'city'
-            scope_ref_id = city_id
-        else:
-            scope_type = 'overall'
-            scope_ref_id = None
-
-        def build_payload():
-            contexto = _montar_resposta_relatorio(
-                evaluation_id,
-                school_id=school_id,
-                city_id=city_id,
-                include_ai=False
-            )
-            student_count = (
-                contexto
-                .get('total_alunos', {})
-                .get('total_geral', {})
-                .get('avaliados', 0)
-            )
-            return contexto, student_count
+        # Verificar se a avaliação existe
+        test = Test.query.get(evaluation_id)
+        if not test:
+            return jsonify({"error": "Avaliação não encontrada"}), 404
         
-        def build_ai_analysis():
-            """Callback para gerar análise de IA"""
-            base_payload = _montar_resposta_relatorio(
-                evaluation_id,
-                school_id=school_id,
-                city_id=city_id,
-                include_ai=False
-            )
-            
-            from app.services.ai_analysis_service import AIAnalysisService
-            ai_service = AIAnalysisService()
-            return ai_service.analyze_report_data({
-                "avaliacao": base_payload.get('avaliacao', {}),
-                "total_alunos": base_payload.get('total_alunos', {}),
-                "niveis_aprendizagem": base_payload.get('niveis_aprendizagem', {}),
-                "proficiencia": base_payload.get('proficiencia', {}),
-                "nota_geral": base_payload.get('nota_geral', {}),
-                "acertos_por_habilidade": base_payload.get('acertos_por_habilidade', {}),
-                "scope_type": scope_type,
-                "scope_id": scope_ref_id
-            })
-
-        # Obter usuário atual para filtrar por role
+        # Obter usuário atual
         user = get_current_user_from_token()
-        user_role = user.get('role', '').lower() if user else None
+        if not user:
+            return jsonify({"error": "Usuário não autenticado"}), 401
+        
+        # Obter parâmetros de filtro (usados apenas para admin)
+        school_id_raw = request.args.get('school_id')
+        city_id = request.args.get('city_id')
+        
+        # Determinar escopo baseado no role do usuário
+        try:
+            scope_type, scope_ref_id = _determinar_escopo_por_role(user, school_id_raw, city_id)
+        except ValueError as e:
+            return jsonify({"error": str(e)}), 400
+        
+        # Para professores, buscar turmas específicas
+        if scope_type == 'teacher':
+            from app.permissions.utils import get_teacher_classes
+            
+            # ✅ CORRIGIDO: Professor só vê avaliações que CRIOU E foram aplicadas nas turmas dele
+            professor_criou_avaliacao = test.created_by == user.get('id')
+            
+            if not professor_criou_avaliacao:
+                return jsonify({"error": "Acesso negado: você não criou esta avaliação"}), 403
+            
+            # Verificar se foi aplicada nas turmas do professor
+            teacher_class_ids = get_teacher_classes(user.get('id'))
+            if not teacher_class_ids:
+                return jsonify({"error": "Professor não vinculado a nenhuma turma"}), 404
+            
+            # Buscar class_tests APENAS das turmas do professor
+            class_tests = ClassTest.query.filter(
+                ClassTest.test_id == evaluation_id,
+                ClassTest.class_id.in_(teacher_class_ids)
+            ).all()
+            
+            if not class_tests:
+                return jsonify({"error": "Avaliação não foi aplicada em nenhuma turma do professor"}), 404
+            
+            def build_payload():
+                contexto = _montar_resposta_relatorio_por_turmas(
+                    evaluation_id,
+                    class_tests,
+                    include_ai=False
+                )
+                student_count = (
+                    contexto
+                    .get('total_alunos', {})
+                    .get('total_geral', {})
+                    .get('avaliados', 0)
+                )
+                return contexto, student_count
+            
+            def build_ai_analysis():
+                """Callback para gerar análise de IA para professor"""
+                base_payload = _montar_resposta_relatorio_por_turmas(
+                    evaluation_id,
+                    class_tests,
+                    include_ai=False
+                )
+                
+                from app.services.ai_analysis_service import AIAnalysisService
+                ai_service = AIAnalysisService()
+                return ai_service.analyze_report_data({
+                    "avaliacao": base_payload.get('avaliacao', {}),
+                    "total_alunos": base_payload.get('total_alunos', {}),
+                    "niveis_aprendizagem": base_payload.get('niveis_aprendizagem', {}),
+                    "proficiencia": base_payload.get('proficiencia', {}),
+                    "nota_geral": base_payload.get('nota_geral', {}),
+                    "acertos_por_habilidade": base_payload.get('acertos_por_habilidade', {}),
+                    "scope_type": scope_type,
+                    "scope_id": scope_ref_id
+                })
+        else:
+            # Para outros roles, usar lógica existente
+            school_id = school_id_raw if scope_type == 'school' else None
+            city_id_scope = scope_ref_id if scope_type == 'city' else None
+            
+            def build_payload():
+                contexto = _montar_resposta_relatorio(
+                    evaluation_id,
+                    school_id=school_id,
+                    city_id=city_id_scope,
+                    include_ai=False
+                )
+                student_count = (
+                    contexto
+                    .get('total_alunos', {})
+                    .get('total_geral', {})
+                    .get('avaliados', 0)
+                )
+                return contexto, student_count
+            
+            def build_ai_analysis():
+                """Callback para gerar análise de IA"""
+                base_payload = _montar_resposta_relatorio(
+                    evaluation_id,
+                    school_id=school_id,
+                    city_id=city_id_scope,
+                    include_ai=False
+                )
+                
+                from app.services.ai_analysis_service import AIAnalysisService
+                ai_service = AIAnalysisService()
+                return ai_service.analyze_report_data({
+                    "avaliacao": base_payload.get('avaliacao', {}),
+                    "total_alunos": base_payload.get('total_alunos', {}),
+                    "niveis_aprendizagem": base_payload.get('niveis_aprendizagem', {}),
+                    "proficiencia": base_payload.get('proficiencia', {}),
+                    "nota_geral": base_payload.get('nota_geral', {}),
+                    "acertos_por_habilidade": base_payload.get('acertos_por_habilidade', {}),
+                    "scope_type": scope_type,
+                    "scope_id": scope_ref_id
+                })
         
         # Buscar payload (com cache)
         context = ReportAggregateService.ensure_payload(
@@ -835,13 +1063,6 @@ def relatorio_pdf(evaluation_id: str):
             scope_ref_id,
             build_payload,
         )
-        
-        # Filtrar por role se necessário
-        if user_role == 'professor':
-            from app.permissions.utils import get_teacher_classes
-            teacher_class_ids = get_teacher_classes(user.get('id'))
-            if teacher_class_ids:
-                context = _filtrar_payload_por_turmas_professor(context, teacher_class_ids)
         
         # Buscar análise de IA (compartilhada entre roles)
         analise_ia = ReportAggregateService.ensure_ai_analysis(
@@ -1324,6 +1545,56 @@ def _determinar_escopo_relatorio(school_id: str, city_id: str) -> tuple:
         return ('city', city_id)
     else:
         return ('all', None)
+
+
+def _determinar_escopo_por_role(user: dict, school_id: str = None, city_id: str = None) -> tuple:
+    """
+    Determina o escopo do relatório baseado no role do usuário.
+    
+    Args:
+        user: Dicionário com informações do usuário (id, role, city_id, etc)
+        school_id: ID da escola (opcional, usado apenas para admin)
+        city_id: ID do município (opcional, usado apenas para admin)
+    
+    Returns:
+        tuple: (scope_type, scope_id) onde:
+            - scope_type: 'overall', 'city', 'school' ou 'teacher'
+            - scope_id: ID do escopo ou None
+    
+    Raises:
+        ValueError: Se o role não tem acesso ou não está configurado corretamente
+    """
+    from app.permissions.utils import get_manager_school, get_teacher
+    
+    role = user.get('role', '').lower()
+    
+    if role == 'admin':
+        # Admin pode escolher qualquer escopo
+        return _determinar_escopo_relatorio(school_id, city_id)
+    
+    elif role == 'tecadm':
+        # Tecadm vê apenas seu município
+        city_id_user = user.get('city_id') or user.get('tenant_id')
+        if not city_id_user:
+            raise ValueError("Tecadm não vinculado a um município")
+        return ('city', city_id_user)
+    
+    elif role in ['diretor', 'coordenador']:
+        # Diretor/Coordenador vê apenas sua escola
+        manager_school_id = get_manager_school(user.get('id'))
+        if not manager_school_id:
+            raise ValueError("Diretor/Coordenador não vinculado a uma escola")
+        return ('school', manager_school_id)
+    
+    elif role == 'professor':
+        # Professor vê apenas suas turmas
+        teacher = get_teacher(user.get('id'))
+        if not teacher:
+            raise ValueError("Professor não encontrado")
+        return ('teacher', teacher.id)
+    
+    else:
+        raise ValueError(f"Role '{role}' não tem acesso a relatórios")
 
 
 def _buscar_turmas_por_escopo(evaluation_id: str, scope_type: str, scope_id: str) -> List[ClassTest]:

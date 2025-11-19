@@ -11,7 +11,7 @@ OPENAI_API_KEY = "sk-proj-nBhKasjrLwZaPMTT6jAoN-0jBVr0DNMKSTxM2boXzGlWvb7xtLpAb1
 
 # Configurações do modelo
 OPENAI_MODEL = "gpt-4o-mini"  # Modelo mais econômico e eficiente
-OPENAI_MAX_TOKENS = 2000
+OPENAI_MAX_TOKENS = 6000  # Aumentado para acomodar todas as análises em uma única chamada
 OPENAI_TEMPERATURE = 0.7
 
 # Inicializar cliente OpenAI

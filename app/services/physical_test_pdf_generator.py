@@ -1,7 +1,11 @@
 # -*- coding: utf-8 -*-
 """
-Serviço para geração de PDFs de provas físicas
-Baseado no formularios.py original, mas adaptado para integrar com o banco de dados
+Serviço para correção de provas físicas
+
+NOVA IMPLEMENTAÇÃO: Usa coordenadas dinâmicas baseadas no novo layout WeasyPrint
+- Template: institutional_test.html (WeasyPrint + Jinja2)
+- Coordenadas calculadas dinamicamente usando QR code como âncora
+- Funções marcadas com "OLD" são da implementação antiga (template ReportLab)
 """
 
 from PIL import Image as PILImage, ImageDraw, ImageFont, ImageFilter, ImageOps
@@ -62,32 +66,17 @@ class PhysicalTestPDFGenerator:
     """
     
     # ============================================================================
-    # CONSTANTES DE COORDENADAS - AJUSTAR AQUI PARA ALTERAR EM TODAS AS FUNÇÕES
+    # OLD: CONSTANTES DE COORDENADAS - Implementação antiga (template ReportLab)
+    # ============================================================================
+    # NOTA: Estas constantes são da implementação antiga e não são mais usadas
+    # O sistema agora usa coordenadas dinâmicas calculadas do novo layout WeasyPrint
+    # Mantidas apenas para compatibilidade/legado com funções antigas marcadas como OLD
     # ============================================================================
     # 
-    # FUNÇÕES ATIVAS (USADAS ATUALMENTE):
-    # ✅ processar_correcao_completa() - Função principal de correção
-    # ✅ _comparar_bolhas_adaptativo() - Detecção moderna por gabarito  
-    # ✅ _gerar_gabarito_referencia_adaptativo() - Geração moderna do gabarito
-    # ✅ processar_correcao_por_gabarito() - Método de correção por gabarito
-    #
-    # FUNÇÕES COMENTADAS (ANTIGAS/NÃO USADAS):
-    # ❌ processar_correcao_por_imagem() - Método antigo
-    # ❌ processar_correcao_projeto_style() - Método antigo do projeto.py
-    # ❌ detect_bubbles_robust_OLD() - Detecção antiga
-    # ❌ _gerar_gabarito_referencia() - Geração antiga do gabarito
-    # ❌ _detectar_bolhas_metodo_antigo() - Método antigo de detecção
-    # ============================================================================
-    # IMPORTANTE: Altere apenas estes valores para ajustar as coordenadas em todo o sistema
-    # 
-    # Coordenadas X das alternativas A, B, C, D (horizontal)
-    # Para mover para DIREITA: AUMENTE os valores
-    # Para mover para ESQUERDA: DIMINUA os valores
+    # OLD: Coordenadas X das alternativas A, B, C, D (horizontal) - template antigo
     BUBBLE_X_POSITIONS = [105, 155, 205, 255]
     
-    # Coordenadas Y das questões 1, 2, 3, 4 (vertical)  
-    # Para mover para BAIXO: AUMENTE os valores
-    # Para mover para CIMA: DIMINUA os valores
+    # OLD: Coordenadas Y das questões 1, 2, 3, 4 (vertical) - template antigo
     BUBBLE_Y_POSITIONS = [950, 1000, 1050, 1100]  # Coordenadas Y das questões
     
     # Dimensões padrão do formulário (para cálculos proporcionais)
@@ -1588,22 +1577,111 @@ class PhysicalTestPDFGenerator:
             
             # 2. EXTRAIR QR CODE PRIMEIRO (na imagem original, sem processamento)
             print(f"🔍 ETAPA 1: DETECTANDO QR CODE NA IMAGEM ORIGINAL...")
-            qr_data = self._extrair_qr_code_original(img_color)
+            qr_result = self._extrair_qr_code_original(img_color)
+            
+            # NOVO: Suportar retorno de tupla (data, bbox) ou apenas data (compatibilidade)
+            if isinstance(qr_result, tuple):
+                qr_data, qr_bbox = qr_result
+            else:
+                qr_data = qr_result
+                qr_bbox = None
+            
             if not qr_data:
                 return {"success": False, "error": "QR code não detectado ou inválido"}
             
-            # Extrair student_id do JSON do QR Code
-            try:
-                import json
-                qr_json = json.loads(qr_data)
-                student_id = qr_json.get('student_id')
-                if not student_id:
-                    return {"success": False, "error": "Student ID não encontrado no QR code"}
-            except json.JSONDecodeError:
-                return {"success": False, "error": "QR code inválido - formato JSON incorreto"}
+            print(f"✅ QR Code detectado: {qr_data}")
+            if qr_bbox:
+                print(f"📍 QR Code bbox: {qr_bbox}")
             
-            print(f"✅ QR CODE DETECTADO: {qr_data}")
-            print(f"✅ STUDENT ID EXTRAÍDO: {student_id}")
+            # NOVO: Extrair informações do QR Code (suporta JSON e UUID simples)
+            # QR code simplificado: apenas student_id e test_id
+            # num_questions será buscado do banco de dados
+            import json
+            student_id = None
+            test_id_from_qr = None
+            num_questions_from_qr = None
+            
+            # Tentar parsear como JSON primeiro
+            try:
+                qr_json = json.loads(qr_data)
+                
+                # Extrair informações do QR code JSON (simplificado: apenas student_id e test_id)
+                student_id = qr_json.get('student_id')
+                test_id_from_qr = qr_json.get('test_id')
+                # Removido: num_questions e qr_code_id - serão buscados do banco
+                
+                print(f"✅ QR CODE DETECTADO (formato JSON): {qr_data}")
+                
+            except json.JSONDecodeError:
+                # QR code não é JSON - pode ser apenas UUID (formato antigo)
+                # Verificar se é um UUID válido
+                import re
+                uuid_pattern = r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+                qr_data_clean = qr_data.strip()
+                
+                if re.match(uuid_pattern, qr_data_clean, re.IGNORECASE):
+                    # É um UUID - tratar como student_id
+                    student_id = qr_data_clean
+                    print(f"✅ QR CODE DETECTADO (formato UUID): {student_id}")
+                    print(f"⚠️ QR code em formato antigo (apenas UUID), buscando informações adicionais...")
+                    
+                    # Buscar informações adicionais do banco se possível
+                    # Tentar buscar PhysicalTestForm com este student_id e test_id
+                    if test_id:
+                        from app.models.physicalTestForm import PhysicalTestForm
+                        form = PhysicalTestForm.query.filter_by(
+                            student_id=student_id,
+                            test_id=test_id
+                        ).first()
+                        
+                        if form:
+                            # Se não encontrou num_questions, buscar do test
+                            from app.models.testQuestion import TestQuestion
+                            num_questions_from_qr = TestQuestion.query.filter_by(test_id=test_id).count()
+                    else:
+                        # Se não tem test_id, tentar buscar de qualquer formulário do aluno
+                        from app.models.physicalTestForm import PhysicalTestForm
+                        form = PhysicalTestForm.query.filter_by(student_id=student_id).first()
+                        if form:
+                            test_id = form.test_id
+                            from app.models.testQuestion import TestQuestion
+                            num_questions_from_qr = TestQuestion.query.filter_by(test_id=test_id).count()
+                else:
+                    # Não é JSON nem UUID - pode ser apenas student_id como string
+                    student_id = qr_data_clean
+                    print(f"✅ QR CODE DETECTADO (formato string): {student_id}")
+            
+            # Validar student_id
+            if not student_id:
+                return {"success": False, "error": "Student ID não encontrado no QR code"}
+            
+            # Se test_id não foi fornecido como parâmetro, usar do QR code ou buscar
+            if not test_id:
+                test_id = test_id_from_qr
+                if not test_id:
+                    # Tentar buscar test_id do banco usando student_id
+                    from app.models.physicalTestForm import PhysicalTestForm
+                    form = PhysicalTestForm.query.filter_by(student_id=student_id).order_by(PhysicalTestForm.generated_at.desc()).first()
+                    if form:
+                        test_id = form.test_id
+                        print(f"📋 Test ID obtido do banco: {test_id}")
+                
+                if not test_id:
+                    return {"success": False, "error": "Test ID não encontrado no QR code nem no banco de dados"}
+            
+            # Validar que o test_id do QR code corresponde ao fornecido
+            if test_id_from_qr and test_id_from_qr != test_id:
+                logging.warning(f"⚠️ Test ID do QR code ({test_id_from_qr}) diferente do fornecido ({test_id})")
+            
+            # Se num_questions não foi encontrado, buscar do banco
+            if not num_questions_from_qr:
+                from app.models.testQuestion import TestQuestion
+                num_questions_from_qr = TestQuestion.query.filter_by(test_id=test_id).count()
+                print(f"📊 Número de questões obtido do banco: {num_questions_from_qr}")
+            
+            print(f"✅ STUDENT ID: {student_id}")
+            print(f"✅ TEST ID: {test_id}")
+            print(f"✅ NUM QUESTIONS: {num_questions_from_qr}")
             
             # 3. AGORA processar imagem para detecção de bolhas (mantendo funcionalidade existente)
             print(f"🔍 ETAPA 2: PROCESSANDO IMAGEM PARA DETECÇÃO DE BOLHAS...")
@@ -1614,45 +1692,78 @@ class PhysicalTestPDFGenerator:
             img_gray = img_result['image_processed']
             print(f"🖼️ Imagem processada para bolhas: {img_gray.shape}")
             
-            # 4. Detectar respostas usando gabarito de referência (MÉTODO CORRETO)
-            print(f"🔍 ETAPA 3: DETECTANDO RESPOSTAS COM GABARITO DE REFERÊNCIA...")
-            # Converter imagem para base64 string para o método de correção por gabarito
-            import base64
-            import cv2
-            _, buffer = cv2.imencode('.jpg', img_color)
-            image_data_str = base64.b64encode(buffer).decode('utf-8')
+            # 4. Detectar respostas usando coordenadas dinâmicas (NOVA IMPLEMENTAÇÃO)
+            print(f"🔍 ETAPA 3: DETECTANDO RESPOSTAS COM COORDENADAS DINÂMICAS...")
             
-            # Processar correção por gabarito e capturar imagens para debug
-            
-            # Gerar gabarito para debug ANTES da comparação
-            debug_gabarito_image = None
             debug_user_image = img_color  # Usar imagem original do usuário
+            respostas_detectadas = {}
+            debug_image_with_areas = None  # Será preenchido pela função de detecção
             
-            try:
-                # Gerar gabarito para debug
-                user_height, user_width = img_color.shape[:2]
-                debug_gabarito_image_pil, _ = self._gerar_gabarito_referencia_adaptativo(
-                    test_id, (user_width, user_height)
+            # NOVA IMPLEMENTAÇÃO: Sempre usar coordenadas dinâmicas baseadas no novo layout (WeasyPrint)
+            coordinates_data = None  # Inicializar para uso posterior no debug
+            if num_questions_from_qr:
+                print(f"📐 Calculando coordenadas dinamicamente (novo layout WeasyPrint)...")
+                img_height, img_width = img_gray.shape[:2]
+                
+                # Calcular coordenadas base (A4 padrão) - transformação será aplicada depois com marcadores
+                coordinates_data = self._calculate_institutional_test_coordinates(
+                    num_questions_from_qr, 
+                    img_width,  # Usar dimensões reais da imagem
+                    img_height,
+                    None  # Não usar mais QR code como âncora - usar marcadores
                 )
                 
-                # Converter PIL Image para OpenCV se necessário
-                if debug_gabarito_image_pil is not None:
-                    if hasattr(debug_gabarito_image_pil, 'mode'):  # É PIL Image
-                        debug_gabarito_image = cv2.cvtColor(np.array(debug_gabarito_image_pil), cv2.COLOR_RGB2BGR)
+                if coordinates_data and coordinates_data.get('coordinates'):
+                    print(f"✅ Coordenadas base calculadas: {len(coordinates_data['coordinates'])} posições")
+                    
+                    # Salvar debug das coordenadas base ANTES da transformação
+                    self._salvar_debug_coordenadas(img_color.copy(), coordinates_data, "coordenadas_base", None)
+                    
+                    # NOVA IMPLEMENTAÇÃO: Detectar marcadores de alinhamento e ajustar coordenadas
+                    print(f"🔍 Detectando marcadores de alinhamento...")
+                    marcadores_detectados = self._detectar_marcadores_alinhamento(img_gray, img_color)
+                    
+                    if marcadores_detectados:
+                        print(f"✅ Marcadores detectados, calculando transformação...")
+                        transformacao = self._calcular_transformacao_marcadores(
+                            marcadores_detectados,
+                            794,  # expected_width (A4)
+                            1123  # expected_height (A4)
+                        )
+                        
+                        if transformacao:
+                            print(f"📐 Transformação calculada: scale_x={transformacao['scale_x']:.3f}, scale_y={transformacao['scale_y']:.3f}, offset=({transformacao['offset_x']:.1f}, {transformacao['offset_y']:.1f})")
+                            
+                            # Salvar coordenadas ANTES da transformação
+                            coordinates_data_antes = coordinates_data.copy()
+                            
+                            # Aplicar transformação nas coordenadas
+                            coordinates_data = self._aplicar_transformacao_coordenadas(
+                                coordinates_data,
+                                transformacao
+                            )
+                            print(f"✅ Coordenadas ajustadas com transformação dos marcadores")
+                            
+                            # Salvar debug das coordenadas DEPOIS da transformação
+                            self._salvar_debug_coordenadas(img_color.copy(), coordinates_data, "coordenadas_transformadas", transformacao)
+                        else:
+                            print(f"⚠️ Falha ao calcular transformação, usando coordenadas base")
                     else:
-                        debug_gabarito_image = debug_gabarito_image_pil
+                        print(f"⚠️ Marcadores não detectados, usando coordenadas base (pode estar desalinhado)")
+                    
+                    # Usar coordenadas ajustadas para detecção (com imagem original para debug)
+                    respostas_detectadas, debug_image_with_areas = self._detectar_respostas_com_coordenadas_dinamicas(
+                        img_gray,
+                        coordinates_data,
+                        num_questions_from_qr,
+                        coordinates_data.get('rect_bounds'),
+                        original_image=img_color  # Passar imagem colorida para debug
+                    )
                 else:
-                    debug_gabarito_image = None
-                
-                print(f"✅ Gabarito de debug gerado: {debug_gabarito_image.shape if debug_gabarito_image is not None else 'None'}")
-            except Exception as e:
-                print(f"⚠️ Erro ao gerar gabarito para debug: {str(e)}")
-                debug_gabarito_image = None
-            
-            # Usar o método de comparação adaptativo que retorna imagem com áreas de detecção
-            respostas_detectadas, debug_image_with_areas = self._comparar_bolhas_adaptativo(
-                debug_gabarito_image, img_color, test_id
-            )
+                    print(f"⚠️ Falha ao calcular coordenadas")
+                    return {"success": False, "error": "Falha ao calcular coordenadas do template"}
+            else:
+                return {"success": False, "error": "Número de questões não encontrado no QR code"}
             
             if not respostas_detectadas:
                 return {"success": False, "error": "Nenhuma resposta detectada"}
@@ -1676,9 +1787,9 @@ class PhysicalTestPDFGenerator:
                     if question:
                         correct_answers[i + 1] = question.correct_answer
                 
-                # Gerar comparação visual
+                # Gerar comparação visual (sem gabarito - não é necessário com coordenadas dinâmicas)
                 debug_file = visualizer.generate_correction_comparison(
-                    gabarito_image=debug_gabarito_image if debug_gabarito_image is not None else img_gray,
+                    gabarito_image=None,  # Não usar gabarito - coordenadas dinâmicas não precisam
                     user_image=debug_user_image,
                     test_id=test_id,
                     student_id=student_id,
@@ -1695,25 +1806,38 @@ class PhysicalTestPDFGenerator:
                 # 3.6. SALVAR BOLHAS DETECTADAS (TEMPORÁRIO)
                 print(f"🔍 ETAPA 3.6: SALVANDO BOLHAS DETECTADAS...")
                 try:
-                    # Obter coordenadas do gabarito
-                    if debug_gabarito_image is not None:
-                        # Converter gabarito para obter coordenadas
-                        if hasattr(debug_gabarito_image, 'convert'):  # PIL
-                            gabarito_array = np.array(debug_gabarito_image)
+                    # NOVA IMPLEMENTAÇÃO: Usar coordenadas dinâmicas calculadas
+                    # Não precisa de gabarito - as coordenadas já foram calculadas acima
+                    if coordinates_data and coordinates_data.get('coordinates'):
+                        # Extrair coordenadas das bolhas detectadas
+                        coordinates_list = coordinates_data.get('coordinates', [])
+                        rect_bounds = coordinates_data.get('rect_bounds')
+                        
+                        if rect_bounds:
+                            rect_x0, rect_y0, _, _ = rect_bounds
                         else:
-                            gabarito_array = debug_gabarito_image
+                            rect_x0, rect_y0 = 0, 0
                         
-                        # Calcular coordenadas (mesma lógica do detector)
-                        gabarito_h, gabarito_w = gabarito_array.shape[:2]
-                        proporcao_x = gabarito_w / 1240
-                        proporcao_y = gabarito_h / 1753
+                        # Converter para formato esperado pelo visualizador
+                        # Agrupar por questão (4 alternativas por questão)
+                        x_positions = []
+                        y_positions = []
                         
-                        # COORDENADAS CORRETAS: Usando constantes da classe
-                        x_positions = [int(x * proporcao_x) for x in self.BUBBLE_X_POSITIONS]
-                        y_positions = [int(y * proporcao_y) for y in self.BUBBLE_Y_POSITIONS]
+                        # Extrair coordenadas X das 4 alternativas (A, B, C, D)
+                        # Pegar as primeiras 4 coordenadas para obter as posições X
+                        if len(coordinates_list) >= 4:
+                            for i in range(4):
+                                x, _, _, _ = coordinates_list[i]
+                                x_positions.append(int(rect_x0 + x))
+                        
+                        # Extrair coordenadas Y (uma por questão)
+                        for i in range(0, len(coordinates_list), 4):
+                            if i < len(coordinates_list):
+                                _, y, _, _ = coordinates_list[i]
+                                y_positions.append(int(rect_y0 + y))
                         
                         coordinates = {
-                            'x_positions': x_positions,
+                            'x_positions': x_positions[:4] if x_positions else [],  # Apenas 4 alternativas (A, B, C, D)
                             'y_positions': y_positions
                         }
                         
@@ -1731,7 +1855,7 @@ class PhysicalTestPDFGenerator:
                         else:
                             print(f"⚠️ Erro ao salvar bolhas detectadas")
                     else:
-                        print(f"⚠️ Gabarito não disponível para salvar bolhas")
+                        print(f"⚠️ Coordenadas não disponíveis para salvar bolhas")
                         
                 except Exception as e:
                     print(f"⚠️ Erro ao salvar bolhas detectadas: {str(e)}")
@@ -1897,6 +2021,7 @@ class PhysicalTestPDFGenerator:
         """
         Extrai QR code da imagem ORIGINAL (sem processamento pesado)
         PRIORIDADE: Detectar QR Code na melhor qualidade possível
+        NOVO: Aplica correção de perspectiva antes de tentar decodificar
         """
         try:
             import cv2
@@ -1913,6 +2038,20 @@ class PhysicalTestPDFGenerator:
                 gray = img.copy()
             
             print(f"📊 Escala de cinza: {gray.shape}, valores únicos: {len(np.unique(gray))}, min: {gray.min()}, max: {gray.max()}")
+            
+            # NOVO: Tentar corrigir perspectiva ANTES de tentar decodificar QR code
+            # A imagem pode vir distorcida (scan, foto, print)
+            print(f"🔄 Tentando correção de perspectiva na imagem original...")
+            img_corrigida = self._corrigir_perspectiva_qr(img.copy())
+            gray_corrigido = None
+            if img_corrigida is not None and not np.array_equal(img_corrigida, img):
+                print(f"✅ Perspectiva corrigida aplicada: {img_corrigida.shape}")
+                if len(img_corrigida.shape) == 3:
+                    gray_corrigido = cv2.cvtColor(img_corrigida, cv2.COLOR_BGR2GRAY)
+                else:
+                    gray_corrigido = img_corrigida.copy()
+            else:
+                print(f"⚠️ Correção de perspectiva não aplicada ou não necessária")
             
             # Detector de QR Code
             qr_detector = cv2.QRCodeDetector()
@@ -1940,36 +2079,103 @@ class PhysicalTestPDFGenerator:
             except Exception as e:
                 print(f"❌ Erro detecção grayscale: {e}")
             
-            # MÉTODO 3: ROI no canto superior esquerdo (onde geralmente está o QR Code)
-            print(f"🔍 Tentando detecção por ROI (canto superior esquerdo)...")
+            # MÉTODO 2.5: Tentar com imagem corrigida (se disponível)
+            if gray_corrigido is not None:
+                print(f"🔍 Tentando detecção em escala de cinza corrigida...")
+                try:
+                    data, bbox, _ = qr_detector.detectAndDecode(gray_corrigido)
+                    print(f"📱 Resultado grayscale corrigido: dados='{data}', bbox={bbox}")
+                    if data and data.strip():
+                        print(f"✅ QR Code detectado (escala de cinza corrigida): {data}")
+                        return data.strip()
+                except Exception as e:
+                    print(f"❌ Erro detecção grayscale corrigido: {e}")
+                
+                # Tentar também na imagem colorida corrigida
+                if len(img_corrigida.shape) == 3:
+                    print(f"🔍 Tentando detecção em imagem colorida corrigida...")
+                    try:
+                        data, bbox, _ = qr_detector.detectAndDecode(img_corrigida)
+                        print(f"📱 Resultado colorida corrigida: dados='{data}', bbox={bbox}")
+                        if data and data.strip():
+                            print(f"✅ QR Code detectado (imagem colorida corrigida): {data}")
+                            return data.strip()
+                    except Exception as e:
+                        print(f"❌ Erro detecção colorida corrigida: {e}")
+            
+            # Criar imagem de debug para QR code
+            debug_qr_image = img.copy() if len(img.shape) == 3 else cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
+            
+            # MÉTODO 3: ROI no canto superior DIREITO (onde está o QR Code no template WeasyPrint)
+            print(f"🔍 Tentando detecção por ROI (canto superior direito)...")
             h, w = gray.shape
             roi_size = min(w, h) // 3  # 1/3 da imagem
-            roi = gray[0:roi_size, 0:roi_size]
-            print(f"📍 ROI superior esquerda: {roi.shape}, valores únicos: {len(np.unique(roi))}")
+            roi = gray[0:roi_size, w-roi_size:w]  # Canto superior direito
+            print(f"📍 ROI superior direita: {roi.shape}, valores únicos: {len(np.unique(roi))}")
+            
+            # Desenhar ROI no debug
+            cv2.rectangle(debug_qr_image, (w-roi_size, 0), (w, roi_size), (0, 255, 0), 2)
+            cv2.putText(debug_qr_image, "ROI 1/3", (w-roi_size, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
             
             try:
                 data, bbox, _ = qr_detector.detectAndDecode(roi)
-                print(f"📱 Resultado ROI 1/3: dados='{data}', bbox={bbox}")
+                print(f"📱 Resultado ROI superior direita 1/3: dados='{data}', bbox={bbox}")
+                if data and data.strip():
+                    print(f"✅ QR Code detectado (ROI superior direita): {data}")
+                    self._salvar_debug_qr(debug_qr_image, "qr_detection_success.png", bbox, data, w-roi_size, 0)
+                    return data.strip()
+                # Se bbox detectado mas sem dados, usar decodificação agressiva
+                if bbox is not None and len(bbox) > 0:
+                    print(f"⚠️ Bbox detectado sem dados, usando decodificação agressiva...")
+                    # Ajustar bbox para coordenadas da imagem original
+                    bbox_orig = bbox[0] + np.array([[w-roi_size, 0]])
+                    self._desenhar_bbox_qr(debug_qr_image, bbox_orig, (255, 255, 0), "QR (sem dados)")
+                    
+                    # Tentar decodificação agressiva na ROI
+                    data = self._decodificar_qr_bbox_agressivo(roi, qr_detector)
+                    if data:
+                        print(f"✅ QR Code detectado (decodificação agressiva): {data}")
+                        self._salvar_debug_qr(debug_qr_image, "qr_detection_aggressive.png", bbox_orig, data, w-roi_size, 0)
+                        return data
+            except Exception as e:
+                print(f"❌ Erro ROI superior direita 1/3: {e}")
+            
+            # MÉTODO 3.5: ROI no canto superior esquerdo (compatibilidade)
+            print(f"🔍 Tentando detecção por ROI (canto superior esquerdo)...")
+            roi_size_left = min(w, h) // 3  # 1/3 da imagem
+            roi_left = gray[0:roi_size_left, 0:roi_size_left]
+            print(f"📍 ROI superior esquerda: {roi_left.shape}, valores únicos: {len(np.unique(roi_left))}")
+            
+            try:
+                data, bbox, _ = qr_detector.detectAndDecode(roi_left)
+                print(f"📱 Resultado ROI superior esquerda 1/3: dados='{data}', bbox={bbox}")
                 if data and data.strip():
                     print(f"✅ QR Code detectado (ROI superior esquerda): {data}")
                     return data.strip()
             except Exception as e:
-                print(f"❌ Erro ROI 1/3: {e}")
+                print(f"❌ Erro ROI superior esquerda 1/3: {e}")
             
-            # MÉTODO 4: ROI menor no canto superior esquerdo (QR Code pode estar pequeno)
-            print(f"🔍 Tentando ROI menor...")
+            # MÉTODO 4: ROI menor no canto superior direito (QR Code pode estar pequeno)
+            print(f"🔍 Tentando ROI menor (canto superior direito)...")
             roi_size_small = min(w, h) // 4  # 1/4 da imagem
-            roi_small = gray[0:roi_size_small, 0:roi_size_small]
-            print(f"📍 ROI pequena: {roi_small.shape}, valores únicos: {len(np.unique(roi_small))}")
+            roi_small = gray[0:roi_size_small, w-roi_size_small:w]  # Canto superior direito
+            print(f"📍 ROI pequena superior direita: {roi_small.shape}, valores únicos: {len(np.unique(roi_small))}")
             
             try:
                 data, bbox, _ = qr_detector.detectAndDecode(roi_small)
-                print(f"📱 Resultado ROI 1/4: dados='{data}', bbox={bbox}")
+                print(f"📱 Resultado ROI pequena superior direita: dados='{data}', bbox={bbox}")
                 if data and data.strip():
-                    print(f"✅ QR Code detectado (ROI pequena): {data}")
+                    print(f"✅ QR Code detectado (ROI pequena superior direita): {data}")
                     return data.strip()
+                # Se bbox detectado mas sem dados, usar decodificação agressiva
+                if bbox is not None and len(bbox) > 0:
+                    print(f"⚠️ Bbox detectado sem dados, usando decodificação agressiva...")
+                    data = self._decodificar_qr_bbox_agressivo(roi_small, qr_detector)
+                    if data:
+                        print(f"✅ QR Code detectado (decodificação agressiva): {data}")
+                        return data
             except Exception as e:
-                print(f"❌ Erro ROI 1/4: {e}")
+                print(f"❌ Erro ROI pequena superior direita: {e}")
             
             # MÉTODO 5: Threshold OTSU (método mais suave)
             print(f"🔍 Tentando threshold OTSU...")
@@ -2048,6 +2254,7 @@ class PhysicalTestPDFGenerator:
             
             # MÉTODO 10: Tentar com diferentes valores de threshold manual
             print(f"🔍 Tentando threshold manual...")
+            detected_bboxes = []  # Armazenar bboxes detectados sem dados
             for threshold_value in [50, 100, 127, 150, 200]:
                 try:
                     _, thresh_manual = cv2.threshold(gray, threshold_value, 255, cv2.THRESH_BINARY)
@@ -2056,8 +2263,39 @@ class PhysicalTestPDFGenerator:
                     if data and data.strip():
                         print(f"✅ QR Code detectado (threshold {threshold_value}): {data}")
                         return data.strip()
+                    # Armazenar bbox detectado sem dados para processamento posterior
+                    if bbox is not None and len(bbox) > 0:
+                        detected_bboxes.append((bbox, thresh_manual, threshold_value))
                 except Exception as e:
                     print(f"❌ Erro threshold {threshold_value}: {e}")
+            
+            # MÉTODO 10.5: Se bboxes foram detectados sem dados, melhorar regiões e tentar novamente
+            if detected_bboxes:
+                print(f"🔍 Processando {len(detected_bboxes)} bboxes detectados sem dados...")
+                for bbox, thresh_img, threshold_value in detected_bboxes:
+                    try:
+                        # Extrair ROI do bbox
+                        bbox_array = np.array(bbox[0], dtype=np.int32)
+                        x_min = max(0, int(bbox_array[:, 0].min()) - 10)
+                        y_min = max(0, int(bbox_array[:, 1].min()) - 10)
+                        x_max = min(w, int(bbox_array[:, 0].max()) + 10)
+                        y_max = min(h, int(bbox_array[:, 1].max()) + 10)
+                        
+                        # Desenhar bbox no debug
+                        cv2.rectangle(debug_qr_image, (x_min, y_min), (x_max, y_max), (255, 0, 255), 2)
+                        cv2.putText(debug_qr_image, f"TH{threshold_value}", (x_min, y_min-5), 
+                                   cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 0, 255), 1)
+                        
+                        if x_max > x_min and y_max > y_min:
+                            roi_bbox = thresh_img[y_min:y_max, x_min:x_max]
+                            # Tentar decodificação agressiva na ROI do bbox
+                            data = self._decodificar_qr_bbox_agressivo(roi_bbox, qr_detector)
+                            if data:
+                                print(f"✅ QR Code detectado (decodificação agressiva, threshold {threshold_value}): {data}")
+                                self._salvar_debug_qr(debug_qr_image, f"qr_detection_th{threshold_value}.png", bbox, data, x_min, y_min)
+                                return data
+                    except Exception as e:
+                        print(f"❌ Erro ao processar bbox: {e}")
             
             # MÉTODO 11: Tentar com pyzbar (biblioteca alternativa)
             print(f"🔍 Tentando detecção com pyzbar...")
@@ -2088,25 +2326,38 @@ class PhysicalTestPDFGenerator:
             except Exception as e:
                 print(f"❌ Erro pyzbar: {e}")
             
-            # MÉTODO 12: Tentar com pyzbar em ROI
+            # MÉTODO 12: Tentar com pyzbar em ROI (canto superior direito primeiro)
             print(f"🔍 Tentando pyzbar em ROI...")
             try:
                 from pyzbar import pyzbar
                 from PIL import Image
                 
-                # Tentar em ROI do canto superior esquerdo
+                # Tentar em ROI do canto superior DIREITO (onde está o QR code)
                 roi_size = min(w, h) // 3
-                roi = gray[0:roi_size, 0:roi_size]
+                roi = gray[0:roi_size, w-roi_size:w]  # Canto superior direito
                 pil_roi = Image.fromarray(roi)
                 
                 barcodes = pyzbar.decode(pil_roi)
-                print(f"📱 Resultado pyzbar ROI: {len(barcodes)} códigos encontrados")
+                print(f"📱 Resultado pyzbar ROI superior direita: {len(barcodes)} códigos encontrados")
                 
                 for barcode in barcodes:
                     data = barcode.data.decode('utf-8')
-                    print(f"📱 Código pyzbar ROI: {data}")
+                    print(f"📱 Código pyzbar ROI superior direita: {data}")
                     if data and data.strip():
-                        print(f"✅ QR Code detectado (pyzbar ROI): {data}")
+                        print(f"✅ QR Code detectado (pyzbar ROI superior direita): {data}")
+                        return data.strip()
+                
+                # Tentar também no canto superior esquerdo (compatibilidade)
+                roi_left = gray[0:roi_size, 0:roi_size]
+                pil_roi_left = Image.fromarray(roi_left)
+                barcodes_left = pyzbar.decode(pil_roi_left)
+                print(f"📱 Resultado pyzbar ROI superior esquerda: {len(barcodes_left)} códigos encontrados")
+                
+                for barcode in barcodes_left:
+                    data = barcode.data.decode('utf-8')
+                    print(f"📱 Código pyzbar ROI superior esquerda: {data}")
+                    if data and data.strip():
+                        print(f"✅ QR Code detectado (pyzbar ROI superior esquerda): {data}")
                         return data.strip()
                         
             except ImportError:
@@ -2114,19 +2365,47 @@ class PhysicalTestPDFGenerator:
             except Exception as e:
                 print(f"❌ Erro pyzbar ROI: {e}")
             
-            # MÉTODO FINAL: Redimensionar imagem para melhorar decodificação
+            # MÉTODO FINAL: Redimensionar imagem para melhorar decodificação (importante para prints)
             print(f"🔍 Tentando redimensionamento final para melhorar decodificação...")
-            try:
-                # Redimensionar para 3x o tamanho original
-                resized = cv2.resize(gray, (w*3, h*3), interpolation=cv2.INTER_CUBIC)
-                data, bbox, _ = qr_detector.detectAndDecode(resized)
-                print(f"📱 Resultado redimensionado final: dados='{data}', bbox={bbox}")
-                if data and data.strip():
-                    print(f"✅ QR Code detectado (redimensionado final): {data}")
-                    return data.strip()
-            except Exception as e:
-                print(f"❌ Erro redimensionamento final: {e}")
+            for scale_factor in [3, 4, 5]:  # Tentar múltiplos fatores de escala
+                try:
+                    resized = cv2.resize(gray, (w*scale_factor, h*scale_factor), interpolation=cv2.INTER_CUBIC)
+                    data, bbox, _ = qr_detector.detectAndDecode(resized)
+                    print(f"📱 Resultado redimensionado {scale_factor}x: dados='{data}', bbox={bbox}")
+                    if data and data.strip():
+                        print(f"✅ QR Code detectado (redimensionado {scale_factor}x): {data}")
+                        # Ajustar bbox para coordenadas originais para debug
+                        if bbox is not None and len(bbox) > 0:
+                            bbox_orig = bbox[0] / scale_factor
+                            self._desenhar_bbox_qr(debug_qr_image, bbox_orig, (0, 255, 0), f"QR {scale_factor}x")
+                        self._salvar_debug_qr(debug_qr_image, f"qr_detection_resized_{scale_factor}x.png", bbox, data, 0, 0)
+                        return data.strip()
+                    # Se bbox detectado mas sem dados, melhorar região e tentar novamente
+                    if bbox is not None and len(bbox) > 0:
+                        print(f"⚠️ Bbox detectado sem dados em escala {scale_factor}x, melhorando região...")
+                        # Ajustar bbox para coordenadas originais para debug
+                        bbox_orig = bbox[0] / scale_factor
+                        self._desenhar_bbox_qr(debug_qr_image, bbox_orig, (255, 255, 0), f"QR {scale_factor}x (sem dados)")
+                        
+                        bbox_array = np.array(bbox[0], dtype=np.int32)
+                        x_min = max(0, int(bbox_array[:, 0].min()) - 10)
+                        y_min = max(0, int(bbox_array[:, 1].min()) - 10)
+                        x_max = min(resized.shape[1], int(bbox_array[:, 0].max()) + 10)
+                        y_max = min(resized.shape[0], int(bbox_array[:, 1].max()) + 10)
+                        
+                        if x_max > x_min and y_max > y_min:
+                            roi_resized = resized[y_min:y_max, x_min:x_max]
+                            # Tentar decodificação agressiva na ROI redimensionada
+                            data = self._decodificar_qr_bbox_agressivo(roi_resized, qr_detector)
+                            if data:
+                                print(f"✅ QR Code detectado (decodificação agressiva, escala {scale_factor}x): {data}")
+                                self._salvar_debug_qr(debug_qr_image, f"qr_detection_resized_{scale_factor}x_aggressive.png", bbox_orig, data, 0, 0)
+                                return data
+                except Exception as e:
+                    print(f"❌ Erro redimensionamento {scale_factor}x: {e}")
             
+            # Salvar debug final mesmo sem detectar
+            self._salvar_debug_qr(debug_qr_image, "qr_detection_all_attempts.png", None, None, 0, 0)
             print("❌ QR Code não detectado em nenhum método na imagem original")
             return None
                 
@@ -2134,246 +2413,256 @@ class PhysicalTestPDFGenerator:
             print(f"❌ Erro ao extrair QR code da imagem original: {str(e)}")
             return None
 
-    def _extrair_qr_code_original(self, img):
+    def _corrigir_perspectiva_qr(self, img):
         """
-        Extrai QR code da imagem ORIGINAL (sem processamento pesado)
-        PRIORIDADE: Detectar QR Code na melhor qualidade possível
+        NOVO: Corrige perspectiva da imagem antes de tentar decodificar QR code
+        Detecta os 4 cantos do formulário e aplica transformação de perspectiva
         """
         try:
             import cv2
             import numpy as np
             
-            print(f"🔍 INICIANDO DETECÇÃO DE QR CODE NA IMAGEM ORIGINAL")
-            print(f"📏 Imagem original: {img.shape}, dtype: {img.dtype}")
-            print(f"📊 Valores únicos: {len(np.unique(img))}, min: {img.min()}, max: {img.max()}")
+            if img is None:
+                return None
             
-            # Converter para escala de cinza se necessário
+            # Converter para grayscale se necessário
             if len(img.shape) == 3:
                 gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
             else:
                 gray = img.copy()
             
-            print(f"📊 Escala de cinza: {gray.shape}, valores únicos: {len(np.unique(gray))}, min: {gray.min()}, max: {gray.max()}")
+            # Aplicar threshold para detectar bordas do formulário
+            _, thresh = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
             
-            # Detector de QR Code
-            qr_detector = cv2.QRCodeDetector()
+            # Encontrar contornos
+            contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
             
-            # MÉTODO 1: Detecção direta na imagem colorida (melhor qualidade)
-            if len(img.shape) == 3:
-                print(f"🔍 Tentando detecção em imagem colorida...")
-                try:
-                    data, bbox, _ = qr_detector.detectAndDecode(img)
-                    print(f"📱 Resultado colorida: dados='{data}', bbox={bbox}")
-                    if data and data.strip():
-                        print(f"✅ QR Code detectado (imagem colorida): {data}")
-                        return data.strip()
-                except Exception as e:
-                    print(f"❌ Erro detecção colorida: {e}")
+            if not contours:
+                return None
             
-            # MÉTODO 2: Detecção direta em escala de cinza
-            print(f"🔍 Tentando detecção em escala de cinza...")
-            try:
-                data, bbox, _ = qr_detector.detectAndDecode(gray)
-                print(f"📱 Resultado grayscale: dados='{data}', bbox={bbox}")
-                if data and data.strip():
-                    print(f"✅ QR Code detectado (escala de cinza): {data}")
-                    return data.strip()
-            except Exception as e:
-                print(f"❌ Erro detecção grayscale: {e}")
+            # Encontrar maior contorno (formulário)
+            maior_contorno = max(contours, key=cv2.contourArea)
+            area_maior = cv2.contourArea(maior_contorno)
             
-            # MÉTODO 3: ROI no canto superior esquerdo (onde geralmente está o QR Code)
-            print(f"🔍 Tentando detecção por ROI (canto superior esquerdo)...")
+            # Verificar se a área é significativa (pelo menos 50% da imagem)
             h, w = gray.shape
-            roi_size = min(w, h) // 3  # 1/3 da imagem
-            roi = gray[0:roi_size, 0:roi_size]
-            print(f"📍 ROI superior esquerda: {roi.shape}, valores únicos: {len(np.unique(roi))}")
+            area_minima = (w * h) * 0.5
             
-            try:
-                data, bbox, _ = qr_detector.detectAndDecode(roi)
-                print(f"📱 Resultado ROI 1/3: dados='{data}', bbox={bbox}")
-                if data and data.strip():
-                    print(f"✅ QR Code detectado (ROI superior esquerda): {data}")
-                    return data.strip()
-            except Exception as e:
-                print(f"❌ Erro ROI 1/3: {e}")
+            if area_maior < area_minima:
+                print(f"⚠️ Área do contorno muito pequena ({area_maior:.0f} < {area_minima:.0f})")
+                return None
             
-            # MÉTODO 4: ROI menor no canto superior esquerdo (QR Code pode estar pequeno)
-            print(f"🔍 Tentando ROI menor...")
-            roi_size_small = min(w, h) // 4  # 1/4 da imagem
-            roi_small = gray[0:roi_size_small, 0:roi_size_small]
-            print(f"📍 ROI pequena: {roi_small.shape}, valores únicos: {len(np.unique(roi_small))}")
+            # Aproximar contorno para encontrar 4 cantos
+            epsilon = 0.02 * cv2.arcLength(maior_contorno, True)
+            approx = cv2.approxPolyDP(maior_contorno, epsilon, True)
             
-            try:
-                data, bbox, _ = qr_detector.detectAndDecode(roi_small)
-                print(f"📱 Resultado ROI 1/4: dados='{data}', bbox={bbox}")
-                if data and data.strip():
-                    print(f"✅ QR Code detectado (ROI pequena): {data}")
-                    return data.strip()
-            except Exception as e:
-                print(f"❌ Erro ROI 1/4: {e}")
+            if len(approx) == 4:
+                print(f"✅ 4 cantos detectados, aplicando correção de perspectiva...")
+                # Aplicar transformação de perspectiva usando a função existente
+                img_corrigida = self.corrigir_perspectiva(img)
+                return img_corrigida
+            else:
+                print(f"⚠️ Não foram encontrados 4 cantos ({len(approx)} encontrados)")
+                return None
             
-            # MÉTODO 5: Threshold OTSU (método mais suave)
-            print(f"🔍 Tentando threshold OTSU...")
-            try:
-                _, thresh = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-                print(f"📊 OTSU threshold: {thresh.shape}, valores únicos: {len(np.unique(thresh))}")
-                data, bbox, _ = qr_detector.detectAndDecode(thresh)
-                print(f"📱 Resultado OTSU: dados='{data}', bbox={bbox}")
-                if data and data.strip():
-                    print(f"✅ QR Code detectado (threshold OTSU): {data}")
-                    return data.strip()
-            except Exception as e:
-                print(f"❌ Erro OTSU: {e}")
+        except Exception as e:
+            print(f"⚠️ Erro ao corrigir perspectiva QR: {e}")
+            return None
+    
+    def _decodificar_qr_bbox_agressivo(self, roi, qr_detector):
+        """
+        NOVO: Decodificação agressiva de QR code quando bbox é detectado sem dados
+        Aplica múltiplas técnicas de pré-processamento e tenta decodificar várias vezes
+        """
+        try:
+            import cv2
+            import numpy as np
             
-            # MÉTODO 6: Threshold adaptativo (mais suave)
-            print(f"🔍 Tentando threshold adaptativo...")
-            try:
-                thresh_adapt = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 11, 2)
-                print(f"📊 Threshold adaptativo: {thresh_adapt.shape}, valores únicos: {len(np.unique(thresh_adapt))}")
-                data, bbox, _ = qr_detector.detectAndDecode(thresh_adapt)
-                print(f"📱 Resultado adaptativo: dados='{data}', bbox={bbox}")
-                if data and data.strip():
-                    print(f"✅ QR Code detectado (threshold adaptativo): {data}")
-                    return data.strip()
-            except Exception as e:
-                print(f"❌ Erro adaptativo: {e}")
+            if roi is None or roi.size == 0:
+                return None
             
-            # MÉTODO 7: Threshold inverso
-            print(f"🔍 Tentando threshold inverso...")
-            try:
-                _, thresh_inv = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
-                print(f"📊 Threshold inverso: {thresh_inv.shape}, valores únicos: {len(np.unique(thresh_inv))}")
-                data, bbox, _ = qr_detector.detectAndDecode(thresh_inv)
-                print(f"📱 Resultado inverso: dados='{data}', bbox={bbox}")
-                if data and data.strip():
-                    print(f"✅ QR Code detectado (threshold inverso): {data}")
-                    return data.strip()
-            except Exception as e:
-                print(f"❌ Erro inverso: {e}")
+            # Converter para grayscale se necessário
+            if len(roi.shape) == 3:
+                roi_gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+            else:
+                roi_gray = roi.copy()
             
-            # MÉTODO 8: Tentar em diferentes regiões (caso QR Code não esteja no canto superior esquerdo)
-            print(f"🔍 Tentando detecção em múltiplas regiões...")
-            regions = [
-                (0, 0, w//2, h//2),      # Superior esquerda
-                (w//2, 0, w, h//2),      # Superior direita
-                (0, h//2, w//2, h),      # Inferior esquerda
-                (w//2, h//2, w, h)       # Inferior direita
-            ]
+            # Usar ROI original (já é uma região extraída com margem)
+            roi_margem = roi_gray
             
-            for i, (x1, y1, x2, y2) in enumerate(regions):
-                roi = gray[y1:y2, x1:x2]
-                if roi.size > 0:
-                    try:
-                        data, bbox, _ = qr_detector.detectAndDecode(roi)
-                        print(f"📱 Resultado região {i+1}: dados='{data}', bbox={bbox}")
-                        if data and data.strip():
-                            print(f"✅ QR Code detectado (região {i+1}): {data}")
-                            return data.strip()
-                    except Exception as e:
-                        print(f"❌ Erro região {i+1}: {e}")
+            # Lista de versões para tentar decodificar
+            versoes = []
             
-            # MÉTODO 9: Tentar com diferentes tamanhos de ROI
-            print(f"🔍 Tentando diferentes tamanhos de ROI...")
-            for size_factor in [0.1, 0.15, 0.2, 0.25, 0.3, 0.35, 0.4, 0.45, 0.5]:
-                roi_size = int(min(w, h) * size_factor)
-                if roi_size > 20:  # Mínimo de 20x20 pixels
-                    roi = gray[0:roi_size, 0:roi_size]
-                    try:
-                        data, bbox, _ = qr_detector.detectAndDecode(roi)
-                        print(f"📱 Resultado ROI {roi_size}x{roi_size}: dados='{data}', bbox={bbox}")
-                        if data and data.strip():
-                            print(f"✅ QR Code detectado (ROI {roi_size}x{roi_size}): {data}")
-                            return data.strip()
-                    except Exception as e:
-                        print(f"❌ Erro ROI {roi_size}x{roi_size}: {e}")
+            # 1. Original
+            versoes.append(("original", roi_margem))
             
-            # MÉTODO 10: Tentar com diferentes valores de threshold manual
-            print(f"🔍 Tentando threshold manual...")
-            for threshold_value in [50, 100, 127, 150, 200]:
+            # 2. Threshold OTSU
+            _, thresh_otsu = cv2.threshold(roi_margem, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+            versoes.append(("otsu", thresh_otsu))
+            
+            # 3. Threshold adaptativo
+            thresh_adapt = cv2.adaptiveThreshold(roi_margem, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 11, 2)
+            versoes.append(("adaptativo", thresh_adapt))
+            
+            # 4. Threshold inverso OTSU
+            _, thresh_inv_otsu = cv2.threshold(roi_margem, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+            versoes.append(("inverso_otsu", thresh_inv_otsu))
+            
+            # 5. Thresholds manuais
+            for threshold_value in [100, 127, 150]:
+                _, thresh_manual = cv2.threshold(roi_margem, threshold_value, 255, cv2.THRESH_BINARY)
+                versoes.append((f"manual_{threshold_value}", thresh_manual))
+            
+            # 6. Versão melhorada (sharpening + CLAHE)
+            improved = self._improve_qr_region(roi_margem)
+            if improved is not None:
+                versoes.append(("melhorada", improved))
+            
+            # 7. Redimensionamentos (2x, 3x, 4x)
+            for scale in [2, 3, 4]:
+                roi_resized = cv2.resize(roi_margem, (w * scale, h * scale), interpolation=cv2.INTER_CUBIC)
+                versoes.append((f"resized_{scale}x", roi_resized))
+                
+                # Também tentar com threshold OTSU nos redimensionados
+                _, thresh_resized = cv2.threshold(roi_resized, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+                versoes.append((f"resized_{scale}x_otsu", thresh_resized))
+            
+            # Tentar decodificar cada versão
+            for nome, versao_img in versoes:
                 try:
-                    _, thresh_manual = cv2.threshold(gray, threshold_value, 255, cv2.THRESH_BINARY)
-                    data, bbox, _ = qr_detector.detectAndDecode(thresh_manual)
-                    print(f"📱 Resultado threshold {threshold_value}: dados='{data}', bbox={bbox}")
+                    data, bbox, _ = qr_detector.detectAndDecode(versao_img)
                     if data and data.strip():
-                        print(f"✅ QR Code detectado (threshold {threshold_value}): {data}")
+                        print(f"✅ QR Code decodificado (versão: {nome}): {data}")
                         return data.strip()
                 except Exception as e:
-                    print(f"❌ Erro threshold {threshold_value}: {e}")
+                    continue
             
-            # MÉTODO 11: Tentar com pyzbar (biblioteca alternativa)
-            print(f"🔍 Tentando detecção com pyzbar...")
+            # Tentar com pyzbar também
             try:
                 from pyzbar import pyzbar
-                import numpy as np
+                from PIL import Image as PILImage
                 
-                # Converter para formato PIL se necessário
-                if len(img.shape) == 3:
-                    from PIL import Image
-                    pil_img = Image.fromarray(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
-                else:
-                    from PIL import Image
-                    pil_img = Image.fromarray(gray)
-                
-                barcodes = pyzbar.decode(pil_img)
-                print(f"📱 Resultado pyzbar: {len(barcodes)} códigos encontrados")
-                
-                for barcode in barcodes:
-                    data = barcode.data.decode('utf-8')
-                    print(f"📱 Código pyzbar: {data}")
-                    if data and data.strip():
-                        print(f"✅ QR Code detectado (pyzbar): {data}")
-                        return data.strip()
+                for nome, versao_img in versoes:
+                    try:
+                        pil_img = PILImage.fromarray(versao_img)
+                        barcodes = pyzbar.decode(pil_img)
                         
+                        for barcode in barcodes:
+                            data = barcode.data.decode('utf-8')
+                            if data and data.strip():
+                                print(f"✅ QR Code decodificado com pyzbar (versão: {nome}): {data}")
+                                return data.strip()
+                    except:
+                        continue
             except ImportError:
-                print(f"⚠️ pyzbar não disponível")
+                pass
             except Exception as e:
-                print(f"❌ Erro pyzbar: {e}")
+                print(f"⚠️ Erro ao tentar pyzbar: {e}")
             
-            # MÉTODO 12: Tentar com pyzbar em ROI
-            print(f"🔍 Tentando pyzbar em ROI...")
-            try:
-                from pyzbar import pyzbar
-                from PIL import Image
-                
-                # Tentar em ROI do canto superior esquerdo
-                roi_size = min(w, h) // 3
-                roi = gray[0:roi_size, 0:roi_size]
-                pil_roi = Image.fromarray(roi)
-                
-                barcodes = pyzbar.decode(pil_roi)
-                print(f"📱 Resultado pyzbar ROI: {len(barcodes)} códigos encontrados")
-                
-                for barcode in barcodes:
-                    data = barcode.data.decode('utf-8')
-                    print(f"📱 Código pyzbar ROI: {data}")
-                    if data and data.strip():
-                        print(f"✅ QR Code detectado (pyzbar ROI): {data}")
-                        return data.strip()
-                        
-            except ImportError:
-                print(f"⚠️ pyzbar não disponível para ROI")
-            except Exception as e:
-                print(f"❌ Erro pyzbar ROI: {e}")
-            
-            # MÉTODO FINAL: Redimensionar imagem para melhorar decodificação
-            print(f"🔍 Tentando redimensionamento final para melhorar decodificação...")
-            try:
-                # Redimensionar para 3x o tamanho original
-                resized = cv2.resize(gray, (w*3, h*3), interpolation=cv2.INTER_CUBIC)
-                data, bbox, _ = qr_detector.detectAndDecode(resized)
-                print(f"📱 Resultado redimensionado final: dados='{data}', bbox={bbox}")
-                if data and data.strip():
-                    print(f"✅ QR Code detectado (redimensionado final): {data}")
-                    return data.strip()
-            except Exception as e:
-                print(f"❌ Erro redimensionamento final: {e}")
-            
-            print("❌ QR Code não detectado em nenhum método na imagem original")
+            print(f"⚠️ Nenhuma versão conseguiu decodificar QR code")
             return None
-                
+            
         except Exception as e:
-            print(f"❌ Erro ao extrair QR code da imagem original: {str(e)}")
+            print(f"⚠️ Erro ao decodificar QR bbox agressivo: {e}")
             return None
+    
+    def _improve_qr_region(self, roi):
+        """
+        Melhora uma região de QR code para facilitar a decodificação
+        Usa técnicas como: sharpening, contrast enhancement, denoising
+        """
+        try:
+            import cv2
+            import numpy as np
+            
+            if roi is None or roi.size == 0:
+                return None
+            
+            # Aplicar sharpening
+            kernel_sharpen = np.array([[-1, -1, -1],
+                                      [-1, 9, -1],
+                                      [-1, -1, -1]])
+            sharpened = cv2.filter2D(roi, -1, kernel_sharpen)
+            
+            # Melhorar contraste usando CLAHE
+            clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+            if len(sharpened.shape) == 2:
+                enhanced = clahe.apply(sharpened)
+            else:
+                enhanced = clahe.apply(cv2.cvtColor(sharpened, cv2.COLOR_BGR2GRAY))
+            
+            # Redimensionar para maior (se muito pequeno)
+            h, w = enhanced.shape[:2]
+            if w < 100 or h < 100:
+                scale = max(100 // w, 100 // h, 2)
+                enhanced = cv2.resize(enhanced, (w * scale, h * scale), interpolation=cv2.INTER_CUBIC)
+            
+            return enhanced
+            
+        except Exception as e:
+            print(f"⚠️ Erro ao melhorar região QR: {e}")
+            return None
+    
+    def _salvar_debug_qr(self, debug_image, filename, bbox, data, offset_x=0, offset_y=0):
+        """Salva imagem de debug do QR code"""
+        try:
+            import cv2
+            import numpy as np
+            import os
+            from datetime import datetime
+            
+            debug_dir = "debug_corrections"
+            os.makedirs(debug_dir, exist_ok=True)
+            
+            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+            debug_path = os.path.join(debug_dir, f"{timestamp}_{filename}")
+            
+            img_copy = debug_image.copy()
+            
+            # Adicionar informações no texto
+            cv2.putText(img_copy, "QR CODE DETECTION DEBUG", (10, 30), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+            
+            if bbox is not None:
+                cv2.putText(img_copy, "Bbox detected: YES", (10, 60), 
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+            else:
+                cv2.putText(img_copy, "Bbox detected: NO", (10, 60), 
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
+            
+            if data:
+                cv2.putText(img_copy, f"Data: {data[:50]}", (10, 90), 
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
+            else:
+                cv2.putText(img_copy, "Data: None", (10, 90), 
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
+            
+            cv2.imwrite(debug_path, img_copy)
+            print(f"🔍 Debug QR salvo: {debug_path}")
+            
+        except Exception as e:
+            print(f"⚠️ Erro ao salvar debug QR: {e}")
+    
+    def _desenhar_bbox_qr(self, debug_image, bbox, color, label=""):
+        """Desenha bbox do QR code na imagem de debug"""
+        try:
+            import cv2
+            import numpy as np
+            
+            if bbox is None or len(bbox) == 0:
+                return
+            
+            bbox_int = np.int32(bbox)
+            cv2.polylines(debug_image, [bbox_int], True, color, 2)
+            
+            if label:
+                x_min = int(bbox_int[:, 0].min())
+                y_min = int(bbox_int[:, 1].min())
+                cv2.putText(debug_image, label, (x_min, y_min-5), 
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.4, color, 1)
+            
+        except Exception as e:
+            print(f"⚠️ Erro ao desenhar bbox QR: {e}")
 
     def _extrair_qr_code(self, img):
         """
@@ -3799,6 +4088,912 @@ class PhysicalTestPDFGenerator:
             logging.error(f"Erro ao buscar coordenadas: {str(e)}")
             return None
     
+    def _aplicar_transformacao_coordenadas(self, coordinates_data: Dict, transformacao: Dict) -> Dict:
+        """
+        NOVA IMPLEMENTAÇÃO: Aplica transformação calculada dos marcadores nas coordenadas das bolhas
+        
+        Args:
+            coordinates_data: Coordenadas base (em coordenadas A4 padrão)
+            transformacao: Dict com scale_x, scale_y, offset_x, offset_y
+        
+        Returns:
+            Dict com coordenadas transformadas
+        """
+        try:
+            scale_x = transformacao['scale_x']
+            scale_y = transformacao['scale_y']
+            offset_x = transformacao['offset_x']
+            offset_y = transformacao['offset_y']
+            
+            coordinates_list = coordinates_data.get('coordinates', [])
+            rect_bounds = coordinates_data.get('rect_bounds')
+            
+            # Converter coordenadas relativas para absolutas (A4 padrão)
+            if rect_bounds:
+                rect_x0, rect_y0, rect_x1, rect_y1 = rect_bounds
+            else:
+                rect_x0, rect_y0 = 0, 0
+                rect_x1, rect_y1 = transformacao['expected_width'], transformacao['expected_height']
+            
+            # Aplicar transformação nas coordenadas
+            transformed_coordinates = []
+            for rel_x, rel_y, w, h in coordinates_list:
+                # Converter para absolutas (A4)
+                abs_x = rect_x0 + rel_x
+                abs_y = rect_y0 + rel_y
+                
+                # Aplicar transformação
+                trans_x = int(offset_x + (abs_x * scale_x))
+                trans_y = int(offset_y + (abs_y * scale_y))
+                trans_w = int(w * scale_x)
+                trans_h = int(h * scale_y)
+                
+                transformed_coordinates.append((trans_x, trans_y, trans_w, trans_h))
+            
+            # Calcular novo rect_bounds baseado nas coordenadas transformadas
+            if transformed_coordinates:
+                min_x = min(coord[0] for coord in transformed_coordinates)
+                min_y = min(coord[1] for coord in transformed_coordinates)
+                max_x = max(coord[0] + coord[2] for coord in transformed_coordinates)
+                max_y = max(coord[1] + coord[3] for coord in transformed_coordinates)
+                
+                padding = 20
+                new_rect_x0 = max(0, min_x - padding)
+                new_rect_y0 = max(0, min_y - padding)
+                new_rect_x1 = max_x + padding
+                new_rect_y1 = max_y + padding
+                
+                # Converter coordenadas transformadas para relativas ao novo rect_bounds
+                coordinates_relative = []
+                for trans_x, trans_y, trans_w, trans_h in transformed_coordinates:
+                    rel_x = trans_x - new_rect_x0
+                    rel_y = trans_y - new_rect_y0
+                    coordinates_relative.append((int(rel_x), int(rel_y), trans_w, trans_h))
+                
+                return {
+                    'coordinates': coordinates_relative,
+                    'rect_bounds': (int(new_rect_x0), int(new_rect_y0), int(new_rect_x1), int(new_rect_y1)),
+                    'num_questions': coordinates_data['num_questions']
+                }
+            else:
+                return coordinates_data
+                
+        except Exception as e:
+            logging.error(f"Erro ao aplicar transformação nas coordenadas: {str(e)}")
+            import traceback
+            logging.error(traceback.format_exc())
+            return coordinates_data
+    
+    def _calculate_institutional_test_coordinates(self, num_questions: int, image_width: int, image_height: int, qr_bbox: Tuple = None) -> Dict:
+        """
+        NOVA IMPLEMENTAÇÃO: Calcula coordenadas do layout HTML/CSS do template WeasyPrint dinamicamente
+        Baseado no CSS do template institutional_test.html (valores exatos do CSS)
+        NOTA: Esta função calcula coordenadas base (A4 padrão). A transformação será aplicada depois
+        usando os marcadores de alinhamento detectados.
+        
+        Args:
+            num_questions: Número total de questões
+            image_width: Largura da imagem processada (não usado - mantido para compatibilidade)
+            image_height: Altura da imagem processada (não usado - mantido para compatibilidade)
+            qr_bbox: DEPRECATED - não usado mais (mantido para compatibilidade)
+        
+        Returns:
+            Dict com coordenadas no formato esperado pela correção (em coordenadas A4 padrão)
+        """
+        try:
+            # A4 em pixels a 96 DPI: 794px × 1123px
+            A4_WIDTH_PX = 794
+            A4_HEIGHT_PX = 1123
+            
+            # NOVA IMPLEMENTAÇÃO: Calcular coordenadas baseadas em A4 padrão (794x1123px a 96 DPI)
+            # A transformação será aplicada depois usando os marcadores de alinhamento detectados
+            # Usar escala 1.0 para calcular coordenadas base (A4 padrão)
+            scale_x = 1.0
+            scale_y = 1.0
+            
+            # Margens da página (@page margin: 0.5cm 0.8cm)
+            # 1cm = 37.8px a 96 DPI
+            PAGE_MARGIN_TOP = int(0.5 * 37.8)  # 0.5cm = 18.9px
+            PAGE_MARGIN_LEFT = int(0.8 * 37.8)  # 0.8cm = 30.24px
+            
+            # Padding do answer-sheet (0.5cm = 18.9px a 96 DPI)
+            ANSWER_SHEET_PADDING = int(18.9)
+            
+            # Alturas estimadas dos elementos (baseado no layout real - valores em pixels A4)
+            HEADER_HEIGHT = int(120)  # Cabeçalho com QR code
+            INSTRUCTIONS_HEIGHT = int(100)  # Instruções
+            APPLICATOR_HEIGHT = int(50)  # Área do aplicador
+            ANSWER_GRID_MARGIN_TOP = int(10)  # Margin do grid (margin: 10px 0)
+            
+            # Calcular posição inicial da grade (em coordenadas A4 padrão)
+            grid_start_y = PAGE_MARGIN_TOP + ANSWER_SHEET_PADDING + HEADER_HEIGHT + INSTRUCTIONS_HEIGHT + APPLICATOR_HEIGHT + ANSWER_GRID_MARGIN_TOP
+            grid_start_x = PAGE_MARGIN_LEFT + ANSWER_SHEET_PADDING
+            
+            # Dimensões da grade (valores EXATOS do CSS - em pixels A4 padrão)
+            GRID_GAP = 8  # gap: 8px entre blocos (.answer-grid-container)
+            BLOCK_PADDING = 5  # padding: 5px (.answer-block)
+            BLOCK_HEADER_HEIGHT = 25  # Altura do cabeçalho do bloco (padding: 4px + texto)
+            BUBBLE_HEADER_HEIGHT = 15  # Altura do header das bolhas (margin: 3px 0)
+            ANSWER_ROW_HEIGHT = 20  # Altura de cada linha (margin: 2px + padding: 1px + bubble: 18px)
+            QUESTION_NUM_WIDTH = 22  # Largura do número da questão (.question-num)
+            
+            # Dimensões das bolhas (valores EXATOS do CSS - em pixels A4 padrão)
+            BUBBLE_SIZE = 18  # 18px (.bubble)
+            BUBBLE_GAP = 6  # gap: 6px entre bolhas (.bubbles)
+            
+            # Calcular número de blocos necessários (12 questões por bloco)
+            questions_per_block = 12
+            num_blocks = (num_questions + questions_per_block - 1) // questions_per_block
+            
+            # Largura disponível para a grade (baseada em A4 padrão - 794px)
+            available_width = A4_WIDTH_PX - (PAGE_MARGIN_LEFT * 2) - (ANSWER_SHEET_PADDING * 2)
+            
+            # Largura de cada bloco (4 colunas com gap de 8px entre elas)
+            block_width = (available_width - (GRID_GAP * 3)) / 4
+            
+            # Calcular posições X das alternativas dentro de um bloco
+            # question-num (22px) + bubbles com gap (6px entre elas)
+            # Cada bubble-container tem 18px, gap de 6px
+            alt_x_positions = []
+            start_x_alt = QUESTION_NUM_WIDTH + BLOCK_PADDING
+            for i in range(4):
+                x = start_x_alt + (i * (BUBBLE_SIZE + BUBBLE_GAP))
+                alt_x_positions.append(x)
+            
+            # Lista para coordenadas
+            coordinates_list = []
+            
+            # Calcular coordenadas para cada questão
+            for question_num in range(1, num_questions + 1):
+                # Calcular em qual bloco está (0-indexed)
+                block_index = (question_num - 1) // questions_per_block
+                question_in_block = ((question_num - 1) % questions_per_block) + 1
+                
+                # Posição X do bloco (4 colunas)
+                block_x = grid_start_x + (block_index * (block_width + GRID_GAP))
+                
+                # Posição Y da questão dentro do bloco
+                question_y_in_block = BLOCK_HEADER_HEIGHT + BUBBLE_HEADER_HEIGHT + ((question_in_block - 1) * ANSWER_ROW_HEIGHT)
+                question_y = grid_start_y + question_y_in_block
+                
+                # Coordenadas de cada alternativa (A, B, C, D)
+                for alt_index in range(4):
+                    alt_x_relative = alt_x_positions[alt_index]
+                    alt_x_absolute = block_x + alt_x_relative
+                    alt_y_absolute = question_y
+                    
+                    # Coordenadas da bolha (canto superior esquerdo)
+                    bubble_x = int(alt_x_absolute)
+                    bubble_y = int(alt_y_absolute)
+                    
+                    coordinates_list.append((bubble_x, bubble_y, BUBBLE_SIZE, BUBBLE_SIZE))
+            
+            # Calcular retângulo externo
+            if coordinates_list:
+                min_x = min(coord[0] for coord in coordinates_list)
+                min_y = min(coord[1] for coord in coordinates_list)
+                max_x = max(coord[0] + coord[2] for coord in coordinates_list)
+                max_y = max(coord[1] + coord[3] for coord in coordinates_list)
+                
+                # Usar coordenadas A4 padrão para rect_bounds (será transformado depois)
+                rect_padding = 20
+                rect_x0 = max(0, min_x - rect_padding)
+                rect_y0 = max(0, min_y - rect_padding)
+                rect_x1 = min(A4_WIDTH_PX, max_x + rect_padding)
+                rect_y1 = min(A4_HEIGHT_PX, max_y + rect_padding)
+                
+                # Converter para coordenadas relativas
+                coordinates_relative = []
+                for abs_x, abs_y, w, h in coordinates_list:
+                    rel_x = abs_x - rect_x0
+                    rel_y = abs_y - rect_y0
+                    coordinates_relative.append((int(rel_x), int(rel_y), int(w), int(h)))
+                
+                return {
+                    'coordinates': coordinates_relative,
+                    'rect_bounds': (int(rect_x0), int(rect_y0), int(rect_x1), int(rect_y1)),
+                    'num_questions': num_questions
+                }
+            else:
+                return {
+                    'coordinates': [],
+                    'rect_bounds': (0, 0, image_width, image_height),
+                    'num_questions': num_questions
+                }
+                
+        except Exception as e:
+            logging.error(f"Erro ao calcular coordenadas institucionais: {str(e)}")
+            import traceback
+            logging.error(traceback.format_exc())
+            return {
+                'coordinates': [],
+                'rect_bounds': (0, 0, image_width, image_height),
+                'num_questions': num_questions
+            }
+    
+    def _detectar_marcadores_alinhamento(self, img_gray, img_color):
+        """
+        NOVA IMPLEMENTAÇÃO: Detecta os 4 marcadores de alinhamento (quadrados pretos) no formulário
+        Retorna coordenadas dos 4 cantos: top-left, top-right, bottom-left, bottom-right
+        
+        Args:
+            img_gray: Imagem em escala de cinza
+            img_color: Imagem colorida (para debug)
+        
+        Returns:
+            Dict com coordenadas dos 4 marcadores ou None se não detectar
+        """
+        try:
+            import cv2
+            import numpy as np
+            import os
+            from datetime import datetime
+            
+            print(f"🔍 DETECTANDO MARCADORES DE ALINHAMENTO...")
+            
+            # Criar imagem de debug
+            debug_markers_image = img_color.copy() if len(img_color.shape) == 3 else cv2.cvtColor(img_color, cv2.COLOR_GRAY2BGR)
+            
+            # Aplicar threshold para detectar quadrados pretos
+            # Marcadores são pretos (#000000), então usar threshold invertido
+            _, thresh = cv2.threshold(img_gray, 50, 255, cv2.THRESH_BINARY_INV)
+            
+            # Encontrar contornos
+            contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            
+            print(f"📊 Total de contornos encontrados: {len(contours)}")
+            
+            # Desenhar todos os contornos na imagem de debug
+            cv2.drawContours(debug_markers_image, contours, -1, (128, 128, 128), 1)
+            
+            # Filtrar contornos que são aproximadamente quadrados e do tamanho esperado
+            # Tamanho esperado: ~15-20px (ajustar conforme escala da imagem)
+            img_height, img_width = img_gray.shape[:2]
+            min_area = (img_width * img_height) * 0.0001  # 0.01% da imagem
+            max_area = (img_width * img_height) * 0.01    # 1% da imagem
+            
+            print(f"📏 Área mínima: {min_area:.0f}, Área máxima: {max_area:.0f}")
+            
+            markers = []
+            for i, contour in enumerate(contours):
+                area = cv2.contourArea(contour)
+                
+                # Desenhar todos os contornos que passam pelo filtro de área
+                if min_area < area < max_area:
+                    x, y, w, h = cv2.boundingRect(contour)
+                    cv2.rectangle(debug_markers_image, (x, y), (x + w, y + h), (255, 165, 0), 1)
+                    cv2.putText(debug_markers_image, f"A:{area:.0f}", (x, y-5), 
+                               cv2.FONT_HERSHEY_SIMPLEX, 0.3, (255, 165, 0), 1)
+                
+                if min_area < area < max_area:
+                    # Aproximar contorno para verificar se é retangular
+                    epsilon = 0.02 * cv2.arcLength(contour, True)
+                    approx = cv2.approxPolyDP(contour, epsilon, True)
+                    
+                    # Verificar se tem aproximadamente 4 vértices (quadrado/retângulo)
+                    if len(approx) >= 4:
+                        x, y, w, h = cv2.boundingRect(contour)
+                        aspect_ratio = w / h if h > 0 else 0
+                        
+                        # Verificar se é aproximadamente quadrado (aspect ratio próximo de 1)
+                        if 0.7 < aspect_ratio < 1.3:
+                            # Calcular centro do marcador
+                            center_x = x + w // 2
+                            center_y = y + h // 2
+                            
+                            markers.append({
+                                'center': (center_x, center_y),
+                                'bbox': (x, y, w, h),
+                                'area': area
+                            })
+                            
+                            # Desenhar marcador detectado em verde
+                            cv2.rectangle(debug_markers_image, (x, y), (x + w, y + h), (0, 255, 0), 2)
+                            cv2.circle(debug_markers_image, (center_x, center_y), 5, (0, 255, 0), -1)
+                            cv2.putText(debug_markers_image, f"M{i}", (x, y-5), 
+                                       cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 0), 1)
+                            
+                            print(f"  ✅ Marcador {i}: centro=({center_x}, {center_y}), tamanho=({w}x{h}), área={area:.0f}")
+            
+            if len(markers) < 4:
+                print(f"⚠️ Apenas {len(markers)} marcadores detectados (esperado: 4)")
+                # Salvar debug mesmo sem detectar todos
+                self._salvar_debug_marcadores(debug_markers_image, len(markers), markers, None)
+                return None
+            
+            # Ordenar marcadores por posição (top-left, top-right, bottom-left, bottom-right)
+            # Ordenar por Y primeiro (top vs bottom), depois por X (left vs right)
+            markers_sorted = sorted(markers, key=lambda m: (m['center'][1], m['center'][0]))
+            
+            # Separar em top e bottom
+            top_markers = sorted(markers_sorted[:len(markers)//2], key=lambda m: m['center'][0])
+            bottom_markers = sorted(markers_sorted[len(markers)//2:], key=lambda m: m['center'][0])
+            
+            if len(top_markers) >= 2 and len(bottom_markers) >= 2:
+                top_left = top_markers[0]['center']
+                top_right = top_markers[-1]['center']
+                bottom_left = bottom_markers[0]['center']
+                bottom_right = bottom_markers[-1]['center']
+                
+                # Desenhar marcadores finais em cores diferentes
+                cv2.circle(debug_markers_image, top_left, 8, (255, 0, 0), -1)  # Azul
+                cv2.circle(debug_markers_image, top_right, 8, (0, 0, 255), -1)  # Vermelho
+                cv2.circle(debug_markers_image, bottom_left, 8, (255, 255, 0), -1)  # Ciano
+                cv2.circle(debug_markers_image, bottom_right, 8, (255, 0, 255), -1)  # Magenta
+                
+                cv2.putText(debug_markers_image, "TL", (top_left[0]+10, top_left[1]), 
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 0, 0), 2)
+                cv2.putText(debug_markers_image, "TR", (top_right[0]+10, top_right[1]), 
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
+                cv2.putText(debug_markers_image, "BL", (bottom_left[0]+10, bottom_left[1]), 
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2)
+                cv2.putText(debug_markers_image, "BR", (bottom_right[0]+10, bottom_right[1]), 
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 0, 255), 2)
+                
+                resultado = {
+                    'top_left': top_left,
+                    'top_right': top_right,
+                    'bottom_left': bottom_left,
+                    'bottom_right': bottom_right,
+                    'markers': markers
+                }
+                
+                print(f"✅ 4 Marcadores detectados:")
+                print(f"   Top-Left: {top_left}")
+                print(f"   Top-Right: {top_right}")
+                print(f"   Bottom-Left: {bottom_left}")
+                print(f"   Bottom-Right: {bottom_right}")
+                
+                # Salvar debug
+                self._salvar_debug_marcadores(debug_markers_image, 4, markers, resultado)
+                
+                return resultado
+            else:
+                print(f"⚠️ Não foi possível ordenar os marcadores corretamente")
+                # Salvar debug mesmo sem ordenar corretamente
+                self._salvar_debug_marcadores(debug_markers_image, len(markers), markers, None)
+                return None
+                
+        except Exception as e:
+            logging.error(f"Erro ao detectar marcadores de alinhamento: {str(e)}")
+            import traceback
+            logging.error(traceback.format_exc())
+            # Tentar salvar debug mesmo com erro
+            try:
+                debug_markers_image = img_color.copy() if len(img_color.shape) == 3 else cv2.cvtColor(img_color, cv2.COLOR_GRAY2BGR)
+                cv2.putText(debug_markers_image, f"ERROR: {str(e)[:50]}", (10, 30), 
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
+                self._salvar_debug_marcadores(debug_markers_image, 0, [], None)
+            except:
+                pass
+            return None
+    
+    def _salvar_debug_marcadores(self, debug_image, num_markers, markers, resultado):
+        """Salva imagem de debug dos marcadores de alinhamento"""
+        try:
+            import cv2
+            import os
+            from datetime import datetime
+            
+            debug_dir = "debug_corrections"
+            os.makedirs(debug_dir, exist_ok=True)
+            
+            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+            debug_path = os.path.join(debug_dir, f"{timestamp}_markers_detection.png")
+            
+            img_copy = debug_image.copy()
+            
+            # Adicionar informações no texto
+            cv2.putText(img_copy, "ALIGNMENT MARKERS DETECTION DEBUG", (10, 30), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+            
+            cv2.putText(img_copy, f"Markers found: {num_markers}/4", (10, 60), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0) if num_markers == 4 else (0, 0, 255), 2)
+            
+            if resultado:
+                cv2.putText(img_copy, "Status: SUCCESS", (10, 90), 
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+                cv2.putText(img_copy, f"TL: {resultado['top_left']}", (10, 120), 
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+                cv2.putText(img_copy, f"TR: {resultado['top_right']}", (10, 140), 
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+                cv2.putText(img_copy, f"BL: {resultado['bottom_left']}", (10, 160), 
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+                cv2.putText(img_copy, f"BR: {resultado['bottom_right']}", (10, 180), 
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+            else:
+                cv2.putText(img_copy, "Status: FAILED", (10, 90), 
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
+            
+            cv2.imwrite(debug_path, img_copy)
+            print(f"🔍 Debug marcadores salvo: {debug_path}")
+            
+        except Exception as e:
+            print(f"⚠️ Erro ao salvar debug marcadores: {e}")
+    
+    def _salvar_debug_coordenadas(self, debug_image, coordinates_data, suffix, transformacao=None):
+        """Salva imagem de debug mostrando as coordenadas calculadas"""
+        try:
+            import cv2
+            import os
+            from datetime import datetime
+            
+            if debug_image is None or coordinates_data is None:
+                return
+            
+            debug_dir = "debug_corrections"
+            os.makedirs(debug_dir, exist_ok=True)
+            
+            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+            debug_path = os.path.join(debug_dir, f"{timestamp}_coordenadas_{suffix}.png")
+            
+            img_copy = debug_image.copy()
+            if len(img_copy.shape) == 2:
+                img_copy = cv2.cvtColor(img_copy, cv2.COLOR_GRAY2BGR)
+            
+            # Adicionar título
+            cv2.putText(img_copy, f"COORDENADAS {suffix.upper()}", (10, 30), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+            
+            if transformacao:
+                cv2.putText(img_copy, f"Scale: ({transformacao['scale_x']:.3f}, {transformacao['scale_y']:.3f})", (10, 60), 
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+                cv2.putText(img_copy, f"Offset: ({transformacao['offset_x']:.1f}, {transformacao['offset_y']:.1f})", (10, 80), 
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+            
+            coordinates_list = coordinates_data.get('coordinates', [])
+            rect_bounds = coordinates_data.get('rect_bounds')
+            
+            if rect_bounds:
+                rect_x0, rect_y0, rect_x1, rect_y1 = rect_bounds
+                # Desenhar retângulo externo
+                cv2.rectangle(img_copy, (rect_x0, rect_y0), (rect_x1, rect_y1), (255, 0, 255), 2)
+                cv2.putText(img_copy, "Grid bounds", (rect_x0, rect_y0-5), 
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 255), 1)
+            
+            # Desenhar todas as coordenadas
+            num_questions = coordinates_data.get('num_questions', len(coordinates_list) // 4)
+            for i, (rel_x, rel_y, w, h) in enumerate(coordinates_list):
+                if rect_bounds:
+                    abs_x = int(rect_x0 + rel_x)
+                    abs_y = int(rect_y0 + rel_y)
+                else:
+                    abs_x = int(rel_x)
+                    abs_y = int(rel_y)
+                
+                # Calcular questão e alternativa
+                question_num = (i // 4) + 1
+                alt_idx = i % 4
+                alt_letter = ['A', 'B', 'C', 'D'][alt_idx]
+                
+                # Desenhar retângulo da bolha
+                color = (0, 0, 255) if alt_idx == 0 else (255, 0, 0) if alt_idx == 1 else (0, 255, 255) if alt_idx == 2 else (255, 255, 0)
+                cv2.rectangle(img_copy, (abs_x, abs_y), (abs_x + w, abs_y + h), color, 1)
+                
+                # Rotular apenas algumas para não poluir
+                if i % 16 == 0:  # A cada 4 questões
+                    cv2.putText(img_copy, f"Q{question_num}{alt_letter}", (abs_x, abs_y-2), 
+                               cv2.FONT_HERSHEY_SIMPLEX, 0.3, color, 1)
+            
+            cv2.putText(img_copy, f"Total: {len(coordinates_list)} coordenadas, {num_questions} questoes", (10, 100), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+            
+            cv2.imwrite(debug_path, img_copy)
+            print(f"🔍 Debug coordenadas salvo: {debug_path}")
+            
+        except Exception as e:
+            print(f"⚠️ Erro ao salvar debug coordenadas: {e}")
+    
+    def _calcular_transformacao_marcadores(self, marcadores_detectados: Dict, 
+                                           expected_width: int = 794, expected_height: int = 1123) -> Dict:
+        """
+        NOVA IMPLEMENTAÇÃO: Calcula transformação baseada nos 4 marcadores de alinhamento detectados
+        
+        Args:
+            marcadores_detectados: Dict com coordenadas dos 4 marcadores
+            expected_width: Largura esperada do formulário (A4: 794px a 96 DPI)
+            expected_height: Altura esperada do formulário (A4: 1123px a 96 DPI)
+        
+        Returns:
+            Dict com informações de transformação (scale, offset, etc.)
+        """
+        try:
+            if not marcadores_detectados:
+                return None
+            
+            # Coordenadas esperadas dos marcadores no template (em pixels A4 a 96 DPI)
+            # Marcadores estão nas bordas da página: top=0.1cm (3.78px), left/right=0.1cm (3.78px), bottom=0.1cm (3.78px)
+            # 1cm = 37.8px a 96 DPI
+            # Marcador: 15px de tamanho
+            MARGIN_TOP = 3.78      # 0.1cm da borda superior
+            MARGIN_LEFT = 3.78     # 0.1cm da borda esquerda
+            MARGIN_RIGHT = 3.78    # 0.1cm da borda direita
+            MARGIN_BOTTOM = 3.78   # 0.1cm da borda inferior (rodapé)
+            MARKER_SIZE = 15
+            
+            expected_top_left = (MARGIN_LEFT, MARGIN_TOP)
+            expected_top_right = (expected_width - MARGIN_RIGHT - MARKER_SIZE, MARGIN_TOP)
+            expected_bottom_left = (MARGIN_LEFT, expected_height - MARGIN_BOTTOM - MARKER_SIZE)
+            expected_bottom_right = (expected_width - MARGIN_RIGHT - MARKER_SIZE, 
+                                    expected_height - MARGIN_BOTTOM - MARKER_SIZE)
+            
+            # Coordenadas detectadas
+            detected_tl = marcadores_detectados['top_left']
+            detected_tr = marcadores_detectados['top_right']
+            detected_bl = marcadores_detectados['bottom_left']
+            detected_br = marcadores_detectados['bottom_right']
+            
+            # Calcular escala baseada na distância entre marcadores
+            # Escala horizontal: distância entre top-left e top-right
+            expected_width_markers = expected_top_right[0] - expected_top_left[0]
+            detected_width_markers = detected_tr[0] - detected_tl[0]
+            scale_x = detected_width_markers / expected_width_markers if expected_width_markers > 0 else 1.0
+            
+            # Escala vertical: distância entre top-left e bottom-left
+            expected_height_markers = expected_bottom_left[1] - expected_top_left[1]
+            detected_height_markers = detected_bl[1] - detected_tl[1]
+            scale_y = detected_height_markers / expected_height_markers if expected_height_markers > 0 else 1.0
+            
+            # Calcular offset (diferença entre marcador detectado e esperado após escala)
+            offset_x = detected_tl[0] - (expected_top_left[0] * scale_x)
+            offset_y = detected_tl[1] - (expected_top_left[1] * scale_y)
+            
+            print(f"📐 Transformação calculada:")
+            print(f"   Escala X: {scale_x:.3f}")
+            print(f"   Escala Y: {scale_y:.3f}")
+            print(f"   Offset: ({offset_x:.1f}, {offset_y:.1f})")
+            
+            return {
+                'scale_x': scale_x,
+                'scale_y': scale_y,
+                'offset_x': offset_x,
+                'offset_y': offset_y,
+                'expected_width': expected_width,
+                'expected_height': expected_height
+            }
+            
+        except Exception as e:
+            logging.error(f"Erro ao calcular transformação dos marcadores: {str(e)}")
+            import traceback
+            logging.error(traceback.format_exc())
+            return None
+    
+    def _detectar_ancoras_institucional(self, img_gray, img_color):
+        """
+        OLD: Detecta pontos de ancoragem no formulário para calcular transformação
+        NOTA: Esta função não é mais usada - substituída por _detectar_marcadores_alinhamento
+        Mantida para compatibilidade/legado
+        Usa: QR code + borda externa do answer-sheet
+        
+        Args:
+            img_gray: Imagem em escala de cinza
+            img_color: Imagem colorida (para detecção de QR code)
+        
+        Returns:
+            Dict com pontos de ancoragem ou None se não detectar
+        """
+        try:
+            import cv2
+            import numpy as np
+            
+            print(f"🔍 DETECTANDO PONTOS DE ANCORAGEM...")
+            
+            # 1. Detectar QR code e obter bounding box
+            qr_bbox = None
+            try:
+                from pyzbar import pyzbar
+                decoded = pyzbar.decode(img_gray)
+                if decoded:
+                    qr_rect = decoded[0].rect
+                    qr_bbox = {
+                        'x': qr_rect.left,
+                        'y': qr_rect.top,
+                        'width': qr_rect.width,
+                        'height': qr_rect.height
+                    }
+                    print(f"✅ QR code detectado como âncora: x={qr_bbox['x']}, y={qr_bbox['y']}, w={qr_bbox['width']}, h={qr_bbox['height']}")
+            except Exception as e:
+                print(f"⚠️ Erro ao detectar QR code como âncora: {str(e)}")
+            
+            # 2. Detectar borda externa do answer-sheet
+            # Procurar por retângulo grande (borda do formulário)
+            # Usar threshold adaptativo para melhor detecção
+            thresh = cv2.adaptiveThreshold(
+                img_gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, 
+                cv2.THRESH_BINARY_INV, 11, 2
+            )
+            
+            # Encontrar contornos externos
+            contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            
+            print(f"🔍 Total de contornos encontrados: {len(contours)}")
+            
+            # Procurar o maior retângulo (borda externa)
+            border_rect = None
+            max_area = 0
+            img_height, img_width = img_gray.shape[:2]
+            min_area = (img_width * img_height) * 0.3  # Pelo menos 30% da imagem
+            
+            for i, contour in enumerate(contours):
+                area = cv2.contourArea(contour)
+                
+                if area > max_area and area > min_area:
+                    # Verificar se é aproximadamente retangular
+                    x, y, w, h = cv2.boundingRect(contour)
+                    aspect_ratio = w / h if h > 0 else 0
+                    
+                    # Proporção esperada para A4 (~0.7) - mais flexível
+                    if 0.4 < aspect_ratio < 1.2:
+                        # Verificar se está bem posicionado (não muito nas bordas)
+                        margin = 20
+                        if (x > margin and y > margin and 
+                            x + w < img_width - margin and 
+                            y + h < img_height - margin):
+                            border_rect = (x, y, w, h)
+                            max_area = area
+                            print(f"  ✅ Retângulo candidato {i}: área={area:.0f}, aspect={aspect_ratio:.2f}, pos=({x},{y}), tamanho=({w}x{h})")
+            
+            # 3. Calcular transformação baseada nas âncoras
+            if border_rect:
+                x, y, w, h = border_rect
+                # Retornar pontos de ancoragem: cantos do retângulo
+                anchor_points = {
+                    'top_left': (x, y),
+                    'top_right': (x + w, y),
+                    'bottom_left': (x, y + h),
+                    'bottom_right': (x + w, y + h),
+                    'width': w,
+                    'height': h,
+                    'center': (x + w // 2, y + h // 2),
+                    'qr_bbox': qr_bbox
+                }
+                print(f"✅ Borda externa detectada: pos=({x},{y}), tamanho=({w}x{h}), área={max_area:.0f}")
+                return anchor_points
+            else:
+                print(f"⚠️ Borda externa não detectada")
+                # Se não detectou borda, tentar usar apenas QR code
+                if qr_bbox:
+                    print(f"⚠️ Usando apenas QR code como âncora")
+                    # Estimar área do formulário baseado no QR code
+                    # QR code geralmente está no canto superior direito
+                    # Estimar que o formulário começa antes do QR code
+                    estimated_x = max(0, qr_bbox['x'] - 200)
+                    estimated_y = max(0, qr_bbox['y'] - 50)
+                    estimated_w = img_width - estimated_x
+                    estimated_h = img_height - estimated_y
+                    
+                    return {
+                        'top_left': (estimated_x, estimated_y),
+                        'top_right': (estimated_x + estimated_w, estimated_y),
+                        'bottom_left': (estimated_x, estimated_y + estimated_h),
+                        'bottom_right': (estimated_x + estimated_w, estimated_y + estimated_h),
+                        'width': estimated_w,
+                        'height': estimated_h,
+                        'center': (estimated_x + estimated_w // 2, estimated_y + estimated_h // 2),
+                        'qr_bbox': qr_bbox,
+                        'estimated': True
+                    }
+                
+                return None
+                
+        except Exception as e:
+            logging.error(f"Erro ao detectar âncoras: {str(e)}")
+            import traceback
+            logging.error(traceback.format_exc())
+            return None
+    
+    def _ajustar_coordenadas_com_ancoras(self, coordinates_data: Dict, anchor_points: Dict, 
+                                         expected_width: int, expected_height: int) -> Dict:
+        """
+        Ajusta coordenadas calculadas baseadas nos pontos de ancoragem detectados
+        
+        Args:
+            coordinates_data: Coordenadas calculadas (baseadas em A4 padrão)
+            anchor_points: Pontos de ancoragem detectados na imagem
+            expected_width: Largura esperada (A4 padrão: 794)
+            expected_height: Altura esperada (A4 padrão: 1123)
+        
+        Returns:
+            Dict com coordenadas ajustadas
+        """
+        try:
+            if not anchor_points:
+                print(f"⚠️ Sem âncoras, retornando coordenadas originais")
+                return coordinates_data
+            
+            detected_width = anchor_points['width']
+            detected_height = anchor_points['height']
+            
+            # Calcular escala real
+            scale_x = detected_width / expected_width
+            scale_y = detected_height / expected_height
+            
+            # Calcular offset (posição do canto superior esquerdo)
+            offset_x = anchor_points['top_left'][0]
+            offset_y = anchor_points['top_left'][1]
+            
+            print(f"📐 Ajustando coordenadas:")
+            print(f"   Dimensões esperadas: {expected_width}x{expected_height}")
+            print(f"   Dimensões detectadas: {detected_width}x{detected_height}")
+            print(f"   Escala: X={scale_x:.3f}, Y={scale_y:.3f}")
+            print(f"   Offset: ({offset_x}, {offset_y})")
+            
+            # Ajustar coordenadas
+            # IMPORTANTE: As coordenadas em coordinates_data são relativas ao rect_bounds
+            # Precisamos primeiro converter para absolutas (baseadas em A4 padrão),
+            # depois aplicar a transformação, e então converter de volta para relativas
+            coordinates_list = coordinates_data.get('coordinates', [])
+            
+            # Obter rect_bounds original (em coordenadas A4 padrão)
+            if coordinates_data.get('rect_bounds'):
+                rect_x0_orig, rect_y0_orig, rect_x1_orig, rect_y1_orig = coordinates_data['rect_bounds']
+            else:
+                # Se não tem rect_bounds, assumir que coordenadas são absolutas
+                rect_x0_orig, rect_y0_orig = 0, 0
+                rect_x1_orig, rect_y1_orig = expected_width, expected_height
+            
+            # Converter coordenadas relativas para absolutas (A4 padrão)
+            coordinates_abs = []
+            for rel_x, rel_y, w, h in coordinates_list:
+                abs_x = rect_x0_orig + rel_x
+                abs_y = rect_y0_orig + rel_y
+                coordinates_abs.append((abs_x, abs_y, w, h))
+            
+            # Aplicar transformação (escala + offset) nas coordenadas absolutas
+            adjusted_coordinates_abs = []
+            for abs_x, abs_y, w, h in coordinates_abs:
+                # Aplicar escala e offset
+                adj_x_abs = int(offset_x + (abs_x * scale_x))
+                adj_y_abs = int(offset_y + (abs_y * scale_y))
+                adj_w = int(w * scale_x)
+                adj_h = int(h * scale_y)
+                adjusted_coordinates_abs.append((adj_x_abs, adj_y_abs, adj_w, adj_h))
+            
+            # Calcular novo rect_bounds baseado nas coordenadas ajustadas
+            if adjusted_coordinates_abs:
+                min_x = min(coord[0] for coord in adjusted_coordinates_abs)
+                min_y = min(coord[1] for coord in adjusted_coordinates_abs)
+                max_x = max(coord[0] + coord[2] for coord in adjusted_coordinates_abs)
+                max_y = max(coord[1] + coord[3] for coord in adjusted_coordinates_abs)
+                
+                # Adicionar padding
+                padding = 20
+                adj_rect_x0 = max(0, min_x - padding)
+                adj_rect_y0 = max(0, min_y - padding)
+                adj_rect_x1 = max_x + padding
+                adj_rect_y1 = max_y + padding
+            else:
+                # Fallback: ajustar rect_bounds original
+                rect_w = rect_x1_orig - rect_x0_orig
+                rect_h = rect_y1_orig - rect_y0_orig
+                adj_rect_x0 = int(offset_x + (rect_x0_orig * scale_x))
+                adj_rect_y0 = int(offset_y + (rect_y0_orig * scale_y))
+                adj_rect_x1 = int(adj_rect_x0 + (rect_w * scale_x))
+                adj_rect_y1 = int(adj_rect_y0 + (rect_h * scale_y))
+            
+            # Converter coordenadas absolutas ajustadas para relativas ao novo rect_bounds
+            adjusted_coordinates = []
+            for adj_x_abs, adj_y_abs, adj_w, adj_h in adjusted_coordinates_abs:
+                rel_x = adj_x_abs - adj_rect_x0
+                rel_y = adj_y_abs - adj_rect_y0
+                adjusted_coordinates.append((int(rel_x), int(rel_y), adj_w, adj_h))
+            
+            return {
+                'coordinates': adjusted_coordinates,
+                'rect_bounds': (adj_rect_x0, adj_rect_y0, adj_rect_x1, adj_rect_y1),
+                'num_questions': coordinates_data['num_questions']
+            }
+            
+        except Exception as e:
+            logging.error(f"Erro ao ajustar coordenadas: {str(e)}")
+            import traceback
+            logging.error(traceback.format_exc())
+            return coordinates_data
+    
+    def _detectar_respostas_com_coordenadas_dinamicas(self, binary_image, coordinates_data: Dict, 
+                                                       num_questions: int, rect_bounds: Tuple = None, 
+                                                       original_image: np.ndarray = None) -> tuple:
+        """
+        NOVA IMPLEMENTAÇÃO: Detecta respostas usando coordenadas calculadas dinamicamente
+        Converte o formato de coordenadas para o formato esperado pela correção
+        Baseado no novo layout WeasyPrint (institutional_test.html)
+        
+        Returns:
+            Tuple (respostas_detectadas: Dict, debug_image: np.ndarray)
+        """
+        try:
+            import cv2
+            import numpy as np
+            
+            print(f"🔍 DETECTANDO RESPOSTAS COM COORDENADAS DINÂMICAS")
+            print(f"📏 Dimensões: {binary_image.shape}")
+            print(f"📊 Questões: {num_questions}")
+            
+            coordinates_list = coordinates_data.get('coordinates', [])
+            if not coordinates_list:
+                print(f"⚠️ Nenhuma coordenada encontrada")
+                return {}, None
+            
+            if rect_bounds:
+                rect_x0, rect_y0, rect_x1, rect_y1 = rect_bounds
+            else:
+                rect_x0, rect_y0 = 0, 0
+            
+            # Criar imagem de debug (usar original se disponível, senão converter binary para colorida)
+            if original_image is not None:
+                debug_image = original_image.copy()
+                if len(debug_image.shape) == 2:
+                    debug_image = cv2.cvtColor(debug_image, cv2.COLOR_GRAY2BGR)
+            else:
+                debug_image = cv2.cvtColor(binary_image, cv2.COLOR_GRAY2BGR)
+            
+            respostas_por_disciplina = {}
+            respostas_por_disciplina['default'] = {}
+            
+            # Processar cada questão
+            for i in range(num_questions):
+                question_key = f"question_{i+1}"
+                respostas_por_disciplina['default'][question_key] = {}
+                
+                # Para cada alternativa (A, B, C, D)
+                for j, alt_letter in enumerate(['A', 'B', 'C', 'D']):
+                    coord_index = (i * 4) + j
+                    
+                    if coord_index >= len(coordinates_list):
+                        respostas_por_disciplina['default'][question_key][alt_letter] = False
+                        continue
+                    
+                    # Obter coordenadas relativas
+                    rel_x, rel_y, w, h = coordinates_list[coord_index]
+                    
+                    # Converter para absolutas
+                    abs_x = int(rect_x0 + rel_x)
+                    abs_y = int(rect_y0 + rel_y)
+                    center_x = int(abs_x + (w / 2))
+                    center_y = int(abs_y + (h / 2))
+                    radius = int(min(w, h) / 2)
+                    
+                    # Verificar limites
+                    h_img, w_img = binary_image.shape
+                    if center_x < 0 or center_x >= w_img or center_y < 0 or center_y >= h_img:
+                        respostas_por_disciplina['default'][question_key][alt_letter] = False
+                        continue
+                    
+                    # Detectar marcação
+                    is_marked = self._detectar_marcacao_circular(binary_image, center_x, center_y, radius)
+                    respostas_por_disciplina['default'][question_key][alt_letter] = is_marked
+                    
+                    # Desenhar área de detecção na imagem de debug
+                    # Retângulo vermelho para todas as áreas
+                    color = (0, 0, 255)  # Vermelho em BGR
+                    cv2.rectangle(debug_image, (abs_x, abs_y), (abs_x + w, abs_y + h), color, 2)
+                    
+                    # Se marcado, desenhar círculo verde no centro
+                    if is_marked:
+                        cv2.circle(debug_image, (center_x, center_y), radius, (0, 255, 0), 2)
+                        print(f"    Q{i+1} {alt_letter}: ✅ MARCADO")
+                    else:
+                        # Desenhar círculo vermelho se não marcado
+                        cv2.circle(debug_image, (center_x, center_y), radius, (0, 0, 255), 1)
+            
+            # Converter para formato esperado pela correção (questão -> resposta)
+            respostas_detectadas = {}
+            for q_num, alts in respostas_por_disciplina['default'].items():
+                marked_alts = [alt for alt, marked in alts.items() if marked]
+                if marked_alts:
+                    # Extrair número da questão (question_1 -> 1)
+                    question_order = int(q_num.split('_')[1])
+                    respostas_detectadas[question_order] = marked_alts[0]  # Pegar primeira alternativa marcada
+            
+            print(f"📊 RESUMO: {len(respostas_detectadas)} questões com respostas detectadas")
+            return respostas_detectadas, debug_image
+            
+        except Exception as e:
+            logging.error(f"Erro ao detectar com coordenadas dinâmicas: {str(e)}")
+            import traceback
+            logging.error(traceback.format_exc())
+            return {}, None
+    
     def _detectar_respostas_com_coordenadas(self, binary_image, coordinates: Dict, num_questions: int = None) -> Dict:
         """
         Detecta respostas usando coordenadas fixas especificadas
@@ -4187,10 +5382,16 @@ class PhysicalTestPDFGenerator:
                 'error': f'Erro interno: {str(e)}'
             }
 
+    # OLD: Implementação antiga - correção usando gabarito do template antigo
+    # Esta função não é mais usada - o sistema agora usa coordenadas dinâmicas
     def processar_correcao_por_gabarito(self, test_id, image_data_str):
         """
-        Nova abordagem: Correção por gabarito de referência ADAPTATIVA
+        OLD: Implementação antiga - Correção por gabarito de referência do template antigo
         
+        NOTA: Esta função não é mais usada na correção. O sistema agora usa coordenadas dinâmicas
+        baseadas no novo layout WeasyPrint. Mantida apenas para compatibilidade/legado.
+        
+        Método antigo:
         1. Processa imagem do usuário PRIMEIRO para obter dimensões
         2. Gera gabarito de referência no tamanho exato da imagem do usuário
         3. Alinha gabarito com imagem do usuário (se necessário)
@@ -4282,9 +5483,14 @@ class PhysicalTestPDFGenerator:
                 'error': f'Erro na correção por gabarito: {str(e)}'
             }
 
+    # OLD: Implementação antiga - gera gabarito usando template antigo (formularios.py)
+    # Esta função não é mais usada - o sistema agora usa coordenadas dinâmicas
     def _gerar_gabarito_referencia_adaptativo(self, test_id, target_size):
         """
-        Gera gabarito de referência adaptativo no tamanho exato da imagem do usuário
+        OLD: Implementação antiga - Gera gabarito de referência usando template antigo (formularios.py)
+        
+        NOTA: Esta função não é mais usada na correção. O sistema agora usa coordenadas dinâmicas
+        baseadas no novo layout WeasyPrint. Mantida apenas para compatibilidade/legado.
         
         Args:
             test_id: ID da prova
@@ -4473,9 +5679,14 @@ class PhysicalTestPDFGenerator:
             print(f"❌ Erro ao alinhar gabarito: {str(e)}")
             return None
 
+    # OLD: Implementação antiga - compara usando gabarito do template antigo
+    # Esta função não é mais usada - o sistema agora usa coordenadas dinâmicas
     def _comparar_bolhas_adaptativo(self, gabarito_image, user_image, test_id):
         """
-        Compara bolhas usando gabarito adaptativo (mesmo tamanho que usuário)
+        OLD: Implementação antiga - Compara bolhas usando gabarito do template antigo
+        
+        NOTA: Esta função não é mais usada na correção. O sistema agora usa coordenadas dinâmicas
+        baseadas no novo layout WeasyPrint. Mantida apenas para compatibilidade/legado.
         """
         try:
             print(f"🔧 Comparando bolhas com gabarito adaptativo...")

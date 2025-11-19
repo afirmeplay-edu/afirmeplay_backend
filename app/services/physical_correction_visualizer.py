@@ -55,19 +55,21 @@ class PhysicalCorrectionVisualizer:
             print(f"📊 Respostas corretas: {correct_answers}")
             
             # Verificar se as imagens são válidas
-            if gabarito_image is None:
-                print(f"❌ Gabarito é None")
-                return None
+            # NOVA IMPLEMENTAÇÃO: Gabarito não é mais necessário (usa coordenadas dinâmicas)
+            # Se gabarito_image for None, não usar (sistema novo não precisa de gabarito)
             if user_image is None:
                 print(f"❌ User image é None")
                 return None
             
             # Converter imagens PIL para OpenCV se necessário
-            if hasattr(gabarito_image, 'convert'):  # É imagem PIL
-                print(f"🔄 Convertendo gabarito de PIL para OpenCV")
-                gabarito_cv = cv2.cvtColor(np.array(gabarito_image), cv2.COLOR_RGB2BGR)
-            else:
-                gabarito_cv = gabarito_image
+            # OLD: Código antigo para gabarito - não é mais necessário
+            gabarito_cv = None
+            if gabarito_image is not None:
+                if hasattr(gabarito_image, 'convert'):  # É imagem PIL
+                    print(f"🔄 Convertendo gabarito de PIL para OpenCV (OLD - não usado)")
+                    gabarito_cv = cv2.cvtColor(np.array(gabarito_image), cv2.COLOR_RGB2BGR)
+                else:
+                    gabarito_cv = gabarito_image
                 
             # Usar imagem com áreas de detecção se fornecida, senão usar imagem original
             if detection_areas is not None:
@@ -80,17 +82,24 @@ class PhysicalCorrectionVisualizer:
                 user_cv = user_image
             
             # Obter dimensões das imagens
-            gabarito_h, gabarito_w = gabarito_cv.shape[:2]
             user_h, user_w = user_cv.shape[:2]
             
-            print(f"📏 Gabarito: {gabarito_w}x{gabarito_h}")
             print(f"📏 Usuário: {user_w}x{user_h}")
             
+            # NOVA IMPLEMENTAÇÃO: Não usar gabarito (sistema usa coordenadas dinâmicas)
+            # Se gabarito não for fornecido, criar canvas apenas com imagem do usuário
+            if gabarito_cv is not None:
+                gabarito_h, gabarito_w = gabarito_cv.shape[:2]
+                print(f"📏 Gabarito (OLD - não usado): {gabarito_w}x{gabarito_h}")
+            
             # Converter para BGR se necessário
-            if len(gabarito_cv.shape) == 2:
-                gabarito_bgr = cv2.cvtColor(gabarito_cv, cv2.COLOR_GRAY2BGR)
+            if gabarito_cv is not None:
+                if len(gabarito_cv.shape) == 2:
+                    gabarito_bgr = cv2.cvtColor(gabarito_cv, cv2.COLOR_GRAY2BGR)
+                else:
+                    gabarito_bgr = gabarito_cv.copy()
             else:
-                gabarito_bgr = gabarito_cv.copy()
+                gabarito_bgr = None
                 
             if len(user_cv.shape) == 2:
                 user_bgr = cv2.cvtColor(user_cv, cv2.COLOR_GRAY2BGR)
@@ -99,11 +108,8 @@ class PhysicalCorrectionVisualizer:
             
             # Redimensionar para tamanho padrão para comparação
             target_height = 800
-            gabarito_scale = target_height / gabarito_h
             user_scale = target_height / user_h
             
-            gabarito_resized = cv2.resize(gabarito_bgr, 
-                                        (int(gabarito_w * gabarito_scale), target_height))
             user_resized = cv2.resize(user_bgr, 
                                     (int(user_w * user_scale), target_height))
             
@@ -111,43 +117,62 @@ class PhysicalCorrectionVisualizer:
             left_margin = 25
             right_margin = 25
             top_margin = 100
-            gap = 50  # separação entre as imagens
+            gap = 50  # separação entre as imagens (se houver gabarito)
             
-            # Criar canvas para comparação lado a lado com margens corretas
-            canvas_width = left_margin + gabarito_resized.shape[1] + gap + user_resized.shape[1] + right_margin
-            canvas_height = max(gabarito_resized.shape[0], user_resized.shape[0]) + top_margin + 300  # Mais espaço para tabela de comparação
+            # Criar canvas - ajustar largura baseado em se há gabarito ou não
+            if gabarito_bgr is not None:
+                gabarito_scale = target_height / gabarito_h
+                gabarito_resized = cv2.resize(gabarito_bgr, 
+                                            (int(gabarito_w * gabarito_scale), target_height))
+                canvas_width = left_margin + gabarito_resized.shape[1] + gap + user_resized.shape[1] + right_margin
+            else:
+                # Sem gabarito - apenas imagem do usuário
+                canvas_width = left_margin + user_resized.shape[1] + right_margin
+                gabarito_resized = None
+            
+            canvas_height = user_resized.shape[0] + top_margin + 300  # Mais espaço para tabela de comparação
             
             canvas = np.ones((canvas_height, canvas_width, 3), dtype=np.uint8) * 255  # Fundo branco
             
             # Calcular posições de colagem
-            g_x1 = left_margin
-            g_y1 = top_margin
-            g_x2 = g_x1 + gabarito_resized.shape[1]
-            g_y2 = g_y1 + gabarito_resized.shape[0]
+            if gabarito_resized is not None:
+                g_x1 = left_margin
+                g_y1 = top_margin
+                g_x2 = g_x1 + gabarito_resized.shape[1]
+                g_y2 = g_y1 + gabarito_resized.shape[0]
+                
+                u_x1 = g_x2 + gap
+                u_y1 = top_margin
+                
+                # Colocar gabarito (OLD - não usado no sistema novo)
+                canvas[g_y1:g_y2, g_x1:g_x2] = gabarito_resized[0:(g_y2-g_y1), 0:(g_x2-g_x1)]
+                
+                # Adicionar título do gabarito (OLD)
+                cv2.putText(canvas, "GABARITO DE REFERENCIA (OLD)", (left_margin, 50), 
+                           cv2.FONT_HERSHEY_SIMPLEX, 1, (128, 128, 128), 2)  # Cinza para indicar que é antigo
+            else:
+                u_x1 = left_margin
+                u_y1 = top_margin
             
-            u_x1 = g_x2 + gap
-            u_y1 = top_margin
             u_x2 = u_x1 + user_resized.shape[1]
             u_y2 = u_y1 + user_resized.shape[0]
             
             # Garantir que as posições estão dentro do canvas
-            g_x2 = min(g_x2, canvas_width)
             u_x2 = min(u_x2, canvas_width)
-            g_y2 = min(g_y2, canvas_height)
             u_y2 = min(u_y2, canvas_height)
             
-            # Colocar imagens lado a lado
-            canvas[g_y1:g_y2, g_x1:g_x2] = gabarito_resized[0:(g_y2-g_y1), 0:(g_x2-g_x1)]
+            # Colocar imagem do usuário
             canvas[u_y1:u_y2, u_x1:u_x2] = user_resized[0:(u_y2-u_y1), 0:(u_x2-u_x1)]
             
-            # Adicionar títulos
-            cv2.putText(canvas, "GABARITO DE REFERENCIA", (left_margin, 50), 
-                       cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 0), 2)
+            # Adicionar título
             cv2.putText(canvas, "RESPOSTA DO ALUNO", (u_x1, 50), 
                        cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 0), 2)
             
             # Adicionar informações das respostas
-            y_offset = g_y2 + 30
+            if gabarito_resized is not None:
+                y_offset = g_y2 + 30
+            else:
+                y_offset = u_y2 + 30
             
             # Cabeçalho da tabela
             cv2.putText(canvas, "COMPARACAO DE RESPOSTAS:", (left_margin, y_offset), 

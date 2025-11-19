@@ -516,6 +516,10 @@ def _draw_text_with_bold(desenho, text, x, y, font_normal, font_bold):
                         width = len(part) * 6  # Fallback
                 current_x += width
 
+# OLD: Implementação antiga - função para gerar formulário usando template antigo (ReportLab/PIL)
+# NOTA: Esta função ainda é usada para gerar a imagem base64 do formulário que é inserida
+# no novo template WeasyPrint (institutional_test.html), mas não é mais usada diretamente
+# para correção. A correção agora usa coordenadas dinâmicas.
 def gerar_formulario_com_qrcode(aluno_id, aluno_nome, num_questoes_total, nome_arquivo_saida, student_data=None, test_data=None):
     """
     Gera formulário em 720x320, retorna a imagem e as coordenadas INTEIRAS das
@@ -967,6 +971,9 @@ def gerar_formulario_com_qrcode(aluno_id, aluno_nome, num_questoes_total, nome_a
         return None, None, None
 
 
+# OLD: Implementação antiga - função adaptativa para gerar formulário usando template antigo
+# NOTA: Esta função é usada apenas para gerar gabaritos de referência (OLD - não mais usado)
+# O sistema agora usa coordenadas dinâmicas baseadas no novo layout WeasyPrint
 def gerar_formulario_com_qrcode_adaptativo(student_id, student_name, num_questoes, nome_arquivo_saida, gabarito_data=None, test_data=None, target_width=None, target_height=None):
     """
     Gera formulário adaptativo com dimensões específicas

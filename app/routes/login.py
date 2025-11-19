@@ -98,6 +98,11 @@ def login():
         
         return response
     except Exception as e:
+        import traceback
+        error_traceback = traceback.format_exc()
+        print(f"ERRO NO LOGIN - Identificador: {identificador}")
+        print(f"ERRO: {str(e)}")
+        print(f"TRACEBACK COMPLETO:\n{error_traceback}")
         logging.error(f"Erro inesperado durante o login para identificador {identificador}: {e}", exc_info=True)
         return jsonify({"erro": "Ocorreu um erro interno no servidor."}), 500
 

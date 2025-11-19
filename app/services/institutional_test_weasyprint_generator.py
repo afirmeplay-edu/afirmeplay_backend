@@ -58,22 +58,21 @@ class InstitutionalTestWeasyPrintGenerator:
                 )
 
                 if pdf_data:
-                    # Mapear coordenadas e gerar QR code (mantido para compatibilidade)
-                    coordinates = self._map_existing_form_coordinates(questions_data)
-                    qr_data, qr_code_id = self._generate_qr_code_with_metadata(
-                        student['id'], test_data['id']
-                    )
+                # Mapear coordenadas e gerar QR code (mantido para compatibilidade)
+                coordinates = self._map_existing_form_coordinates(questions_data)
+                qr_data = self._generate_qr_code_with_metadata(
+                    student['id'], test_data['id']
+                )
 
-                    generated_files.append({
-                        'student_id': student['id'],
-                        'student_name': student.get('name', student.get('nome', 'Nome não informado')),
-                        'pdf_data': pdf_data,
-                        'qr_code_data': json.dumps(qr_data),
-                        'qr_code_id': qr_code_id,
-                        'coordinates': coordinates,
-                        'has_pdf_data': True,
-                        'has_answer_sheet_data': False
-                    })
+                generated_files.append({
+                    'student_id': student['id'],
+                    'student_name': student.get('name', student.get('nome', 'Nome não informado')),
+                    'pdf_data': pdf_data,
+                    'qr_code_data': json.dumps(qr_data),
+                    'coordinates': coordinates,
+                    'has_pdf_data': True,
+                    'has_answer_sheet_data': False
+                })
 
             except Exception as e:
                 logging.error(f"Erro ao gerar PDF institucional WeasyPrint para aluno {student['id']}: {str(e)}")
@@ -103,13 +102,53 @@ class InstitutionalTestWeasyPrintGenerator:
             answer_sheet_image = self._generate_answer_sheet_base64(
                 student, questions_data, test_data
             )
-
+            
+            # Gerar QR code com metadados simplificados (apenas student_id e test_id)
+            # num_questions será buscado do banco de dados
+            import qrcode
+            import json
+            from io import BytesIO
+            import base64
+            
+            total_questions = len(questions_data)
+            
+            # Criar metadados simplificados do QR code (apenas student_id e test_id)
+            # Removido: num_questions e qr_code_id para tornar QR code menor e mais fácil de decodificar
+            qr_metadata = {
+                "student_id": str(student['id']),
+                "test_id": str(test_data['id'])
+            }
+            
+            # Gerar QR code com JSON
+            qr = qrcode.QRCode(
+                version=1,
+                error_correction=qrcode.constants.ERROR_CORRECT_L,
+                box_size=10,
+                border=2,
+            )
+            qr.add_data(json.dumps(qr_metadata))
+            qr.make(fit=True)
+            
+            # Criar imagem do QR Code
+            qr_img = qr.make_image(fill_color="black", back_color="white")
+            
+            # Converter para base64
+            qr_buffer = BytesIO()
+            qr_img.save(qr_buffer, format="PNG")
+            qr_buffer.seek(0)
+            qr_code_base64 = base64.b64encode(qr_buffer.read()).decode()
+            
+            # Adicionar QR code ao student dict para o template
+            student_with_qr = student.copy()
+            student_with_qr['qr_code'] = qr_code_base64
+            
             # Preparar dados para o template
             template_data = {
                 'test_data': test_data,
-                'student': student,
+                'student': student_with_qr,  # Usar student com QR code
                 'questions_by_subject': questions_by_subject,
                 'answer_sheet_image': answer_sheet_image,
+                'total_questions': total_questions,  # NOVO: facilitar cálculo no template
                 'datetime': datetime,
                 'generated_date': datetime.now().strftime('%d/%m/%Y %H:%M')
             }
@@ -421,21 +460,17 @@ class InstitutionalTestWeasyPrintGenerator:
             logging.error(f"Erro ao mapear coordenadas: {str(e)}")
             return {}
 
-    def _generate_qr_code_with_metadata(self, student_id: str, test_id: str) -> tuple:
+    def _generate_qr_code_with_metadata(self, student_id: str, test_id: str) -> dict:
         """
-        Gera QR code com metadados para compatibilidade
+        Gera QR code com metadados simplificados (apenas student_id e test_id)
         """
         try:
-            import uuid
-            qr_code_id = str(uuid.uuid4())
             qr_data = {
                 'student_id': student_id,
-                'test_id': test_id,
-                'qr_code_id': qr_code_id,
-                'timestamp': datetime.now().isoformat()
+                'test_id': test_id
             }
-            return qr_data, qr_code_id
+            return qr_data
 
         except Exception as e:
             logging.error(f"Erro ao gerar QR code: {str(e)}")
-            return {}, ''
+            return {}

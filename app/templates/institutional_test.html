@@ -401,6 +401,37 @@
             page: with-footer;
             page-break-before: always;
             padding: 0.5cm;
+            position: relative; /* Para posicionar marcadores de alinhamento */
+        }
+        
+        /* Marcadores de alinhamento - 4 quadrados pretos nos cantos */
+        .alignment-marker {
+            position: absolute;
+            width: 15px;
+            height: 15px;
+            background: #000000;
+            border: 1px solid #000000;
+            z-index: 1000; /* Garantir que fiquem visíveis */
+        }
+        
+        .marker-top-left {
+            top: 0.1cm;    /* Mais próximo da borda superior da página (afastado do conteúdo) */
+            left: 0.1cm;   /* Mais próximo da borda esquerda da página */
+        }
+        
+        .marker-top-right {
+            top: 0.1cm;    /* Mais próximo da borda superior da página */
+            right: 0.1cm;  /* Mais próximo da borda direita da página */
+        }
+        
+        .marker-bottom-left {
+            bottom: 0.1cm; /* Mais próximo do rodapé (abaixo de todas as questões, até 12 por bloco) */
+            left: 0.1cm;   /* Mais próximo da borda esquerda da página */
+        }
+        
+        .marker-bottom-right {
+            bottom: 0.1cm; /* Mais próximo do rodapé */
+            right: 0.1cm;  /* Mais próximo da borda direita da página */
         }
 
         /* Cabeçalho da folha de resposta */
@@ -871,6 +902,12 @@
 
     <!-- Formulário de Respostas -->
     <div class="answer-sheet">
+        <!-- Marcadores de Alinhamento - 4 quadrados pretos nos cantos -->
+        <div class="alignment-marker marker-top-left"></div>
+        <div class="alignment-marker marker-top-right"></div>
+        <div class="alignment-marker marker-bottom-left"></div>
+        <div class="alignment-marker marker-bottom-right"></div>
+        
         <!-- Cabeçalho -->
         <div class="answer-sheet-header">
             <div class="header-left">
@@ -965,11 +1002,16 @@
             </div>
         </div>
 
-        <!-- Grade de Respostas (4 blocos de 12 questões) -->
+        <!-- Grade de Respostas DINÂMICA -->
         <div class="answer-grid-container">
-            {% for block in range(1, 5) %}
+            {% set questions_per_block = 12 %}
+            {% set total_questions = total_questions | default(48) %}
+            {% set num_blocks = ((total_questions + questions_per_block - 1) / questions_per_block) | round(0, 'ceil') | int %}
+            {% if num_blocks == 0 %}{% set num_blocks = 1 %}{% endif %}
+            
+            {% for block in range(1, num_blocks + 1) %}
             <div class="answer-block">
-                <div class="block-header">BLOCO 0{{ block }}</div>
+                <div class="block-header">BLOCO {{ "%02d"|format(block) }}</div>
 
                 <!-- Cabeçalho com letras A B C D -->
                 <div class="bubble-headers">
@@ -982,9 +1024,13 @@
                     </div>
                 </div>
 
-                <!-- Linhas de resposta -->
-                {% for q in range(1, 13) %}
-                {% set question_num = (block - 1) * 12 + q %}
+                <!-- Linhas de resposta DINÂMICAS -->
+                {% set start_question = (block - 1) * questions_per_block + 1 %}
+                {% set end_question = [block * questions_per_block, total_questions] | min %}
+                {% set questions_in_block = end_question - start_question + 1 %}
+                
+                {% for q in range(1, questions_in_block + 1) %}
+                {% set question_num = start_question + q - 1 %}
                 <div class="answer-row">
                     <span class="question-num">{{ question_num }}.</span>
                     <div class="bubbles">

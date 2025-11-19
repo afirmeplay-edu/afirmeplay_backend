@@ -37,6 +37,6 @@ class User(db.Model):
     avatar_config = db.Column(db.JSON, nullable=True)
     address = db.Column(db.String(255), nullable=True)
 
-    student = db.relationship("Student", back_populates="users", uselist=False)
+    student = db.relationship("Student", back_populates="user", uselist=False)
     teacher = db.relationship("Teacher", backref="users", uselist=False)
     city_id = db.Column(db.String, db.ForeignKey('city.id'), nullable=True)

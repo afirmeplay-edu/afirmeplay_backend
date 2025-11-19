@@ -252,14 +252,26 @@ class PhysicalTestFormService:
                     if school_obj:
                         school_name = school_obj.name
 
-        # Gerar QR Code com o ID do aluno
+        # Gerar QR Code com metadados simplificados (apenas student_id)
+        # NOTA: test_id será preenchido quando o QR code for gerado no contexto da prova (institutional_test_weasyprint_generator.py)
+        # Removido: qr_code_id para tornar QR code menor e mais fácil de decodificar
+        import json
+        
+        # Criar metadados simplificados do QR code (apenas student_id)
+        qr_metadata = {
+            "student_id": str(student.id)
+        }
+        
+        # Converter para JSON
+        qr_json = json.dumps(qr_metadata)
+        
         qr = qrcode.QRCode(
             version=1,
             error_correction=qrcode.constants.ERROR_CORRECT_L,
             box_size=10,
             border=2,
         )
-        qr.add_data(str(student.id))
+        qr.add_data(qr_json)
         qr.make(fit=True)
 
         # Criar imagem do QR Code

@@ -1,7 +1,11 @@
 # -*- coding: utf-8 -*-
 """
-Serviço para geração de PDFs de provas institucionais
-Baseado no formato das imagens fornecidas - capa institucional, capas de disciplina e questões
+OLD: Implementação antiga - Serviço para geração de PDFs usando ReportLab
+
+NOTA: Este arquivo é da implementação antiga (template ReportLab).
+O sistema agora usa institutional_test_weasyprint_generator.py (WeasyPrint + Jinja2).
+
+Mantido apenas para compatibilidade/legado.
 """
 
 from PIL import Image as PILImage, ImageDraw, ImageFont

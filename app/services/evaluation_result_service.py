@@ -337,6 +337,18 @@ class EvaluationResultService:
             if scope_city_id:
                 ReportAggregateService.mark_dirty(test_id, 'city', scope_city_id, commit=False)
             
+            # Marcar dirty para professores vinculados às turmas do aluno
+            if class_identifier:
+                from app.models.teacherClass import TeacherClass
+                
+                # Buscar professores vinculados à turma do aluno
+                teacher_classes = TeacherClass.query.filter_by(class_id=class_identifier).all()
+                teacher_ids = [tc.teacher_id for tc in teacher_classes]
+                
+                # Marcar dirty para cada professor
+                for teacher_id in teacher_ids:
+                    ReportAggregateService.mark_dirty(test_id, 'teacher', teacher_id, commit=False)
+            
             db.session.commit()
             
             # Preparar resposta com informações adicionais se houver múltiplas disciplinas

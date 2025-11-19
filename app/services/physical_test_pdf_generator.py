@@ -1683,90 +1683,63 @@ class PhysicalTestPDFGenerator:
             print(f"✅ TEST ID: {test_id}")
             print(f"✅ NUM QUESTIONS: {num_questions_from_qr}")
             
-            # 3. AGORA processar imagem para detecção de bolhas (mantendo funcionalidade existente)
-            print(f"🔍 ETAPA 2: PROCESSANDO IMAGEM PARA DETECÇÃO DE BOLHAS...")
-            img_result = self.processar_imagem_formulario(image_data)
-            if img_result is None or not img_result.get('success'):
-                return {"success": False, "error": "Erro ao processar imagem para detecção de bolhas"}
+            # 3. NOVA IMPLEMENTAÇÃO: Usar gabarito de referência com transformação de perspectiva
+            print(f"🔍 ETAPA 2: APLICANDO ALINHAMENTO AO GABARITO...")
             
-            img_gray = img_result['image_processed']
-            print(f"🖼️ Imagem processada para bolhas: {img_gray.shape}")
-            
-            # 4. Detectar respostas usando coordenadas dinâmicas (NOVA IMPLEMENTAÇÃO)
-            print(f"🔍 ETAPA 3: DETECTANDO RESPOSTAS COM COORDENADAS DINÂMICAS...")
-            
-            debug_user_image = img_color  # Usar imagem original do usuário
-            respostas_detectadas = {}
-            debug_image_with_areas = None  # Será preenchido pela função de detecção
-            
-            # NOVA IMPLEMENTAÇÃO: Sempre usar coordenadas dinâmicas baseadas no novo layout (WeasyPrint)
-            coordinates_data = None  # Inicializar para uso posterior no debug
-            if num_questions_from_qr:
-                print(f"📐 Calculando coordenadas dinamicamente (novo layout WeasyPrint)...")
-                img_height, img_width = img_gray.shape[:2]
-                
-                # Calcular coordenadas base (A4 padrão) - transformação será aplicada depois com marcadores
-                coordinates_data = self._calculate_institutional_test_coordinates(
-                    num_questions_from_qr, 
-                    img_width,  # Usar dimensões reais da imagem
-                    img_height,
-                    None  # Não usar mais QR code como âncora - usar marcadores
-                )
-                
-                if coordinates_data and coordinates_data.get('coordinates'):
-                    print(f"✅ Coordenadas base calculadas: {len(coordinates_data['coordinates'])} posições")
-                    
-                    # Salvar debug das coordenadas base ANTES da transformação
-                    self._salvar_debug_coordenadas(img_color.copy(), coordinates_data, "coordenadas_base", None)
-                    
-                    # NOVA IMPLEMENTAÇÃO: Detectar marcadores de alinhamento e ajustar coordenadas
-                    print(f"🔍 Detectando marcadores de alinhamento...")
-                    marcadores_detectados = self._detectar_marcadores_alinhamento(img_gray, img_color)
-                    
-                    if marcadores_detectados:
-                        print(f"✅ Marcadores detectados, calculando transformação...")
-                        transformacao = self._calcular_transformacao_marcadores(
-                            marcadores_detectados,
-                            794,  # expected_width (A4)
-                            1123  # expected_height (A4)
-                        )
-                        
-                        if transformacao:
-                            print(f"📐 Transformação calculada: scale_x={transformacao['scale_x']:.3f}, scale_y={transformacao['scale_y']:.3f}, offset=({transformacao['offset_x']:.1f}, {transformacao['offset_y']:.1f})")
-                            
-                            # Salvar coordenadas ANTES da transformação
-                            coordinates_data_antes = coordinates_data.copy()
-                            
-                            # Aplicar transformação nas coordenadas
-                            coordinates_data = self._aplicar_transformacao_coordenadas(
-                                coordinates_data,
-                                transformacao
-                            )
-                            print(f"✅ Coordenadas ajustadas com transformação dos marcadores")
-                            
-                            # Salvar debug das coordenadas DEPOIS da transformação
-                            self._salvar_debug_coordenadas(img_color.copy(), coordinates_data, "coordenadas_transformadas", transformacao)
-                        else:
-                            print(f"⚠️ Falha ao calcular transformação, usando coordenadas base")
-                    else:
-                        print(f"⚠️ Marcadores não detectados, usando coordenadas base (pode estar desalinhado)")
-                    
-                    # Usar coordenadas ajustadas para detecção (com imagem original para debug)
-                    respostas_detectadas, debug_image_with_areas = self._detectar_respostas_com_coordenadas_dinamicas(
-                        img_gray,
-                        coordinates_data,
-                        num_questions_from_qr,
-                        coordinates_data.get('rect_bounds'),
-                        original_image=img_color  # Passar imagem colorida para debug
-                    )
-                else:
-                    print(f"⚠️ Falha ao calcular coordenadas")
-                    return {"success": False, "error": "Falha ao calcular coordenadas do template"}
-            else:
+            if not num_questions_from_qr:
                 return {"success": False, "error": "Número de questões não encontrado no QR code"}
             
+            # Gerar gabarito de referência e alinhar imagem do aluno
+            aligned_image, gabarito_coords, homography_matrix = self._aplicar_alinhamento_gabarito(
+                img_color,  # Imagem original do aluno
+                None,  # Gerar gabarito automaticamente
+                num_questions_from_qr
+            )
+            
+            if aligned_image is None or gabarito_coords is None:
+                return {"success": False, "error": "Falha ao alinhar imagem ao gabarito - verifique se os 4 marcadores estão visíveis"}
+            
+            print(f"✅ Imagem alinhada ao gabarito: {aligned_image.shape}")
+            
+            # Salvar debug visual: gabarito vs imagem original vs imagem alinhada
+            self._salvar_debug_gabarito_comparacao(
+                img_color,  # Imagem original do aluno
+                aligned_image,  # Imagem alinhada
+                num_questions_from_qr,
+                test_id,
+                student_id
+            )
+            
+            # Converter imagem alinhada para grayscale para detecção
+            if len(aligned_image.shape) == 3:
+                aligned_gray = cv2.cvtColor(aligned_image, cv2.COLOR_BGR2GRAY)
+            else:
+                aligned_gray = aligned_image.copy()
+            
+            # Aplicar threshold adaptativo na imagem alinhada
+            blur = cv2.GaussianBlur(aligned_gray, (5, 5), 0)
+            binary_image = cv2.adaptiveThreshold(blur, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 11, 2)
+            
+            print(f"🖼️ Imagem binária preparada: {binary_image.shape}")
+            
+            # 4. Detectar respostas usando coordenadas do gabarito (coordenadas conhecidas)
+            print(f"🔍 ETAPA 3: DETECTANDO RESPOSTAS COM COORDENADAS DO GABARITO...")
+            
+            debug_user_image = aligned_image  # Usar imagem alinhada para debug
+            respostas_detectadas = {}
+            debug_image_with_areas = None
+            
+            # Usar coordenadas do gabarito (já conhecidas e corretas)
+            respostas_detectadas, debug_image_with_areas = self._detectar_respostas_com_coordenadas_dinamicas(
+                binary_image,
+                gabarito_coords,
+                num_questions_from_qr,
+                gabarito_coords.get('rect_bounds'),
+                original_image=aligned_image  # Passar imagem alinhada para debug
+            )
+            
             if not respostas_detectadas:
-                return {"success": False, "error": "Nenhuma resposta detectada"}
+                return {"success": False, "error": "Nenhuma resposta detectada após alinhamento"}
             
             print(f"✅ RESPOSTAS DETECTADAS: {respostas_detectadas}")
             
@@ -1787,10 +1760,13 @@ class PhysicalTestPDFGenerator:
                     if question:
                         correct_answers[i + 1] = question.correct_answer
                 
-                # Gerar comparação visual (sem gabarito - não é necessário com coordenadas dinâmicas)
+                # Gerar gabarito para visualização
+                gabarito_image, _ = self._gerar_gabarito_referencia(num_questions_from_qr)
+                
+                # Gerar comparação visual com gabarito
                 debug_file = visualizer.generate_correction_comparison(
-                    gabarito_image=None,  # Não usar gabarito - coordenadas dinâmicas não precisam
-                    user_image=debug_user_image,
+                    gabarito_image=gabarito_image,  # Gabarito de referência
+                    user_image=debug_user_image,  # Imagem alinhada do aluno
                     test_id=test_id,
                     student_id=student_id,
                     detected_answers=respostas_detectadas,
@@ -1806,12 +1782,11 @@ class PhysicalTestPDFGenerator:
                 # 3.6. SALVAR BOLHAS DETECTADAS (TEMPORÁRIO)
                 print(f"🔍 ETAPA 3.6: SALVANDO BOLHAS DETECTADAS...")
                 try:
-                    # NOVA IMPLEMENTAÇÃO: Usar coordenadas dinâmicas calculadas
-                    # Não precisa de gabarito - as coordenadas já foram calculadas acima
-                    if coordinates_data and coordinates_data.get('coordinates'):
-                        # Extrair coordenadas das bolhas detectadas
-                        coordinates_list = coordinates_data.get('coordinates', [])
-                        rect_bounds = coordinates_data.get('rect_bounds')
+                    # NOVA IMPLEMENTAÇÃO: Usar coordenadas do gabarito (já calculadas)
+                    if gabarito_coords and gabarito_coords.get('coordinates'):
+                        # Extrair coordenadas das bolhas do gabarito
+                        coordinates_list = gabarito_coords.get('coordinates', [])
+                        rect_bounds = gabarito_coords.get('rect_bounds')
                         
                         if rect_bounds:
                             rect_x0, rect_y0, _, _ = rect_bounds
@@ -4310,6 +4285,362 @@ class PhysicalTestPDFGenerator:
                 'rect_bounds': (0, 0, image_width, image_height),
                 'num_questions': num_questions
             }
+    
+    def _gerar_gabarito_referencia(self, num_questions: int) -> tuple:
+        """
+        NOVO: Gera gabarito de referência com coordenadas conhecidas
+        Usa o mesmo layout do template HTML para garantir correspondência exata
+        
+        Returns:
+            Tuple (gabarito_image: np.ndarray, coordinates_data: Dict)
+        """
+        try:
+            import cv2
+            import numpy as np
+            
+            print(f"🎨 GERANDO GABARITO DE REFERÊNCIA...")
+            print(f"📊 Questões: {num_questions}")
+            
+            # A4 em pixels a 96 DPI: 794px × 1123px
+            A4_WIDTH_PX = 794
+            A4_HEIGHT_PX = 1123
+            
+            # Criar imagem branca A4
+            gabarito = np.ones((A4_HEIGHT_PX, A4_WIDTH_PX, 3), dtype=np.uint8) * 255
+            
+            # Coordenadas dos 4 marcadores de alinhamento (valores exatos do CSS)
+            # Marcadores: 15px, posicionados a 0.1cm (3.78px) das bordas
+            MARGIN_TOP = 3.78
+            MARGIN_LEFT = 3.78
+            MARGIN_RIGHT = 3.78
+            MARGIN_BOTTOM = 3.78
+            MARKER_SIZE = 15
+            
+            marker_tl = (int(MARGIN_LEFT), int(MARGIN_TOP))
+            marker_tr = (int(A4_WIDTH_PX - MARGIN_RIGHT - MARKER_SIZE), int(MARGIN_TOP))
+            marker_bl = (int(MARGIN_LEFT), int(A4_HEIGHT_PX - MARGIN_BOTTOM - MARKER_SIZE))
+            marker_br = (int(A4_WIDTH_PX - MARGIN_RIGHT - MARKER_SIZE), 
+                        int(A4_HEIGHT_PX - MARGIN_BOTTOM - MARKER_SIZE))
+            
+            # Desenhar os 4 marcadores (quadrados pretos)
+            cv2.rectangle(gabarito, marker_tl, 
+                         (marker_tl[0] + MARKER_SIZE, marker_tl[1] + MARKER_SIZE), (0, 0, 0), -1)
+            cv2.rectangle(gabarito, marker_tr, 
+                         (marker_tr[0] + MARKER_SIZE, marker_tr[1] + MARKER_SIZE), (0, 0, 0), -1)
+            cv2.rectangle(gabarito, marker_bl, 
+                         (marker_bl[0] + MARKER_SIZE, marker_bl[1] + MARKER_SIZE), (0, 0, 0), -1)
+            cv2.rectangle(gabarito, marker_br, 
+                         (marker_br[0] + MARKER_SIZE, marker_br[1] + MARKER_SIZE), (0, 0, 0), -1)
+            
+            # Calcular coordenadas das bolhas usando a mesma lógica do template
+            coordinates_data = self._calculate_institutional_test_coordinates(
+                num_questions, A4_WIDTH_PX, A4_HEIGHT_PX, None
+            )
+            
+            # Desenhar bolhas no gabarito (apenas para visualização/debug)
+            coordinates_list = coordinates_data.get('coordinates', [])
+            rect_bounds = coordinates_data.get('rect_bounds')
+            
+            if rect_bounds:
+                rect_x0, rect_y0, _, _ = rect_bounds
+                
+                for i, (rel_x, rel_y, w, h) in enumerate(coordinates_list):
+                    abs_x = int(rect_x0 + rel_x)
+                    abs_y = int(rect_y0 + rel_y)
+                    
+                    # Desenhar círculo da bolha (apenas borda para visualização)
+                    center_x = abs_x + w // 2
+                    center_y = abs_y + h // 2
+                    radius = w // 2
+                    cv2.circle(gabarito, (center_x, center_y), radius, (200, 200, 200), 1)
+            
+            print(f"✅ Gabarito gerado: {A4_WIDTH_PX}x{A4_HEIGHT_PX}px")
+            print(f"✅ Coordenadas calculadas: {len(coordinates_list)} posições")
+            
+            # Retornar também as coordenadas dos marcadores para uso na homografia
+            markers_coords = {
+                'top_left': marker_tl,
+                'top_right': marker_tr,
+                'bottom_left': marker_bl,
+                'bottom_right': marker_br
+            }
+            
+            coordinates_data['markers_coords'] = markers_coords
+            
+            return gabarito, coordinates_data
+            
+        except Exception as e:
+            logging.error(f"Erro ao gerar gabarito de referência: {str(e)}")
+            import traceback
+            logging.error(traceback.format_exc())
+            return None, None
+    
+    def _calcular_homografia_marcadores(self, gabarito_markers: Dict, user_markers: Dict) -> np.ndarray:
+        """
+        NOVO: Calcula matriz de homografia usando os 4 marcadores de alinhamento
+        Usa getPerspectiveTransform para calcular transformação de perspectiva
+        
+        Args:
+            gabarito_markers: Dict com coordenadas dos marcadores no gabarito (referência)
+            user_markers: Dict com coordenadas dos marcadores na imagem do aluno
+        
+        Returns:
+            Matriz de transformação 3x3 (homografia)
+        """
+        try:
+            import cv2
+            import numpy as np
+            
+            print(f"📐 CALCULANDO HOMOGRAFIA DOS MARCADORES...")
+            
+            # Pontos de origem (imagem do aluno - queremos transformar esta imagem)
+            src_points = np.array([
+                user_markers['top_left'],
+                user_markers['top_right'],
+                user_markers['bottom_right'],
+                user_markers['bottom_left']
+            ], dtype=np.float32)
+            
+            # Pontos de destino (gabarito - referência - para onde queremos mapear)
+            dst_points = np.array([
+                gabarito_markers['top_left'],
+                gabarito_markers['top_right'],
+                gabarito_markers['bottom_right'],
+                gabarito_markers['bottom_left']
+            ], dtype=np.float32)
+            
+            print(f"📍 Pontos origem (imagem do aluno):")
+            print(f"   TL: {src_points[0]}, TR: {src_points[1]}")
+            print(f"   BR: {src_points[2]}, BL: {src_points[3]}")
+            print(f"📍 Pontos destino (gabarito - referência):")
+            print(f"   TL: {dst_points[0]}, TR: {dst_points[1]}")
+            print(f"   BR: {dst_points[2]}, BL: {dst_points[3]}")
+            
+            # Calcular matriz de transformação de perspectiva
+            M = cv2.getPerspectiveTransform(src_points, dst_points)
+            
+            print(f"✅ Matriz de homografia calculada:")
+            print(f"   {M}")
+            
+            return M
+            
+        except Exception as e:
+            logging.error(f"Erro ao calcular homografia: {str(e)}")
+            import traceback
+            logging.error(traceback.format_exc())
+            return None
+    
+    def _aplicar_alinhamento_gabarito(self, user_image: np.ndarray, 
+                                     gabarito_image: np.ndarray,
+                                     num_questions: int) -> tuple:
+        """
+        NOVO: Alinha imagem do aluno ao gabarito usando os 4 marcadores
+        Detecta marcadores em ambas as imagens, calcula homografia e aplica transformação
+        
+        Args:
+            user_image: Imagem do aluno (BGR)
+            gabarito_image: Imagem do gabarito de referência (BGR)
+            num_questions: Número de questões
+        
+        Returns:
+            Tuple (aligned_image: np.ndarray, coordinates_data: Dict, homography_matrix: np.ndarray)
+        """
+        try:
+            import cv2
+            import numpy as np
+            
+            print(f"🔄 APLICANDO ALINHAMENTO AO GABARITO...")
+            
+            # 1. Gerar gabarito se não fornecido
+            if gabarito_image is None:
+                gabarito_image, gabarito_coords = self._gerar_gabarito_referencia(num_questions)
+                if gabarito_image is None:
+                    return None, None, None
+            else:
+                # Se gabarito fornecido, calcular coordenadas
+                gabarito_coords = self._calculate_institutional_test_coordinates(
+                    num_questions, gabarito_image.shape[1], gabarito_image.shape[0], None
+                )
+                # Adicionar coordenadas dos marcadores
+                MARGIN_TOP = 3.78
+                MARGIN_LEFT = 3.78
+                MARGIN_RIGHT = 3.78
+                MARGIN_BOTTOM = 3.78
+                MARKER_SIZE = 15
+                A4_WIDTH_PX = gabarito_image.shape[1]
+                A4_HEIGHT_PX = gabarito_image.shape[0]
+                
+                gabarito_coords['markers_coords'] = {
+                    'top_left': (int(MARGIN_LEFT), int(MARGIN_TOP)),
+                    'top_right': (int(A4_WIDTH_PX - MARGIN_RIGHT - MARKER_SIZE), int(MARGIN_TOP)),
+                    'bottom_left': (int(MARGIN_LEFT), int(A4_HEIGHT_PX - MARGIN_BOTTOM - MARKER_SIZE)),
+                    'bottom_right': (int(A4_WIDTH_PX - MARGIN_RIGHT - MARKER_SIZE), 
+                                    int(A4_HEIGHT_PX - MARGIN_BOTTOM - MARKER_SIZE))
+                }
+            
+            # 2. Converter imagens para grayscale para detecção
+            if len(user_image.shape) == 3:
+                user_gray = cv2.cvtColor(user_image, cv2.COLOR_BGR2GRAY)
+            else:
+                user_gray = user_image.copy()
+            
+            if len(gabarito_image.shape) == 3:
+                gabarito_gray = cv2.cvtColor(gabarito_image, cv2.COLOR_BGR2GRAY)
+            else:
+                gabarito_gray = gabarito_image.copy()
+            
+            # 3. Detectar marcadores no gabarito (coordenadas conhecidas)
+            gabarito_markers = gabarito_coords.get('markers_coords')
+            if not gabarito_markers:
+                print(f"❌ Marcadores do gabarito não encontrados")
+                return None, None, None
+            
+            print(f"✅ Marcadores do gabarito (conhecidos):")
+            print(f"   TL: {gabarito_markers['top_left']}")
+            print(f"   TR: {gabarito_markers['top_right']}")
+            print(f"   BL: {gabarito_markers['bottom_left']}")
+            print(f"   BR: {gabarito_markers['bottom_right']}")
+            
+            # 4. Detectar marcadores na imagem do aluno
+            user_markers = self._detectar_marcadores_alinhamento(user_gray, user_image)
+            if not user_markers:
+                print(f"❌ Marcadores não detectados na imagem do aluno")
+                return None, None, None
+            
+            print(f"✅ Marcadores detectados na imagem do aluno:")
+            print(f"   TL: {user_markers['top_left']}")
+            print(f"   TR: {user_markers['top_right']}")
+            print(f"   BL: {user_markers['bottom_left']}")
+            print(f"   BR: {user_markers['bottom_right']}")
+            
+            # 5. Calcular homografia
+            homography_matrix = self._calcular_homografia_marcadores(gabarito_markers, user_markers)
+            if homography_matrix is None:
+                print(f"❌ Falha ao calcular homografia")
+                return None, None, None
+            
+            # 6. Aplicar transformação de perspectiva na imagem do aluno
+            # Usar dimensões do gabarito como destino
+            gabarito_h, gabarito_w = gabarito_image.shape[:2]
+            aligned_image = cv2.warpPerspective(
+                user_image, 
+                homography_matrix, 
+                (gabarito_w, gabarito_h),
+                flags=cv2.INTER_LINEAR,
+                borderMode=cv2.BORDER_CONSTANT,
+                borderValue=(255, 255, 255)
+            )
+            
+            print(f"✅ Imagem alinhada: {aligned_image.shape}")
+            
+            # 7. Retornar imagem alinhada, coordenadas do gabarito e matriz de homografia
+            return aligned_image, gabarito_coords, homography_matrix
+            
+        except Exception as e:
+            logging.error(f"Erro ao aplicar alinhamento ao gabarito: {str(e)}")
+            import traceback
+            logging.error(traceback.format_exc())
+            return None, None, None
+    
+    def _salvar_debug_gabarito_comparacao(self, user_image_original: np.ndarray, 
+                                         user_image_aligned: np.ndarray,
+                                         num_questions: int,
+                                         test_id: str,
+                                         student_id: str):
+        """
+        NOVO: Salva imagem de debug comparando gabarito, imagem original e imagem alinhada
+        """
+        try:
+            import cv2
+            import numpy as np
+            import os
+            from datetime import datetime
+            
+            print(f"🔍 GERANDO DEBUG: GABARITO vs IMAGEM ORIGINAL vs IMAGEM ALINHADA...")
+            
+            # Gerar gabarito
+            gabarito_image, gabarito_coords = self._gerar_gabarito_referencia(num_questions)
+            if gabarito_image is None:
+                print(f"⚠️ Não foi possível gerar gabarito para debug")
+                return
+            
+            # Redimensionar imagens para terem a mesma altura (facilitar comparação)
+            target_height = 800
+            scale_factor = target_height / gabarito_image.shape[0]
+            target_width_gabarito = int(gabarito_image.shape[1] * scale_factor)
+            target_width_original = int(user_image_original.shape[1] * (target_height / user_image_original.shape[0]))
+            target_width_aligned = int(user_image_aligned.shape[1] * (target_height / user_image_aligned.shape[0]))
+            
+            gabarito_resized = cv2.resize(gabarito_image, (target_width_gabarito, target_height), interpolation=cv2.INTER_LINEAR)
+            original_resized = cv2.resize(user_image_original, (target_width_original, target_height), interpolation=cv2.INTER_LINEAR)
+            aligned_resized = cv2.resize(user_image_aligned, (target_width_aligned, target_height), interpolation=cv2.INTER_LINEAR)
+            
+            # Criar canvas para colocar as 3 imagens lado a lado
+            padding = 20
+            text_height = 50
+            canvas_width = target_width_gabarito + target_width_original + target_width_aligned + (padding * 4)
+            canvas_height = target_height + (padding * 2) + text_height
+            
+            canvas = np.ones((canvas_height, canvas_width, 3), dtype=np.uint8) * 255
+            
+            # Adicionar títulos
+            font = cv2.FONT_HERSHEY_SIMPLEX
+            font_scale = 0.8
+            thickness = 2
+            color = (0, 0, 0)
+            
+            # Título: GABARITO
+            text = "GABARITO (REFERENCIA)"
+            text_size = cv2.getTextSize(text, font, font_scale, thickness)[0]
+            text_x = padding + (target_width_gabarito - text_size[0]) // 2
+            cv2.putText(canvas, text, (text_x, 30), font, font_scale, color, thickness)
+            
+            # Título: IMAGEM ORIGINAL
+            text = "IMAGEM ORIGINAL (ALUNO)"
+            text_size = cv2.getTextSize(text, font, font_scale, thickness)[0]
+            text_x = padding * 2 + target_width_gabarito + (target_width_original - text_size[0]) // 2
+            cv2.putText(canvas, text, (text_x, 30), font, font_scale, color, thickness)
+            
+            # Título: IMAGEM ALINHADA
+            text = "IMAGEM ALINHADA (ALUNO)"
+            text_size = cv2.getTextSize(text, font, font_scale, thickness)[0]
+            text_x = padding * 3 + target_width_gabarito + target_width_original + (target_width_aligned - text_size[0]) // 2
+            cv2.putText(canvas, text, (text_x, 30), font, font_scale, color, thickness)
+            
+            # Colocar imagens no canvas
+            y_start = padding + text_height
+            
+            # Gabarito (esquerda)
+            canvas[y_start:y_start+target_height, padding:padding+target_width_gabarito] = gabarito_resized
+            
+            # Imagem original (meio)
+            x_start_original = padding * 2 + target_width_gabarito
+            canvas[y_start:y_start+target_height, x_start_original:x_start_original+target_width_original] = original_resized
+            
+            # Imagem alinhada (direita)
+            x_start_aligned = padding * 3 + target_width_gabarito + target_width_original
+            canvas[y_start:y_start+target_height, x_start_aligned:x_start_aligned+target_width_aligned] = aligned_resized
+            
+            # Adicionar informações na parte inferior
+            info_text = f"Test ID: {test_id[:8]}... | Student ID: {student_id[:8]}... | Questions: {num_questions}"
+            cv2.putText(canvas, info_text, (padding, canvas_height - 10), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, (100, 100, 100), 1)
+            
+            # Salvar imagem
+            debug_dir = "debug_corrections"
+            os.makedirs(debug_dir, exist_ok=True)
+            
+            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+            debug_path = os.path.join(debug_dir, f"{timestamp}_gabarito_comparacao_{test_id[:8]}_{student_id[:8]}.png")
+            
+            cv2.imwrite(debug_path, canvas)
+            print(f"✅ Debug gabarito vs imagem salvo: {debug_path}")
+            
+        except Exception as e:
+            logging.error(f"Erro ao salvar debug gabarito: {str(e)}")
+            import traceback
+            logging.error(traceback.format_exc())
+            print(f"⚠️ Erro ao salvar debug gabarito: {e}")
     
     def _detectar_marcadores_alinhamento(self, img_gray, img_color):
         """

@@ -4,6 +4,7 @@ Serviço para análise de relatórios usando OpenAI
 """
 
 import logging
+import re
 from typing import Dict, Any, Optional
 from app.openai_config.openai_config import (
     get_openai_client, 
@@ -25,53 +26,43 @@ class AIAnalysisService:
         self.client = get_openai_client()
         self.logger = logging.getLogger(__name__)
     
-    def analyze_report_data(self, report_data: Dict[str, Any]) -> Dict[str, str]:
+    def analyze_report_data(self, report_data: Dict[str, Any]) -> Dict[str, Any]:
         """
-        Analisa dados do relatório e gera textos usando OpenAI
+        Analisa dados do relatório e gera textos usando OpenAI em UMA ÚNICA chamada.
+        OTIMIZAÇÃO: Consolida todas as análises (participação, proficiência, notas, níveis) 
+        em uma única requisição à API para reduzir custos e latência.
         
         Args:
             report_data: Dados do relatório completo
             
         Returns:
-            Dict com textos analíticos gerados pela IA
+            Dict com textos analíticos gerados pela IA:
+            {
+                'participacao': str,
+                'proficiencia': Dict[str, str],  # {disciplina: análise}
+                'notas': str,
+                'niveis_aprendizagem': Dict[str, str]  # {disciplina: análise}
+            }
         """
         try:
             # Preparar dados para análise
             analysis_data = self._prepare_analysis_data(report_data)
-            
-            # Gerar análises específicas para cada página
-            analysis_texts = {}
-            
-            # Análise da página 4 - Participação
             avaliacao_titulo = report_data.get('avaliacao', {}).get('titulo', '') or report_data.get('avaliacao', {}).get('title', '')
-            analysis_texts['participacao'] = self._analyze_participation(
-                analysis_data, 
-                report_data.get('scope_type', 'all'),
-                avaliacao_titulo
-            )
+            scope_type = report_data.get('scope_type', 'all')
             
-            # Análise da página 6 - Proficiência (por disciplina)
-            analysis_texts['proficiencia'] = self._analyze_proficiency_disciplinas(
-                report_data,
-                avaliacao_titulo
-            )
+            # Construir prompt unificado com todos os dados
+            unified_prompt = self._build_unified_prompt(report_data, analysis_data, avaliacao_titulo, scope_type)
             
-            # Análise da página 6 - Notas
-            analysis_texts['notas'] = self._analyze_grades(
-                report_data,
-                avaliacao_titulo
-            )
+            # Fazer UMA ÚNICA chamada à IA
+            unified_response = self._call_openai(unified_prompt)
             
-            # Análise de níveis de aprendizagem por disciplina
-            analysis_texts['niveis_aprendizagem'] = self._analyze_niveis_aprendizagem_disciplinas(
-                report_data,
-                avaliacao_titulo
-            )
+            # Processar resposta e extrair as diferentes seções
+            analysis_texts = self._parse_unified_response(unified_response, report_data)
             
             return analysis_texts
             
         except Exception as e:
-            self.logger.error(f"Erro na análise da IA: {str(e)}")
+            self.logger.error(f"Erro na análise da IA: {str(e)}", exc_info=True)
             return self._get_fallback_texts()
     
     def _prepare_analysis_data(self, report_data: Dict[str, Any]) -> Dict[str, Any]:
@@ -920,12 +911,424 @@ e recomendações práticas para a escola.
             self.logger.error(f"Erro ao processar resposta da IA: {str(e)}")
             return self._get_fallback_texts()
     
-    def _get_fallback_texts(self) -> Dict[str, str]:
+    def _build_unified_prompt(self, report_data: Dict[str, Any], analysis_data: Dict[str, Any], 
+                             avaliacao_titulo: str, scope_type: str) -> str:
+        """
+        Constrói um prompt unificado que solicita todas as análises de uma vez.
+        
+        Args:
+            report_data: Dados completos do relatório
+            analysis_data: Dados preparados para análise
+            avaliacao_titulo: Título da avaliação
+            scope_type: Tipo de escopo (overall, city, school, teacher)
+            
+        Returns:
+            String com o prompt completo
+        """
+        participacao = analysis_data.get('participacao', {})
+        proficiencia = report_data.get('proficiencia', {})
+        nota_geral = report_data.get('nota_geral', {})
+        niveis_aprendizagem = report_data.get('niveis_aprendizagem', {})
+        
+        # Dados de participação
+        total_matriculados = participacao.get('total_matriculados', 0)
+        total_avaliados = participacao.get('total_avaliados', 0)
+        total_faltosos = participacao.get('total_faltosos', 0)
+        percentual_participacao = participacao.get('percentual_participacao', 0)
+        dados_detalhados_participacao = participacao.get('por_turma', []) if scope_type != 'city' else participacao.get('por_escola', [])
+        
+        # Determinar contexto
+        if scope_type == 'city':
+            entidade = "Município"
+            unidade_nome = "escola"
+            unidade_label = "Escola"
+        else:
+            entidade = "Escola"
+            unidade_nome = "turma"
+            unidade_label = "Turma"
+        
+        # Identificar destaques e pontos de atenção para participação
+        destaques = []
+        pontos_atencao = []
+        for item in dados_detalhados_participacao:
+            nome = item.get(unidade_nome, 'N/A')
+            avaliados = item.get('avaliados', 0)
+            matriculados = item.get('matriculados', 0)
+            faltosos = item.get('faltosos', 0)
+            percentual_item = item.get('percentual', 0)
+            
+            if percentual_item >= 95:
+                destaques.append(f"{nome}: {percentual_item:.0f}% ({avaliados}/{matriculados})")
+            if percentual_item < 80 or faltosos > 0:
+                if faltosos > 0:
+                    pontos_atencao.append(f"{nome}: {percentual_item:.0f}% ({avaliados}/{matriculados}) com {faltosos} faltoso(s)")
+                else:
+                    pontos_atencao.append(f"{nome}: {percentual_item:.0f}% ({avaliados}/{matriculados})")
+        
+        destaque_str = " ".join(destaques) if destaques else "Nenhum destaque específico"
+        atencao_str = "; ".join(pontos_atencao) if pontos_atencao else "Nenhum ponto de atenção específico"
+        
+        # Dados de proficiência por disciplina
+        prof_disciplinas = proficiencia.get('por_disciplina', {})
+        media_municipal_prof = proficiencia.get('media_municipal_por_disciplina', {})
+        prof_data_str = ""
+        for disciplina, dados in prof_disciplinas.items():
+            if disciplina == 'GERAL':
+                continue
+            media_geral = dados.get('media_geral', 0)
+            media_municipal = media_municipal_prof.get(disciplina, 0)
+            dados_detalhados = dados.get('por_turma', []) if scope_type != 'city' else dados.get('por_escola', [])
+            detalhes_list = []
+            for detalhe in dados_detalhados:
+                nome_unidade = detalhe.get(unidade_nome, 'N/A')
+                prof_value = detalhe.get('proficiencia', detalhe.get('media', 0))
+                detalhes_list.append(f"  - {nome_unidade}: {prof_value:.2f}")
+            detalhes_str = "\n".join(detalhes_list) if detalhes_list else f"  Nenhum dado por {unidade_nome} disponível"
+            prof_data_str += f"\n{disciplina}:\n  - Média Geral: {media_geral:.2f}\n"
+            if media_municipal > 0:
+                prof_data_str += f"  - Média Municipal: {media_municipal:.2f}\n"
+            prof_data_str += f"  - Resultados por {unidade_label}:\n{detalhes_str}\n"
+        
+        # Dados de notas
+        notas_disciplinas = nota_geral.get('por_disciplina', {})
+        media_municipal_notas = nota_geral.get('media_municipal_por_disciplina', {})
+        notas_data_str = ""
+        media_geral_total = notas_disciplinas.get('GERAL', {}).get('media_geral', 0)
+        media_municipal_geral = media_municipal_notas.get('GERAL', 0)
+        for disciplina, dados in notas_disciplinas.items():
+            if disciplina == 'GERAL':
+                continue
+            media_disciplina = dados.get('media_geral', 0)
+            media_municipal_disc = media_municipal_notas.get(disciplina, 0)
+            dados_detalhados = dados.get('por_turma', []) if scope_type != 'city' else dados.get('por_escola', [])
+            detalhes_list = []
+            for detalhe in dados_detalhados:
+                nome_unidade = detalhe.get(unidade_nome, 'N/A')
+                nota_value = detalhe.get('nota', detalhe.get('media', 0))
+                detalhes_list.append(f"  - {nome_unidade}: {nota_value:.2f}")
+            detalhes_str = "\n".join(detalhes_list) if detalhes_list else f"  Nenhum dado por {unidade_nome} disponível"
+            notas_data_str += f"\n{disciplina}:\n  - Média Geral: {media_disciplina:.2f}\n"
+            if media_municipal_disc > 0:
+                notas_data_str += f"  - Média Municipal: {media_municipal_disc:.2f}\n"
+            notas_data_str += f"  - Notas por {unidade_label}:\n{detalhes_str}\n"
+        
+        # Dados de níveis de aprendizagem por disciplina
+        niveis_data_str = ""
+        for disciplina, dados in niveis_aprendizagem.items():
+            if disciplina == 'GERAL':
+                continue
+            disc_data = dados.get('geral') or dados.get('total_geral', {})
+            if not disc_data:
+                continue
+            total_alunos = disc_data.get('total', 0)
+            if total_alunos == 0:
+                continue
+            abaixo_basico = disc_data.get('abaixo_do_basico', 0)
+            basico = disc_data.get('basico', 0)
+            adequado = disc_data.get('adequado', 0)
+            avancado = disc_data.get('avancado', 0)
+            perc_abaixo = (abaixo_basico / total_alunos * 100) if total_alunos > 0 else 0
+            perc_basico = (basico / total_alunos * 100) if total_alunos > 0 else 0
+            perc_adequado = (adequado / total_alunos * 100) if total_alunos > 0 else 0
+            perc_avancado = (avancado / total_alunos * 100) if total_alunos > 0 else 0
+            niveis_data_str += f"\n{disciplina}:\n"
+            niveis_data_str += f"  - Total de alunos: {total_alunos}\n"
+            niveis_data_str += f"  - Abaixo do Básico: {abaixo_basico} alunos ({perc_abaixo:.1f}%)\n"
+            niveis_data_str += f"  - Básico: {basico} alunos ({perc_basico:.1f}%)\n"
+            niveis_data_str += f"  - Adequado: {adequado} alunos ({perc_adequado:.1f}%)\n"
+            niveis_data_str += f"  - Avançado: {avancado} alunos ({perc_avancado:.1f}%)\n"
+        
+        # Obter ano/série
+        ano_serie = self._obter_ano_serie(report_data)
+        
+        # Formatar média municipal geral (evitar erro de formatação)
+        media_municipal_geral_str = f"{media_municipal_geral:.2f}" if media_municipal_geral > 0 else "Não disponível"
+        
+        # Construir prompt unificado
+        prompt = f"""IMPORTANTE: Você deve gerar TODAS as análises solicitadas abaixo em uma única resposta, separadas por marcadores claros.
+
+Gere APENAS texto puro, SEM formatação markdown (sem #, ##, *, **, etc). Use apenas parágrafos normais e títulos em maiúsculas seguidos de dois pontos.
+
+Use QUEBRAS DE LINHA DUPLAS (\\n\\n) para separar parágrafos diferentes.
+Use QUEBRAS DE LINHA SIMPLES (\\n) antes de títulos ou seções importantes.
+
+===========================================
+DADOS DO RELATÓRIO
+===========================================
+- Entidade: {entidade}
+- Avaliação: {avaliacao_titulo or 'Avaliação Diagnóstica'}
+- Ano/Série: {ano_serie}
+- Escopo: {scope_type}
+
+===========================================
+1. ANÁLISE DE PARTICIPAÇÃO
+===========================================
+
+DADOS DE PARTICIPAÇÃO:
+- Total de Alunos Matriculados: {total_matriculados}
+- Total de Alunos Avaliados: {total_avaliados}
+- Total de Faltosos: {total_faltosos}
+- Taxa de Participação Geral: {percentual_participacao}%
+- Destaque(s) por {unidade_label}: {destaque_str}
+- Ponto(s) de Atenção por {unidade_label}: {atencao_str}
+
+TABELA DE CLASSIFICAÇÃO DE PARTICIPAÇÃO:
+{PARTICIPATION_CLASSIFICATION_TABLE}
+
+INSTRUÇÕES PARA ANÁLISE DE PARTICIPAÇÃO:
+Gere um PARECER TÉCNICO DE PARTICIPAÇÃO seguindo este formato:
+
+PARECER TÉCNICO DE PARTICIPAÇÃO: {entidade} ({avaliacao_titulo or 'Avaliação Diagnóstica'})
+[Primeiro parágrafo mencionando a participação geral e os dados básicos. Use os números específicos fornecidos.]
+
+Classificação: [Nome da Classificação]
+[Segundo parágrafo explicando o que essa classificação significa em termos de engajamento e confiabilidade dos dados. Explique se podemos confiar nas médias de proficiência.]
+
+Destaques e Recomendações:
+[Mencione os destaques formatados como frases completas. Se não houver destaques, não mencione destaques.]
+[Mencione as recomendações práticas focadas nos pontos de atenção, especialmente alunos faltosos. Use formato de parágrafo ou lista com bullets simples (•).]
+
+Use a tabela acima para classificar a taxa de participação de {percentual_participacao}% e mencione a classificação encontrada no texto.
+
+===========================================
+2. ANÁLISE DE PROFICIÊNCIA POR DISCIPLINA
+===========================================
+
+TABELA DE REFERÊNCIA SAEB:
+{SAEB_PROFICIENCY_REFERENCE_TABLE}
+
+DADOS DE PROFICIÊNCIA:
+{prof_data_str}
+
+INSTRUÇÕES PARA ANÁLISE DE PROFICIÊNCIA:
+Para CADA disciplina listada acima, gere um PARECER TÉCNICO DE PROFICIÊNCIA seguindo este formato:
+
+PARECER TÉCNICO: PROFICIÊNCIA EM [Disciplina] ({ano_serie} - {avaliacao_titulo or 'Avaliação Diagnóstica'})
+[Primeiro parágrafo explicando o que é proficiência na escala TRI e mencionando que a meta é o nível "Adequado"]
+
+1. Classificação da Média Geral
+[Aqui classifique a média geral de acordo com a tabela de referência e mencione o valor e a classificação encontrada]
+
+2. Análise de Posição
+[Aqui descreva onde a média se encontra em relação aos pontos de corte. Se houver benchmark municipal, mencione a distância até ele.]
+
+3. Diagnóstico Pedagógico (INEP)
+[Aqui use as definições oficiais do INEP para descrever o que essa classificação significa em termos de aprendizagem, mencionando "desempenho aquém do esperado", "significativo comprometimento", "intervenções emergenciais", etc.]
+
+4. Análise por {unidade_label}
+[Se houver dados por {unidade_nome}, classifique cada uma individualmente e aponte as disparidades. Use formato de lista com bullets simples (•).]
+
+Use a tabela de referência acima para classificar a média geral de acordo com o ano/série e disciplina.
+
+===========================================
+3. ANÁLISE DE NOTAS
+===========================================
+
+TABELA DE REFERÊNCIA PEDAGÓGICA:
+{NOTA_REFERENCE_TABLE}
+
+DADOS DE NOTAS:
+{notas_data_str}
+- Média Geral (Todas as Disciplinas): {media_geral_total:.2f}
+- Benchmark (Média Municipal): {media_municipal_geral_str}
+
+INSTRUÇÕES PARA ANÁLISE DE NOTAS:
+Gere um PARECER TÉCNICO DE NOTA seguindo este formato:
+
+PARECER TÉCNICO: NOTA (0-10) - {ano_serie} ({avaliacao_titulo or 'Avaliação Diagnóstica'})
+[Primeiro parágrafo explicando brevemente o que é a Nota (escala 0-10 derivada da proficiência, usada no IDEB)]
+
+1. Classificação e Comparação (Média Geral)
+[Aqui classifique a média geral usando a tabela de referência. Compare com a média municipal, com a meta e com o IDEB oficial se disponível.]
+
+2. Análise por Disciplina e {unidade_label}
+[Aqui compare o desempenho entre disciplinas (LP vs MT) e entre {unidade_label.lower()}s. Aponte disparidades e onde o reforço é mais necessário. Use formato de lista com bullets simples (•) se necessário.]
+
+3. Conclusão e Recomendação
+[Baseado apenas na análise das notas, sumarize o diagnóstico e recomende ações gerais (aulas de recuperação, avaliações formativas, metodologias ativas) para elevar o rendimento.]
+
+Use a tabela de referência acima para classificar a média geral.
+
+===========================================
+4. ANÁLISE DE NÍVEIS DE APRENDIZAGEM POR DISCIPLINA
+===========================================
+
+DEFINIÇÕES DOS NÍVEIS (INEP - "Descritores de Padrões de Desempenho - 2025"):
+1. Abaixo do Básico: Indica um desempenho "aquém do esperado", com "significativo comprometimento" das habilidades. Esses alunos têm a "trajetória académica seriamente comprometida" e necessitam de "intervenções emergenciais".
+2. Básico: Indica um domínio parcial e insuficiente das habilidades. O aluno não consolidou as competências essenciais para a série e precisa de apoio para recompor a aprendizagem.
+3. Adequado (A Meta): Indica o "desempenho esperado". O aluno demonstra ter "desenvolvido as habilidades previstas" e possui "condições adequadas à continuidade" de sua trajetória.
+4. Avançado: Indica um "desempenho superior àquele esperado". O aluno domina "habilidades mais complexas" e necessita de "atividades mais desafiadoras".
+
+DADOS DE NÍVEIS DE APRENDIZAGEM:
+{niveis_data_str}
+
+INSTRUÇÕES PARA ANÁLISE DE NÍVEIS:
+Para CADA disciplina listada acima, gere um PARECER TÉCNICO DE NÍVEIS DE APRENDIZAGEM seguindo este formato:
+
+PARECER TÉCNICO: NÍVEIS DE APRENDIZAGEM EM [Disciplina] ({avaliacao_titulo or 'Avaliação Diagnóstica'})
+[Aqui comece o primeiro parágrafo explicando o que são os Níveis de Aprendizagem e sua importância como diagnóstico pedagógico. Em seguida, explique os 4 níveis usando as definições do INEP, deixando claro que "Adequado" é a meta esperada.]
+
+Diagnóstico e Meta ([Disciplina] - {ano_serie})
+[Segundo parágrafo apresentando os dados da avaliação e a análise do gargalo: percentual que não atingiu a meta vs percentual que atingiu a meta, com detalhamento por nível]
+
+Conclusão: [Conclusão diagnosticando onde está o maior desafio (gargalo) para esta disciplina]
+
+Calcule e apresente claramente:
+- O percentual total de alunos que NÃO ATINGIRAM A META (soma de Abaixo do Básico + Básico)
+- O percentual total de alunos que ATINGIRAM A META (soma de Adequado + Avançado)
+- Detalhe cada nível com números específicos (ex: "42% (19 alunos) estão no nível Abaixo do Básico")
+
+===========================================
+FORMATO DA RESPOSTA
+===========================================
+
+Sua resposta deve seguir EXATAMENTE este formato, usando os marcadores abaixo para separar as seções:
+
+[MARCADOR: PARTICIPACAO]
+[Análise completa de participação aqui]
+
+[MARCADOR: PROFICIENCIA]
+[Para cada disciplina, use o formato:]
+[DISCIPLINA: Nome da Disciplina]
+[Análise de proficiência para esta disciplina]
+
+[DISCIPLINA: Próxima Disciplina]
+[Análise de proficiência para esta disciplina]
+
+[MARCADOR: NOTAS]
+[Análise completa de notas aqui]
+
+[MARCADOR: NIVEIS]
+[Para cada disciplina, use o formato:]
+[DISCIPLINA: Nome da Disciplina]
+[Análise de níveis de aprendizagem para esta disciplina]
+
+[DISCIPLINA: Próxima Disciplina]
+[Análise de níveis de aprendizagem para esta disciplina]
+
+IMPORTANTE: Use os marcadores exatos [MARCADOR: PARTICIPACAO], [MARCADOR: PROFICIENCIA], [MARCADOR: NOTAS], [MARCADOR: NIVEIS] e [DISCIPLINA: ...] para que possamos processar sua resposta corretamente.
+"""
+        return prompt
+    
+    def _parse_unified_response(self, unified_response: str, report_data: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Processa a resposta unificada da IA e extrai as diferentes seções.
+        
+        Args:
+            unified_response: Resposta completa da IA
+            report_data: Dados do relatório (para identificar disciplinas)
+            
+        Returns:
+            Dict com as análises separadas:
+            {
+                'participacao': str,
+                'proficiencia': Dict[str, str],
+                'notas': str,
+                'niveis_aprendizagem': Dict[str, str]
+            }
+        """
+        result = {
+            'participacao': '',
+            'proficiencia': {},
+            'notas': '',
+            'niveis_aprendizagem': {}
+        }
+        
+        try:
+            # Extrair seção de participação
+            if '[MARCADOR: PARTICIPACAO]' in unified_response:
+                parts = unified_response.split('[MARCADOR: PARTICIPACAO]', 1)
+                if len(parts) > 1:
+                    participacao_section = parts[1].split('[MARCADOR: PROFICIENCIA]', 1)[0]
+                    result['participacao'] = participacao_section.strip()
+            
+            # Extrair seção de proficiência
+            if '[MARCADOR: PROFICIENCIA]' in unified_response:
+                parts = unified_response.split('[MARCADOR: PROFICIENCIA]', 1)
+                if len(parts) > 1:
+                    prof_section = parts[1].split('[MARCADOR: NOTAS]', 1)[0]
+                    # Extrair todas as disciplinas usando regex
+                    disciplina_pattern = r'\[DISCIPLINA:\s*([^\]]+)\]'
+                    matches = re.finditer(disciplina_pattern, prof_section)
+                    for match in matches:
+                        disciplina_nome = match.group(1).strip()
+                        start_pos = match.end()
+                        # Encontrar próxima disciplina ou fim da seção
+                        next_match = re.search(disciplina_pattern, prof_section[start_pos:])
+                        if next_match:
+                            end_pos = start_pos + next_match.start()
+                        else:
+                            end_pos = len(prof_section)
+                        disc_analysis = prof_section[start_pos:end_pos].strip()
+                        result['proficiencia'][disciplina_nome] = disc_analysis
+            
+            # Extrair seção de notas
+            if '[MARCADOR: NOTAS]' in unified_response:
+                parts = unified_response.split('[MARCADOR: NOTAS]', 1)
+                if len(parts) > 1:
+                    notas_section = parts[1].split('[MARCADOR: NIVEIS]', 1)[0]
+                    result['notas'] = notas_section.strip()
+            
+            # Extrair seção de níveis
+            if '[MARCADOR: NIVEIS]' in unified_response:
+                parts = unified_response.split('[MARCADOR: NIVEIS]', 1)
+                if len(parts) > 1:
+                    niveis_section = parts[1]
+                    # Extrair todas as disciplinas usando regex
+                    disciplina_pattern = r'\[DISCIPLINA:\s*([^\]]+)\]'
+                    matches = re.finditer(disciplina_pattern, niveis_section)
+                    for match in matches:
+                        disciplina_nome = match.group(1).strip()
+                        start_pos = match.end()
+                        # Encontrar próxima disciplina ou fim da seção
+                        next_match = re.search(disciplina_pattern, niveis_section[start_pos:])
+                        if next_match:
+                            end_pos = start_pos + next_match.start()
+                        else:
+                            end_pos = len(niveis_section)
+                        disc_analysis = niveis_section[start_pos:end_pos].strip()
+                        result['niveis_aprendizagem'][disciplina_nome] = disc_analysis
+            
+            # Fallback: se não encontrou marcadores, tentar parsing mais flexível
+            if not result['participacao'] and not result['proficiencia']:
+                self.logger.warning("Marcadores não encontrados na resposta da IA, tentando parsing alternativo")
+                # Dividir por seções comuns
+                sections = unified_response.split('\n\n\n')
+                if len(sections) >= 1:
+                    result['participacao'] = sections[0][:500] if sections[0] else ''
+                if len(sections) >= 2:
+                    result['notas'] = sections[1][:500] if sections[1] else ''
+            
+        except Exception as e:
+            self.logger.error(f"Erro ao processar resposta unificada: {str(e)}", exc_info=True)
+            # Retornar fallback
+            return self._get_fallback_texts()
+        
+        # Garantir que pelo menos temos fallback para campos vazios
+        if not result['participacao']:
+            result['participacao'] = 'Análise de participação não disponível no momento.'
+        if not result['notas']:
+            result['notas'] = 'Análise de notas não disponível no momento.'
+        if not result['proficiencia']:
+            # Tentar obter disciplinas do report_data
+            prof_disciplinas = report_data.get('proficiencia', {}).get('por_disciplina', {})
+            for disciplina in prof_disciplinas.keys():
+                if disciplina != 'GERAL':
+                    result['proficiencia'][disciplina] = f'Análise de proficiência não disponível para {disciplina}.'
+        if not result['niveis_aprendizagem']:
+            # Tentar obter disciplinas do report_data
+            niveis_disciplinas = report_data.get('niveis_aprendizagem', {})
+            for disciplina in niveis_disciplinas.keys():
+                if disciplina != 'GERAL':
+                    result['niveis_aprendizagem'][disciplina] = f'Análise de níveis não disponível para {disciplina}.'
+        
+        return result
+    
+    def _get_fallback_texts(self) -> Dict[str, Any]:
         """Retorna textos padrão em caso de erro"""
         return {
-            'participacao_analise': 'Análise de participação não disponível no momento.',
-            'proficiencia_analise': 'Análise de proficiência não disponível no momento.',
-            'notas_analise': 'Análise de notas não disponível no momento.',
-            'habilidades_analise': 'Análise de habilidades não disponível no momento.',
-            'recomendacoes_gerais': 'Recomendações não disponíveis no momento.'
+            'participacao': 'Análise de participação não disponível no momento.',
+            'proficiencia': {},
+            'notas': 'Análise de notas não disponível no momento.',
+            'niveis_aprendizagem': {}
         }

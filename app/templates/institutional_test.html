@@ -1006,10 +1006,18 @@
         <div class="answer-grid-container">
             {% set questions_per_block = 12 %}
             {% set total_questions = total_questions | default(48) %}
-            {% set num_blocks = ((total_questions + questions_per_block - 1) / questions_per_block) | round(0, 'ceil') | int %}
+            {# CORREÇÃO: Calcular num_blocks usando divisão inteira (não arredondamento para cima) #}
+            {# Apenas gerar blocos que realmente têm questões #}
+            {% set num_blocks = ((total_questions - 1) // questions_per_block) + 1 %}
             {% if num_blocks == 0 %}{% set num_blocks = 1 %}{% endif %}
             
             {% for block in range(1, num_blocks + 1) %}
+            {% set start_question = (block - 1) * questions_per_block + 1 %}
+            {% set end_question = [block * questions_per_block, total_questions] | min %}
+            {% set questions_in_block = end_question - start_question + 1 %}
+            
+            {# CORREÇÃO: Só gerar bloco se tiver questões #}
+            {% if questions_in_block > 0 %}
             <div class="answer-block">
                 <div class="block-header">BLOCO {{ "%02d"|format(block) }}</div>
 
@@ -1025,10 +1033,6 @@
                 </div>
 
                 <!-- Linhas de resposta DINÂMICAS -->
-                {% set start_question = (block - 1) * questions_per_block + 1 %}
-                {% set end_question = [block * questions_per_block, total_questions] | min %}
-                {% set questions_in_block = end_question - start_question + 1 %}
-                
                 {% for q in range(1, questions_in_block + 1) %}
                 {% set question_num = start_question + q - 1 %}
                 <div class="answer-row">
@@ -1050,6 +1054,7 @@
                 </div>
                 {% endfor %}
             </div>
+            {% endif %}
             {% endfor %}
         </div>
     </div>

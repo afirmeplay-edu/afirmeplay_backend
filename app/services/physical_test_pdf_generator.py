@@ -1849,24 +1849,36 @@ class PhysicalTestPDFGenerator:
             print(f"📚 Questões da prova: {len(test_questions)}")
             
             # 5. Mapear respostas detectadas com questões
+            # CORREÇÃO: respostas_detectadas usa índice sequencial (1, 2, 3, 4...)
+            # Não usa test_question.order (que pode ser diferente)
+            # Mapear usando a posição sequencial na lista ordenada por order
             student_answers = []
             correct_answers = 0
             total_questions = len(test_questions)
             
-            for test_question in test_questions:
+            # Criar mapeamento: índice sequencial (1, 2, 3, 4...) -> test_question
+            questions_by_sequential_index = {}
+            for idx, test_question in enumerate(test_questions, start=1):
+                questions_by_sequential_index[idx] = test_question
+            
+            print(f"🔍 Respostas detectadas: {respostas_detectadas}")
+            print(f"🔍 Questões ordenadas: {[(idx, tq.order, tq.question_id) for idx, tq in questions_by_sequential_index.items()]}")
+            
+            for sequential_idx, test_question in questions_by_sequential_index.items():
                 question_order = test_question.order
                 question_id = test_question.question_id
                 
                 # Buscar questão
                 question = Question.query.get(question_id)
                 if not question:
-                    print(f"⚠️ Questão {question_order}: ID {question_id} não encontrada")
+                    print(f"⚠️ Questão {sequential_idx} (order={question_order}): ID {question_id} não encontrada")
                     continue
                 
-                # Resposta detectada para esta questão
-                detected_answer = respostas_detectadas.get(question_order)
+                # CORREÇÃO: Usar índice sequencial (1, 2, 3, 4...) para buscar resposta detectada
+                # Não usar test_question.order que pode ser diferente
+                detected_answer = respostas_detectadas.get(sequential_idx)
                 if not detected_answer:
-                    print(f"⚠️ Questão {question_order}: Nenhuma resposta detectada")
+                    print(f"⚠️ Questão {sequential_idx} (order={question_order}): Nenhuma resposta detectada")
                     continue
                 
                 # Verificar se está correta
@@ -1876,7 +1888,7 @@ class PhysicalTestPDFGenerator:
                     if is_correct:
                         correct_answers += 1
                 
-                print(f"📝 Questão {question_order}: {detected_answer} {'✅' if is_correct else '❌'} (correta: {question.correct_answer})")
+                print(f"📝 Questão {sequential_idx} (order={question_order}): {detected_answer} {'✅' if is_correct else '❌'} (correta: {question.correct_answer})")
                 
                 # Salvar resposta do aluno
                 from app.models.studentAnswer import StudentAnswer
@@ -1892,7 +1904,7 @@ class PhysicalTestPDFGenerator:
                     # Atualizar resposta existente
                     existing_answer.answer = detected_answer
                     existing_answer.is_correct = is_correct
-                    print(f"  🔄 Resposta atualizada para questão {question_order}")
+                    print(f"  🔄 Resposta atualizada para questão {sequential_idx} (order={question_order})")
                 else:
                     # Criar nova resposta
                     student_answer = StudentAnswer(
@@ -1903,10 +1915,11 @@ class PhysicalTestPDFGenerator:
                         is_correct=is_correct
                     )
                     db.session.add(student_answer)
-                    print(f"  ➕ Nova resposta criada para questão {question_order}")
+                    print(f"  ➕ Nova resposta criada para questão {sequential_idx} (order={question_order})")
                 
                 student_answers.append({
                     'question_order': question_order,
+                    'question_sequential_index': sequential_idx,  # Adicionar índice sequencial
                     'question_id': question_id,
                     'detected_answer': detected_answer,
                     'correct_answer': question.correct_answer,

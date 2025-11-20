@@ -58,21 +58,21 @@ class InstitutionalTestWeasyPrintGenerator:
                 )
 
                 if pdf_data:
-                # Mapear coordenadas e gerar QR code (mantido para compatibilidade)
-                coordinates = self._map_existing_form_coordinates(questions_data)
-                qr_data = self._generate_qr_code_with_metadata(
-                    student['id'], test_data['id']
-                )
+                    # Mapear coordenadas e gerar QR code (mantido para compatibilidade)
+                    coordinates = self._map_existing_form_coordinates(questions_data)
+                    qr_data = self._generate_qr_code_with_metadata(
+                        student['id'], test_data['id']
+                    )
 
-                generated_files.append({
-                    'student_id': student['id'],
-                    'student_name': student.get('name', student.get('nome', 'Nome não informado')),
-                    'pdf_data': pdf_data,
-                    'qr_code_data': json.dumps(qr_data),
-                    'coordinates': coordinates,
-                    'has_pdf_data': True,
-                    'has_answer_sheet_data': False
-                })
+                    generated_files.append({
+                        'student_id': student['id'],
+                        'student_name': student.get('name', student.get('nome', 'Nome não informado')),
+                        'pdf_data': pdf_data,
+                        'qr_code_data': json.dumps(qr_data),
+                        'coordinates': coordinates,
+                        'has_pdf_data': True,
+                        'has_answer_sheet_data': False
+                    })
 
             except Exception as e:
                 logging.error(f"Erro ao gerar PDF institucional WeasyPrint para aluno {student['id']}: {str(e)}")

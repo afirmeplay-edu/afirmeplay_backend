@@ -5297,9 +5297,19 @@ class PhysicalTestPDFGenerator:
                     center_y = int(abs_y + (h / 2))
                     radius = int(min(w, h) / 2)
                     
+                    # ADICIONAR DEBUG: Log das coordenadas calculadas (apenas primeira questão)
+                    if i == 0 and j == 0:
+                        print(f"📐 DEBUG Coordenadas Q1:")
+                        print(f"   rel_x={rel_x}, rel_y={rel_y}, w={w}, h={h}")
+                        print(f"   rect_bounds: {rect_bounds}")
+                        print(f"   abs_x={abs_x}, abs_y={abs_y}")
+                        print(f"   center_x={center_x}, center_y={center_y}, radius={radius}")
+                        print(f"   binary_image.shape: {binary_image.shape}")
+                    
                     # Verificar limites
                     h_img, w_img = binary_image.shape
                     if center_x < 0 or center_x >= w_img or center_y < 0 or center_y >= h_img:
+                        print(f"⚠️ Q{i+1} {alt_letter}: Coordenadas fora da imagem (center_x={center_x}, center_y={center_y}, img_size=({w_img}, {h_img}))")
                         respostas_por_disciplina['default'][question_key][alt_letter] = False
                         continue
                     
@@ -5431,50 +5441,60 @@ class PhysicalTestPDFGenerator:
             logging.error(f"Erro ao detectar respostas com coordenadas: {str(e)}")
             return {}
     
-    def _detectar_marcacao_circular(self, binary_image, x: int, y: int, radius: int) -> bool:
+    def _detectar_marcacao_circular(self, binary_image, center_x: int, center_y: int, radius: int) -> bool:
         """
-        Detecta marcação usando o MESMO método exato do projeto.py
+        Detecta marcação usando região circular centrada em (center_x, center_y)
+        CORRIGIDO: Agora usa o radius fornecido e assume que x,y são coordenadas do centro
         """
         try:
-            # Usar o método EXATO do projeto.py
+            import cv2
+            import numpy as np
+            
             h, w = binary_image.shape
             
-            # Definir região de 20x20 como no projeto.py
-            region_size = 20
-            x1 = max(0, x)
-            y1 = max(0, y)
-            x2 = min(w, x + region_size)
-            y2 = min(h, y + region_size)
+            # Definir região de interesse usando o radius fornecido
+            # Criar uma região quadrada que contém o círculo
+            region_size = max(radius * 2, 20)  # Mínimo de 20px para garantir área suficiente
+            
+            # Calcular cantos da região (centrado em center_x, center_y)
+            half_size = region_size // 2
+            x1 = max(0, center_x - half_size)
+            y1 = max(0, center_y - half_size)
+            x2 = min(w, center_x + half_size)
+            y2 = min(h, center_y + half_size)
             
             # Extrair região de interesse
-            interesse = binary_image[y1:y2, x1:x2]
-            if interesse.size == 0:
+            roi = binary_image[y1:y2, x1:x2]
+            if roi.size == 0:
                 return False
             
-            # Criar máscara circular (método exato do projeto.py)
-            mask = np.zeros((region_size, region_size), dtype=np.uint8)
-            centro_x = region_size // 2
-            centro_y = region_size // 2
-            raio = min(region_size, region_size) // 2
-            cv2.circle(mask, (centro_x, centro_y), raio, 255, -1)
+            # Ajustar centro relativo à ROI
+            roi_center_x = center_x - x1
+            roi_center_y = center_y - y1
+            
+            # Criar máscara circular na ROI (usar radius fornecido)
+            mask = np.zeros((y2 - y1, x2 - x1), dtype=np.uint8)
+            cv2.circle(mask, (roi_center_x, roi_center_y), radius, 255, -1)
             
             # Aplicar máscara
-            interesse_mascarado = cv2.bitwise_and(interesse, interesse, mask=mask)
+            masked_roi = cv2.bitwise_and(roi, roi, mask=mask)
             
-            # Contar pixels (método exato do projeto.py)
+            # Contar pixels brancos dentro da máscara circular
             total_pixels = cv2.countNonZero(mask)
-            pixels_brancos = cv2.countNonZero(interesse_mascarado)
+            pixels_brancos = cv2.countNonZero(masked_roi)
             
             if total_pixels == 0:
                 return False
             
             porcentagem_branco = (pixels_brancos / total_pixels) * 100
             
-            # Threshold exato do projeto.py
-            return porcentagem_branco >= 70
+            # Threshold ajustado (reduzido de 70% para 60% para melhor detecção)
+            return porcentagem_branco >= 60
             
         except Exception as e:
             logging.error(f"Erro ao detectar marcação circular: {str(e)}")
+            import traceback
+            logging.error(traceback.format_exc())
             return False
     
     # ============================================================================

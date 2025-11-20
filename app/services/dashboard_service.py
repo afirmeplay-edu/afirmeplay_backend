@@ -241,7 +241,8 @@ class DashboardService:
 
     @classmethod
     def _build_recent_evaluations(cls, scope: Dict[str, Any], limit: int = MAX_LIST_SIZE) -> List[Dict[str, Any]]:
-        test_query = Test.query.order_by(Test.created_at.desc())
+        # Usar subquery para evitar duplicatas quando há joins
+        test_query = Test.query.with_entities(Test.id).order_by(Test.created_at.desc())
 
         if scope["scope"] == "municipio" and scope.get("city_id"):
             city_school_ids = cls._extract_school_ids(scope) or []
@@ -250,6 +251,7 @@ class DashboardService:
                     test_query.join(ClassTest, ClassTest.test_id == Test.id)
                     .join(Class, Class.id == ClassTest.class_id)
                     .filter(Class.school_id.in_(city_school_ids))
+                    .distinct()
                 )
         elif scope["scope"] == "escola":
             school_ids = scope.get("school_ids") or []
@@ -258,9 +260,14 @@ class DashboardService:
                     test_query.join(ClassTest, ClassTest.test_id == Test.id)
                     .join(Class, Class.id == ClassTest.class_id)
                     .filter(Class.school_id.in_(school_ids))
+                    .distinct()
                 )
 
-        tests = test_query.limit(limit).all()
+        # Obter IDs únicos
+        test_ids = [row.id for row in test_query.limit(limit).all()]
+        
+        # Buscar objetos Test completos
+        tests = Test.query.filter(Test.id.in_(test_ids)).order_by(Test.created_at.desc()).all() if test_ids else []
         results = []
 
         for test in tests:
@@ -299,13 +306,15 @@ class DashboardService:
 
             if class_tests and class_tests[0].application:
                 application = class_tests[0].application
-                start_date = application.isoformat() if hasattr(application, "isoformat") else str(application)
+                # application é db.Text (string), não datetime
+                start_date = str(application) if application else None
             else:
                 start_date = None
 
             if class_tests and class_tests[0].expiration:
                 expiration = class_tests[0].expiration
-                end_date = expiration.isoformat() if hasattr(expiration, "isoformat") else str(expiration)
+                # expiration é db.Text (string), não datetime
+                end_date = str(expiration) if expiration else None
             else:
                 end_date = None
 
@@ -1074,7 +1083,8 @@ class DashboardService:
         if not class_ids:
             return 0
         return (
-            Test.query.join(ClassTest, ClassTest.test_id == Test.id)
+            Test.query.with_entities(Test.id)
+            .join(ClassTest, ClassTest.test_id == Test.id)
             .filter(ClassTest.class_id.in_(class_ids))
             .distinct()
             .count()
@@ -1129,7 +1139,8 @@ class DashboardService:
                 "label": "Avaliações",
                 "value": evaluations_count,
                 "created_this_month": (
-                    Test.query.join(ClassTest, ClassTest.test_id == Test.id)
+                    Test.query.with_entities(Test.id)
+                    .join(ClassTest, ClassTest.test_id == Test.id)
                     .filter(ClassTest.class_id.in_(class_ids))
                     .filter(Test.created_at >= datetime.utcnow() - timedelta(days=30))
                     .distinct()
@@ -1206,12 +1217,25 @@ class DashboardService:
         if not class_ids:
             return []
 
-        evaluations = (
-            Test.query.join(ClassTest, ClassTest.test_id == Test.id)
+        # Usar subquery para evitar duplicatas quando há joins
+        test_ids_query = (
+            Test.query.with_entities(Test.id)
+            .join(ClassTest, ClassTest.test_id == Test.id)
             .filter(ClassTest.class_id.in_(class_ids))
-            .order_by(Test.created_at.desc())
+            .distinct()
             .limit(cls.MAX_LIST_SIZE)
+        )
+        
+        # Obter IDs únicos
+        test_ids = [row.id for row in test_ids_query.all()]
+        
+        # Buscar objetos Test completos
+        evaluations = (
+            Test.query.filter(Test.id.in_(test_ids))
+            .order_by(Test.created_at.desc())
             .all()
+            if test_ids
+            else []
         )
 
         data = []
@@ -1238,7 +1262,7 @@ class DashboardService:
                     "total_students": len(sessions),
                     "completed_students": completed,
                     "created_at": evaluation.created_at.isoformat() if evaluation.created_at else None,
-                    "due_date": class_test.expiration.isoformat() if class_test and class_test.expiration else None,
+                    "due_date": str(class_test.expiration) if class_test and class_test.expiration else None,
                     "average_score": round(average_score or 0, 2),
                 }
             )

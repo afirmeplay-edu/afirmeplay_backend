@@ -242,7 +242,8 @@ class DashboardService:
     @classmethod
     def _build_recent_evaluations(cls, scope: Dict[str, Any], limit: int = MAX_LIST_SIZE) -> List[Dict[str, Any]]:
         # Usar subquery para evitar duplicatas quando há joins
-        test_query = Test.query.with_entities(Test.id).order_by(Test.created_at.desc())
+        # Incluir created_at na seleção para permitir ORDER BY com DISTINCT
+        test_query = Test.query.with_entities(Test.id, Test.created_at).order_by(Test.created_at.desc())
 
         if scope["scope"] == "municipio" and scope.get("city_id"):
             city_school_ids = cls._extract_school_ids(scope) or []
@@ -263,11 +264,16 @@ class DashboardService:
                     .distinct()
                 )
 
-        # Obter IDs únicos
+        # Obter IDs únicos (ordenados por created_at)
         test_ids = [row.id for row in test_query.limit(limit).all()]
         
-        # Buscar objetos Test completos
-        tests = Test.query.filter(Test.id.in_(test_ids)).order_by(Test.created_at.desc()).all() if test_ids else []
+        # Buscar objetos Test completos mantendo a ordem
+        # Criar um dicionário para preservar a ordem original
+        if test_ids:
+            tests_dict = {test.id: test for test in Test.query.filter(Test.id.in_(test_ids)).all()}
+            tests = [tests_dict[tid] for tid in test_ids if tid in tests_dict]
+        else:
+            tests = []
         results = []
 
         for test in tests:

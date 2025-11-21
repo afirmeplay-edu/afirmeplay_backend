@@ -1000,19 +1000,33 @@ def bulk_delete_tests():
             
             logging.info(f"🗑️ Excluídos {len(physical_forms)} formulários físicos, {total_physical_answers_deleted} respostas físicas e {len(form_coordinates)} coordenadas para teste {test.id}")
             
-            # 3. Excluir sessões de teste
+            # 3. Excluir resultados de avaliação
+            from app.models.evaluationResult import EvaluationResult
+            evaluation_results = EvaluationResult.query.filter_by(test_id=test.id).all()
+            for result in evaluation_results:
+                db.session.delete(result)
+            logging.info(f"🗑️ Excluídos {len(evaluation_results)} resultados de avaliação para teste {test.id}")
+            
+            # 4. Excluir agregados de relatórios (report_aggregates)
+            from app.models.reportAggregate import ReportAggregate
+            report_aggregates = ReportAggregate.query.filter_by(test_id=test.id).all()
+            for aggregate in report_aggregates:
+                db.session.delete(aggregate)
+            logging.info(f"🗑️ Excluídos {len(report_aggregates)} agregados de relatórios para teste {test.id}")
+            
+            # 5. Excluir sessões de teste
             test_sessions = TestSession.query.filter_by(test_id=test.id).all()
             for session in test_sessions:
                 db.session.delete(session)
             logging.info(f"🗑️ Excluídas {len(test_sessions)} sessões de teste para teste {test.id}")
             
-            # 4. Excluir aplicações de classe
+            # 6. Excluir aplicações de classe
             class_tests = ClassTest.query.filter_by(test_id=test.id).all()
             for class_test in class_tests:
                 db.session.delete(class_test)
             logging.info(f"🗑️ Excluídas {len(class_tests)} aplicações de classe para teste {test.id}")
             
-            # 5. Excluir apenas as associações de questões (test_questions)
+            # 7. Excluir apenas as associações de questões (test_questions)
             # As questões permanecem no banco para reutilização futura
             from app.models.testQuestion import TestQuestion
             test_questions = TestQuestion.query.filter_by(test_id=test.id).all()
@@ -1021,7 +1035,7 @@ def bulk_delete_tests():
                 db.session.delete(test_question)
             logging.info(f"🗑️ Removidas {len(test_questions)} associações de questões para teste {test.id} (questões preservadas)")
             
-            # 6. Finalmente, excluir o teste
+            # 8. Finalmente, excluir o teste
             db.session.delete(test)
             logging.info(f"🗑️ Teste {test.id} marcado para exclusão")
         
@@ -1114,20 +1128,27 @@ def deletar_avaliacao(test_id):
             db.session.delete(result)
         logging.info(f"🗑️ Excluídos {len(evaluation_results)} resultados de avaliação")
         
-        # 4. Excluir sessões de teste
+        # 4. Excluir agregados de relatórios (report_aggregates)
+        from app.models.reportAggregate import ReportAggregate
+        report_aggregates = ReportAggregate.query.filter_by(test_id=test_id).all()
+        for aggregate in report_aggregates:
+            db.session.delete(aggregate)
+        logging.info(f"🗑️ Excluídos {len(report_aggregates)} agregados de relatórios")
+        
+        # 5. Excluir sessões de teste
         from app.models.testSession import TestSession
         test_sessions = TestSession.query.filter_by(test_id=test_id).all()
         for session in test_sessions:
             db.session.delete(session)
         logging.info(f"🗑️ Excluídas {len(test_sessions)} sessões de teste")
         
-        # 5. Excluir aplicações de classe
+        # 6. Excluir aplicações de classe
         class_tests = ClassTest.query.filter_by(test_id=test_id).all()
         for class_test in class_tests:
             db.session.delete(class_test)
         logging.info(f"🗑️ Excluídas {len(class_tests)} aplicações de classe")
         
-        # 6. Excluir apenas as associações de questões (test_questions)
+        # 7. Excluir apenas as associações de questões (test_questions)
         # As questões permanecem no banco para reutilização futura
         from app.models.testQuestion import TestQuestion
         test_questions = TestQuestion.query.filter_by(test_id=test_id).all()
@@ -1136,7 +1157,7 @@ def deletar_avaliacao(test_id):
             db.session.delete(test_question)
         logging.info(f"🗑️ Removidas {len(test_questions)} associações de questões (questões preservadas)")
         
-        # 7. Finalmente, excluir o teste
+        # 8. Finalmente, excluir o teste
         db.session.delete(test)
         logging.info("🗑️ Excluindo a avaliação principal...")
         

@@ -7,7 +7,9 @@ import logging
 import re
 from typing import Dict, Any, Optional
 from app.openai_config.openai_config import (
-    get_openai_client, 
+    get_openai_client,
+    get_gemini_client,
+    USE_GEMINI,
     ANALYSIS_PROMPT_BASE, 
     CONTEXT_SETTINGS,
     PARTICIPATION_CLASSIFICATION_TABLE,
@@ -20,11 +22,27 @@ from app.openai_config.openai_config import (
 )
 
 class AIAnalysisService:
-    """Serviço para análise de relatórios usando IA"""
+    """Serviço para análise de relatórios usando IA (OpenAI ou Gemini)"""
     
     def __init__(self):
-        self.client = get_openai_client()
-        self.logger = logging.getLogger(__name__)
+        self.use_gemini = USE_GEMINI
+        if self.use_gemini:
+            try:
+                self.gemini_model = get_gemini_client()
+                self.client = None  # Não usar OpenAI quando usar Gemini
+                self.logger = logging.getLogger(__name__)
+                self.logger.info("Usando Google Gemini para análise de relatórios")
+            except Exception as e:
+                self.logger = logging.getLogger(__name__)
+                self.logger.warning(f"Erro ao inicializar Gemini, usando OpenAI como fallback: {str(e)}")
+                self.client = get_openai_client()
+                self.gemini_model = None
+                self.use_gemini = False
+        else:
+            self.client = get_openai_client()
+            self.gemini_model = None
+            self.logger = logging.getLogger(__name__)
+            self.logger.info("Usando OpenAI para análise de relatórios")
     
     def analyze_report_data(self, report_data: Dict[str, Any]) -> Dict[str, Any]:
         """
@@ -855,26 +873,67 @@ e recomendações práticas para a escola.
         return formatted
     
     def _call_openai(self, prompt: str) -> str:
-        """Chama OpenAI API"""
+        """Chama API de IA (OpenAI ou Gemini)"""
         try:
-            response = self.client.chat.completions.create(
-                model=CONTEXT_SETTINGS['model'],
-                messages=[
-                    {
-                        "role": "system", 
-                        "content": "Você é um especialista em educação e análise de dados educacionais. Sempre gere texto humanizado e profissional, SEM usar formatação markdown (sem #, ##, *, **, etc). Use apenas parágrafos normais e títulos em maiúsculas seguidos de dois pontos."
-                    },
-                    {"role": "user", "content": prompt}
-                ],
-                max_tokens=CONTEXT_SETTINGS['max_tokens'],
-                temperature=CONTEXT_SETTINGS['temperature']
-            )
+            system_prompt = "Você é um especialista em educação e análise de dados educacionais. Sempre gere texto humanizado e profissional, SEM usar formatação markdown (sem #, ##, *, **, etc). Use apenas parágrafos normais e títulos em maiúsculas seguidos de dois pontos."
             
-            return response.choices[0].message.content
-            
+            if self.use_gemini and self.gemini_model:
+                # Usar Gemini
+                try:
+                    # Combinar system prompt com user prompt para Gemini
+                    full_prompt = f"{system_prompt}\n\n{prompt}"
+                    
+                    response = self.gemini_model.generate_content(
+                        full_prompt,
+                        generation_config={
+                            "temperature": CONTEXT_SETTINGS['temperature'],
+                            "max_output_tokens": CONTEXT_SETTINGS['max_tokens'],
+                        }
+                    )
+                    
+                    # Extrair texto da resposta
+                    if hasattr(response, 'text'):
+                        return response.text
+                    elif hasattr(response, 'candidates') and len(response.candidates) > 0:
+                        return response.candidates[0].content.parts[0].text
+                    else:
+                        raise Exception("Resposta do Gemini em formato inesperado")
+                        
+                except Exception as e:
+                    self.logger.error(f"Erro ao chamar Gemini: {str(e)}")
+                    # Tentar fallback para OpenAI se disponível
+                    if self.client:
+                        self.logger.info("Tentando fallback para OpenAI...")
+                        self.use_gemini = False
+                        return self._call_openai_openai(prompt)
+                    raise
+            else:
+                # Usar OpenAI (código original)
+                return self._call_openai_openai(prompt)
+                
         except Exception as e:
-            self.logger.error(f"Erro ao chamar OpenAI: {str(e)}")
+            self.logger.error(f"Erro ao chamar API de IA: {str(e)}")
             raise
+    
+    def _call_openai_openai(self, prompt: str) -> str:
+        """Chama OpenAI API (método auxiliar)"""
+        if not self.client:
+            raise Exception("Cliente OpenAI não está disponível")
+            
+        response = self.client.chat.completions.create(
+            model=CONTEXT_SETTINGS['model'],
+            messages=[
+                {
+                    "role": "system", 
+                    "content": "Você é um especialista em educação e análise de dados educacionais. Sempre gere texto humanizado e profissional, SEM usar formatação markdown (sem #, ##, *, **, etc). Use apenas parágrafos normais e títulos em maiúsculas seguidos de dois pontos."
+                },
+                {"role": "user", "content": prompt}
+            ],
+            max_tokens=CONTEXT_SETTINGS['max_tokens'],
+            temperature=CONTEXT_SETTINGS['temperature']
+        )
+        
+        return response.choices[0].message.content
     
     def _process_ai_response(self, ai_response: str) -> Dict[str, str]:
         """Processa resposta da IA e organiza em seções"""

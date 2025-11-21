@@ -513,12 +513,11 @@ def dados_json(evaluation_id: str):
         # Para professores, buscar turmas específicas
         if scope_type == 'teacher':
             from app.permissions.utils import get_teacher_classes
+            from app.permissions.rules import can_view_test
             
-            # ✅ CORRIGIDO: Professor só vê avaliações que CRIOU E foram aplicadas nas turmas dele
-            professor_criou_avaliacao = test.created_by == user.get('id')
-            
-            if not professor_criou_avaliacao:
-                return jsonify({"error": "Acesso negado: você não criou esta avaliação"}), 403
+            # Professor pode ver se CRIOU OU se foi aplicada nas turmas dele
+            if not can_view_test(user, evaluation_id):
+                return jsonify({"error": "Acesso negado: você não tem permissão para ver esta avaliação"}), 403
             
             # Verificar se foi aplicada nas turmas do professor
             teacher_class_ids = get_teacher_classes(user.get('id'))
@@ -959,12 +958,11 @@ def relatorio_pdf(evaluation_id: str):
         # Para professores, buscar turmas específicas
         if scope_type == 'teacher':
             from app.permissions.utils import get_teacher_classes
+            from app.permissions.rules import can_view_test
             
-            # ✅ CORRIGIDO: Professor só vê avaliações que CRIOU E foram aplicadas nas turmas dele
-            professor_criou_avaliacao = test.created_by == user.get('id')
-            
-            if not professor_criou_avaliacao:
-                return jsonify({"error": "Acesso negado: você não criou esta avaliação"}), 403
+            # Professor pode ver se CRIOU OU se foi aplicada nas turmas dele
+            if not can_view_test(user, evaluation_id):
+                return jsonify({"error": "Acesso negado: você não tem permissão para ver esta avaliação"}), 403
             
             # Verificar se foi aplicada nas turmas do professor
             teacher_class_ids = get_teacher_classes(user.get('id'))

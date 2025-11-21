@@ -20,7 +20,6 @@ from typing import Dict, Any, Optional
 from app.models.test import Test
 from app.models.school import School
 from app.models.studentClass import Class
-# ⚠️ ClassSubject não é usado no sistema (desconsiderado)
 from app.models.teacherClass import TeacherClass
 from app.models.classTest import ClassTest
 from app.models.teacher import Teacher
@@ -86,26 +85,20 @@ def can_view_test(user: Dict[str, Any], test_id: str) -> bool:
             if not class_ids_avaliacao:
                 return False
             
-            # Buscar turmas onde o professor está vinculado via ClassSubject
-            class_subjects = ClassSubject.query.filter_by(teacher_id=teacher.id).all()
-            teacher_class_ids_subjects = [cs.class_id for cs in class_subjects]
-            
             # Buscar turmas onde o professor está vinculado via TeacherClass
             teacher_classes = TeacherClass.query.filter_by(teacher_id=teacher.id).all()
-            teacher_class_ids_direct = [tc.class_id for tc in teacher_classes]
+            teacher_class_ids = [tc.class_id for tc in teacher_classes]
             
-            # Combinar todas as turmas onde o professor está vinculado
-            all_teacher_class_ids = list(set(teacher_class_ids_subjects + teacher_class_ids_direct))
-            
-            if not all_teacher_class_ids:
+            if not teacher_class_ids:
                 return False
             
             # Verificar INTERSECÇÃO entre turmas da avaliação E turmas do professor
             avaliacao_turmas = set(class_ids_avaliacao)
-            professor_turmas = set(all_teacher_class_ids)
+            professor_turmas = set(teacher_class_ids)
+            interseccao = avaliacao_turmas.intersection(professor_turmas)
             
             # Se há pelo menos uma turma em comum, o professor pode ver
-            return len(avaliacao_turmas.intersection(professor_turmas)) > 0
+            return len(interseccao) > 0
         
         # Diretor e Coordenador: podem ver se a avaliação foi aplicada em sua escola
         elif role in [Roles.DIRETOR, Roles.COORDENADOR]:

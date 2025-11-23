@@ -1,9 +1,11 @@
 from flask import Blueprint, request, jsonify
 from app.permissions.decorators import role_required, get_current_user_from_token
+from app.permissions.rules import get_user_permission_scope
 from app import db
-from app.models import CalendarEvent, CalendarEventUser
+from app.models import CalendarEvent, CalendarEventUser, City, School, Grade, Class
 from app.services.calendar_event_service import CalendarEventService
 from datetime import datetime
+from typing import List, Dict, Any
 
 
 bp = Blueprint('calendar', __name__, url_prefix='/calendar')
@@ -38,6 +40,13 @@ def create_event():
 
     if data.get('end_at') and data['end_at'] < data['start_at']:
         return jsonify({"error": "end_at não pode ser anterior a start_at"}), 400
+
+    # Validar permissões de targets
+    targets = data.get('targets', [])
+    if targets:
+        is_valid, error_message = CalendarEventService.validate_targets_by_role(user, targets)
+        if not is_valid:
+            return jsonify({"error": error_message}), 403
 
     event = CalendarEventService.create_event(data, user)
     return jsonify({"event": to_fullcalendar_event(event)}), 201
@@ -169,5 +178,178 @@ def mark_dismiss(event_id: str):
     user = get_current_user_from_token()
     CalendarEventService.mark_dismiss(event_id, user['id'])
     return jsonify({"success": True}), 200
+
+
+@bp.route('/targets/me', methods=['GET'])
+@role_required("admin", "professor", "coordenador", "diretor", "tecadm")
+def obter_meus_targets():
+    """
+    Retorna os targets disponíveis para o usuário logado baseado no seu role.
+    
+    - Admin: retorna municípios, escolas e turmas (todas)
+    - Tecadm: retorna escolas e turmas do município
+    - Diretor/Coordenador: retorna turmas da escola
+    - Professor: retorna escolas vinculadas e turmas vinculadas
+    """
+    try:
+        user = get_current_user_from_token()
+        if not user:
+            return jsonify({"error": "Usuário não encontrado"}), 401
+
+        # Verificar permissões
+        permissao = get_user_permission_scope(user)
+        if not permissao['permitted']:
+            return jsonify({"error": permissao.get('error', 'Acesso negado')}), 403
+
+        response = {}
+        user_role = user.get('role', '').lower()
+
+        # Admin: retorna municípios, escolas e turmas
+        if user_role == 'admin':
+            response['municipios'] = _obter_todos_municipios()
+            response['escolas'] = _obter_todas_escolas()
+            response['turmas'] = _obter_todas_turmas_formatadas()
+        
+        # Tecadm: retorna escolas e turmas do município
+        elif user_role == 'tecadm':
+            city_id = user.get('city_id') or user.get('tenant_id')
+            if city_id:
+                response['escolas'] = _obter_escolas_por_municipio(city_id)
+                response['turmas'] = _obter_turmas_por_municipio_formatadas(city_id)
+        
+        # Diretor/Coordenador: retorna turmas da escola
+        elif user_role in ['diretor', 'coordenador']:
+            from app.permissions.utils import get_manager_school
+            school_id = get_manager_school(user['id'])
+            if school_id:
+                response['turmas'] = _obter_turmas_por_escola_formatadas(school_id)
+        
+        # Professor: retorna escolas vinculadas e turmas vinculadas
+        elif user_role == 'professor':
+            from app.permissions.utils import get_teacher_schools, get_teacher_classes
+            school_ids = get_teacher_schools(user['id'])
+            class_ids = get_teacher_classes(user['id'])
+            
+            if school_ids:
+                response['escolas'] = _obter_escolas_por_ids(school_ids)
+            if class_ids:
+                response['turmas'] = _obter_turmas_por_ids_formatadas(class_ids)
+
+        return jsonify(response), 200
+
+    except Exception as e:
+        import logging
+        logging.error(f"Erro ao obter targets: {str(e)}", exc_info=True)
+        return jsonify({"error": "Erro ao obter targets", "details": str(e)}), 500
+
+
+def _obter_todos_municipios() -> List[Dict[str, Any]]:
+    """Retorna todos os municípios."""
+    municipios = City.query.all()
+    return [{"id": str(m.id), "nome": m.name, "target_type": "MUNICIPALITY"} for m in municipios]
+
+
+def _obter_todas_escolas() -> List[Dict[str, Any]]:
+    """Retorna todas as escolas."""
+    escolas = School.query.all()
+    return [{"id": str(e.id), "nome": e.name, "target_type": "SCHOOL"} for e in escolas]
+
+
+def _obter_todas_turmas_formatadas() -> List[Dict[str, Any]]:
+    """Retorna todas as turmas formatadas como 'Série - Turma'."""
+    turmas = Class.query.join(Grade, Class.grade_id == Grade.id).all()
+    result = []
+    for turma in turmas:
+        serie_nome = turma.grade.name if turma.grade else "Sem série"
+        turma_nome = turma.name or "Sem nome"
+        nome_formatado = f"{serie_nome} - {turma_nome}"
+        
+        result.append({
+            "id": str(turma.id),
+            "nome": nome_formatado,
+            "target_type": "CLASS",
+            "serie_id": str(turma.grade_id) if turma.grade_id else None,
+            "serie_nome": serie_nome,
+            "escola_id": turma.school_id,
+            "escola_nome": turma.school.name if turma.school else None
+        })
+    return result
+
+
+def _obter_escolas_por_municipio(city_id: str) -> List[Dict[str, Any]]:
+    """Retorna escolas de um município."""
+    escolas = School.query.filter_by(city_id=city_id).all()
+    return [{"id": str(e.id), "nome": e.name, "target_type": "SCHOOL"} for e in escolas]
+
+
+def _obter_turmas_por_municipio_formatadas(city_id: str) -> List[Dict[str, Any]]:
+    """Retorna turmas do município formatadas como 'Série - Turma'."""
+    turmas = Class.query.join(School, Class.school_id == School.id)\
+                        .join(Grade, Class.grade_id == Grade.id)\
+                        .filter(School.city_id == city_id).all()
+    result = []
+    for turma in turmas:
+        serie_nome = turma.grade.name if turma.grade else "Sem série"
+        turma_nome = turma.name or "Sem nome"
+        nome_formatado = f"{serie_nome} - {turma_nome}"
+        
+        result.append({
+            "id": str(turma.id),
+            "nome": nome_formatado,
+            "target_type": "CLASS",
+            "serie_id": str(turma.grade_id) if turma.grade_id else None,
+            "serie_nome": serie_nome,
+            "escola_id": turma.school_id,
+            "escola_nome": turma.school.name if turma.school else None
+        })
+    return result
+
+
+def _obter_turmas_por_escola_formatadas(school_id: str) -> List[Dict[str, Any]]:
+    """Retorna turmas da escola formatadas como 'Série - Turma'."""
+    turmas = Class.query.join(Grade, Class.grade_id == Grade.id)\
+                        .filter(Class.school_id == school_id).all()
+    result = []
+    for turma in turmas:
+        serie_nome = turma.grade.name if turma.grade else "Sem série"
+        turma_nome = turma.name or "Sem nome"
+        nome_formatado = f"{serie_nome} - {turma_nome}"
+        
+        result.append({
+            "id": str(turma.id),
+            "nome": nome_formatado,
+            "target_type": "CLASS",
+            "serie_id": str(turma.grade_id) if turma.grade_id else None,
+            "serie_nome": serie_nome
+        })
+    return result
+
+
+def _obter_escolas_por_ids(school_ids: List[str]) -> List[Dict[str, Any]]:
+    """Retorna escolas por IDs."""
+    escolas = School.query.filter(School.id.in_(school_ids)).all()
+    return [{"id": str(e.id), "nome": e.name, "target_type": "SCHOOL"} for e in escolas]
+
+
+def _obter_turmas_por_ids_formatadas(class_ids: List[str]) -> List[Dict[str, Any]]:
+    """Retorna turmas por IDs formatadas como 'Série - Turma'."""
+    turmas = Class.query.join(Grade, Class.grade_id == Grade.id)\
+                        .filter(Class.id.in_(class_ids)).all()
+    result = []
+    for turma in turmas:
+        serie_nome = turma.grade.name if turma.grade else "Sem série"
+        turma_nome = turma.name or "Sem nome"
+        nome_formatado = f"{serie_nome} - {turma_nome}"
+        
+        result.append({
+            "id": str(turma.id),
+            "nome": nome_formatado,
+            "target_type": "CLASS",
+            "serie_id": str(turma.grade_id) if turma.grade_id else None,
+            "serie_nome": serie_nome,
+            "escola_id": turma.school_id,
+            "escola_nome": turma.school.name if turma.school else None
+        })
+    return result
 
 

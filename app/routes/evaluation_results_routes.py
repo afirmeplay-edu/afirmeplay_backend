@@ -3041,34 +3041,30 @@ def recalcular_avaliacao():
 @role_required("admin", "professor", "coordenador", "diretor", "tecadm")
 def rebuild_report_cache(test_id: str):
     """
-    Regera e persiste os agregados de relatório para uma avaliação ou todas as avaliações aplicadas.
-
-    Permite reconstruir dados consolidados para relatórios PDF/JSON por escopo.
+    Regera e persiste os agregados de relatório para uma avaliação.
     
-    Body (JSON):
-    - rebuild_all: bool (default: False) - Rebuild todos os escopos da avaliação
+    Por padrão, sempre reconstrói TODOS os escopos da avaliação (overall, school, city, teacher).
+    
+    Body (JSON) - opcional:
     - rebuild_all_tests: bool (default: False) - Rebuild cache de TODAS as avaliações aplicadas
-    - scope_type: str (opcional) - Tipo de escopo específico (overall, school, city, teacher)
-    - scope_id: str (opcional) - ID do escopo específico
+    - rebuild_ai: bool (default: True) - Se deve regenerar análise de IA também
     """
     try:
         payload = request.get_json(silent=True) or {}
         rebuild_all_tests = bool(payload.get('rebuild_all_tests', False))
+        rebuild_ai = bool(payload.get('rebuild_ai', True))  # Por padrão, regenerar IA
         
         # Se rebuild_all_tests, processar todas as avaliações aplicadas
         if rebuild_all_tests:
             return _rebuild_all_tests_cache()
         
-        # Caso contrário, processar apenas a avaliação específica
+        # Processar apenas a avaliação específica
         test = Test.query.get(test_id)
         if not test:
             return jsonify({"error": "Avaliação não encontrada"}), 404
 
-        rebuild_all = bool(payload.get('rebuild_all', False))
-        requested_scope_type = payload.get('scope_type')
-        requested_scope_id = payload.get('scope_id')
-
         from app.routes.report_routes import _montar_resposta_relatorio, _montar_resposta_relatorio_por_turmas
+        from app.services.ai_analysis_service import AIAnalysisService
 
         processed_scopes = []
 
@@ -3101,7 +3097,7 @@ def rebuild_report_cache(test_id: str):
                 else:
                     school_id = scope_id if scope_type == 'school' else None
                     city_id = scope_id if scope_type == 'city' else None
-                    context = _montar_resposta_relatorio(test_id, school_id, city_id)
+                    context = _montar_resposta_relatorio(test_id, school_id, city_id, include_ai=False)
                 
                 student_count = (
                     context
@@ -3109,6 +3105,8 @@ def rebuild_report_cache(test_id: str):
                     .get('total_geral', {})
                     .get('avaliados', 0)
                 )
+                
+                # Salvar payload
                 ReportAggregateService.save_payload(
                     test_id=test_id,
                     scope_type=scope_type,
@@ -3117,6 +3115,41 @@ def rebuild_report_cache(test_id: str):
                     student_count=student_count or 0,
                     commit=False,
                 )
+                
+                # Regenerar análise de IA se solicitado
+                if rebuild_ai:
+                    try:
+                        # Marcar análise como dirty primeiro
+                        ReportAggregateService.mark_ai_dirty(
+                            test_id=test_id,
+                            scope_type=scope_type,
+                            scope_id=scope_id if scope_type != 'overall' else None,
+                            commit=False
+                        )
+                        
+                        # Preparar dados para análise de IA
+                        report_data = context.copy()
+                        report_data['scope_type'] = scope_type
+                        report_data['scope_id'] = scope_id
+                        
+                        # Gerar análise de IA
+                        ai_service = AIAnalysisService()
+                        ai_analysis = ai_service.analyze_report_data(report_data)
+                        
+                        # Salvar análise de IA
+                        ReportAggregateService.save_ai_analysis(
+                            test_id=test_id,
+                            scope_type=scope_type,
+                            scope_id=scope_id if scope_type != 'overall' else None,
+                            ai_analysis=ai_analysis,
+                            commit=False
+                        )
+                        
+                        logging.info(f"Análise de IA regenerada para {scope_type}:{scope_id}")
+                    except Exception as e:
+                        logging.error(f"Erro ao regenerar análise de IA para {scope_type}:{scope_id}: {str(e)}", exc_info=True)
+                        # Continuar mesmo se falhar a análise de IA
+                
                 processed_scopes.append({
                     "scope_type": scope_type,
                     "scope_id": scope_id,
@@ -3125,57 +3158,50 @@ def rebuild_report_cache(test_id: str):
             except Exception as e:
                 logging.error(f"Erro ao processar escopo {scope_type}:{scope_id} para avaliação {test_id}: {str(e)}", exc_info=True)
 
-        if rebuild_all:
-            # Geral
-            build_and_save('overall', None)
+        # Sempre reconstruir todos os escopos
+        # 1. Overall
+        build_and_save('overall', None)
 
-            # Identificar escolas e municípios ligados à avaliação
-            class_tests = ClassTest.query.filter_by(test_id=test_id).all()
-            school_ids = set()
-            city_ids = set()
-            teacher_ids = set()
+        # 2. Identificar escolas e municípios ligados à avaliação
+        class_tests = ClassTest.query.filter_by(test_id=test_id).all()
+        school_ids = set()
+        city_ids = set()
+        teacher_ids = set()
 
-            for class_test in class_tests:
-                turma = Class.query.get(class_test.class_id)
-                if turma and turma.school_id:
-                    school_ids.add(turma.school_id)
-                    escola = School.query.get(turma.school_id)
-                    if escola and escola.city_id:
-                        city_ids.add(escola.city_id)
-                
-                # Buscar professores vinculados à turma
-                from app.models.teacherClass import TeacherClass
-                teacher_classes = TeacherClass.query.filter_by(class_id=class_test.class_id).all()
-                for tc in teacher_classes:
-                    teacher_ids.add(tc.teacher_id)
-
-            for school_id in school_ids:
-                build_and_save('school', school_id)
-
-            for city_id in city_ids:
-                build_and_save('city', city_id)
+        for class_test in class_tests:
+            turma = Class.query.get(class_test.class_id)
+            if turma and turma.school_id:
+                school_ids.add(turma.school_id)
+                escola = School.query.get(turma.school_id)
+                if escola and escola.city_id:
+                    city_ids.add(escola.city_id)
             
-            # Rebuild cache para todos os professores vinculados
-            for teacher_id in teacher_ids:
-                build_and_save('teacher', teacher_id)
-        else:
-            scope_type = (requested_scope_type or 'overall').lower()
-            if scope_type not in {'overall', 'school', 'city', 'teacher'}:
-                return jsonify({"error": "scope_type inválido. Use overall, school, city ou teacher."}), 400
+            # Buscar professores vinculados à turma
+            from app.models.teacherClass import TeacherClass
+            teacher_classes = TeacherClass.query.filter_by(class_id=class_test.class_id).all()
+            for tc in teacher_classes:
+                teacher_ids.add(tc.teacher_id)
 
-            scope_id = requested_scope_id if scope_type in {'school', 'city', 'teacher'} else None
-            if scope_type in {'school', 'city', 'teacher'} and not scope_id:
-                return jsonify({"error": "scope_id é obrigatório para escopos school, city ou teacher"}), 400
+        # 3. Rebuild cache para todas as escolas
+        for school_id in school_ids:
+            build_and_save('school', school_id)
 
-            build_and_save(scope_type, scope_id)
+        # 4. Rebuild cache para todos os municípios
+        for city_id in city_ids:
+            build_and_save('city', city_id)
+        
+        # 5. Rebuild cache para todos os professores vinculados
+        for teacher_id in teacher_ids:
+            build_and_save('teacher', teacher_id)
 
         db.session.commit()
 
         return jsonify({
-            "message": "Cache de relatório regenerado com sucesso",
+            "message": "Cache de relatório regenerado com sucesso para todos os escopos",
             "test_id": test_id,
-            "rebuild_all": rebuild_all,
-            "processed_scopes": processed_scopes
+            "rebuild_ai": rebuild_ai,
+            "processed_scopes": processed_scopes,
+            "total_scopes": len(processed_scopes)
         }), 200
 
     except Exception as e:

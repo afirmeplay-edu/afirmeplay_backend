@@ -23,12 +23,12 @@ else:
     USE_GEMINI = False  # Usar OpenAI se não houver chave do Gemini
 
 # Configurações do modelo OpenAI
-OPENAI_MODEL = "gpt-4o-mini"  # Modelo mais econômico e eficiente
+OPENAI_MODEL = "gemini-1.5-flash"  # Modelo mais econômico e eficiente
 OPENAI_MAX_TOKENS = 6000  # Aumentado para acomodar todas as análises em uma única chamada
 OPENAI_TEMPERATURE = 0.7
 
 # Configurações do modelo Gemini
-GEMINI_MODEL = "gemini-1.5-flash"  # Modelo mais rápido e econômico
+GEMINI_MODEL = "gemini-2.5-pro"  # Modelo mais rápido e econômico
 # GEMINI_MODEL = "gemini-1.5-pro"  # Modelo mais poderoso, mas mais lento
 GEMINI_MAX_TOKENS = 8192  # Limite do Gemini Flash
 GEMINI_TEMPERATURE = 0.7

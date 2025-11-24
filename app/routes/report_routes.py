@@ -21,7 +21,9 @@ from app.models.classTest import ClassTest
 from app.models.evaluationResult import EvaluationResult
 from app import db
 import logging
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Union
+import math
+import unicodedata
 from sqlalchemy import func, case, desc
 from datetime import datetime
 from sqlalchemy.orm import joinedload
@@ -332,10 +334,20 @@ def relatorio_completo(evaluation_id: str):
         if not test:
             return jsonify({"error": "Avaliação não encontrada"}), 404
         
-        # Buscar turmas onde a avaliação foi aplicada
-        class_tests = ClassTest.query.filter_by(test_id=evaluation_id).all()
+        # Determinar escopo a partir dos parâmetros de query
+        school_id = request.args.get('school_id')
+        city_id = request.args.get('city_id')
+        scope_type, scope_id = _determinar_escopo_relatorio(school_id, city_id)
+
+        # Buscar turmas conforme o escopo selecionado
+        class_tests = _buscar_turmas_por_escopo(evaluation_id, scope_type, scope_id)
         if not class_tests:
-            return jsonify({"error": "Avaliação não foi aplicada em nenhuma turma"}), 404
+            if scope_type == 'school':
+                return jsonify({"error": "Avaliação não foi aplicada em nenhuma turma da escola especificada"}), 404
+            elif scope_type == 'city':
+                return jsonify({"error": "Avaliação não foi aplicada em nenhuma turma do município especificado"}), 404
+            else:
+                return jsonify({"error": "Avaliação não foi aplicada em nenhuma turma"}), 404
         
         # Obter dados da avaliação
         course_name = _obter_nome_curso(test)
@@ -350,22 +362,22 @@ def relatorio_completo(evaluation_id: str):
         logging.info(f"Disciplinas identificadas para avaliação {evaluation_id}: {avaliacao_data['disciplinas']}")
         
         # 1. Total de alunos que realizaram a avaliação
-        total_alunos = _calcular_totais_alunos(evaluation_id, class_tests)
+        total_alunos = _calcular_totais_alunos_por_escopo(evaluation_id, class_tests, scope_type)
         
-        # 2. Níveis de Aprendizagem por turma
-        niveis_aprendizagem = _calcular_niveis_aprendizagem(evaluation_id, class_tests)
+        # 2. Níveis de Aprendizagem por escopo
+        niveis_aprendizagem = _calcular_niveis_aprendizagem_por_escopo(evaluation_id, class_tests, scope_type)
         logging.info(f"Níveis de aprendizagem calculados para disciplinas: {list(niveis_aprendizagem.keys())}")
         
         # 3. Proficiência
-        proficiencia = _calcular_proficiencia(evaluation_id, class_tests)
+        proficiencia = _calcular_proficiencia_por_escopo(evaluation_id, class_tests, scope_type)
         logging.info(f"Proficiência calculada para disciplinas: {list(proficiencia.get('por_disciplina', {}).keys())}")
         
-        # 4. Nota Geral por turma
-        nota_geral = _calcular_nota_geral(evaluation_id, class_tests)
+        # 4. Nota Geral
+        nota_geral = _calcular_nota_geral_por_escopo(evaluation_id, class_tests, scope_type)
         logging.info(f"Nota geral calculada para disciplinas: {list(nota_geral.get('por_disciplina', {}).keys())}")
         
         # 5. Acertos por habilidade
-        acertos_habilidade = _calcular_acertos_habilidade(evaluation_id)
+        acertos_habilidade = _calcular_acertos_habilidade_por_escopo(evaluation_id, class_tests, scope_type)
         logging.info(f"Acertos por habilidade calculados para disciplinas: {list(acertos_habilidade.keys())}")
         
         return jsonify({
@@ -374,7 +386,13 @@ def relatorio_completo(evaluation_id: str):
             "niveis_aprendizagem": niveis_aprendizagem,
             "proficiencia": proficiencia,
             "nota_geral": nota_geral,
-            "acertos_por_habilidade": acertos_habilidade
+            "acertos_por_habilidade": acertos_habilidade,
+            "escopo": {
+                "tipo": scope_type,
+                "id": scope_id,
+                "school_id": school_id,
+                "city_id": city_id
+            }
         }), 200
         
     except Exception as e:
@@ -1124,6 +1142,240 @@ def relatorio_pdf(evaluation_id: str):
         import traceback
         traceback_str = traceback.format_exc()
         logging.error(f"Erro ao gerar relatório PDF: {str(e)}\n{traceback_str}")
+        return jsonify({"error": "Erro interno do servidor", "details": str(e)}), 500
+
+
+def _criar_badge_proficiencia(proficiency_level: str, proficiency_label: str) -> Dict[str, str]:
+    """
+    Cria objeto badge baseado no nível de proficiência
+    
+    Args:
+        proficiency_level: Nível de proficiência (avancado, adequado, basico, abaixo_do_basico)
+        proficiency_label: Label do nível (Avançado, Adequado, etc.)
+    
+    Returns:
+        Dict com bg, text e label
+    """
+    cores = {
+        'avancado': {'bg': '#16A34A', 'text': '#FFFFFF'},
+        'adequado': {'bg': '#22C55E', 'text': '#FFFFFF'},
+        'basico': {'bg': '#F59E0B', 'text': '#FFFFFF'},
+        'abaixo_do_basico': {'bg': '#DC2626', 'text': '#FFFFFF'}
+    }
+    
+    cor = cores.get(proficiency_level.lower(), {'bg': '#6B7280', 'text': '#FFFFFF'})
+    return {
+        'bg': cor['bg'],
+        'text': cor['text'],
+        'label': proficiency_label
+    }
+
+
+def _transformar_dados_frontend_para_template(dados_frontend: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Transforma os dados enviados pelo frontend para o formato esperado pelo template
+    
+    Args:
+        dados_frontend: Dados JSON enviados pelo frontend
+    
+    Returns:
+        Dict com dados formatados para o template
+    """
+    from datetime import datetime
+    
+    # Extrair dados do frontend
+    evaluation = dados_frontend.get('evaluation', {})
+    summary = dados_frontend.get('summary', {})
+    totals = dados_frontend.get('totals', {})
+    classes = dados_frontend.get('classes', [])
+    charts = dados_frontend.get('charts', [])
+    metadata = dados_frontend.get('metadata', {})
+    
+    # Buscar dados adicionais do banco
+    municipality_name = "Município não informado"
+    state_name = "Estado não informado"
+    school_name = metadata.get('school_name') or "Escola não informada"
+    
+    # Buscar município
+    if metadata.get('municipality_id'):
+        city = City.query.get(metadata['municipality_id'])
+        if city:
+            municipality_name = city.name
+            state_name = city.state or metadata.get('state_id', 'Estado não informado')
+    
+    # Se não encontrou município, tentar buscar pela escola
+    if municipality_name == "Município não informado" and metadata.get('school_id'):
+        school = School.query.get(metadata['school_id'])
+        if school and school.city:
+            municipality_name = school.city.name
+            state_name = school.city.state or metadata.get('state_id', 'Estado não informado')
+            if not school_name or school_name == "Escola não informada":
+                school_name = school.name
+    
+    # Criar badge para summary
+    summary_badge = None
+    if summary.get('proficiency_level') and summary.get('proficiency_label'):
+        summary_badge = _criar_badge_proficiencia(
+            summary['proficiency_level'],
+            summary['proficiency_label']
+        )
+    
+    # Transformar classes em class_rows
+    class_rows = []
+    for class_data in classes:
+        badge = None
+        if class_data.get('proficiency_level') and class_data.get('proficiency_label'):
+            badge = _criar_badge_proficiencia(
+                class_data['proficiency_level'],
+                class_data['proficiency_label']
+            )
+        
+        class_rows.append({
+            'turma': class_data.get('turma', ''),
+            'media_lp': class_data.get('media_lp', 0),
+            'media_mat': class_data.get('media_mat', 0),
+            'media_geral': class_data.get('media_geral', 0),
+            'comparecimento': class_data.get('comparecimento', 0),
+            'proficiencia_media': class_data.get('proficiencia_media', 0),
+            'badge': badge
+        })
+    
+    # Criar total_row a partir do summary
+    total_row = {
+        'turma': 'Total' if metadata.get('scope') == 'escola' else 'Total Município',
+        'media_lp': summary.get('media_lp', 0),
+        'media_mat': summary.get('media_mat', 0),
+        'media_geral': summary.get('media_geral', 0),
+        'comparecimento': summary.get('comparecimento', 0),
+        'proficiencia_media': summary.get('proficiencia_media', 0),
+        'badge': summary_badge
+    }
+    
+    # Transformar charts: renomear segments para legend
+    charts_transformados = []
+    for chart in charts:
+        charts_transformados.append({
+            'title': chart.get('title', ''),
+            'total': chart.get('total', 0),
+            'legend': chart.get('segments', [])  # Renomear segments para legend
+        })
+    
+    # Gerar data de geração
+    generated_at = datetime.now().strftime("%d/%m/%Y %H:%M")
+    
+    # Montar dados para o template
+    return {
+        'generated_at': generated_at,
+        'municipality': municipality_name,
+        'state': state_name,
+        'school_name': school_name,
+        'evaluation': {
+            'title': evaluation.get('title', 'AVALIAÇÃO')
+        },
+        'metadata': {
+            'scope': metadata.get('scope', 'escola')
+        },
+        'summary': {
+            'media_lp': summary.get('media_lp', 0),
+            'media_mat': summary.get('media_mat', 0),
+            'media_geral': summary.get('media_geral', 0),
+            'proficiencia_media': summary.get('proficiencia_media', 0),
+            'badge': summary_badge
+        },
+        'class_rows': class_rows,
+        'total_row': total_row,
+        'charts': charts_transformados,
+        'totals': {
+            'matriculados': totals.get('matriculados', 0),
+            'avaliados': totals.get('avaliados', 0),
+            'percentual': totals.get('percentual', 0)
+        }
+    }
+
+
+@bp.route('/relatorios/relatorio-escolar-pdf', methods=['OPTIONS'])
+def relatorio_escolar_pdf_options():
+    """
+    Trata requisições OPTIONS (CORS preflight) para relatório escolar PDF
+    """
+    response = make_response()
+    response.headers.add('Access-Control-Allow-Origin', '*')
+    response.headers.add('Access-Control-Allow-Headers', 'Content-Type, Authorization')
+    response.headers.add('Access-Control-Allow-Methods', 'POST, OPTIONS')
+    return response
+
+
+@bp.route('/relatorios/relatorio-escolar-pdf', methods=['POST'])
+@jwt_required()
+@role_required("admin", "professor", "coordenador", "diretor", "tecadm")
+def relatorio_escolar_pdf():
+    """
+    Gera relatório escolar PDF a partir de dados enviados pelo frontend
+    
+    Recebe um JSON com os dados do relatório e gera um PDF usando o template relatorio_escolar_pdf.html
+    
+    Returns:
+        Arquivo PDF do relatório para download
+    """
+    try:
+        # Obter dados do frontend
+        dados_frontend = request.get_json()
+        if not dados_frontend:
+            return jsonify({"error": "Dados não fornecidos"}), 400
+        
+        # Transformar dados para o formato do template
+        template_data = _transformar_dados_frontend_para_template(dados_frontend)
+        
+        # Configurar Jinja2
+        templates_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'templates')
+        env = Environment(loader=FileSystemLoader(templates_dir), autoescape=select_autoescape(['html', 'xml']))
+        
+        # Adicionar filtro batch para agrupar charts em pares
+        def batch_filter(items, n, fillvalue=None):
+            """Agrupa itens em lotes de n elementos"""
+            items = list(items)
+            for i in range(0, len(items), n):
+                batch = items[i:i+n]
+                while len(batch) < n:
+                    batch.append(fillvalue)
+                yield batch
+        
+        # Adicionar filtro para formatação de números
+        def format_float(value, decimals=1):
+            """Formata número float com n casas decimais"""
+            try:
+                return f"{float(value):.{decimals}f}"
+            except (TypeError, ValueError):
+                return "0.0"
+        
+        env.filters['batch'] = batch_filter
+        env.filters['format_float'] = format_float
+        
+        # Renderizar template
+        template = env.get_template('relatorio_escolar_pdf.html')
+        html_content = template.render(**template_data)
+        
+        # Gerar PDF com WeasyPrint
+        pdf_content = HTML(string=html_content, base_url=templates_dir).write_pdf()
+        
+        # Preparar nome do arquivo
+        evaluation_title = template_data.get('evaluation', {}).get('title', 'relatorio')
+        nome_avaliacao = evaluation_title.replace(' ', '_').replace('/', '_').replace('\\', '_') \
+                                         .replace(':', '_').replace('?', '_').replace('*', '_') \
+                                         .replace('"', '_').replace('<', '_').replace('>', '_').replace('|', '_')
+        nome_arquivo = f"relatorio_escolar_{nome_avaliacao}.pdf"
+        
+        # Retornar PDF
+        response = make_response(pdf_content)
+        response.headers['Content-Type'] = 'application/pdf'
+        response.headers['Content-Disposition'] = f'attachment; filename={nome_arquivo}'
+        response.headers.add('Access-Control-Allow-Origin', '*')
+        return response
+        
+    except Exception as e:
+        import traceback
+        traceback_str = traceback.format_exc()
+        logging.error(f"Erro ao gerar relatório escolar PDF: {str(e)}\n{traceback_str}")
         return jsonify({"error": "Erro interno do servidor", "details": str(e)}), 500
 
 

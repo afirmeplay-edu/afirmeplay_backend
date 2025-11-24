@@ -11,10 +11,10 @@
 				box-sizing: border-box;
 			}
 
-			@page: first{
+			@page: first {
 				size: A4;
 				margin: 1cm;
-			};
+			}
 
 			@page {
 				size: A4;
@@ -803,21 +803,13 @@
 							>{{ metadados.municipio }}</span
 						>
 					</div>
-					{% endif %} {% if is_school_scope %}
+					{% endif %} {% if avaliacao.serie or metadados.serie %}
 					<div class="cover-info-item">
-						<span class="cover-info-label">SÉRIES:</span>
+						<span class="cover-info-label">SÉRIE:</span>
 						<span class="cover-info-value"
-							>{{ series_label or general_label_text }}</span
+							>{{ avaliacao.serie or metadados.serie or '9º Ano'
+							}}</span
 						>
-					</div>
-					{% else %}
-					<div class="cover-info-item">
-						<span class="cover-info-label">ESCOPO:</span>
-						<span class="cover-info-value">
-							{% if metadados.scope_type == 'city' %} {{
-							municipal_label }} {% else %} Rede Municipal {%
-							endif %}
-						</span>
 					</div>
 					{% endif %}
 				</div>
@@ -965,7 +957,10 @@
 					</tr>
 					{% endfor %} {% if total_alunos.total_geral %}
 					<tr>
-						<th>{{ general_label_text | upper }}</th>
+						<th>
+							{% if metadados.scope_type == 'school' %}9º GERAL{%
+							else %}MUNICIPAL GERAL{% endif %}
+						</th>
 						<th>{{ total_alunos.total_geral.matriculados }}</th>
 						<th>{{ total_alunos.total_geral.avaliados }}</th>
 						<th>
@@ -985,9 +980,9 @@
 			</div>
 			{% elif total_alunos.total_geral %}
 			<div class="analysis-text">
-				{% if is_school_scope %} A escola avaliou
+				A escola avaliou
 				<strong>{{ total_alunos.total_geral.avaliados }} alunos</strong>
-				das turmas {{ series_label or 'avaliadas' }}, o que representa
+				do 9º ano, o que representa
 				<strong
 					>{{ '%.0f' % (total_alunos.total_geral.percentual or 0)
 					}}%</strong
@@ -1001,38 +996,14 @@
 					>{{ '%.0f' % (total_alunos.total_geral.percentual or 0)
 					}}%</strong
 				>
-				indica o nível de engajamento das turmas. Recomenda-se
-				investigar as ausências e contatar as famílias para garantir
-				participação integral e planejar reposições diagnósticas quando
-				necessário. {% elif metadados.scope_type == 'city' %} A rede
-				municipal avaliou
-				<strong>{{ total_alunos.total_geral.avaliados }} alunos</strong
-				>, alcançando
-				<strong
-					>{{ '%.0f' % (total_alunos.total_geral.percentual or 0)
-					}}%</strong
-				>
-				de participação entre os
-				<strong>{{ total_alunos.total_geral.matriculados }}</strong>
-				estudantes matriculados. Houve
-				<strong>{{ total_alunos.total_geral.faltosos }}</strong>
-				ausências registradas. Manter o acompanhamento das escolas com
-				menor presença e fortalecer ações junto às famílias contribui
-				para ampliar o engajamento nas próximas avaliações. {% else %}
-				Foram avaliados
-				<strong>{{ total_alunos.total_geral.avaliados }} alunos</strong
-				>, correspondendo a
-				<strong
-					>{{ '%.0f' % (total_alunos.total_geral.percentual or 0)
-					}}%</strong
-				>
-				dos
-				<strong>{{ total_alunos.total_geral.matriculados }}</strong>
-				estudantes previstos, com
-				<strong>{{ total_alunos.total_geral.faltosos }}</strong> faltas
-				registradas. Recomenda-se monitorar as unidades com participação
-				reduzida para ampliar a adesão nas próximas aplicações. {% endif
-				%}
+				é boa, indicando um bom engajamento geral. Contudo, a ausência
+				de
+				<strong>{{ total_alunos.total_geral.faltosos }}</strong> alunos
+				é um número considerável. Recomenda-se a investigação das causas
+				dessas ausências, um contato proativo com as famílias para
+				elevar a participação em futuras avaliações e o planejamento de
+				uma reposição diagnóstica para os alunos faltosos, visando obter
+				um panorama mais completo da aprendizagem na série.
 			</div>
 			{% endif %}
 		</section>
@@ -1093,7 +1064,10 @@
 						{% endfor %} {% endif %} {% if bloco.geral or
 						bloco.total_geral %}
 						<tr>
-							<th>{{ general_label_text | upper }}</th>
+							<th>
+								{% if metadados.scope_type == 'school' %}9º
+								GERAL{% else %}MUNICIPAL GERAL{% endif %}
+							</th>
 							<th>
 								{{ (bloco.geral.abaixo_do_basico if bloco.geral
 								else bloco.total_geral.abaixo_do_basico) }}
@@ -1321,20 +1295,20 @@
 					<tr>
 						<td style="text-align: left">{{ turma_nome }}</td>
 						<td>
-							{{ ('%.1f' % ns_turma_prof.portugues).replace('.',
+							{{ ('%.2f' % ns_turma_prof.portugues).replace('.',
 							',') }}
 						</td>
 						<td>
-							{{ ('%.1f' % ns_turma_prof.matematica).replace('.',
+							{{ ('%.2f' % ns_turma_prof.matematica).replace('.',
 							',') }}
 						</td>
-						<td>{{ ('%.1f' % media_turma).replace('.', ',') }}</td>
+						<td>{{ ('%.2f' % media_turma).replace('.', ',') }}</td>
 						{% if loop.first %} {% set count_entidades =
 						lista_entidades|length %}
 						<td
 							rowspan="{{ count_entidades }}"
 							style="vertical-align: middle; font-weight: 700">
-							{{ ('%.1f' % media_municipal).replace('.', ',') }}
+							{{ ('%.2f' % media_municipal).replace('.', ',') }}
 						</td>
 						{% endif %}
 					</tr>
@@ -1351,20 +1325,21 @@
 
 					<tr>
 						<th style="text-align: left">
-							{{ general_label_text | upper }}
+							{% if metadados.scope_type == 'school' %}9º GERAL{%
+							else %}MUNICIPAL GERAL{% endif %}
 						</th>
 						<th>
-							{{ ('%.1f' % media_pt_geral).replace('.', ',') }}
+							{{ ('%.2f' % media_pt_geral).replace('.', ',') }}
 						</th>
 						<th>
-							{{ ('%.1f' % media_mat_geral).replace('.', ',') }}
+							{{ ('%.2f' % media_mat_geral).replace('.', ',') }}
 						</th>
 						<th>
-							{{ ('%.1f' % media_geral_proficiencia).replace('.',
+							{{ ('%.2f' % media_geral_proficiencia).replace('.',
 							',') }}
 						</th>
 						<th>
-							{{ ('%.1f' % media_municipal).replace('.', ',') }}
+							{{ ('%.2f' % media_municipal).replace('.', ',') }}
 						</th>
 					</tr>
 				</tbody>
@@ -1389,8 +1364,9 @@
 					class="analysis-text"
 					style="margin-top: 0; margin-bottom: 8px">
 					<strong
-						>Proficiência Geral ({{ general_label_text | upper
-						}})</strong
+						>Proficiência Geral ({% if metadados.scope_type ==
+						'school' %}9º GERAL{% else %}MUNICIPAL GERAL{% endif
+						%})</strong
 					>
 				</div>
 				<div class="bar-chart-container">
@@ -1399,13 +1375,13 @@
 							<div
 								class="bar-fill bar-blue"
 								style="height: {{ percent_pt_prof }}%;">
-								{% if percent_pt_prof > 5 %}{{ ('%.1f' %
+								{% if percent_pt_prof > 5 %}{{ ('%.2f' %
 								media_pt_geral).replace('.', ',') }}{% endif %}
 							</div>
 						</div>
 						<div class="bar-label">Língua Portuguesa</div>
 						<div class="bar-value">
-							{{ ('%.1f' % media_pt_geral).replace('.', ',') }}
+							{{ ('%.2f' % media_pt_geral).replace('.', ',') }}
 						</div>
 					</div>
 					<div class="bar-item">
@@ -1413,13 +1389,13 @@
 							<div
 								class="bar-fill bar-purple"
 								style="height: {{ percent_mat_prof }}%;">
-								{% if percent_mat_prof > 5 %}{{ ('%.1f' %
+								{% if percent_mat_prof > 5 %}{{ ('%.2f' %
 								media_mat_geral).replace('.', ',') }}{% endif %}
 							</div>
 						</div>
 						<div class="bar-label">Matemática</div>
 						<div class="bar-value">
-							{{ ('%.1f' % media_mat_geral).replace('.', ',') }}
+							{{ ('%.2f' % media_mat_geral).replace('.', ',') }}
 						</div>
 					</div>
 					<div class="bar-item">
@@ -1427,14 +1403,14 @@
 							<div
 								class="bar-fill bar-teal"
 								style="height: {{ percent_media_prof }}%;">
-								{% if percent_media_prof > 5 %}{{ ('%.1f' %
+								{% if percent_media_prof > 5 %}{{ ('%.2f' %
 								media_geral_proficiencia).replace('.', ',') }}{%
 								endif %}
 							</div>
 						</div>
 						<div class="bar-label">Média</div>
 						<div class="bar-value">
-							{{ ('%.1f' % media_geral_proficiencia).replace('.',
+							{{ ('%.2f' % media_geral_proficiencia).replace('.',
 							',') }}
 						</div>
 					</div>
@@ -1443,13 +1419,13 @@
 							<div
 								class="bar-fill bar-gray"
 								style="height: {{ percent_municipal_prof }}%;">
-								{% if percent_municipal_prof > 5 %}{{ ('%.1f' %
+								{% if percent_municipal_prof > 5 %}{{ ('%.2f' %
 								media_municipal).replace('.', ',') }}{% endif %}
 							</div>
 						</div>
 						<div class="bar-label">Média Municipal</div>
 						<div class="bar-value">
-							{{ ('%.1f' % media_municipal).replace('.', ',') }}
+							{{ ('%.2f' % media_municipal).replace('.', ',') }}
 						</div>
 					</div>
 				</div>
@@ -1614,7 +1590,10 @@
 					bloco_mat.media_geral is not none else 0 %} {% endif %}
 
 					<tr>
-						<th style="text-align: left">Média Geral</th>
+						<th style="text-align: left">
+							{% if metadados.scope_type == 'school' %}9º GERAL{%
+							else %}MUNICIPAL GERAL{% endif %}
+						</th>
 						<th>
 							{{ ('%.1f' % nota_media_pt_geral).replace('.', ',')
 							}}

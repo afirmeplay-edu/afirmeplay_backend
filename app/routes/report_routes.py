@@ -21,7 +21,9 @@ from app.models.classTest import ClassTest
 from app.models.evaluationResult import EvaluationResult
 from app import db
 import logging
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Union
+import math
+import unicodedata
 from sqlalchemy import func, case, desc
 from datetime import datetime
 from sqlalchemy.orm import joinedload
@@ -332,10 +334,20 @@ def relatorio_completo(evaluation_id: str):
         if not test:
             return jsonify({"error": "Avaliação não encontrada"}), 404
         
-        # Buscar turmas onde a avaliação foi aplicada
-        class_tests = ClassTest.query.filter_by(test_id=evaluation_id).all()
+        # Determinar escopo a partir dos parâmetros de query
+        school_id = request.args.get('school_id')
+        city_id = request.args.get('city_id')
+        scope_type, scope_id = _determinar_escopo_relatorio(school_id, city_id)
+
+        # Buscar turmas conforme o escopo selecionado
+        class_tests = _buscar_turmas_por_escopo(evaluation_id, scope_type, scope_id)
         if not class_tests:
-            return jsonify({"error": "Avaliação não foi aplicada em nenhuma turma"}), 404
+            if scope_type == 'school':
+                return jsonify({"error": "Avaliação não foi aplicada em nenhuma turma da escola especificada"}), 404
+            elif scope_type == 'city':
+                return jsonify({"error": "Avaliação não foi aplicada em nenhuma turma do município especificado"}), 404
+            else:
+                return jsonify({"error": "Avaliação não foi aplicada em nenhuma turma"}), 404
         
         # Obter dados da avaliação
         course_name = _obter_nome_curso(test)
@@ -350,22 +362,22 @@ def relatorio_completo(evaluation_id: str):
         logging.info(f"Disciplinas identificadas para avaliação {evaluation_id}: {avaliacao_data['disciplinas']}")
         
         # 1. Total de alunos que realizaram a avaliação
-        total_alunos = _calcular_totais_alunos(evaluation_id, class_tests)
+        total_alunos = _calcular_totais_alunos_por_escopo(evaluation_id, class_tests, scope_type)
         
-        # 2. Níveis de Aprendizagem por turma
-        niveis_aprendizagem = _calcular_niveis_aprendizagem(evaluation_id, class_tests)
+        # 2. Níveis de Aprendizagem por escopo
+        niveis_aprendizagem = _calcular_niveis_aprendizagem_por_escopo(evaluation_id, class_tests, scope_type)
         logging.info(f"Níveis de aprendizagem calculados para disciplinas: {list(niveis_aprendizagem.keys())}")
         
         # 3. Proficiência
-        proficiencia = _calcular_proficiencia(evaluation_id, class_tests)
+        proficiencia = _calcular_proficiencia_por_escopo(evaluation_id, class_tests, scope_type)
         logging.info(f"Proficiência calculada para disciplinas: {list(proficiencia.get('por_disciplina', {}).keys())}")
         
-        # 4. Nota Geral por turma
-        nota_geral = _calcular_nota_geral(evaluation_id, class_tests)
+        # 4. Nota Geral
+        nota_geral = _calcular_nota_geral_por_escopo(evaluation_id, class_tests, scope_type)
         logging.info(f"Nota geral calculada para disciplinas: {list(nota_geral.get('por_disciplina', {}).keys())}")
         
         # 5. Acertos por habilidade
-        acertos_habilidade = _calcular_acertos_habilidade(evaluation_id)
+        acertos_habilidade = _calcular_acertos_habilidade_por_escopo(evaluation_id, class_tests, scope_type)
         logging.info(f"Acertos por habilidade calculados para disciplinas: {list(acertos_habilidade.keys())}")
         
         return jsonify({
@@ -374,7 +386,13 @@ def relatorio_completo(evaluation_id: str):
             "niveis_aprendizagem": niveis_aprendizagem,
             "proficiencia": proficiencia,
             "nota_geral": nota_geral,
-            "acertos_por_habilidade": acertos_habilidade
+            "acertos_por_habilidade": acertos_habilidade,
+            "escopo": {
+                "tipo": scope_type,
+                "id": scope_id,
+                "school_id": school_id,
+                "city_id": city_id
+            }
         }), 200
         
     except Exception as e:

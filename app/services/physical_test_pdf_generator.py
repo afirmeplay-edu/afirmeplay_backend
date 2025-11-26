@@ -1710,33 +1710,53 @@ class PhysicalTestPDFGenerator:
                 student_id
             )
             
-            # Converter imagem alinhada para grayscale para detecção
-            if len(aligned_image.shape) == 3:
-                aligned_gray = cv2.cvtColor(aligned_image, cv2.COLOR_BGR2GRAY)
+            # NOVO: Usar imagem ORIGINAL (não distorcida) para detecção
+            print(f"🔍 ETAPA 3: DETECTANDO RESPOSTAS NA IMAGEM ORIGINAL (SEM DISTORÇÃO)...")
+            
+            # Converter imagem original para grayscale
+            if len(img_color.shape) == 3:
+                original_gray = cv2.cvtColor(img_color, cv2.COLOR_BGR2GRAY)
             else:
-                aligned_gray = aligned_image.copy()
+                original_gray = img_color.copy()
             
-            # Aplicar threshold adaptativo na imagem alinhada
-            blur = cv2.GaussianBlur(aligned_gray, (5, 5), 0)
-            binary_image = cv2.adaptiveThreshold(blur, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 11, 2)
+            # Aplicar threshold adaptativo na imagem original
+            blur = cv2.GaussianBlur(original_gray, (5, 5), 0)
+            binary_image_original = cv2.adaptiveThreshold(blur, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 11, 2)
             
-            print(f"🖼️ Imagem binária preparada: {binary_image.shape}")
+            print(f"🖼️ Imagem binária original preparada: {binary_image_original.shape}")
             
-            # 4. Detectar respostas usando coordenadas do gabarito (coordenadas conhecidas)
-            print(f"🔍 ETAPA 3: DETECTANDO RESPOSTAS COM COORDENADAS DO GABARITO...")
+            # Calcular matriz de homografia INVERSA para transformar coordenadas do gabarito para imagem original
+            import numpy as np
             
-            debug_user_image = aligned_image  # Usar imagem alinhada para debug
+            # A homografia atual transforma: imagem_original -> imagem_alinhada
+            # Precisamos da inversa: imagem_alinhada -> imagem_original
+            # Mas queremos: coordenadas_gabarito -> coordenadas_imagem_original
+            # Então: coordenadas_gabarito -> (usar homografia inversa) -> coordenadas_imagem_original
+            
+            # Calcular homografia inversa
+            homography_inverse = np.linalg.inv(homography_matrix)
+            print(f"✅ Matriz de homografia inversa calculada")
+            
+            # Transformar coordenadas do gabarito para o espaço da imagem original
+            gabarito_coords_original = self._transformar_coordenadas_para_imagem_original(
+                gabarito_coords, 
+                homography_inverse,
+                img_color.shape[:2]  # (height, width)
+            )
+            
+            # Detectar respostas na imagem original usando coordenadas transformadas
             respostas_detectadas = {}
             debug_image_with_areas = None
             
-            # Usar coordenadas do gabarito (já conhecidas e corretas)
             respostas_detectadas, debug_image_with_areas = self._detectar_respostas_com_coordenadas_dinamicas(
-                binary_image,
-                gabarito_coords,
+                binary_image_original,  # Usar imagem original binária
+                gabarito_coords_original,  # Usar coordenadas transformadas
                 num_questions_from_qr,
-                gabarito_coords.get('rect_bounds'),
-                original_image=aligned_image  # Passar imagem alinhada para debug
+                gabarito_coords_original.get('rect_bounds'),
+                original_image=img_color  # Passar imagem original para debug
             )
+            
+            debug_user_image = img_color  # Usar imagem original para debug
             
             if not respostas_detectadas:
                 return {"success": False, "error": "Nenhuma resposta detectada após alinhamento"}
@@ -4407,20 +4427,44 @@ class PhysicalTestPDFGenerator:
             print(f"📐 CALCULANDO HOMOGRAFIA DOS MARCADORES...")
             
             # Pontos de origem (imagem do aluno - queremos transformar esta imagem)
+            # ORDEM CRÍTICA: TL, TR, BR, BL (deve corresponder exatamente à ordem do destino)
             src_points = np.array([
-                user_markers['top_left'],
-                user_markers['top_right'],
-                user_markers['bottom_right'],
-                user_markers['bottom_left']
+                user_markers['top_left'],      # 0: TL
+                user_markers['top_right'],     # 1: TR
+                user_markers['bottom_right'],  # 2: BR
+                user_markers['bottom_left']    # 3: BL
             ], dtype=np.float32)
             
             # Pontos de destino (gabarito - referência - para onde queremos mapear)
+            # ORDEM CRÍTICA: TL, TR, BR, BL (deve corresponder exatamente à ordem da origem)
             dst_points = np.array([
-                gabarito_markers['top_left'],
-                gabarito_markers['top_right'],
-                gabarito_markers['bottom_right'],
-                gabarito_markers['bottom_left']
+                gabarito_markers['top_left'],      # 0: TL
+                gabarito_markers['top_right'],     # 1: TR
+                gabarito_markers['bottom_right'],  # 2: BR
+                gabarito_markers['bottom_left']    # 3: BL
             ], dtype=np.float32)
+            
+            # VALIDAÇÃO: Verificar se a ordem está correta
+            # TL deve ter menor X e menor Y
+            # TR deve ter maior X e menor Y
+            # BR deve ter maior X e maior Y
+            # BL deve ter menor X e maior Y
+            tl_src, tr_src, br_src, bl_src = src_points
+            tl_dst, tr_dst, br_dst, bl_dst = dst_points
+            
+            # Validar ordem dos pontos origem
+            if not (tl_src[0] < tr_src[0] and tl_src[1] < bl_src[1] and 
+                    tr_src[0] < br_src[0] and tr_src[1] < br_src[1] and
+                    bl_src[0] < br_src[0] and bl_src[1] < br_src[1]):
+                print(f"⚠️ AVISO: Ordem dos pontos origem pode estar incorreta!")
+                print(f"   TL: {tl_src}, TR: {tr_src}, BR: {br_src}, BL: {bl_src}")
+            
+            # Validar ordem dos pontos destino
+            if not (tl_dst[0] < tr_dst[0] and tl_dst[1] < bl_dst[1] and 
+                    tr_dst[0] < br_dst[0] and tr_dst[1] < br_dst[1] and
+                    bl_dst[0] < br_dst[0] and bl_dst[1] < br_dst[1]):
+                print(f"⚠️ AVISO: Ordem dos pontos destino pode estar incorreta!")
+                print(f"   TL: {tl_dst}, TR: {tr_dst}, BR: {br_dst}, BL: {bl_dst}")
             
             print(f"📍 Pontos origem (imagem do aluno):")
             print(f"   TL: {src_points[0]}, TR: {src_points[1]}")
@@ -4429,11 +4473,35 @@ class PhysicalTestPDFGenerator:
             print(f"   TL: {dst_points[0]}, TR: {dst_points[1]}")
             print(f"   BR: {dst_points[2]}, BL: {dst_points[3]}")
             
-            # Calcular matriz de transformação de perspectiva
-            M = cv2.getPerspectiveTransform(src_points, dst_points)
+            # NOVO: Usar findHomography com RANSAC para maior robustez
+            # findHomography é mais robusto que getPerspectiveTransform porque:
+            # 1. Usa RANSAC para lidar com outliers
+            # 2. É mais tolerante a pequenos erros de detecção
+            # 3. Retorna uma máscara indicando quais pontos são inliers
+            M, mask = cv2.findHomography(
+                src_points, 
+                dst_points, 
+                method=cv2.RANSAC,
+                ransacReprojThreshold=5.0  # Threshold de reprojeção em pixels
+            )
             
-            print(f"✅ Matriz de homografia calculada:")
-            print(f"   {M}")
+            if M is None:
+                print(f"❌ Falha ao calcular homografia com findHomography")
+                # Fallback: tentar com getPerspectiveTransform
+                print(f"🔄 Tentando fallback com getPerspectiveTransform...")
+                M = cv2.getPerspectiveTransform(src_points, dst_points)
+            
+            # Validar qualidade da homografia
+            if mask is not None:
+                inliers = np.sum(mask)
+                print(f"✅ Matriz de homografia calculada (RANSAC):")
+                print(f"   Inliers: {inliers}/4 pontos")
+                if inliers < 4:
+                    print(f"⚠️ AVISO: Apenas {inliers} pontos são inliers - homografia pode estar imprecisa")
+            else:
+                print(f"✅ Matriz de homografia calculada (getPerspectiveTransform fallback):")
+            
+            print(f"   Matriz:\n{M}")
             
             return M
             
@@ -4555,6 +4623,120 @@ class PhysicalTestPDFGenerator:
             logging.error(traceback.format_exc())
             return None, None, None
     
+    def _transformar_coordenadas_para_imagem_original(self, gabarito_coords: Dict, 
+                                                   homography_inverse: np.ndarray,
+                                                   original_image_shape: tuple) -> Dict:
+        """
+        Transforma coordenadas do gabarito para o espaço da imagem original
+        usando a matriz de homografia inversa
+        
+        Args:
+            gabarito_coords: Coordenadas no espaço do gabarito
+            homography_inverse: Matriz de homografia inversa (3x3)
+            original_image_shape: (height, width) da imagem original
+        
+        Returns:
+            Dict com coordenadas transformadas para o espaço da imagem original
+        """
+        try:
+            import cv2
+            import numpy as np
+            
+            print(f"🔄 TRANSFORMANDO COORDENADAS PARA IMAGEM ORIGINAL...")
+            
+            coordinates_list = gabarito_coords.get('coordinates', [])
+            rect_bounds = gabarito_coords.get('rect_bounds')
+            
+            if not coordinates_list:
+                print(f"⚠️ Nenhuma coordenada para transformar")
+                return gabarito_coords
+            
+            print(f"📐 Transformando {len(coordinates_list)} coordenadas...")
+            
+            # Transformar rect_bounds primeiro
+            if rect_bounds:
+                rect_x0, rect_y0, rect_x1, rect_y1 = rect_bounds
+                
+                # Transformar os 4 cantos do rect_bounds
+                corners = np.array([
+                    [rect_x0, rect_y0, 1],
+                    [rect_x1, rect_y0, 1],
+                    [rect_x1, rect_y1, 1],
+                    [rect_x0, rect_y1, 1]
+                ], dtype=np.float32)
+                
+                # Aplicar transformação inversa
+                corners_transformed = cv2.perspectiveTransform(corners.reshape(1, -1, 3), homography_inverse)[0]
+                
+                # Calcular novo rect_bounds
+                min_x = int(corners_transformed[:, 0].min())
+                max_x = int(corners_transformed[:, 0].max())
+                min_y = int(corners_transformed[:, 1].min())
+                max_y = int(corners_transformed[:, 1].max())
+                
+                # Garantir que está dentro dos limites da imagem original
+                h_orig, w_orig = original_image_shape
+                min_x = max(0, min_x)
+                min_y = max(0, min_y)
+                max_x = min(w_orig, max_x)
+                max_y = min(h_orig, max_y)
+                
+                new_rect_bounds = (min_x, min_y, max_x, max_y)
+                print(f"📐 Rect bounds transformado: ({rect_x0}, {rect_y0}, {rect_x1}, {rect_y1}) -> {new_rect_bounds}")
+            else:
+                new_rect_bounds = None
+                print(f"⚠️ Rect bounds não fornecido")
+            
+            # Transformar cada coordenada
+            transformed_coordinates = []
+            for idx, (rel_x, rel_y, w, h) in enumerate(coordinates_list):
+                # Converter para absolutas no espaço do gabarito
+                if rect_bounds:
+                    abs_x = rect_x0 + rel_x
+                    abs_y = rect_y0 + rel_y
+                else:
+                    abs_x = rel_x
+                    abs_y = rel_y
+                
+                # Transformar o centro da bolha
+                center_gabarito = np.array([[
+                    [abs_x + w/2, abs_y + h/2, 1]
+                ]], dtype=np.float32)
+                
+                center_original = cv2.perspectiveTransform(center_gabarito, homography_inverse)[0][0]
+                
+                # Calcular novas coordenadas relativas ao novo rect_bounds
+                new_abs_x = int(center_original[0] - w/2)
+                new_abs_y = int(center_original[1] - h/2)
+                
+                if new_rect_bounds:
+                    new_rel_x = new_abs_x - new_rect_bounds[0]
+                    new_rel_y = new_abs_y - new_rect_bounds[1]
+                else:
+                    new_rel_x = new_abs_x
+                    new_rel_y = new_abs_y
+                
+                transformed_coordinates.append((int(new_rel_x), int(new_rel_y), w, h))
+                
+                # Log das primeiras 4 coordenadas para debug
+                if idx < 4:
+                    print(f"   Coord {idx}: ({rel_x}, {rel_y}) -> ({new_rel_x}, {new_rel_y})")
+            
+            print(f"✅ {len(transformed_coordinates)} coordenadas transformadas")
+            
+            return {
+                'coordinates': transformed_coordinates,
+                'rect_bounds': new_rect_bounds,
+                'num_questions': gabarito_coords.get('num_questions', len(transformed_coordinates) // 4),
+                'markers_coords': gabarito_coords.get('markers_coords')  # Manter para referência
+            }
+            
+        except Exception as e:
+            logging.error(f"Erro ao transformar coordenadas: {str(e)}")
+            import traceback
+            logging.error(traceback.format_exc())
+            return gabarito_coords  # Retornar original em caso de erro
+    
     def _salvar_debug_gabarito_comparacao(self, user_image_original: np.ndarray, 
                                          user_image_aligned: np.ndarray,
                                          num_questions: int,
@@ -4655,6 +4837,55 @@ class PhysicalTestPDFGenerator:
             logging.error(traceback.format_exc())
             print(f"⚠️ Erro ao salvar debug gabarito: {e}")
     
+    def _ordenar_marcadores_corretamente(self, markers):
+        """
+        Ordena os 4 marcadores na ordem correta: TL, TR, BR, BL
+        Usa método robusto que funciona mesmo com imagens inclinadas ou distorcidas
+        
+        Ordem correta para homografia:
+        0 - canto superior esquerdo (TL)
+        1 - canto superior direito (TR)
+        2 - canto inferior direito (BR)
+        3 - canto inferior esquerdo (BL)
+        
+        Args:
+            markers: Lista de dicts com 'center' (x, y) de cada marcador
+        
+        Returns:
+            np.array com 4 pontos ordenados: [TL, TR, BR, BL]
+        """
+        import numpy as np
+        
+        if len(markers) != 4:
+            raise ValueError(f"Esperado 4 marcadores, encontrado {len(markers)}")
+        
+        # Converter para array numpy
+        pts = np.array([m['center'] for m in markers])
+        
+        # Ordenar por Y (topo → baixo)
+        pts = pts[np.argsort(pts[:, 1])]
+        
+        # Separar em top e bottom (2 primeiros = top, 2 últimos = bottom)
+        top = pts[:2]
+        bottom = pts[2:]
+        
+        # Ordenar top por X (esquerda → direita)
+        top = top[np.argsort(top[:, 0])]
+        
+        # Ordenar bottom por X (esquerda → direita)
+        bottom = bottom[np.argsort(bottom[:, 0])]
+        
+        # Retornar na ordem: TL, TR, BR, BL
+        ordered_points = np.array([top[0], top[1], bottom[1], bottom[0]], dtype=np.float32)
+        
+        print(f"📐 Marcadores ordenados:")
+        print(f"   TL (top-left): {ordered_points[0]}")
+        print(f"   TR (top-right): {ordered_points[1]}")
+        print(f"   BR (bottom-right): {ordered_points[2]}")
+        print(f"   BL (bottom-left): {ordered_points[3]}")
+        
+        return ordered_points
+    
     def _detectar_marcadores_alinhamento(self, img_gray, img_color):
         """
         NOVA IMPLEMENTAÇÃO: Detecta os 4 marcadores de alinhamento (quadrados pretos) no formulário
@@ -4690,54 +4921,193 @@ class PhysicalTestPDFGenerator:
             # Desenhar todos os contornos na imagem de debug
             cv2.drawContours(debug_markers_image, contours, -1, (128, 128, 128), 1)
             
-            # Filtrar contornos que são aproximadamente quadrados e do tamanho esperado
-            # Tamanho esperado: ~15-20px (ajustar conforme escala da imagem)
+            # FILTROS MELHORADOS E MAIS RESTRITIVOS PARA DETECTAR APENAS OS 4 MARCADORES
             img_height, img_width = img_gray.shape[:2]
-            min_area = (img_width * img_height) * 0.0001  # 0.01% da imagem
-            max_area = (img_width * img_height) * 0.01    # 1% da imagem
             
-            print(f"📏 Área mínima: {min_area:.0f}, Área máxima: {max_area:.0f}")
+            # 1. ÁREA MAIS ESPECÍFICA: Marcadores são ~15x15px = 225px
+            # Mas podem variar com escala, então usar range mais restritivo
+            # Assumir que marcadores têm entre 80-400 pixels (mais restritivo que antes)
+            min_area = 80   # Mínimo absoluto (marcador muito pequeno)
+            max_area = 400  # Máximo absoluto (marcador muito grande)
+            
+            # 2. TAMANHO ABSOLUTO: w e h devem ser similares e dentro de range
+            min_size = 8   # Mínimo 8px
+            max_size = 25  # Máximo 25px
+            
+            # 3. ASPECT RATIO MAIS RESTRITIVO: Quadrados quase perfeitos
+            min_aspect = 0.85  # Mais próximo de 1.0 (era 0.7)
+            max_aspect = 1.15  # Mais próximo de 1.0 (era 1.3)
+            
+            # 4. SOLIDITY: Verificar se o contorno está preenchido (área do contorno / área do bounding box)
+            min_solidity = 0.7  # Pelo menos 70% preenchido
+            
+            # 5. FILTRAR POR POSIÇÃO: Marcadores devem estar próximos dos cantos
+            corner_margin = 0.15  # 15% da imagem (margem dos cantos)
+            
+            print(f"📏 Filtros de detecção:")
+            print(f"   Área: {min_area}-{max_area} pixels")
+            print(f"   Tamanho: {min_size}-{max_size}px (w e h)")
+            print(f"   Aspect ratio: {min_aspect:.2f}-{max_aspect:.2f}")
+            print(f"   Solidity: >= {min_solidity:.1%}")
+            print(f"   Posição: dentro de {corner_margin:.0%} dos cantos")
             
             markers = []
+            candidates_count = 0  # Contador de candidatos que passam pelos primeiros filtros
+            filtered_by_area = 0  # Contador de filtrados por área
+            
+            # Primeiro, detectar QR code para excluir da busca de marcadores
+            # QR code geralmente está no canto superior direito
+            qr_code_region = None
+            try:
+                qr_detector = cv2.QRCodeDetector()
+                qr_data, qr_points, _ = qr_detector.detectAndDecodeMulti(img_gray)
+                
+                if qr_points is not None and len(qr_points) > 0:
+                    # Pegar o primeiro QR code detectado
+                    qr_pts = qr_points[0][0] if len(qr_points[0]) > 0 else None
+                    if qr_pts is not None:
+                        qr_x = int(min(pt[0] for pt in qr_pts))
+                        qr_y = int(min(pt[1] for pt in qr_pts))
+                        qr_w = int(max(pt[0] for pt in qr_pts) - qr_x)
+                        qr_h = int(max(pt[1] for pt in qr_pts) - qr_y)
+                        qr_code_region = (qr_x, qr_y, qr_w, qr_h)
+                        print(f"📱 QR Code detectado na região: ({qr_x}, {qr_y}, {qr_w}x{qr_h})")
+            except Exception as e:
+                # Se não conseguir detectar QR code, continuar sem esse filtro
+                print(f"⚠️ Não foi possível detectar QR code para filtro: {str(e)}")
+                pass
+            
             for i, contour in enumerate(contours):
                 area = cv2.contourArea(contour)
+                x, y, w, h = cv2.boundingRect(contour)
+                center_x = x + w // 2
+                center_y = y + h // 2
                 
-                # Desenhar todos os contornos que passam pelo filtro de área
-                if min_area < area < max_area:
-                    x, y, w, h = cv2.boundingRect(contour)
-                    cv2.rectangle(debug_markers_image, (x, y), (x + w, y + h), (255, 165, 0), 1)
-                    cv2.putText(debug_markers_image, f"A:{area:.0f}", (x, y-5), 
-                               cv2.FONT_HERSHEY_SIMPLEX, 0.3, (255, 165, 0), 1)
+                # Filtro 1: Área
+                if not (min_area <= area <= max_area):
+                    filtered_by_area += 1
+                    # Log apenas para áreas próximas (para não poluir muito)
+                    if area > 50 and area < 500:
+                        print(f"  ⚪ Contorno {i}: área={area:.0f}px (fora do range {min_area}-{max_area}) - posição=({center_x}, {center_y}), tamanho=({w}x{h})")
+                    continue
                 
-                if min_area < area < max_area:
-                    # Aproximar contorno para verificar se é retangular
-                    epsilon = 0.02 * cv2.arcLength(contour, True)
-                    approx = cv2.approxPolyDP(contour, epsilon, True)
-                    
-                    # Verificar se tem aproximadamente 4 vértices (quadrado/retângulo)
-                    if len(approx) >= 4:
-                        x, y, w, h = cv2.boundingRect(contour)
-                        aspect_ratio = w / h if h > 0 else 0
-                        
-                        # Verificar se é aproximadamente quadrado (aspect ratio próximo de 1)
-                        if 0.7 < aspect_ratio < 1.3:
-                            # Calcular centro do marcador
-                            center_x = x + w // 2
-                            center_y = y + h // 2
-                            
-                            markers.append({
-                                'center': (center_x, center_y),
-                                'bbox': (x, y, w, h),
-                                'area': area
-                            })
-                            
-                            # Desenhar marcador detectado em verde
-                            cv2.rectangle(debug_markers_image, (x, y), (x + w, y + h), (0, 255, 0), 2)
-                            cv2.circle(debug_markers_image, (center_x, center_y), 5, (0, 255, 0), -1)
-                            cv2.putText(debug_markers_image, f"M{i}", (x, y-5), 
-                                       cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 0), 1)
-                            
-                            print(f"  ✅ Marcador {i}: centro=({center_x}, {center_y}), tamanho=({w}x{h}), área={area:.0f}")
+                # Aproximar contorno para verificar se é retangular
+                epsilon = 0.02 * cv2.arcLength(contour, True)
+                approx = cv2.approxPolyDP(contour, epsilon, True)
+                
+                # Filtro 2: Deve ter aproximadamente 4 vértices (quadrado/retângulo)
+                if len(approx) < 4:
+                    continue
+                
+                x, y, w, h = cv2.boundingRect(contour)
+                center_x = x + w // 2
+                center_y = y + h // 2
+                
+                # LOG DETALHADO: Mostrar todos os candidatos que passam pelos primeiros filtros
+                candidates_count += 1
+                aspect_ratio = w / h if h > 0 else 0
+                bbox_area = w * h
+                solidity = area / bbox_area if bbox_area > 0 else 0
+                
+                print(f"  🔍 Candidato {i} (candidato #{candidates_count}):")
+                print(f"     Posição: ({center_x}, {center_y}), tamanho=({w}x{h})")
+                print(f"     Área: {area:.0f}px (filtro: {min_area}-{max_area})")
+                print(f"     Aspect ratio: {aspect_ratio:.2f} (filtro: {min_aspect:.2f}-{max_aspect:.2f})")
+                print(f"     Solidity: {solidity:.2f} (filtro: >= {min_solidity:.2f})")
+                
+                # Filtro 3: Tamanho absoluto
+                if not (min_size <= w <= max_size and min_size <= h <= max_size):
+                    print(f"     ❌ FILTRADO: Tamanho fora do range (w={w}, h={h}, esperado: {min_size}-{max_size}px)")
+                    continue
+                
+                # Filtro 4: Aspect ratio (deve ser quase quadrado)
+                if not (min_aspect <= aspect_ratio <= max_aspect):
+                    print(f"     ❌ FILTRADO: Aspect ratio fora do range ({aspect_ratio:.2f})")
+                    continue
+                
+                # Filtro 5: Solidity (quão preenchido está)
+                if solidity < min_solidity:
+                    print(f"     ❌ FILTRADO: Solidity muito baixa ({solidity:.2f} < {min_solidity:.2f})")
+                    continue
+                
+                # Filtro 6: Posição (deve estar próximo de um canto)
+                corner_margin_x = img_width * corner_margin
+                corner_margin_y = img_height * corner_margin
+                
+                is_tl = (center_x < corner_margin_x and center_y < corner_margin_y)
+                is_tr = (center_x > img_width * (1 - corner_margin) and center_y < corner_margin_y)
+                is_br = (center_x > img_width * (1 - corner_margin) and center_y > img_height * (1 - corner_margin))
+                is_bl = (center_x < corner_margin_x and center_y > img_height * (1 - corner_margin))
+                
+                is_near_corner = is_tl or is_tr or is_br or is_bl
+                
+                corner_name = ""
+                if is_tl:
+                    corner_name = "TL (Top-Left)"
+                elif is_tr:
+                    corner_name = "TR (Top-Right)"
+                elif is_br:
+                    corner_name = "BR (Bottom-Right)"
+                elif is_bl:
+                    corner_name = "BL (Bottom-Left)"
+                
+                print(f"     Posição: {corner_name if is_near_corner else 'CENTRO/MEIO'}")
+                print(f"     Margens: X<{corner_margin_x:.0f} ou X>{img_width*(1-corner_margin):.0f}, Y<{corner_margin_y:.0f} ou Y>{img_height*(1-corner_margin):.0f}")
+                
+                if not is_near_corner:
+                    print(f"     ❌ FILTRADO: Não está próximo de nenhum canto")
+                    continue
+                
+                # FILTRO ADICIONAL 1: Excluir QR code por tamanho
+                # QR code geralmente é maior que os marcadores (50-100px)
+                # Marcadores são pequenos (10-20px) e totalmente pretos
+                qr_code_min_size = 30  # QR codes são geralmente maiores que 30px
+                
+                if w > qr_code_min_size or h > qr_code_min_size:
+                    print(f"     ❌ FILTRADO: Muito grande para ser marcador (possível QR code: {w}x{h} > {qr_code_min_size}px)")
+                    continue
+                
+                # FILTRO ADICIONAL 2: Excluir elementos próximos ao QR code detectado
+                if qr_code_region is not None:
+                    qr_x, qr_y, qr_w, qr_h = qr_code_region
+                    # Verificar se o centro do candidato está dentro ou muito próximo do QR code
+                    qr_margin = 20  # Margem de 20px ao redor do QR code
+                    is_near_qr = (
+                        center_x >= (qr_x - qr_margin) and center_x <= (qr_x + qr_w + qr_margin) and
+                        center_y >= (qr_y - qr_margin) and center_y <= (qr_y + qr_h + qr_margin)
+                    )
+                    if is_near_qr:
+                        print(f"     ❌ FILTRADO: Muito próximo do QR code detectado (QR em ({qr_x}, {qr_y}, {qr_w}x{qr_h}))")
+                        continue
+                
+                # Todos os filtros passaram - é um marcador válido
+                markers.append({
+                    'center': (center_x, center_y),
+                    'bbox': (x, y, w, h),
+                    'area': area,
+                    'solidity': solidity,
+                    'corner': corner_name
+                })
+                
+                # Desenhar marcador detectado em verde
+                cv2.rectangle(debug_markers_image, (x, y), (x + w, y + h), (0, 255, 0), 2)
+                cv2.circle(debug_markers_image, (center_x, center_y), 5, (0, 255, 0), -1)
+                cv2.putText(debug_markers_image, f"M{i}", (x, y-5), 
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 0), 1)
+                
+                print(f"     ✅ ACEITO: Marcador {len(markers)} - {corner_name}")
+                print(f"        centro=({center_x}, {center_y}), tamanho=({w}x{h}), área={area:.0f}, solidity={solidity:.2f}")
+            
+            print(f"\n📊 RESUMO DE DETECÇÃO:")
+            print(f"   Total de contornos encontrados: {len(contours)}")
+            print(f"   Filtrados por área: {filtered_by_area}")
+            print(f"   Candidatos que passaram filtro de área: {candidates_count}")
+            print(f"   Marcadores válidos detectados: {len(markers)}/4")
+            
+            if len(markers) > 0:
+                print(f"\n📍 Marcadores detectados:")
+                for idx, m in enumerate(markers, 1):
+                    print(f"   {idx}. {m.get('corner', 'Desconhecido')}: centro={m['center']}, tamanho={m['bbox'][2]}x{m['bbox'][3]}, área={m['area']:.0f}px")
             
             if len(markers) < 4:
                 print(f"⚠️ Apenas {len(markers)} marcadores detectados (esperado: 4)")
@@ -4745,34 +5115,30 @@ class PhysicalTestPDFGenerator:
                 self._salvar_debug_marcadores(debug_markers_image, len(markers), markers, None)
                 return None
             
-            # Ordenar marcadores por posição (top-left, top-right, bottom-left, bottom-right)
-            # Ordenar por Y primeiro (top vs bottom), depois por X (left vs right)
-            markers_sorted = sorted(markers, key=lambda m: (m['center'][1], m['center'][0]))
-            
-            # Separar em top e bottom
-            top_markers = sorted(markers_sorted[:len(markers)//2], key=lambda m: m['center'][0])
-            bottom_markers = sorted(markers_sorted[len(markers)//2:], key=lambda m: m['center'][0])
-            
-            if len(top_markers) >= 2 and len(bottom_markers) >= 2:
-                top_left = top_markers[0]['center']
-                top_right = top_markers[-1]['center']
-                bottom_left = bottom_markers[0]['center']
-                bottom_right = bottom_markers[-1]['center']
+            # NOVO: Usar ordenação robusta que funciona mesmo com imagens inclinadas
+            try:
+                ordered_points = self._ordenar_marcadores_corretamente(markers)
+                
+                # Extrair coordenadas na ordem correta: TL, TR, BR, BL
+                top_left = tuple(ordered_points[0].astype(int))
+                top_right = tuple(ordered_points[1].astype(int))
+                bottom_right = tuple(ordered_points[2].astype(int))
+                bottom_left = tuple(ordered_points[3].astype(int))
                 
                 # Desenhar marcadores finais em cores diferentes
-                cv2.circle(debug_markers_image, top_left, 8, (255, 0, 0), -1)  # Azul
-                cv2.circle(debug_markers_image, top_right, 8, (0, 0, 255), -1)  # Vermelho
-                cv2.circle(debug_markers_image, bottom_left, 8, (255, 255, 0), -1)  # Ciano
-                cv2.circle(debug_markers_image, bottom_right, 8, (255, 0, 255), -1)  # Magenta
+                cv2.circle(debug_markers_image, top_left, 8, (255, 0, 0), -1)  # Azul - TL
+                cv2.circle(debug_markers_image, top_right, 8, (0, 0, 255), -1)  # Vermelho - TR
+                cv2.circle(debug_markers_image, bottom_right, 8, (255, 0, 255), -1)  # Magenta - BR
+                cv2.circle(debug_markers_image, bottom_left, 8, (255, 255, 0), -1)  # Ciano - BL
                 
                 cv2.putText(debug_markers_image, "TL", (top_left[0]+10, top_left[1]), 
                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 0, 0), 2)
                 cv2.putText(debug_markers_image, "TR", (top_right[0]+10, top_right[1]), 
                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
-                cv2.putText(debug_markers_image, "BL", (bottom_left[0]+10, bottom_left[1]), 
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2)
                 cv2.putText(debug_markers_image, "BR", (bottom_right[0]+10, bottom_right[1]), 
                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 0, 255), 2)
+                cv2.putText(debug_markers_image, "BL", (bottom_left[0]+10, bottom_left[1]), 
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2)
                 
                 resultado = {
                     'top_left': top_left,
@@ -4782,19 +5148,21 @@ class PhysicalTestPDFGenerator:
                     'markers': markers
                 }
                 
-                print(f"✅ 4 Marcadores detectados:")
+                print(f"✅ 4 Marcadores detectados e ordenados corretamente:")
                 print(f"   Top-Left: {top_left}")
                 print(f"   Top-Right: {top_right}")
-                print(f"   Bottom-Left: {bottom_left}")
                 print(f"   Bottom-Right: {bottom_right}")
+                print(f"   Bottom-Left: {bottom_left}")
                 
                 # Salvar debug
                 self._salvar_debug_marcadores(debug_markers_image, 4, markers, resultado)
                 
                 return resultado
-            else:
-                print(f"⚠️ Não foi possível ordenar os marcadores corretamente")
-                # Salvar debug mesmo sem ordenar corretamente
+            except Exception as e:
+                print(f"⚠️ Erro ao ordenar marcadores: {str(e)}")
+                import traceback
+                logging.error(traceback.format_exc())
+                # Salvar debug mesmo com erro
                 self._salvar_debug_marcadores(debug_markers_image, len(markers), markers, None)
                 return None
                 
@@ -5250,18 +5618,28 @@ class PhysicalTestPDFGenerator:
             import numpy as np
             
             print(f"🔍 DETECTANDO RESPOSTAS COM COORDENADAS DINÂMICAS")
-            print(f"📏 Dimensões: {binary_image.shape}")
-            print(f"📊 Questões: {num_questions}")
+            print(f"📏 Dimensões da imagem binária: {binary_image.shape}")
+            print(f"📊 Questões esperadas: {num_questions}")
             
             coordinates_list = coordinates_data.get('coordinates', [])
             if not coordinates_list:
                 print(f"⚠️ Nenhuma coordenada encontrada")
                 return {}, None
             
+            print(f"📐 Total de coordenadas disponíveis: {len(coordinates_list)}")
+            print(f"📐 Coordenadas esperadas (questões × alternativas): {num_questions * 4}")
+            
             if rect_bounds:
                 rect_x0, rect_y0, rect_x1, rect_y1 = rect_bounds
+                print(f"📐 Rect bounds: ({rect_x0}, {rect_y0}) -> ({rect_x1}, {rect_y1})")
             else:
                 rect_x0, rect_y0 = 0, 0
+                print(f"⚠️ Rect bounds não fornecido, usando (0, 0)")
+            
+            # Validar se temos coordenadas suficientes
+            expected_coords = num_questions * 4
+            if len(coordinates_list) < expected_coords:
+                print(f"⚠️ AVISO: Coordenadas insuficientes! Esperado: {expected_coords}, Encontrado: {len(coordinates_list)}")
             
             # Criar imagem de debug (usar original se disponível, senão converter binary para colorida)
             if original_image is not None:
@@ -5295,16 +5673,17 @@ class PhysicalTestPDFGenerator:
                     abs_y = int(rect_y0 + rel_y)
                     center_x = int(abs_x + (w / 2))
                     center_y = int(abs_y + (h / 2))
-                    radius = int(min(w, h) / 2)
+                    # AUMENTAR RADIUS: Usar tamanho completo da bolha menos 2px de margem
+                    # Para bolhas de 18px, isso dá 8px de radius (melhor que 9px de antes que era metade)
+                    # Isso garante que capturamos a área completa da bolha mesmo com pequenos desalinhamentos
+                    radius = max(int(min(w, h) * 0.85), 7)  # Mínimo de 7px, idealmente 85% do tamanho
                     
-                    # ADICIONAR DEBUG: Log das coordenadas calculadas (apenas primeira questão)
-                    if i == 0 and j == 0:
-                        print(f"📐 DEBUG Coordenadas Q1:")
+                    # DEBUG: Log das coordenadas calculadas (primeiras 3 questões)
+                    if i < 3 and j == 0:
+                        print(f"📐 DEBUG Coordenadas Q{i+1}:")
                         print(f"   rel_x={rel_x}, rel_y={rel_y}, w={w}, h={h}")
-                        print(f"   rect_bounds: {rect_bounds}")
                         print(f"   abs_x={abs_x}, abs_y={abs_y}")
                         print(f"   center_x={center_x}, center_y={center_y}, radius={radius}")
-                        print(f"   binary_image.shape: {binary_image.shape}")
                     
                     # Verificar limites
                     h_img, w_img = binary_image.shape
@@ -5313,19 +5692,27 @@ class PhysicalTestPDFGenerator:
                         respostas_por_disciplina['default'][question_key][alt_letter] = False
                         continue
                     
-                    # Detectar marcação
-                    is_marked = self._detectar_marcacao_circular(binary_image, center_x, center_y, radius)
+                    # Detectar marcação (agora retorna tupla: is_marked, porcentagem)
+                    is_marked, porcentagem = self._detectar_marcacao_circular(binary_image, center_x, center_y, radius)
                     respostas_por_disciplina['default'][question_key][alt_letter] = is_marked
+                    
+                    # LOGS DETALHADOS: Mostrar porcentagem para todas as questões
+                    status = "✅ MARCADO" if is_marked else "❌ NÃO MARCADO"
+                    print(f"    Q{i+1} {alt_letter}: {status} ({porcentagem:.1f}%)")
                     
                     # Desenhar área de detecção na imagem de debug
                     # Retângulo vermelho para todas as áreas
                     color = (0, 0, 255)  # Vermelho em BGR
                     cv2.rectangle(debug_image, (abs_x, abs_y), (abs_x + w, abs_y + h), color, 2)
                     
+                    # Adicionar texto com porcentagem na imagem de debug
+                    text_color = (0, 255, 0) if is_marked else (0, 0, 255)
+                    cv2.putText(debug_image, f"{porcentagem:.0f}%", 
+                               (abs_x, abs_y - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.4, text_color, 1)
+                    
                     # Se marcado, desenhar círculo verde no centro
                     if is_marked:
                         cv2.circle(debug_image, (center_x, center_y), radius, (0, 255, 0), 2)
-                        print(f"    Q{i+1} {alt_letter}: ✅ MARCADO")
                     else:
                         # Desenhar círculo vermelho se não marcado
                         cv2.circle(debug_image, (center_x, center_y), radius, (0, 0, 255), 1)
@@ -5338,8 +5725,20 @@ class PhysicalTestPDFGenerator:
                     # Extrair número da questão (question_1 -> 1)
                     question_order = int(q_num.split('_')[1])
                     respostas_detectadas[question_order] = marked_alts[0]  # Pegar primeira alternativa marcada
+                else:
+                    # Log para questões sem resposta detectada
+                    question_order = int(q_num.split('_')[1])
+                    print(f"    ⚠️ Q{question_order}: Nenhuma alternativa marcada detectada")
             
-            print(f"📊 RESUMO: {len(respostas_detectadas)} questões com respostas detectadas")
+            # RESUMO DETALHADO
+            print(f"\n📊 RESUMO DA DETECÇÃO:")
+            print(f"   Total de questões processadas: {num_questions}")
+            print(f"   Questões com respostas detectadas: {len(respostas_detectadas)}")
+            if respostas_detectadas:
+                print(f"   Respostas detectadas: {respostas_detectadas}")
+            else:
+                print(f"   ⚠️ NENHUMA RESPOSTA DETECTADA - Verifique coordenadas e threshold!")
+            
             return respostas_detectadas, debug_image
             
         except Exception as e:
@@ -5407,11 +5806,12 @@ class PhysicalTestPDFGenerator:
                         respostas_por_disciplina[subject_key][question_key][alt_id] = False
                         continue
                     
-                    # Detectar se está marcado
-                    is_marked = self._detectar_marcacao_circular(binary_image, x, y, radius)
+                    # Detectar se está marcado (agora retorna tupla: is_marked, porcentagem)
+                    is_marked, porcentagem = self._detectar_marcacao_circular(binary_image, x, y, radius)
                     respostas_por_disciplina[subject_key][question_key][alt_id] = is_marked
                     
-                    print(f"    Q{i+1} {alt_id}: {'✅ MARCADO' if is_marked else '❌ NÃO MARCADO'}")
+                    status = "✅ MARCADO" if is_marked else "❌ NÃO MARCADO"
+                    print(f"    Q{i+1} {alt_id}: {status} ({porcentagem:.1f}%)")
             
             # Calcular estatísticas
             total_questions = 0
@@ -5441,10 +5841,13 @@ class PhysicalTestPDFGenerator:
             logging.error(f"Erro ao detectar respostas com coordenadas: {str(e)}")
             return {}
     
-    def _detectar_marcacao_circular(self, binary_image, center_x: int, center_y: int, radius: int) -> bool:
+    def _detectar_marcacao_circular(self, binary_image, center_x: int, center_y: int, radius: int) -> tuple:
         """
         Detecta marcação usando região circular centrada em (center_x, center_y)
         CORRIGIDO: Agora usa o radius fornecido e assume que x,y são coordenadas do centro
+        
+        Returns:
+            Tuple (is_marked: bool, porcentagem: float) - Retorna se está marcado e a porcentagem detectada
         """
         try:
             import cv2
@@ -5452,9 +5855,9 @@ class PhysicalTestPDFGenerator:
             
             h, w = binary_image.shape
             
-            # Definir região de interesse usando o radius fornecido
-            # Criar uma região quadrada que contém o círculo
-            region_size = max(radius * 2, 20)  # Mínimo de 20px para garantir área suficiente
+            # Aumentar região de interesse para garantir captura completa da bolha
+            # Usar radius completo + margem de segurança
+            region_size = max(radius * 2 + 4, 24)  # Mínimo de 24px para garantir área suficiente
             
             # Calcular cantos da região (centrado em center_x, center_y)
             half_size = region_size // 2
@@ -5466,7 +5869,7 @@ class PhysicalTestPDFGenerator:
             # Extrair região de interesse
             roi = binary_image[y1:y2, x1:x2]
             if roi.size == 0:
-                return False
+                return False, 0.0
             
             # Ajustar centro relativo à ROI
             roi_center_x = center_x - x1
@@ -5484,18 +5887,21 @@ class PhysicalTestPDFGenerator:
             pixels_brancos = cv2.countNonZero(masked_roi)
             
             if total_pixels == 0:
-                return False
+                return False, 0.0
             
             porcentagem_branco = (pixels_brancos / total_pixels) * 100
             
-            # Threshold ajustado (reduzido de 70% para 60% para melhor detecção)
-            return porcentagem_branco >= 60
+            # Threshold reduzido de 60% para 45% para melhor detecção
+            # Imagem binária usa THRESH_BINARY_INV, então bolhas preenchidas aparecem como brancas
+            is_marked = porcentagem_branco >= 45
+            
+            return is_marked, porcentagem_branco
             
         except Exception as e:
             logging.error(f"Erro ao detectar marcação circular: {str(e)}")
             import traceback
             logging.error(traceback.format_exc())
-            return False
+            return False, 0.0
     
     # ============================================================================
     # FUNÇÃO ANTIGA - NÃO USADA MAIS (PROJETO STYLE)

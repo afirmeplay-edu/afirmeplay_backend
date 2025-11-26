@@ -24,6 +24,8 @@ RUN apt-get update && apt-get install -y \
     libfribidi-dev \
     libxcb1-dev \
     libgl1 \
+    libzbar0 \
+    libzbar-dev \
     libglib2.0-0 \
     fonts-dejavu-core \
     librsvg2-common \

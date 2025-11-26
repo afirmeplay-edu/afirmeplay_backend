@@ -14,6 +14,7 @@ from app.models.physicalTestForm import PhysicalTestForm
 from app.models.classTest import ClassTest
 from app.services.physical_test_pdf_generator import PhysicalTestPDFGenerator
 from app.services.physical_test_form_service import PhysicalTestFormService
+from app.services.sistemaORM import SistemaORM  # NOVO SISTEMA OMR
 import tempfile
 from app.services.batch_correction_service import batch_correction_service
 import logging
@@ -415,32 +416,204 @@ def process_physical_correction(test_id):
         if not image_data:
             return jsonify({"error": "Imagem não fornecida"}), 400
         
-        # Usar PhysicalTestFormService para processar correção
-        form_service = PhysicalTestFormService()
+        # Verificar se deve usar o novo sistema OMR (parâmetro opcional)
+        data = request.get_json() or {}
+        use_new_orm = data.get('use_new_orm', False) or request.form.get('use_new_orm', 'false').lower() == 'true'
         
-        result = form_service.process_physical_correction(
-            test_id=test_id,
-            image_data=image_data,
-            correction_image_url=None
-        )
+        if use_new_orm:
+            # NOVO SISTEMA OMR - Alinhamento pela página inteira
+            print("🆕 Usando NOVO SISTEMA OMR (alinhamento pela página)")
+            
+            try:
+                # Converter image_data para base64 string
+                if isinstance(image_data, bytes):
+                    image_base64 = base64.b64encode(image_data).decode('utf-8')
+                    image_data_str = f"data:image/jpeg;base64,{image_base64}"
+                else:
+                    image_data_str = image_data
+                
+                # Criar instância do novo sistema
+                sistema_orm = SistemaORM(debug=True)
+                
+                # Processar correção
+                result = sistema_orm.process_exam(
+                    image_data=image_data_str,
+                    num_questions=None  # Será buscado do banco
+                )
+                
+                if result.get('success'):
+                    return jsonify({
+                        "message": "Correção processada com sucesso (NOVO SISTEMA OMR)",
+                        "system": "new_orm",
+                        "student_id": result.get('student_id'),
+                        "test_id": result.get('test_id'),
+                        "correct": result.get('correct'),
+                        "total": result.get('total'),
+                        "score": result.get('score'),
+                        "percentage": result.get('percentage'),
+                        "answers": result.get('answers'),
+                        "saved_answers": result.get('saved_answers'),
+                        "evaluation_result": result.get('evaluation_result')
+                    }), 200
+                else:
+                    return jsonify({
+                        "error": result.get('error', 'Erro desconhecido na correção'),
+                        "system": "new_orm"
+                    }), 500
+                    
+            except Exception as e:
+                logging.error(f"Erro no novo sistema OMR: {str(e)}")
+                import traceback
+                logging.error(traceback.format_exc())
+                return jsonify({
+                    "error": f"Erro no novo sistema OMR: {str(e)}",
+                    "system": "new_orm"
+                }), 500
         
-        if result.get('success'):
-            return jsonify({
-                "message": "Correção processada com sucesso",
-                "student_id": result.get('student_id'),
-                "test_id": test_id,
-                "correct_answers": result.get('correct_answers'),
-                "total_questions": result.get('total_questions'),
-                "score_percentage": result.get('score_percentage'),
-                "grade": result.get('grade'),
-                "proficiency": result.get('proficiency'),
-                "classification": result.get('classification'),
-                "answers_detected": result.get('answers_detected'),
-                "student_answers": result.get('student_answers'),
-                "evaluation_result_id": result.get('evaluation_result_id')
-            }), 200
         else:
-            return jsonify({"error": result.get('error', 'Erro desconhecido na correção')}), 500
+            # SISTEMA ANTIGO - Mantido para compatibilidade
+            print("📋 Usando SISTEMA ANTIGO (alinhamento por marcadores)")
+            
+            form_service = PhysicalTestFormService()
+            
+            result = form_service.process_physical_correction(
+                test_id=test_id,
+                image_data=image_data,
+                correction_image_url=None
+            )
+            
+            if result.get('success'):
+                return jsonify({
+                    "message": "Correção processada com sucesso",
+                    "system": "old",
+                    "student_id": result.get('student_id'),
+                    "test_id": test_id,
+                    "correct_answers": result.get('correct_answers'),
+                    "total_questions": result.get('total_questions'),
+                    "score_percentage": result.get('score_percentage'),
+                    "grade": result.get('grade'),
+                    "proficiency": result.get('proficiency'),
+                    "classification": result.get('classification'),
+                    "answers_detected": result.get('answers_detected'),
+                    "student_answers": result.get('student_answers'),
+                    "evaluation_result_id": result.get('evaluation_result_id')
+                }), 200
+            else:
+                return jsonify({
+                    "error": result.get('error', 'Erro desconhecido na correção'),
+                    "system": "old"
+                }), 500
+        
+    except Exception as e:
+        print(f"❌ Erro ao processar correção: {str(e)}")
+        return jsonify({"error": "Erro interno do servidor"}), 500
+
+
+@bp.route('/test/<string:test_id>/process-correction-orm', methods=['POST'])
+@jwt_required()
+@role_required("admin", "professor", "coordenador", "diretor")
+def process_physical_correction_orm(test_id):
+    """
+    ROTA TEMPORÁRIA: Processa correção usando o NOVO SISTEMA OMR
+    Alinhamento pela página inteira (não pelos 4 quadradinhos)
+    
+    Esta rota usa exclusivamente o novo sistema OMR para testes
+    """
+    try:
+        user = get_current_user_from_token()
+        if not user:
+            return jsonify({"error": "User not found or token invalid"}), 401
+        
+        # Buscar a prova
+        test = Test.query.get(test_id)
+        if not test:
+            return jsonify({"error": f"Prova não encontrada: {test_id}"}), 404
+        
+        # Verificar permissões do professor
+        if user['role'] == 'professor' and test.created_by != user['id']:
+            return jsonify({"error": "Você só pode processar correções de suas próprias provas"}), 403
+        
+        # Obter dados da imagem
+        image_data = None
+        
+        if 'image' in request.files:
+            # Upload de arquivo
+            file = request.files['image']
+            if file and file.filename:
+                image_data = file.read()
+        else:
+            # Tentar obter dados JSON
+            try:
+                data = request.get_json() or {}
+                if 'image' in data:
+                    # Base64
+                    image_base64 = data['image']
+                    if image_base64.startswith('data:image'):
+                        image_base64 = image_base64.split(',')[1]
+                    image_data = base64.b64decode(image_base64)
+            except Exception as e:
+                # Se não conseguir obter JSON, tentar form data
+                try:
+                    image_base64 = request.form.get('image')
+                    if image_base64:
+                        if image_base64.startswith('data:image'):
+                            image_base64 = image_base64.split(',')[1]
+                        image_data = base64.b64decode(image_base64)
+                except Exception as e2:
+                    return jsonify({"error": "Formato de dados inválido. Envie como JSON ou form-data"}), 400
+        
+        if not image_data:
+            return jsonify({"error": "Imagem não fornecida"}), 400
+        
+        # NOVO SISTEMA OMR
+        print("🆕 Processando correção com NOVO SISTEMA OMR")
+        
+        try:
+            # Converter image_data para base64 string
+            if isinstance(image_data, bytes):
+                image_base64 = base64.b64encode(image_data).decode('utf-8')
+                image_data_str = f"data:image/jpeg;base64,{image_base64}"
+            else:
+                image_data_str = image_data
+            
+            # Criar instância do novo sistema
+            sistema_orm = SistemaORM(debug=True)
+            
+            # Processar correção
+            result = sistema_orm.process_exam(
+                image_data=image_data_str,
+                num_questions=None  # Será buscado do banco
+            )
+            
+            if result.get('success'):
+                return jsonify({
+                    "message": "Correção processada com sucesso (NOVO SISTEMA OMR)",
+                    "system": "new_orm",
+                    "student_id": result.get('student_id'),
+                    "test_id": result.get('test_id'),
+                    "correct": result.get('correct'),
+                    "total": result.get('total'),
+                    "score": result.get('score'),
+                    "percentage": result.get('percentage'),
+                    "answers": result.get('answers'),
+                    "saved_answers": result.get('saved_answers'),
+                    "evaluation_result": result.get('evaluation_result')
+                }), 200
+            else:
+                return jsonify({
+                    "error": result.get('error', 'Erro desconhecido na correção'),
+                    "system": "new_orm"
+                }), 500
+                
+        except Exception as e:
+            logging.error(f"Erro no novo sistema OMR: {str(e)}")
+            import traceback
+            logging.error(traceback.format_exc())
+            return jsonify({
+                "error": f"Erro no novo sistema OMR: {str(e)}",
+                "system": "new_orm",
+                "traceback": traceback.format_exc() if logging.getLogger().level == logging.DEBUG else None
+            }), 500
         
     except Exception as e:
         print(f"❌ Erro ao processar correção: {str(e)}")

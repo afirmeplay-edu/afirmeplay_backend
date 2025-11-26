@@ -1,0 +1,587 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Gabarito de Referência - {{ test_id }}</title>
+    <style>
+        @page {
+            size: A4 portrait;
+            margin: 0.5cm 0.8cm 1.5cm 0.8cm;
+        }
+
+        @page with-footer {
+            @bottom-left {
+                content: "InnovPlay Sistema de Ensino e Avaliação";
+                font-family: 'Helvetica', Arial, sans-serif;
+                font-size: 7pt;
+                color: #999;
+            }
+            @bottom-center {
+                content: "Página " counter(page);
+                font-family: 'Helvetica', Arial, sans-serif;
+                font-size: 7pt;
+                color: #999;
+            }
+            @bottom-right {
+                content: "Gabarito de Referência OMR";
+                font-family: 'Helvetica', Arial, sans-serif;
+                font-size: 7pt;
+                color: #999;
+            }
+        }
+
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Helvetica', Arial, sans-serif;
+            font-size: 12pt;
+            color: #374151;
+            line-height: 1.6;
+        }
+
+        /* Formulário de Respostas */
+        .answer-sheet {
+            page: with-footer;
+            padding: 0.5cm;
+            position: relative; /* Para posicionar marcadores de alinhamento */
+        }
+        
+        /* Marcadores de alinhamento - 4 quadrados pretos nos cantos */
+        .alignment-marker {
+            position: absolute;
+            width: 15px;
+            height: 15px;
+            background: #000000;
+            border: 1px solid #000000;
+            z-index: 1000; /* Garantir que fiquem visíveis */
+        }
+        
+        .marker-top-left {
+            top: 0.1cm;    /* Mais próximo da borda superior da página */
+            left: 0.1cm;   /* Mais próximo da borda esquerda da página */
+        }
+        
+        .marker-top-right {
+            top: 0.1cm;    /* Mais próximo da borda superior da página */
+            right: 0.1cm;  /* Mais próximo da borda direita da página */
+        }
+        
+        .marker-bottom-left {
+            bottom: 0.1cm; /* Mais próximo do rodapé */
+            left: 0.1cm;   /* Mais próximo da borda esquerda da página */
+        }
+        
+        .marker-bottom-right {
+            bottom: 0.1cm; /* Mais próximo do rodapé */
+            right: 0.1cm;  /* Mais próximo da borda direita da página */
+        }
+
+        /* Cabeçalho da folha de resposta */
+        .answer-sheet-header {
+            border: 1px solid #000;
+            padding: 10px;
+            margin: 0;
+            margin-bottom: 15px;
+            display: flex;
+            justify-content: space-between;
+            align-items: stretch;
+        }
+
+        .header-left {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            justify-content: space-between;
+        }
+
+        .header-info-line {
+            font-size: 7pt;
+            margin: 2px 0;
+            font-weight: bold;
+            text-transform: uppercase;
+        }
+
+        .student-name-grid {
+            margin-top: 8px;
+            border-top: 1px solid #000;
+            padding-top: 8px;
+        }
+
+        .student-name-label {
+            font-size: 7pt;
+            font-weight: bold;
+            margin-bottom: 3px;
+            text-transform: uppercase;
+        }
+
+        .name-boxes {
+            display: flex;
+            flex-direction: column;
+            gap: 3px;
+        }
+
+        .name-boxes-row {
+            display: flex;
+            gap: 2px;
+        }
+
+        .name-box {
+            width: 20px;
+            height: 25px;
+            border: 1px solid #000;
+            display: inline-block;
+            background: white;
+        }
+
+        .header-right {
+            width: 100px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            border-left: 1px solid #000;
+            padding-left: 10px;
+            margin-left: 10px;
+        }
+
+        .qr-code-box {
+            width: 90px;
+            height: 90px;
+            border: 1px solid #333;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            background: white;
+            margin-bottom: 15px;
+        }
+
+        .qr-code-box img {
+            width: 100%;
+            height: 100%;
+        }
+
+        .qr-label {
+            font-size: 7pt;
+            font-weight: bold;
+            text-align: center;
+        }
+
+        .test-name-section {
+            border-top: 1px solid #000;
+            padding-top: 5px;
+            margin-top: 5px;
+            display: flex;
+            gap: 5px;
+            align-items: center;
+        }
+
+        .test-name-label {
+            font-size: 7pt;
+            font-weight: bold;
+        }
+
+        .test-name-value {
+            font-size: 7pt;
+        }
+
+        .signature-section {
+            border-top: 1px dashed #000;
+            padding-top: 5px;
+            margin-top: 8px;
+            text-align: center;
+            font-size: 7pt;
+            font-weight: bold;
+        }
+
+        /* Instruções */
+        .instructions-box {
+            margin: 10px 0;
+            padding: 0;
+            background: white;
+            border: 1px solid #333;
+        }
+
+        .instructions-title {
+            font-size: 9pt;
+            font-weight: bold;
+            text-transform: uppercase;
+            margin: 0;
+            padding: 8px 12px;
+            color: white;
+            background: #7c3aed;
+            text-align: center;
+        }
+
+        .instructions-content {
+            padding: 10px 15px;
+        }
+
+        .instructions-box ul {
+            margin: 0;
+            padding-left: 20px;
+            font-size: 7.5pt;
+            line-height: 1.5;
+        }
+
+        .instructions-box li {
+            margin: 5px 0;
+        }
+
+        .instructions-examples {
+            display: flex;
+            justify-content: center;
+            gap: 30px;
+            margin-top: 10px;
+            padding: 8px;
+            background: white;
+        }
+
+        .example-item {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            font-size: 8pt;
+            font-weight: bold;
+        }
+
+        .example-bubble {
+            width: 16px;
+            height: 16px;
+            border: 1.5px solid #000;
+            border-radius: 50%;
+            display: inline-block;
+        }
+
+        .example-bubble.filled {
+            background: #000;
+        }
+
+        .example-bubble.half {
+            background: linear-gradient(90deg, #000 50%, white 50%);
+        }
+
+        .example-bubble.crossed::before,
+        .example-bubble.crossed::after {
+            content: '';
+            position: absolute;
+            width: 20px;
+            height: 1.5px;
+            background: #000;
+            top: 50%;
+            left: 50%;
+        }
+
+        .example-bubble.crossed::before {
+            transform: translate(-50%, -50%) rotate(45deg);
+        }
+
+        .example-bubble.crossed::after {
+            transform: translate(-50%, -50%) rotate(-45deg);
+        }
+
+        /* Bloco exclusivo para aplicador */
+        .applicator-box {
+            margin: 10px 0;
+            padding: 0;
+            background: white;
+            border: 1px solid #333;
+        }
+
+        .applicator-title {
+            font-size: 9pt;
+            font-weight: bold;
+            text-transform: uppercase;
+            margin: 0;
+            padding: 8px 12px;
+            color: white;
+            background: #7c3aed;
+            text-align: center;
+        }
+
+        .applicator-content {
+            padding: 15px;
+        }
+
+        .applicator-options {
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+        }
+
+        .applicator-option {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            font-size: 8pt;
+        }
+
+        .applicator-checkbox {
+            width: 18px;
+            height: 18px;
+            border: 1.5px solid #000;
+            border-radius: 50%;
+            display: inline-block;
+            flex-shrink: 0;
+        }
+
+        /* Grade de respostas */
+        .answer-grid-container {
+            margin: 10px 0;
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 8px;
+        }
+
+        .answer-block {
+            border: 1px solid #333;
+            padding: 5px;
+        }
+
+        .block-header {
+            text-align: center;
+            font-weight: bold;
+            font-size: 8pt;
+            margin: 0 0 2px 0;
+            padding: 4px;
+            background: white;
+        }
+
+        .bubble-headers {
+            display: flex;
+            align-items: center;
+            margin: 3px 0 3px 0;
+            padding: 0;
+            font-size: 7pt;
+            font-weight: bold;
+        }
+
+        .bubble-headers .header-spacer {
+            width: 22px;
+            flex-shrink: 0;
+        }
+
+        .bubble-headers .header-bubbles {
+            display: flex;
+            gap: 6px;
+            justify-content: space-between;
+            flex: 1;
+        }
+
+        .bubble-headers .header-bubbles span {
+            width: 18px;
+            text-align: center;
+            flex-shrink: 0;
+        }
+
+        .answer-row {
+            display: flex;
+            align-items: center;
+            margin: 2px 0;
+            padding: 1px 0;
+        }
+
+        .question-num {
+            font-size: 7pt;
+            font-weight: bold;
+            width: 22px;
+            text-align: left;
+            flex-shrink: 0;
+        }
+
+        .bubbles {
+            display: flex;
+            gap: 6px;
+            justify-content: space-between;
+            flex: 1;
+        }
+
+        .bubble-container {
+            width: 18px;
+            display: flex;
+            justify-content: center;
+            flex-shrink: 0;
+        }
+
+        .bubble {
+            width: 18px;
+            height: 18px;
+            border: 1px solid #333;
+            border-radius: 50%;
+            display: inline-block;
+        }
+
+        .bubble-label {
+            font-size: 6pt;
+            text-align: center;
+            margin-top: -2px;
+        }
+    </style>
+</head>
+<body>
+    <!-- Formulário de Respostas -->
+    <div class="answer-sheet">
+        <!-- Marcadores de Alinhamento - 4 quadrados pretos nos cantos -->
+        <div class="alignment-marker marker-top-left"></div>
+        <div class="alignment-marker marker-top-right"></div>
+        <div class="alignment-marker marker-bottom-left"></div>
+        <div class="alignment-marker marker-bottom-right"></div>
+        
+        <!-- Cabeçalho -->
+        <div class="answer-sheet-header">
+            <div class="header-left">
+                <div>
+                    <div class="header-info-line">Nome completo: GABARITO DE REFERÊNCIA</div>
+                    <div class="header-info-line">Estado: REFERÊNCIA</div>
+                    <div class="header-info-line">Município: REFERÊNCIA</div>
+                    <div class="header-info-line">Escola: REFERÊNCIA</div>
+                    <div class="header-info-line">Turma: REFERÊNCIA</div>
+                </div>
+                <div class="student-name-grid">
+                    <div class="student-name-label">NOME DO ALUNO:</div>
+                    <div class="name-boxes">
+                        <div class="name-boxes-row">
+                            {% for i in range(25) %}
+                            <span class="name-box"></span>
+                            {% endfor %}
+                        </div>
+                        <div class="name-boxes-row">
+                            {% for i in range(25) %}
+                            <span class="name-box"></span>
+                            {% endfor %}
+                        </div>
+                    </div>
+                </div>
+                <div class="test-name-section">
+                    <div class="test-name-label">NOME DA PROVA:</div>
+                    <div class="test-name-value">{{ test_title or 'GABARITO DE REFERÊNCIA' }}</div>
+                </div>
+                <div class="signature-section">
+                    Assinatura do participante:
+                </div>
+            </div>
+            <div class="header-right">
+                <div class="qr-code-box">
+                    {% if qr_code_base64 %}
+                    <img src="data:image/png;base64,{{ qr_code_base64 }}" alt="QR Code">
+                    {% else %}
+                    <div style="text-align: center; font-size: 6pt; padding: 10px;">QR CODE</div>
+                    {% endif %}
+                </div>
+                <div class="qr-label">QR Code:</div>
+            </div>
+        </div>
+
+        <!-- Instruções -->
+        <div class="instructions-box">
+            <div class="instructions-title">Instruções para o aluno</div>
+            <div class="instructions-content">
+                <ul>
+                    <li>Preencha seu nome e data de nascimento.</li>
+                    <li>Este cartão-resposta não será substituído. Tenha muita atenção ao marcar as alternativas.</li>
+                    <li>Em cada questão é apresentada uma única resposta correta portando o seu cartão-resposta.</li>
+                    <li>Use apenas caneta esferográfica de tinta preta. Não amasse, dobre ou rasure o cartão, pois ele é o único documento para correção.</li>
+                    <li>Para todas as marcações neste CARTÃO-RESPOSTA, <strong>preencha os círculos completamente</strong>, utilizando caneta esferográfica de tinta preta fabricada em material transparente, conforme na ilustração.</li>
+                </ul>
+                <div class="instructions-examples">
+                    <div class="example-item">
+                        <span class="example-bubble filled"></span>
+                        <span>CORRETO</span>
+                    </div>
+                    <div class="example-item">
+                        <span class="example-bubble"></span>
+                        <span>INCORRETO</span>
+                    </div>
+                    <div class="example-item">
+                        <span class="example-bubble half"></span>
+                        <span>INCORRETO</span>
+                    </div>
+                    <div class="example-item">
+                        <span class="example-bubble crossed" style="position: relative;"></span>
+                        <span>INCORRETO</span>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Bloco Exclusivo para Aplicador -->
+        <div class="applicator-box">
+            <div class="applicator-title">Atenção: Bloco Exclusivo para Uso do Aplicador</div>
+            <div class="applicator-content">
+                <div class="applicator-options">
+                    <div class="applicator-option">
+                        <span class="applicator-checkbox"></span>
+                        <span>1. Aluno ausente</span>
+                    </div>
+                    <div class="applicator-option">
+                        <span class="applicator-checkbox"></span>
+                        <span>2. Aluno com deficiência indicada no Censo</span>
+                    </div>
+                    <div class="applicator-option">
+                        <span class="applicator-checkbox"></span>
+                        <span>3. Aluno com atendimento especializado que utilizou tempo adicional.</span>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Grade de Respostas DINÂMICA -->
+        <div class="answer-grid-container">
+            {% set questions_per_block = 12 %}
+            {% set total_questions = num_questions | default(48) %}
+            {% set num_blocks = ((total_questions - 1) // questions_per_block) + 1 %}
+            {% if num_blocks == 0 %}{% set num_blocks = 1 %}{% endif %}
+            
+            {% for block in range(1, num_blocks + 1) %}
+            {% set start_question = (block - 1) * questions_per_block + 1 %}
+            {% set end_question = [block * questions_per_block, total_questions] | min %}
+            {% set questions_in_block = end_question - start_question + 1 %}
+            
+            {% if questions_in_block > 0 %}
+            <div class="answer-block">
+                <div class="block-header">BLOCO {{ "%02d"|format(block) }}</div>
+
+                <!-- Cabeçalho com letras A B C D -->
+                <div class="bubble-headers">
+                    <div class="header-spacer"></div>
+                    <div class="header-bubbles">
+                        <span>A</span>
+                        <span>B</span>
+                        <span>C</span>
+                        <span>D</span>
+                    </div>
+                </div>
+
+                <!-- Linhas de resposta DINÂMICAS -->
+                {% for q in range(1, questions_in_block + 1) %}
+                {% set question_num = start_question + q - 1 %}
+                <div class="answer-row">
+                    <span class="question-num">{{ question_num }}.</span>
+                    <div class="bubbles">
+                        <div class="bubble-container">
+                            <div class="bubble"></div>
+                        </div>
+                        <div class="bubble-container">
+                            <div class="bubble"></div>
+                        </div>
+                        <div class="bubble-container">
+                            <div class="bubble"></div>
+                        </div>
+                        <div class="bubble-container">
+                            <div class="bubble"></div>
+                        </div>
+                    </div>
+                </div>
+                {% endfor %}
+            </div>
+            {% endif %}
+            {% endfor %}
+        </div>
+    </div>
+</body>
+</html>
+

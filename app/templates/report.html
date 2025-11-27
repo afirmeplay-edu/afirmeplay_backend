@@ -153,6 +153,18 @@
 				text-align: center;
 				font-family: sans-serif;
 			}
+			.cover-disciplinas {
+				font-size: 14pt;
+				font-weight: 500;
+				color: #475569;
+				text-align: center;
+				font-family: sans-serif;
+				margin-top: 20px;
+				max-width: 100%;
+				word-wrap: break-word;
+				overflow-wrap: break-word;
+				line-height: 1.6;
+			}
 			.cover-bottom-section {
 				flex: 0 0 auto;
 				padding: 40px 0 60px 0;
@@ -187,6 +199,7 @@
 			.cover-info-value {
 				color: #1e293b;
 				font-weight: 400;
+				text-align: left;
 			}
 
 			/* Layout e Seções */
@@ -781,6 +794,11 @@
 					style="margin-top: 55px; margin-bottom: 55px">
 					{{ avaliacao.titulo or 'AVALIAÇÃO DIAGNÓSTICA' }}
 				</div>
+				{% if avaliacao.disciplinas %}
+				<div class="cover-disciplinas">
+					{{ avaliacao.disciplinas | join(', ') }}
+				</div>
+				{% endif %}
 			</div>
 
 			{# Seção 3: Rodapé - Card com ESCOLA e SÉRIE (ou MUNICÍPIO para
@@ -908,20 +926,6 @@
 			<div class="justified" style="margin-top: 8px">
 				As turmas são únicas e, portanto, a observação das necessidades
 				de cada turma deve ser analisada através do sistema.
-			</div>
-			<div class="justified" style="margin-top: 8px">
-				Foram constatadas algumas inconsistências em algumas questões.
-				Para conhecimento:
-			</div>
-			<div class="justified" style="margin-top: 8px">
-				A necessidade de anulação de duas questões de
-				<strong>Matemática</strong> direcionadas ao
-				<strong>9º ano</strong>. As questões (<strong>nº 10</strong> e
-				<strong>nº 11</strong> do material da <strong>SEMED</strong>),
-				referentes a <strong>36º</strong> e <strong>37º</strong> na
-				avaliação <strong>InnovPlay</strong> foram enviadas com
-				possíveis erros pela equipe responsável pela elaboração da
-				SEMED, por este motivo havendo a necessidade de anular.
 			</div>
 		</section>
 

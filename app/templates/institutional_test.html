@@ -141,6 +141,10 @@
 				font-weight: bold;
 				text-transform: uppercase;
 				letter-spacing: 0.5px;
+				max-width: 100%;
+				word-wrap: break-word;
+				overflow-wrap: break-word;
+				line-height: 1.6;
 			}
 
 			.subject-item {
@@ -182,7 +186,7 @@
 				font-size: 11pt;
 				color: #1f2937;
 				font-weight: normal;
-				text-align: right;
+				text-align: left;
 			}
 
 			/* Capa de Disciplina */
@@ -851,6 +855,37 @@
 		</div>
 
 		<!-- Disciplinas e Questões -->
+		{% if questions_by_block %}
+		{# Usar nova estrutura de blocos configurável #}
+		{% for block in questions_by_block %}
+		<!-- Capa do Bloco -->
+		<div class="subject-cover">
+			<div class="block-number">BLOCO {{ "%02d"|format(block.block_number) }}</div>
+			{% if block.subject_name %}
+			<div class="subject-name">{{ block.subject_name }}</div>
+			{% else %}
+			<div class="subject-name">QUESTÕES {{ block.start_question_num }} A {{ block.end_question_num }}</div>
+			{% endif %}
+
+			<div class="subject-octagon">
+				<div class="octagon-text">
+					Aguarde instruções para virar a página.
+				</div>
+			</div>
+
+			<div class="time-text">
+				<strong
+					>Você terá 25 minutos para responder a este bloco.</strong
+				>
+			</div>
+		</div>
+
+		<!-- Questões do Bloco -->
+		<div class="questions-section">
+			{% for question in block.questions %}
+		{% endfor %}
+		{% else %}
+		{# Comportamento padrão: organizar por disciplina #}
 		{% for subject_name, subject_questions in questions_by_subject.items()
 		%}
 		<!-- Capa da Disciplina -->
@@ -874,6 +909,7 @@
 		<!-- Questões da Disciplina -->
 		<div class="questions-section">
 			{% for question in subject_questions %}
+		{% endif %}
 			<div class="question no-break">
 				<div class="question-header">
 					<span class="question-number"
@@ -1052,21 +1088,18 @@
 
 			<!-- Grade de Respostas DINÂMICA -->
 			<div class="answer-grid-container">
-				{% set questions_per_block = 12 %} {% set total_questions =
-				total_questions | default(48) %} {# CORREÇÃO: Calcular
-				num_blocks usando divisão inteira (não arredondamento para cima)
-				#} {# Apenas gerar blocos que realmente têm questões #} {% set
-				num_blocks = ((total_questions - 1) // questions_per_block) + 1
-				%} {% if num_blocks == 0 %}{% set num_blocks = 1 %}{% endif %}
-				{% for block in range(1, num_blocks + 1) %} {% set
-				start_question = (block - 1) * questions_per_block + 1 %} {% set
-				end_question = [block * questions_per_block, total_questions] |
-				min %} {% set questions_in_block = end_question - start_question
-				+ 1 %} {# CORREÇÃO: Só gerar bloco se tiver questões #} {% if
-				questions_in_block > 0 %}
+				{% if blocks_config and blocks_config.use_blocks %}
+				{# Usar configuração de blocos personalizada #}
+				{% set num_blocks = blocks_config.num_blocks | default(1) %}
+				{% set questions_per_block = blocks_config.questions_per_block | default(12) %}
+				{% if questions_by_block %}
+				{# Usar estrutura de blocos já calculada #}
+				{% for block in questions_by_block %}
+				{% set questions_in_block = block.questions | length %}
+				{% if questions_in_block > 0 %}
 				<div class="answer-block">
 					<div class="block-header">
-						BLOCO {{ "%02d"|format(block) }}
+						BLOCO {{ "%02d"|format(block.block_number) }}
 					</div>
 
 					<!-- Cabeçalho com letras A B C D -->
@@ -1081,8 +1114,54 @@
 					</div>
 
 					<!-- Linhas de resposta DINÂMICAS -->
-					{% for q in range(1, questions_in_block + 1) %} {% set
-					question_num = start_question + q - 1 %}
+					{% for question in block.questions %}
+					<div class="answer-row">
+						<span class="question-num">{{ question.question_number }}.</span>
+						<div class="bubbles">
+							<div class="bubble-container">
+								<div class="bubble"></div>
+							</div>
+							<div class="bubble-container">
+								<div class="bubble"></div>
+							</div>
+							<div class="bubble-container">
+								<div class="bubble"></div>
+							</div>
+							<div class="bubble-container">
+								<div class="bubble"></div>
+							</div>
+						</div>
+					</div>
+					{% endfor %}
+				</div>
+				{% endif %}
+				{% endfor %}
+				{% else %}
+				{# Calcular blocos manualmente se não tiver questions_by_block #}
+				{% for block_num in range(1, num_blocks + 1) %}
+				{% set start_question = (block_num - 1) * questions_per_block + 1 %}
+				{% set end_question = [block_num * questions_per_block, total_questions] | min %}
+				{% set questions_in_block = end_question - start_question + 1 %}
+				{% if questions_in_block > 0 %}
+				<div class="answer-block">
+					<div class="block-header">
+						BLOCO {{ "%02d"|format(block_num) }}
+					</div>
+
+					<!-- Cabeçalho com letras A B C D -->
+					<div class="bubble-headers">
+						<div class="header-spacer"></div>
+						<div class="header-bubbles">
+							<span>A</span>
+							<span>B</span>
+							<span>C</span>
+							<span>D</span>
+						</div>
+					</div>
+
+					<!-- Linhas de resposta DINÂMICAS -->
+					{% for q in range(1, questions_in_block + 1) %}
+					{% set question_num = start_question + q - 1 %}
 					<div class="answer-row">
 						<span class="question-num">{{ question_num }}.</span>
 						<div class="bubbles">
@@ -1102,7 +1181,61 @@
 					</div>
 					{% endfor %}
 				</div>
-				{% endif %} {% endfor %}
+				{% endif %}
+				{% endfor %}
+				{% endif %}
+				{% else %}
+				{# Comportamento padrão: 12 questões por bloco #}
+				{% set questions_per_block = 12 %}
+				{% set total_questions = total_questions | default(48) %}
+				{% set num_blocks = ((total_questions - 1) // questions_per_block) + 1 %}
+				{% if num_blocks == 0 %}{% set num_blocks = 1 %}{% endif %}
+				{% for block in range(1, num_blocks + 1) %}
+				{% set start_question = (block - 1) * questions_per_block + 1 %}
+				{% set end_question = [block * questions_per_block, total_questions] | min %}
+				{% set questions_in_block = end_question - start_question + 1 %}
+				{% if questions_in_block > 0 %}
+				<div class="answer-block">
+					<div class="block-header">
+						BLOCO {{ "%02d"|format(block) }}
+					</div>
+
+					<!-- Cabeçalho com letras A B C D -->
+					<div class="bubble-headers">
+						<div class="header-spacer"></div>
+						<div class="header-bubbles">
+							<span>A</span>
+							<span>B</span>
+							<span>C</span>
+							<span>D</span>
+						</div>
+					</div>
+
+					<!-- Linhas de resposta DINÂMICAS -->
+					{% for q in range(1, questions_in_block + 1) %}
+					{% set question_num = start_question + q - 1 %}
+					<div class="answer-row">
+						<span class="question-num">{{ question_num }}.</span>
+						<div class="bubbles">
+							<div class="bubble-container">
+								<div class="bubble"></div>
+							</div>
+							<div class="bubble-container">
+								<div class="bubble"></div>
+							</div>
+							<div class="bubble-container">
+								<div class="bubble"></div>
+							</div>
+							<div class="bubble-container">
+								<div class="bubble"></div>
+							</div>
+						</div>
+					</div>
+					{% endfor %}
+				</div>
+				{% endif %}
+				{% endfor %}
+				{% endif %}
 			</div>
 		</div>
 	</body>

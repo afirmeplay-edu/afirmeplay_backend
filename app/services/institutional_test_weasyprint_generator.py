@@ -52,12 +52,16 @@ class InstitutionalTestWeasyPrintGenerator:
 
         for student in students_data:
             try:
+                print(f"DEBUG: Gerando PDF para aluno {student.get('id')} - {student.get('name', student.get('nome', 'N/A'))}")
                 # Gerar PDF individual para cada aluno
                 pdf_data = self._generate_individual_institutional_pdf_data(
                     test_data, student, questions_data, class_test_id
                 )
 
                 if pdf_data:
+                    print(f"DEBUG: PDF gerado com sucesso para aluno {student.get('id')}, tamanho: {len(pdf_data)} bytes")
+                else:
+                    print(f"DEBUG: ERRO - PDF NÃO gerado para aluno {student.get('id')} (pdf_data é None ou vazio)")
                     # Mapear coordenadas e gerar QR code (mantido para compatibilidade)
                     coordinates = self._map_existing_form_coordinates(questions_data)
                     qr_data = self._generate_qr_code_with_metadata(
@@ -75,10 +79,12 @@ class InstitutionalTestWeasyPrintGenerator:
                     })
 
             except Exception as e:
-                logging.error(f"Erro ao gerar PDF institucional WeasyPrint para aluno {student['id']}: {str(e)}")
+                logging.error(f"Erro ao gerar PDF institucional WeasyPrint para aluno {student.get('id', 'N/A')}: {str(e)}")
                 import traceback
                 logging.error(traceback.format_exc())
                 continue
+        
+        print(f"DEBUG: Total de arquivos gerados: {len(generated_files)}")
 
         return generated_files
 
@@ -88,15 +94,36 @@ class InstitutionalTestWeasyPrintGenerator:
         Gera PDF individual institucional para um aluno usando WeasyPrint
         """
         try:
-            # Organizar questões por disciplina
+            # Organizar questões por disciplina (mantido para compatibilidade)
             questions_by_subject = self._organize_questions_by_subject(questions_data, test_data)
-
-            # Adicionar número sequencial às questões
-            question_counter = 1
-            for subject_name, subject_questions in questions_by_subject.items():
-                for question in subject_questions:
-                    question['question_number'] = question_counter
-                    question_counter += 1
+            
+            # Organizar questões por blocos conforme configuração
+            blocks_config = test_data.get('blocks_config', {})
+            use_blocks = blocks_config.get('use_blocks', False)
+            
+            print(f"DEBUG: use_blocks={use_blocks}, blocks_config={blocks_config}")
+            print(f"DEBUG: Total de questões: {len(questions_data)}")
+            
+            if use_blocks:
+                questions_by_block = self._organize_questions_by_blocks(questions_data, test_data)
+                print(f"DEBUG: Blocos organizados: {len(questions_by_block)} blocos")
+                
+                # Adicionar número sequencial às questões baseado nos blocos
+                question_counter = 1
+                for block in questions_by_block:
+                    if block and 'questions' in block:
+                        for question in block['questions']:
+                            if question:
+                                question['question_number'] = question_counter
+                                question_counter += 1
+            else:
+                # Comportamento padrão: organizar por disciplina
+                questions_by_block = None
+                question_counter = 1
+                for subject_name, subject_questions in questions_by_subject.items():
+                    for question in subject_questions:
+                        question['question_number'] = question_counter
+                        question_counter += 1
 
             # Gerar formulário de resposta (imagem base64)
             answer_sheet_image = self._generate_answer_sheet_base64(
@@ -146,21 +173,29 @@ class InstitutionalTestWeasyPrintGenerator:
             template_data = {
                 'test_data': test_data,
                 'student': student_with_qr,  # Usar student com QR code
-                'questions_by_subject': questions_by_subject,
+                'questions_by_subject': questions_by_subject,  # Mantido para compatibilidade
+                'questions_by_block': questions_by_block,  # Nova estrutura de blocos
+                'blocks_config': blocks_config,  # Configuração de blocos
                 'answer_sheet_image': answer_sheet_image,
-                'total_questions': total_questions,  # NOVO: facilitar cálculo no template
+                'total_questions': total_questions,
                 'datetime': datetime,
                 'generated_date': datetime.now().strftime('%d/%m/%Y %H:%M')
             }
 
             # Renderizar template HTML
+            print(f"DEBUG: Renderizando template com {len(template_data.get('questions_by_block', []))} blocos")
             template = self.env.get_template('institutional_test.html')
             html_content = template.render(**template_data)
+            print(f"DEBUG: Template renderizado com sucesso, tamanho HTML: {len(html_content)}")
 
             # Gerar PDF com WeasyPrint
             pdf_buffer = io.BytesIO()
             HTML(string=html_content).write_pdf(pdf_buffer)
             pdf_buffer.seek(0)
+            
+            pdf_size = len(pdf_buffer.read())
+            pdf_buffer.seek(0)
+            print(f"DEBUG: PDF gerado com sucesso, tamanho: {pdf_size} bytes")
 
             return pdf_buffer.read()
 
@@ -213,6 +248,87 @@ class InstitutionalTestWeasyPrintGenerator:
             import traceback
             logging.error(traceback.format_exc())
             return {}
+
+    def _organize_questions_by_blocks(self, questions_data: List[Dict], test_data: Dict) -> List[Dict]:
+        """
+        Organiza questões por blocos conforme configuração
+        
+        Args:
+            questions_data: Lista de questões ordenadas
+            test_data: Dados da prova incluindo blocks_config
+            
+        Returns:
+            Lista de blocos, cada um contendo:
+            - block_number: número do bloco
+            - subject_name: nome da disciplina (ou None se não separar por disciplina)
+            - questions: lista de questões do bloco
+            - start_question_num: número da primeira questão
+            - end_question_num: número da última questão
+        """
+        blocks_config = test_data.get('blocks_config', {})
+        use_blocks = blocks_config.get('use_blocks', False)
+        separate_by_subject = blocks_config.get('separate_by_subject', False)
+        
+        blocks = []
+        
+        # Esta função só é chamada quando use_blocks = True
+        # Se use_blocks = False, não deveria chegar aqui
+        if separate_by_subject:
+            # Separar por disciplina: 1 bloco = 1 disciplina
+            questions_by_subject = self._organize_questions_by_subject(questions_data, test_data)
+            
+            block_num = 1
+            question_counter = 1
+            for subject_name, subject_questions in questions_by_subject.items():
+                if subject_questions:
+                    # As questões já foram processadas em _organize_questions_by_subject
+                    blocks.append({
+                        'block_number': block_num,
+                        'subject_name': subject_name,
+                        'questions': subject_questions,
+                        'start_question_num': question_counter,
+                        'end_question_num': question_counter + len(subject_questions) - 1
+                    })
+                    question_counter += len(subject_questions)
+                    block_num += 1
+        else:
+            # Distribuir questões sequencialmente pelos blocos
+            num_blocks = blocks_config.get('num_blocks', 1)
+            questions_per_block = blocks_config.get('questions_per_block', 12)
+            total_questions = len(questions_data)
+            
+            for block_num in range(1, num_blocks + 1):
+                start_idx = (block_num - 1) * questions_per_block
+                end_idx = min(block_num * questions_per_block, total_questions)
+                block_questions_raw = questions_data[start_idx:end_idx]
+                
+                # Processar questões para o template
+                block_questions = [self._process_question_for_template(q) for q in block_questions_raw]
+                
+                if block_questions:
+                    blocks.append({
+                        'block_number': block_num,
+                        'subject_name': None,
+                        'questions': block_questions,
+                        'start_question_num': start_idx + 1,
+                        'end_question_num': end_idx
+                    })
+        
+        # Validar que temos pelo menos um bloco
+        if not blocks:
+            print("DEBUG: Nenhum bloco foi criado, criando bloco padrão com todas as questões")
+            processed_questions = [self._process_question_for_template(q) for q in questions_data]
+            if processed_questions:
+                blocks.append({
+                    'block_number': 1,
+                    'subject_name': None,
+                    'questions': processed_questions,
+                    'start_question_num': 1,
+                    'end_question_num': len(processed_questions)
+                })
+        
+        print(f"DEBUG: _organize_questions_by_blocks retornou {len(blocks)} blocos")
+        return blocks
 
     def _process_question_for_template(self, question: Dict) -> Dict:
         """

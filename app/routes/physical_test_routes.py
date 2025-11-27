@@ -88,6 +88,12 @@ def generate_physical_forms(test_id):
         logo_data = data.get('logo_data')  # Logo será implementado posteriormente
         force_regenerate = data.get('force_regenerate', False)  # Forçar regeneração de formulários existentes
         
+        # Parâmetros de configuração de blocos
+        use_blocks = data.get('use_blocks', False)
+        num_blocks = data.get('num_blocks', None)
+        questions_per_block = data.get('questions_per_block', None)
+        separate_by_subject = data.get('separate_by_subject', False)
+        
         # Buscar questões da prova
         from app.models.testQuestion import TestQuestion
         from app.models.question import Question
@@ -131,7 +137,7 @@ def generate_physical_forms(test_id):
             if course:
                 course_name = course.name
         
-        # Preparar dados para o gerador
+        # Preparar dados para o gerador (blocks_config será adicionado após validação)
         test_data = {
             'id': test.id,
             'title': test.title,
@@ -189,6 +195,45 @@ def generate_physical_forms(test_id):
             }
             questions_data.append(question_data)
         
+        # Validar configuração de blocos
+        total_questions = len(questions_data)
+        unique_subjects = set()
+        for q in questions_data:
+            if q.get('subject') and q['subject'].get('name'):
+                unique_subjects.add(q['subject']['name'])
+        num_subjects = len(unique_subjects) if unique_subjects else 1
+        
+        if use_blocks:
+            if separate_by_subject:
+                # Se separar por disciplina, num_blocks deve ser igual ao número de disciplinas
+                if num_blocks is not None and num_blocks != num_subjects:
+                    return jsonify({
+                        "error": f"Se separar por disciplina, o número de blocos deve ser igual ao número de disciplinas ({num_subjects}). Você informou {num_blocks} blocos."
+                    }), 400
+                # Se não informou num_blocks, usar número de disciplinas
+                if num_blocks is None:
+                    num_blocks = num_subjects
+            else:
+                # Se não separar por disciplina, validar quantidade de questões
+                if num_blocks is None or questions_per_block is None:
+                    return jsonify({
+                        "error": "Quando use_blocks=true e separate_by_subject=false, é necessário informar num_blocks e questions_per_block"
+                    }), 400
+                
+                max_questions = num_blocks * questions_per_block
+                if max_questions < total_questions:
+                    return jsonify({
+                        "error": f"Configuração inválida: {num_blocks} blocos × {questions_per_block} questões = {max_questions} questões, mas a prova tem {total_questions} questões"
+                    }), 400
+        
+        # Adicionar configuração de blocos ao test_data
+        test_data['blocks_config'] = {
+            'use_blocks': use_blocks,
+            'num_blocks': num_blocks,
+            'questions_per_block': questions_per_block,
+            'separate_by_subject': separate_by_subject
+        }
+        
         # Obter class_test_id (usar o primeiro se houver múltiplos)
         class_test_id = class_tests[0].id if class_tests else None
         
@@ -197,11 +242,12 @@ def generate_physical_forms(test_id):
         
         form_service = PhysicalTestFormService()
         
-        # Gerar formulários usando o serviço
+        # Gerar formulários usando o serviço (passar test_data com blocks_config)
         with tempfile.TemporaryDirectory() as temp_dir:
             result = form_service.generate_physical_forms(
                 test_id=test_id,
-                output_dir=temp_dir
+                output_dir=temp_dir,
+                test_data=test_data  # Passar test_data com blocks_config
             )
             
             if result.get('success'):

@@ -10,7 +10,7 @@ from openai import OpenAI
 OPENAI_API_KEY = "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"
 
 # Configuração da API Key Gemini
-GEMINI_API_KEY = "AIzaSyAkr6sVMz_QF6lctb0yCEpaWR0tTWYkMZw"
+GEMINI_API_KEY = "AIzaSyDcwxjngnTvZb8Xe4BDno6dQlBJRsExliE"
 
 # Escolher qual API usar (pode ser configurado via variável de ambiente)
 # Por padrão, usar Gemini se a chave estiver disponível

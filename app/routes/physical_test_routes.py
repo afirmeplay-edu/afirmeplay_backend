@@ -15,6 +15,7 @@ from app.models.classTest import ClassTest
 from app.services.physical_test_pdf_generator import PhysicalTestPDFGenerator
 from app.services.physical_test_form_service import PhysicalTestFormService
 from app.services.sistemaORM import SistemaORM  # NOVO SISTEMA OMR
+from app.services.correcaoIA import CorrecaoIA  # CORREÇÃO COM IA
 import tempfile
 from app.services.batch_correction_service import batch_correction_service
 import logging
@@ -462,11 +463,48 @@ def process_physical_correction(test_id):
         if not image_data:
             return jsonify({"error": "Imagem não fornecida"}), 400
         
-        # Verificar se deve usar o novo sistema OMR (parâmetro opcional)
+        # Verificar qual sistema usar (IA é o padrão agora)
         data = request.get_json() or {}
         use_new_orm = data.get('use_new_orm', False) or request.form.get('use_new_orm', 'false').lower() == 'true'
+        use_old_system = data.get('use_old_system', False) or request.form.get('use_old_system', 'false').lower() == 'true'
+        use_ai_correction = data.get('use_ai_correction', True)  # Padrão: True (IA)
         
-        if use_new_orm:
+        # Se explicitamente desabilitar IA ou pedir sistema antigo, usar alternativas
+        if use_old_system:
+            # SISTEMA ANTIGO - Mantido para compatibilidade
+            print("📋 Usando SISTEMA ANTIGO (alinhamento por marcadores)")
+            
+            form_service = PhysicalTestFormService()
+            
+            result = form_service.process_physical_correction(
+                test_id=test_id,
+                image_data=image_data,
+                correction_image_url=None
+            )
+            
+            if result.get('success'):
+                return jsonify({
+                    "message": "Correção processada com sucesso",
+                    "system": "old",
+                    "student_id": result.get('student_id'),
+                    "test_id": test_id,
+                    "correct_answers": result.get('correct_answers'),
+                    "total_questions": result.get('total_questions'),
+                    "score_percentage": result.get('score_percentage'),
+                    "grade": result.get('grade'),
+                    "proficiency": result.get('proficiency'),
+                    "classification": result.get('classification'),
+                    "answers_detected": result.get('answers_detected'),
+                    "student_answers": result.get('student_answers'),
+                    "evaluation_result_id": result.get('evaluation_result_id')
+                }), 200
+            else:
+                return jsonify({
+                    "error": result.get('error', 'Erro desconhecido na correção'),
+                    "system": "old"
+                }), 500
+        
+        elif use_new_orm:
             # NOVO SISTEMA OMR - Alinhamento pela página inteira
             print("🆕 Usando NOVO SISTEMA OMR (alinhamento pela página)")
             
@@ -517,41 +555,60 @@ def process_physical_correction(test_id):
                 }), 500
         
         else:
-            # SISTEMA ANTIGO - Mantido para compatibilidade
-            print("📋 Usando SISTEMA ANTIGO (alinhamento por marcadores)")
+            # CORREÇÃO COM IA (PADRÃO)
+            print("🤖 Usando CORREÇÃO COM IA (Gemini Vision) - PADRÃO")
             
-            form_service = PhysicalTestFormService()
-            
-            result = form_service.process_physical_correction(
-                test_id=test_id,
-                image_data=image_data,
-                correction_image_url=None
-            )
-            
-            if result.get('success'):
+            try:
+                # Criar instância do serviço de correção com IA
+                correcao_ia = CorrecaoIA(debug=True)
+                
+                # Processar correção
+                result = correcao_ia.corrigir_prova_com_ia(
+                    image_data=image_data,
+                    test_id=test_id
+                )
+                
+                if result.get('success'):
+                    return jsonify({
+                        "message": "Correção processada com sucesso (IA)",
+                        "system": "ai",
+                        "student_id": result.get('student_id'),
+                        "test_id": result.get('test_id'),
+                        "correct": result.get('correct'),
+                        "total": result.get('total'),
+                        "percentage": result.get('percentage'),
+                        "score_percentage": result.get('score_percentage', result.get('percentage')),
+                        "grade": result.get('grade'),
+                        "proficiency": result.get('proficiency'),
+                        "classification": result.get('classification'),
+                        "evaluation_result_id": result.get('evaluation_result_id'),
+                        # Campos de compatibilidade
+                        "correct_answers": result.get('correct_answers', result.get('correct')),
+                        "total_questions": result.get('total_questions', result.get('total')),
+                        # Dados detalhados
+                        "answers": result.get('answers'),
+                        "correction": result.get('correction'),
+                        "details": result.get('details', {}),
+                        "saved_answers": result.get('saved_answers')
+                    }), 200
+                else:
+                    return jsonify({
+                        "error": result.get('error', 'Erro desconhecido na correção com IA'),
+                        "system": "ai"
+                    }), 500
+                    
+            except Exception as e:
+                logging.error(f"Erro na correção com IA: {str(e)}")
+                import traceback
+                logging.error(traceback.format_exc())
                 return jsonify({
-                    "message": "Correção processada com sucesso",
-                    "system": "old",
-                    "student_id": result.get('student_id'),
-                    "test_id": test_id,
-                    "correct_answers": result.get('correct_answers'),
-                    "total_questions": result.get('total_questions'),
-                    "score_percentage": result.get('score_percentage'),
-                    "grade": result.get('grade'),
-                    "proficiency": result.get('proficiency'),
-                    "classification": result.get('classification'),
-                    "answers_detected": result.get('answers_detected'),
-                    "student_answers": result.get('student_answers'),
-                    "evaluation_result_id": result.get('evaluation_result_id')
-                }), 200
-            else:
-                return jsonify({
-                    "error": result.get('error', 'Erro desconhecido na correção'),
-                    "system": "old"
+                    "error": f"Erro na correção com IA: {str(e)}",
+                    "system": "ai"
                 }), 500
         
     except Exception as e:
         print(f"❌ Erro ao processar correção: {str(e)}")
+        logging.error(f"Erro ao processar correção: {str(e)}", exc_info=True)
         return jsonify({"error": "Erro interno do servidor"}), 500
 
 

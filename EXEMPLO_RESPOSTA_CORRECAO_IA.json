@@ -1,0 +1,109 @@
+{
+  "message": "Correção processada com sucesso (IA)",
+  "system": "ai",
+  "student_id": "ae3b4c91-4f9e-4e0e-bd97-ff1d40b6b22b",
+  "test_id": "eafb4493-e47a-43e2-98ea-70f75bf6b103",
+  "correct": 18,
+  "total": 20,
+  "percentage": 90.0,
+  "score_percentage": 90.0,
+  "grade": 9.0,
+  "proficiency": 350.5,
+  "classification": "Avançado",
+  "evaluation_result_id": "f8a9b2c3-d4e5-4f6a-7b8c-9d0e1f2a3b4c",
+  "correct_answers": 18,
+  "total_questions": 20,
+  "answers": {
+    "1": "A",
+    "2": "B",
+    "3": "C",
+    "4": "D",
+    "5": "A",
+    "6": "B",
+    "7": "C",
+    "8": "D",
+    "9": "A",
+    "10": "B",
+    "11": "C",
+    "12": "D",
+    "13": "A",
+    "14": "B",
+    "15": "C",
+    "16": "D",
+    "17": "A",
+    "18": "B",
+    "19": null,
+    "20": null
+  },
+  "correction": {
+    "total_questions": 20,
+    "answered": 18,
+    "correct": 18,
+    "incorrect": 0,
+    "unanswered": 2,
+    "score_percentage": 90.0
+  },
+  "details": {
+    "1": {
+      "detected": "A",
+      "correct": "A",
+      "is_correct": true,
+      "confidence": 0.95
+    },
+    "2": {
+      "detected": "B",
+      "correct": "B",
+      "is_correct": true,
+      "confidence": 0.92
+    },
+    "3": {
+      "detected": "C",
+      "correct": "C",
+      "is_correct": true,
+      "confidence": 0.88
+    },
+    "19": {
+      "detected": null,
+      "correct": "A",
+      "is_correct": false,
+      "confidence": 0.3
+    },
+    "20": {
+      "detected": null,
+      "correct": "B",
+      "is_correct": false,
+      "confidence": 0.25
+    }
+  },
+  "saved_answers": [
+    {
+      "question_number": 1,
+      "question_id": "q1-uuid-here",
+      "detected_answer": "A",
+      "correct_answer": "A",
+      "is_correct": true
+    },
+    {
+      "question_number": 2,
+      "question_id": "q2-uuid-here",
+      "detected_answer": "B",
+      "correct_answer": "B",
+      "is_correct": true
+    },
+    {
+      "question_number": 19,
+      "question_id": "q19-uuid-here",
+      "detected_answer": null,
+      "correct_answer": "A",
+      "is_correct": false
+    },
+    {
+      "question_number": 20,
+      "question_id": "q20-uuid-here",
+      "detected_answer": null,
+      "correct_answer": "B",
+      "is_correct": false
+    }
+  ]
+}
+

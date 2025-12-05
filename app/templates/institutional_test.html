@@ -883,33 +883,6 @@
 		<!-- Questões do Bloco -->
 		<div class="questions-section">
 			{% for question in block.questions %}
-		{% endfor %}
-		{% else %}
-		{# Comportamento padrão: organizar por disciplina #}
-		{% for subject_name, subject_questions in questions_by_subject.items()
-		%}
-		<!-- Capa da Disciplina -->
-		<div class="subject-cover">
-			<div class="block-number">BLOCO 0{{ loop.index }}</div>
-			<div class="subject-name">{{ subject_name }}</div>
-
-			<div class="subject-octagon">
-				<div class="octagon-text">
-					Aguarde instruções para virar a página.
-				</div>
-			</div>
-
-			<div class="time-text">
-				<strong
-					>Você terá 25 minutos para responder a este bloco.</strong
-				>
-			</div>
-		</div>
-
-		<!-- Questões da Disciplina -->
-		<div class="questions-section">
-			{% for question in subject_questions %}
-		{% endif %}
 			<div class="question no-break">
 				<div class="question-header">
 					<span class="question-number"
@@ -950,6 +923,72 @@
 			{% endfor %}
 		</div>
 		{% endfor %}
+		{% else %}
+		{# Comportamento padrão: organizar por disciplina #}
+		{% for subject_name, subject_questions in questions_by_subject.items()
+		%}
+		<!-- Capa da Disciplina -->
+		<div class="subject-cover">
+			<div class="block-number">BLOCO 0{{ loop.index }}</div>
+			<div class="subject-name">{{ subject_name }}</div>
+
+			<div class="subject-octagon">
+				<div class="octagon-text">
+					Aguarde instruções para virar a página.
+				</div>
+			</div>
+
+			<div class="time-text">
+				<strong
+					>Você terá 25 minutos para responder a este bloco.</strong
+				>
+			</div>
+		</div>
+
+		<!-- Questões da Disciplina -->
+		<div class="questions-section">
+			{% for question in subject_questions %}
+			<div class="question no-break">
+				<div class="question-header">
+					<span class="question-number"
+						>Questão {{ question.question_number }}</span
+					>
+					{% if question.skill_code %}
+					<span class="skill-code">({{ question.skill_code }})</span>
+					{% endif %}
+				</div>
+
+				{% if question.instruction %}
+				<div class="question-instruction-text">
+					{{ question.instruction }}
+				</div>
+				{% endif %} {% if question.title %}
+				<div class="question-title">{{ question.title }}</div>
+				{% endif %}
+
+				<div class="question-content">{{ question.content|safe }}</div>
+
+				{% if question.prompt %}
+				<div class="question-prompt">{{ question.prompt|safe }}</div>
+				{% endif %} {% if question.alternatives %}
+				<div class="alternatives">
+					{% for alt in question.alternatives %}
+					<div class="alternative">
+						<span class="alternative-letter"
+							>({{ alt.letter }})</span
+						>
+						<div class="alternative-content">
+							{{ alt.content|safe }}
+						</div>
+					</div>
+					{% endfor %}
+				</div>
+				{% endif %}
+			</div>
+			{% endfor %}
+		</div>
+		{% endfor %}
+		{% endif %}
 
 		<!-- Formulário de Respostas -->
 		<div class="answer-sheet">

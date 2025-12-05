@@ -52,16 +52,12 @@ class InstitutionalTestWeasyPrintGenerator:
 
         for student in students_data:
             try:
-                print(f"DEBUG: Gerando PDF para aluno {student.get('id')} - {student.get('name', student.get('nome', 'N/A'))}")
                 # Gerar PDF individual para cada aluno
                 pdf_data = self._generate_individual_institutional_pdf_data(
                     test_data, student, questions_data, class_test_id
                 )
 
                 if pdf_data:
-                    print(f"DEBUG: PDF gerado com sucesso para aluno {student.get('id')}, tamanho: {len(pdf_data)} bytes")
-                else:
-                    print(f"DEBUG: ERRO - PDF NÃO gerado para aluno {student.get('id')} (pdf_data é None ou vazio)")
                     # Mapear coordenadas e gerar QR code (mantido para compatibilidade)
                     coordinates = self._map_existing_form_coordinates(questions_data)
                     qr_data = self._generate_qr_code_with_metadata(
@@ -83,8 +79,6 @@ class InstitutionalTestWeasyPrintGenerator:
                 import traceback
                 logging.error(traceback.format_exc())
                 continue
-        
-        print(f"DEBUG: Total de arquivos gerados: {len(generated_files)}")
 
         return generated_files
 
@@ -101,12 +95,8 @@ class InstitutionalTestWeasyPrintGenerator:
             blocks_config = test_data.get('blocks_config', {})
             use_blocks = blocks_config.get('use_blocks', False)
             
-            print(f"DEBUG: use_blocks={use_blocks}, blocks_config={blocks_config}")
-            print(f"DEBUG: Total de questões: {len(questions_data)}")
-            
             if use_blocks:
                 questions_by_block = self._organize_questions_by_blocks(questions_data, test_data)
-                print(f"DEBUG: Blocos organizados: {len(questions_by_block)} blocos")
                 
                 # Adicionar número sequencial às questões baseado nos blocos
                 question_counter = 1
@@ -183,19 +173,13 @@ class InstitutionalTestWeasyPrintGenerator:
             }
 
             # Renderizar template HTML
-            print(f"DEBUG: Renderizando template com {len(template_data.get('questions_by_block', []))} blocos")
             template = self.env.get_template('institutional_test.html')
             html_content = template.render(**template_data)
-            print(f"DEBUG: Template renderizado com sucesso, tamanho HTML: {len(html_content)}")
 
             # Gerar PDF com WeasyPrint
             pdf_buffer = io.BytesIO()
             HTML(string=html_content).write_pdf(pdf_buffer)
             pdf_buffer.seek(0)
-            
-            pdf_size = len(pdf_buffer.read())
-            pdf_buffer.seek(0)
-            print(f"DEBUG: PDF gerado com sucesso, tamanho: {pdf_size} bytes")
 
             return pdf_buffer.read()
 
@@ -316,7 +300,6 @@ class InstitutionalTestWeasyPrintGenerator:
         
         # Validar que temos pelo menos um bloco
         if not blocks:
-            print("DEBUG: Nenhum bloco foi criado, criando bloco padrão com todas as questões")
             processed_questions = [self._process_question_for_template(q) for q in questions_data]
             if processed_questions:
                 blocks.append({
@@ -327,7 +310,6 @@ class InstitutionalTestWeasyPrintGenerator:
                     'end_question_num': len(processed_questions)
                 })
         
-        print(f"DEBUG: _organize_questions_by_blocks retornou {len(blocks)} blocos")
         return blocks
 
     def _process_question_for_template(self, question: Dict) -> Dict:
@@ -342,10 +324,6 @@ class InstitutionalTestWeasyPrintGenerator:
 
         # Processar formatted_text como conteúdo principal
         content = processed.get('formatted_text') or processed.get('text', '')
-
-        # LOG: Ver o conteúdo antes de processar
-        logging.info(f"DEBUG: Processando questão - content length: {len(content) if content else 0}")
-        logging.info(f"DEBUG: Content preview: {content[:200] if content else 'EMPTY'}")
 
         # Separar instrução inicial, título centralizado e conteúdo
         instruction = None
@@ -374,7 +352,6 @@ class InstitutionalTestWeasyPrintGenerator:
         # Processar secondstatement como pergunta/objetivo (aparece APÓS content e ANTES de alternatives)
         prompt = processed.get('secondstatement', '')
         if prompt:
-            logging.info(f"DEBUG: Prompt preview: {prompt[:200]}")
             processed['prompt'] = self._process_html_content(prompt)
         else:
             processed['prompt'] = None

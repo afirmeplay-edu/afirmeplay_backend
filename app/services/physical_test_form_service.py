@@ -152,11 +152,9 @@ class PhysicalTestFormService:
             )
             
             # Salvar informações no banco de dados
-            print(f"DEBUG: Total de arquivos gerados antes de salvar: {len(generated_files)}")
             saved_forms = self._save_physical_forms_to_db(
                 test_id, generated_files, questions
             )
-            print(f"DEBUG: Total de formulários salvos: {len(saved_forms)}")
             
             return {
                 'success': True,
@@ -304,10 +302,7 @@ class PhysicalTestFormService:
         """Salva formulários físicos no banco de dados"""
         saved_forms = []
         try:
-            print(f"DEBUG: _save_physical_forms_to_db recebeu {len(generated_files)} arquivos")
-            
             if not generated_files:
-                print("DEBUG: Nenhum arquivo gerado para salvar!")
                 return []
             
             # Buscar ClassTest associado à prova
@@ -315,21 +310,16 @@ class PhysicalTestFormService:
             
             if not class_test:
                 # Se não existe ClassTest, criar um temporário ou usar um padrão
-                print(f"⚠️ Nenhum ClassTest encontrado para a prova {test_id}")
                 # Por enquanto, vamos usar um ID temporário
                 class_test_id = "temp-class-test-id"
             else:
                 class_test_id = class_test.id
             
             for file_info in generated_files:
-                print(f"DEBUG: Salvando formulário para aluno {file_info.get('student_id')}")
                 # Criar registro do formulário físico
                 pdf_data = file_info.get('pdf_data')
                 if not pdf_data:
-                    print(f"DEBUG: Aluno {file_info.get('student_id')} não tem pdf_data!")
                     continue
-                
-                print(f"DEBUG: Criando PhysicalTestForm para aluno {file_info.get('student_id')}, tamanho PDF: {len(pdf_data) if pdf_data else 0} bytes")
                 
                 physical_form = PhysicalTestForm(
                     test_id=test_id,
@@ -349,10 +339,8 @@ class PhysicalTestFormService:
                     'form_id': physical_form.id,
                     'pdf_path': file_info.get('pdf_path', None)
                 })
-                print(f"DEBUG: Formulário {physical_form.id} criado com sucesso para aluno {file_info.get('student_id')}")
             
             db.session.commit()
-            print(f"DEBUG: Commit realizado, {len(saved_forms)} formulários salvos")
             return saved_forms
             
         except Exception as e:

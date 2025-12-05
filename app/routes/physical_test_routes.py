@@ -6,6 +6,7 @@ Rotas para formulários físicos - Versão simplificada sem SSE
 from flask import Blueprint, request, jsonify, send_file
 from flask_jwt_extended import jwt_required, get_jwt_identity
 from app.decorators.role_required import role_required
+from app import db
 from app.models.test import Test
 from app.models.student import Student
 from app.models.user import User
@@ -1210,4 +1211,67 @@ def delete_all_physical_forms_by_test(test_id):
         
     except Exception as e:
         print(f"❌ Erro ao excluir formulários: {str(e)}")
+        return jsonify({"error": "Erro interno do servidor"}), 500
+
+# ============================================================================
+# ROTA PARA MARCAR FORMULÁRIO COMO ENVIADO
+# ============================================================================
+
+@bp.route('/form/<string:form_id>/mark-as-sent', methods=['POST'])
+@jwt_required()
+@role_required("admin", "professor", "coordenador", "diretor")
+def mark_form_as_sent(form_id):
+    """
+    Marca um formulário como enviado (answer sheet sent)
+    
+    Validações:
+    - Formulário não pode estar corrigido (is_corrected=False e corrected_at=None)
+    - Formulário deve existir
+    - Usuário deve ter permissão para a prova
+    
+    Returns:
+        - Confirmação de atualização
+        - Dados atualizados do formulário
+    """
+    try:
+        user = get_current_user_from_token()
+        if not user:
+            return jsonify({"error": "User not found or token invalid"}), 401
+        
+        # Buscar formulário
+        form = PhysicalTestForm.query.get(form_id)
+        if not form:
+            return jsonify({"error": "Formulário não encontrado"}), 404
+        
+        # Verificar permissões
+        test = Test.query.get(form.test_id)
+        if not test:
+            return jsonify({"error": "Prova não encontrada"}), 404
+        
+        if user['role'] == 'professor' and test.created_by != user['id']:
+            return jsonify({"error": "Você não tem permissão para marcar este formulário"}), 403
+        
+        # VALIDAÇÃO: Não permitir marcar como enviado se já foi corrigido
+        if form.is_corrected or form.corrected_at:
+            return jsonify({
+                "error": "Não é possível marcar como enviado um formulário que já foi corrigido",
+                "is_corrected": form.is_corrected,
+                "corrected_at": form.corrected_at.isoformat() if form.corrected_at else None
+            }), 400
+        
+        # Atualizar campo
+        from datetime import datetime
+        form.answer_sheet_sent_at = datetime.utcnow()
+        db.session.commit()
+        
+        return jsonify({
+            "message": "Formulário marcado como enviado com sucesso",
+            "form": form.to_dict()
+        }), 200
+        
+    except Exception as e:
+        db.session.rollback()
+        print(f"❌ Erro ao marcar formulário como enviado: {str(e)}")
+        import traceback
+        logging.error(traceback.format_exc())
         return jsonify({"error": "Erro interno do servidor"}), 500

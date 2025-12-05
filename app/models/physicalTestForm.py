@@ -38,6 +38,7 @@ class PhysicalTestForm(db.Model):
     generated_at = db.Column(db.DateTime, default=datetime.utcnow)
     corrected_at = db.Column(db.DateTime, nullable=True)
     processed_at = db.Column(db.DateTime, nullable=True)
+    answer_sheet_sent_at = db.Column(db.DateTime, nullable=True)  # Data em que o formulário foi marcado como enviado
     
     # Relacionamentos
     test = db.relationship('Test', backref='physical_forms')
@@ -91,5 +92,6 @@ class PhysicalTestForm(db.Model):
             'generated_at': self.generated_at.isoformat() if self.generated_at else None,
             'corrected_at': self.corrected_at.isoformat() if self.corrected_at else None,
             'processed_at': self.processed_at.isoformat() if self.processed_at else None,
+            'answer_sheet_sent_at': self.answer_sheet_sent_at.isoformat() if self.answer_sheet_sent_at else None,
             'created_at': self.generated_at.isoformat() if self.generated_at else None  # Alias para compatibilidade
         }

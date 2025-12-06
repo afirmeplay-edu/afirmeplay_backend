@@ -557,8 +557,6 @@ def process_physical_correction(test_id):
         
         else:
             # CORREÇÃO COM IA (PADRÃO)
-            print("🤖 Usando CORREÇÃO COM IA (Gemini Vision) - PADRÃO")
-            
             try:
                 # Criar instância do serviço de correção com IA
                 correcao_ia = CorrecaoIA(debug=True)

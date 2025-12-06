@@ -159,6 +159,9 @@ class InstitutionalTestWeasyPrintGenerator:
             student_with_qr = student.copy()
             student_with_qr['qr_code'] = qr_code_base64
             
+            # Carregar logo padrão (afirme_logo.png) se não houver logo do município
+            default_logo_base64 = self._load_default_logo()
+            
             # Preparar dados para o template
             template_data = {
                 'test_data': test_data,
@@ -169,7 +172,8 @@ class InstitutionalTestWeasyPrintGenerator:
                 'answer_sheet_image': answer_sheet_image,
                 'total_questions': total_questions,
                 'datetime': datetime,
-                'generated_date': datetime.now().strftime('%d/%m/%Y %H:%M')
+                'generated_date': datetime.now().strftime('%d/%m/%Y %H:%M'),
+                'default_logo': default_logo_base64  # Logo padrão (afirme_logo.png)
             }
 
             # Renderizar template HTML
@@ -552,6 +556,28 @@ class InstitutionalTestWeasyPrintGenerator:
         except Exception as e:
             logging.error(f"Erro ao mapear coordenadas: {str(e)}")
             return {}
+
+    def _load_default_logo(self) -> Optional[str]:
+        """
+        Carrega a logo padrão (afirme_logo.png) e converte para base64
+        """
+        try:
+            # Caminho para a logo padrão
+            assets_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'assets')
+            logo_path = os.path.join(assets_dir, 'afirme_logo.png')
+            
+            if os.path.exists(logo_path):
+                with open(logo_path, 'rb') as logo_file:
+                    logo_data = logo_file.read()
+                    logo_base64 = base64.b64encode(logo_data).decode('utf-8')
+                    return logo_base64
+            else:
+                logging.warning(f"Logo padrão não encontrada em: {logo_path}")
+                return None
+                
+        except Exception as e:
+            logging.error(f"Erro ao carregar logo padrão: {str(e)}")
+            return None
 
     def _generate_qr_code_with_metadata(self, student_id: str, test_id: str) -> dict:
         """

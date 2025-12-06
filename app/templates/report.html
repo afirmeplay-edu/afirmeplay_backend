@@ -20,7 +20,7 @@
 				size: A4;
 				margin: 1cm;
 				@bottom-left {
-					content: "InnovPlay: Sistema de Ensino e Avaliação";
+					content: "AfirmePlay: Sistema de Ensino e Avaliação";
 					font-size: 8pt;
 					font-family: "Inter", -apple-system, BlinkMacSystemFont,
 						"Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
@@ -91,9 +91,9 @@
 				padding: 20px 0;
 			}
 			.cover-logo-box {
-				width: 120px;
-				height: 120px;
-				background: #6b21a8;
+				width: 200px;
+				height: 200px;
+				background: transparent;
 				border-radius: 8px;
 				display: inline-flex;
 				flex-direction: column;
@@ -152,6 +152,17 @@
 				color: #1e293b;
 				text-align: center;
 				font-family: sans-serif;
+			}
+			.cover-series {
+				font-size: 16pt;
+				font-weight: 600;
+				color: #6b21a8;
+				text-align: center;
+				font-family: sans-serif;
+				margin-top: 15px;
+				margin-bottom: 15px;
+				text-transform: uppercase;
+				letter-spacing: 0.02em;
 			}
 			.cover-disciplinas {
 				font-size: 14pt;
@@ -712,7 +723,23 @@
 		Geral') if series_label else ('Municipal Geral' if metadados.scope_type
 		== 'city' else 'Geral')) %} {% set general_label_text = general_label or
 		'Geral' %} {% set municipal_label = 'Município de ' ~
-		metadados.municipio if metadados.municipio else 'Rede Municipal' %} {#
+		metadados.municipio if metadados.municipio else 'Rede Municipal' %}
+		{# Determinar série dinâmica para substituir "9º GERAL" #}
+		{% if is_school_scope %}
+			{% if avaliacao.series_label %}
+				{% set serie_geral_label = (avaliacao.series_label ~ ' GERAL') | upper %}
+			{% elif metadados.series_label %}
+				{% set serie_geral_label = (metadados.series_label ~ ' GERAL') | upper %}
+			{% elif avaliacao.series and avaliacao.series|length > 0 %}
+				{% set serie_geral_label = (avaliacao.series | join(', ') ~ ' GERAL') | upper %}
+			{% elif metadados.series and metadados.series|length > 0 %}
+				{% set serie_geral_label = (metadados.series | join(', ') ~ ' GERAL') | upper %}
+			{% else %}
+				{% set serie_geral_label = 'GERAL' %}
+			{% endif %}
+		{% else %}
+			{% set serie_geral_label = 'MUNICIPAL GERAL' %}
+		{% endif %} {#
 		Macro para criar gráfico doughnut com paths SVG #} {% macro
 		doughnut_chart(items_list, colors) %} {% set total = items_list |
 		sum_values('value') %}
@@ -774,7 +801,13 @@
 			{# Seção 1: Topo - Logo roxo + Município + Secretaria #}
 			<div class="cover-top-section">
 				<div class="cover-logo-box">
-					<div class="cover-logo-text">INNOV<br />PLAY</div>
+					{% if metadados.logo and metadados.logo != '' and metadados.logo != None %}
+					<img src="{{ metadados.logo }}" alt="Logo" style="width: 100%; height: 100%; object-fit: contain; border-radius: 8px;">
+					{% elif default_logo %}
+					<img src="data:image/png;base64,{{ default_logo }}" alt="Logo" style="width: 100%; height: 100%; object-fit: contain; border-radius: 8px;">
+					{% else %}
+					<div class="cover-logo-text">AfirmePlay<br />PLAY</div>
+					{% endif %}
 				</div>
 				{% if metadados.municipio %}
 				<div class="cover-municipio">
@@ -791,9 +824,22 @@
 			<div class="cover-middle-section">
 				<div
 					class="cover-title"
-					style="margin-top: 55px; margin-bottom: 55px">
+					style="margin-top: 55px; margin-bottom: 20px">
 					{{ avaliacao.titulo or 'AVALIAÇÃO DIAGNÓSTICA' }}
 				</div>
+				{% if avaliacao.series_label or metadados.series_label or (avaliacao.series and avaliacao.series|length > 0) or (metadados.series and metadados.series|length > 0) %}
+				<div class="cover-series">
+					{% if avaliacao.series_label %}
+						{{ avaliacao.series_label }}
+					{% elif metadados.series_label %}
+						{{ metadados.series_label }}
+					{% elif avaliacao.series and avaliacao.series|length > 0 %}
+						{{ avaliacao.series | join(', ') }}
+					{% elif metadados.series and metadados.series|length > 0 %}
+						{{ metadados.series | join(', ') }}
+					{% endif %}
+				</div>
+				{% endif %}
 				{% if avaliacao.disciplinas %}
 				<div class="cover-disciplinas">
 					{{ avaliacao.disciplinas | join(', ') }}
@@ -903,7 +949,7 @@
 				>, com dados apresentados por turma, por série e consolidado
 				para toda a rede. Gráficos nominais por aluno e rendimento de
 				cada turma estão disponíveis na
-				<strong>Plataforma InnovPlay</strong>, nas respectivas unidades
+				<strong>Plataforma AfirmePlay</strong>, nas respectivas unidades
 				de ensino.
 			</div>
 			<div class="justified" style="margin-top: 8px">
@@ -943,7 +989,9 @@
 						</th>
 					</tr>
 					<tr>
-						<th>SÉRIE/TURNO</th>
+						<th>
+							{% if metadados.scope_type == 'school' %}SÉRIE/TURNO{% else %}ESCOLA{% endif %}
+						</th>
 						<th>MATRICULADOS</th>
 						<th>AVALIADOS</th>
 						<th>PERCENTUAL</th>
@@ -951,19 +999,33 @@
 					</tr>
 				</thead>
 				<tbody>
-					{% for t in (total_alunos.por_turma or []) %}
-					<tr>
-						<td>{{ t.turma }}</td>
-						<td>{{ t.matriculados }}</td>
-						<td>{{ t.avaliados }}</td>
-						<td>{{ '%.0f' % (t.percentual or 0) }}%</td>
-						<td>{{ t.faltosos }}</td>
-					</tr>
-					{% endfor %} {% if total_alunos.total_geral %}
+					{% if metadados.scope_type == 'school' %}
+						{# Relatório por escola: mostrar turmas #}
+						{% for t in (total_alunos.por_turma or []) %}
+						<tr>
+							<td>{{ t.turma }}</td>
+							<td>{{ t.matriculados }}</td>
+							<td>{{ t.avaliados }}</td>
+							<td>{{ '%.0f' % (t.percentual or 0) }}%</td>
+							<td>{{ t.faltosos }}</td>
+						</tr>
+						{% endfor %}
+					{% else %}
+						{# Relatório municipal: mostrar escolas #}
+						{% for e in (total_alunos.por_escola or []) %}
+						<tr>
+							<td style="text-align: left">{{ e.escola }}</td>
+							<td>{{ e.matriculados }}</td>
+							<td>{{ e.avaliados }}</td>
+							<td>{{ '%.0f' % (e.percentual or 0) }}%</td>
+							<td>{{ e.faltosos }}</td>
+						</tr>
+						{% endfor %}
+					{% endif %}
+					{% if total_alunos.total_geral %}
 					<tr>
 						<th>
-							{% if metadados.scope_type == 'school' %}9º GERAL{%
-							else %}MUNICIPAL GERAL{% endif %}
+							{{ serie_geral_label }}
 						</th>
 						<th>{{ total_alunos.total_geral.matriculados }}</th>
 						<th>{{ total_alunos.total_geral.avaliados }}</th>
@@ -986,7 +1048,11 @@
 			<div class="analysis-text">
 				A escola avaliou
 				<strong>{{ total_alunos.total_geral.avaliados }} alunos</strong>
-				do 9º ano, o que representa
+				{% if serie_geral_label and serie_geral_label != 'MUNICIPAL GERAL' %}
+				{{ serie_geral_label | replace(' GERAL', '') | lower }}, o que representa
+				{% else %}
+				avaliados, o que representa
+				{% endif %}
 				<strong
 					>{{ '%.0f' % (total_alunos.total_geral.percentual or 0)
 					}}%</strong
@@ -1069,8 +1135,7 @@
 						bloco.total_geral %}
 						<tr>
 							<th>
-								{% if metadados.scope_type == 'school' %}9º
-								GERAL{% else %}MUNICIPAL GERAL{% endif %}
+								{{ serie_geral_label }}
 							</th>
 							<th>
 								{{ (bloco.geral.abaixo_do_basico if bloco.geral
@@ -1244,8 +1309,8 @@
 					{% set lista_entidades = total_alunos.por_escola or [] %} {%
 					endif %} {% if lista_entidades %} {% for t in
 					lista_entidades %} {% if metadados.scope_type == 'school' %}
-					{% set turma_nome = (t.turma|string|trim)|upper %} {% else
-					%} {% set turma_nome = (t.escola|string|trim)|upper %} {%
+					{% set turma_nome = (t.turma|string|trim)|upper %} {% set entidade_nome_display = t.turma %} {% else
+					%} {% set turma_nome = (t.escola|string|trim)|upper %} {% set entidade_nome_display = t.escola %} {%
 					endif %} {% set ns_turma_prof = namespace(portugues=0,
 					matematica=0) %} {# Buscar proficiência de Português #} {%
 					if ns_prof.disc_portugues %} {% set bloco_pt =
@@ -1297,22 +1362,22 @@
 					%} {% endif %} {% endfor %} {% endif %} {% endif %}
 
 					<tr>
-						<td style="text-align: left">{{ turma_nome }}</td>
+						<td style="text-align: left">{{ entidade_nome_display }}</td>
 						<td>
-							{{ ('%.2f' % ns_turma_prof.portugues).replace('.',
+							{{ ('%.1f' % ns_turma_prof.portugues).replace('.',
 							',') }}
 						</td>
 						<td>
-							{{ ('%.2f' % ns_turma_prof.matematica).replace('.',
+							{{ ('%.1f' % ns_turma_prof.matematica).replace('.',
 							',') }}
 						</td>
-						<td>{{ ('%.2f' % media_turma).replace('.', ',') }}</td>
+						<td>{{ ('%.1f' % media_turma).replace('.', ',') }}</td>
 						{% if loop.first %} {% set count_entidades =
 						lista_entidades|length %}
 						<td
 							rowspan="{{ count_entidades }}"
 							style="vertical-align: middle; font-weight: 700">
-							{{ ('%.2f' % media_municipal).replace('.', ',') }}
+							{{ ('%.1f' % media_municipal).replace('.', ',') }}
 						</td>
 						{% endif %}
 					</tr>
@@ -1329,21 +1394,20 @@
 
 					<tr>
 						<th style="text-align: left">
-							{% if metadados.scope_type == 'school' %}9º GERAL{%
-							else %}MUNICIPAL GERAL{% endif %}
+							{{ serie_geral_label }}
 						</th>
 						<th>
-							{{ ('%.2f' % media_pt_geral).replace('.', ',') }}
+							{{ ('%.1f' % media_pt_geral).replace('.', ',') }}
 						</th>
 						<th>
-							{{ ('%.2f' % media_mat_geral).replace('.', ',') }}
+							{{ ('%.1f' % media_mat_geral).replace('.', ',') }}
 						</th>
 						<th>
-							{{ ('%.2f' % media_geral_proficiencia).replace('.',
+							{{ ('%.1f' % media_geral_proficiencia).replace('.',
 							',') }}
 						</th>
 						<th>
-							{{ ('%.2f' % media_municipal).replace('.', ',') }}
+							{{ ('%.1f' % media_municipal).replace('.', ',') }}
 						</th>
 					</tr>
 				</tbody>
@@ -1368,9 +1432,7 @@
 					class="analysis-text"
 					style="margin-top: 0; margin-bottom: 8px">
 					<strong
-						>Proficiência Geral ({% if metadados.scope_type ==
-						'school' %}9º GERAL{% else %}MUNICIPAL GERAL{% endif
-						%})</strong
+						>Proficiência Geral ({{ serie_geral_label }})</strong
 					>
 				</div>
 				<div class="bar-chart-container">
@@ -1379,13 +1441,13 @@
 							<div
 								class="bar-fill bar-blue"
 								style="height: {{ percent_pt_prof }}%;">
-								{% if percent_pt_prof > 5 %}{{ ('%.2f' %
+								{% if percent_pt_prof > 5 %}{{ ('%.1f' %
 								media_pt_geral).replace('.', ',') }}{% endif %}
 							</div>
 						</div>
 						<div class="bar-label">Língua Portuguesa</div>
 						<div class="bar-value">
-							{{ ('%.2f' % media_pt_geral).replace('.', ',') }}
+							{{ ('%.1f' % media_pt_geral).replace('.', ',') }}
 						</div>
 					</div>
 					<div class="bar-item">
@@ -1393,13 +1455,13 @@
 							<div
 								class="bar-fill bar-purple"
 								style="height: {{ percent_mat_prof }}%;">
-								{% if percent_mat_prof > 5 %}{{ ('%.2f' %
+								{% if percent_mat_prof > 5 %}{{ ('%.1f' %
 								media_mat_geral).replace('.', ',') }}{% endif %}
 							</div>
 						</div>
 						<div class="bar-label">Matemática</div>
 						<div class="bar-value">
-							{{ ('%.2f' % media_mat_geral).replace('.', ',') }}
+							{{ ('%.1f' % media_mat_geral).replace('.', ',') }}
 						</div>
 					</div>
 					<div class="bar-item">
@@ -1407,14 +1469,14 @@
 							<div
 								class="bar-fill bar-teal"
 								style="height: {{ percent_media_prof }}%;">
-								{% if percent_media_prof > 5 %}{{ ('%.2f' %
+								{% if percent_media_prof > 5 %}{{ ('%.1f' %
 								media_geral_proficiencia).replace('.', ',') }}{%
 								endif %}
 							</div>
 						</div>
 						<div class="bar-label">Média</div>
 						<div class="bar-value">
-							{{ ('%.2f' % media_geral_proficiencia).replace('.',
+							{{ ('%.1f' % media_geral_proficiencia).replace('.',
 							',') }}
 						</div>
 					</div>
@@ -1423,13 +1485,13 @@
 							<div
 								class="bar-fill bar-gray"
 								style="height: {{ percent_municipal_prof }}%;">
-								{% if percent_municipal_prof > 5 %}{{ ('%.2f' %
+								{% if percent_municipal_prof > 5 %}{{ ('%.1f' %
 								media_municipal).replace('.', ',') }}{% endif %}
 							</div>
 						</div>
 						<div class="bar-label">Média Municipal</div>
 						<div class="bar-value">
-							{{ ('%.2f' % media_municipal).replace('.', ',') }}
+							{{ ('%.1f' % media_municipal).replace('.', ',') }}
 						</div>
 					</div>
 				</div>
@@ -1507,8 +1569,8 @@
 					{% set lista_entidades = total_alunos.por_escola or [] %} {%
 					endif %} {% if lista_entidades %} {% for t in
 					lista_entidades %} {% if metadados.scope_type == 'school' %}
-					{% set turma_nome = (t.turma|string|trim)|upper %} {% else
-					%} {% set turma_nome = (t.escola|string|trim)|upper %} {%
+					{% set turma_nome = (t.turma|string|trim)|upper %} {% set entidade_nome_display = t.turma %} {% else
+					%} {% set turma_nome = (t.escola|string|trim)|upper %} {% set entidade_nome_display = t.escola %} {%
 					endif %} {% set ns_turma_nota = namespace(portugues=0,
 					matematica=0) %} {# Buscar nota de Português #} {% if
 					ns_nota.disc_portugues %} {% set bloco_pt =
@@ -1560,7 +1622,7 @@
 					{% endif %} {% endfor %} {% endif %} {% endif %}
 
 					<tr>
-						<td style="text-align: left">{{ turma_nome }}</td>
+						<td style="text-align: left">{{ entidade_nome_display }}</td>
 						<td>
 							{{ ('%.1f' % ns_turma_nota.portugues).replace('.',
 							',') }}
@@ -1595,8 +1657,7 @@
 
 					<tr>
 						<th style="text-align: left">
-							{% if metadados.scope_type == 'school' %}9º GERAL{%
-							else %}MUNICIPAL GERAL{% endif %}
+							{{ serie_geral_label }}
 						</th>
 						<th>
 							{{ ('%.1f' % nota_media_pt_geral).replace('.', ',')

@@ -44,6 +44,7 @@ from app.services.ai_analysis_service import AIAnalysisService
 from app.services.evaluation_result_service import EvaluationResultService
 from app.services.report_aggregate_service import ReportAggregateService
 from weasyprint import HTML
+import base64
 
 # Importar docxtpl para template Word (comentado - usando PDF agora)
 # try:
@@ -66,6 +67,30 @@ RED = colors.HexColor("#e53935")
 YELLOW = colors.HexColor("#f1c232")
 ADEQ = colors.HexColor("#6aa84f")
 GREEN = colors.HexColor("#00a651")
+
+
+def _load_default_logo() -> Optional[str]:
+    """
+    Carrega a logo padrão (afirme_logo.png) e converte para base64
+    """
+    try:
+        # Caminho para a logo padrão
+        assets_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'assets')
+        logo_path = os.path.join(assets_dir, 'afirme_logo.png')
+        
+        if os.path.exists(logo_path):
+            with open(logo_path, 'rb') as logo_file:
+                logo_data = logo_file.read()
+                logo_base64 = base64.b64encode(logo_data).decode('utf-8')
+                return logo_base64
+        else:
+            logging.warning(f"Logo padrão não encontrada em: {logo_path}")
+            return None
+            
+    except Exception as e:
+        logging.error(f"Erro ao carregar logo padrão: {str(e)}")
+        return None
+
 
 def _header(canvas: Canvas, doc, logo_esq=None, logo_dir=None):
     """Função para desenhar cabeçalho com logos em todas as páginas"""
@@ -796,6 +821,9 @@ def _montar_resposta_relatorio(
             "scope_id": scope_id
         })
 
+    # Carregar logo padrão
+    default_logo = _load_default_logo()
+    
     return {
         "acertos_por_habilidade": acertos_habilidade,
         "analise_ia": analise_ia,
@@ -804,7 +832,8 @@ def _montar_resposta_relatorio(
         "niveis_aprendizagem": niveis_aprendizagem,
         "nota_geral": nota_geral,
         "proficiencia": proficiencia,
-        "total_alunos": total_alunos
+        "total_alunos": total_alunos,
+        "default_logo": default_logo  # Logo padrão para templates
     }
 
 
@@ -922,6 +951,9 @@ def _montar_resposta_relatorio_por_turmas(
             "scope_id": None
         })
     
+    # Carregar logo padrão
+    default_logo = _load_default_logo()
+    
     return {
         "acertos_por_habilidade": acertos_habilidade,
         "analise_ia": analise_ia,
@@ -930,7 +962,8 @@ def _montar_resposta_relatorio_por_turmas(
         "niveis_aprendizagem": niveis_aprendizagem,
         "nota_geral": nota_geral,
         "proficiencia": proficiencia,
-        "total_alunos": total_alunos
+        "total_alunos": total_alunos,
+        "default_logo": default_logo  # Logo padrão para templates
     }
 
 
@@ -1091,6 +1124,9 @@ def relatorio_pdf(evaluation_id: str):
         
         # Adicionar análise de IA ao contexto
         context['analise_ia'] = analise_ia
+        
+        # Adicionar logo padrão ao contexto (para templates que precisam)
+        context['default_logo'] = _load_default_logo()
 
         templates_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'templates')
         env = Environment(loader=FileSystemLoader(templates_dir), autoescape=select_autoescape(['html', 'xml']))
@@ -1263,12 +1299,16 @@ def _transformar_dados_frontend_para_template(dados_frontend: Dict[str, Any]) ->
     # Gerar data de geração
     generated_at = datetime.now().strftime("%d/%m/%Y %H:%M")
     
+    # Carregar logo padrão
+    default_logo = _load_default_logo()
+    
     # Montar dados para o template
     return {
         'generated_at': generated_at,
         'municipality': municipality_name,
         'state': state_name,
         'school_name': school_name,
+        'default_logo': default_logo,  # Logo padrão para templates
         'evaluation': {
             'title': evaluation.get('title', 'AVALIAÇÃO')
         },
@@ -3267,7 +3307,7 @@ def _calcular_totais_alunos_por_escopo(evaluation_id: str, class_tests: List[Cla
     Returns:
         Dict com totais agrupados conforme o escopo
     """
-    if scope_type == 'city':
+    if scope_type == 'city' or scope_type == 'all':
         return _calcular_totais_alunos_por_municipio(evaluation_id, class_tests)
     else:
         return _calcular_totais_alunos(evaluation_id, class_tests)
@@ -3441,7 +3481,7 @@ def _calcular_niveis_aprendizagem_por_escopo(evaluation_id: str, class_tests: Li
     Returns:
         Dict com níveis de aprendizagem agrupados conforme o escopo
     """
-    if scope_type == 'city':
+    if scope_type == 'city' or scope_type == 'all':
         return _calcular_niveis_aprendizagem_por_municipio(evaluation_id, class_tests)
     else:
         return _calcular_niveis_aprendizagem(evaluation_id, class_tests)
@@ -4045,7 +4085,7 @@ def _calcular_proficiencia_por_escopo(evaluation_id: str, class_tests: List[Clas
     Returns:
         Dict com proficiência agrupada conforme o escopo
     """
-    if scope_type == 'city':
+    if scope_type == 'city' or scope_type == 'all':
         return _calcular_proficiencia_por_municipio(evaluation_id, class_tests)
     else:
         return _calcular_proficiencia(evaluation_id, class_tests)
@@ -4578,7 +4618,7 @@ def _calcular_nota_geral_por_escopo(evaluation_id: str, class_tests: List[ClassT
     Returns:
         Dict com nota geral agrupada conforme o escopo
     """
-    if scope_type == 'city':
+    if scope_type == 'city' or scope_type == 'all':
         return _calcular_nota_geral_por_municipio(evaluation_id, class_tests)
     else:
         return _calcular_nota_geral(evaluation_id, class_tests)
@@ -5141,7 +5181,7 @@ def _calcular_acertos_habilidade_por_escopo(evaluation_id: str, class_tests: Lis
     Returns:
         Dict com acertos por habilidade agrupados conforme o escopo
     """
-    if scope_type == 'city':
+    if scope_type == 'city' or scope_type == 'all':
         return _calcular_acertos_habilidade_por_municipio(evaluation_id, class_tests)
     else:
         return _calcular_acertos_habilidade(evaluation_id)

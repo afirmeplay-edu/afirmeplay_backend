@@ -38,7 +38,6 @@ class CorrecaoIA:
         # Tentar inicializar Gemini
         try:
             self.gemini = get_gemini_client()
-            self.logger.info("Gemini Vision inicializado com sucesso")
         except Exception as e:
             self.logger.error(f"Erro ao inicializar Gemini: {str(e)}")
             self.gemini = None
@@ -66,7 +65,6 @@ class CorrecaoIA:
             if img is None:
                 return {"success": False, "error": "Erro ao decodificar imagem"}
             
-            self.logger.info(f"Imagem decodificada: {img.shape}")
             
             # 2. Detectar QR Code
             qr_result = self._detectar_qr_code(img)
@@ -80,21 +78,17 @@ class CorrecaoIA:
             if test_id_from_qr != test_id:
                 self.logger.warning(f"Test ID do QR ({test_id_from_qr}) diferente do fornecido ({test_id})")
             
-            self.logger.info(f"QR Code detectado: student_id={student_id}, test_id={test_id_from_qr}")
             
             # 3. Detectar ROI (borda grossa de 5px)
             roi_corners = self._detectar_roi_borda_grossa(img)
             if roi_corners is None:
                 return {"success": False, "error": "ROI (borda grossa) não detectado na imagem"}
             
-            self.logger.info("ROI detectado com sucesso")
             
             # 4. Extrair e processar ROI
             roi_image = self._extrair_roi(img, roi_corners)
             if roi_image is None:
                 return {"success": False, "error": "Erro ao extrair ROI"}
-            
-            self.logger.info(f"ROI extraído: {roi_image.shape}")
             
             # 5. Buscar gabarito do teste
             gabarito = self._buscar_gabarito(test_id)
@@ -102,7 +96,6 @@ class CorrecaoIA:
                 return {"success": False, "error": "Gabarito não encontrado para esta prova"}
             
             num_questions = len(gabarito)
-            self.logger.info(f"Gabarito carregado: {num_questions} questões")
             
             # 6. Preparar imagem para IA
             image_base64 = self._preparar_imagem_para_ia(roi_image)
@@ -128,12 +121,18 @@ class CorrecaoIA:
                 gabarito=gabarito
             )
             
-            # 11. Calcular nota, proficiência e classificação usando EvaluationResultService
-            from app.services.evaluation_result_service import EvaluationResultService
-            import uuid
+            # 11. Criar sessão temporária para correção física
+            session_id = self._criar_sessao_temporaria_para_correcao_fisica(
+                test_id=test_id,
+                student_id=student_id
+            )
             
-            # Gerar session_id temporário para correções físicas
-            session_id = f"physical_correction_ia_{uuid.uuid4().hex[:8]}"
+            if not session_id:
+                self.logger.error("Erro ao criar sessão temporária para correção física")
+                return {"success": False, "error": "Erro ao criar sessão temporária"}
+            
+            # 12. Calcular nota, proficiência e classificação usando EvaluationResultService
+            from app.services.evaluation_result_service import EvaluationResultService
             
             evaluation_result = EvaluationResultService.calculate_and_save_result(
                 test_id=test_id,
@@ -141,7 +140,7 @@ class CorrecaoIA:
                 session_id=session_id
             )
             
-            # 12. Calcular resultado final
+            # 13. Calcular resultado final
             correct_count = resultado['correction']['correct']
             total_count = resultado['correction']['total_questions']
             percentage = resultado['correction']['score_percentage']
@@ -180,6 +179,9 @@ class CorrecaoIA:
                 response_data["correct_answers"] = correct_count
                 response_data["total_questions"] = total_count
             
+            # 14. Marcar formulário físico como corrigido
+            self._marcar_formulario_como_corrigido(test_id, student_id)
+            
             return response_data
             
         except Exception as e:
@@ -202,8 +204,6 @@ class CorrecaoIA:
         Tenta várias técnicas em cascata para melhorar detecção em imagens de baixa qualidade
         """
         try:
-            self.logger.info("🔍 INICIANDO DETECÇÃO DE QR CODE (múltiplas estratégias)")
-            
             # Converter para grayscale se necessário
             if len(img.shape) == 3:
                 gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
@@ -211,39 +211,32 @@ class CorrecaoIA:
                 gray = img.copy()
             
             h, w = gray.shape
-            self.logger.info(f"📏 Imagem: {w}x{h}px")
             
             # Estratégia 1: Detecção direta na imagem original
             qr_data = self._detectar_qr_direto(gray)
             if qr_data:
-                self.logger.info("✅ QR Code detectado (método direto)")
                 return self._parsear_qr_data(qr_data)
             
             # Estratégia 2: Pré-processamento com múltiplas técnicas
             processed_images = self._preprocessar_imagem_para_qr(gray)
             for i, processed_img in enumerate(processed_images):
-                self.logger.info(f"🔍 Tentando detecção com imagem processada {i+1}/{len(processed_images)}...")
                 qr_data = self._detectar_qr_direto(processed_img)
                 if qr_data:
-                    self.logger.info(f"✅ QR Code detectado (imagem processada {i+1})")
                     return self._parsear_qr_data(qr_data)
             
             # Estratégia 3: Detecção por regiões (QR Code geralmente no canto superior direito)
             qr_data = self._detectar_qr_por_regioes(img)
             if qr_data:
-                self.logger.info("✅ QR Code detectado (por regiões)")
                 return self._parsear_qr_data(qr_data)
             
             # Estratégia 4: Redimensionamento múltiplo
             qr_data = self._detectar_qr_redimensionamento_multiplo(img)
             if qr_data:
-                self.logger.info("✅ QR Code detectado (redimensionamento múltiplo)")
                 return self._parsear_qr_data(qr_data)
             
             # Estratégia 5: Método resiliente (com upscale e tight-crop)
             qr_data = self._detectar_qr_resiliente(img)
             if qr_data:
-                self.logger.info("✅ QR Code detectado (método resiliente)")
                 return self._parsear_qr_data(qr_data)
             
             self.logger.warning("❌ Nenhum QR Code detectado após todas as estratégias")
@@ -337,7 +330,6 @@ class CorrecaoIA:
             inverted = cv2.bitwise_not(gray)
             processed_images.append(inverted)
             
-            self.logger.info(f"📊 Geradas {len(processed_images)} imagens processadas para detecção")
             return processed_images
             
         except Exception as e:
@@ -381,7 +373,6 @@ class CorrecaoIA:
                     self.logger.debug(f"📍 Testando região {i+1}: ({x1},{y1}) a ({x2},{y2})")
                     data, _, _ = detector.detectAndDecode(roi)
                     if data:
-                        self.logger.info(f"✅ QR Code detectado na região {i+1}")
                         return data
             
             return None
@@ -419,7 +410,6 @@ class CorrecaoIA:
                     resized = cv2.resize(gray, (new_w, new_h), interpolation=cv2.INTER_CUBIC)
                     data, _, _ = detector.detectAndDecode(resized)
                     if data:
-                        self.logger.info(f"✅ QR code detectado na escala {scale}x")
                         return data
             
             return None
@@ -526,7 +516,6 @@ class CorrecaoIA:
                         cand_for_cv = cand
                     data, _, _ = detector.detectAndDecode(cand_for_cv)
                     if data:
-                        self.logger.info(f"✅ QR detectado via cv2_{name}")
                         return data
                 except Exception as e:
                     self.logger.debug(f"cv2 detect erro {name}: {e}")
@@ -544,7 +533,6 @@ class CorrecaoIA:
                                     txt = raw.decode("utf-8")
                                 except Exception:
                                     txt = str(raw)
-                                self.logger.info(f"✅ QR detectado via pyzbar_{name}")
                                 return txt
                     except Exception as e:
                         self.logger.debug(f"pyzbar erro {name}: {e}")
@@ -596,7 +584,6 @@ class CorrecaoIA:
                 gray = img.copy()
             
             h, w = gray.shape
-            self.logger.info(f"Detectando ROI em imagem {w}x{h}px")
             
             # Aplicar blur gaussiano
             blurred = cv2.GaussianBlur(gray, (5, 5), 0)
@@ -645,7 +632,6 @@ class CorrecaoIA:
             # Ordenar pontos (TL, TR, BR, BL)
             pontos_ordenados = self._ordenar_pontos(aproximado)
             
-            self.logger.info("ROI detectado com sucesso")
             return pontos_ordenados
             
         except Exception as e:
@@ -940,6 +926,97 @@ IMPORTANTE:
             "unanswered": unanswered,
             "score_percentage": round(score_percentage, 2)
         }
+    
+    def _marcar_formulario_como_corrigido(self, test_id: str, student_id: str) -> bool:
+        """
+        Marca o PhysicalTestForm como corrigido após processar a correção
+        
+        Args:
+            test_id: ID da prova
+            student_id: ID do aluno
+            
+        Returns:
+            bool: True se marcado com sucesso, False caso contrário
+        """
+        try:
+            from app.models.physicalTestForm import PhysicalTestForm
+            from datetime import datetime
+            
+            # Buscar formulário físico do aluno para esta prova
+            form = PhysicalTestForm.query.filter_by(
+                test_id=test_id,
+                student_id=student_id
+            ).first()
+            
+            if not form:
+                self.logger.warning(f"Formulário físico não encontrado para test_id={test_id}, student_id={student_id}")
+                return False
+            
+            # Marcar como enviado (se ainda não foi marcado)
+            # Se estamos corrigindo, significa que o formulário foi entregue/enviado
+            if not form.answer_sheet_sent_at:
+                form.answer_sheet_sent_at = datetime.utcnow()
+            
+            # Marcar como corrigido
+            form.is_corrected = True
+            form.corrected_at = datetime.utcnow()
+            form.status = 'corrigido'
+            
+            db.session.commit()
+            
+            return True
+            
+        except Exception as e:
+            db.session.rollback()
+            self.logger.error(f"Erro ao marcar formulário como corrigido: {str(e)}", exc_info=True)
+            return False
+    
+    def _criar_sessao_temporaria_para_correcao_fisica(self, test_id: str, student_id: str) -> Optional[str]:
+        """
+        Cria uma sessão temporária (TestSession) para correções físicas
+        
+        Args:
+            test_id: ID da prova
+            student_id: ID do aluno
+            
+        Returns:
+            session_id: ID da sessão criada ou None se erro
+        """
+        try:
+            from app.models.testSession import TestSession
+            from datetime import datetime
+            
+            # Verificar se já existe uma sessão para esta correção física
+            existing_session = TestSession.query.filter_by(
+                test_id=test_id,
+                student_id=student_id,
+                status='corrigida'  # Sessões de correção física ficam como 'corrigida'
+            ).first()
+            
+            if existing_session:
+                return existing_session.id
+            
+            # Criar nova sessão temporária para correção física
+            session = TestSession(
+                student_id=student_id,
+                test_id=test_id,
+                time_limit_minutes=None,  # Correções físicas não têm limite de tempo
+                ip_address=None,  # Correção física não tem IP
+                user_agent='Physical Test Correction (IA)',  # Identificador de correção física
+                status='corrigida',  # Status específico para correções físicas
+                started_at=datetime.utcnow(),  # Data de início = data da correção
+                submitted_at=datetime.utcnow()  # Data de submissão = data da correção
+            )
+            
+            db.session.add(session)
+            db.session.commit()
+            
+            return session.id
+            
+        except Exception as e:
+            db.session.rollback()
+            self.logger.error(f"Erro ao criar sessão temporária: {str(e)}", exc_info=True)
+            return None
     
     def _salvar_respostas_no_banco(self, test_id: str, student_id: str,
                                    respostas_detectadas: Dict[int, Optional[str]],

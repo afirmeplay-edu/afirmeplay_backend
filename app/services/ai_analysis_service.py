@@ -1,15 +1,17 @@
 # -*- coding: utf-8 -*-
 """
-Serviço para análise de relatórios usando OpenAI
+Serviço para análise de relatórios usando Abacus AI
 """
 
 import logging
 import re
 from typing import Dict, Any, Optional
 from app.openai_config.openai_config import (
-    get_openai_client,
-    get_gemini_client,
-    USE_GEMINI,
+    ABACUS_API_KEY,
+    ABACUS_API_URL,
+    ABACUS_MODEL,
+    ABACUS_MAX_TOKENS,
+    ABACUS_TEMPERATURE,
     ANALYSIS_PROMPT_BASE, 
     CONTEXT_SETTINGS,
     PARTICIPATION_CLASSIFICATION_TABLE,
@@ -20,29 +22,14 @@ from app.openai_config.openai_config import (
     NOTA_REFERENCE_TABLE,
     NOTA_ANALYSIS_PROMPT_TEMPLATE
 )
+import requests
 
 class AIAnalysisService:
-    """Serviço para análise de relatórios usando IA (OpenAI ou Gemini)"""
+    """Serviço para análise de relatórios usando Abacus AI"""
     
     def __init__(self):
-        self.use_gemini = USE_GEMINI
-        if self.use_gemini:
-            try:
-                self.gemini_model = get_gemini_client()
-                self.client = None  # Não usar OpenAI quando usar Gemini
-                self.logger = logging.getLogger(__name__)
-                self.logger.info("Usando Google Gemini para análise de relatórios")
-            except Exception as e:
-                self.logger = logging.getLogger(__name__)
-                self.logger.warning(f"Erro ao inicializar Gemini, usando OpenAI como fallback: {str(e)}")
-                self.client = get_openai_client()
-                self.gemini_model = None
-                self.use_gemini = False
-        else:
-            self.client = get_openai_client()
-            self.gemini_model = None
-            self.logger = logging.getLogger(__name__)
-            self.logger.info("Usando OpenAI para análise de relatórios")
+        self.logger = logging.getLogger(__name__)
+        self.logger.info("Usando Abacus AI para análise de relatórios (REST API)")
     
     def analyze_report_data(self, report_data: Dict[str, Any]) -> Dict[str, Any]:
         """
@@ -873,67 +860,89 @@ e recomendações práticas para a escola.
         return formatted
     
     def _call_openai(self, prompt: str) -> str:
-        """Chama API de IA (OpenAI ou Gemini)"""
+        """Chama API Abacus AI via REST"""
         try:
             system_prompt = "Você é um especialista em educação e análise de dados educacionais. Sempre gere texto humanizado e profissional, SEM usar formatação markdown (sem #, ##, *, **, etc). Use apenas parágrafos normais e títulos em maiúsculas seguidos de dois pontos."
             
-            if self.use_gemini and self.gemini_model:
-                # Usar Gemini
-                try:
-                    # Combinar system prompt com user prompt para Gemini
-                    full_prompt = f"{system_prompt}\n\n{prompt}"
-                    
-                    response = self.gemini_model.generate_content(
-                        full_prompt,
-                        generation_config={
-                            "temperature": CONTEXT_SETTINGS['temperature'],
-                            "max_output_tokens": CONTEXT_SETTINGS['max_tokens'],
-                        }
-                    )
-                    
-                    # Extrair texto da resposta
-                    if hasattr(response, 'text'):
-                        return response.text
-                    elif hasattr(response, 'candidates') and len(response.candidates) > 0:
-                        return response.candidates[0].content.parts[0].text
-                    else:
-                        raise Exception("Resposta do Gemini em formato inesperado")
-                        
-                except Exception as e:
-                    self.logger.error(f"Erro ao chamar Gemini: {str(e)}")
-                    # Tentar fallback para OpenAI se disponível
-                    if self.client:
-                        self.logger.info("Tentando fallback para OpenAI...")
-                        self.use_gemini = False
-                        return self._call_openai_openai(prompt)
-                    raise
-            else:
-                # Usar OpenAI (código original)
-                return self._call_openai_openai(prompt)
-                
-        except Exception as e:
-            self.logger.error(f"Erro ao chamar API de IA: {str(e)}")
-            raise
-    
-    def _call_openai_openai(self, prompt: str) -> str:
-        """Chama OpenAI API (método auxiliar)"""
-        if not self.client:
-            raise Exception("Cliente OpenAI não está disponível")
+            # Preparar headers
+            headers = {
+                "Authorization": f"Bearer {ABACUS_API_KEY}",
+                "Content-Type": "application/json"
+            }
             
-        response = self.client.chat.completions.create(
-            model=CONTEXT_SETTINGS['model'],
-            messages=[
-                {
-                    "role": "system", 
-                    "content": "Você é um especialista em educação e análise de dados educacionais. Sempre gere texto humanizado e profissional, SEM usar formatação markdown (sem #, ##, *, **, etc). Use apenas parágrafos normais e títulos em maiúsculas seguidos de dois pontos."
-                },
-                {"role": "user", "content": prompt}
-            ],
-            max_tokens=CONTEXT_SETTINGS['max_tokens'],
-            temperature=CONTEXT_SETTINGS['temperature']
-        )
-        
-        return response.choices[0].message.content
+            # Preparar payload no formato OpenAI API
+            payload = {
+                "model": ABACUS_MODEL,
+                "messages": [
+                    {
+                        "role": "system",
+                        "content": system_prompt
+                    },
+                    {
+                        "role": "user",
+                        "content": prompt
+                    }
+                ],
+                "temperature": ABACUS_TEMPERATURE,
+                "max_tokens": ABACUS_MAX_TOKENS
+            }
+            
+            # Fazer requisição
+            response = requests.post(
+                ABACUS_API_URL,
+                headers=headers,
+                json=payload,
+                timeout=120
+            )
+            
+            # Verificar status da resposta
+            response.raise_for_status()
+            
+            # Parsear resposta JSON
+            result = response.json()
+            
+            # Extrair conteúdo da resposta (múltiplos formatos possíveis)
+            content = None
+            
+            # Formato 1: OpenAI API (choices[0].message.content)
+            if 'choices' in result and len(result['choices']) > 0:
+                if 'message' in result['choices'][0] and 'content' in result['choices'][0]['message']:
+                    content = result['choices'][0]['message']['content']
+            
+            # Formato 2: Resposta direta (content)
+            elif 'content' in result:
+                content = result['content']
+            
+            # Formato 3: Resposta direta (text)
+            elif 'text' in result:
+                content = result['text']
+            
+            # Formato 4: Resposta direta (response)
+            elif 'response' in result:
+                content = result['response']
+            
+            # Formato 5: Resposta direta (message)
+            elif 'message' in result:
+                content = result['message']
+            
+            if content:
+                return content
+            else:
+                self.logger.error(f"Resposta do Abacus AI em formato inesperado: {result}")
+                raise Exception("Resposta do Abacus AI em formato inesperado")
+                
+        except requests.exceptions.RequestException as e:
+            self.logger.error(f"Erro na requisição HTTP para Abacus AI: {str(e)}")
+            if hasattr(e, 'response') and e.response is not None:
+                try:
+                    error_detail = e.response.json()
+                    self.logger.error(f"Detalhes do erro: {error_detail}")
+                except:
+                    self.logger.error(f"Status code: {e.response.status_code}")
+            raise
+        except Exception as e:
+            self.logger.error(f"Erro ao chamar Abacus AI: {str(e)}")
+            raise
     
     def _process_ai_response(self, ai_response: str) -> Dict[str, str]:
         """Processa resposta da IA e organiza em seções"""
@@ -1110,6 +1119,16 @@ Gere APENAS texto puro, SEM formatação markdown (sem #, ##, *, **, etc). Use a
 
 Use QUEBRAS DE LINHA DUPLAS (\\n\\n) para separar parágrafos diferentes.
 Use QUEBRAS DE LINHA SIMPLES (\\n) antes de títulos ou seções importantes.
+
+FORMATAÇÃO DE NÚMEROS (OBRIGATÓRIO):
+- Sempre use 1 (uma) casa decimal após a vírgula para:
+  * Notas (ex: 7,5 ao invés de 7,50 ou 7)
+  * Percentuais (ex: 85,3% ao invés de 85,30% ou 85%)
+  * Médias de proficiência (ex: 245,7 ao invés de 245,70 ou 245)
+  * Qualquer valor numérico decimal mencionado no texto
+- Use vírgula (,) como separador decimal, não ponto (.)
+- Exemplos corretos: 7,5 pontos | 85,3% | 245,7 de proficiência
+- Exemplos incorretos: 7,50 | 85,30% | 245,70 | 7.5 | 85.3%
 
 ===========================================
 DADOS DO RELATÓRIO
@@ -1381,7 +1400,179 @@ IMPORTANTE: Use os marcadores exatos [MARCADOR: PARTICIPACAO], [MARCADOR: PROFIC
                 if disciplina != 'GERAL':
                     result['niveis_aprendizagem'][disciplina] = f'Análise de níveis não disponível para {disciplina}.'
         
+        # Formatar todas as análises em HTML
+        result['participacao'] = self._format_ai_text(result['participacao'])
+        result['notas'] = self._format_ai_text(result['notas'])
+        
+        # Formatar análises por disciplina
+        for disciplina in result['proficiencia']:
+            result['proficiencia'][disciplina] = self._format_ai_text(result['proficiencia'][disciplina])
+        
+        for disciplina in result['niveis_aprendizagem']:
+            result['niveis_aprendizagem'][disciplina] = self._format_ai_text(result['niveis_aprendizagem'][disciplina])
+        
+        # Formatar acertos por habilidade se existir
+        if 'acertos_habilidade' in result:
+            for disciplina in result.get('acertos_habilidade', {}):
+                result['acertos_habilidade'][disciplina] = self._format_ai_text(result['acertos_habilidade'][disciplina])
+        
         return result
+    
+    def _format_ai_text(self, text: str) -> str:
+        """
+        Formata texto da IA convertendo markdown simples em HTML.
+        
+        Converte:
+        - Títulos (linhas que começam com #, PARECER TÉCNICO, ou são seguidas de dois pontos)
+        - Listas (linhas que começam com -, *, •, ou números)
+        - Negrito (texto entre **)
+        - Parágrafos (quebras de linha duplas)
+        
+        Args:
+            text: Texto simples da IA
+            
+        Returns:
+            Texto formatado em HTML
+        """
+        if not text or not isinstance(text, str):
+            return text or ''
+        
+        # Log para debug (pode remover depois)
+        self.logger.debug(f"Formatando texto da IA (tamanho: {len(text)} caracteres)")
+        
+        # Normalizar espaços múltiplos mas preservar estrutura
+        text = re.sub(r'[ \t]+', ' ', text)  # Múltiplos espaços/tabs viram um espaço
+        text = re.sub(r'\n\s*\n+', '\n\n', text)  # Múltiplas quebras viram duas
+        
+        # Dividir por quebras de linha existentes
+        lines = text.split('\n')
+        non_empty_lines = [l.strip() for l in lines if l.strip()]
+        
+        # Se não há quebras de linha adequadas ou texto está muito longo, tentar dividir por padrões
+        if len(non_empty_lines) <= 1 or (len(non_empty_lines) == 1 and len(non_empty_lines[0]) > 200):
+            original_text = text
+            # IMPORTANTE: Dividir por padrões específicos ANTES de outras divisões
+            
+            # 1. Dividir por títulos em maiúsculas seguidos de dois pontos (ex: "PARECER TÉCNICO DE PARTICIPAÇÃO:")
+            text = re.sub(r'([A-ZÁÉÍÓÚÇ][A-ZÁÉÍÓÚÇ\s]{10,}):\s*', r'\n\n\1: ', text)
+            
+            # 2. Dividir por títulos menores seguidos de dois pontos (ex: "Classificação:", "Destaques e Recomendações:")
+            text = re.sub(r'([A-ZÁÉÍÓÚÇ][a-záéíóúç\s]{3,30}):\s*', r'\n\n\1: ', text)
+            
+            # 3. Dividir por listas com bullet (•) - adicionar quebra antes do bullet
+            text = re.sub(r'\s+•\s+', r'\n• ', text)
+            
+            # 4. Dividir por padrões como " - " (lista) - preservar o espaço após o hífen
+            text = re.sub(r'\s+-\s+([A-ZÁÉÍÓÚÇ])', r'\n- \1', text)
+            text = re.sub(r'\s+-\s+', r'\n- ', text)
+            
+            # 5. Dividir por pontos finais seguidos de espaço e maiúscula (novos parágrafos)
+            text = re.sub(r'\.\s+([A-ZÁÉÍÓÚÇ][a-záéíóúç])', r'.\n\n\1', text)
+            
+            lines = [l.strip() for l in text.split('\n') if l.strip()]
+        
+        formatted_lines = []
+        in_list = False
+        
+        for line in lines:
+            line = line.strip()
+            
+            if not line:
+                if in_list:
+                    formatted_lines.append('</ul>')
+                    in_list = False
+                continue
+            
+            # Títulos: linhas que começam com # ou são seguidas de dois pontos
+            if line.startswith('#'):
+                if in_list:
+                    formatted_lines.append('</ul>')
+                    in_list = False
+                title_text = line.lstrip('#').strip()
+                if title_text:
+                    formatted_lines.append(f'<p style="margin-top: 12px; margin-bottom: 8px;"><strong style="font-size: 1.15em; font-weight: bold; color: #1e293b;">{self._process_inline_formatting(title_text)}</strong></p>')
+            # Títulos em maiúsculas (como "PARECER TÉCNICO DE PARTICIPAÇÃO:" ou "DIAGNÓSTICO E META")
+            elif (re.match(r'^[A-ZÁÉÍÓÚÇ][A-ZÁÉÍÓÚÇ\s]{8,}:', line) or 
+                  (line.isupper() and len(line) > 15 and ':' in line) or
+                  (re.match(r'^[A-ZÁÉÍÓÚÇ][A-ZÁÉÍÓÚÇ\s]{5,}DE\s+[A-ZÁÉÍÓÚÇ]', line) and ':' in line)):
+                if in_list:
+                    formatted_lines.append('</ul>')
+                    in_list = False
+                if ':' in line:
+                    title_part = line.split(':', 1)[0].strip()
+                    content_part = line.split(':', 1)[1].strip()
+                    if content_part:
+                        formatted_lines.append(f'<p style="margin-top: 12px; margin-bottom: 8px;"><strong style="font-size: 1.1em; font-weight: bold; color: #1e293b;">{self._process_inline_formatting(title_part)}:</strong> {self._process_inline_formatting(content_part)}</p>')
+                    else:
+                        formatted_lines.append(f'<p style="margin-top: 12px; margin-bottom: 8px;"><strong style="font-size: 1.1em; font-weight: bold; color: #1e293b;">{self._process_inline_formatting(title_part)}:</strong></p>')
+                else:
+                    formatted_lines.append(f'<p style="margin-top: 12px; margin-bottom: 8px;"><strong style="font-size: 1.1em; font-weight: bold; color: #1e293b;">{self._process_inline_formatting(line)}</strong></p>')
+            # Títulos menores (texto curto seguido de dois pontos, não lista)
+            elif ':' in line and len(line.split(':')[0]) < 60 and not line.startswith('-') and not line.startswith('*') and not (len(line) > 0 and line[0].isdigit()):
+                if in_list:
+                    formatted_lines.append('</ul>')
+                    in_list = False
+                title_part = line.split(':', 1)[0].strip()
+                content_part = line.split(':', 1)[1].strip() if ':' in line else ''
+                if title_part:
+                    formatted_lines.append(f'<p style="margin-top: 8px; margin-bottom: 4px;"><strong style="font-weight: bold; color: #1e293b;">{self._process_inline_formatting(title_part)}:</strong> {self._process_inline_formatting(content_part) if content_part else ""}</p>')
+                else:
+                    formatted_lines.append(f'<p style="margin-top: 8px; margin-bottom: 4px; text-align: left;">{self._process_inline_formatting(line)}</p>')
+            # Listas: linhas que começam com -, *, •, ou números
+            elif (line.startswith('-') or line.startswith('*') or line.startswith('•') or 
+                  (len(line) > 0 and line[0].isdigit() and len(line) > 1 and (line[1] in '. )'))):
+                if not in_list:
+                    formatted_lines.append('<ul style="margin-left: 20px; padding-left: 20px; list-style-type: disc; text-align: left;">')
+                    in_list = True
+                # Remover marcador de lista
+                if line.startswith('•'):
+                    list_item = line[1:].strip()
+                elif line.startswith('-') or line.startswith('*'):
+                    list_item = line[1:].strip()
+                else:
+                    # Para listas numeradas, remover número e marcador
+                    list_item = re.sub(r'^\d+[\.\)]\s*', '', line).strip()
+                if list_item:
+                    formatted_lines.append(f'<li style="margin-bottom: 6px; text-align: left; line-height: 1.6;">{self._process_inline_formatting(list_item)}</li>')
+            else:
+                if in_list:
+                    formatted_lines.append('</ul>')
+                    in_list = False
+                # Parágrafo normal
+                formatted_lines.append(f'<p style="margin-top: 8px; margin-bottom: 8px; text-align: justify; line-height: 1.8;">{self._process_inline_formatting(line)}</p>')
+        
+        # Fechar lista se ainda estiver aberta
+        if in_list:
+            formatted_lines.append('</ul>')
+        
+        return '\n'.join(formatted_lines)
+    
+    def _process_inline_formatting(self, text: str) -> str:
+        """
+        Processa formatação inline (negrito, itálico) no texto.
+        
+        Args:
+            text: Texto com formatação markdown
+            
+        Returns:
+            Texto com HTML inline
+        """
+        if not text:
+            return ''
+        
+        # Escapar HTML para segurança
+        import html
+        text = html.escape(text)
+        
+        # Negrito: **texto** ou __texto__
+        text = re.sub(r'\*\*(.+?)\*\*', r'<strong>\1</strong>', text)
+        text = re.sub(r'__(.+?)__', r'<strong>\1</strong>', text)
+        
+        # Itálico: *texto* ou _texto_
+        text = re.sub(r'(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)', r'<em>\1</em>', text)
+        text = re.sub(r'(?<!_)_(?!_)(.+?)(?<!_)_(?!_)', r'<em>\1</em>', text)
+        
+        return text
     
     def _get_fallback_texts(self) -> Dict[str, Any]:
         """Retorna textos padrão em caso de erro"""

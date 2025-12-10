@@ -29,7 +29,12 @@ from app.models.test import Test
 from app.services.ai_analysis_service import AIAnalysisService
 from app.services.report_aggregate_service import ReportAggregateService
 from app.routes.report_routes import _montar_resposta_relatorio, _montar_resposta_relatorio_por_turmas
-from app.openai_config.openai_config import get_gemini_client, USE_GEMINI, GEMINI_MODEL
+from app.openai_config.openai_config import (
+    ABACUS_API_KEY,
+    ABACUS_API_URL,
+    ABACUS_MODEL
+)
+import requests
 import logging
 import json
 from datetime import datetime
@@ -43,52 +48,65 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-def test_gemini_connection():
-    """Testa se a conexão com Gemini está funcionando"""
+def test_abacus_connection():
+    """Testa se a conexão com Abacus AI está funcionando"""
     print("\n" + "="*80)
-    print("TESTE 1: Conexão com Gemini")
+    print("TESTE 1: Conexão com Abacus AI (REST API)")
     print("="*80)
     
     try:
-        if not USE_GEMINI:
-            print("❌ Gemini está DESABILITADO (USE_GEMINI=False)")
-            return False
+        # Preparar requisição REST
+        headers = {
+            "Authorization": f"Bearer {ABACUS_API_KEY}",
+            "Content-Type": "application/json"
+        }
         
-        print(f"✓ Gemini está habilitado")
-        print(f"✓ Modelo configurado: {GEMINI_MODEL}")
-        
-        # Tentar inicializar o cliente
-        try:
-            model = get_gemini_client()
-            print(f"✓ Cliente Gemini inicializado com sucesso")
-            
-            # Testar uma chamada simples
-            print("\nTestando chamada simples ao Gemini...")
-            response = model.generate_content(
-                "Responda apenas: OK",
-                generation_config={
-                    "temperature": 0.7,
-                    "max_output_tokens": 10,
+        payload = {
+            "model": ABACUS_MODEL,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": "Responda apenas: OK"
                 }
-            )
-            
-            if hasattr(response, 'text'):
-                result = response.text
-            elif hasattr(response, 'candidates') and len(response.candidates) > 0:
-                result = response.candidates[0].content.parts[0].text
-            else:
-                result = str(response)
-            
-            print(f"✓ Resposta recebida: {result[:50]}")
+            ],
+            "max_tokens": 10
+        }
+        
+        print(f"✓ Testando conexão com modelo: {ABACUS_MODEL}")
+        print(f"✓ URL: {ABACUS_API_URL}")
+        
+        # Testar uma chamada simples
+        print("\nTestando chamada simples ao Abacus AI...")
+        response = requests.post(
+            ABACUS_API_URL,
+            headers=headers,
+            json=payload,
+            timeout=30
+        )
+        
+        response.raise_for_status()
+        result = response.json()
+        
+        if 'choices' in result and len(result['choices']) > 0:
+            content = result['choices'][0]['message']['content']
+            print(f"✓ Resposta recebida: {content[:50]}")
             return True
-            
-        except Exception as e:
-            print(f"❌ Erro ao conectar com Gemini: {str(e)}")
-            print(f"   Tipo do erro: {type(e).__name__}")
+        else:
+            print(f"❌ Resposta não contém 'choices': {result}")
             return False
             
+    except requests.exceptions.RequestException as e:
+        print(f"❌ Erro na requisição HTTP: {str(e)}")
+        if hasattr(e, 'response') and e.response is not None:
+            print(f"   Status code: {e.response.status_code}")
+            try:
+                print(f"   Erro: {e.response.json()}")
+            except:
+                print(f"   Text: {e.response.text[:200]}")
+        return False
     except Exception as e:
-        print(f"❌ Erro ao testar Gemini: {str(e)}")
+        print(f"❌ Erro ao testar Abacus AI: {str(e)}")
+        print(f"   Tipo do erro: {type(e).__name__}")
         return False
 
 
@@ -143,9 +161,8 @@ def test_ai_service_initialization():
     try:
         ai_service = AIAnalysisService()
         print(f"✓ Serviço inicializado")
-        print(f"   use_gemini: {ai_service.use_gemini}")
-        print(f"   gemini_model: {ai_service.gemini_model is not None if ai_service.use_gemini else 'N/A'}")
-        print(f"   client (OpenAI): {ai_service.client is not None if not ai_service.use_gemini else 'N/A'}")
+        print(f"   Modelo: {ABACUS_MODEL}")
+        print(f"   API URL: {ABACUS_API_URL}")
         return ai_service
     except Exception as e:
         print(f"❌ Erro ao inicializar serviço: {str(e)}")
@@ -211,11 +228,7 @@ def test_ai_analysis_generation(test_id: str, scope_type: str = "overall", scope
         print("\nInicializando serviço de IA...")
         ai_service = AIAnalysisService()
         
-        if not ai_service.use_gemini and not ai_service.client:
-            print("❌ Nenhum serviço de IA disponível")
-            return None
-        
-        print(f"✓ Serviço de IA inicializado ({'Gemini' if ai_service.use_gemini else 'OpenAI'})")
+        print(f"✓ Serviço de IA inicializado (Abacus AI - REST API)")
         
         # Gerar análise
         print("\nGerando análise de IA (isso pode levar alguns segundos)...")
@@ -391,7 +404,7 @@ def main():
         
         if not test_id:
             print("\n⚠ Nenhum test_id fornecido. Executando apenas testes básicos...")
-            test_gemini_connection()
+            test_abacus_connection()
             test_ai_service_initialization()
             print("\n" + "="*80)
             print("Para testar com uma avaliação específica:")
@@ -400,7 +413,7 @@ def main():
             return
         
         # Executar todos os testes
-        test_gemini_connection()
+        test_abacus_connection()
         test_ai_service_initialization()
         check_cache_status(test_id, scope_type, scope_id)
         test_ai_analysis_generation(test_id, scope_type, scope_id)

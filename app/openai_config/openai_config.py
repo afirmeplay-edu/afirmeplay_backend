@@ -1,54 +1,18 @@
 # -*- coding: utf-8 -*-
 """
-Configuração para integração com OpenAI API e Google Gemini API
+Configuração para integração com Abacus AI API
 """
 
-import os
-from openai import OpenAI
+# Configuração da API Key Abacus AI
+ABACUS_API_KEY = "s2_b0167419bc70447ba819248ad57abc5a"
 
-# Configuração da API Key OpenAI
-OPENAI_API_KEY = "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"
+# Configurações do modelo Abacus AI
+ABACUS_MODEL = "o4-mini"
+ABACUS_MAX_TOKENS = 8192
+ABACUS_TEMPERATURE = 0.7
 
-# Configuração da API Key Gemini
-GEMINI_API_KEY = "AIzaSyDcwxjngnTvZb8Xe4BDno6dQlBJRsExliE"
-
-# Escolher qual API usar (pode ser configurado via variável de ambiente)
-# Por padrão, usar Gemini se a chave estiver disponível
-USE_GEMINI_ENV = os.getenv("USE_GEMINI", "").lower()
-if USE_GEMINI_ENV:
-    USE_GEMINI = USE_GEMINI_ENV == "true"
-elif GEMINI_API_KEY:
-    USE_GEMINI = True  # Usar Gemini por padrão se a chave estiver disponível
-else:
-    USE_GEMINI = False  # Usar OpenAI se não houver chave do Gemini
-
-# Configurações do modelo OpenAI
-OPENAI_MODEL = "gemini-1.5-flash"  # Modelo mais econômico e eficiente
-OPENAI_MAX_TOKENS = 6000  # Aumentado para acomodar todas as análises em uma única chamada
-OPENAI_TEMPERATURE = 0.7
-
-# Configurações do modelo Gemini
-GEMINI_MODEL = "gemini-2.5-pro"  # Modelo mais rápido e econômico
-# GEMINI_MODEL = "gemini-1.5-pro"  # Modelo mais poderoso, mas mais lento
-GEMINI_MAX_TOKENS = 8192  # Limite do Gemini Flash
-GEMINI_TEMPERATURE = 0.7
-
-# Inicializar cliente OpenAI
-def get_openai_client():
-    """Retorna cliente OpenAI configurado"""
-    return OpenAI(api_key=OPENAI_API_KEY)
-
-# Inicializar cliente Gemini
-def get_gemini_client():
-    """Retorna cliente Gemini configurado"""
-    try:
-        import google.generativeai as genai
-        genai.configure(api_key=GEMINI_API_KEY)
-        return genai.GenerativeModel(GEMINI_MODEL)
-    except ImportError:
-        raise ImportError("google-generativeai não está instalado. Execute: pip install google-generativeai")
-    except Exception as e:
-        raise Exception(f"Erro ao configurar Gemini: {str(e)}")
+# URL da API Abacus AI (RouteLLM - compatível com OpenAI Chat Completions API)
+ABACUS_API_URL = "https://routellm.abacus.ai/v1/chat/completions"
 
 # Prompt base para análise de relatórios
 ANALYSIS_PROMPT_BASE = """
@@ -98,6 +62,14 @@ Inválido (Falha Grave)	Abaixo de 50%	Processo falhou. A avaliação não pode s
 PARTICIPATION_ANALYSIS_PROMPT_TEMPLATE = """
 IMPORTANTE: Gere APENAS texto puro, SEM formatação markdown (sem #, ##, *, **, etc). Use apenas parágrafos normais e títulos em maiúsculas seguidos de dois pontos.
 
+FORMATAÇÃO DE NÚMEROS (OBRIGATÓRIO):
+- Sempre use 1 (uma) casa decimal após a vírgula para:
+  * Percentuais (ex: 85,3% ao invés de 85,30% ou 85%)
+  * Qualquer valor numérico decimal mencionado no texto
+- Use vírgula (,) como separador decimal, não ponto (.)
+- Exemplos corretos: 85,3% | 75,0% | 92,5%
+- Exemplos incorretos: 85,30% | 75% | 92,50% | 85.3% | 92.5%
+
 Gere um PARECER TÉCNICO DE PARTICIPAÇÃO humanizado e formatado para o relatório PDF, seguindo exatamente este formato:
 
 PARECER TÉCNICO DE PARTICIPAÇÃO: [Entidade] ([Avaliação])
@@ -137,6 +109,14 @@ INSTRUÇÕES IMPORTANTES:
 # Template do prompt para análise de níveis de aprendizagem
 NIVEIS_APRENDIZAGEM_ANALYSIS_PROMPT_TEMPLATE = """
 IMPORTANTE: Gere APENAS texto puro, SEM formatação markdown (sem #, ##, *, **, etc). Use apenas parágrafos normais e títulos em maiúsculas seguidos de dois pontos.
+
+FORMATAÇÃO DE NÚMEROS (OBRIGATÓRIO):
+- Sempre use 1 (uma) casa decimal após a vírgula para:
+  * Percentuais (ex: 42,5% ao invés de 42,50% ou 42%)
+  * Qualquer valor numérico decimal mencionado no texto
+- Use vírgula (,) como separador decimal, não ponto (.)
+- Exemplos corretos: 42,5% | 35,0% | 18,3%
+- Exemplos incorretos: 42,50% | 35% | 18,30% | 42.5% | 18.3%
 
 Gere um PARECER TÉCNICO DE NÍVEIS DE APRENDIZAGEM humanizado e formatado para o relatório PDF, seguindo exatamente este formato:
 
@@ -212,6 +192,15 @@ Matemática:
 PROFICIENCY_ANALYSIS_PROMPT_TEMPLATE = """
 IMPORTANTE: Gere APENAS texto puro, SEM formatação markdown (sem #, ##, *, **, etc). Use apenas parágrafos normais e títulos em maiúsculas seguidos de dois pontos.
 
+FORMATAÇÃO DE NÚMEROS (OBRIGATÓRIO):
+- Sempre use 1 (uma) casa decimal após a vírgula para:
+  * Médias de proficiência (ex: 245,7 ao invés de 245,70 ou 245)
+  * Diferenças entre médias (ex: 12,3 pontos ao invés de 12,30)
+  * Qualquer valor numérico decimal mencionado no texto
+- Use vírgula (,) como separador decimal, não ponto (.)
+- Exemplos corretos: 245,7 de proficiência | 12,3 pontos acima | 180,5
+- Exemplos incorretos: 245,70 | 12,30 | 180,50 | 245.7 | 12.3
+
 Gere um PARECER TÉCNICO DE PROFICIÊNCIA humanizado e formatado para o relatório PDF, seguindo exatamente este formato:
 
 PARECER TÉCNICO: PROFICIÊNCIA EM [Disciplina] ([Ano/Série] - [Avaliação])
@@ -272,6 +261,15 @@ Muito Abaixo do Esperado	Abaixo de 3,0	Nível crítico. Indica grandes defasagen
 NOTA_ANALYSIS_PROMPT_TEMPLATE = """
 IMPORTANTE: Gere APENAS texto puro, SEM formatação markdown (sem #, ##, *, **, etc). Use apenas parágrafos normais e títulos em maiúsculas seguidos de dois pontos.
 
+FORMATAÇÃO DE NÚMEROS (OBRIGATÓRIO):
+- Sempre use 1 (uma) casa decimal após a vírgula para:
+  * Notas (ex: 7,5 ao invés de 7,50 ou 7)
+  * Médias (ex: 6,8 ao invés de 6,80 ou 6,8)
+  * Qualquer valor numérico decimal mencionado no texto
+- Use vírgula (,) como separador decimal, não ponto (.)
+- Exemplos corretos: 7,5 pontos | 6,8 de média | 8,3
+- Exemplos incorretos: 7,50 | 6,80 | 8,30 | 7.5 | 6.8
+
 Gere um PARECER TÉCNICO DE NOTA humanizado e formatado para o relatório PDF, seguindo exatamente este formato:
 
 PARECER TÉCNICO: NOTA (0-10) - [Ano/Série] ([Avaliação])
@@ -310,10 +308,8 @@ INSTRUÇÕES IMPORTANTES:
 9. Seja específico com os números fornecidos (mencione exatamente as notas de cada turma, disciplina, etc).
 """
 
-# Configurações de contexto (compatível com ambas as APIs)
+# Configurações de contexto
 CONTEXT_SETTINGS = {
-    "max_tokens": GEMINI_MAX_TOKENS if USE_GEMINI else OPENAI_MAX_TOKENS,
-    "temperature": GEMINI_TEMPERATURE if USE_GEMINI else OPENAI_TEMPERATURE,
-    "model": GEMINI_MODEL if USE_GEMINI else OPENAI_MODEL,
-    "use_gemini": USE_GEMINI
+    "max_tokens": ABACUS_MAX_TOKENS,
+    "temperature": ABACUS_TEMPERATURE
 }

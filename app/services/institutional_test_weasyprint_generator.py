@@ -120,8 +120,8 @@ class InstitutionalTestWeasyPrintGenerator:
                 student, questions_data, test_data
             )
             
-            # Gerar QR code com metadados simplificados (apenas student_id e test_id)
-            # num_questions será buscado do banco de dados
+            # Gerar QR code no formato JSON (compatível com correcaoIA.py)
+            # Formato: {"student_id": "...", "test_id": "..."}
             import qrcode
             import json
             from io import BytesIO
@@ -129,21 +129,26 @@ class InstitutionalTestWeasyPrintGenerator:
             
             total_questions = len(questions_data)
             
-            # Criar metadados simplificados do QR code (apenas student_id e test_id)
-            # Removido: num_questions e qr_code_id para tornar QR code menor e mais fácil de decodificar
-            qr_metadata = {
-                "student_id": str(student['id']),
-                "test_id": str(test_data['id'])
+            # Criar metadados do QR Code em JSON
+            student_id = str(student.get('id', ''))
+            test_id = str(test_data.get('id', ''))
+            
+            qr_data = {
+                "student_id": student_id,
+                "test_id": test_id
             }
             
-            # Gerar QR code com JSON
+            # Converter para JSON
+            qr_json = json.dumps(qr_data)
+            
+            # Gerar QR code com formato JSON
             qr = qrcode.QRCode(
                 version=1,
                 error_correction=qrcode.constants.ERROR_CORRECT_L,
                 box_size=10,
                 border=2,
             )
-            qr.add_data(json.dumps(qr_metadata))
+            qr.add_data(qr_json)
             qr.make(fit=True)
             
             # Criar imagem do QR Code

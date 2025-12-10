@@ -27,7 +27,7 @@ import unicodedata
 from sqlalchemy import func, case, desc
 from datetime import datetime
 from sqlalchemy.orm import joinedload
-from collections import defaultdict
+from collections import defaultdict, OrderedDict
 import os
 from jinja2 import Template
 from jinja2 import Environment, FileSystemLoader, select_autoescape
@@ -5218,13 +5218,11 @@ def _calcular_acertos_habilidade_por_municipio(evaluation_id: str, class_tests: 
         skills = Skill.query.filter(Skill.id.in_(skill_ids)).all()
         skills_dict = {str(skill.id): skill for skill in skills}
     
-    # Calcular acertos por habilidade e disciplina
-    disciplinas_habilidades = defaultdict(lambda: defaultdict(lambda: {"total": 0, "acertos": 0, "questoes": [], "descricao": ""}))
-
-    # Dados gerais que englobam todas as disciplinas
-    habilidades_gerais = defaultdict(lambda: {"total": 0, "acertos": 0, "questoes": [], "descricao": ""})
+    # Lista para manter a ordem original das questões conforme aparecem na avaliação
+    questoes_ordenadas = []
     
-    for question in test.questions:
+    # Processar questões na ordem original (test.questions já está ordenado)
+    for idx, question in enumerate(test.questions, start=1):
         # Questões com skill: mapear via skill.subject_id
         if question.skill and question.skill.strip() and question.skill != '{}':
             # Remover chaves {} do UUID se existirem
@@ -5277,81 +5275,36 @@ def _calcular_acertos_habilidade_por_municipio(evaluation_id: str, class_tests: 
                 if str(answer.answer).strip().lower() == str(question.correct_answer).strip().lower():
                     acertos += 1
         
-        disciplinas_habilidades[disciplina][skill_code]["total"] += total_respostas
-        disciplinas_habilidades[disciplina][skill_code]["acertos"] += acertos
-        if not disciplinas_habilidades[disciplina][skill_code]["descricao"]:
-            disciplinas_habilidades[disciplina][skill_code]["descricao"] = skill_description
-        disciplinas_habilidades[disciplina][skill_code]["questoes"].append({
-            "numero": question.number or 1,
-            "acertos": acertos,
-            "total": total_respostas
-        })
+        percentual = (acertos / total_respostas) * 100 if total_respostas > 0 else 0
         
-        # Adicionar aos dados gerais
-        habilidades_gerais[skill_code]["total"] += total_respostas
-        habilidades_gerais[skill_code]["acertos"] += acertos
-        if not habilidades_gerais[skill_code]["descricao"]:
-            habilidades_gerais[skill_code]["descricao"] = skill_description
-        habilidades_gerais[skill_code]["questoes"].append({
-            "numero": question.number or 1,
+        # Armazenar questão na ordem original
+        questoes_ordenadas.append({
+            "ordem_original": idx,  # Posição na avaliação (1, 2, 3, ...)
+            "disciplina": disciplina,
+            "codigo": skill_code,
+            "descricao": skill_description,
             "acertos": acertos,
-            "total": total_respostas
+            "total": total_respostas,
+            "percentual": round(percentual, 1)
         })
     
-    # Organizar resultado por disciplina
+    # Agrupar por disciplina mantendo a ordem original das questões
     resultado_por_disciplina = {}
+    disciplinas_ordem = []  # Lista para manter ordem de aparição das disciplinas
     
-    # Primeiro, coletar todas as questões com numeração global
-    todas_questoes = []
-    numero_questao_global = 1
-    
-    # Ordenar disciplinas para garantir ordem consistente
-    disciplinas_ordenadas = sorted(disciplinas_habilidades.keys())
-    
-    for disciplina in disciplinas_ordenadas:
-        habilidades = disciplinas_habilidades[disciplina]
-        # Processar cada habilidade e suas questões
-        for skill_code, dados in habilidades.items():
-            if dados["total"] > 0:
-                # Para cada questão desta habilidade
-                for questao_data in dados["questoes"]:
-                    percentual = (questao_data["acertos"] / questao_data["total"]) * 100 if questao_data["total"] > 0 else 0
-                    todas_questoes.append({
-                        "disciplina": disciplina,
-                        "numero_questao": numero_questao_global,
-                        "codigo": skill_code,
-                        "descricao": dados["descricao"] if dados.get("descricao") else f"Habilidade {skill_code}",
-                        "acertos": questao_data["acertos"],
-                        "total": questao_data["total"],
-                        "percentual": round(percentual, 1)
-                    })
-                    numero_questao_global += 1
-    
-    # Agora agrupar por disciplina mantendo a numeração global
-    for disciplina in disciplinas_ordenadas:
-        questoes_disciplina = []
-        for questao in todas_questoes:
-            if questao["disciplina"] == disciplina:
-                # Criar nova questão sem o campo disciplina
-                questoes_disciplina.append({
-                    "numero_questao": questao["numero_questao"],
-                    "codigo": questao["codigo"],
-                    "descricao": questao["descricao"],
-                    "acertos": questao["acertos"],
-                    "total": questao["total"],
-                    "percentual": questao["percentual"]
-                })
+    for questao in questoes_ordenadas:
+        disciplina = questao["disciplina"]
         
-        resultado_por_disciplina[disciplina] = {
-            "questoes": questoes_disciplina
-        }
-    
-    # Adicionar dados gerais que englobam todas as disciplinas
-    # Usar as mesmas questões já numeradas globalmente
-    questoes_gerais = []
-    for questao in todas_questoes:
-        questoes_gerais.append({
-            "numero_questao": questao["numero_questao"],
+        # Se é a primeira vez que vemos esta disciplina, adicionar à lista de ordem
+        if disciplina not in disciplinas_ordem:
+            disciplinas_ordem.append(disciplina)
+            resultado_por_disciplina[disciplina] = {
+                "questoes": []
+            }
+        
+        # Adicionar questão à disciplina (mantendo ordem original)
+        resultado_por_disciplina[disciplina]["questoes"].append({
+            "numero_questao": questao["ordem_original"],
             "codigo": questao["codigo"],
             "descricao": questao["descricao"],
             "acertos": questao["acertos"],
@@ -5359,14 +5312,31 @@ def _calcular_acertos_habilidade_por_municipio(evaluation_id: str, class_tests: 
             "percentual": questao["percentual"]
         })
     
-    # Ordenar questões por número
-    questoes_gerais.sort(key=lambda x: x["numero_questao"])
+    # Adicionar dados gerais que englobam todas as disciplinas (na ordem original)
+    questoes_gerais = []
+    for questao in questoes_ordenadas:
+        questoes_gerais.append({
+            "numero_questao": questao["ordem_original"],
+            "codigo": questao["codigo"],
+            "descricao": questao["descricao"],
+            "acertos": questao["acertos"],
+            "total": questao["total"],
+            "percentual": questao["percentual"]
+        })
     
-    resultado_por_disciplina["GERAL"] = {
+    # Construir resultado final ordenado usando a ordem de aparição das disciplinas
+    resultado_ordenado = OrderedDict()
+    
+    # Adicionar disciplinas na ordem de aparição
+    for disciplina in disciplinas_ordem:
+        resultado_ordenado[disciplina] = resultado_por_disciplina[disciplina]
+    
+    # Adicionar "GERAL" sempre por último
+    resultado_ordenado["GERAL"] = {
         "questoes": questoes_gerais
     }
     
-    return resultado_por_disciplina
+    return resultado_ordenado
 
 
 def _calcular_acertos_habilidade(evaluation_id: str) -> Dict[str, Any]:
@@ -5410,13 +5380,11 @@ def _calcular_acertos_habilidade(evaluation_id: str) -> Dict[str, Any]:
         if not_found:
             logging.warning(f"Skill IDs não encontrados: {not_found}")
     
-    # Calcular acertos por habilidade e disciplina
-    disciplinas_habilidades = defaultdict(lambda: defaultdict(lambda: {"total": 0, "acertos": 0, "questoes": [], "descricao": ""}))
+    # Lista para manter a ordem original das questões conforme aparecem na avaliação
+    questoes_ordenadas = []
     
-    # Dados gerais que englobam todas as disciplinas
-    habilidades_gerais = defaultdict(lambda: {"total": 0, "acertos": 0, "questoes": [], "descricao": ""})
-    
-    for question in test.questions:
+    # Processar questões na ordem original (test.questions já está ordenado)
+    for idx, question in enumerate(test.questions, start=1):
         # Questões com skill: mapear via skill.subject_id
         if question.skill and question.skill.strip() and question.skill != '{}':
             # Remover chaves {} do UUID se existirem
@@ -5472,81 +5440,36 @@ def _calcular_acertos_habilidade(evaluation_id: str) -> Dict[str, Any]:
                 if str(answer.answer).strip().lower() == str(question.correct_answer).strip().lower():
                     acertos += 1
         
-        disciplinas_habilidades[disciplina][skill_code]["total"] += total_respostas
-        disciplinas_habilidades[disciplina][skill_code]["acertos"] += acertos
-        if not disciplinas_habilidades[disciplina][skill_code]["descricao"]:
-            disciplinas_habilidades[disciplina][skill_code]["descricao"] = skill_description
-        disciplinas_habilidades[disciplina][skill_code]["questoes"].append({
-            "numero": question.number or 1,
-            "acertos": acertos,
-            "total": total_respostas
-        })
+        percentual = (acertos / total_respostas) * 100 if total_respostas > 0 else 0
         
-        # Adicionar aos dados gerais
-        habilidades_gerais[skill_code]["total"] += total_respostas
-        habilidades_gerais[skill_code]["acertos"] += acertos
-        if not habilidades_gerais[skill_code]["descricao"]:
-            habilidades_gerais[skill_code]["descricao"] = skill_description
-        habilidades_gerais[skill_code]["questoes"].append({
-            "numero": question.number or 1,
+        # Armazenar questão na ordem original
+        questoes_ordenadas.append({
+            "ordem_original": idx,  # Posição na avaliação (1, 2, 3, ...)
+            "disciplina": disciplina,
+            "codigo": skill_code,
+            "descricao": skill_description,
             "acertos": acertos,
-            "total": total_respostas
+            "total": total_respostas,
+            "percentual": round(percentual, 1)
         })
     
-    # Organizar resultado por disciplina
+    # Agrupar por disciplina mantendo a ordem original das questões
     resultado_por_disciplina = {}
+    disciplinas_ordem = []  # Lista para manter ordem de aparição das disciplinas
     
-    # Primeiro, coletar todas as questões com numeração global
-    todas_questoes = []
-    numero_questao_global = 1
-    
-    # Ordenar disciplinas para garantir ordem consistente
-    disciplinas_ordenadas = sorted(disciplinas_habilidades.keys())
-    
-    for disciplina in disciplinas_ordenadas:
-        habilidades = disciplinas_habilidades[disciplina]
-        # Processar cada habilidade e suas questões
-        for skill_code, dados in habilidades.items():
-            if dados["total"] > 0:
-                # Para cada questão desta habilidade
-                for questao_data in dados["questoes"]:
-                    percentual = (questao_data["acertos"] / questao_data["total"]) * 100 if questao_data["total"] > 0 else 0
-                    todas_questoes.append({
-                        "disciplina": disciplina,
-                        "numero_questao": numero_questao_global,
-                        "codigo": skill_code,
-                        "descricao": dados["descricao"] if dados.get("descricao") else f"Habilidade {skill_code}",
-                        "acertos": questao_data["acertos"],
-                        "total": questao_data["total"],
-                        "percentual": round(percentual, 1)
-                    })
-                    numero_questao_global += 1
-    
-    # Agora agrupar por disciplina mantendo a numeração global
-    for disciplina in disciplinas_ordenadas:
-        questoes_disciplina = []
-        for questao in todas_questoes:
-            if questao["disciplina"] == disciplina:
-                # Criar nova questão sem o campo disciplina
-                questoes_disciplina.append({
-                    "numero_questao": questao["numero_questao"],
-                    "codigo": questao["codigo"],
-                    "descricao": questao["descricao"],
-                    "acertos": questao["acertos"],
-                    "total": questao["total"],
-                    "percentual": questao["percentual"]
-                })
+    for questao in questoes_ordenadas:
+        disciplina = questao["disciplina"]
         
-        resultado_por_disciplina[disciplina] = {
-            "questoes": questoes_disciplina
-        }
-    
-    # Adicionar dados gerais que englobam todas as disciplinas
-    # Usar as mesmas questões já numeradas globalmente
-    questoes_gerais = []
-    for questao in todas_questoes:
-        questoes_gerais.append({
-            "numero_questao": questao["numero_questao"],
+        # Se é a primeira vez que vemos esta disciplina, adicionar à lista de ordem
+        if disciplina not in disciplinas_ordem:
+            disciplinas_ordem.append(disciplina)
+            resultado_por_disciplina[disciplina] = {
+                "questoes": []
+            }
+        
+        # Adicionar questão à disciplina (mantendo ordem original)
+        resultado_por_disciplina[disciplina]["questoes"].append({
+            "numero_questao": questao["ordem_original"],
             "codigo": questao["codigo"],
             "descricao": questao["descricao"],
             "acertos": questao["acertos"],
@@ -5554,14 +5477,31 @@ def _calcular_acertos_habilidade(evaluation_id: str) -> Dict[str, Any]:
             "percentual": questao["percentual"]
         })
     
-    # Ordenar questões por número
-    questoes_gerais.sort(key=lambda x: x["numero_questao"])
+    # Adicionar dados gerais que englobam todas as disciplinas (na ordem original)
+    questoes_gerais = []
+    for questao in questoes_ordenadas:
+        questoes_gerais.append({
+            "numero_questao": questao["ordem_original"],
+            "codigo": questao["codigo"],
+            "descricao": questao["descricao"],
+            "acertos": questao["acertos"],
+            "total": questao["total"],
+            "percentual": questao["percentual"]
+        })
     
-    resultado_por_disciplina["GERAL"] = {
+    # Construir resultado final ordenado usando a ordem de aparição das disciplinas
+    resultado_ordenado = OrderedDict()
+    
+    # Adicionar disciplinas na ordem de aparição
+    for disciplina in disciplinas_ordem:
+        resultado_ordenado[disciplina] = resultado_por_disciplina[disciplina]
+    
+    # Adicionar "GERAL" sempre por último
+    resultado_ordenado["GERAL"] = {
         "questoes": questoes_gerais
     }
     
-    return resultado_por_disciplina
+    return resultado_ordenado
 
 
 def _calcular_media_municipal(evaluation_id: str) -> float:

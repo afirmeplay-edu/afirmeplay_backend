@@ -468,10 +468,66 @@ def process_physical_correction(test_id):
         data = request.get_json() or {}
         use_new_orm = data.get('use_new_orm', False) or request.form.get('use_new_orm', 'false').lower() == 'true'
         use_old_system = data.get('use_old_system', False) or request.form.get('use_old_system', 'false').lower() == 'true'
+        use_omr_system = data.get('use_omr_system', False) or request.form.get('use_omr_system', 'false').lower() == 'true'
         use_ai_correction = data.get('use_ai_correction', True)  # Padrão: True (IA)
         
         # Se explicitamente desabilitar IA ou pedir sistema antigo, usar alternativas
-        if use_old_system:
+        if use_omr_system:
+            # NOVO SISTEMA OMR (SEM IA) - Usa triângulos, quadrados e círculos
+            print("🔷 Usando NOVO SISTEMA OMR (sem IA - triângulos/quadrados/círculos)")
+            
+            try:
+                from app.services.correction_new import CorrecaoNova
+                
+                # Criar instância do serviço de correção sem IA
+                correcao_nova = CorrecaoNova(debug=True)
+                
+                # Processar correção
+                result = correcao_nova.corrigir_prova_sem_ia(
+                    image_data=image_data,
+                    test_id=test_id
+                )
+                
+                if result.get('success'):
+                    return jsonify({
+                        "message": "Correção processada com sucesso (OMR sem IA)",
+                        "system": "omr",
+                        "student_id": result.get('student_id'),
+                        "test_id": result.get('test_id'),
+                        "correct": result.get('correct'),
+                        "total": result.get('total'),
+                        "percentage": result.get('percentage'),
+                        "score_percentage": result.get('score_percentage', result.get('percentage')),
+                        "grade": result.get('grade'),
+                        "proficiency": result.get('proficiency'),
+                        "classification": result.get('classification'),
+                        "evaluation_result_id": result.get('evaluation_result_id'),
+                        # Campos de compatibilidade
+                        "correct_answers": result.get('correct_answers', result.get('correct')),
+                        "total_questions": result.get('total_questions', result.get('total')),
+                        # Dados detalhados
+                        "answers": result.get('answers'),
+                        "correction": result.get('correction'),
+                        "details": result.get('details', {}),
+                        "saved_answers": result.get('saved_answers'),
+                        "warnings": result.get('warnings', [])
+                    }), 200
+                else:
+                    return jsonify({
+                        "error": result.get('error', 'Erro desconhecido na correção OMR'),
+                        "system": "omr"
+                    }), 500
+                    
+            except Exception as e:
+                logging.error(f"Erro no sistema OMR: {str(e)}")
+                import traceback
+                logging.error(traceback.format_exc())
+                return jsonify({
+                    "error": f"Erro no sistema OMR: {str(e)}",
+                    "system": "omr"
+                }), 500
+        
+        elif use_old_system:
             # SISTEMA ANTIGO - Mantido para compatibilidade
             print("📋 Usando SISTEMA ANTIGO (alinhamento por marcadores)")
             

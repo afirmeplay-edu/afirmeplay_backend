@@ -120,30 +120,51 @@ class InstitutionalTestWeasyPrintGenerator:
                 student, questions_data, test_data
             )
             
-            # Gerar QR code com metadados simplificados (apenas student_id e test_id)
-            # num_questions será buscado do banco de dados
+            # Gerar QR code no formato antigo (40 caracteres: id_prova.id_aluno)
+            # Formato: preenchido com # até 40 caracteres
             import qrcode
             import json
             from io import BytesIO
             import base64
+            import hashlib
             
             total_questions = len(questions_data)
             
-            # Criar metadados simplificados do QR code (apenas student_id e test_id)
-            # Removido: num_questions e qr_code_id para tornar QR code menor e mais fácil de decodificar
-            qr_metadata = {
-                "student_id": str(student['id']),
-                "test_id": str(test_data['id'])
-            }
+            # Converter UUIDs para números usando hash (para compatibilidade com sistema antigo)
+            # O sistema antigo espera números, então vamos criar um hash numérico dos UUIDs
+            def uuid_to_numeric(uuid_str: str, max_digits: int = 15) -> str:
+                """Converte UUID para número usando hash"""
+                # Criar hash do UUID
+                hash_obj = hashlib.md5(uuid_str.encode())
+                hash_hex = hash_obj.hexdigest()
+                # Converter hex para int e pegar os primeiros dígitos
+                hash_int = int(hash_hex[:max_digits], 16)
+                # Limitar a max_digits dígitos
+                return str(hash_int % (10 ** max_digits)).zfill(max_digits)
             
-            # Gerar QR code com JSON
+            # Converter IDs para formato numérico
+            test_id_numeric = uuid_to_numeric(str(test_data['id']), max_digits=15)
+            student_id_numeric = uuid_to_numeric(str(student['id']), max_digits=15)
+            
+            # Formatar mensagem no formato antigo: id_prova.id_aluno (40 caracteres)
+            qr_message = f"{test_id_numeric}.{student_id_numeric}"
+            
+            # Preencher com # até 40 caracteres (formato do sistema antigo)
+            if len(qr_message) < 40:
+                padding = '#' * (40 - len(qr_message))
+                qr_message = padding + qr_message
+            elif len(qr_message) > 40:
+                # Se for maior, truncar (não deveria acontecer com max_digits=15)
+                qr_message = qr_message[:40]
+            
+            # Gerar QR code com formato antigo (string de 40 caracteres)
             qr = qrcode.QRCode(
                 version=1,
                 error_correction=qrcode.constants.ERROR_CORRECT_L,
                 box_size=10,
                 border=2,
             )
-            qr.add_data(json.dumps(qr_metadata))
+            qr.add_data(qr_message)
             qr.make(fit=True)
             
             # Criar imagem do QR Code

@@ -426,7 +426,53 @@
 				position: relative; /* Para posicionar marcadores de alinhamento */
 			}
 
-			/* Marcadores de alinhamento REMOVIDOS - Agora usamos borda grossa ao redor dos blocos */
+			/* Triângulos de orientação nos cantos da página */
+			/* Posições baseadas no sistema antigo: t1=(40,640), t2=(largura-70,640), t3=(40,altura-60), t4=(largura-70,altura-60) */
+			/* Usando SVG inline para renderização correta no WeasyPrint */
+			.orientation-triangle {
+				position: absolute;
+				width: 30px;
+				height: 30px;
+			}
+
+			.triangle-top-left {
+				top: 0;
+				left: 0;
+			}
+
+			.triangle-top-right {
+				top: 0;
+				right: 0;
+			}
+
+			.triangle-bottom-left {
+				bottom: 0;
+				left: 0;
+			}
+
+			.triangle-bottom-right {
+				bottom: 0;
+				right: 0;
+			}
+
+			/* Quadrados verticais (marcadores de questões) - 20x20px como no sistema antigo */
+			.question-marker-square {
+				width: 20px;
+				height: 20px;
+				background: #000;
+				display: inline-block;
+				vertical-align: middle;
+				flex-shrink: 0;
+			}
+
+			/* Quadrados horizontais (marcadores de alternativas) - 20x20px como no sistema antigo */
+			.alternative-marker-square {
+				width: 20px;
+				height: 20px;
+				background: #000;
+				display: inline-block;
+				flex-shrink: 0;
+			}
 
 			/* Cabeçalho da folha de resposta */
 			.answer-sheet-header {
@@ -682,9 +728,10 @@
 				display: grid;
 				grid-template-columns: repeat(4, 1fr);
 				gap: 8px;
-				/* BORDA GROSSA PRETA AO REDOR DE TODOS OS BLOCOS - USADA PARA DETECÇÃO OMR */
-				border: 5px solid #000000;
+				/* BORDA REMOVIDA - Agora usamos triângulos e quadrados para detecção */
+				border: none;
 				padding: 5px;
+				position: relative; /* Para posicionar triângulos relativos a este container */
 			}
 
 			.answer-block {
@@ -708,10 +755,20 @@
 				padding: 0;
 				font-size: 7pt;
 				font-weight: bold;
+				position: relative;
+			}
+
+			.alternative-markers-row {
+				display: flex;
+				justify-content: space-between;
+				width: 100%;
+				margin-bottom: 2px;
+				padding-left: 50px;
+				gap: 6px;
 			}
 
 			.bubble-headers .header-spacer {
-				width: 22px;
+				width: 50px;
 				flex-shrink: 0;
 			}
 
@@ -738,8 +795,15 @@
 			.question-num {
 				font-size: 7pt;
 				font-weight: bold;
-				width: 22px;
+				min-width: 50px;
 				text-align: left;
+				flex-shrink: 0;
+				display: flex;
+				align-items: center;
+				gap: 3px;
+			}
+
+			.question-num-text {
 				flex-shrink: 0;
 			}
 
@@ -1131,6 +1195,28 @@
 
 			<!-- Grade de Respostas DINÂMICA -->
 			<div class="answer-grid-container">
+				<!-- Triângulos de orientação nos cantos do container de respostas -->
+				<div class="orientation-triangle triangle-top-left">
+					<svg width="30" height="30" xmlns="http://www.w3.org/2000/svg">
+						<polygon points="0,0 0,30 30,0" fill="#000" />
+					</svg>
+				</div>
+				<div class="orientation-triangle triangle-top-right">
+					<svg width="30" height="30" xmlns="http://www.w3.org/2000/svg">
+						<polygon points="30,0 0,0 30,30" fill="#000" />
+					</svg>
+				</div>
+				<div class="orientation-triangle triangle-bottom-left">
+					<svg width="30" height="30" xmlns="http://www.w3.org/2000/svg">
+						<polygon points="0,30 0,0 30,30" fill="#000" />
+					</svg>
+				</div>
+				<div class="orientation-triangle triangle-bottom-right">
+					<svg width="30" height="30" xmlns="http://www.w3.org/2000/svg">
+						<polygon points="30,30 0,30 30,0" fill="#000" />
+					</svg>
+				</div>
+				
 				{% if blocks_config and blocks_config.use_blocks %}
 				{# Usar configuração de blocos personalizada #}
 				{% set num_blocks = blocks_config.num_blocks | default(1) %}
@@ -1143,6 +1229,14 @@
 				<div class="answer-block">
 					<div class="block-header">
 						BLOCO {{ "%02d"|format(block.block_number) }}
+					</div>
+
+					<!-- Quadrados horizontais (marcadores de alternativas) -->
+					<div class="alternative-markers-row">
+						<div class="alternative-marker-square"></div>
+						<div class="alternative-marker-square"></div>
+						<div class="alternative-marker-square"></div>
+						<div class="alternative-marker-square"></div>
 					</div>
 
 					<!-- Cabeçalho com letras A B C D -->
@@ -1159,7 +1253,10 @@
 					<!-- Linhas de resposta DINÂMICAS -->
 					{% for question in block.questions %}
 					<div class="answer-row">
-						<span class="question-num">{{ question.question_number }}.</span>
+						<span class="question-num">
+							<span class="question-marker-square"></span>
+							<span class="question-num-text">{{ question.question_number }}.</span>
+						</span>
 						<div class="bubbles">
 							<div class="bubble-container">
 								<div class="bubble"></div>
@@ -1191,6 +1288,14 @@
 						BLOCO {{ "%02d"|format(block_num) }}
 					</div>
 
+					<!-- Quadrados horizontais (marcadores de alternativas) -->
+					<div class="alternative-markers-row">
+						<div class="alternative-marker-square"></div>
+						<div class="alternative-marker-square"></div>
+						<div class="alternative-marker-square"></div>
+						<div class="alternative-marker-square"></div>
+					</div>
+
 					<!-- Cabeçalho com letras A B C D -->
 					<div class="bubble-headers">
 						<div class="header-spacer"></div>
@@ -1206,7 +1311,10 @@
 					{% for q in range(1, questions_in_block + 1) %}
 					{% set question_num = start_question + q - 1 %}
 					<div class="answer-row">
-						<span class="question-num">{{ question_num }}.</span>
+						<span class="question-num">
+							<span class="question-marker-square"></span>
+							<span class="question-num-text">{{ question_num }}.</span>
+						</span>
 						<div class="bubbles">
 							<div class="bubble-container">
 								<div class="bubble"></div>
@@ -1243,6 +1351,14 @@
 						BLOCO {{ "%02d"|format(block) }}
 					</div>
 
+					<!-- Quadrados horizontais (marcadores de alternativas) -->
+					<div class="alternative-markers-row">
+						<div class="alternative-marker-square"></div>
+						<div class="alternative-marker-square"></div>
+						<div class="alternative-marker-square"></div>
+						<div class="alternative-marker-square"></div>
+					</div>
+
 					<!-- Cabeçalho com letras A B C D -->
 					<div class="bubble-headers">
 						<div class="header-spacer"></div>
@@ -1258,7 +1374,10 @@
 					{% for q in range(1, questions_in_block + 1) %}
 					{% set question_num = start_question + q - 1 %}
 					<div class="answer-row">
-						<span class="question-num">{{ question_num }}.</span>
+						<span class="question-num">
+							<span class="question-marker-square"></span>
+							<span class="question-num-text">{{ question_num }}.</span>
+						</span>
 						<div class="bubbles">
 							<div class="bubble-container">
 								<div class="bubble"></div>

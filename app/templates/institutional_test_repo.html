@@ -728,8 +728,8 @@
 				display: grid;
 				grid-template-columns: repeat(4, 1fr);
 				gap: 8px;
-				/* BORDA GROSSA PRETA AO REDOR DE TODOS OS BLOCOS - USADA PARA DETECÇÃO OMR */
-				border: 5px solid #000000;
+				/* BORDA REMOVIDA - Agora usamos triângulos e quadrados para detecção */
+				border: none;
 				padding: 5px;
 				position: relative; /* Para posicionar triângulos relativos a este container */
 			}
@@ -1196,6 +1196,40 @@
 
 			<!-- Grade de Respostas DINÂMICA -->
 			<div class="answer-grid-container">
+				<!-- Triângulos de orientação nos cantos do container de respostas -->
+				<div class="orientation-triangle triangle-top-left">
+					<svg
+						width="30"
+						height="30"
+						xmlns="http://www.w3.org/2000/svg">
+						<polygon points="0,0 0,30 30,0" fill="#000" />
+					</svg>
+				</div>
+				<div class="orientation-triangle triangle-top-right">
+					<svg
+						width="30"
+						height="30"
+						xmlns="http://www.w3.org/2000/svg">
+						<polygon points="30,0 0,0 30,30" fill="#000" />
+					</svg>
+				</div>
+				<div class="orientation-triangle triangle-bottom-left">
+					<svg
+						width="30"
+						height="30"
+						xmlns="http://www.w3.org/2000/svg">
+						<polygon points="0,30 0,0 30,30" fill="#000" />
+					</svg>
+				</div>
+				<div class="orientation-triangle triangle-bottom-right">
+					<svg
+						width="30"
+						height="30"
+						xmlns="http://www.w3.org/2000/svg">
+						<polygon points="30,30 0,30 30,0" fill="#000" />
+					</svg>
+				</div>
+
 				{% if blocks_config and blocks_config.use_blocks %} {# Usar
 				configuração de blocos personalizada #} {% set num_blocks =
 				blocks_config.num_blocks | default(1) %} {% set
@@ -1207,6 +1241,14 @@
 				<div class="answer-block">
 					<div class="block-header">
 						BLOCO {{ "%02d"|format(block.block_number) }}
+					</div>
+
+					<!-- Quadrados horizontais (marcadores de alternativas) -->
+					<div class="alternative-markers-row">
+						<div class="alternative-marker-square"></div>
+						<div class="alternative-marker-square"></div>
+						<div class="alternative-marker-square"></div>
+						<div class="alternative-marker-square"></div>
 					</div>
 
 					<!-- Cabeçalho com letras A B C D -->
@@ -1224,6 +1266,7 @@
 					{% for question in block.questions %}
 					<div class="answer-row">
 						<span class="question-num">
+							<span class="question-marker-square"></span>
 							<span class="question-num-text"
 								>{{ question.question_number }}.</span
 							>
@@ -1257,6 +1300,14 @@
 						BLOCO {{ "%02d"|format(block_num) }}
 					</div>
 
+					<!-- Quadrados horizontais (marcadores de alternativas) -->
+					<div class="alternative-markers-row">
+						<div class="alternative-marker-square"></div>
+						<div class="alternative-marker-square"></div>
+						<div class="alternative-marker-square"></div>
+						<div class="alternative-marker-square"></div>
+					</div>
+
 					<!-- Cabeçalho com letras A B C D -->
 					<div class="bubble-headers">
 						<div class="header-spacer"></div>
@@ -1273,6 +1324,7 @@
 					question_num = start_question + q - 1 %}
 					<div class="answer-row">
 						<span class="question-num">
+							<span class="question-marker-square"></span>
 							<span class="question-num-text"
 								>{{ question_num }}.</span
 							>
@@ -1309,6 +1361,14 @@
 						BLOCO {{ "%02d"|format(block) }}
 					</div>
 
+					<!-- Quadrados horizontais (marcadores de alternativas) -->
+					<div class="alternative-markers-row">
+						<div class="alternative-marker-square"></div>
+						<div class="alternative-marker-square"></div>
+						<div class="alternative-marker-square"></div>
+						<div class="alternative-marker-square"></div>
+					</div>
+
 					<!-- Cabeçalho com letras A B C D -->
 					<div class="bubble-headers">
 						<div class="header-spacer"></div>
@@ -1325,6 +1385,7 @@
 					question_num = start_question + q - 1 %}
 					<div class="answer-row">
 						<span class="question-num">
+							<span class="question-marker-square"></span>
 							<span class="question-num-text"
 								>{{ question_num }}.</span
 							>

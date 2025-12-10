@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-Serviço de Correção de Provas Institucionais usando IA (Gemini Vision)
+Serviço de Correção de Provas Institucionais usando IA (Abacus AI)
 Detecta ROI (borda grossa), extrai região e usa IA para detectar respostas marcadas
 """
 
@@ -11,7 +11,14 @@ import base64
 import logging
 import re
 from typing import Dict, List, Optional, Tuple, Any
-from app.openai_config.openai_config import get_gemini_client
+from app.openai_config.openai_config import (
+    ABACUS_API_KEY,
+    ABACUS_API_URL,
+    ABACUS_MODEL,
+    ABACUS_MAX_TOKENS,
+    ABACUS_TEMPERATURE
+)
+import requests
 from app import db
 from app.models.testQuestion import TestQuestion
 from app.models.question import Question
@@ -35,12 +42,8 @@ class CorrecaoIA:
         self.debug = debug
         self.logger = logging.getLogger(__name__)
         
-        # Tentar inicializar Gemini
-        try:
-            self.gemini = get_gemini_client()
-        except Exception as e:
-            self.logger.error(f"Erro ao inicializar Gemini: {str(e)}")
-            self.gemini = None
+        # Abacus AI usa REST API direta, não precisa de cliente
+        self.logger.info("Abacus AI configurado (REST API)")
     
     def corrigir_prova_com_ia(self, image_data: bytes, test_id: str) -> Dict[str, Any]:
         """
@@ -77,6 +80,12 @@ class CorrecaoIA:
             # Validar test_id
             if test_id_from_qr != test_id:
                 self.logger.warning(f"Test ID do QR ({test_id_from_qr}) diferente do fornecido ({test_id})")
+            
+            # Validar se student_id existe no banco de dados
+            student = Student.query.get(student_id)
+            if not student:
+                self.logger.error(f"Student ID {student_id} não encontrado no banco de dados")
+                return {"success": False, "error": f"Aluno com ID {student_id} não encontrado no sistema"}
             
             
             # 3. Detectar ROI (borda grossa de 5px)
@@ -121,24 +130,25 @@ class CorrecaoIA:
                 gabarito=gabarito
             )
             
-            # 11. Criar sessão temporária para correção física
-            session_id = self._criar_sessao_temporaria_para_correcao_fisica(
+            # 11. Criar sessão mínima para EvaluationResultService (necessária devido a foreign key)
+            # Criamos apenas uma sessão mínima sem dados desnecessários
+            session_id = self._criar_sessao_minima_para_evaluation_result(
                 test_id=test_id,
                 student_id=student_id
             )
             
             if not session_id:
-                self.logger.error("Erro ao criar sessão temporária para correção física")
-                return {"success": False, "error": "Erro ao criar sessão temporária"}
-            
-            # 12. Calcular nota, proficiência e classificação usando EvaluationResultService
-            from app.services.evaluation_result_service import EvaluationResultService
-            
-            evaluation_result = EvaluationResultService.calculate_and_save_result(
-                test_id=test_id,
-                student_id=student_id,
-                session_id=session_id
-            )
+                self.logger.warning("Não foi possível criar sessão mínima, continuando sem EvaluationResult")
+                evaluation_result = None
+            else:
+                # 12. Calcular nota, proficiência e classificação usando EvaluationResultService
+                from app.services.evaluation_result_service import EvaluationResultService
+                
+                evaluation_result = EvaluationResultService.calculate_and_save_result(
+                    test_id=test_id,
+                    student_id=student_id,
+                    session_id=session_id
+                )
             
             # 13. Calcular resultado final
             correct_count = resultado['correction']['correct']
@@ -807,33 +817,97 @@ IMPORTANTE:
     
     def _chamar_ia(self, prompt: str, image_base64: str) -> Optional[str]:
         """
-        Chama Gemini Vision API com prompt e imagem
+        Chama Abacus AI RouteLLM API REST diretamente com prompt e imagem
+        Usa endpoint https://routellm.abacus.ai/v1/chat/completions (compatível com OpenAI)
         """
         try:
-            if not self.gemini:
-                self.logger.error("Gemini não está disponível")
-                return None
+            # Preparar headers
+            headers = {
+                "Authorization": f"Bearer {ABACUS_API_KEY}",
+                "Content-Type": "application/json"
+            }
             
-            # Chamar Gemini Vision
-            response = self.gemini.generate_content([
-                prompt,
-                {
-                    "mime_type": "image/jpeg",
-                    "data": image_base64
-                }
-            ])
+            # Preparar payload no formato OpenAI API
+            payload = {
+                "model": ABACUS_MODEL,
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": prompt
+                            },
+                            {
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": f"data:image/jpeg;base64,{image_base64}"
+                                }
+                            }
+                        ]
+                    }
+                ],
+                "temperature": ABACUS_TEMPERATURE,
+                "max_tokens": ABACUS_MAX_TOKENS
+            }
             
-            # Extrair texto da resposta
-            if hasattr(response, 'text'):
-                return response.text
-            elif hasattr(response, 'candidates') and len(response.candidates) > 0:
-                return response.candidates[0].content.parts[0].text
+            # Fazer requisição
+            self.logger.info(f"Chamando Abacus AI REST API (modelo: {ABACUS_MODEL})...")
+            response = requests.post(
+                ABACUS_API_URL,
+                headers=headers,
+                json=payload,
+                timeout=120  # Timeout de 2 minutos para análise de imagens
+            )
+            
+            # Verificar status da resposta
+            response.raise_for_status()
+            
+            # Parsear resposta JSON
+            result = response.json()
+            
+            # Extrair conteúdo da resposta (múltiplos formatos possíveis)
+            content = None
+            
+            # Formato 1: OpenAI API (choices[0].message.content)
+            if 'choices' in result and len(result['choices']) > 0:
+                if 'message' in result['choices'][0] and 'content' in result['choices'][0]['message']:
+                    content = result['choices'][0]['message']['content']
+            
+            # Formato 2: Resposta direta (content)
+            elif 'content' in result:
+                content = result['content']
+            
+            # Formato 3: Resposta direta (text)
+            elif 'text' in result:
+                content = result['text']
+            
+            # Formato 4: Resposta direta (response)
+            elif 'response' in result:
+                content = result['response']
+            
+            # Formato 5: Resposta direta (message)
+            elif 'message' in result:
+                content = result['message']
+            
+            if content:
+                self.logger.info("Resposta recebida com sucesso do Abacus AI")
+                return content
             else:
-                self.logger.error("Resposta do Gemini em formato inesperado")
+                self.logger.error(f"Resposta do Abacus AI em formato inesperado: {result}")
                 return None
                 
+        except requests.exceptions.RequestException as e:
+            self.logger.error(f"Erro na requisição HTTP para Abacus AI: {str(e)}")
+            if hasattr(e, 'response') and e.response is not None:
+                try:
+                    error_detail = e.response.json()
+                    self.logger.error(f"Detalhes do erro: {error_detail}")
+                except:
+                    self.logger.error(f"Status code: {e.response.status_code}, Text: {e.response.text[:200]}")
+            return None
         except Exception as e:
-            self.logger.error(f"Erro ao chamar IA: {str(e)}", exc_info=True)
+            self.logger.error(f"Erro ao chamar Abacus AI: {str(e)}", exc_info=True)
             return None
     
     def _processar_resposta_ia(self, ai_response: str, gabarito: Dict[int, str]) -> Optional[Dict[str, Any]]:
@@ -841,18 +915,72 @@ IMPORTANTE:
         Processa resposta da IA e valida estrutura
         """
         try:
-            # Tentar extrair JSON da resposta
+            # Log da resposta bruta para debug
+            self.logger.debug(f"Resposta bruta da IA (primeiros 500 chars): {ai_response[:500]}")
+            
+            if not ai_response:
+                self.logger.error("Resposta da IA está vazia")
+                return None
+            
+            # Tentar extrair JSON da resposta (múltiplas estratégias)
+            json_str = None
+            
+            # Estratégia 1: JSON dentro de ```json ... ```
             json_match = re.search(r'```json\s*(\{.*?\})\s*```', ai_response, re.DOTALL)
             if json_match:
                 json_str = json_match.group(1)
-            else:
-                # Buscar JSON direto
-                json_match = re.search(r'\{.*\}', ai_response, re.DOTALL)
+                self.logger.debug("JSON encontrado dentro de ```json```")
+            
+            # Estratégia 2: JSON dentro de ``` ... ```
+            if not json_str:
+                json_match = re.search(r'```\s*(\{.*?\})\s*```', ai_response, re.DOTALL)
+                if json_match:
+                    json_str = json_match.group(1)
+                    self.logger.debug("JSON encontrado dentro de ```")
+            
+            # Estratégia 3: Buscar primeiro { até último } (mais robusto)
+            if not json_str:
+                # Encontrar primeiro {
+                start_idx = ai_response.find('{')
+                if start_idx != -1:
+                    # Encontrar último } a partir do primeiro {
+                    # Contar chaves para encontrar o JSON completo
+                    brace_count = 0
+                    end_idx = start_idx
+                    for i in range(start_idx, len(ai_response)):
+                        if ai_response[i] == '{':
+                            brace_count += 1
+                        elif ai_response[i] == '}':
+                            brace_count -= 1
+                            if brace_count == 0:
+                                end_idx = i + 1
+                                break
+                    
+                    if end_idx > start_idx:
+                        json_str = ai_response[start_idx:end_idx]
+                        self.logger.debug("JSON encontrado usando contagem de chaves")
+            
+            # Estratégia 4: Regex simples para { ... }
+            if not json_str:
+                json_match = re.search(r'\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}', ai_response, re.DOTALL)
                 if json_match:
                     json_str = json_match.group(0)
-                else:
-                    self.logger.error("JSON não encontrado na resposta da IA")
-                    return None
+                    self.logger.debug("JSON encontrado usando regex simples")
+            
+            # Estratégia 5: Tentar parsear a resposta inteira como JSON
+            if not json_str:
+                try:
+                    # Tentar parsear resposta inteira
+                    test_json = json.loads(ai_response.strip())
+                    if isinstance(test_json, dict):
+                        json_str = ai_response.strip()
+                        self.logger.debug("Resposta inteira é JSON válido")
+                except:
+                    pass
+            
+            if not json_str:
+                self.logger.error(f"JSON não encontrado na resposta da IA. Resposta completa: {ai_response}")
+                return None
             
             # Parsear JSON
             resultado = json.loads(json_str)
@@ -927,6 +1055,57 @@ IMPORTANTE:
             "score_percentage": round(score_percentage, 2)
         }
     
+    def _criar_sessao_minima_para_evaluation_result(self, test_id: str, student_id: str) -> Optional[str]:
+        """
+        Cria uma sessão mínima apenas para satisfazer a foreign key do EvaluationResult
+        Não é uma sessão real de teste, apenas um registro técnico
+        
+        Args:
+            test_id: ID da prova
+            student_id: ID do aluno
+            
+        Returns:
+            session_id: ID da sessão criada ou None se erro
+        """
+        try:
+            from app.models.testSession import TestSession
+            from datetime import datetime
+            import uuid
+            
+            # Verificar se já existe uma sessão para esta correção física
+            existing_session = TestSession.query.filter_by(
+                test_id=test_id,
+                student_id=student_id,
+                status='corrigida',
+                user_agent='Physical Test Correction (IA)'
+            ).first()
+            
+            if existing_session:
+                return existing_session.id
+            
+            # Criar nova sessão mínima para correção física
+            session = TestSession(
+                id=str(uuid.uuid4()),  # Gerar ID explícito
+                student_id=student_id,
+                test_id=test_id,
+                time_limit_minutes=None,
+                ip_address=None,
+                user_agent='Physical Test Correction (IA)',
+                status='corrigida',
+                started_at=datetime.utcnow(),
+                submitted_at=datetime.utcnow()
+            )
+            
+            db.session.add(session)
+            db.session.commit()
+            
+            return session.id
+            
+        except Exception as e:
+            db.session.rollback()
+            self.logger.error(f"Erro ao criar sessão mínima: {str(e)}", exc_info=True)
+            return None
+    
     def _marcar_formulario_como_corrigido(self, test_id: str, student_id: str) -> bool:
         """
         Marca o PhysicalTestForm como corrigido após processar a correção
@@ -970,53 +1149,6 @@ IMPORTANTE:
             db.session.rollback()
             self.logger.error(f"Erro ao marcar formulário como corrigido: {str(e)}", exc_info=True)
             return False
-    
-    def _criar_sessao_temporaria_para_correcao_fisica(self, test_id: str, student_id: str) -> Optional[str]:
-        """
-        Cria uma sessão temporária (TestSession) para correções físicas
-        
-        Args:
-            test_id: ID da prova
-            student_id: ID do aluno
-            
-        Returns:
-            session_id: ID da sessão criada ou None se erro
-        """
-        try:
-            from app.models.testSession import TestSession
-            from datetime import datetime
-            
-            # Verificar se já existe uma sessão para esta correção física
-            existing_session = TestSession.query.filter_by(
-                test_id=test_id,
-                student_id=student_id,
-                status='corrigida'  # Sessões de correção física ficam como 'corrigida'
-            ).first()
-            
-            if existing_session:
-                return existing_session.id
-            
-            # Criar nova sessão temporária para correção física
-            session = TestSession(
-                student_id=student_id,
-                test_id=test_id,
-                time_limit_minutes=None,  # Correções físicas não têm limite de tempo
-                ip_address=None,  # Correção física não tem IP
-                user_agent='Physical Test Correction (IA)',  # Identificador de correção física
-                status='corrigida',  # Status específico para correções físicas
-                started_at=datetime.utcnow(),  # Data de início = data da correção
-                submitted_at=datetime.utcnow()  # Data de submissão = data da correção
-            )
-            
-            db.session.add(session)
-            db.session.commit()
-            
-            return session.id
-            
-        except Exception as e:
-            db.session.rollback()
-            self.logger.error(f"Erro ao criar sessão temporária: {str(e)}", exc_info=True)
-            return None
     
     def _salvar_respostas_no_banco(self, test_id: str, student_id: str,
                                    respostas_detectadas: Dict[int, Optional[str]],

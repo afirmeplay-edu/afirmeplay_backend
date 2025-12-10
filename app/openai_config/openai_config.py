@@ -1,54 +1,18 @@
 # -*- coding: utf-8 -*-
 """
-Configuração para integração com OpenAI API e Google Gemini API
+Configuração para integração com Abacus AI API
 """
 
-import os
-from openai import OpenAI
+# Configuração da API Key Abacus AI
+ABACUS_API_KEY = "s2_b0167419bc70447ba819248ad57abc5a"
 
-# Configuração da API Key OpenAI
-OPENAI_API_KEY = "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"
+# Configurações do modelo Abacus AI
+ABACUS_MODEL = "o4-mini"
+ABACUS_MAX_TOKENS = 8192
+ABACUS_TEMPERATURE = 0.7
 
-# Configuração da API Key Gemini
-GEMINI_API_KEY = "AIzaSyDcwxjngnTvZb8Xe4BDno6dQlBJRsExliE"
-
-# Escolher qual API usar (pode ser configurado via variável de ambiente)
-# Por padrão, usar Gemini se a chave estiver disponível
-USE_GEMINI_ENV = os.getenv("USE_GEMINI", "").lower()
-if USE_GEMINI_ENV:
-    USE_GEMINI = USE_GEMINI_ENV == "true"
-elif GEMINI_API_KEY:
-    USE_GEMINI = True  # Usar Gemini por padrão se a chave estiver disponível
-else:
-    USE_GEMINI = False  # Usar OpenAI se não houver chave do Gemini
-
-# Configurações do modelo OpenAI
-OPENAI_MODEL = "gemini-1.5-flash"  # Modelo mais econômico e eficiente
-OPENAI_MAX_TOKENS = 6000  # Aumentado para acomodar todas as análises em uma única chamada
-OPENAI_TEMPERATURE = 0.7
-
-# Configurações do modelo Gemini
-GEMINI_MODEL = "gemini-2.5-pro"  # Modelo mais rápido e econômico
-# GEMINI_MODEL = "gemini-1.5-pro"  # Modelo mais poderoso, mas mais lento
-GEMINI_MAX_TOKENS = 8192  # Limite do Gemini Flash
-GEMINI_TEMPERATURE = 0.7
-
-# Inicializar cliente OpenAI
-def get_openai_client():
-    """Retorna cliente OpenAI configurado"""
-    return OpenAI(api_key=OPENAI_API_KEY)
-
-# Inicializar cliente Gemini
-def get_gemini_client():
-    """Retorna cliente Gemini configurado"""
-    try:
-        import google.generativeai as genai
-        genai.configure(api_key=GEMINI_API_KEY)
-        return genai.GenerativeModel(GEMINI_MODEL)
-    except ImportError:
-        raise ImportError("google-generativeai não está instalado. Execute: pip install google-generativeai")
-    except Exception as e:
-        raise Exception(f"Erro ao configurar Gemini: {str(e)}")
+# URL da API Abacus AI (RouteLLM - compatível com OpenAI Chat Completions API)
+ABACUS_API_URL = "https://routellm.abacus.ai/v1/chat/completions"
 
 # Prompt base para análise de relatórios
 ANALYSIS_PROMPT_BASE = """
@@ -310,10 +274,8 @@ INSTRUÇÕES IMPORTANTES:
 9. Seja específico com os números fornecidos (mencione exatamente as notas de cada turma, disciplina, etc).
 """
 
-# Configurações de contexto (compatível com ambas as APIs)
+# Configurações de contexto
 CONTEXT_SETTINGS = {
-    "max_tokens": GEMINI_MAX_TOKENS if USE_GEMINI else OPENAI_MAX_TOKENS,
-    "temperature": GEMINI_TEMPERATURE if USE_GEMINI else OPENAI_TEMPERATURE,
-    "model": GEMINI_MODEL if USE_GEMINI else OPENAI_MODEL,
-    "use_gemini": USE_GEMINI
+    "max_tokens": ABACUS_MAX_TOKENS,
+    "temperature": ABACUS_TEMPERATURE
 }

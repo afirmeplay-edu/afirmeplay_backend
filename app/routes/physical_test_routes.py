@@ -6,7 +6,6 @@ Rotas para formulários físicos - Versão simplificada sem SSE
 from flask import Blueprint, request, jsonify, send_file
 from flask_jwt_extended import jwt_required, get_jwt_identity
 from app.decorators.role_required import role_required
-from app import db
 from app.models.test import Test
 from app.models.student import Student
 from app.models.user import User
@@ -16,7 +15,7 @@ from app.models.classTest import ClassTest
 from app.services.physical_test_pdf_generator import PhysicalTestPDFGenerator
 from app.services.physical_test_form_service import PhysicalTestFormService
 from app.services.sistemaORM import SistemaORM  # NOVO SISTEMA OMR
-from app.services.correcaoIA import CorrecaoIA  # CORREÇÃO COM IA
+from app.services.correcaoIA import CorrecaoIA  # SISTEMA DE CORREÇÃO COM IA (Abacus AI)
 import tempfile
 from app.services.batch_correction_service import batch_correction_service
 import logging
@@ -90,12 +89,6 @@ def generate_physical_forms(test_id):
         logo_data = data.get('logo_data')  # Logo será implementado posteriormente
         force_regenerate = data.get('force_regenerate', False)  # Forçar regeneração de formulários existentes
         
-        # Parâmetros de configuração de blocos
-        use_blocks = data.get('use_blocks', False)
-        num_blocks = data.get('num_blocks', None)
-        questions_per_block = data.get('questions_per_block', None)
-        separate_by_subject = data.get('separate_by_subject', False)
-        
         # Buscar questões da prova
         from app.models.testQuestion import TestQuestion
         from app.models.question import Question
@@ -139,7 +132,7 @@ def generate_physical_forms(test_id):
             if course:
                 course_name = course.name
         
-        # Preparar dados para o gerador (blocks_config será adicionado após validação)
+        # Preparar dados para o gerador
         test_data = {
             'id': test.id,
             'title': test.title,
@@ -197,45 +190,6 @@ def generate_physical_forms(test_id):
             }
             questions_data.append(question_data)
         
-        # Validar configuração de blocos
-        total_questions = len(questions_data)
-        unique_subjects = set()
-        for q in questions_data:
-            if q.get('subject') and q['subject'].get('name'):
-                unique_subjects.add(q['subject']['name'])
-        num_subjects = len(unique_subjects) if unique_subjects else 1
-        
-        if use_blocks:
-            if separate_by_subject:
-                # Se separar por disciplina, num_blocks deve ser igual ao número de disciplinas
-                if num_blocks is not None and num_blocks != num_subjects:
-                    return jsonify({
-                        "error": f"Se separar por disciplina, o número de blocos deve ser igual ao número de disciplinas ({num_subjects}). Você informou {num_blocks} blocos."
-                    }), 400
-                # Se não informou num_blocks, usar número de disciplinas
-                if num_blocks is None:
-                    num_blocks = num_subjects
-            else:
-                # Se não separar por disciplina, validar quantidade de questões
-                if num_blocks is None or questions_per_block is None:
-                    return jsonify({
-                        "error": "Quando use_blocks=true e separate_by_subject=false, é necessário informar num_blocks e questions_per_block"
-                    }), 400
-                
-                max_questions = num_blocks * questions_per_block
-                if max_questions < total_questions:
-                    return jsonify({
-                        "error": f"Configuração inválida: {num_blocks} blocos × {questions_per_block} questões = {max_questions} questões, mas a prova tem {total_questions} questões"
-                    }), 400
-        
-        # Adicionar configuração de blocos ao test_data
-        test_data['blocks_config'] = {
-            'use_blocks': use_blocks,
-            'num_blocks': num_blocks,
-            'questions_per_block': questions_per_block,
-            'separate_by_subject': separate_by_subject
-        }
-        
         # Obter class_test_id (usar o primeiro se houver múltiplos)
         class_test_id = class_tests[0].id if class_tests else None
         
@@ -244,12 +198,11 @@ def generate_physical_forms(test_id):
         
         form_service = PhysicalTestFormService()
         
-        # Gerar formulários usando o serviço (passar test_data com blocks_config)
+        # Gerar formulários usando o serviço
         with tempfile.TemporaryDirectory() as temp_dir:
             result = form_service.generate_physical_forms(
                 test_id=test_id,
-                output_dir=temp_dir,
-                test_data=test_data  # Passar test_data com blocks_config
+                output_dir=temp_dir
             )
             
             if result.get('success'):
@@ -464,104 +417,14 @@ def process_physical_correction(test_id):
         if not image_data:
             return jsonify({"error": "Imagem não fornecida"}), 400
         
-        # Verificar qual sistema usar (IA é o padrão agora)
+        # Verificar qual sistema usar (parâmetros opcionais)
         data = request.get_json() or {}
         use_new_orm = data.get('use_new_orm', False) or request.form.get('use_new_orm', 'false').lower() == 'true'
+        use_ai = data.get('use_ai', True)  # Por padrão, usar IA (CorrecaoIA)
         use_old_system = data.get('use_old_system', False) or request.form.get('use_old_system', 'false').lower() == 'true'
-        use_omr_system = data.get('use_omr_system', False) or request.form.get('use_omr_system', 'false').lower() == 'true'
-        use_ai_correction = data.get('use_ai_correction', True)  # Padrão: True (IA)
         
-        # Se explicitamente desabilitar IA ou pedir sistema antigo, usar alternativas
-        if use_omr_system:
-            # NOVO SISTEMA OMR (SEM IA) - Usa triângulos, quadrados e círculos
-            print("🔷 Usando NOVO SISTEMA OMR (sem IA - triângulos/quadrados/círculos)")
-            
-            try:
-                from app.services.correction_new import CorrecaoNova
-                
-                # Criar instância do serviço de correção sem IA
-                correcao_nova = CorrecaoNova(debug=True)
-                
-                # Processar correção
-                result = correcao_nova.corrigir_prova_sem_ia(
-                    image_data=image_data,
-                    test_id=test_id
-                )
-                
-                if result.get('success'):
-                    return jsonify({
-                        "message": "Correção processada com sucesso (OMR sem IA)",
-                        "system": "omr",
-                        "student_id": result.get('student_id'),
-                        "test_id": result.get('test_id'),
-                        "correct": result.get('correct'),
-                        "total": result.get('total'),
-                        "percentage": result.get('percentage'),
-                        "score_percentage": result.get('score_percentage', result.get('percentage')),
-                        "grade": result.get('grade'),
-                        "proficiency": result.get('proficiency'),
-                        "classification": result.get('classification'),
-                        "evaluation_result_id": result.get('evaluation_result_id'),
-                        # Campos de compatibilidade
-                        "correct_answers": result.get('correct_answers', result.get('correct')),
-                        "total_questions": result.get('total_questions', result.get('total')),
-                        # Dados detalhados
-                        "answers": result.get('answers'),
-                        "correction": result.get('correction'),
-                        "details": result.get('details', {}),
-                        "saved_answers": result.get('saved_answers'),
-                        "warnings": result.get('warnings', [])
-                    }), 200
-                else:
-                    return jsonify({
-                        "error": result.get('error', 'Erro desconhecido na correção OMR'),
-                        "system": "omr"
-                    }), 500
-                    
-            except Exception as e:
-                logging.error(f"Erro no sistema OMR: {str(e)}")
-                import traceback
-                logging.error(traceback.format_exc())
-                return jsonify({
-                    "error": f"Erro no sistema OMR: {str(e)}",
-                    "system": "omr"
-                }), 500
-        
-        elif use_old_system:
-            # SISTEMA ANTIGO - Mantido para compatibilidade
-            print("📋 Usando SISTEMA ANTIGO (alinhamento por marcadores)")
-            
-            form_service = PhysicalTestFormService()
-            
-            result = form_service.process_physical_correction(
-                test_id=test_id,
-                image_data=image_data,
-                correction_image_url=None
-            )
-            
-            if result.get('success'):
-                return jsonify({
-                    "message": "Correção processada com sucesso",
-                    "system": "old",
-                    "student_id": result.get('student_id'),
-                    "test_id": test_id,
-                    "correct_answers": result.get('correct_answers'),
-                    "total_questions": result.get('total_questions'),
-                    "score_percentage": result.get('score_percentage'),
-                    "grade": result.get('grade'),
-                    "proficiency": result.get('proficiency'),
-                    "classification": result.get('classification'),
-                    "answers_detected": result.get('answers_detected'),
-                    "student_answers": result.get('student_answers'),
-                    "evaluation_result_id": result.get('evaluation_result_id')
-                }), 200
-            else:
-                return jsonify({
-                    "error": result.get('error', 'Erro desconhecido na correção'),
-                    "system": "old"
-                }), 500
-        
-        elif use_new_orm:
+        # Prioridade: use_new_orm > use_ai > use_old_system
+        if use_new_orm:
             # NOVO SISTEMA OMR - Alinhamento pela página inteira
             print("🆕 Usando NOVO SISTEMA OMR (alinhamento pela página)")
             
@@ -611,13 +474,49 @@ def process_physical_correction(test_id):
                     "system": "new_orm"
                 }), 500
         
+        elif use_old_system:
+            # SISTEMA ANTIGO - Mantido para compatibilidade
+            print("📋 Usando SISTEMA ANTIGO (alinhamento por marcadores)")
+            
+            form_service = PhysicalTestFormService()
+            
+            result = form_service.process_physical_correction(
+                test_id=test_id,
+                image_data=image_data,
+                correction_image_url=None
+            )
+            
+            if result.get('success'):
+                return jsonify({
+                    "message": "Correção processada com sucesso",
+                    "system": "old",
+                    "student_id": result.get('student_id'),
+                    "test_id": test_id,
+                    "correct_answers": result.get('correct_answers'),
+                    "total_questions": result.get('total_questions'),
+                    "score_percentage": result.get('score_percentage'),
+                    "grade": result.get('grade'),
+                    "proficiency": result.get('proficiency'),
+                    "classification": result.get('classification'),
+                    "answers_detected": result.get('answers_detected'),
+                    "student_answers": result.get('student_answers'),
+                    "evaluation_result_id": result.get('evaluation_result_id')
+                }), 200
+            else:
+                return jsonify({
+                    "error": result.get('error', 'Erro desconhecido na correção'),
+                    "system": "old"
+                }), 500
+        
         else:
-            # CORREÇÃO COM IA (PADRÃO)
+            # SISTEMA COM IA (CorrecaoIA) - PADRÃO
+            print("🤖 Usando SISTEMA COM IA (Abacus AI)")
+            
             try:
-                # Criar instância do serviço de correção com IA
+                # Criar instância do CorrecaoIA
                 correcao_ia = CorrecaoIA(debug=True)
                 
-                # Processar correção
+                # Processar correção usando IA
                 result = correcao_ia.corrigir_prova_com_ia(
                     image_data=image_data,
                     test_id=test_id
@@ -625,45 +524,40 @@ def process_physical_correction(test_id):
                 
                 if result.get('success'):
                     return jsonify({
-                        "message": "Correção processada com sucesso (IA)",
+                        "message": "Correção processada com sucesso (IA - Abacus AI)",
                         "system": "ai",
                         "student_id": result.get('student_id'),
                         "test_id": result.get('test_id'),
                         "correct": result.get('correct'),
                         "total": result.get('total'),
                         "percentage": result.get('percentage'),
-                        "score_percentage": result.get('score_percentage', result.get('percentage')),
                         "grade": result.get('grade'),
                         "proficiency": result.get('proficiency'),
                         "classification": result.get('classification'),
-                        "evaluation_result_id": result.get('evaluation_result_id'),
-                        # Campos de compatibilidade
-                        "correct_answers": result.get('correct_answers', result.get('correct')),
-                        "total_questions": result.get('total_questions', result.get('total')),
-                        # Dados detalhados
+                        "score_percentage": result.get('score_percentage'),
                         "answers": result.get('answers'),
                         "correction": result.get('correction'),
-                        "details": result.get('details', {}),
-                        "saved_answers": result.get('saved_answers')
+                        "details": result.get('details'),
+                        "saved_answers": result.get('saved_answers'),
+                        "evaluation_result_id": result.get('evaluation_result_id')
                     }), 200
                 else:
                     return jsonify({
-                        "error": result.get('error', 'Erro desconhecido na correção com IA'),
+                        "error": result.get('error', 'Erro desconhecido na correção'),
                         "system": "ai"
                     }), 500
                     
             except Exception as e:
-                logging.error(f"Erro na correção com IA: {str(e)}")
+                logging.error(f"Erro no sistema de correção com IA: {str(e)}")
                 import traceback
                 logging.error(traceback.format_exc())
                 return jsonify({
-                    "error": f"Erro na correção com IA: {str(e)}",
+                    "error": f"Erro no sistema de correção com IA: {str(e)}",
                     "system": "ai"
                 }), 500
         
     except Exception as e:
         print(f"❌ Erro ao processar correção: {str(e)}")
-        logging.error(f"Erro ao processar correção: {str(e)}", exc_info=True)
         return jsonify({"error": "Erro interno do servidor"}), 500
 
 
@@ -1265,67 +1159,4 @@ def delete_all_physical_forms_by_test(test_id):
         
     except Exception as e:
         print(f"❌ Erro ao excluir formulários: {str(e)}")
-        return jsonify({"error": "Erro interno do servidor"}), 500
-
-# ============================================================================
-# ROTA PARA MARCAR FORMULÁRIO COMO ENVIADO
-# ============================================================================
-
-@bp.route('/form/<string:form_id>/mark-as-sent', methods=['POST'])
-@jwt_required()
-@role_required("admin", "professor", "coordenador", "diretor")
-def mark_form_as_sent(form_id):
-    """
-    Marca um formulário como enviado (answer sheet sent)
-    
-    Validações:
-    - Formulário não pode estar corrigido (is_corrected=False e corrected_at=None)
-    - Formulário deve existir
-    - Usuário deve ter permissão para a prova
-    
-    Returns:
-        - Confirmação de atualização
-        - Dados atualizados do formulário
-    """
-    try:
-        user = get_current_user_from_token()
-        if not user:
-            return jsonify({"error": "User not found or token invalid"}), 401
-        
-        # Buscar formulário
-        form = PhysicalTestForm.query.get(form_id)
-        if not form:
-            return jsonify({"error": "Formulário não encontrado"}), 404
-        
-        # Verificar permissões
-        test = Test.query.get(form.test_id)
-        if not test:
-            return jsonify({"error": "Prova não encontrada"}), 404
-        
-        if user['role'] == 'professor' and test.created_by != user['id']:
-            return jsonify({"error": "Você não tem permissão para marcar este formulário"}), 403
-        
-        # VALIDAÇÃO: Não permitir marcar como enviado se já foi corrigido
-        if form.is_corrected or form.corrected_at:
-            return jsonify({
-                "error": "Não é possível marcar como enviado um formulário que já foi corrigido",
-                "is_corrected": form.is_corrected,
-                "corrected_at": form.corrected_at.isoformat() if form.corrected_at else None
-            }), 400
-        
-        # Atualizar campo
-        from datetime import datetime
-        form.answer_sheet_sent_at = datetime.utcnow()
-        db.session.commit()
-        
-        return jsonify({
-            "message": "Formulário marcado como enviado com sucesso",
-            "form": form.to_dict()
-        }), 200
-        
-    except Exception as e:
-        db.session.rollback()
-        print(f"❌ Erro ao marcar formulário como enviado: {str(e)}")
-        import traceback
-        logging.error(traceback.format_exc())
         return jsonify({"error": "Erro interno do servidor"}), 500

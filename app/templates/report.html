@@ -417,9 +417,24 @@
 			/* Estilos para textos descritivos */
 			.analysis-text {
 				margin-top: 16px;
+				font-size: 11pt;
+			}
+			.analysis-text p {
+				margin-top: 8px;
+				margin-bottom: 8px;
 				text-align: justify;
 				line-height: 1.8;
-				font-size: 11pt;
+			}
+			.analysis-text ul {
+				margin: 8px 0 8px 20px;
+				padding-left: 20px;
+				list-style-type: disc;
+				text-align: left;
+			}
+			.analysis-text li {
+				margin: 6px 0;
+				line-height: 1.6;
+				text-align: left;
 			}
 			.analysis-text strong {
 				font-weight: 700;
@@ -1039,10 +1054,10 @@
 				</tbody>
 			</table>
 
-			{# Análise da IA para participação #} {% if analise_ia and
+			{# Análise da IA para participação #} 			{% if analise_ia and
 			analise_ia.participacao %}
-			<div class="analysis-text" style="white-space: pre-line">
-				{{ analise_ia.participacao }}
+			<div class="analysis-text">
+				{{ analise_ia.participacao|safe }}
 			</div>
 			{% elif total_alunos.total_geral %}
 			<div class="analysis-text">
@@ -1249,8 +1264,8 @@
 				analise_ia.niveis_aprendizagem[disc] %}
 				<div
 					class="analysis-text"
-					style="margin-top: 16px; white-space: pre-line">
-					{{ analise_ia.niveis_aprendizagem[disc] }}
+					style="margin-top: 16px;">
+					{{ analise_ia.niveis_aprendizagem[disc]|safe }}
 				</div>
 				{% endif %}
 			</div>
@@ -1502,15 +1517,15 @@
 			analise_ia.proficiencia[ns_prof.disc_portugues] %}
 			<div
 				class="analysis-text"
-				style="margin-top: 16px; white-space: pre-line">
-				{{ analise_ia.proficiencia[ns_prof.disc_portugues] }}
+				style="margin-top: 16px;">
+				{{ analise_ia.proficiencia[ns_prof.disc_portugues]|safe }}
 			</div>
 			{% endif %} {% if ns_prof.disc_matematica and
 			analise_ia.proficiencia[ns_prof.disc_matematica] %}
 			<div
 				class="analysis-text"
-				style="margin-top: 16px; white-space: pre-line">
-				{{ analise_ia.proficiencia[ns_prof.disc_matematica] }}
+				style="margin-top: 16px;">
+				{{ analise_ia.proficiencia[ns_prof.disc_matematica]|safe }}
 			</div>
 			{% endif %} {% endif %}
 		</section>
@@ -1743,8 +1758,8 @@
 			analise_ia.notas %}
 			<div
 				class="analysis-text"
-				style="margin-top: 16px; white-space: pre-line">
-				{{ analise_ia.notas }}
+				style="margin-top: 16px;">
+				{{ analise_ia.notas|safe }}
 			</div>
 			{% endif %}
 		</section>
@@ -1867,8 +1882,8 @@
 				analise_ia.acertos_habilidade[disc] %}
 				<div
 					class="analysis-text"
-					style="margin-top: 16px; white-space: pre-line">
-					{{ analise_ia.acertos_habilidade[disc] }}
+					style="margin-top: 16px;">
+					{{ analise_ia.acertos_habilidade[disc]|safe }}
 				</div>
 				{% endif %}
 			</div>

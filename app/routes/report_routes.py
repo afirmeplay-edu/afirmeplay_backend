@@ -27,7 +27,7 @@ import unicodedata
 from sqlalchemy import func, case, desc
 from datetime import datetime
 from sqlalchemy.orm import joinedload
-from collections import defaultdict
+from collections import defaultdict, OrderedDict
 import os
 from jinja2 import Template
 from jinja2 import Environment, FileSystemLoader, select_autoescape
@@ -5324,11 +5324,19 @@ def _calcular_acertos_habilidade_por_municipio(evaluation_id: str, class_tests: 
             "percentual": questao["percentual"]
         })
     
-    resultado_por_disciplina["GERAL"] = {
+    # Construir resultado final ordenado usando a ordem de aparição das disciplinas
+    resultado_ordenado = OrderedDict()
+    
+    # Adicionar disciplinas na ordem de aparição
+    for disciplina in disciplinas_ordem:
+        resultado_ordenado[disciplina] = resultado_por_disciplina[disciplina]
+    
+    # Adicionar "GERAL" sempre por último
+    resultado_ordenado["GERAL"] = {
         "questoes": questoes_gerais
     }
     
-    return resultado_por_disciplina
+    return resultado_ordenado
 
 
 def _calcular_acertos_habilidade(evaluation_id: str) -> Dict[str, Any]:
@@ -5481,11 +5489,19 @@ def _calcular_acertos_habilidade(evaluation_id: str) -> Dict[str, Any]:
             "percentual": questao["percentual"]
         })
     
-    resultado_por_disciplina["GERAL"] = {
+    # Construir resultado final ordenado usando a ordem de aparição das disciplinas
+    resultado_ordenado = OrderedDict()
+    
+    # Adicionar disciplinas na ordem de aparição
+    for disciplina in disciplinas_ordem:
+        resultado_ordenado[disciplina] = resultado_por_disciplina[disciplina]
+    
+    # Adicionar "GERAL" sempre por último
+    resultado_ordenado["GERAL"] = {
         "questoes": questoes_gerais
     }
     
-    return resultado_por_disciplina
+    return resultado_ordenado
 
 
 def _calcular_media_municipal(evaluation_id: str) -> float:

@@ -1120,6 +1120,16 @@ Gere APENAS texto puro, SEM formatação markdown (sem #, ##, *, **, etc). Use a
 Use QUEBRAS DE LINHA DUPLAS (\\n\\n) para separar parágrafos diferentes.
 Use QUEBRAS DE LINHA SIMPLES (\\n) antes de títulos ou seções importantes.
 
+FORMATAÇÃO DE NÚMEROS (OBRIGATÓRIO):
+- Sempre use 1 (uma) casa decimal após a vírgula para:
+  * Notas (ex: 7,5 ao invés de 7,50 ou 7)
+  * Percentuais (ex: 85,3% ao invés de 85,30% ou 85%)
+  * Médias de proficiência (ex: 245,7 ao invés de 245,70 ou 245)
+  * Qualquer valor numérico decimal mencionado no texto
+- Use vírgula (,) como separador decimal, não ponto (.)
+- Exemplos corretos: 7,5 pontos | 85,3% | 245,7 de proficiência
+- Exemplos incorretos: 7,50 | 85,30% | 245,70 | 7.5 | 85.3%
+
 ===========================================
 DADOS DO RELATÓRIO
 ===========================================
@@ -1390,7 +1400,179 @@ IMPORTANTE: Use os marcadores exatos [MARCADOR: PARTICIPACAO], [MARCADOR: PROFIC
                 if disciplina != 'GERAL':
                     result['niveis_aprendizagem'][disciplina] = f'Análise de níveis não disponível para {disciplina}.'
         
+        # Formatar todas as análises em HTML
+        result['participacao'] = self._format_ai_text(result['participacao'])
+        result['notas'] = self._format_ai_text(result['notas'])
+        
+        # Formatar análises por disciplina
+        for disciplina in result['proficiencia']:
+            result['proficiencia'][disciplina] = self._format_ai_text(result['proficiencia'][disciplina])
+        
+        for disciplina in result['niveis_aprendizagem']:
+            result['niveis_aprendizagem'][disciplina] = self._format_ai_text(result['niveis_aprendizagem'][disciplina])
+        
+        # Formatar acertos por habilidade se existir
+        if 'acertos_habilidade' in result:
+            for disciplina in result.get('acertos_habilidade', {}):
+                result['acertos_habilidade'][disciplina] = self._format_ai_text(result['acertos_habilidade'][disciplina])
+        
         return result
+    
+    def _format_ai_text(self, text: str) -> str:
+        """
+        Formata texto da IA convertendo markdown simples em HTML.
+        
+        Converte:
+        - Títulos (linhas que começam com #, PARECER TÉCNICO, ou são seguidas de dois pontos)
+        - Listas (linhas que começam com -, *, •, ou números)
+        - Negrito (texto entre **)
+        - Parágrafos (quebras de linha duplas)
+        
+        Args:
+            text: Texto simples da IA
+            
+        Returns:
+            Texto formatado em HTML
+        """
+        if not text or not isinstance(text, str):
+            return text or ''
+        
+        # Log para debug (pode remover depois)
+        self.logger.debug(f"Formatando texto da IA (tamanho: {len(text)} caracteres)")
+        
+        # Normalizar espaços múltiplos mas preservar estrutura
+        text = re.sub(r'[ \t]+', ' ', text)  # Múltiplos espaços/tabs viram um espaço
+        text = re.sub(r'\n\s*\n+', '\n\n', text)  # Múltiplas quebras viram duas
+        
+        # Dividir por quebras de linha existentes
+        lines = text.split('\n')
+        non_empty_lines = [l.strip() for l in lines if l.strip()]
+        
+        # Se não há quebras de linha adequadas ou texto está muito longo, tentar dividir por padrões
+        if len(non_empty_lines) <= 1 or (len(non_empty_lines) == 1 and len(non_empty_lines[0]) > 200):
+            original_text = text
+            # IMPORTANTE: Dividir por padrões específicos ANTES de outras divisões
+            
+            # 1. Dividir por títulos em maiúsculas seguidos de dois pontos (ex: "PARECER TÉCNICO DE PARTICIPAÇÃO:")
+            text = re.sub(r'([A-ZÁÉÍÓÚÇ][A-ZÁÉÍÓÚÇ\s]{10,}):\s*', r'\n\n\1: ', text)
+            
+            # 2. Dividir por títulos menores seguidos de dois pontos (ex: "Classificação:", "Destaques e Recomendações:")
+            text = re.sub(r'([A-ZÁÉÍÓÚÇ][a-záéíóúç\s]{3,30}):\s*', r'\n\n\1: ', text)
+            
+            # 3. Dividir por listas com bullet (•) - adicionar quebra antes do bullet
+            text = re.sub(r'\s+•\s+', r'\n• ', text)
+            
+            # 4. Dividir por padrões como " - " (lista) - preservar o espaço após o hífen
+            text = re.sub(r'\s+-\s+([A-ZÁÉÍÓÚÇ])', r'\n- \1', text)
+            text = re.sub(r'\s+-\s+', r'\n- ', text)
+            
+            # 5. Dividir por pontos finais seguidos de espaço e maiúscula (novos parágrafos)
+            text = re.sub(r'\.\s+([A-ZÁÉÍÓÚÇ][a-záéíóúç])', r'.\n\n\1', text)
+            
+            lines = [l.strip() for l in text.split('\n') if l.strip()]
+        
+        formatted_lines = []
+        in_list = False
+        
+        for line in lines:
+            line = line.strip()
+            
+            if not line:
+                if in_list:
+                    formatted_lines.append('</ul>')
+                    in_list = False
+                continue
+            
+            # Títulos: linhas que começam com # ou são seguidas de dois pontos
+            if line.startswith('#'):
+                if in_list:
+                    formatted_lines.append('</ul>')
+                    in_list = False
+                title_text = line.lstrip('#').strip()
+                if title_text:
+                    formatted_lines.append(f'<p style="margin-top: 12px; margin-bottom: 8px;"><strong style="font-size: 1.15em; font-weight: bold; color: #1e293b;">{self._process_inline_formatting(title_text)}</strong></p>')
+            # Títulos em maiúsculas (como "PARECER TÉCNICO DE PARTICIPAÇÃO:" ou "DIAGNÓSTICO E META")
+            elif (re.match(r'^[A-ZÁÉÍÓÚÇ][A-ZÁÉÍÓÚÇ\s]{8,}:', line) or 
+                  (line.isupper() and len(line) > 15 and ':' in line) or
+                  (re.match(r'^[A-ZÁÉÍÓÚÇ][A-ZÁÉÍÓÚÇ\s]{5,}DE\s+[A-ZÁÉÍÓÚÇ]', line) and ':' in line)):
+                if in_list:
+                    formatted_lines.append('</ul>')
+                    in_list = False
+                if ':' in line:
+                    title_part = line.split(':', 1)[0].strip()
+                    content_part = line.split(':', 1)[1].strip()
+                    if content_part:
+                        formatted_lines.append(f'<p style="margin-top: 12px; margin-bottom: 8px;"><strong style="font-size: 1.1em; font-weight: bold; color: #1e293b;">{self._process_inline_formatting(title_part)}:</strong> {self._process_inline_formatting(content_part)}</p>')
+                    else:
+                        formatted_lines.append(f'<p style="margin-top: 12px; margin-bottom: 8px;"><strong style="font-size: 1.1em; font-weight: bold; color: #1e293b;">{self._process_inline_formatting(title_part)}:</strong></p>')
+                else:
+                    formatted_lines.append(f'<p style="margin-top: 12px; margin-bottom: 8px;"><strong style="font-size: 1.1em; font-weight: bold; color: #1e293b;">{self._process_inline_formatting(line)}</strong></p>')
+            # Títulos menores (texto curto seguido de dois pontos, não lista)
+            elif ':' in line and len(line.split(':')[0]) < 60 and not line.startswith('-') and not line.startswith('*') and not (len(line) > 0 and line[0].isdigit()):
+                if in_list:
+                    formatted_lines.append('</ul>')
+                    in_list = False
+                title_part = line.split(':', 1)[0].strip()
+                content_part = line.split(':', 1)[1].strip() if ':' in line else ''
+                if title_part:
+                    formatted_lines.append(f'<p style="margin-top: 8px; margin-bottom: 4px;"><strong style="font-weight: bold; color: #1e293b;">{self._process_inline_formatting(title_part)}:</strong> {self._process_inline_formatting(content_part) if content_part else ""}</p>')
+                else:
+                    formatted_lines.append(f'<p style="margin-top: 8px; margin-bottom: 4px; text-align: left;">{self._process_inline_formatting(line)}</p>')
+            # Listas: linhas que começam com -, *, •, ou números
+            elif (line.startswith('-') or line.startswith('*') or line.startswith('•') or 
+                  (len(line) > 0 and line[0].isdigit() and len(line) > 1 and (line[1] in '. )'))):
+                if not in_list:
+                    formatted_lines.append('<ul style="margin-left: 20px; padding-left: 20px; list-style-type: disc; text-align: left;">')
+                    in_list = True
+                # Remover marcador de lista
+                if line.startswith('•'):
+                    list_item = line[1:].strip()
+                elif line.startswith('-') or line.startswith('*'):
+                    list_item = line[1:].strip()
+                else:
+                    # Para listas numeradas, remover número e marcador
+                    list_item = re.sub(r'^\d+[\.\)]\s*', '', line).strip()
+                if list_item:
+                    formatted_lines.append(f'<li style="margin-bottom: 6px; text-align: left; line-height: 1.6;">{self._process_inline_formatting(list_item)}</li>')
+            else:
+                if in_list:
+                    formatted_lines.append('</ul>')
+                    in_list = False
+                # Parágrafo normal
+                formatted_lines.append(f'<p style="margin-top: 8px; margin-bottom: 8px; text-align: justify; line-height: 1.8;">{self._process_inline_formatting(line)}</p>')
+        
+        # Fechar lista se ainda estiver aberta
+        if in_list:
+            formatted_lines.append('</ul>')
+        
+        return '\n'.join(formatted_lines)
+    
+    def _process_inline_formatting(self, text: str) -> str:
+        """
+        Processa formatação inline (negrito, itálico) no texto.
+        
+        Args:
+            text: Texto com formatação markdown
+            
+        Returns:
+            Texto com HTML inline
+        """
+        if not text:
+            return ''
+        
+        # Escapar HTML para segurança
+        import html
+        text = html.escape(text)
+        
+        # Negrito: **texto** ou __texto__
+        text = re.sub(r'\*\*(.+?)\*\*', r'<strong>\1</strong>', text)
+        text = re.sub(r'__(.+?)__', r'<strong>\1</strong>', text)
+        
+        # Itálico: *texto* ou _texto_
+        text = re.sub(r'(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)', r'<em>\1</em>', text)
+        text = re.sub(r'(?<!_)_(?!_)(.+?)(?<!_)_(?!_)', r'<em>\1</em>', text)
+        
+        return text
     
     def _get_fallback_texts(self) -> Dict[str, Any]:
         """Retorna textos padrão em caso de erro"""

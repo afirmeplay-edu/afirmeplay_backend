@@ -62,6 +62,14 @@ Inválido (Falha Grave)	Abaixo de 50%	Processo falhou. A avaliação não pode s
 PARTICIPATION_ANALYSIS_PROMPT_TEMPLATE = """
 IMPORTANTE: Gere APENAS texto puro, SEM formatação markdown (sem #, ##, *, **, etc). Use apenas parágrafos normais e títulos em maiúsculas seguidos de dois pontos.
 
+FORMATAÇÃO DE NÚMEROS (OBRIGATÓRIO):
+- Sempre use 1 (uma) casa decimal após a vírgula para:
+  * Percentuais (ex: 85,3% ao invés de 85,30% ou 85%)
+  * Qualquer valor numérico decimal mencionado no texto
+- Use vírgula (,) como separador decimal, não ponto (.)
+- Exemplos corretos: 85,3% | 75,0% | 92,5%
+- Exemplos incorretos: 85,30% | 75% | 92,50% | 85.3% | 92.5%
+
 Gere um PARECER TÉCNICO DE PARTICIPAÇÃO humanizado e formatado para o relatório PDF, seguindo exatamente este formato:
 
 PARECER TÉCNICO DE PARTICIPAÇÃO: [Entidade] ([Avaliação])
@@ -101,6 +109,14 @@ INSTRUÇÕES IMPORTANTES:
 # Template do prompt para análise de níveis de aprendizagem
 NIVEIS_APRENDIZAGEM_ANALYSIS_PROMPT_TEMPLATE = """
 IMPORTANTE: Gere APENAS texto puro, SEM formatação markdown (sem #, ##, *, **, etc). Use apenas parágrafos normais e títulos em maiúsculas seguidos de dois pontos.
+
+FORMATAÇÃO DE NÚMEROS (OBRIGATÓRIO):
+- Sempre use 1 (uma) casa decimal após a vírgula para:
+  * Percentuais (ex: 42,5% ao invés de 42,50% ou 42%)
+  * Qualquer valor numérico decimal mencionado no texto
+- Use vírgula (,) como separador decimal, não ponto (.)
+- Exemplos corretos: 42,5% | 35,0% | 18,3%
+- Exemplos incorretos: 42,50% | 35% | 18,30% | 42.5% | 18.3%
 
 Gere um PARECER TÉCNICO DE NÍVEIS DE APRENDIZAGEM humanizado e formatado para o relatório PDF, seguindo exatamente este formato:
 
@@ -176,6 +192,15 @@ Matemática:
 PROFICIENCY_ANALYSIS_PROMPT_TEMPLATE = """
 IMPORTANTE: Gere APENAS texto puro, SEM formatação markdown (sem #, ##, *, **, etc). Use apenas parágrafos normais e títulos em maiúsculas seguidos de dois pontos.
 
+FORMATAÇÃO DE NÚMEROS (OBRIGATÓRIO):
+- Sempre use 1 (uma) casa decimal após a vírgula para:
+  * Médias de proficiência (ex: 245,7 ao invés de 245,70 ou 245)
+  * Diferenças entre médias (ex: 12,3 pontos ao invés de 12,30)
+  * Qualquer valor numérico decimal mencionado no texto
+- Use vírgula (,) como separador decimal, não ponto (.)
+- Exemplos corretos: 245,7 de proficiência | 12,3 pontos acima | 180,5
+- Exemplos incorretos: 245,70 | 12,30 | 180,50 | 245.7 | 12.3
+
 Gere um PARECER TÉCNICO DE PROFICIÊNCIA humanizado e formatado para o relatório PDF, seguindo exatamente este formato:
 
 PARECER TÉCNICO: PROFICIÊNCIA EM [Disciplina] ([Ano/Série] - [Avaliação])
@@ -235,6 +260,15 @@ Muito Abaixo do Esperado	Abaixo de 3,0	Nível crítico. Indica grandes defasagen
 # Template do prompt para análise de notas
 NOTA_ANALYSIS_PROMPT_TEMPLATE = """
 IMPORTANTE: Gere APENAS texto puro, SEM formatação markdown (sem #, ##, *, **, etc). Use apenas parágrafos normais e títulos em maiúsculas seguidos de dois pontos.
+
+FORMATAÇÃO DE NÚMEROS (OBRIGATÓRIO):
+- Sempre use 1 (uma) casa decimal após a vírgula para:
+  * Notas (ex: 7,5 ao invés de 7,50 ou 7)
+  * Médias (ex: 6,8 ao invés de 6,80 ou 6,8)
+  * Qualquer valor numérico decimal mencionado no texto
+- Use vírgula (,) como separador decimal, não ponto (.)
+- Exemplos corretos: 7,5 pontos | 6,8 de média | 8,3
+- Exemplos incorretos: 7,50 | 6,80 | 8,30 | 7.5 | 6.8
 
 Gere um PARECER TÉCNICO DE NOTA humanizado e formatado para o relatório PDF, seguindo exatamente este formato:
 

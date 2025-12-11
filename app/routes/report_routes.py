@@ -3219,6 +3219,67 @@ def _obter_disciplinas_avaliacao(test: Test) -> List[str]:
     return disciplinas_finais
 
 
+def _obter_ordem_disciplinas_avaliacao(test: Test) -> List[str]:
+    """
+    Obtém a ordem das disciplinas conforme aparecem na avaliação.
+    Retorna uma lista ordenada pela primeira aparição de cada disciplina nas questões.
+    
+    Args:
+        test: Objeto Test da avaliação
+        
+    Returns:
+        Lista de nomes de disciplinas na ordem de aparição
+    """
+    if not test or not test.questions:
+        return []
+    
+    from app.models.skill import Skill
+    
+    # Buscar todas as habilidades
+    skill_ids = set()
+    for question in test.questions:
+        if question.skill and question.skill.strip() and question.skill != '{}':
+            clean_skill_id = question.skill.replace('{', '').replace('}', '')
+            skill_ids.add(clean_skill_id)
+    
+    skills_dict = {}
+    if skill_ids:
+        skills = Skill.query.filter(Skill.id.in_(skill_ids)).all()
+        skills_dict = {str(skill.id): skill for skill in skills}
+    
+    # Mapear questões para disciplinas na ordem que aparecem
+    disciplinas_ordem = []
+    disciplinas_vistas = set()
+    
+    for question in test.questions:
+        disciplina = None
+        
+        # Questões com skill: mapear via skill.subject_id
+        if question.skill and question.skill.strip() and question.skill != '{}':
+            clean_skill_id = question.skill.replace('{', '').replace('}', '')
+            skill_obj = skills_dict.get(clean_skill_id)
+            
+            if skill_obj and skill_obj.subject_id:
+                subject = Subject.query.get(skill_obj.subject_id)
+                if subject:
+                    disciplina = subject.name
+            else:
+                disciplina = "Disciplina Geral"
+        else:
+            # Questões sem skill: mapear para disciplina principal da avaliação
+            if test.subject_rel:
+                disciplina = test.subject_rel.name
+            else:
+                disciplina = "Disciplina Geral"
+        
+        # Adicionar disciplina à lista de ordem se ainda não foi vista
+        if disciplina and disciplina not in disciplinas_vistas:
+            disciplinas_ordem.append(disciplina)
+            disciplinas_vistas.add(disciplina)
+    
+    return disciplinas_ordem
+
+
 def _obter_metadados_relatorio(test: Test, class_tests: List[ClassTest], scope_type: str, scope_id: Optional[str] = None) -> Dict[str, Any]:
     """
     Obtém metadados do relatório (escola, município, UF, período, escopo)
@@ -3563,9 +3624,13 @@ def _calcular_niveis_aprendizagem_por_municipio(evaluation_id: str, class_tests:
             results_by_school[school_id].append(result)
     
     # Calcular níveis por escola e disciplina
+    # Obter ordem das disciplinas conforme aparecem na avaliação
+    ordem_disciplinas = _obter_ordem_disciplinas_avaliacao(test)
+    disciplinas_para_processar = ordem_disciplinas if ordem_disciplinas else list(disciplinas_identificadas)
+    
     niveis_por_disciplina = {}
     
-    for disciplina in disciplinas_identificadas:
+    for disciplina in disciplinas_para_processar:
         niveis_por_disciplina[disciplina] = {
             'por_escola': [],
             'total_geral': {
@@ -3713,7 +3778,25 @@ def _calcular_niveis_aprendizagem_por_municipio(evaluation_id: str, class_tests:
         "total_geral": total_geral_acumulado
     }
     
-    return niveis_por_disciplina
+    # Ordenar disciplinas pela ordem de aparição na avaliação
+    ordem_disciplinas = _obter_ordem_disciplinas_avaliacao(test)
+    resultado_ordenado = OrderedDict()
+    
+    # Adicionar disciplinas na ordem de aparição
+    for disciplina in ordem_disciplinas:
+        if disciplina in niveis_por_disciplina:
+            resultado_ordenado[disciplina] = niveis_por_disciplina[disciplina]
+    
+    # Adicionar disciplinas que não estão na ordem (caso existam)
+    for disciplina, dados in niveis_por_disciplina.items():
+        if disciplina not in resultado_ordenado and disciplina != "GERAL":
+            resultado_ordenado[disciplina] = dados
+    
+    # Adicionar "GERAL" sempre por último
+    if "GERAL" in niveis_por_disciplina:
+        resultado_ordenado["GERAL"] = niveis_por_disciplina["GERAL"]
+    
+    return resultado_ordenado
 
 
 def _calcular_niveis_aprendizagem(evaluation_id: str, class_tests: List[ClassTest]) -> Dict[str, Any]:
@@ -4070,7 +4153,25 @@ def _calcular_niveis_aprendizagem(evaluation_id: str, class_tests: List[ClassTes
     
     logging.info(f"Resultado final com disciplinas: {list(resultado_final.keys())}")
     
-    return resultado_final
+    # Ordenar disciplinas pela ordem de aparição na avaliação
+    ordem_disciplinas = _obter_ordem_disciplinas_avaliacao(test)
+    resultado_ordenado = OrderedDict()
+    
+    # Adicionar disciplinas na ordem de aparição
+    for disciplina in ordem_disciplinas:
+        if disciplina in resultado_final:
+            resultado_ordenado[disciplina] = resultado_final[disciplina]
+    
+    # Adicionar disciplinas que não estão na ordem (caso existam)
+    for disciplina, dados in resultado_final.items():
+        if disciplina not in resultado_ordenado and disciplina != "GERAL":
+            resultado_ordenado[disciplina] = dados
+    
+    # Adicionar "GERAL" sempre por último
+    if "GERAL" in resultado_final:
+        resultado_ordenado["GERAL"] = resultado_final["GERAL"]
+    
+    return resultado_ordenado
 
 
 def _calcular_proficiencia_por_escopo(evaluation_id: str, class_tests: List[ClassTest], scope_type: str) -> Dict[str, Any]:
@@ -4184,9 +4285,13 @@ def _calcular_proficiencia_por_municipio(evaluation_id: str, class_tests: List[C
     course_name = _obter_nome_curso(test)
 
     # Calcular proficiência por escola e disciplina
+    # Obter ordem das disciplinas conforme aparecem na avaliação
+    ordem_disciplinas = _obter_ordem_disciplinas_avaliacao(test)
+    disciplinas_para_processar = ordem_disciplinas if ordem_disciplinas else list(disciplinas_identificadas)
+    
     proficiencia_por_disciplina = {}
     
-    for disciplina in disciplinas_identificadas:
+    for disciplina in disciplinas_para_processar:
         proficiencia_por_disciplina[disciplina] = {
             'por_escola': [],
             'media_geral': 0.0
@@ -4304,8 +4409,26 @@ def _calcular_proficiencia_por_municipio(evaluation_id: str, class_tests: List[C
         "media_geral": round(sum(item['proficiencia'] for item in dados_gerais_por_escola_lista) / len(dados_gerais_por_escola_lista), 2) if dados_gerais_por_escola_lista else 0
     }
     
+    # Ordenar disciplinas pela ordem de aparição na avaliação
+    ordem_disciplinas = _obter_ordem_disciplinas_avaliacao(test)
+    resultado_ordenado = OrderedDict()
+    
+    # Adicionar disciplinas na ordem de aparição
+    for disciplina in ordem_disciplinas:
+        if disciplina in proficiencia_por_disciplina:
+            resultado_ordenado[disciplina] = proficiencia_por_disciplina[disciplina]
+    
+    # Adicionar disciplinas que não estão na ordem (caso existam)
+    for disciplina, dados in proficiencia_por_disciplina.items():
+        if disciplina not in resultado_ordenado and disciplina != "GERAL":
+            resultado_ordenado[disciplina] = dados
+    
+    # Adicionar "GERAL" sempre por último
+    if "GERAL" in proficiencia_por_disciplina:
+        resultado_ordenado["GERAL"] = proficiencia_por_disciplina["GERAL"]
+    
     return {
-        'por_disciplina': proficiencia_por_disciplina
+        'por_disciplina': resultado_ordenado
     }
 
 
@@ -4600,8 +4723,26 @@ def _calcular_proficiencia(evaluation_id: str, class_tests: List[ClassTest]) -> 
     # Calcular média municipal por disciplina
     media_municipal_por_disciplina = _calcular_media_municipal_por_disciplina(evaluation_id, question_disciplines)
 
+    # Ordenar disciplinas pela ordem de aparição na avaliação
+    ordem_disciplinas = _obter_ordem_disciplinas_avaliacao(test)
+    resultado_ordenado = OrderedDict()
+    
+    # Adicionar disciplinas na ordem de aparição
+    for disciplina in ordem_disciplinas:
+        if disciplina in resultado_final:
+            resultado_ordenado[disciplina] = resultado_final[disciplina]
+    
+    # Adicionar disciplinas que não estão na ordem (caso existam)
+    for disciplina, dados in resultado_final.items():
+        if disciplina not in resultado_ordenado and disciplina != "GERAL":
+            resultado_ordenado[disciplina] = dados
+    
+    # Adicionar "GERAL" sempre por último
+    if "GERAL" in resultado_final:
+        resultado_ordenado["GERAL"] = resultado_final["GERAL"]
+
     return {
-        "por_disciplina": resultado_final,
+        "por_disciplina": resultado_ordenado,
         "media_municipal_por_disciplina": media_municipal_por_disciplina
     }
 
@@ -4718,9 +4859,13 @@ def _calcular_nota_geral_por_municipio(evaluation_id: str, class_tests: List[Cla
     use_simple_calculation = test.grade_calculation_type == 'simple'
 
     # Calcular nota geral por escola e disciplina
+    # Obter ordem das disciplinas conforme aparecem na avaliação
+    ordem_disciplinas = _obter_ordem_disciplinas_avaliacao(test)
+    disciplinas_para_processar = ordem_disciplinas if ordem_disciplinas else list(disciplinas_identificadas)
+    
     nota_por_disciplina = {}
     
-    for disciplina in disciplinas_identificadas:
+    for disciplina in disciplinas_para_processar:
         nota_por_disciplina[disciplina] = {
             'por_escola': [],
             'media_geral': 0.0
@@ -4846,8 +4991,26 @@ def _calcular_nota_geral_por_municipio(evaluation_id: str, class_tests: List[Cla
         "media_geral": round(sum(item['nota'] for item in dados_gerais_por_escola_lista) / len(dados_gerais_por_escola_lista), 2) if dados_gerais_por_escola_lista else 0
     }
     
+    # Ordenar disciplinas pela ordem de aparição na avaliação
+    ordem_disciplinas = _obter_ordem_disciplinas_avaliacao(test)
+    resultado_ordenado = OrderedDict()
+    
+    # Adicionar disciplinas na ordem de aparição
+    for disciplina in ordem_disciplinas:
+        if disciplina in nota_por_disciplina:
+            resultado_ordenado[disciplina] = nota_por_disciplina[disciplina]
+    
+    # Adicionar disciplinas que não estão na ordem (caso existam)
+    for disciplina, dados in nota_por_disciplina.items():
+        if disciplina not in resultado_ordenado and disciplina != "GERAL":
+            resultado_ordenado[disciplina] = dados
+    
+    # Adicionar "GERAL" sempre por último
+    if "GERAL" in nota_por_disciplina:
+        resultado_ordenado["GERAL"] = nota_por_disciplina["GERAL"]
+    
     return {
-        'por_disciplina': nota_por_disciplina
+        'por_disciplina': resultado_ordenado
     }
 
 
@@ -5163,8 +5326,26 @@ def _calcular_nota_geral(evaluation_id: str, class_tests: List[ClassTest]) -> Di
     # Calcular média municipal por disciplina
     media_municipal_por_disciplina = _calcular_media_municipal_nota_por_disciplina(evaluation_id, question_disciplines)
 
+    # Ordenar disciplinas pela ordem de aparição na avaliação
+    ordem_disciplinas = _obter_ordem_disciplinas_avaliacao(test)
+    resultado_ordenado = OrderedDict()
+    
+    # Adicionar disciplinas na ordem de aparição
+    for disciplina in ordem_disciplinas:
+        if disciplina in resultado_final:
+            resultado_ordenado[disciplina] = resultado_final[disciplina]
+    
+    # Adicionar disciplinas que não estão na ordem (caso existam)
+    for disciplina, dados in resultado_final.items():
+        if disciplina not in resultado_ordenado and disciplina != "GERAL":
+            resultado_ordenado[disciplina] = dados
+    
+    # Adicionar "GERAL" sempre por último
+    if "GERAL" in resultado_final:
+        resultado_ordenado["GERAL"] = resultado_final["GERAL"]
+
     return {
-        "por_disciplina": resultado_final,
+        "por_disciplina": resultado_ordenado,
         "media_municipal_por_disciplina": media_municipal_por_disciplina
     }
 

@@ -16,7 +16,7 @@
 
 			@page with-footer {
 				@bottom-left {
-					content: "InnovPlay Sistema de Ensino e Avaliação";
+					content: "AfirmePlay Sistema de Ensino e Avaliação";
 					font-family: "Helvetica", Arial, sans-serif;
 					font-size: 7pt;
 					color: #999;
@@ -71,12 +71,19 @@
 				width: 180px;
 				height: 180px;
 				flex-shrink: 0;
+				display: flex;
+				align-items: center;
+				justify-content: center;
 			}
 
 			.municipality-logo img {
-				width: 100%;
-				height: 100%;
+				max-width: 100%;
+				max-height: 100%;
+				width: auto;
+				height: auto;
 				object-fit: contain;
+				display: block;
+				margin: 0 auto;
 			}
 
 			.header-titles {
@@ -164,10 +171,11 @@
 
 			.info-row {
 				display: flex;
-				justify-content: space-between;
+				justify-content: flex-start;
 				align-items: baseline;
 				padding: 12px 0;
 				border-bottom: 1px solid #f3f4f6;
+				gap: 10px;
 			}
 
 			.info-row:last-child {
@@ -180,6 +188,7 @@
 				font-weight: bold;
 				text-transform: uppercase;
 				letter-spacing: 0.5px;
+				flex-shrink: 0;
 			}
 
 			.info-value {
@@ -187,6 +196,8 @@
 				color: #1f2937;
 				font-weight: normal;
 				text-align: left;
+				flex: 1;
+				min-width: 0;
 			}
 
 			/* Capa de Disciplina */
@@ -377,7 +388,7 @@
 				max-width: 100%;
 				height: auto;
 				display: block;
-				margin: 12px 0;
+				margin: 12px auto;
 				border: none;
 			}
 
@@ -415,7 +426,7 @@
 				max-width: 100%;
 				height: auto;
 				display: block;
-				margin: 8px 0;
+				margin: 8px auto;
 			}
 
 			/* Formulário de Respostas */
@@ -500,7 +511,7 @@
 			}
 
 			.student-name-grid {
-				margin-top: 8px;
+				margin-top: 15px;
 				border-top: 1px solid #000;
 				padding-top: 8px;
 			}
@@ -532,7 +543,7 @@
 			}
 
 			.header-right {
-				width: 100px;
+				width: 140px;
 				display: flex;
 				flex-direction: column;
 				align-items: center;
@@ -540,11 +551,12 @@
 				border-left: 1px solid #000;
 				padding-left: 10px;
 				margin-left: 10px;
+				flex-shrink: 0;
 			}
 
 			.qr-code-box {
-				width: 90px;
-				height: 90px;
+				width: 120px;
+				height: 120px;
 				border: 1px solid #333;
 				display: flex;
 				align-items: center;
@@ -869,7 +881,7 @@
 							fill="white"
 							font-size="12"
 							font-weight="bold">
-							INNOV PLAY
+							AFIRME PLAY
 						</text>
 					</svg>
 					{% endif %}
@@ -1079,19 +1091,20 @@
 							Escola: {{ student.school_name or 'Não informado' }}
 						</div>
 						<div class="header-info-line">
-							Turma: {{ student.class_name or 'Não informado' }}
+							Turma: {{ test_data.grade_name or 'Sem turma' }} -
+							{{ student.class_name or 'A' }}
 						</div>
 					</div>
 					<div class="student-name-grid">
 						<div class="student-name-label">NOME DO ALUNO:</div>
 						<div class="name-boxes">
 							<div class="name-boxes-row">
-								{% for i in range(25) %}
+								{% for i in range(23) %}
 								<span class="name-box"></span>
 								{% endfor %}
 							</div>
 							<div class="name-boxes-row">
-								{% for i in range(25) %}
+								{% for i in range(23) %}
 								<span class="name-box"></span>
 								{% endfor %}
 							</div>
@@ -1100,6 +1113,35 @@
 					<div class="test-name-section">
 						<div class="test-name-label">NOME DA PROVA:</div>
 						<div class="test-name-value">{{ test_data.title }}</div>
+					</div>
+					<div class="test-name-section">
+						<div class="test-name-label">DISCIPLINAS:</div>
+						<div class="test-name-value">
+							<!-- DEBUG: questions_by_subject = {{ questions_by_subject|default('NÃO DEFINIDO') }} -->
+							<!-- DEBUG: questions_by_block = {{ questions_by_block|default('NÃO DEFINIDO') }} -->
+							<!-- DEBUG: test_data.subjects_info = {{ test_data.subjects_info|default('NÃO DEFINIDO') }} -->
+							{% if questions_by_subject and
+							questions_by_subject|length > 0 %} {% for
+							subject_name in questions_by_subject.keys() %} {{
+							subject_name }}{% if not loop.last %} • {% endif %}
+							{% endfor %} {% elif questions_by_block and
+							questions_by_block|length > 0 %} {% for block in
+							questions_by_block %} {% if block.subject_name %} {{
+							block.subject_name }}{% if not loop.last %} • {%
+							endif %} {% endif %} {% endfor %} {% elif
+							test_data.subjects_info %} {% if
+							test_data.subjects_info is mapping %} {% for
+							subject_id, subject_info in
+							test_data.subjects_info.items() %} {% if
+							subject_info.name %} {{ subject_info.name }}{% if
+							not loop.last %} • {% endif %} {% endif %} {% endfor
+							%} {% elif test_data.subjects_info is iterable %} {%
+							for subject_info in test_data.subjects_info %} {% if
+							subject_info.name %} {{ subject_info.name }}{% if
+							not loop.last %} • {% endif %} {% endif %} {% endfor
+							%} {% endif %} {% else %} DEBUG: Nenhuma fonte de
+							disciplinas encontrada {% endif %}
+						</div>
 					</div>
 					<div class="signature-section">
 						Assinatura do participante:
@@ -1206,7 +1248,9 @@
 				questions_in_block > 0 %}
 				<div class="answer-block">
 					<div class="block-header">
-						BLOCO {{ "%02d"|format(block.block_number) }}
+						BLOCO {{ "%02d"|format(block.block_number) }}{% if
+						block.subject_name %} - {{ block.subject_name }}{% endif
+						%}
 					</div>
 
 					<!-- Cabeçalho com letras A B C D -->

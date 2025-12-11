@@ -180,6 +180,7 @@ class InstitutionalTestWeasyPrintGenerator:
                 'generated_date': datetime.now().strftime('%d/%m/%Y %H:%M'),
                 'default_logo': default_logo_base64  # Logo padrão (afirme_logo.png)
             }
+            
 
             # Renderizar template HTML
             template = self.env.get_template('institutional_test.html')
@@ -209,12 +210,31 @@ class InstitutionalTestWeasyPrintGenerator:
             # Converter subjects_info para dict se for lista
             if isinstance(subjects_info, list):
                 subjects_info_dict = {}
-                for item in subjects_info:
+                for idx, item in enumerate(subjects_info):
                     if isinstance(item, dict) and 'id' in item:
+                        # Item já é um dicionário com id e name
                         subjects_info_dict[str(item['id'])] = item
+                    elif isinstance(item, str):
+                        # Item é uma string (ID da disciplina) - buscar no banco
+                        try:
+                            from app.models.subject import Subject
+                            from app import db
+                            subject_obj = Subject.query.get(item)
+                            if subject_obj:
+                                subjects_info_dict[str(item)] = {
+                                    'id': subject_obj.id,
+                                    'name': subject_obj.name
+                                }
+                            else:
+                                logging.warning(f"Subject não encontrado no banco: {item}")
+                        except Exception as e:
+                            logging.error(f"Erro ao buscar Subject {item}: {str(e)}")
                 subjects_info = subjects_info_dict
-
-            for question in questions_data:
+            elif not isinstance(subjects_info, dict):
+                logging.warning(f"subjects_info é de tipo inesperado: {type(subjects_info)}")
+                subjects_info = {}
+            
+            for idx, question in enumerate(questions_data):
                 subject_id = question.get('subject_id')
 
                 if subject_id and str(subject_id) in subjects_info:
@@ -234,6 +254,7 @@ class InstitutionalTestWeasyPrintGenerator:
                 processed_question = self._process_question_for_template(question)
                 subjects[subject_name].append(processed_question)
 
+            
             return subjects
 
         except Exception as e:

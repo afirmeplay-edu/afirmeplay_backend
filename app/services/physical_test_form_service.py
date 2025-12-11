@@ -62,6 +62,30 @@ class PhysicalTestFormService:
                     'generated_forms': 0
                 }
             
+            # Verificar se já existem formulários gerados para esta prova
+            existing_forms = PhysicalTestForm.query.filter_by(test_id=test_id, form_type='institutional').all()
+            if existing_forms:
+                # Buscar informações dos alunos que já têm formulários
+                students_with_forms = []
+                for form in existing_forms:
+                    student = Student.query.get(form.student_id)
+                    if student:
+                        students_with_forms.append({
+                            'student_id': form.student_id,
+                            'student_name': student.name,
+                            'form_id': form.id
+                        })
+                
+                logging.info(f"Formulários já existem para a prova {test_id}. Total: {len(existing_forms)}")
+                return {
+                    'success': True,
+                    'message': f'Formulários já foram gerados anteriormente para esta prova',
+                    'already_generated': True,
+                    'generated_forms': len(existing_forms),
+                    'test_title': test.title,
+                    'forms': students_with_forms
+                }
+            
             # Verificar se a prova foi aplicada (class_test existe)
             class_tests = ClassTest.query.filter_by(test_id=test_id).all()
             if not class_tests:
@@ -116,6 +140,7 @@ class PhysicalTestFormService:
                                 municipality_name = city_obj.name
                                 state_name = city_obj.state
 
+            
             # Criar test_data base, mesclando com test_data passado como parâmetro
             base_test_data = {
                 'id': test.id,
@@ -135,6 +160,7 @@ class PhysicalTestFormService:
             test_data = base_test_data
             
             questions_data = [self._format_question_data(q) for q in questions]
+            
             students_data = [self._format_student_data(s) for s in students]
             
             # Buscar ClassTest associado à prova
@@ -316,6 +342,27 @@ class PhysicalTestFormService:
                 class_test_id = class_test.id
             
             for file_info in generated_files:
+                student_id = file_info['student_id']
+                
+                # Verificar se já existe formulário para este aluno e esta prova
+                existing_form = PhysicalTestForm.query.filter_by(
+                    test_id=test_id,
+                    student_id=student_id,
+                    form_type='institutional'
+                ).first()
+                
+                if existing_form:
+                    logging.warning(f"Formulário já existe para aluno {student_id} e prova {test_id}. Pulando...")
+                    # Adicionar à lista de formulários existentes
+                    saved_forms.append({
+                        'student_id': student_id,
+                        'student_name': file_info['student_name'],
+                        'form_id': existing_form.id,
+                        'pdf_path': file_info.get('pdf_path', None),
+                        'already_exists': True
+                    })
+                    continue
+                
                 # Criar registro do formulário físico
                 pdf_data = file_info.get('pdf_data')
                 if not pdf_data:
@@ -323,7 +370,7 @@ class PhysicalTestFormService:
                 
                 physical_form = PhysicalTestForm(
                     test_id=test_id,
-                    student_id=file_info['student_id'],
+                    student_id=student_id,
                     class_test_id=class_test_id,
                     form_pdf_data=pdf_data,
                     form_pdf_url=file_info.get('pdf_path', None),
@@ -334,10 +381,11 @@ class PhysicalTestFormService:
                 db.session.add(physical_form)
                 db.session.flush()  # Para obter o ID
                 saved_forms.append({
-                    'student_id': file_info['student_id'],
+                    'student_id': student_id,
                     'student_name': file_info['student_name'],
                     'form_id': physical_form.id,
-                    'pdf_path': file_info.get('pdf_path', None)
+                    'pdf_path': file_info.get('pdf_path', None),
+                    'already_exists': False
                 })
             
             db.session.commit()

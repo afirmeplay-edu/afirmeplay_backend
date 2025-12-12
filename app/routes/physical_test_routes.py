@@ -89,6 +89,17 @@ def generate_physical_forms(test_id):
         logo_data = data.get('logo_data')  # Logo será implementado posteriormente
         force_regenerate = data.get('force_regenerate', False)  # Forçar regeneração de formulários existentes
         
+        # Extrair blocks_config do body
+        blocks_config = data.get('blocks_config')
+        if not blocks_config:
+            # Se não vier como objeto, montar a partir dos parâmetros individuais
+            blocks_config = {
+                'use_blocks': data.get('use_blocks', False),
+                'num_blocks': data.get('num_blocks', 1),
+                'questions_per_block': data.get('questions_per_block', 12),
+                'separate_by_subject': data.get('separate_by_subject', False)
+            }
+        
         # Buscar questões da prova
         from app.models.testQuestion import TestQuestion
         from app.models.question import Question
@@ -141,7 +152,8 @@ def generate_physical_forms(test_id):
             'course_name': course_name,
             'education_stage_id': test.grade.education_stage_id if test.grade else None,
             'education_stage_name': education_stage_name,
-            'grade_name': test.grade.name if test.grade else '9° ANO'
+            'grade_name': test.grade.name if test.grade else '9° ANO',
+            'blocks_config': blocks_config  # Incluir blocks_config do body
         }
         
         students_data = []
@@ -202,7 +214,8 @@ def generate_physical_forms(test_id):
         with tempfile.TemporaryDirectory() as temp_dir:
             result = form_service.generate_physical_forms(
                 test_id=test_id,
-                output_dir=temp_dir
+                output_dir=temp_dir,
+                test_data=test_data  # Passar test_data com blocks_config
             )
             
             if result.get('success'):

@@ -23,6 +23,7 @@ from app.models.city import City
 from app.models.grades import Grade
 from app.models.physicalTestForm import PhysicalTestForm
 from app.models.physicalTestAnswer import PhysicalTestAnswer
+from app.models.answerSheetGabarito import AnswerSheetGabarito
 from app.services.physical_test_pdf_generator import PhysicalTestPDFGenerator
 # from app.services.physical_test_correction import PhysicalTestCorrection  # ARQUIVO DELETADO
 from app.services.evaluation_calculator import EvaluationCalculator
@@ -141,6 +142,18 @@ class PhysicalTestFormService:
                                 state_name = city_obj.state
 
             
+            # Buscar blocks_config do AnswerSheetGabarito se existir
+            blocks_config = None
+            gabarito = AnswerSheetGabarito.query.filter_by(test_id=test_id).first()
+            if gabarito:
+                if gabarito.blocks_config:
+                    blocks_config = gabarito.blocks_config.copy()
+                    # Garantir que use_blocks está presente
+                    if gabarito.use_blocks:
+                        blocks_config['use_blocks'] = True
+                    else:
+                        blocks_config['use_blocks'] = False
+            
             # Criar test_data base, mesclando com test_data passado como parâmetro
             base_test_data = {
                 'id': test.id,
@@ -156,6 +169,15 @@ class PhysicalTestFormService:
             # Mesclar com test_data passado (se houver), priorizando valores passados
             if test_data:
                 base_test_data.update(test_data)
+            
+            # Incluir blocks_config do gabarito apenas se não foi passado no test_data
+            if blocks_config and 'blocks_config' not in base_test_data:
+                base_test_data['blocks_config'] = blocks_config
+            elif blocks_config and 'blocks_config' in base_test_data:
+                # Se ambos existem, mesclar: usar valores do test_data passado, mas preencher campos faltantes do gabarito
+                merged_blocks_config = blocks_config.copy()
+                merged_blocks_config.update(base_test_data['blocks_config'])
+                base_test_data['blocks_config'] = merged_blocks_config
             
             test_data = base_test_data
             

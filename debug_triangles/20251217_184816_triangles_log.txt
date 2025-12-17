@@ -1,7 +1,0 @@
-Total de triângulos encontrados: 4
-Triângulos aceitos (50 < area < 50000): 4
-
-Triângulo 0: Area=420.50, Centro=(713, 813), Aceito=True
-Triângulo 1: Area=420.50, Centro=(22, 813), Aceito=True
-Triângulo 4: Area=406.00, Centro=(713, 579), Aceito=True
-Triângulo 5: Area=406.00, Centro=(23, 578), Aceito=True

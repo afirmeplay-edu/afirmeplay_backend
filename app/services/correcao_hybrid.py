@@ -200,14 +200,375 @@ class CorrecaoHybrid:
     
     def _detectar_qr_code(self, img: np.ndarray) -> Optional[Dict[str, str]]:
         """
-        Detecta QR Code na imagem (importa método robusto do correcaoIA)
+        Detecta QR Code na imagem usando múltiplas estratégias robustas
+        Tenta várias técnicas em cascata para melhorar detecção em imagens de baixa qualidade
         """
         try:
-            from app.services.correcaoIA import CorrecaoIA
-            correcao_ia = CorrecaoIA(debug=self.debug)
-            return correcao_ia._detectar_qr_code(img)
+            # Converter para grayscale se necessário
+            if len(img.shape) == 3:
+                gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+            else:
+                gray = img.copy()
+            
+            h, w = gray.shape
+            
+            # Estratégia 1: Detecção direta na imagem original
+            qr_data = self._detectar_qr_direto(gray)
+            if qr_data:
+                return self._parsear_qr_data(qr_data)
+            
+            # Estratégia 2: Pré-processamento com múltiplas técnicas
+            processed_images = self._preprocessar_imagem_para_qr(gray)
+            for i, processed_img in enumerate(processed_images):
+                qr_data = self._detectar_qr_direto(processed_img)
+                if qr_data:
+                    return self._parsear_qr_data(qr_data)
+            
+            # Estratégia 3: Detecção por regiões (QR Code geralmente no canto superior direito)
+            qr_data = self._detectar_qr_por_regioes(img)
+            if qr_data:
+                return self._parsear_qr_data(qr_data)
+            
+            # Estratégia 4: Redimensionamento múltiplo
+            qr_data = self._detectar_qr_redimensionamento_multiplo(img)
+            if qr_data:
+                return self._parsear_qr_data(qr_data)
+            
+            # Estratégia 5: Método resiliente (com upscale e tight-crop)
+            qr_data = self._detectar_qr_resiliente(img)
+            if qr_data:
+                return self._parsear_qr_data(qr_data)
+            
+            self.logger.warning("❌ Nenhum QR Code detectado após todas as estratégias")
+            return None
+                
         except Exception as e:
             self.logger.error(f"Erro ao detectar QR Code: {str(e)}", exc_info=True)
+            return None
+    
+    def _detectar_qr_direto(self, img: np.ndarray) -> Optional[str]:
+        """
+        Detecção direta de QR code usando OpenCV
+        """
+        try:
+            detector = cv2.QRCodeDetector()
+            
+            # Converter para grayscale se necessário
+            if len(img.shape) == 3:
+                gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+            else:
+                gray = img
+            
+            # Detecção direta
+            data, _, _ = detector.detectAndDecode(gray)
+            return data if data else None
+            
+        except Exception as e:
+            self.logger.debug(f"Erro na detecção direta: {str(e)}")
+            return None
+    
+    def _preprocessar_imagem_para_qr(self, img: np.ndarray) -> List[np.ndarray]:
+        """
+        Pré-processa imagem com múltiplas técnicas para melhorar detecção de QR code
+        Retorna lista de imagens processadas para testar
+        """
+        processed_images = []
+        
+        try:
+            # Garantir que é grayscale
+            if len(img.shape) == 3:
+                gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+            else:
+                gray = img.copy()
+            
+            # 1. Imagem original em grayscale
+            processed_images.append(gray)
+            
+            # 2. Ajuste de contraste (CLAHE)
+            clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+            enhanced = clahe.apply(gray)
+            processed_images.append(enhanced)
+            
+            # 3. Threshold OTSU
+            _, thresh_otsu = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+            processed_images.append(thresh_otsu)
+            
+            # 4. Threshold adaptativo
+            thresh_adapt = cv2.adaptiveThreshold(
+                gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, 
+                cv2.THRESH_BINARY, 11, 2
+            )
+            processed_images.append(thresh_adapt)
+            
+            # 5. Múltiplos thresholds manuais
+            for threshold in [100, 127, 150, 180]:
+                _, thresh = cv2.threshold(gray, threshold, 255, cv2.THRESH_BINARY)
+                processed_images.append(thresh)
+            
+            # 6. Morfologia para limpar ruído
+            kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
+            morphed = cv2.morphologyEx(gray, cv2.MORPH_CLOSE, kernel)
+            morphed = cv2.morphologyEx(morphed, cv2.MORPH_OPEN, kernel)
+            processed_images.append(morphed)
+            
+            # 7. Redimensionamento para diferentes escalas
+            for scale in [0.5, 1.5, 2.0]:
+                new_width = int(gray.shape[1] * scale)
+                new_height = int(gray.shape[0] * scale)
+                resized = cv2.resize(gray, (new_width, new_height), interpolation=cv2.INTER_CUBIC)
+                processed_images.append(resized)
+            
+            # 8. Filtro gaussiano para suavizar
+            blurred = cv2.GaussianBlur(gray, (3, 3), 0)
+            processed_images.append(blurred)
+            
+            # 9. Equalização de histograma
+            equalized = cv2.equalizeHist(gray)
+            processed_images.append(equalized)
+            
+            # 10. Inversão de cores (para QR codes escuros em fundo claro)
+            inverted = cv2.bitwise_not(gray)
+            processed_images.append(inverted)
+            
+            return processed_images
+            
+        except Exception as e:
+            self.logger.error(f"Erro no pré-processamento: {str(e)}")
+            return [gray] if 'gray' in locals() else []
+    
+    def _detectar_qr_por_regioes(self, img: np.ndarray) -> Optional[str]:
+        """
+        Detecta QR code por regiões específicas da imagem
+        QR code geralmente está no canto superior direito
+        """
+        try:
+            # Converter para grayscale se necessário
+            if len(img.shape) == 3:
+                gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+            else:
+                gray = img.copy()
+            
+            height, width = gray.shape
+            detector = cv2.QRCodeDetector()
+            
+            # Regiões para buscar QR code (priorizando canto superior direito)
+            regions = [
+                # Canto superior direito (mais comum)
+                (width//2, 0, width, height//2),
+                # Canto superior esquerdo
+                (0, 0, width//2, height//2),
+                # Região central superior
+                (width//4, 0, 3*width//4, height//2),
+                # Região central
+                (width//4, height//4, 3*width//4, 3*height//4),
+                # Região inferior direita
+                (width//2, height//2, width, height),
+                # Região inferior esquerda
+                (0, height//2, width//2, height),
+            ]
+            
+            for i, (x1, y1, x2, y2) in enumerate(regions):
+                roi = gray[y1:y2, x1:x2]
+                if roi.size > 0:
+                    self.logger.debug(f"📍 Testando região {i+1}: ({x1},{y1}) a ({x2},{y2})")
+                    data, _, _ = detector.detectAndDecode(roi)
+                    if data:
+                        return data
+            
+            return None
+            
+        except Exception as e:
+            self.logger.debug(f"Erro na detecção por regiões: {str(e)}")
+            return None
+    
+    def _detectar_qr_redimensionamento_multiplo(self, img: np.ndarray) -> Optional[str]:
+        """
+        Detecção de QR code com múltiplos redimensionamentos
+        Útil para QR codes muito pequenos ou muito grandes
+        """
+        try:
+            detector = cv2.QRCodeDetector()
+            
+            # Converter para grayscale se necessário
+            if len(img.shape) == 3:
+                gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+            else:
+                gray = img.copy()
+            
+            h, w = gray.shape
+            
+            # Diferentes escalas para testar
+            scales = [0.5, 0.75, 1.0, 1.25, 1.5, 2.0, 3.0]
+            
+            self.logger.debug(f"📏 Dimensões originais: {w}x{h}")
+            
+            for scale in scales:
+                new_w = int(w * scale)
+                new_h = int(h * scale)
+                
+                if new_w > 50 and new_h > 50:  # Imagem deve ser grande o suficiente
+                    resized = cv2.resize(gray, (new_w, new_h), interpolation=cv2.INTER_CUBIC)
+                    data, _, _ = detector.detectAndDecode(resized)
+                    if data:
+                        return data
+            
+            return None
+            
+        except Exception as e:
+            self.logger.debug(f"Erro no redimensionamento múltiplo: {str(e)}")
+            return None
+    
+    def _detectar_qr_resiliente(self, img: np.ndarray, upscale: int = 5, margin_factor: float = 0.35) -> Optional[str]:
+        """
+        Detecção de QR robusta:
+        - calcula ROI (canto superior direito) baseado no layout A4
+        - tenta achar tight-crop via contornos quadrados (remove bordas)
+        - amplia o tight-crop (upscale)
+        - tenta cv2.QRCodeDetector e em fallback pyzbar (se instalado)
+        """
+        try:
+            # Converter para grayscale se necessário
+            if len(img.shape) == 3:
+                gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+            else:
+                gray = img.copy()
+            
+            h, w = gray.shape
+            
+            # Estimar posição do QR code (canto superior direito)
+            # Baseado em layout A4 típico
+            proporcao_x = w / 1240.0
+            proporcao_y = h / 1753.0
+            qr_size_estimado = max(32, int(200 * min(proporcao_x, proporcao_y)))
+            qr_x_estimado = w - qr_size_estimado - int(20 * proporcao_x)
+            qr_y_estimado = int(20 * proporcao_y)
+            
+            margin = int(qr_size_estimado * margin_factor)
+            x_start = max(0, qr_x_estimado - margin)
+            y_start = max(0, qr_y_estimado - margin)
+            x_end = min(w, qr_x_estimado + qr_size_estimado + margin)
+            y_end = min(h, qr_y_estimado + qr_size_estimado + margin)
+            
+            roi = gray[y_start:y_end, x_start:x_end].copy()
+            if roi.size == 0:
+                return None
+            
+            # Tentar tight-crop via contornos
+            def tight_crop_from_roi(img_roi):
+                blur = cv2.GaussianBlur(img_roi, (3, 3), 0)
+                _, bw = cv2.threshold(blur, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+                contours, _ = cv2.findContours(bw, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                if not contours:
+                    return None
+                
+                contours = sorted(contours, key=cv2.contourArea, reverse=True)
+                for cnt in contours[:5]:
+                    area = cv2.contourArea(cnt)
+                    if area < 100:
+                        continue
+                    peri = cv2.arcLength(cnt, True)
+                    approx = cv2.approxPolyDP(cnt, 0.02 * peri, True)
+                    if len(approx) == 4:
+                        x, y, wc, hc = cv2.boundingRect(approx)
+                        if wc > img_roi.shape[1] * 0.2 and hc > img_roi.shape[0] * 0.2:
+                            pad = max(1, int(min(wc, hc) * 0.03))
+                            return (max(0, x - pad), max(0, y - pad), 
+                                   min(img_roi.shape[1], x + wc + pad), 
+                                   min(img_roi.shape[0], y + hc + pad))
+                
+                # Fallback: bounding box do maior contorno
+                cnt = contours[0]
+                x, y, wc, hc = cv2.boundingRect(cnt)
+                return (x, y, x + wc, y + hc)
+            
+            tight = tight_crop_from_roi(roi)
+            if tight is not None:
+                tx0, ty0, tx1, ty1 = tight
+                roi_tight = roi[ty0:ty1, tx0:tx1].copy()
+            else:
+                roi_tight = roi
+            
+            # Ampliar tight-crop
+            if upscale <= 1:
+                upscale = 2
+            roi_up = cv2.resize(roi_tight, None, fx=upscale, fy=upscale, interpolation=cv2.INTER_CUBIC)
+            
+            # Criar variantes para testar
+            gray_up = roi_up if len(roi_up.shape) == 2 else cv2.cvtColor(roi_up, cv2.COLOR_BGR2GRAY)
+            _, otsu = cv2.threshold(gray_up, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+            gauss = cv2.GaussianBlur(gray_up, (0, 0), sigmaX=1.0)
+            unsharp = cv2.addWeighted(gray_up, 1.4, gauss, -0.4, 0)
+            
+            candidates = [
+                ("ampliado_color", roi_up),
+                ("ampliado_gray", gray_up),
+                ("ampliado_otsu", otsu),
+                ("ampliado_unsharp", unsharp),
+            ]
+            
+            # Tentar OpenCV detector
+            detector = cv2.QRCodeDetector()
+            for name, cand in candidates:
+                try:
+                    if cand.ndim == 2:  # gray
+                        cand_for_cv = cv2.cvtColor(cand, cv2.COLOR_GRAY2BGR)
+                    else:
+                        cand_for_cv = cand
+                    data, _, _ = detector.detectAndDecode(cand_for_cv)
+                    if data:
+                        return data
+                except Exception as e:
+                    self.logger.debug(f"cv2 detect erro {name}: {e}")
+            
+            # Fallback: tentar pyzbar (se instalado)
+            try:
+                from pyzbar.pyzbar import decode as pdecode
+                for name, cand in candidates:
+                    try:
+                        results = pdecode(cand)
+                        if results:
+                            for r in results:
+                                raw = r.data
+                                try:
+                                    txt = raw.decode("utf-8")
+                                except Exception:
+                                    txt = str(raw)
+                                return txt
+                    except Exception as e:
+                        self.logger.debug(f"pyzbar erro {name}: {e}")
+            except ImportError:
+                self.logger.debug("pyzbar não disponível")
+            
+            return None
+            
+        except Exception as e:
+            self.logger.debug(f"Erro na detecção resiliente: {str(e)}")
+            return None
+    
+    def _parsear_qr_data(self, data: str) -> Optional[Dict[str, str]]:
+        """
+        Parseia dados do QR code (JSON ou string simples)
+        """
+        try:
+            if not data:
+                return None
+            
+            # Tentar parsear como JSON
+            try:
+                qr_json = json.loads(data)
+                return {
+                    'student_id': qr_json.get('student_id'),
+                    'test_id': qr_json.get('test_id')
+                }
+            except json.JSONDecodeError:
+                # Se não for JSON, tratar como student_id direto
+                return {
+                    'student_id': data.strip(),
+                    'test_id': None
+                }
+                
+        except Exception as e:
+            self.logger.error(f"Erro ao parsear dados do QR: {str(e)}")
             return None
     
     def _paper90(self, img: np.ndarray) -> Optional[np.ndarray]:
@@ -1062,34 +1423,166 @@ class CorrecaoHybrid:
             "score_percentage": round(score_percentage, 2)
         }
     
-    def _salvar_respostas_no_banco(self, test_id: str, student_id: str, 
-                                   respostas_detectadas: Dict[int, Optional[str]], 
-                                   gabarito: Dict[int, str]) -> List[Dict]:
-        """Salva respostas no banco de dados"""
+    def _salvar_respostas_no_banco(self, test_id: str, student_id: str,
+                                   respostas_detectadas: Dict[int, Optional[str]],
+                                   gabarito: Dict[int, str]) -> List[Dict[str, Any]]:
+        """
+        Salva respostas detectadas no banco de dados
+        """
         try:
-            from app.services.correcaoIA import CorrecaoIA
-            correcao_ia = CorrecaoIA(debug=self.debug)
-            return correcao_ia._salvar_respostas_no_banco(test_id, student_id, respostas_detectadas, gabarito)
+            # Buscar questões do teste
+            test_questions = TestQuestion.query.filter_by(test_id=test_id).order_by(TestQuestion.order).all()
+
+            # Criar mapeamento: índice sequencial -> test_question
+            questions_by_index = {}
+            for idx, tq in enumerate(test_questions, start=1):
+                questions_by_index[idx] = tq
+
+            saved_answers = []
+
+            for q_num, detected_answer in respostas_detectadas.items():
+                if q_num not in questions_by_index:
+                    continue
+
+                test_question = questions_by_index[q_num]
+                question_id = test_question.question_id
+                correct_answer = gabarito.get(q_num, '')
+
+                # Verificar se está correta
+                is_correct = None
+                if detected_answer and correct_answer:
+                    is_correct = (detected_answer.upper() == correct_answer.upper())
+
+                # Verificar se já existe resposta
+                existing_answer = StudentAnswer.query.filter_by(
+                    student_id=student_id,
+                    test_id=test_id,
+                    question_id=question_id
+                ).first()
+
+                if existing_answer:
+                    # Atualizar resposta existente
+                    existing_answer.answer = detected_answer if detected_answer else ''
+                    existing_answer.is_correct = is_correct
+                    existing_answer.answered_at = datetime.utcnow()
+                    student_answer = existing_answer
+                else:
+                    # Criar nova resposta
+                    student_answer = StudentAnswer(
+                        student_id=student_id,
+                        test_id=test_id,
+                        question_id=question_id,
+                        answer=detected_answer if detected_answer else '',
+                        is_correct=is_correct
+                    )
+                    db.session.add(student_answer)
+
+                saved_answers.append({
+                    'question_number': q_num,
+                    'question_id': question_id,
+                    'detected_answer': detected_answer,
+                    'correct_answer': correct_answer,
+                    'is_correct': is_correct
+                })
+
+            # Commit
+            db.session.commit()
+
+            return saved_answers
+
         except Exception as e:
-            self.logger.error(f"Erro ao salvar respostas: {str(e)}")
+            db.session.rollback()
+            self.logger.error(f"Erro ao salvar respostas: {str(e)}", exc_info=True)
             return []
     
     def _criar_sessao_minima_para_evaluation_result(self, test_id: str, student_id: str) -> Optional[str]:
-        """Cria sessão mínima para EvaluationResult"""
+        """
+        Cria uma sessão mínima apenas para satisfazer a foreign key do EvaluationResult
+        Não é uma sessão real de teste, apenas um registro técnico
+
+        Args:
+            test_id: ID da prova
+            student_id: ID do aluno
+
+        Returns:
+            session_id: ID da sessão criada ou None se erro
+        """
         try:
-            from app.services.correcaoIA import CorrecaoIA
-            correcao_ia = CorrecaoIA(debug=self.debug)
-            return correcao_ia._criar_sessao_minima_para_evaluation_result(test_id, student_id)
+            from app.models.testSession import TestSession
+            import uuid
+
+            # Verificar se já existe uma sessão para esta correção física
+            existing_session = TestSession.query.filter_by(
+                test_id=test_id,
+                student_id=student_id,
+                status='corrigida',
+                user_agent='Physical Test Correction (Hybrid)'
+            ).first()
+
+            if existing_session:
+                return existing_session.id
+
+            # Criar nova sessão mínima para correção física
+            session = TestSession(
+                id=str(uuid.uuid4()),
+                student_id=student_id,
+                test_id=test_id,
+                time_limit_minutes=None,
+                ip_address=None,
+                user_agent='Physical Test Correction (Hybrid)',
+                status='corrigida',
+                started_at=datetime.utcnow(),
+                submitted_at=datetime.utcnow()
+            )
+
+            db.session.add(session)
+            db.session.commit()
+
+            return session.id
+
         except Exception as e:
-            self.logger.error(f"Erro ao criar sessão: {str(e)}")
+            db.session.rollback()
+            self.logger.error(f"Erro ao criar sessão mínima: {str(e)}", exc_info=True)
             return None
     
     def _marcar_formulario_como_corrigido(self, test_id: str, student_id: str) -> bool:
-        """Marca formulário como corrigido"""
+        """
+        Marca o PhysicalTestForm como corrigido após processar a correção
+
+        Args:
+            test_id: ID da prova
+            student_id: ID do aluno
+
+        Returns:
+            bool: True se marcado com sucesso, False caso contrário
+        """
         try:
-            from app.services.correcaoIA import CorrecaoIA
-            correcao_ia = CorrecaoIA(debug=self.debug)
-            return correcao_ia._marcar_formulario_como_corrigido(test_id, student_id)
+            from app.models.physicalTestForm import PhysicalTestForm
+
+            # Buscar formulário físico do aluno para esta prova
+            form = PhysicalTestForm.query.filter_by(
+                test_id=test_id,
+                student_id=student_id
+            ).first()
+
+            if not form:
+                self.logger.warning(f"Formulário físico não encontrado para test_id={test_id}, student_id={student_id}")
+                return False
+
+            # Marcar como enviado (se ainda não foi marcado)
+            if not form.answer_sheet_sent_at:
+                form.answer_sheet_sent_at = datetime.utcnow()
+
+            # Marcar como corrigido
+            form.is_corrected = True
+            form.corrected_at = datetime.utcnow()
+            form.status = 'corrigido'
+
+            db.session.commit()
+
+            return True
+
         except Exception as e:
-            self.logger.error(f"Erro ao marcar formulário: {str(e)}")
+            db.session.rollback()
+            self.logger.error(f"Erro ao marcar formulário como corrigido: {str(e)}", exc_info=True)
             return False

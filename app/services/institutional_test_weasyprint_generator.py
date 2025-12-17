@@ -183,7 +183,8 @@ class InstitutionalTestWeasyPrintGenerator:
             
 
             # Renderizar template HTML
-            template = self.env.get_template('institutional_test.html')
+            #template = self.env.get_template('institutional_test.html')
+            template = self.env.get_template('institutional_test_hybrid.html')
             html_content = template.render(**template_data)
 
             # Gerar PDF com WeasyPrint

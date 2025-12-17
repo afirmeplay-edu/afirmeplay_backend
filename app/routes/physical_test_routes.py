@@ -16,6 +16,7 @@ from app.services.physical_test_pdf_generator import PhysicalTestPDFGenerator
 from app.services.physical_test_form_service import PhysicalTestFormService
 from app.services.sistemaORM import SistemaORM  # NOVO SISTEMA OMR
 from app.services.correcaoIA import CorrecaoIA  # SISTEMA DE CORREÇÃO COM IA (Abacus AI)
+from app.services.correcao_hybrid import CorrecaoHybrid  # SISTEMA HÍBRIDO (Geométrico)
 import tempfile
 from app.services.batch_correction_service import batch_correction_service
 import logging
@@ -440,7 +441,7 @@ def process_physical_correction(test_id):
         if use_new_orm:
             # NOVO SISTEMA OMR - Alinhamento pela página inteira
             print("🆕 Usando NOVO SISTEMA OMR (alinhamento pela página)")
-            
+
             try:
                 # Converter image_data para base64 string
                 if isinstance(image_data, bytes):
@@ -448,16 +449,16 @@ def process_physical_correction(test_id):
                     image_data_str = f"data:image/jpeg;base64,{image_base64}"
                 else:
                     image_data_str = image_data
-                
+
                 # Criar instância do novo sistema
                 sistema_orm = SistemaORM(debug=True)
-                
+
                 # Processar correção
                 result = sistema_orm.process_exam(
                     image_data=image_data_str,
                     num_questions=None  # Será buscado do banco
                 )
-                
+
                 if result.get('success'):
                     return jsonify({
                         "message": "Correção processada com sucesso (NOVO SISTEMA OMR)",
@@ -477,7 +478,7 @@ def process_physical_correction(test_id):
                         "error": result.get('error', 'Erro desconhecido na correção'),
                         "system": "new_orm"
                     }), 500
-                    
+
             except Exception as e:
                 logging.error(f"Erro no novo sistema OMR: {str(e)}")
                 import traceback
@@ -486,19 +487,62 @@ def process_physical_correction(test_id):
                     "error": f"Erro no novo sistema OMR: {str(e)}",
                     "system": "new_orm"
                 }), 500
-        
+
+        elif data.get('use_hybrid', False) or request.form.get('use_hybrid', 'false').lower() == 'true':
+            # SISTEMA HÍBRIDO - Detecção geométrica (OpenCV)
+            print("🔷 Usando SISTEMA HÍBRIDO (detecção geométrica)")
+
+            try:
+                # Criar instância do CorrecaoHybrid
+                correcao_hybrid = CorrecaoHybrid(debug=True)
+
+                # Processar correção usando detecção geométrica
+                result = correcao_hybrid.corrigir_prova_geometrica(
+                    image_data=image_data,
+                    test_id=test_id
+                )
+
+                if result.get('success'):
+                    return jsonify({
+                        "message": "Correção processada com sucesso (Sistema Híbrido - Geométrico)",
+                        "system": "hybrid",
+                        "student_id": result.get('student_id'),
+                        "test_id": result.get('test_id'),
+                        "correct": result.get('correct'),
+                        "total": result.get('total'),
+                        "percentage": result.get('percentage'),
+                        "score_percentage": result.get('score_percentage'),
+                        "answers": result.get('answers'),
+                        "saved_answers": result.get('saved_answers'),
+                        "evaluation_result": result.get('evaluation_result')
+                    }), 200
+                else:
+                    return jsonify({
+                        "error": result.get('error', 'Erro desconhecido na correção'),
+                        "system": "hybrid"
+                    }), 500
+
+            except Exception as e:
+                logging.error(f"Erro no sistema híbrido: {str(e)}")
+                import traceback
+                logging.error(traceback.format_exc())
+                return jsonify({
+                    "error": f"Erro no sistema híbrido: {str(e)}",
+                    "system": "hybrid"
+                }), 500
+
         elif use_old_system:
             # SISTEMA ANTIGO - Mantido para compatibilidade
             print("📋 Usando SISTEMA ANTIGO (alinhamento por marcadores)")
-            
+
             form_service = PhysicalTestFormService()
-            
+
             result = form_service.process_physical_correction(
                 test_id=test_id,
                 image_data=image_data,
                 correction_image_url=None
             )
-            
+
             if result.get('success'):
                 return jsonify({
                     "message": "Correção processada com sucesso",
@@ -520,21 +564,21 @@ def process_physical_correction(test_id):
                     "error": result.get('error', 'Erro desconhecido na correção'),
                     "system": "old"
                 }), 500
-        
+
         else:
             # SISTEMA COM IA (CorrecaoIA) - PADRÃO
             print("🤖 Usando SISTEMA COM IA (Abacus AI)")
-            
+
             try:
                 # Criar instância do CorrecaoIA
                 correcao_ia = CorrecaoIA(debug=True)
-                
+
                 # Processar correção usando IA
                 result = correcao_ia.corrigir_prova_com_ia(
                     image_data=image_data,
                     test_id=test_id
                 )
-                
+
                 if result.get('success'):
                     return jsonify({
                         "message": "Correção processada com sucesso (IA - Abacus AI)",
@@ -559,7 +603,7 @@ def process_physical_correction(test_id):
                         "error": result.get('error', 'Erro desconhecido na correção'),
                         "system": "ai"
                     }), 500
-                    
+
             except Exception as e:
                 logging.error(f"Erro no sistema de correção com IA: {str(e)}")
                 import traceback

@@ -1,6 +1,8 @@
 # -*- coding: utf-8 -*-
 """
-Rotas para formulários físicos - Versão simplificada sem SSE
+Rotas para formulários físicos
+Sistema de correção: CorrecaoHybrid (detecção geométrica)
+Suporta correção única (síncrona) e em lote (assíncrona com polling)
 """
 
 from flask import Blueprint, request, jsonify, send_file
@@ -14,11 +16,14 @@ from app.models.physicalTestForm import PhysicalTestForm
 from app.models.classTest import ClassTest
 from app.services.physical_test_pdf_generator import PhysicalTestPDFGenerator
 from app.services.physical_test_form_service import PhysicalTestFormService
-from app.services.sistemaORM import SistemaORM  # NOVO SISTEMA OMR
-from app.services.correcaoIA import CorrecaoIA  # SISTEMA DE CORREÇÃO COM IA (Abacus AI)
-from app.services.correcao_hybrid import CorrecaoHybrid  # SISTEMA HÍBRIDO (Geométrico)
+from app.services.correcao_hybrid import CorrecaoHybrid  # ÚNICO SISTEMA DE CORREÇÃO
+from app.services.progress_store import (
+    create_job, update_item_processing, update_item_done,
+    update_item_error, complete_job, get_job
+)
 import tempfile
-from app.services.batch_correction_service import batch_correction_service
+import threading
+import uuid
 import logging
 import base64
 import os
@@ -375,6 +380,72 @@ def generate_individual_physical_form(test_id, student_id):
         return jsonify({"error": "Erro interno do servidor"}), 500
 
 # ============================================================================
+# FUNÇÃO DE PROCESSAMENTO EM BACKGROUND
+# ============================================================================
+
+def process_batch_in_background(job_id: str, test_id: str, images: list):
+    """
+    Processa correção em lote em background thread
+    
+    Args:
+        job_id: ID do job para tracking
+        test_id: ID da prova
+        images: Lista de imagens em base64
+    """
+    from app import create_app
+    
+    # Criar contexto da aplicação para a thread
+    app = create_app()
+    
+    with app.app_context():
+        try:
+            correcao = CorrecaoHybrid(debug=True)
+            
+            for i, image_base64 in enumerate(images):
+                try:
+                    # Marcar como processando
+                    update_item_processing(job_id, i)
+                    
+                    # Decodificar imagem
+                    if image_base64.startswith('data:image'):
+                        image_base64_clean = image_base64.split(',')[1]
+                    else:
+                        image_base64_clean = image_base64
+                    image_data = base64.b64decode(image_base64_clean)
+                    
+                    # Processar correção com CorrecaoHybrid
+                    result = correcao.corrigir_prova_geometrica(
+                        image_data=image_data,
+                        test_id=test_id
+                    )
+                    
+                    if result.get('success'):
+                        # Buscar nome do aluno se não veio no resultado
+                        if not result.get('student_name') and result.get('student_id'):
+                            student = Student.query.get(result['student_id'])
+                            if student:
+                                result['student_name'] = student.name
+                        
+                        update_item_done(job_id, i, result)
+                        logging.info(f"✅ Job {job_id}: Imagem {i+1} processada com sucesso")
+                    else:
+                        update_item_error(job_id, i, result.get('error', 'Erro desconhecido'))
+                        logging.warning(f"❌ Job {job_id}: Imagem {i+1} falhou: {result.get('error')}")
+                        
+                except Exception as e:
+                    update_item_error(job_id, i, str(e))
+                    logging.error(f"❌ Job {job_id}: Erro na imagem {i+1}: {str(e)}")
+            
+            # Marcar job como concluído
+            complete_job(job_id)
+            logging.info(f"✅ Job {job_id} concluído")
+            
+        except Exception as e:
+            logging.error(f"❌ Erro crítico no job {job_id}: {str(e)}")
+            complete_job(job_id)
+
+
+# ============================================================================
 # ROTAS DE CORREÇÃO
 # ============================================================================
 
@@ -383,7 +454,32 @@ def generate_individual_physical_form(test_id, student_id):
 @role_required("admin", "professor", "coordenador", "diretor")
 def process_physical_correction(test_id):
     """
-    Processa correção de gabarito físico preenchido usando gabarito de referência
+    Processa correção de formulário(s) físico(s) usando CorrecaoHybrid
+    
+    Aceita:
+    - Uma única imagem (campo 'image') - processamento SÍNCRONO
+    - Múltiplas imagens (campo 'images') - processamento ASSÍNCRONO com job_id
+    
+    Body (JSON) - Modo Único:
+    {
+        "image": "data:image/jpeg;base64,..."
+    }
+    
+    Body (JSON) - Modo Lote:
+    {
+        "images": [
+            "data:image/jpeg;base64,...",
+            "data:image/jpeg;base64,...",
+            ...
+        ]
+    }
+    
+    Returns (síncrono - 1 imagem):
+        Resultado completo da correção
+        
+    Returns (assíncrono - múltiplas imagens):
+        {"job_id": "uuid", "message": "Processamento iniciado", "total": N}
+        Use GET /correction-progress/<job_id> para acompanhar o progresso
     """
     try:
         user = get_current_user_from_token()
@@ -399,425 +495,175 @@ def process_physical_correction(test_id):
         if user['role'] == 'professor' and test.created_by != user['id']:
             return jsonify({"error": "Você só pode processar correções de suas próprias provas"}), 403
         
-        # Obter dados da imagem
-        image_data = None
+        # Obter dados da requisição
+        data = None
+        images = []
+        single_image = None
         
-        if 'image' in request.files:
-            # Upload de arquivo
+        # Tentar obter de JSON
+        try:
+            data = request.get_json() or {}
+            
+            # Verificar se é lote (campo 'images') ou única (campo 'image')
+            if 'images' in data and isinstance(data['images'], list):
+                images = data['images']
+            elif 'image' in data:
+                single_image = data['image']
+        except:
+            pass
+        
+        # Tentar obter de form-data (arquivo)
+        if not images and not single_image and 'image' in request.files:
             file = request.files['image']
             if file and file.filename:
-                image_data = file.read()
-        else:
-            # Tentar obter dados JSON
-            try:
-                data = request.get_json() or {}
-                if 'image' in data:
-                    # Base64
-                    image_base64 = data['image']
-                    if image_base64.startswith('data:image'):
-                        image_base64 = image_base64.split(',')[1]
-                    image_data = base64.b64decode(image_base64)
-            except Exception as e:
-                # Se não conseguir obter JSON, tentar form data
-                try:
-                    image_base64 = request.form.get('image')
-                    if image_base64:
-                        if image_base64.startswith('data:image'):
-                            image_base64 = image_base64.split(',')[1]
-                        image_data = base64.b64decode(image_base64)
-                except Exception as e2:
-                    return jsonify({"error": "Formato de dados inválido. Envie como JSON ou form-data"}), 400
+                image_bytes = file.read()
+                single_image = f"data:image/jpeg;base64,{base64.b64encode(image_bytes).decode('utf-8')}"
         
-        if not image_data:
-            return jsonify({"error": "Imagem não fornecida"}), 400
+        # Tentar obter de form-data (base64)
+        if not images and not single_image:
+            image_base64 = request.form.get('image')
+            if image_base64:
+                single_image = image_base64
         
-        # Verificar qual sistema usar (parâmetros opcionais)
-        data = request.get_json() or {}
-        use_new_orm = data.get('use_new_orm', False) or request.form.get('use_new_orm', 'false').lower() == 'true'
-        use_ai = data.get('use_ai', True)  # Por padrão, usar IA (CorrecaoIA)
-        use_old_system = data.get('use_old_system', False) or request.form.get('use_old_system', 'false').lower() == 'true'
-        
-        # Prioridade: use_new_orm > use_ai > use_old_system
-        if use_new_orm:
-            # NOVO SISTEMA OMR - Alinhamento pela página inteira
-            print("🆕 Usando NOVO SISTEMA OMR (alinhamento pela página)")
-
-            try:
-                # Converter image_data para base64 string
-                if isinstance(image_data, bytes):
-                    image_base64 = base64.b64encode(image_data).decode('utf-8')
-                    image_data_str = f"data:image/jpeg;base64,{image_base64}"
-                else:
-                    image_data_str = image_data
-
-                # Criar instância do novo sistema
-                sistema_orm = SistemaORM(debug=True)
-
-                # Processar correção
-                result = sistema_orm.process_exam(
-                    image_data=image_data_str,
-                    num_questions=None  # Será buscado do banco
-                )
-
-                if result.get('success'):
-                    return jsonify({
-                        "message": "Correção processada com sucesso (NOVO SISTEMA OMR)",
-                        "system": "new_orm",
-                        "student_id": result.get('student_id'),
-                        "test_id": result.get('test_id'),
-                        "correct": result.get('correct'),
-                        "total": result.get('total'),
-                        "score": result.get('score'),
-                        "percentage": result.get('percentage'),
-                        "answers": result.get('answers'),
-                        "saved_answers": result.get('saved_answers'),
-                        "evaluation_result": result.get('evaluation_result')
-                    }), 200
-                else:
-                    return jsonify({
-                        "error": result.get('error', 'Erro desconhecido na correção'),
-                        "system": "new_orm"
-                    }), 500
-
-            except Exception as e:
-                logging.error(f"Erro no novo sistema OMR: {str(e)}")
-                import traceback
-                logging.error(traceback.format_exc())
-                return jsonify({
-                    "error": f"Erro no novo sistema OMR: {str(e)}",
-                    "system": "new_orm"
-                }), 500
-
-        elif data.get('use_hybrid', False) or request.form.get('use_hybrid', 'false').lower() == 'true':
-            # SISTEMA HÍBRIDO - Detecção geométrica (OpenCV)
-            print("🔷 Usando SISTEMA HÍBRIDO (detecção geométrica)")
-
-            try:
-                # Criar instância do CorrecaoHybrid
-                correcao_hybrid = CorrecaoHybrid(debug=True)
-
-                # Processar correção usando detecção geométrica
-                result = correcao_hybrid.corrigir_prova_geometrica(
-                    image_data=image_data,
-                    test_id=test_id
-                )
-
-                if result.get('success'):
-                    return jsonify({
-                        "message": "Correção processada com sucesso (Sistema Híbrido - Geométrico)",
-                        "system": "hybrid",
-                        "student_id": result.get('student_id'),
-                        "test_id": result.get('test_id'),
-                        "correct": result.get('correct'),
-                        "total": result.get('total'),
-                        "percentage": result.get('percentage'),
-                        "score_percentage": result.get('score_percentage'),
-                        "answers": result.get('answers'),
-                        "saved_answers": result.get('saved_answers'),
-                        "evaluation_result": result.get('evaluation_result')
-                    }), 200
-                else:
-                    return jsonify({
-                        "error": result.get('error', 'Erro desconhecido na correção'),
-                        "system": "hybrid"
-                    }), 500
-
-            except Exception as e:
-                logging.error(f"Erro no sistema híbrido: {str(e)}")
-                import traceback
-                logging.error(traceback.format_exc())
-                return jsonify({
-                    "error": f"Erro no sistema híbrido: {str(e)}",
-                    "system": "hybrid"
-                }), 500
-
-        elif use_old_system:
-            # SISTEMA ANTIGO - Mantido para compatibilidade
-            print("📋 Usando SISTEMA ANTIGO (alinhamento por marcadores)")
-
-            form_service = PhysicalTestFormService()
-
-            result = form_service.process_physical_correction(
-                test_id=test_id,
+        # ==================================================================
+        # MODO ÚNICO (1 imagem) - Processamento SÍNCRONO
+        # ==================================================================
+        if single_image and not images:
+            logging.info(f"🔧 Processando correção única para prova {test_id}")
+            
+            # Decodificar imagem
+            if single_image.startswith('data:image'):
+                single_image_clean = single_image.split(',')[1]
+            else:
+                single_image_clean = single_image
+            image_data = base64.b64decode(single_image_clean)
+            
+            # Processar com CorrecaoHybrid
+            correcao = CorrecaoHybrid(debug=True)
+            result = correcao.corrigir_prova_geometrica(
                 image_data=image_data,
-                correction_image_url=None
+                test_id=test_id
             )
-
+            
             if result.get('success'):
                 return jsonify({
                     "message": "Correção processada com sucesso",
-                    "system": "old",
+                    "system": "hybrid",
                     "student_id": result.get('student_id'),
-                    "test_id": test_id,
-                    "correct_answers": result.get('correct_answers'),
-                    "total_questions": result.get('total_questions'),
-                    "score_percentage": result.get('score_percentage'),
+                    "test_id": result.get('test_id'),
+                    "correct": result.get('correct'),
+                    "total": result.get('total'),
+                    "percentage": result.get('percentage'),
                     "grade": result.get('grade'),
                     "proficiency": result.get('proficiency'),
                     "classification": result.get('classification'),
-                    "answers_detected": result.get('answers_detected'),
-                    "student_answers": result.get('student_answers'),
+                    "score_percentage": result.get('score_percentage'),
+                    "answers": result.get('answers'),
+                    "correction": result.get('correction'),
+                    "saved_answers": result.get('saved_answers'),
                     "evaluation_result_id": result.get('evaluation_result_id')
                 }), 200
             else:
                 return jsonify({
                     "error": result.get('error', 'Erro desconhecido na correção'),
-                    "system": "old"
-                }), 500
-
-        else:
-            # SISTEMA COM IA (CorrecaoIA) - PADRÃO
-            print("🤖 Usando SISTEMA COM IA (Abacus AI)")
-
-            try:
-                # Criar instância do CorrecaoIA
-                correcao_ia = CorrecaoIA(debug=True)
-
-                # Processar correção usando IA
-                result = correcao_ia.corrigir_prova_com_ia(
-                    image_data=image_data,
-                    test_id=test_id
-                )
-
-                if result.get('success'):
-                    return jsonify({
-                        "message": "Correção processada com sucesso (IA - Abacus AI)",
-                        "system": "ai",
-                        "student_id": result.get('student_id'),
-                        "test_id": result.get('test_id'),
-                        "correct": result.get('correct'),
-                        "total": result.get('total'),
-                        "percentage": result.get('percentage'),
-                        "grade": result.get('grade'),
-                        "proficiency": result.get('proficiency'),
-                        "classification": result.get('classification'),
-                        "score_percentage": result.get('score_percentage'),
-                        "answers": result.get('answers'),
-                        "correction": result.get('correction'),
-                        "details": result.get('details'),
-                        "saved_answers": result.get('saved_answers'),
-                        "evaluation_result_id": result.get('evaluation_result_id')
-                    }), 200
-                else:
-                    return jsonify({
-                        "error": result.get('error', 'Erro desconhecido na correção'),
-                        "system": "ai"
-                    }), 500
-
-            except Exception as e:
-                logging.error(f"Erro no sistema de correção com IA: {str(e)}")
-                import traceback
-                logging.error(traceback.format_exc())
-                return jsonify({
-                    "error": f"Erro no sistema de correção com IA: {str(e)}",
-                    "system": "ai"
+                    "system": "hybrid"
                 }), 500
         
-    except Exception as e:
-        print(f"❌ Erro ao processar correção: {str(e)}")
-        return jsonify({"error": "Erro interno do servidor"}), 500
-
-
-@bp.route('/test/<string:test_id>/process-correction-orm', methods=['POST'])
-@jwt_required()
-@role_required("admin", "professor", "coordenador", "diretor")
-def process_physical_correction_orm(test_id):
-    """
-    ROTA TEMPORÁRIA: Processa correção usando o NOVO SISTEMA OMR
-    Alinhamento pela página inteira (não pelos 4 quadradinhos)
-    
-    Esta rota usa exclusivamente o novo sistema OMR para testes
-    """
-    try:
-        user = get_current_user_from_token()
-        if not user:
-            return jsonify({"error": "User not found or token invalid"}), 401
-        
-        # Buscar a prova
-        test = Test.query.get(test_id)
-        if not test:
-            return jsonify({"error": f"Prova não encontrada: {test_id}"}), 404
-        
-        # Verificar permissões do professor
-        if user['role'] == 'professor' and test.created_by != user['id']:
-            return jsonify({"error": "Você só pode processar correções de suas próprias provas"}), 403
-        
-        # Obter dados da imagem
-        image_data = None
-        
-        if 'image' in request.files:
-            # Upload de arquivo
-            file = request.files['image']
-            if file and file.filename:
-                image_data = file.read()
-        else:
-            # Tentar obter dados JSON
-            try:
-                data = request.get_json() or {}
-                if 'image' in data:
-                    # Base64
-                    image_base64 = data['image']
-                    if image_base64.startswith('data:image'):
-                        image_base64 = image_base64.split(',')[1]
-                    image_data = base64.b64decode(image_base64)
-            except Exception as e:
-                # Se não conseguir obter JSON, tentar form data
-                try:
-                    image_base64 = request.form.get('image')
-                    if image_base64:
-                        if image_base64.startswith('data:image'):
-                            image_base64 = image_base64.split(',')[1]
-                        image_data = base64.b64decode(image_base64)
-                except Exception as e2:
-                    return jsonify({"error": "Formato de dados inválido. Envie como JSON ou form-data"}), 400
-        
-        if not image_data:
-            return jsonify({"error": "Imagem não fornecida"}), 400
-        
-        # NOVO SISTEMA OMR
-        print("🆕 Processando correção com NOVO SISTEMA OMR")
-        
-        try:
-            # Converter image_data para base64 string
-            if isinstance(image_data, bytes):
-                image_base64 = base64.b64encode(image_data).decode('utf-8')
-                image_data_str = f"data:image/jpeg;base64,{image_base64}"
-            else:
-                image_data_str = image_data
+        # ==================================================================
+        # MODO LOTE (múltiplas imagens) - Processamento ASSÍNCRONO
+        # ==================================================================
+        if images:
+            # Validar quantidade
+            if len(images) > 50:
+                return jsonify({"error": "Máximo de 50 imagens por lote"}), 400
             
-            # Criar instância do novo sistema
-            sistema_orm = SistemaORM(debug=True)
+            if len(images) == 0:
+                return jsonify({"error": "Nenhuma imagem fornecida"}), 400
             
-            # Processar correção
-            result = sistema_orm.process_exam(
-                image_data=image_data_str,
-                num_questions=None  # Será buscado do banco
+            logging.info(f"🔧 Iniciando correção em lote: {len(images)} imagens para prova {test_id}")
+            
+            # Criar job ID
+            job_id = str(uuid.uuid4())
+            
+            # Criar job no store
+            create_job(job_id, len(images), test_id)
+            
+            # Iniciar thread de processamento
+            thread = threading.Thread(
+                target=process_batch_in_background,
+                args=(job_id, test_id, images),
+                daemon=True
             )
+            thread.start()
             
-            if result.get('success'):
-                return jsonify({
-                    "message": "Correção processada com sucesso (NOVO SISTEMA OMR)",
-                    "system": "new_orm",
-                    "student_id": result.get('student_id'),
-                    "test_id": result.get('test_id'),
-                    "correct": result.get('correct'),
-                    "total": result.get('total'),
-                    "score": result.get('score'),
-                    "percentage": result.get('percentage'),
-                    "answers": result.get('answers'),
-                    "saved_answers": result.get('saved_answers'),
-                    "evaluation_result": result.get('evaluation_result')
-                }), 200
-            else:
-                return jsonify({
-                    "error": result.get('error', 'Erro desconhecido na correção'),
-                    "system": "new_orm"
-                }), 500
-                
-        except Exception as e:
-            logging.error(f"Erro no novo sistema OMR: {str(e)}")
-            import traceback
-            logging.error(traceback.format_exc())
             return jsonify({
-                "error": f"Erro no novo sistema OMR: {str(e)}",
-                "system": "new_orm",
-                "traceback": traceback.format_exc() if logging.getLogger().level == logging.DEBUG else None
-            }), 500
+                "job_id": job_id,
+                "message": "Processamento em lote iniciado",
+                "total": len(images),
+                "status": "processing"
+            }), 202  # 202 Accepted
+        
+        # Nenhuma imagem fornecida
+        return jsonify({"error": "Imagem não fornecida. Use 'image' para única ou 'images' para lote."}), 400
         
     except Exception as e:
-        print(f"❌ Erro ao processar correção: {str(e)}")
+        logging.error(f"❌ Erro ao processar correção: {str(e)}")
         return jsonify({"error": "Erro interno do servidor"}), 500
 
+
 # ============================================================================
-# ROTAS DE CORREÇÃO EM LOTE SÍNCRONA
+# ROTA DE PROGRESSO DA CORREÇÃO EM LOTE
 # ============================================================================
 
-@bp.route('/test/<string:test_id>/batch-process-correction', methods=['POST'])
+@bp.route('/correction-progress/<string:job_id>', methods=['GET'])
 @jwt_required()
-@role_required("admin", "professor", "coordenador", "diretor")
-def batch_process_correction(test_id):
+def get_correction_progress(job_id):
     """
-    Processa correção em lote de múltiplos formulários físicos de forma síncrona
-    
-    Body (JSON):
-    {
-        "images": [
-            {
-                "student_id": "uuid1", // opcional
-                "student_name": "João Silva", // opcional
-                "image": "data:image/jpeg;base64,..."
-            },
-            {
-                "student_id": "uuid2",
-                "image": "data:image/jpeg;base64,..."
-            }
-        ]
-    }
+    Consulta progresso de uma correção em lote
     
     Returns:
-        - Resultados de todas as correções
-        - Resumo final
+    {
+        "job_id": "uuid",
+        "total": 5,
+        "completed": 2,
+        "successful": 2,
+        "failed": 0,
+        "status": "processing",  // "processing" | "completed"
+        "percentage": 40.0,
+        "items": {
+            "0": {"status": "done", "student_id": "xxx", "student_name": "João", ...},
+            "1": {"status": "done", "student_id": "yyy", "student_name": "Maria", ...},
+            "2": {"status": "processing"},
+            "3": {"status": "pending"},
+            "4": {"status": "pending"}
+        },
+        "results": [...]  // Resultados completos quando status = "completed"
+    }
     """
-    try:
-        user = get_current_user_from_token()
-        if not user:
-            return jsonify({"error": "User not found or token invalid"}), 401
-        
-        # Validar prova
-        test = Test.query.get(test_id)
-        if not test:
-            return jsonify({"error": f"Prova não encontrada: {test_id}"}), 404
-        
-        # Verificar permissões
-        if user['role'] == 'professor' and test.created_by != user['id']:
-            return jsonify({"error": "Você só pode processar correções de suas próprias provas"}), 403
-        
-        # Obter dados das imagens
-        data = request.get_json()
-        if not data or 'images' not in data:
-            return jsonify({"error": "Campo 'images' é obrigatório"}), 400
-        
-        images = data['images']
-        if not isinstance(images, list) or len(images) == 0:
-            return jsonify({"error": "Lista de imagens deve ser um array não vazio"}), 400
-        
-        # Limitar número de imagens por lote
-        if len(images) > 50:
-            return jsonify({"error": "Máximo de 50 imagens por lote"}), 400
-        
-        # Validar formato das imagens
-        for i, img_data in enumerate(images):
-            if not isinstance(img_data, dict) or 'image' not in img_data:
-                return jsonify({"error": f"Imagem {i+1} deve ter campo 'image'"}), 400
-            
-            # Validar formato base64
-            image_str = img_data['image']
-            if not image_str.startswith('data:image'):
-                return jsonify({"error": f"Imagem {i+1} deve estar em formato base64"}), 400
-        
-        # Processar correção em lote de forma síncrona
-        results = batch_correction_service.process_batch_sync(
-            test_id=test_id,
-            created_by=user['id'],
-            images_data=images
-        )
-        
-        logging.info(f"Correção em lote concluída: {len(images)} imagens processadas")
-        
-        return jsonify({
-            "message": "Correção em lote concluída com sucesso",
-            "test_id": test_id,
-            "total_images": len(images),
-            "successful_corrections": results['successful_corrections'],
-            "failed_corrections": results['failed_corrections'],
-            "success_rate": results['success_rate'],
-            "results": results['results'],
-            "errors": results['errors']
-        }), 200
-        
-    except Exception as e:
-        print(f"❌ Erro ao processar correção em lote: {str(e)}")
-        return jsonify({"error": "Erro interno do servidor"}), 500
+    job = get_job(job_id)
+    
+    if not job:
+        return jsonify({"error": "Job não encontrado"}), 404
+    
+    # Calcular porcentagem
+    percentage = (job["completed"] / job["total"] * 100) if job["total"] > 0 else 0
+    
+    response = {
+        "job_id": job_id,
+        "total": job["total"],
+        "completed": job["completed"],
+        "successful": job["successful"],
+        "failed": job["failed"],
+        "status": job["status"],
+        "percentage": round(percentage, 1),
+        "items": job["items"]
+    }
+    
+    # Incluir resultados completos apenas quando finalizado
+    if job["status"] == "completed":
+        response["results"] = job["results"]
+    
+    return jsonify(response), 200
 
 # ============================================================================
 # ROTAS DE LISTAGEM E CONSULTA

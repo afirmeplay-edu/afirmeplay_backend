@@ -1,18 +1,24 @@
 # -*- coding: utf-8 -*-
 """
-Configuração para integração com Abacus AI API
+Configuração para integração com OpenRouter AI API
 """
 
-# Configuração da API Key Abacus AI
-ABACUS_API_KEY = "s2_b0167419bc70447ba819248ad57abc5a"
+from openai import OpenAI
 
-# Configurações do modelo Abacus AI
-ABACUS_MODEL = "o4-mini"
-ABACUS_MAX_TOKENS = 8192
-ABACUS_TEMPERATURE = 0.7
+# Configuração da API Key OpenRouter
+OPENROUTER_API_KEY = "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"
 
-# URL da API Abacus AI (RouteLLM - compatível com OpenAI Chat Completions API)
-ABACUS_API_URL = "https://routellm.abacus.ai/v1/chat/completions"
+# Configurações do modelo OpenRouter
+OPENROUTER_MODEL = "nex-agi/deepseek-v3.1-nex-n1:free"
+OPENROUTER_MAX_TOKENS = 8192
+OPENROUTER_TEMPERATURE = 0.7
+
+# URL base da API OpenRouter
+OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
+
+# Headers opcionais para rankings no OpenRouter (opcional)
+OPENROUTER_HTTP_REFERER = None  # Opcional: URL do seu site
+OPENROUTER_SITE_NAME = None  # Opcional: Nome do seu site
 
 # Prompt base para análise de relatórios
 ANALYSIS_PROMPT_BASE = """
@@ -310,6 +316,37 @@ INSTRUÇÕES IMPORTANTES:
 
 # Configurações de contexto
 CONTEXT_SETTINGS = {
-    "max_tokens": ABACUS_MAX_TOKENS,
-    "temperature": ABACUS_TEMPERATURE
+    "max_tokens": OPENROUTER_MAX_TOKENS,
+    "temperature": OPENROUTER_TEMPERATURE
 }
+
+def get_openrouter_client() -> OpenAI:
+    """
+    Retorna cliente OpenAI configurado para OpenRouter
+    
+    Returns:
+        OpenAI: Cliente configurado com base_url e api_key do OpenRouter
+    """
+    client = OpenAI(
+        base_url=OPENROUTER_BASE_URL,
+        api_key=OPENROUTER_API_KEY
+    )
+    
+    return client
+
+def get_openrouter_extra_headers() -> dict:
+    """
+    Retorna headers extras para usar nas chamadas do OpenRouter
+    
+    Returns:
+        dict: Headers extras (HTTP-Referer e X-Title) se configurados
+    """
+    extra_headers = {}
+    
+    if OPENROUTER_HTTP_REFERER:
+        extra_headers["HTTP-Referer"] = OPENROUTER_HTTP_REFERER
+    
+    if OPENROUTER_SITE_NAME:
+        extra_headers["X-Title"] = OPENROUTER_SITE_NAME
+    
+    return extra_headers

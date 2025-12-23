@@ -1,17 +1,17 @@
 # -*- coding: utf-8 -*-
 """
-Serviço para análise de relatórios usando Abacus AI
+Serviço para análise de relatórios usando OpenRouter AI
 """
 
 import logging
 import re
 from typing import Dict, Any, Optional
 from app.openai_config.openai_config import (
-    ABACUS_API_KEY,
-    ABACUS_API_URL,
-    ABACUS_MODEL,
-    ABACUS_MAX_TOKENS,
-    ABACUS_TEMPERATURE,
+    OPENROUTER_MODEL,
+    OPENROUTER_MAX_TOKENS,
+    OPENROUTER_TEMPERATURE,
+    get_openrouter_client,
+    get_openrouter_extra_headers,
     ANALYSIS_PROMPT_BASE, 
     CONTEXT_SETTINGS,
     PARTICIPATION_CLASSIFICATION_TABLE,
@@ -22,14 +22,14 @@ from app.openai_config.openai_config import (
     NOTA_REFERENCE_TABLE,
     NOTA_ANALYSIS_PROMPT_TEMPLATE
 )
-import requests
 
 class AIAnalysisService:
-    """Serviço para análise de relatórios usando Abacus AI"""
+    """Serviço para análise de relatórios usando OpenRouter AI"""
     
     def __init__(self):
         self.logger = logging.getLogger(__name__)
-        self.logger.info("Usando Abacus AI para análise de relatórios (REST API)")
+        self.client = get_openrouter_client()
+        self.logger.info("Usando OpenRouter AI para análise de relatórios")
     
     def analyze_report_data(self, report_data: Dict[str, Any]) -> Dict[str, Any]:
         """
@@ -860,20 +860,17 @@ e recomendações práticas para a escola.
         return formatted
     
     def _call_openai(self, prompt: str) -> str:
-        """Chama API Abacus AI via REST"""
+        """Chama API OpenRouter via cliente OpenAI"""
         try:
             system_prompt = "Você é um especialista em educação e análise de dados educacionais. Sempre gere texto humanizado e profissional, SEM usar formatação markdown (sem #, ##, *, **, etc). Use apenas parágrafos normais e títulos em maiúsculas seguidos de dois pontos."
             
-            # Preparar headers
-            headers = {
-                "Authorization": f"Bearer {ABACUS_API_KEY}",
-                "Content-Type": "application/json"
-            }
+            # Obter headers extras do OpenRouter (opcionais)
+            extra_headers = get_openrouter_extra_headers()
             
-            # Preparar payload no formato OpenAI API
-            payload = {
-                "model": ABACUS_MODEL,
-                "messages": [
+            # Fazer chamada usando cliente OpenAI
+            completion = self.client.chat.completions.create(
+                model=OPENROUTER_MODEL,
+                messages=[
                     {
                         "role": "system",
                         "content": system_prompt
@@ -883,65 +880,23 @@ e recomendações práticas para a escola.
                         "content": prompt
                     }
                 ],
-                "temperature": ABACUS_TEMPERATURE,
-                "max_tokens": ABACUS_MAX_TOKENS
-            }
-            
-            # Fazer requisição
-            response = requests.post(
-                ABACUS_API_URL,
-                headers=headers,
-                json=payload,
-                timeout=120
+                temperature=OPENROUTER_TEMPERATURE,
+                max_tokens=OPENROUTER_MAX_TOKENS,
+                extra_headers=extra_headers if extra_headers else {}
             )
             
-            # Verificar status da resposta
-            response.raise_for_status()
+            # Extrair conteúdo da resposta
+            if completion.choices and len(completion.choices) > 0:
+                content = completion.choices[0].message.content
+                if content:
+                    return content
             
-            # Parsear resposta JSON
-            result = response.json()
-            
-            # Extrair conteúdo da resposta (múltiplos formatos possíveis)
-            content = None
-            
-            # Formato 1: OpenAI API (choices[0].message.content)
-            if 'choices' in result and len(result['choices']) > 0:
-                if 'message' in result['choices'][0] and 'content' in result['choices'][0]['message']:
-                    content = result['choices'][0]['message']['content']
-            
-            # Formato 2: Resposta direta (content)
-            elif 'content' in result:
-                content = result['content']
-            
-            # Formato 3: Resposta direta (text)
-            elif 'text' in result:
-                content = result['text']
-            
-            # Formato 4: Resposta direta (response)
-            elif 'response' in result:
-                content = result['response']
-            
-            # Formato 5: Resposta direta (message)
-            elif 'message' in result:
-                content = result['message']
-            
-            if content:
-                return content
-            else:
-                self.logger.error(f"Resposta do Abacus AI em formato inesperado: {result}")
-                raise Exception("Resposta do Abacus AI em formato inesperado")
+            # Se não houver conteúdo, lançar exceção
+            self.logger.error(f"Resposta do OpenRouter em formato inesperado: {completion}")
+            raise Exception("Resposta do OpenRouter em formato inesperado")
                 
-        except requests.exceptions.RequestException as e:
-            self.logger.error(f"Erro na requisição HTTP para Abacus AI: {str(e)}")
-            if hasattr(e, 'response') and e.response is not None:
-                try:
-                    error_detail = e.response.json()
-                    self.logger.error(f"Detalhes do erro: {error_detail}")
-                except:
-                    self.logger.error(f"Status code: {e.response.status_code}")
-            raise
         except Exception as e:
-            self.logger.error(f"Erro ao chamar Abacus AI: {str(e)}")
+            self.logger.error(f"Erro ao chamar OpenRouter AI: {str(e)}", exc_info=True)
             raise
     
     def _process_ai_response(self, ai_response: str) -> Dict[str, str]:

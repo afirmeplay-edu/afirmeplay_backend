@@ -721,81 +721,38 @@
 			.answer-grid-container {
 				margin: 6px 0;
 				display: flex;
-				flex-wrap: wrap;
+				flex-direction: row;
+				flex-wrap: nowrap;
 				gap: 15px;
 				align-items: flex-start; /* Alinha blocos pelo topo */
-				justify-content: flex-start; /* Alinha blocos à esquerda */
 			}
 
 			.answer-block {
-				border: 1px solid #333;
-				padding: 4px 6px;
-				flex: 0 0 auto; /* Não crescer, não encolher, tamanho automático */
-				min-width: 140px; /* Largura mínima */
-				max-width: 180px; /* Largura máxima para não ficar muito largo */
+				border: 2px solid #000;
+				padding: 8px 10px;
+				flex: 1 1 auto; /* Permite que os blocos cresçam e encolham igualmente */
+				min-width: 0; /* Permite que encolham abaixo do conteúdo mínimo */
+				position: relative;
+				background: white;
 			}
 
 			.block-header {
 				text-align: center;
 				font-weight: bold;
 				font-size: 9pt;
-				margin: 0 0 5px 0;
-				padding: 3px;
+				margin: 0 0 8px 0;
+				padding: 4px;
 				background: #f5f5f5;
 				line-height: 1.3;
 				border-bottom: 1px solid #ccc;
 			}
 
-			.bubble-headers {
-				display: flex;
-				align-items: center;
-				margin: 0 0 2px 0;
-				padding: 0;
-				font-size: 9pt;
-				font-weight: bold;
-				position: relative;
-				height: 18px;
-				line-height: 18px;
-			}
-
-			.bubble-headers .header-spacer {
-				width: 30px;
-				flex-shrink: 0;
-				min-width: 30px;
-			}
-
-			.bubble-headers .header-bubbles {
-				display: flex;
-				gap: 0;
-				justify-content: flex-start;
-				flex: 1;
-				align-items: center;
-				height: 18px;
-			}
-
-			.bubble-headers .header-bubbles span {
-				width: 18px;
-				text-align: center;
-				flex-shrink: 0;
-				margin-right: 10px;
-				display: flex;
-				align-items: center;
-				justify-content: center;
-				height: 18px;
-				line-height: 18px;
-			}
-
-			.bubble-headers .header-bubbles span:last-child {
-				margin-right: 0;
-			}
-
 			.answer-row {
 				display: flex;
 				align-items: center;
-				margin: 0 0 3px 0;
-				padding: 0;
-				height: 18px;
-				line-height: 18px;
+				margin: 0 0 8px 0;
+				padding: 4px 0;
+				min-height: 33px;
 				gap: 0;
 			}
 
@@ -810,7 +767,6 @@
 				align-items: center;
 				justify-content: flex-start;
 				gap: 0;
-				line-height: 18px;
 			}
 
 			.question-num-text {
@@ -819,30 +775,26 @@
 
 			.bubbles {
 				display: flex;
-				gap: 0;
+				gap: 8px;
 				justify-content: flex-start;
 				flex: 1;
 				align-items: center;
 			}
 
-			.bubble-container {
-				width: 18px;
-				display: flex;
-				justify-content: center;
-				flex-shrink: 0;
-				margin-right: 10px;
-			}
-
-			.bubble-container:last-child {
-				margin-right: 0;
-			}
-
 			.bubble {
-				width: 16px;
-				height: 16px;
-				border: 1.5px solid #333;
+				width: 25px;
+				height: 25px;
+				border: 1px solid #000;
 				border-radius: 50%;
-				display: inline-block;
+				background: white;
+				display: inline-flex;
+				align-items: center;
+				justify-content: center;
+				font-size: 9pt;
+				font-weight: bold;
+				color: #ccc;
+				line-height: 1;
+				flex-shrink: 0;
 			}
 
 			.bubble-label {
@@ -1297,17 +1249,6 @@
 							endif %}
 						</div>
 
-						<!-- Cabeçalho com letras A B C D -->
-						<div class="bubble-headers">
-							<div class="header-spacer"></div>
-							<div class="header-bubbles">
-								<span>A</span>
-								<span>B</span>
-								<span>C</span>
-								<span>D</span>
-							</div>
-						</div>
-
 						<!-- Linhas de resposta -->
 						{% for question in block.questions %}
 						<div class="answer-row">
@@ -1318,18 +1259,10 @@
 							</span>
 
 							<div class="bubbles">
-								<div class="bubble-container">
-									<div class="bubble"></div>
-								</div>
-								<div class="bubble-container">
-									<div class="bubble"></div>
-								</div>
-								<div class="bubble-container">
-									<div class="bubble"></div>
-								</div>
-								<div class="bubble-container">
-									<div class="bubble"></div>
-								</div>
+								<div class="bubble">A</div>
+								<div class="bubble">B</div>
+								<div class="bubble">C</div>
+								<div class="bubble">D</div>
 							</div>
 						</div>
 						{% endfor %}
@@ -1343,16 +1276,6 @@
 							BLOCO {{ "%02d"|format(block_num) }}
 						</div>
 
-						<div class="bubble-headers">
-							<div class="header-spacer"></div>
-							<div class="header-bubbles">
-								<span>A</span>
-								<span>B</span>
-								<span>C</span>
-								<span>D</span>
-							</div>
-						</div>
-
 						{% for q_num in range(start_question, end_question + 1)
 						%}
 						<div class="answer-row">
@@ -1362,18 +1285,10 @@
 								>
 							</span>
 							<div class="bubbles">
-								<div class="bubble-container">
-									<div class="bubble"></div>
-								</div>
-								<div class="bubble-container">
-									<div class="bubble"></div>
-								</div>
-								<div class="bubble-container">
-									<div class="bubble"></div>
-								</div>
-								<div class="bubble-container">
-									<div class="bubble"></div>
-								</div>
+								<div class="bubble">A</div>
+								<div class="bubble">B</div>
+								<div class="bubble">C</div>
+								<div class="bubble">D</div>
 							</div>
 						</div>
 						{% endfor %}
@@ -1385,16 +1300,6 @@
 							BLOCO 0{{ loop.index }} - {{ subject_name }}
 						</div>
 
-						<div class="bubble-headers">
-							<div class="header-spacer"></div>
-							<div class="header-bubbles">
-								<span>A</span>
-								<span>B</span>
-								<span>C</span>
-								<span>D</span>
-							</div>
-						</div>
-
 						{% for question in subject_questions %}
 						<div class="answer-row">
 							<span class="question-num">
@@ -1403,18 +1308,10 @@
 								>
 							</span>
 							<div class="bubbles">
-								<div class="bubble-container">
-									<div class="bubble"></div>
-								</div>
-								<div class="bubble-container">
-									<div class="bubble"></div>
-								</div>
-								<div class="bubble-container">
-									<div class="bubble"></div>
-								</div>
-								<div class="bubble-container">
-									<div class="bubble"></div>
-								</div>
+								<div class="bubble">A</div>
+								<div class="bubble">B</div>
+								<div class="bubble">C</div>
+								<div class="bubble">D</div>
 							</div>
 						</div>
 						{% endfor %}

@@ -32,14 +32,18 @@ class CorrecaoHybrid:
             debug: Se True, gera logs detalhados
         """
         self.debug = debug
-        self.save_debug_images = False  # Desabilita salvamento de imagens de debug
+        self.save_debug_images = True  # Ativa salvamento de imagens de debug
         self.logger = logging.getLogger(__name__)
         self.logger.info("Correção Híbrida inicializada (detecção geométrica)")
     
     def _save_debug_image(self, path: str, img):
         """Salva imagem de debug apenas se save_debug_images estiver habilitado"""
         if self.save_debug_images:
-            self._save_debug_image(path, img)
+            import os
+            dir_path = os.path.dirname(path)
+            if dir_path and not os.path.exists(dir_path):
+                os.makedirs(dir_path)
+            cv2.imwrite(path, img)
     
     def corrigir_prova_geometrica(self, image_data: bytes, test_id: str) -> Dict[str, Any]:
         """
@@ -1156,16 +1160,96 @@ class CorrecaoHybrid:
             shapes.append(shape)
         return shapes
     
+    def _four_point_transform(self, image: np.ndarray, pts: np.ndarray) -> np.ndarray:
+        """
+        Aplica transformação de perspectiva usando 4 pontos
+        Equivalente a imutils.perspective.four_point_transform
+        """
+        # Obter pontos ordenados
+        rect = self._order_points(pts)
+        (tl, tr, br, bl) = rect
+        
+        # Calcular largura do novo retângulo
+        widthA = np.sqrt(((br[0] - bl[0]) ** 2) + ((br[1] - bl[1]) ** 2))
+        widthB = np.sqrt(((tr[0] - tl[0]) ** 2) + ((tr[1] - tl[1]) ** 2))
+        maxWidth = max(int(widthA), int(widthB))
+        
+        # Calcular altura do novo retângulo
+        heightA = np.sqrt(((tr[0] - br[0]) ** 2) + ((tr[1] - br[1]) ** 2))
+        heightB = np.sqrt(((tl[0] - bl[0]) ** 2) + ((tl[1] - bl[1]) ** 2))
+        maxHeight = max(int(heightA), int(heightB))
+        
+        # Pontos de destino
+        dst = np.array([
+            [0, 0],
+            [maxWidth - 1, 0],
+            [maxWidth - 1, maxHeight - 1],
+            [0, maxHeight - 1]
+        ], dtype="float32")
+        
+        # Calcular matriz de transformação e aplicar
+        M = cv2.getPerspectiveTransform(rect, dst)
+        warped = cv2.warpPerspective(image, M, (maxWidth, maxHeight))
+        
+        return warped
+    
+    def _order_points(self, pts: np.ndarray) -> np.ndarray:
+        """
+        Ordena pontos como: top-left, top-right, bottom-right, bottom-left
+        """
+        rect = np.zeros((4, 2), dtype="float32")
+        
+        # Soma e diferença
+        s = pts.sum(axis=1)
+        diff = np.diff(pts, axis=1)
+        
+        # Top-left: menor soma
+        rect[0] = pts[np.argmin(s)]
+        # Bottom-right: maior soma
+        rect[2] = pts[np.argmax(s)]
+        # Top-right: menor diferença
+        rect[1] = pts[np.argmin(diff)]
+        # Bottom-left: maior diferença
+        rect[3] = pts[np.argmax(diff)]
+        
+        return rect
+    
+    def _sort_contours(self, cnts: List, method: str = "left-to-right") -> List:
+        """
+        Ordena contornos
+        Equivalente a imutils.contours.sort_contours
+        """
+        reverse = False
+        i = 0
+        
+        if method == "right-to-left" or method == "bottom-to-top":
+            reverse = True
+        
+        if method == "top-to-bottom" or method == "bottom-to-top":
+            i = 1
+        
+        boundingBoxes = [cv2.boundingRect(c) for c in cnts]
+        (cnts, boundingBoxes) = zip(*sorted(zip(cnts, boundingBoxes),
+            key=lambda b: b[1][i], reverse=reverse))
+        
+        return list(cnts)
+    
     def _getAnswers(self, img: np.ndarray, num_questions: int = None) -> Optional[Dict[int, str]]:
         """
-        Detecta círculos (bolinhas) e verifica se estão marcados
-        Pipeline simples e robusto:
-        1. Detecta SOMENTE círculos usando HoughCircles
-        2. Verifica se cada círculo está marcado (preenchido)
-        3. Agrupa por LINHA (Y) para questões e COLUNA (X) para alternativas
+        Detecta bolhas e verifica se estão marcadas
+        Baseado no algoritmo de detecção de bolhas usando Canny edge detection
+        
+        Pipeline:
+        1. Detecta bordas dos blocos usando Canny
+        2. Encontra contornos retangulares dos blocos
+        3. Para cada bloco, faz crop e processa bolhas individualmente
+        4. Aplica threshold binário invertido
+        5. Detecta bolhas por tamanho e aspect ratio
+        6. Agrupa bolhas em questões (4 por questão)
+        7. Conta pixels brancos para determinar resposta marcada
         
         Args:
-            img: Imagem já cropped e alinhada
+            img: Imagem já cropped e alinhada (após correção de perspectiva)
             num_questions: Número esperado de questões (opcional, para validação)
         
         Returns:
@@ -1187,188 +1271,558 @@ class CorrecaoHybrid:
             else:
                 gray = img.copy()
             
-            gray = cv2.GaussianBlur(gray, (5, 5), 0)
-            self._save_debug_image(f"{debug_dir}/{timestamp}_15_gray_blur.jpg", gray)
+            blurred = cv2.GaussianBlur(gray, (5, 5), 0)
+            self._save_debug_image(f"{debug_dir}/{timestamp}_15_gray_blur.jpg", blurred)
             
-            # PASSO 2: Detectar SOMENTE círculos usando HoughCircles
-            circles = cv2.HoughCircles(
-                gray,
-                cv2.HOUGH_GRADIENT,
-                dp=1.2,
-                minDist=20,
-                param1=50,
-                param2=15,
-                minRadius=6,
-                maxRadius=12
-            )
+            # PASSO 2: Detectar bordas usando Canny (para detectar blocos)
+            edged = cv2.Canny(blurred, 75, 200)
+            self._save_debug_image(f"{debug_dir}/{timestamp}_15_canny_edges.jpg", edged)
             
-            if circles is None:
-                self.logger.warning("Nenhum círculo detectado")
-                return {}
+            # PASSO 3: Encontrar contornos dos blocos (retângulos grandes)
+            # Tentar múltiplas abordagens para detectar blocos
+            block_contours = []
+            img_height, img_width = gray.shape[:2]
+            min_block_area = (img_width * img_height) * 0.03  # Pelo menos 3% da imagem
+            max_block_area = (img_width * img_height) * 0.8    # No máximo 80% da imagem
             
-            circles = np.round(circles[0, :]).astype("int")
-            self.logger.info(f"✅ Detectados {len(circles)} círculos")
+            # Abordagem 1: Canny edges
+            cnts = cv2.findContours(edged.copy(), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            cnts = cnts[0] if len(cnts) == 2 else cnts[1]
             
-            # Desenhar todos os círculos detectados (debug)
-            img_circles_debug = img.copy()
-            for (x, y, r) in circles:
-                cv2.circle(img_circles_debug, (x, y), r, (0, 255, 0), 2)
-            self._save_debug_image(f"{debug_dir}/{timestamp}_16_all_circles.jpg", img_circles_debug)
+            for c in cnts:
+                area = cv2.contourArea(c)
+                if min_block_area < area < max_block_area:
+                    peri = cv2.arcLength(c, True)
+                    approx = cv2.approxPolyDP(c, 0.02 * peri, True)
+                    # Procurar por retângulos (4 vértices)
+                    if len(approx) == 4:
+                        # Verificar se é realmente um retângulo (aspect ratio razoável)
+                        x, y, w, h = cv2.boundingRect(approx)
+                        aspect_ratio = w / float(h) if h > 0 else 0
+                        if 0.3 < aspect_ratio < 3.0:  # Retângulos não muito alongados
+                            block_contours.append(approx)
             
-            # PASSO 3: Verificar se cada círculo está marcado (preenchido)
-            def is_marked(gray_img, x, y, r):
-                """Verifica se o círculo está marcado (preenchido)"""
-                mask = np.zeros(gray_img.shape, dtype=np.uint8)
-                cv2.circle(mask, (x, y), int(r * 0.6), 255, -1)
-                mean = cv2.mean(gray_img, mask=mask)[0]
-                return mean < 180  # Escuro = marcado, claro = vazio
-            
-            marked_circles = []
-            img_marked_debug = img.copy()
-            
-            for (x, y, r) in circles:
-                if is_marked(gray, x, y, r):
-                    marked_circles.append((x, y, r))
-                    cv2.circle(img_marked_debug, (x, y), r, (0, 255, 0), -1)  # Preenchido verde
-                else:
-                    cv2.circle(img_marked_debug, (x, y), r, (255, 0, 0), 2)  # Vazio azul
-            
-            self._save_debug_image(f"{debug_dir}/{timestamp}_17_marked_circles.jpg", img_marked_debug)
-            self.logger.info(f"✅ {len(marked_circles)} círculos marcados de {len(circles)} detectados")
-            
-            if len(marked_circles) == 0:
-                self.logger.warning("Nenhum círculo marcado detectado")
-                return {}
-            
-            # PASSO 4: Separar círculos por BLOCO (X) primeiro, depois por LINHA (Y)
-            # Isso é necessário porque há múltiplos blocos lado a lado
-            
-            all_circles = [(x, y, r, is_marked(gray, x, y, r)) for (x, y, r) in circles]
-            
-            # Calcular ponto médio X para separar blocos
-            if len(all_circles) == 0:
-                self.logger.warning("Nenhum círculo detectado")
-                return {}
-            
-            all_x = [c[0] for c in all_circles]
-            min_x, max_x = min(all_x), max(all_x)
-            width_range = max_x - min_x
-            
-            # Detectar quantos blocos existem analisando gaps no eixo X
-            # Ordenar por X e encontrar gaps grandes
-            sorted_by_x = sorted(all_circles, key=lambda c: c[0])
-            x_positions = [c[0] for c in sorted_by_x]
-            
-            # Encontrar gaps significativos (> 30% da largura de um bloco típico)
-            gaps = []
-            for i in range(1, len(x_positions)):
-                gap = x_positions[i] - x_positions[i-1]
-                if gap > 50:  # Gap maior que 50px indica separação de bloco
-                    gaps.append((x_positions[i-1] + x_positions[i]) / 2)
-            
-            # Dividir em blocos baseado nos gaps
-            block_boundaries = [min_x - 1] + gaps + [max_x + 1]
-            num_blocks = len(block_boundaries) - 1
-            
-            self.logger.info(f"✅ Detectados {num_blocks} blocos (gaps: {len(gaps)})")
-            
-            # Separar círculos por bloco
-            blocks = [[] for _ in range(num_blocks)]
-            for circle in all_circles:
-                x = circle[0]
-                for i in range(num_blocks):
-                    if block_boundaries[i] <= x < block_boundaries[i + 1]:
-                        blocks[i].append(circle)
-                        break
-            
-            # Função para agrupar círculos por linha Y dentro de um bloco
-            def group_by_rows(block_circles):
-                rows = []
-                Y_THRESH = 15
-                for circle in sorted(block_circles, key=lambda c: c[1]):
-                    x, y, r, marked = circle
-                    added = False
-                    for row in rows:
-                        if len(row) > 0:
-                            _, row_y, _, _ = row[0]
-                            if abs(y - row_y) < Y_THRESH:
-                                row.append(circle)
-                                added = True
-                                break
-                    if not added:
-                        rows.append([circle])
+            # Abordagem 2: Se não encontrou blocos, tentar threshold adaptativo
+            if len(block_contours) == 0:
+                self.logger.debug("Canny não encontrou blocos, tentando threshold adaptativo")
+                thresh_adapt = cv2.adaptiveThreshold(blurred, 255, 
+                                                    cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+                                                    cv2.THRESH_BINARY_INV, 11, 2)
+                cnts = cv2.findContours(thresh_adapt, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                cnts = cnts[0] if len(cnts) == 2 else cnts[1]
                 
-                # FILTRO: Só manter linhas com exatamente 4 círculos (A, B, C, D)
-                # Isso elimina falsos positivos do cabeçalho/título
-                valid_rows = [row for row in rows if len(row) == 4]
-                invalid_count = len(rows) - len(valid_rows)
-                if invalid_count > 0:
-                    self.logger.debug(f"Filtradas {invalid_count} linhas inválidas (não têm 4 círculos)")
-                
-                return valid_rows
+                for c in cnts:
+                    area = cv2.contourArea(c)
+                    if min_block_area < area < max_block_area:
+                        peri = cv2.arcLength(c, True)
+                        approx = cv2.approxPolyDP(c, 0.02 * peri, True)
+                        if len(approx) == 4:
+                            x, y, w, h = cv2.boundingRect(approx)
+                            aspect_ratio = w / float(h) if h > 0 else 0
+                            if 0.3 < aspect_ratio < 3.0:
+                                block_contours.append(approx)
             
-            # Processar cada bloco e extrair respostas
-            answers = {}
-            img_final_debug = img.copy()
+            # Ordenar blocos da esquerda para direita
+            if len(block_contours) > 0:
+                block_contours = sorted(block_contours, key=lambda c: cv2.boundingRect(c)[0])
+            
+            self.logger.info(f"✅ Detectados {len(block_contours)} blocos de resposta")
+            
+            # Se não encontrou blocos, processar imagem inteira
+            if len(block_contours) == 0:
+                self.logger.warning("Nenhum bloco detectado, processando imagem inteira")
+                return self._process_bubbles_in_roi(img, gray, blurred, timestamp, debug_dir, 1)
+            
+            # PASSO 4: Processar cada bloco individualmente
+            all_answers = {}
             question_counter = 1
+            img_final_debug = img.copy()
             
-            for block_idx, block_circles in enumerate(blocks):
-                if len(block_circles) == 0:
-                    continue
-                    
-                rows = group_by_rows(block_circles)
-                rows.sort(key=lambda r: r[0][1])  # Ordenar linhas por Y
+            for block_idx, block_cnt in enumerate(block_contours):
+                # Fazer crop do bloco (usar boundingRect para simplificar)
+                x, y, w, h = cv2.boundingRect(block_cnt)
                 
-                self.logger.info(f"Bloco {block_idx + 1}: {len(rows)} linhas, {len(block_circles)} círculos")
+                # Adicionar margem pequena
+                margin = 5
+                x = max(0, x - margin)
+                y = max(0, y - margin)
+                w = min(img.shape[1] - x, w + 2 * margin)
+                h = min(img.shape[0] - y, h + 2 * margin)
                 
-                for row in rows:
-                    # Ordenar por X (da esquerda para direita) = A, B, C, D
-                    row.sort(key=lambda c: c[0])
-                    
-                    # Filtrar apenas os círculos marcados nesta linha
-                    marked_in_row = [(x, y, r) for (x, y, r, marked) in row if marked]
-                    
-                    if len(marked_in_row) == 0:
-                        answers[question_counter] = None
-                        self.logger.debug(f"Questão {question_counter}: Nenhuma resposta marcada")
-                        question_counter += 1
-                        continue
-                    
-                    if len(marked_in_row) > 1:
-                        self.logger.warning(f"Questão {question_counter}: {len(marked_in_row)} círculos marcados")
-                    
-                    # Pegar o primeiro círculo marcado
-                    x, y, r = marked_in_row[0]
-                    
-                    # Determinar alternativa baseado na posição X dentro da linha
-                    all_x_positions = sorted([c[0] for c in row])
-                    
-                    try:
-                        alt_idx = all_x_positions.index(x)
-                        if alt_idx >= 4:
-                            alt_idx = 3
-                        
-                        answers[question_counter] = chr(65 + alt_idx)
-                        
-                        # Debug visual
-                        cv2.circle(img_final_debug, (x, y), r + 2, (0, 255, 0), 2)
-                        cv2.putText(img_final_debug, f"Q{question_counter}:{chr(65 + alt_idx)}", 
-                                  (x - 20, y - 10), 
-                                  cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 0), 1)
-                    except ValueError:
-                        answers[question_counter] = None
-                    
+                block_roi = img[y:y+h, x:x+w]
+                block_gray = gray[y:y+h, x:x+w]
+                block_blurred = blurred[y:y+h, x:x+w]
+                
+                # Debug: salvar ROI do bloco com informações
+                self._save_debug_image(f"{debug_dir}/{timestamp}_block_{block_idx+1}_roi.jpg", block_roi)
+                
+                # Log informações do bloco
+                self.logger.info(f"Bloco {block_idx + 1}: ROI {w}x{h} pixels, posição ({x}, {y})")
+                
+                # Processar bolhas neste bloco
+                block_answers = self._process_bubbles_in_roi(
+                    block_roi, block_gray, block_blurred, 
+                    timestamp, debug_dir, question_counter, block_idx + 1
+                )
+                
+                # Atualizar contador de questões e adicionar respostas
+                for q_num, answer in block_answers.items():
+                    all_answers[question_counter] = answer
                     question_counter += 1
+                
+                # Debug: desenhar contorno do bloco
+                cv2.drawContours(img_final_debug, [block_cnt], -1, (255, 0, 0), 3)
+                cv2.putText(img_final_debug, f"Block {block_idx+1}", 
+                          (x, y-10), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 0, 0), 2)
             
             self.logger.info(f"✅ Total de questões processadas: {question_counter - 1}")
-            
             self._save_debug_image(f"{debug_dir}/{timestamp}_18_final_answers.jpg", img_final_debug)
-            self.logger.info(f"✅ Respostas detectadas: {answers}")
+            self.logger.info(f"✅ Respostas detectadas: {all_answers}")
+            
+            return all_answers
+            
+        except Exception as e:
+            self.logger.error(f"Erro em getAnswers: {str(e)}", exc_info=True)
+            return {}
+    
+    def _process_bubbles_in_roi(self, roi_img: np.ndarray, roi_gray: np.ndarray, 
+                                roi_blurred: np.ndarray, timestamp: str, 
+                                debug_dir: str, start_question: int, 
+                                block_num: int = None) -> Dict[int, str]:
+        """
+        Processa bolhas dentro de um ROI (bloco)
+        Baseado no algoritmo fornecido de detecção de bolhas
+        
+        Args:
+            roi_img: ROI colorido
+            roi_gray: ROI em grayscale
+            roi_blurred: ROI com blur aplicado
+            timestamp: Timestamp para debug
+            debug_dir: Diretório para salvar imagens de debug
+            start_question: Número da primeira questão neste bloco
+            block_num: Número do bloco (opcional, para debug)
+        
+        Returns:
+            Dict[question_num, 'A'|'B'|'C'|'D'] onde question_num começa em start_question
+        """
+        try:
+            # Debug: salvar ROI original e grayscale
+            if block_num:
+                self._save_debug_image(f"{debug_dir}/{timestamp}_block_{block_num}_original.jpg", roi_img)
+                self._save_debug_image(f"{debug_dir}/{timestamp}_block_{block_num}_grayscale.jpg", roi_gray)
+            
+            # Aplicar threshold binário invertido
+            # THRESH_BINARY_INV: branco = marcado/preenchido, preto = vazio
+            thresh = cv2.threshold(roi_blurred, 0, 255, 
+                                  cv2.THRESH_BINARY_INV | cv2.THRESH_OTSU)[1]
+            
+            if block_num:
+                self._save_debug_image(f"{debug_dir}/{timestamp}_block_{block_num}_thresh.jpg", thresh)
+                
+                # Debug: criar imagem combinada mostrando original e threshold lado a lado
+                h, w = roi_img.shape[:2]
+                combined = np.zeros((h, w * 2, 3), dtype=np.uint8)
+                combined[:, :w] = roi_img
+                combined[:, w:] = cv2.cvtColor(thresh, cv2.COLOR_GRAY2BGR)
+                self._save_debug_image(f"{debug_dir}/{timestamp}_block_{block_num}_combined.jpg", combined)
+                
+                # Debug: também salvar threshold normal (sem inversão) para comparação
+                thresh_normal = cv2.threshold(roi_blurred, 0, 255, 
+                                             cv2.THRESH_BINARY | cv2.THRESH_OTSU)[1]
+                self._save_debug_image(f"{debug_dir}/{timestamp}_block_{block_num}_thresh_normal.jpg", 
+                                     thresh_normal)
+            
+            # Encontrar contornos na imagem threshold
+            # Usar RETR_TREE para pegar contornos externos E internos (bolhas dentro da borda)
+            all_cnts, hierarchy = cv2.findContours(thresh.copy(), cv2.RETR_TREE, 
+                                                   cv2.CHAIN_APPROX_SIMPLE)
+            # Processar hierarquia para separar borda do bloco das bolhas internas
+            roi_height, roi_width = roi_img.shape[:2]
+            roi_area = roi_width * roi_height
+            max_border_area = roi_area * 0.3  # Borda ocupa mais de 30% da área
+            
+            # Encontrar a borda do bloco (contorno externo grande)
+            border_contour_idx = None
+            border_contour = None
+            if hierarchy is not None:
+                for i, h in enumerate(hierarchy[0]):
+                    if h[3] == -1:  # Contorno externo (sem pai)
+                        area = cv2.contourArea(all_cnts[i])
+                        if area > max_border_area:
+                            border_contour_idx = i
+                            border_contour = all_cnts[i]
+                            break
+            
+            # Filtrar contornos: pegar apenas os que estão DENTRO da borda (filhos da borda)
+            # OU contornos externos pequenos (bolhas que não estão dentro de nada)
+            valid_cnts = []
+            
+            if border_contour_idx is not None:
+                # Encontrar todos os filhos da borda (contornos internos)
+                def get_children(parent_idx):
+                    children = []
+                    for i, h in enumerate(hierarchy[0]):
+                        if h[3] == parent_idx:  # Este contorno tem a borda como pai
+                            children.append(i)
+                            # Recursivamente pegar filhos dos filhos
+                            children.extend(get_children(i))
+                    return children
+                
+                # Pegar todos os contornos que são filhos da borda (bolhas dentro)
+                children_indices = get_children(border_contour_idx)
+                for idx in children_indices:
+                    valid_cnts.append(all_cnts[idx])
+                
+                self.logger.info(f"Bloco {block_num or 'único'}: Borda detectada (índice {border_contour_idx}), "
+                               f"{len(children_indices)} contornos internos encontrados")
+            else:
+                # Se não encontrou borda, usar todos os contornos externos pequenos
+                for i, h in enumerate(hierarchy[0] if hierarchy is not None else []):
+                    if h[3] == -1:  # Contorno externo
+                        area = cv2.contourArea(all_cnts[i])
+                        if area <= max_border_area:  # Não é a borda
+                            valid_cnts.append(all_cnts[i])
+                
+                self.logger.info(f"Bloco {block_num or 'único'}: Borda não detectada, "
+                               f"usando {len(valid_cnts)} contornos externos pequenos")
+            
+            cnts = valid_cnts
+            
+            # Debug: desenhar TODOS os contornos encontrados (incluindo borda e internos)
+            img_all_contours = roi_img.copy()
+            
+            # Desenhar borda em magenta se encontrada
+            if border_contour is not None:
+                cv2.drawContours(img_all_contours, [border_contour], -1, (255, 0, 255), 3)
+                (bx, by, bw, bh) = cv2.boundingRect(border_contour)
+                cv2.putText(img_all_contours, "BORDA", (bx, by-10), 
+                          cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 0, 255), 2)
+            
+            # Desenhar contornos válidos (bolhas dentro)
+            for idx, c in enumerate(cnts):
+                (x, y, w, h) = cv2.boundingRect(c)
+                ar = w / float(h) if h > 0 else 0
+                area = cv2.contourArea(c)
+                
+                # Desenhar contorno
+                cv2.drawContours(img_all_contours, [c], -1, (0, 255, 0), 2)
+                # Desenhar bounding box
+                cv2.rectangle(img_all_contours, (x, y), (x+w, y+h), (0, 255, 0), 1)
+                # Adicionar informações
+                cv2.putText(img_all_contours, f"C{idx+1}: {w}x{h}", 
+                          (x, y-10), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 0), 1)
+                cv2.putText(img_all_contours, f"AR:{ar:.2f}", 
+                          (x, y+h+15), cv2.FONT_HERSHEY_SIMPLEX, 0.3, (0, 255, 0), 1)
+            
+            if block_num:
+                self._save_debug_image(f"{debug_dir}/{timestamp}_block_{block_num}_all_contours.jpg", 
+                                     img_all_contours)
+            
+            self.logger.info(f"Bloco {block_num or 'único'}: {len(cnts)} contornos internos (bolhas) encontrados")
+            
+            # Log detalhado de cada contorno
+            if block_num and len(cnts) > 0:
+                for idx, c in enumerate(cnts):
+                    (x, y, w, h) = cv2.boundingRect(c)
+                    ar = w / float(h) if h > 0 else 0
+                    area = cv2.contourArea(c)
+                    self.logger.info(f"  Bolha {idx+1}: w={w}, h={h}, ar={ar:.2f}, area={area:.0f}, pos=({x},{y})")
+            
+            # Filtrar contornos que correspondem a bolhas
+            # Ajustado para bolhas menores (ROI pequeno reduz o tamanho das bolhas)
+            # NOTA: A borda externa já foi filtrada pela hierarquia acima
+            questionCnts = []
+            
+            # Calcular área do ROI para filtrar bordas internas grandes
+            roi_height, roi_width = roi_img.shape[:2]
+            roi_area = roi_width * roi_height
+            max_internal_border_area = roi_area * 0.2  # Borda interna pode ocupar até 20% da área
+            
+            for c in cnts:
+                # compute the bounding box of the contour, then use the
+                # bounding box to derive the aspect ratio
+                (x, y, w, h) = cv2.boundingRect(c)
+                ar = w / float(h) if h > 0 else 0
+                area = cv2.contourArea(c)
+                
+                # Filtrar bordas internas grandes (como a "Bolha 1" com w=301, h=160)
+                if area > max_internal_border_area:
+                    if block_num:
+                        self.logger.debug(f"Bloco {block_num}: Ignorando borda interna - w={w}, h={h}, area={area:.0f}")
+                    continue
+                
+                # Ajustado para aceitar bolhas menores (10-12 pixels mínimo)
+                # Aspect ratio entre 0.9 e 1.1 (quase circular/quadrado)
+                if w >= 10 and h >= 10 and ar >= 0.9 and ar <= 1.1:
+                    questionCnts.append(c)
+            
+            if block_num:
+                self.logger.info(f"Bloco {block_num}: {len(questionCnts)} bolhas detectadas após filtro")
+            
+            if len(questionCnts) == 0:
+                self.logger.warning(f"Bloco {block_num or 'único'}: Nenhuma bolha detectada após filtro")
+                # Debug: salvar imagem com informações detalhadas dos contornos rejeitados
+                img_rejected = roi_img.copy()
+                
+                # Recalcular área máxima para borda interna (mesmo cálculo do filtro)
+                roi_height_debug, roi_width_debug = roi_img.shape[:2]
+                roi_area_debug = roi_width_debug * roi_height_debug
+                max_internal_border_area_debug = roi_area_debug * 0.2
+                
+                # Adicionar texto informativo no topo
+                cv2.putText(img_rejected, f"Total contornos internos: {len(cnts)} | Filtro: w>=10, h>=10, ar 0.9-1.1", 
+                          (10, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2)
+                
+                # Desenhar borda se encontrada
+                if border_contour is not None:
+                    cv2.drawContours(img_rejected, [border_contour], -1, (255, 0, 255), 3)
+                    (bx, by, bw, bh) = cv2.boundingRect(border_contour)
+                    cv2.putText(img_rejected, "BORDA (ignorada)", (bx, by-10), 
+                              cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 0, 255), 2)
+                
+                for idx, c in enumerate(cnts[:30]):  # Mostrar até 30 contornos
+                    (x, y, w, h) = cv2.boundingRect(c)
+                    ar = w / float(h) if h > 0 else 0
+                    area = cv2.contourArea(c)
+                    color = (0, 0, 255)  # Vermelho para rejeitados
+                    
+                    # Verificar se seria aceito com critérios ajustados
+                    if w >= 10 and h >= 10 and ar >= 0.9 and ar <= 1.1:
+                        # Verificar se não é borda interna
+                        if area <= max_internal_border_area_debug:
+                            color = (255, 165, 0)  # Laranja para quase aceito
+                            reason_text = "ACEITO"
+                        else:
+                            color = (255, 0, 255)  # Magenta para borda interna
+                            reason_text = "BORDA_INT"
+                    else:
+                        # Adicionar motivo da rejeição
+                        reasons = []
+                        if w < 10:
+                            reasons.append("w<10")
+                        if h < 10:
+                            reasons.append("h<10")
+                        if ar < 0.9 or ar > 1.1:
+                            reasons.append(f"ar!={ar:.2f}")
+                        reason_text = " | ".join(reasons) if reasons else "OUTRO"
+                    
+                    # Desenhar contorno
+                    cv2.drawContours(img_rejected, [c], -1, color, 2)
+                    # Desenhar bounding box
+                    cv2.rectangle(img_rejected, (x, y), (x+w, y+h), color, 2)
+                    # Informações acima
+                    cv2.putText(img_rejected, f"C{idx+1}: {w}x{h}", 
+                              (x, max(0, y-5)), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
+                    # Informações abaixo
+                    info_text = f"AR:{ar:.2f} A:{int(area)}"
+                    cv2.putText(img_rejected, info_text, 
+                              (x, min(roi_img.shape[0]-5, y+h+20)), cv2.FONT_HERSHEY_SIMPLEX, 0.4, color, 1)
+                    
+                    # Motivo da rejeição/classificação
+                    cv2.putText(img_rejected, reason_text, 
+                              (x, min(roi_img.shape[0]-5, y+h+35)), 
+                              cv2.FONT_HERSHEY_SIMPLEX, 0.35, color, 1)
+                
+                if block_num:
+                    self._save_debug_image(f"{debug_dir}/{timestamp}_block_{block_num}_rejected_contours.jpg", 
+                                         img_rejected)
+                    
+                    # Salvar também o threshold para análise
+                    self._save_debug_image(f"{debug_dir}/{timestamp}_block_{block_num}_thresh_analysis.jpg", thresh)
+                
+                return {}
+            
+            # Agrupar bolhas por LINHA (Y similar) primeiro
+            # Baseado no tutorial PyImageSearch: https://pyimagesearch.com/2016/10/03/bubble-sheet-multiple-choice-scanner-and-test-grader-using-omr-python-and-opencv/
+            Y_TOLERANCE = 15  # Tolerância vertical para considerar mesma linha
+            
+            # Agrupar bolhas por linha Y
+            rows = []
+            for c in questionCnts:
+                (x, y, w, h) = cv2.boundingRect(c)
+                center_y = y + h // 2  # Centro Y da bolha
+                
+                # Procurar linha existente próxima
+                found_row = False
+                for row in rows:
+                    if len(row) > 0:
+                        # Pegar Y médio da linha
+                        row_y_centers = [cv2.boundingRect(b)[1] + cv2.boundingRect(b)[3] // 2 for b in row]
+                        avg_row_y = sum(row_y_centers) / len(row_y_centers)
+                        
+                        # Se está na mesma linha (tolerância)
+                        if abs(center_y - avg_row_y) < Y_TOLERANCE:
+                            row.append(c)
+                            found_row = True
+                            break
+                
+                # Se não encontrou linha próxima, criar nova linha
+                if not found_row:
+                    rows.append([c])
+            
+            # Ordenar linhas por Y (de cima para baixo) = questões
+            rows.sort(key=lambda row: cv2.boundingRect(row[0])[1])
+            
+            if block_num:
+                self.logger.info(f"Bloco {block_num}: {len(rows)} linhas (questões) detectadas")
+            
+            # Debug: desenhar todas as bolhas agrupadas por linha
+            img_bubbles_debug = roi_img.copy()
+            for row_idx, row in enumerate(rows):
+                for bubble_idx, c in enumerate(row):
+                    (x, y, w, h) = cv2.boundingRect(c)
+                    cv2.drawContours(img_bubbles_debug, [c], -1, (0, 255, 0), 2)
+                    cv2.rectangle(img_bubbles_debug, (x, y), (x+w, y+h), (0, 255, 0), 1)
+                    cv2.putText(img_bubbles_debug, f"R{row_idx+1}B{bubble_idx+1}", 
+                              (x, y-5), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 0), 1)
+            
+            if block_num:
+                self._save_debug_image(f"{debug_dir}/{timestamp}_block_{block_num}_bubbles_grouped.jpg", 
+                                     img_bubbles_debug)
+            
+            # Processar cada linha (questão)
+            answers = {}
+            question_num = start_question
+            roi_width = roi_img.shape[1]  # Largura do ROI para calcular X relativo
+            LETTERS = ['A', 'B', 'C', 'D']  # Ordem das alternativas
+            
+            # Definir centros X esperados (em X relativo 0.0 a 1.0) - usado apenas como fallback
+            # Ajustado considerando número da questão à esquerda e padding do bloco
+            COLUNAS_X_CENTERS = {
+                'A': 0.20,   # 20% da largura do ROI (ajustado para considerar número da questão)
+                'B': 0.40,   # 40% da largura do ROI
+                'C': 0.60,   # 60% da largura do ROI
+                'D': 0.80,   # 80% da largura do ROI
+            }
+            
+            def get_bubble_letter_by_distance(x_center, roi_width):
+                """Mapeia posição X para letra usando distância mínima aos centros esperados (fallback)"""
+                x_rel = x_center / roi_width if roi_width > 0 else 0
+                
+                # Calcular distância para cada coluna esperada
+                distances = {}
+                for letra, expected_x_rel in COLUNAS_X_CENTERS.items():
+                    distances[letra] = abs(x_rel - expected_x_rel)
+                
+                # Retornar a letra com menor distância
+                return min(distances.items(), key=lambda x: x[1])[0]
+            
+            for row_idx, row in enumerate(rows):
+                if len(row) == 0:
+                    question_num += 1
+                    continue
+                
+                # CORREÇÃO: Ordenar bolhas por X (da esquerda para direita)
+                # Isso garante que a primeira bolha é sempre A, segunda é B, etc.
+                row.sort(key=lambda c: cv2.boundingRect(c)[0])
+                
+                # Processar TODAS as bolhas detectadas na linha
+                bolhas_com_pixels = []
+                
+                for c in row:
+                    (x, y, w, h) = cv2.boundingRect(c)
+                    x_center = x + w // 2  # Centro X da bolha
+                    y_center = y + h // 2  # Centro Y da bolha
+                    
+                    # Criar máscara CIRCULAR exata da bolha
+                    radius = min(w, h) // 2
+                    if radius < 3:
+                        continue
+                    
+                    mask = np.zeros(thresh.shape, dtype="uint8")
+                    cv2.circle(mask, (x_center, y_center), max(1, radius - 2), 255, -1)
+                    
+                    # Aplicar máscara e contar pixels brancos
+                    mask_applied = cv2.bitwise_and(thresh, thresh, mask=mask)
+                    total = cv2.countNonZero(mask_applied)
+                    
+                    # Calcular área do círculo para normalizar
+                    circle_area = np.pi * (max(1, radius - 2)) ** 2
+                    if circle_area > 0:
+                        fill_percentage = (total / circle_area) * 100
+                    else:
+                        fill_percentage = 0
+                    
+                    bolhas_com_pixels.append({
+                        'contour': c,
+                        'x_center': x_center,
+                        'total_pixels': total,
+                        'fill_percentage': fill_percentage,
+                        'position': len(bolhas_com_pixels)  # Posição na linha (0, 1, 2, 3)
+                    })
+                
+                if len(bolhas_com_pixels) == 0:
+                    self.logger.warning(f"Bloco {block_num or 'único'}, Questão {question_num}: Nenhuma bolha válida")
+                    answers[question_num] = None
+                    question_num += 1
+                    continue
+                
+                # Encontrar a bolha com mais pixels (a marcada)
+                bolha_marcada = max(bolhas_com_pixels, key=lambda b: b['total_pixels'])
+                posicao_na_linha = bolha_marcada['position']  # Usar o campo 'position' já armazenado
+                
+                # Mapear posição para letra
+                # ESTRATÉGIA PRINCIPAL: Se temos 4 bolhas, mapear diretamente pela posição
+                # ESTRATÉGIA FALLBACK: Se temos menos de 4, usar distância relativa X
+                if len(bolhas_com_pixels) == 4:
+                    # Mapeamento direto: primeira = A, segunda = B, terceira = C, quarta = D
+                    bubble_letter = LETTERS[posicao_na_linha]
+                    mapping_method = "direto_por_posição"
+                else:
+                    # Fallback: usar posição relativa X para mapear
+                    # Útil quando algumas bolhas não foram detectadas
+                    x_rel = bolha_marcada['x_center'] / roi_width if roi_width > 0 else 0
+                    bubble_letter = get_bubble_letter_by_distance(bolha_marcada['x_center'], roi_width)
+                    mapping_method = "distância_relativa"
+                
+                # Log detalhado
+                if block_num:
+                    totals_str = ", ".join([f"{LETTERS[b['position']] if b['position'] < len(LETTERS) else '?'}: {b['total_pixels']}px ({b['fill_percentage']:.1f}%)" 
+                                           for b in bolhas_com_pixels])
+                    self.logger.info(f"Bloco {block_num}, Questão {question_num}: {totals_str}")
+                    self.logger.info(f"  → Método de mapeamento: {mapping_method}")
+                    self.logger.info(f"  → Marcada: {bubble_letter} (posição {posicao_na_linha + 1}, "
+                                   f"{bolha_marcada['total_pixels']}px, {bolha_marcada['fill_percentage']:.1f}%)")
+                    if mapping_method == "distância_relativa":
+                        x_rel = bolha_marcada['x_center'] / roi_width if roi_width > 0 else 0
+                        self.logger.info(f"  → X absoluto: {bolha_marcada['x_center']}px, X relativo: {x_rel:.3f}, ROI width: {roi_width}px")
+                
+                answers[question_num] = bubble_letter
+                
+                # Debug visual
+                cv2.drawContours(img_bubbles_debug, [bolha_marcada['contour']], -1, (0, 255, 0), 3)
+                (bx, by, bw, bh) = cv2.boundingRect(bolha_marcada['contour'])
+                cv2.putText(img_bubbles_debug, f"Q{question_num}:{bubble_letter}", 
+                          (bx - 20, by - 10), 
+                          cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 0), 1)
+                
+                question_num += 1
+            
+            if block_num:
+                self._save_debug_image(f"{debug_dir}/{timestamp}_block_{block_num}_final.jpg", 
+                                     img_bubbles_debug)
+                
+                # Debug: criar imagem com estatísticas
+                stats_img = roi_img.copy()
+                stats_text = [
+                    f"Total contornos: {len(cnts)}",
+                    f"Bolhas detectadas: {len(questionCnts)}",
+                    f"Questoes processadas: {len(answers)}",
+                    f"Filtro: w>=10, h>=10, ar 0.9-1.1",
+                    f"ROI size: {roi_img.shape[1]}x{roi_img.shape[0]}"
+                ]
+                y_offset = 20
+                for text in stats_text:
+                    cv2.putText(stats_img, text, (10, y_offset), 
+                              cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 0), 1)
+                    y_offset += 20
+                self._save_debug_image(f"{debug_dir}/{timestamp}_block_{block_num}_stats.jpg", 
+                                     stats_img)
             
             return answers
             
         except Exception as e:
-            self.logger.error(f"Erro em getAnswers: {str(e)}", exc_info=True)
+            self.logger.error(f"Erro ao processar bolhas no ROI: {str(e)}", exc_info=True)
             return {}
     
     def _buscar_gabarito(self, test_id: str) -> Dict[int, str]:

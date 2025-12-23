@@ -30,11 +30,10 @@ from app.services.ai_analysis_service import AIAnalysisService
 from app.services.report_aggregate_service import ReportAggregateService
 from app.routes.report_routes import _montar_resposta_relatorio, _montar_resposta_relatorio_por_turmas
 from app.openai_config.openai_config import (
-    ABACUS_API_KEY,
-    ABACUS_API_URL,
-    ABACUS_MODEL
+    OPENROUTER_MODEL,
+    OPENROUTER_BASE_URL,
+    get_openrouter_client
 )
-import requests
 import logging
 import json
 from datetime import datetime
@@ -48,65 +47,44 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-def test_abacus_connection():
-    """Testa se a conexão com Abacus AI está funcionando"""
+def test_openrouter_connection():
+    """Testa se a conexão com OpenRouter AI está funcionando"""
     print("\n" + "="*80)
-    print("TESTE 1: Conexão com Abacus AI (REST API)")
+    print("TESTE 1: Conexão com OpenRouter AI")
     print("="*80)
     
     try:
-        # Preparar requisição REST
-        headers = {
-            "Authorization": f"Bearer {ABACUS_API_KEY}",
-            "Content-Type": "application/json"
-        }
+        client = get_openrouter_client()
         
-        payload = {
-            "model": ABACUS_MODEL,
-            "messages": [
+        print(f"✓ Testando conexão com modelo: {OPENROUTER_MODEL}")
+        print(f"✓ URL: {OPENROUTER_BASE_URL}")
+        
+        # Testar uma chamada simples
+        print("\nTestando chamada simples ao OpenRouter AI...")
+        completion = client.chat.completions.create(
+            model=OPENROUTER_MODEL,
+            messages=[
                 {
                     "role": "user",
                     "content": "Responda apenas: OK"
                 }
             ],
-            "max_tokens": 10
-        }
-        
-        print(f"✓ Testando conexão com modelo: {ABACUS_MODEL}")
-        print(f"✓ URL: {ABACUS_API_URL}")
-        
-        # Testar uma chamada simples
-        print("\nTestando chamada simples ao Abacus AI...")
-        response = requests.post(
-            ABACUS_API_URL,
-            headers=headers,
-            json=payload,
-            timeout=30
+            max_tokens=10
         )
         
-        response.raise_for_status()
-        result = response.json()
-        
-        if 'choices' in result and len(result['choices']) > 0:
-            content = result['choices'][0]['message']['content']
+        if completion.choices and len(completion.choices) > 0:
+            content = completion.choices[0].message.content
             print(f"✓ Resposta recebida: {content[:50]}")
             return True
         else:
-            print(f"❌ Resposta não contém 'choices': {result}")
+            print(f"❌ Resposta não contém 'choices': {completion}")
             return False
             
-    except requests.exceptions.RequestException as e:
-        print(f"❌ Erro na requisição HTTP: {str(e)}")
-        if hasattr(e, 'response') and e.response is not None:
-            print(f"   Status code: {e.response.status_code}")
-            try:
-                print(f"   Erro: {e.response.json()}")
-            except:
-                print(f"   Text: {e.response.text[:200]}")
-        return False
     except Exception as e:
-        print(f"❌ Erro ao testar Abacus AI: {str(e)}")
+        print(f"❌ Erro ao testar OpenRouter AI: {str(e)}")
         print(f"   Tipo do erro: {type(e).__name__}")
+        import traceback
+        traceback.print_exc()
         return False
 
 
@@ -161,8 +139,8 @@ def test_ai_service_initialization():
     try:
         ai_service = AIAnalysisService()
         print(f"✓ Serviço inicializado")
-        print(f"   Modelo: {ABACUS_MODEL}")
-        print(f"   API URL: {ABACUS_API_URL}")
+        print(f"   Modelo: {OPENROUTER_MODEL}")
+        print(f"   API URL: {OPENROUTER_BASE_URL}")
         return ai_service
     except Exception as e:
         print(f"❌ Erro ao inicializar serviço: {str(e)}")
@@ -228,7 +206,7 @@ def test_ai_analysis_generation(test_id: str, scope_type: str = "overall", scope
         print("\nInicializando serviço de IA...")
         ai_service = AIAnalysisService()
         
-        print(f"✓ Serviço de IA inicializado (Abacus AI - REST API)")
+        print(f"✓ Serviço de IA inicializado (OpenRouter AI)")
         
         # Gerar análise
         print("\nGerando análise de IA (isso pode levar alguns segundos)...")
@@ -404,7 +382,7 @@ def main():
         
         if not test_id:
             print("\n⚠ Nenhum test_id fornecido. Executando apenas testes básicos...")
-            test_abacus_connection()
+            test_openrouter_connection()
             test_ai_service_initialization()
             print("\n" + "="*80)
             print("Para testar com uma avaliação específica:")
@@ -413,7 +391,7 @@ def main():
             return
         
         # Executar todos os testes
-        test_abacus_connection()
+        test_openrouter_connection()
         test_ai_service_initialization()
         check_cache_status(test_id, scope_type, scope_id)
         test_ai_analysis_generation(test_id, scope_type, scope_id)

@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-Serviço de Correção de Cartões Resposta usando IA (Abacus AI)
+Serviço de Correção de Cartões Resposta usando IA
 Reutiliza lógica do CorrecaoIA mas busca gabarito do AnswerSheetGabarito
 """
 
@@ -11,7 +11,7 @@ import base64
 import logging
 import re
 from typing import Dict, List, Optional, Tuple, Any
-# answer_sheet_correction reutiliza correcaoIA que já tem Abacus AI configurado
+# answer_sheet_correction reutiliza correcaoIA
 from app import db
 from app.models.studentAnswer import StudentAnswer
 from app.models.student import Student
@@ -33,8 +33,8 @@ class AnswerSheetCorrection:
         self.debug = debug
         self.logger = logging.getLogger(__name__)
         
-        # Abacus AI é usado via correcaoIA (REST API)
-        self.logger.info("Abacus AI configurado (via correcaoIA)")
+        # IA é usada via correcaoIA
+        self.logger.info("IA configurada (via correcaoIA)")
     
     def corrigir_cartao_resposta(self, image_data: bytes, gabarito_id: str = None, 
                                  test_id: str = None) -> Dict[str, Any]:
@@ -361,7 +361,7 @@ class AnswerSheetCorrection:
     
     def _chamar_ia(self, prompt: str, image_base64: str) -> Optional[str]:
         """
-        Chama Abacus AI API - reutiliza lógica do CorrecaoIA
+        Chama API de IA - reutiliza lógica do CorrecaoIA
         """
         try:
             from app.services.correcaoIA import CorrecaoIA

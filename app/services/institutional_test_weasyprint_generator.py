@@ -120,35 +120,35 @@ class InstitutionalTestWeasyPrintGenerator:
                 student, questions_data, test_data
             )
             
-            # Gerar QR code no formato JSON (compatível com correcaoIA.py)
-            # Formato: {"student_id": "...", "test_id": "..."}
+            # Gerar QR code no formato ultra-compacto (reduz densidade)
+            # Formato: s12345678t87654321 (últimos 8 caracteres de cada UUID)
             import qrcode
-            import json
             from io import BytesIO
             import base64
             
             total_questions = len(questions_data)
             
-            # Criar metadados do QR Code em JSON
+            # Obter IDs completos
             student_id = str(student.get('id', ''))
             test_id = str(test_data.get('id', ''))
             
-            qr_data = {
-                "student_id": student_id,
-                "test_id": test_id
-            }
+            # Encurtar IDs: usar últimos 8 caracteres (sem hífens)
+            # Exemplo: "a1b2c3d4-e5f6-7890-abcd-ef1234567890" -> "12345678"
+            short_student_id = student_id.replace('-', '')[-8:] if student_id else ''
+            short_test_id = test_id.replace('-', '')[-8:] if test_id else ''
             
-            # Converter para JSON
-            qr_json = json.dumps(qr_data)
+            # Formato ultra-compacto: s12345678t87654321
+            qr_data = f"s{short_student_id}t{short_test_id}"
             
-            # Gerar QR code com formato JSON
+            # Gerar QR code com formato ultra-compacto
+            # box_size aumentado para facilitar leitura mesmo com qualidade ruim
             qr = qrcode.QRCode(
                 version=1,
                 error_correction=qrcode.constants.ERROR_CORRECT_L,
-                box_size=10,
+                box_size=12,  # Aumentado de 10 para 12 (módulos maiores)
                 border=2,
             )
-            qr.add_data(qr_json)
+            qr.add_data(qr_data)
             qr.make(fit=True)
             
             # Criar imagem do QR Code

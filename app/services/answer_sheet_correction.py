@@ -219,13 +219,54 @@ class AnswerSheetCorrection:
     
     def _parsear_qr_data(self, data: str) -> Optional[Dict[str, str]]:
         """
-        Parseia dados do QR code (JSON ou string simples)
+        Parseia dados do QR code (formato ultra-compacto s12345678t87654321,
+        formato compacto s:xxx t:xxx, JSON ou string simples)
+        Busca IDs completos no banco quando usa formato encurtado
         """
         try:
             if not data:
                 return None
             
-            # Tentar parsear como JSON
+            # Tentar formato ultra-compacto primeiro: s12345678t87654321
+            if data.startswith('s') and 't' in data[1:]:
+                t_index = data.find('t', 1)
+                if t_index > 1:
+                    short_student_id = data[1:t_index]
+                    short_test_id = data[t_index+1:]
+                    
+                    # Buscar IDs completos no banco usando os últimos caracteres
+                    student_id = self._buscar_id_completo_por_sufixo('student', short_student_id)
+                    test_id = self._buscar_id_completo_por_sufixo('test', short_test_id)
+                    
+                    if student_id and test_id:
+                        return {
+                            'student_id': student_id,
+                            'test_id': test_id,
+                            'gabarito_id': None  # Não está no formato compacto
+                        }
+                    else:
+                        self.logger.warning(f"Não foi possível encontrar IDs completos: "
+                                          f"student_suffix={short_student_id}, test_suffix={short_test_id}")
+                        # Fallback: retornar os sufixos mesmo assim
+                        return {
+                            'student_id': short_student_id,
+                            'test_id': short_test_id,
+                            'gabarito_id': None
+                        }
+            
+            # Tentar formato compacto com dois pontos: s:xxx t:xxx
+            if data.startswith('s:') and ' t:' in data:
+                parts = data.split(' t:')
+                if len(parts) == 2:
+                    student_id = parts[0].replace('s:', '').strip()
+                    test_id = parts[1].strip()
+                    return {
+                        'student_id': student_id,
+                        'test_id': test_id,
+                        'gabarito_id': None  # Não está no formato compacto
+                    }
+            
+            # Tentar parsear como JSON (compatibilidade com formato antigo)
             try:
                 qr_json = json.loads(data)
                 return {
@@ -243,6 +284,31 @@ class AnswerSheetCorrection:
                 
         except Exception as e:
             self.logger.error(f"Erro ao parsear dados do QR: {str(e)}")
+            return None
+    
+    def _buscar_id_completo_por_sufixo(self, table_name: str, suffix: str) -> Optional[str]:
+        """
+        Busca ID completo no banco usando sufixo (últimos caracteres)
+        """
+        try:
+            from sqlalchemy import func
+            from app import db
+            
+            if table_name == 'student':
+                from app.models.student import Student
+                student = Student.query.filter(
+                    func.replace(Student.id, '-', '').like(f'%{suffix}')
+                ).first()
+                return student.id if student else None
+            elif table_name == 'test':
+                from app.models.test import Test
+                test = Test.query.filter(
+                    func.replace(Test.id, '-', '').like(f'%{suffix}')
+                ).first()
+                return test.id if test else None
+            return None
+        except Exception as e:
+            self.logger.error(f"Erro ao buscar ID completo para {table_name} com sufixo {suffix}: {str(e)}")
             return None
     
     def _detectar_roi_borda_grossa(self, img: np.ndarray) -> Optional[np.ndarray]:

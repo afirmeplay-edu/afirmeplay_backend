@@ -32,7 +32,7 @@ class CorrecaoHybrid:
             debug: Se True, gera logs detalhados
         """
         self.debug = debug
-        self.save_debug_images = True  # Ativa salvamento de imagens de debug
+        self.save_debug_images = False  # Desativado: não salva imagens de debug
         self.logger = logging.getLogger(__name__)
         self.logger.info("Correção Híbrida inicializada (detecção geométrica)")
     
@@ -551,13 +551,51 @@ class CorrecaoHybrid:
     
     def _parsear_qr_data(self, data: str) -> Optional[Dict[str, str]]:
         """
-        Parseia dados do QR code (JSON ou string simples)
+        Parseia dados do QR code (formato ultra-compacto s12345678t87654321, 
+        formato compacto s:xxx t:xxx, JSON ou string simples)
+        Busca IDs completos no banco quando usa formato encurtado
         """
         try:
             if not data:
                 return None
             
-            # Tentar parsear como JSON
+            # Tentar formato ultra-compacto primeiro: s12345678t87654321
+            if data.startswith('s') and 't' in data[1:]:
+                t_index = data.find('t', 1)
+                if t_index > 1:
+                    short_student_id = data[1:t_index]
+                    short_test_id = data[t_index+1:]
+                    
+                    # Buscar IDs completos no banco usando os últimos caracteres
+                    student_id = self._buscar_id_completo_por_sufixo('student', short_student_id)
+                    test_id = self._buscar_id_completo_por_sufixo('test', short_test_id)
+                    
+                    if student_id and test_id:
+                        return {
+                            'student_id': student_id,
+                            'test_id': test_id
+                        }
+                    else:
+                        self.logger.warning(f"Não foi possível encontrar IDs completos: "
+                                          f"student_suffix={short_student_id}, test_suffix={short_test_id}")
+                        # Fallback: retornar os sufixos mesmo assim
+                        return {
+                            'student_id': short_student_id,
+                            'test_id': short_test_id
+                        }
+            
+            # Tentar formato compacto com dois pontos: s:xxx t:xxx
+            if data.startswith('s:') and ' t:' in data:
+                parts = data.split(' t:')
+                if len(parts) == 2:
+                    student_id = parts[0].replace('s:', '').strip()
+                    test_id = parts[1].strip()
+                    return {
+                        'student_id': student_id,
+                        'test_id': test_id
+                    }
+            
+            # Tentar parsear como JSON (compatibilidade com formato antigo)
             try:
                 qr_json = json.loads(data)
                 return {
@@ -573,6 +611,40 @@ class CorrecaoHybrid:
                 
         except Exception as e:
             self.logger.error(f"Erro ao parsear dados do QR: {str(e)}")
+            return None
+    
+    def _buscar_id_completo_por_sufixo(self, table_name: str, suffix: str) -> Optional[str]:
+        """
+        Busca ID completo no banco usando sufixo (últimos caracteres)
+        
+        Args:
+            table_name: Nome da tabela ('student' ou 'test')
+            suffix: Últimos caracteres do ID (sem hífens)
+            
+        Returns:
+            ID completo ou None se não encontrado
+        """
+        try:
+            from sqlalchemy import func
+            
+            if table_name == 'student':
+                from app.models.student import Student
+                # Buscar usando LIKE '%suffix' (últimos caracteres sem hífens)
+                # Remove hífens do ID e compara com o sufixo
+                student = Student.query.filter(
+                    func.replace(Student.id, '-', '').like(f'%{suffix}')
+                ).first()
+                return student.id if student else None
+            elif table_name == 'test':
+                from app.models.test import Test
+                # Buscar usando LIKE '%suffix' (últimos caracteres sem hífens)
+                test = Test.query.filter(
+                    func.replace(Test.id, '-', '').like(f'%{suffix}')
+                ).first()
+                return test.id if test else None
+            return None
+        except Exception as e:
+            self.logger.error(f"Erro ao buscar ID completo para {table_name} com sufixo {suffix}: {str(e)}")
             return None
     
     def _paper90(self, img: np.ndarray) -> Optional[np.ndarray]:
@@ -1632,13 +1704,58 @@ class CorrecaoHybrid:
                 
                 return {}
             
+            # CORREÇÃO: Detectar TODAS as bolhas (vazias e preenchidas) usando HoughCircles
+            # Isso garante que sempre detectemos 4 bolhas por linha
+            # Primeiro, detectar círculos usando HoughCircles (detecta bordas, não precisa estar preenchido)
+            # Usar Canny para melhorar detecção de bordas roxas
+            edges = cv2.Canny(roi_gray, 50, 150)
+            circles = cv2.HoughCircles(
+                edges,  # Usar bordas Canny ao invés de grayscale direto
+                cv2.HOUGH_GRADIENT,
+                dp=1,
+                minDist=15,  # Distância mínima entre centros de círculos (reduzido)
+                param1=30,   # Threshold superior para detecção de bordas (reduzido para detectar bordas roxas)
+                param2=15,   # Threshold para detecção de centro (reduzido = mais círculos)
+                minRadius=10,  # Raio mínimo (bolhas são ~12-13px de raio)
+                maxRadius=15   # Raio máximo (ajustado)
+            )
+            
+            # Converter círculos detectados em contornos para processamento uniforme
+            all_bubbles = list(questionCnts)  # Começar com bolhas preenchidas já detectadas
+            
+            if circles is not None:
+                circles = np.round(circles[0, :]).astype("int")
+                for (x_c, y_c, r) in circles:
+                    # Verificar se este círculo não é muito diferente das bolhas já detectadas
+                    # e se não está muito próximo de uma bolha já detectada
+                    is_duplicate = False
+                    for existing_c in questionCnts:
+                        (ex, ey, ew, eh) = cv2.boundingRect(existing_c)
+                        ex_center = ex + ew // 2
+                        ey_center = ey + eh // 2
+                        distance = np.sqrt((x_c - ex_center)**2 + (y_c - ey_center)**2)
+                        if distance < 15:  # Se está muito próximo, é duplicata
+                            is_duplicate = True
+                            break
+                    
+                    if not is_duplicate:
+                        # Criar contorno aproximado do círculo
+                        # Criar um contorno circular usando pontos
+                        circle_pts = []
+                        for angle in range(0, 360, 10):
+                            px = int(x_c + r * np.cos(np.radians(angle)))
+                            py = int(y_c + r * np.sin(np.radians(angle)))
+                            circle_pts.append([[px, py]])
+                        circle_contour = np.array(circle_pts, dtype=np.int32)
+                        all_bubbles.append(circle_contour)
+            
             # Agrupar bolhas por LINHA (Y similar) primeiro
             # Baseado no tutorial PyImageSearch: https://pyimagesearch.com/2016/10/03/bubble-sheet-multiple-choice-scanner-and-test-grader-using-omr-python-and-opencv/
             Y_TOLERANCE = 15  # Tolerância vertical para considerar mesma linha
             
             # Agrupar bolhas por linha Y
             rows = []
-            for c in questionCnts:
+            for c in all_bubbles:
                 (x, y, w, h) = cv2.boundingRect(c)
                 center_y = y + h // 2  # Centro Y da bolha
                 
@@ -1662,6 +1779,9 @@ class CorrecaoHybrid:
             
             # Ordenar linhas por Y (de cima para baixo) = questões
             rows.sort(key=lambda row: cv2.boundingRect(row[0])[1])
+            
+            # Filtrar linhas que não têm pelo menos 3 bolhas (esperamos 4, mas aceitamos 3+)
+            rows = [row for row in rows if len(row) >= 3]
             
             if block_num:
                 self.logger.info(f"Bloco {block_num}: {len(rows)} linhas (questões) detectadas")
@@ -1762,15 +1882,17 @@ class CorrecaoHybrid:
                 posicao_na_linha = bolha_marcada['position']  # Usar o campo 'position' já armazenado
                 
                 # Mapear posição para letra
-                # ESTRATÉGIA PRINCIPAL: Se temos 4 bolhas, mapear diretamente pela posição
-                # ESTRATÉGIA FALLBACK: Se temos menos de 4, usar distância relativa X
-                if len(bolhas_com_pixels) == 4:
+                # ESTRATÉGIA PRINCIPAL: Se temos 3 ou 4 bolhas, mapear diretamente pela posição
+                # ESTRATÉGIA FALLBACK: Se temos menos de 3, usar distância relativa X
+                if len(bolhas_com_pixels) >= 3:
                     # Mapeamento direto: primeira = A, segunda = B, terceira = C, quarta = D
-                    bubble_letter = LETTERS[posicao_na_linha]
+                    # Assumimos que as bolhas estão ordenadas da esquerda para direita
+                    # Se temos 3 bolhas, a primeira é sempre A (mesmo que a bolha A vazia não tenha sido detectada)
+                    bubble_letter = LETTERS[posicao_na_linha] if posicao_na_linha < len(LETTERS) else LETTERS[-1]
                     mapping_method = "direto_por_posição"
                 else:
                     # Fallback: usar posição relativa X para mapear
-                    # Útil quando algumas bolhas não foram detectadas
+                    # Útil quando apenas 1 ou 2 bolhas foram detectadas
                     x_rel = bolha_marcada['x_center'] / roi_width if roi_width > 0 else 0
                     bubble_letter = get_bubble_letter_by_distance(bolha_marcada['x_center'], roi_width)
                     mapping_method = "distância_relativa"

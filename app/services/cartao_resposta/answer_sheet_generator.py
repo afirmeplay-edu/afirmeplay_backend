@@ -1,0 +1,326 @@
+# -*- coding: utf-8 -*-
+"""
+Serviço para geração de PDFs de cartões resposta usando WeasyPrint + Jinja2
+"""
+
+from weasyprint import HTML
+from jinja2 import Environment, FileSystemLoader, select_autoescape
+import os
+import io
+import base64
+import logging
+import json
+import qrcode
+from datetime import datetime
+from typing import List, Dict, Any, Optional
+from io import BytesIO
+
+
+class AnswerSheetGenerator:
+    """
+    Gerador de PDFs para cartões resposta usando WeasyPrint + Jinja2
+    """
+
+    def __init__(self):
+        # Configurar Jinja2 para carregar templates
+        template_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), 'templates')
+        self.env = Environment(
+            loader=FileSystemLoader(template_dir),
+            autoescape=select_autoescape(['html', 'xml'])
+        )
+
+        # Adicionar filtros personalizados
+        self.env.filters['safe'] = lambda x: x
+
+    def generate_answer_sheets(self, class_id: str, test_data: Dict, 
+                              num_questions: int, use_blocks: bool,
+                              blocks_config: Dict, correct_answers: Dict,
+                              gabarito_id: str = None) -> List[Dict]:
+        """
+        Gera PDFs de cartões resposta para todos os alunos de uma turma
+
+        Args:
+            class_id: ID da turma
+            test_data: Dados da prova (title, municipality, state, etc.)
+            num_questions: Quantidade de questões
+            use_blocks: Se usa blocos ou não
+            blocks_config: Configuração de blocos {num_blocks, questions_per_block, separate_by_subject}
+            correct_answers: Dict com respostas corretas {1: "A", 2: "B", ...}
+            gabarito_id: ID do gabarito salvo (opcional)
+
+        Returns:
+            Lista com informações dos PDFs gerados
+        """
+        try:
+            from app.models.student import Student
+            from app.models.studentClass import Class
+
+            # Buscar turma
+            class_obj = Class.query.get(class_id)
+            if not class_obj:
+                raise ValueError(f"Turma {class_id} não encontrada")
+
+            # Buscar alunos da turma
+            students = Student.query.filter_by(class_id=class_id).all()
+            if not students:
+                raise ValueError(f"Nenhum aluno encontrado na turma {class_id}")
+
+            generated_files = []
+
+            # Organizar questões por blocos se necessário
+            questions_by_block = None
+            if use_blocks:
+                questions_by_block = self._organize_questions_by_blocks(
+                    num_questions, blocks_config
+                )
+
+            for student in students:
+                try:
+                    # Gerar PDF individual para cada aluno
+                    pdf_data = self._generate_individual_answer_sheet(
+                        student, test_data, num_questions, use_blocks,
+                        blocks_config, questions_by_block, gabarito_id
+                    )
+
+                    if pdf_data:
+                        generated_files.append({
+                            'student_id': student.id,
+                            'student_name': student.name,
+                            'pdf_data': pdf_data,
+                            'has_pdf_data': True
+                        })
+
+                except Exception as e:
+                    logging.error(f"Erro ao gerar cartão resposta para aluno {student.id}: {str(e)}")
+                    import traceback
+                    logging.error(traceback.format_exc())
+                    continue
+
+            return generated_files
+
+        except Exception as e:
+            logging.error(f"Erro ao gerar cartões resposta: {str(e)}")
+            import traceback
+            logging.error(traceback.format_exc())
+            raise
+
+    def _generate_individual_answer_sheet(self, student: Dict, test_data: Dict,
+                                         num_questions: int, use_blocks: bool,
+                                         blocks_config: Dict, questions_by_block: List[Dict],
+                                         gabarito_id: str = None) -> Optional[bytes]:
+        """
+        Gera PDF individual de cartão resposta para um aluno
+        """
+        try:
+            # Buscar dados completos do aluno
+            student_data = self._get_complete_student_data(student)
+
+            # Gerar QR code com metadados
+            qr_code_base64 = self._generate_qr_code(
+                student_id=student_data['id'],
+                test_id=test_data.get('id'),
+                gabarito_id=gabarito_id
+            )
+
+            # Adicionar QR code ao student dict
+            student_with_qr = student_data.copy()
+            student_with_qr['qr_code'] = qr_code_base64
+
+            # Preparar dados para o template
+            template_data = {
+                'test_data': test_data,
+                'student': student_with_qr,
+                'questions_by_block': questions_by_block,
+                'blocks_config': blocks_config if use_blocks else None,
+                'total_questions': num_questions,
+                'datetime': datetime,
+                'generated_date': datetime.now().strftime('%d/%m/%Y %H:%M')
+            }
+
+            # Renderizar template HTML
+            template = self.env.get_template('answer_sheet.html')
+            html_content = template.render(**template_data)
+
+            # Gerar PDF com WeasyPrint
+            pdf_buffer = io.BytesIO()
+            HTML(string=html_content).write_pdf(pdf_buffer)
+            pdf_buffer.seek(0)
+
+            return pdf_buffer.read()
+
+        except Exception as e:
+            logging.error(f"Erro ao gerar PDF individual: {str(e)}")
+            import traceback
+            logging.error(traceback.format_exc())
+            return None
+
+    def _organize_questions_by_blocks(self, num_questions: int, blocks_config: Dict) -> List[Dict]:
+        """
+        Organiza questões por blocos conforme configuração
+        
+        Args:
+            num_questions: Total de questões
+            blocks_config: Configuração de blocos
+            
+        Returns:
+            Lista de blocos, cada um contendo:
+            - block_number: número do bloco
+            - questions: lista de questões do bloco (apenas números)
+            - start_question_num: número da primeira questão
+            - end_question_num: número da última questão
+        """
+        blocks = []
+        
+        num_blocks = blocks_config.get('num_blocks', 1)
+        questions_per_block = blocks_config.get('questions_per_block', 12)
+        separate_by_subject = blocks_config.get('separate_by_subject', False)
+        
+        if separate_by_subject:
+            # Se separar por disciplina, precisaríamos de dados de disciplinas
+            # Por enquanto, vamos distribuir sequencialmente
+            # TODO: Implementar separação por disciplina se necessário
+            pass
+        
+        # Distribuir questões sequencialmente pelos blocos
+        for block_num in range(1, num_blocks + 1):
+            start_question = (block_num - 1) * questions_per_block + 1
+            end_question = min(block_num * questions_per_block, num_questions)
+            
+            # Criar lista de questões (apenas números para o template)
+            questions = []
+            for q_num in range(start_question, end_question + 1):
+                questions.append({
+                    'question_number': q_num
+                })
+            
+            if questions:
+                blocks.append({
+                    'block_number': block_num,
+                    'subject_name': None,
+                    'questions': questions,
+                    'start_question_num': start_question,
+                    'end_question_num': end_question
+                })
+        
+        # Validar que temos pelo menos um bloco
+        if not blocks:
+            questions = []
+            for q_num in range(1, num_questions + 1):
+                questions.append({
+                    'question_number': q_num
+                })
+            
+            if questions:
+                blocks.append({
+                    'block_number': 1,
+                    'subject_name': None,
+                    'questions': questions,
+                    'start_question_num': 1,
+                    'end_question_num': num_questions
+                })
+        
+        return blocks
+
+    def _get_complete_student_data(self, student) -> Dict:
+        """
+        Obtém dados completos do aluno
+        """
+        try:
+            from app.models.student import Student
+            from app.models.studentClass import Class
+            from app.models.school import School
+            
+            # Se já for um objeto Student, usar diretamente
+            if isinstance(student, Student):
+                student_obj = student
+            else:
+                # Se for dict, buscar do banco
+                student_id = student.get('id') if isinstance(student, dict) else str(student)
+                student_obj = Student.query.get(student_id)
+            
+            if not student_obj:
+                return {
+                    'id': str(student.id) if hasattr(student, 'id') else str(student),
+                    'name': getattr(student, 'name', 'Nome não informado'),
+                    'nome': getattr(student, 'name', 'Nome não informado')
+                }
+            
+            # Buscar dados da turma e escola
+            class_name = ''
+            school_name = ''
+            
+            if student_obj.class_id:
+                class_obj = Class.query.get(student_obj.class_id)
+                if class_obj:
+                    class_name = class_obj.name or ''
+            
+            if student_obj.school_id:
+                school_obj = School.query.get(student_obj.school_id)
+                if school_obj:
+                    school_name = school_obj.name or ''
+            
+            return {
+                'id': str(student_obj.id),
+                'name': student_obj.name or 'Nome não informado',
+                'nome': student_obj.name or 'Nome não informado',
+                'registration': getattr(student_obj, 'registration', ''),
+                'class_name': class_name,
+                'school_name': school_name,
+                'class_id': str(student_obj.class_id) if student_obj.class_id else ''
+            }
+
+        except Exception as e:
+            logging.error(f"Erro ao buscar dados do aluno: {str(e)}")
+            import traceback
+            logging.error(traceback.format_exc())
+            return {
+                'id': str(student.id) if hasattr(student, 'id') else '',
+                'name': 'Nome não informado',
+                'nome': 'Nome não informado'
+            }
+
+    def _generate_qr_code(self, student_id: str, test_id: str = None, 
+                         gabarito_id: str = None) -> str:
+        """
+        Gera QR code com metadados simplificados
+        Prioriza gabarito_id se fornecido, senão usa test_id
+        """
+        try:
+            # Criar metadados do QR code
+            qr_metadata = {
+                "student_id": str(student_id)
+            }
+            
+            # Adicionar test_id ou gabarito_id
+            if gabarito_id:
+                qr_metadata["gabarito_id"] = str(gabarito_id)
+            elif test_id:
+                qr_metadata["test_id"] = str(test_id)
+            
+            # Gerar QR code com JSON
+            qr = qrcode.QRCode(
+                version=1,
+                error_correction=qrcode.constants.ERROR_CORRECT_L,
+                box_size=10,
+                border=2,
+            )
+            qr.add_data(json.dumps(qr_metadata))
+            qr.make(fit=True)
+            
+            # Criar imagem do QR Code
+            qr_img = qr.make_image(fill_color="black", back_color="white")
+            
+            # Converter para base64
+            qr_buffer = BytesIO()
+            qr_img.save(qr_buffer, format="PNG")
+            qr_buffer.seek(0)
+            qr_code_base64 = base64.b64encode(qr_buffer.read()).decode()
+            
+            return qr_code_base64
+
+        except Exception as e:
+            logging.error(f"Erro ao gerar QR code: {str(e)}")
+            import traceback
+            logging.error(traceback.format_exc())
+            return ""
+

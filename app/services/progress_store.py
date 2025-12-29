@@ -36,7 +36,7 @@ lock = Lock()
 logger = logging.getLogger(__name__)
 
 
-def create_job(job_id: str, total: int, test_id: str = None) -> dict:
+def create_job(job_id: str, total: int, test_id: str = None, gabarito_id: str = None) -> dict:
     """
     Cria um novo job de correção em lote
     
@@ -44,6 +44,7 @@ def create_job(job_id: str, total: int, test_id: str = None) -> dict:
         job_id: ID único do job
         total: Número total de imagens a processar
         test_id: ID da prova (opcional)
+        gabarito_id: ID do gabarito (opcional)
     
     Returns:
         dict: Dados do job criado
@@ -56,6 +57,7 @@ def create_job(job_id: str, total: int, test_id: str = None) -> dict:
             "failed": 0,
             "status": "processing",
             "test_id": test_id,
+            "gabarito_id": gabarito_id,
             "created_at": datetime.utcnow().isoformat(),
             "items": {str(i): {"status": "pending"} for i in range(total)},
             "results": []
@@ -211,6 +213,10 @@ def get_all_jobs() -> dict:
     """
     with lock:
         return dict(progress)
+
+
+
+
 
 
 

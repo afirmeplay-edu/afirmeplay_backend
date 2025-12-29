@@ -3,7 +3,7 @@
 Rotas para geração e correção de cartões resposta
 """
 
-from flask import Blueprint, request, jsonify
+from flask import Blueprint, request, jsonify, send_file
 from flask_jwt_extended import jwt_required, get_jwt_identity
 from app.decorators.role_required import role_required, get_current_user_from_token
 from app import db
@@ -11,11 +11,19 @@ from app.models.answerSheetGabarito import AnswerSheetGabarito
 from app.models.studentClass import Class
 from app.models.student import Student
 from app.models.user import User
-from app.services.answer_sheet_generator import AnswerSheetGenerator
-from app.services.answer_sheet_correction import AnswerSheetCorrection
+from app.services.cartao_resposta.answer_sheet_generator import AnswerSheetGenerator
+from app.services.cartao_resposta.answer_sheet_correction_service import AnswerSheetCorrectionService
+from app.services.progress_store import (
+    create_job, update_item_processing, update_item_done,
+    update_item_error, complete_job, get_job
+)
 import logging
 import base64
 import io
+import zipfile
+import threading
+import uuid
+from io import BytesIO
 
 bp = Blueprint('answer_sheets', __name__, url_prefix='/answer-sheets')
 
@@ -25,7 +33,7 @@ bp = Blueprint('answer_sheets', __name__, url_prefix='/answer-sheets')
 @role_required("admin", "professor", "coordenador", "diretor", "tecadm")
 def generate_answer_sheets():
     """
-    Gera cartões resposta para uma turma
+    Gera cartões resposta para uma turma e retorna como arquivo ZIP
     
     Body:
         {
@@ -52,7 +60,8 @@ def generate_answer_sheets():
         }
     
     Returns:
-        Lista de PDFs gerados (base64)
+        Arquivo ZIP contendo todos os PDFs dos cartões resposta
+        O ZIP também contém um arquivo metadata.json com informações do gabarito
     """
     try:
         user = get_current_user_from_token()
@@ -106,6 +115,16 @@ def generate_answer_sheets():
             if 'questions_per_block' not in blocks_config:
                 blocks_config['questions_per_block'] = 12
         
+        # Buscar informações da turma e escola para salvar no gabarito
+        school_id = None
+        school_name = ''
+        if class_obj.school_id:
+            from app.models.school import School
+            school = School.query.get(class_obj.school_id)
+            if school:
+                school_id = school.id
+                school_name = school.name or ''
+        
         # Salvar gabarito no banco
         gabarito = AnswerSheetGabarito(
             test_id=data.get('test_id'),
@@ -115,7 +134,14 @@ def generate_answer_sheets():
             blocks_config=blocks_config,
             correct_answers=correct_answers,
             title=test_data.get('title', 'Cartão Resposta'),
-            created_by=user['id']
+            created_by=user['id'],
+            # Campos adicionais
+            school_id=school_id,
+            school_name=school_name,
+            municipality=test_data.get('municipality', ''),
+            state=test_data.get('state', ''),
+            grade_name=test_data.get('grade_name', ''),
+            institution=test_data.get('institution', '')
         )
         db.session.add(gabarito)
         db.session.commit()
@@ -144,25 +170,57 @@ def generate_answer_sheets():
             gabarito_id=gabarito.id
         )
         
-        # Converter PDFs para base64
-        result = []
-        for file_info in generated_files:
-            pdf_data = file_info.get('pdf_data')
-            if pdf_data:
-                pdf_base64 = base64.b64encode(pdf_data).decode('utf-8')
-                result.append({
-                    'student_id': file_info['student_id'],
-                    'student_name': file_info['student_name'],
-                    'pdf_base64': pdf_base64,
-                    'gabarito_id': gabarito.id
-                })
+        if not generated_files:
+            return jsonify({"error": "Nenhum cartão resposta foi gerado"}), 400
         
-        return jsonify({
-            "success": True,
-            "gabarito_id": gabarito.id,
-            "generated_count": len(result),
-            "files": result
-        }), 200
+        # Criar ZIP em memória
+        zip_buffer = BytesIO()
+        
+        with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
+            # Adicionar cada PDF ao ZIP
+            for file_info in generated_files:
+                pdf_data = file_info.get('pdf_data')
+                if pdf_data:
+                    # Nome do arquivo: cartao_NomeAluno_studentId.pdf
+                    student_name = file_info.get('student_name', 'Aluno')
+                    student_id = file_info.get('student_id', '')
+                    
+                    # Limpar caracteres inválidos do nome do arquivo
+                    safe_name = "".join(c for c in student_name if c.isalnum() or c in (' ', '-', '_')).strip()
+                    safe_name = safe_name.replace(' ', '_')
+                    
+                    filename = f"cartao_{safe_name}_{student_id[:8]}.pdf"
+                    zip_file.writestr(filename, pdf_data)
+            
+            # Adicionar arquivo de metadados com informações do gabarito
+            metadata = {
+                "gabarito_id": gabarito.id,
+                "test_id": gabarito.test_id,
+                "class_id": gabarito.class_id,
+                "title": gabarito.title,
+                "num_questions": gabarito.num_questions,
+                "use_blocks": gabarito.use_blocks,
+                "blocks_config": gabarito.blocks_config,
+                "generated_count": len([f for f in generated_files if f.get('pdf_data')]),
+                "created_at": gabarito.created_at.isoformat() if gabarito.created_at else None
+            }
+            import json as json_module
+            zip_file.writestr("metadata.json", json_module.dumps(metadata, indent=2, ensure_ascii=False))
+        
+        zip_buffer.seek(0)
+        
+        # Nome do arquivo ZIP
+        zip_filename = f"cartoes_resposta_{test_data_complete.get('title', 'CartaoResposta')}_{gabarito.id[:8]}.zip"
+        # Limpar caracteres inválidos
+        zip_filename = "".join(c for c in zip_filename if c.isalnum() or c in (' ', '-', '_', '.')).rstrip()
+        zip_filename = zip_filename.replace(' ', '_')
+        
+        return send_file(
+            zip_buffer,
+            as_attachment=True,
+            download_name=zip_filename,
+            mimetype='application/zip'
+        )
         
     except Exception as e:
         db.session.rollback()
@@ -170,65 +228,278 @@ def generate_answer_sheets():
         return jsonify({"error": f"Erro ao gerar cartões resposta: {str(e)}"}), 500
 
 
+# ============================================================================
+# FUNÇÃO DE PROCESSAMENTO EM BACKGROUND
+# ============================================================================
+
+def process_answer_sheet_batch_in_background(job_id: str, images: list = None):
+    """
+    Processa correção em lote de cartões resposta em background thread
+    
+    Args:
+        job_id: ID do job para tracking
+        images: Lista de imagens em base64
+    """
+    from app import create_app
+    
+    # Criar contexto da aplicação para a thread
+    app = create_app()
+    
+    with app.app_context():
+        try:
+            correction_service = AnswerSheetCorrectionService(debug=True)
+            
+            for i, image_base64 in enumerate(images):
+                try:
+                    # Marcar como processando
+                    update_item_processing(job_id, i)
+                    
+                    # Decodificar imagem
+                    if image_base64.startswith('data:image'):
+                        image_base64_clean = image_base64.split(',')[1]
+                    else:
+                        image_base64_clean = image_base64
+                    image_data = base64.b64decode(image_base64_clean)
+                    
+                    # Processar correção (gabarito_id vem do QR code)
+                    result = correction_service.corrigir_cartao_resposta(
+                        image_data=image_data
+                    )
+                    
+                    if result.get('success'):
+                        # Buscar nome do aluno se não veio no resultado
+                        if not result.get('student_name') and result.get('student_id'):
+                            student = Student.query.get(result['student_id'])
+                            if student:
+                                result['student_name'] = student.name
+                        
+                        update_item_done(job_id, i, result)
+                        logging.info(f"✅ Job {job_id}: Cartão resposta {i+1} processado com sucesso")
+                    else:
+                        update_item_error(job_id, i, result.get('error', 'Erro desconhecido'))
+                        logging.warning(f"❌ Job {job_id}: Cartão resposta {i+1} falhou: {result.get('error')}")
+                        
+                except Exception as e:
+                    update_item_error(job_id, i, str(e))
+                    logging.error(f"❌ Job {job_id}: Erro no cartão resposta {i+1}: {str(e)}")
+            
+            # Marcar job como concluído
+            complete_job(job_id)
+            logging.info(f"✅ Job {job_id} concluído")
+            
+        except Exception as e:
+            logging.error(f"❌ Erro crítico no job {job_id}: {str(e)}")
+            complete_job(job_id)
+
+
+# ============================================================================
+# ROTAS DE CORREÇÃO
+# ============================================================================
+
 @bp.route('/correct', methods=['POST'])
 @jwt_required()
 @role_required("admin", "professor", "coordenador", "diretor", "tecadm")
 def correct_answer_sheet():
     """
-    Corrige um cartão resposta usando IA
+    Corrige cartão(ões) resposta usando detecção geométrica
     
-    Body:
-        {
-            "image": "base64_encoded_image",
-            "gabarito_id": "uuid" (opcional, se não tiver test_id),
-            "test_id": "uuid" (opcional, se não tiver gabarito_id)
-        }
+    O gabarito_id é extraído automaticamente do QR code no cartão resposta.
+    Não é necessário enviar gabarito_id na requisição.
     
-    Returns:
-        Resultado da correção com notas e respostas
+    Aceita:
+    - Uma única imagem (campo 'image') - processamento SÍNCRONO
+    - Múltiplas imagens (campo 'images') - processamento ASSÍNCRONO com job_id
+    
+    Body (JSON) - Modo Único:
+    {
+        "image": "data:image/jpeg;base64,..."
+    }
+    
+    Body (JSON) - Modo Lote:
+    {
+        "images": [
+            "data:image/jpeg;base64,...",
+            "data:image/jpeg;base64,...",
+            ...
+        ]
+    }
+    
+    Returns (síncrono - 1 imagem):
+        Resultado completo da correção
+        
+    Returns (assíncrono - múltiplas imagens):
+        {"job_id": "uuid", "message": "Processamento iniciado", "total": N}
+        Use GET /answer-sheets/correction-progress/<job_id> para acompanhar o progresso
     """
     try:
         user = get_current_user_from_token()
         if not user:
             return jsonify({"error": "Usuário não encontrado"}), 401
         
-        data = request.get_json()
-        if not data:
-            return jsonify({"error": "Dados não fornecidos"}), 400
+        # Obter dados da requisição
+        data = None
+        images = []
+        single_image = None
         
-        # Validar campos
-        image_base64 = data.get('image')
-        gabarito_id = data.get('gabarito_id')
-        test_id = data.get('test_id')
-        
-        if not image_base64:
-            return jsonify({"error": "image é obrigatório"}), 400
-        
-        if not gabarito_id and not test_id:
-            return jsonify({"error": "gabarito_id ou test_id é obrigatório"}), 400
-        
-        # Decodificar imagem
+        # Tentar obter de JSON
         try:
-            image_data = base64.b64decode(image_base64)
-        except Exception as e:
-            return jsonify({"error": f"Erro ao decodificar imagem: {str(e)}"}), 400
+            data = request.get_json() or {}
+            
+            # Verificar se é lote (campo 'images') ou única (campo 'image')
+            if 'images' in data and isinstance(data['images'], list):
+                images = data['images']
+            elif 'image' in data:
+                single_image = data['image']
+        except:
+            pass
         
-        # Corrigir cartão resposta
-        correction_service = AnswerSheetCorrection(debug=True)
-        resultado = correction_service.corrigir_cartao_resposta(
-            image_data=image_data,
-            gabarito_id=gabarito_id,
-            test_id=test_id
-        )
+        # Tentar obter de form-data (arquivo)
+        if not images and not single_image and 'image' in request.files:
+            file = request.files['image']
+            if file and file.filename:
+                image_bytes = file.read()
+                single_image = f"data:image/jpeg;base64,{base64.b64encode(image_bytes).decode('utf-8')}"
         
-        if not resultado.get('success'):
-            return jsonify(resultado), 400
+        # Tentar obter de form-data (base64)
+        if not images and not single_image:
+            image_base64 = request.form.get('image')
+            if image_base64:
+                single_image = image_base64
         
-        return jsonify(resultado), 200
+        # ==================================================================
+        # MODO ÚNICO (1 imagem) - Processamento SÍNCRONO
+        # ==================================================================
+        if single_image and not images:
+            logging.info(f"🔧 Processando correção única de cartão resposta")
+            
+            # Decodificar imagem
+            if single_image.startswith('data:image'):
+                single_image_clean = single_image.split(',')[1]
+            else:
+                single_image_clean = single_image
+            image_data = base64.b64decode(single_image_clean)
+            
+            # Processar correção (gabarito_id vem do QR code)
+            correction_service = AnswerSheetCorrectionService(debug=True)
+            resultado = correction_service.corrigir_cartao_resposta(
+                image_data=image_data
+            )
+            
+            if resultado.get('success'):
+                return jsonify({
+                    "message": "Correção processada com sucesso",
+                    "system": "geometric",
+                    "student_id": resultado.get('student_id'),
+                    "gabarito_id": resultado.get('gabarito_id'),
+                    "test_id": resultado.get('test_id'),
+                    "correct": resultado.get('correct'),
+                    "total": resultado.get('total'),
+                    "percentage": resultado.get('percentage'),
+                    "grade": resultado.get('grade'),
+                    "proficiency": resultado.get('proficiency'),
+                    "classification": resultado.get('classification'),
+                    "score_percentage": resultado.get('score_percentage'),
+                    "answers": resultado.get('answers'),
+                    "correction": resultado.get('correction'),
+                    "answer_sheet_result_id": resultado.get('answer_sheet_result_id')
+                }), 200
+            else:
+                return jsonify({
+                    "error": resultado.get('error', 'Erro desconhecido na correção'),
+                    "system": "geometric"
+                }), 500
+        
+        # ==================================================================
+        # MODO LOTE (múltiplas imagens) - Processamento ASSÍNCRONO
+        # ==================================================================
+        if images:
+            # Validar quantidade
+            if len(images) > 50:
+                return jsonify({"error": "Máximo de 50 imagens por lote"}), 400
+            
+            if len(images) == 0:
+                return jsonify({"error": "Nenhuma imagem fornecida"}), 400
+            
+            logging.info(f"🔧 Iniciando correção em lote: {len(images)} cartões resposta")
+            
+            # Criar job ID
+            job_id = str(uuid.uuid4())
+            
+            # Criar job no store
+            create_job(job_id, len(images))
+            
+            # Iniciar thread de processamento
+            thread = threading.Thread(
+                target=process_answer_sheet_batch_in_background,
+                args=(job_id, images),
+                daemon=True
+            )
+            thread.start()
+            
+            return jsonify({
+                "job_id": job_id,
+                "message": "Processamento em lote iniciado",
+                "total": len(images),
+                "status": "processing"
+            }), 202  # 202 Accepted
+        
+        # Nenhuma imagem fornecida
+        return jsonify({"error": "Imagem não fornecida. Use 'image' para única ou 'images' para lote."}), 400
         
     except Exception as e:
         logging.error(f"Erro ao corrigir cartão resposta: {str(e)}", exc_info=True)
         return jsonify({"error": f"Erro ao corrigir cartão resposta: {str(e)}"}), 500
+
+
+@bp.route('/correction-progress/<string:job_id>', methods=['GET'])
+@jwt_required()
+def get_answer_sheet_correction_progress(job_id):
+    """
+    Consulta progresso de uma correção em lote de cartões resposta
+    
+    Returns:
+    {
+        "job_id": "uuid",
+        "total": 5,
+        "completed": 2,
+        "successful": 2,
+        "failed": 0,
+        "status": "processing",  // "processing" | "completed"
+        "percentage": 40.0,
+        "items": {
+            "0": {"status": "done", "student_id": "xxx", "student_name": "João", ...},
+            "1": {"status": "done", "student_id": "yyy", "student_name": "Maria", ...},
+            "2": {"status": "processing"},
+            "3": {"status": "pending"},
+            "4": {"status": "pending"}
+        },
+        "results": [...]  // Resultados completos quando status = "completed"
+    }
+    """
+    job = get_job(job_id)
+    
+    if not job:
+        return jsonify({"error": "Job não encontrado"}), 404
+    
+    # Calcular porcentagem
+    percentage = (job["completed"] / job["total"] * 100) if job["total"] > 0 else 0
+    
+    response = {
+        "job_id": job_id,
+        "total": job["total"],
+        "completed": job["completed"],
+        "successful": job["successful"],
+        "failed": job["failed"],
+        "status": job["status"],
+        "percentage": round(percentage, 1),
+        "items": job["items"]
+    }
+    
+    # Incluir resultados completos apenas quando finalizado
+    if job["status"] == "completed":
+        response["results"] = job["results"]
+    
+    return jsonify(response), 200
 
 
 @bp.route('/gabarito/<string:gabarito_id>', methods=['GET'])

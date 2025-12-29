@@ -600,13 +600,15 @@ class CorrecaoHybrid:
                 qr_json = json.loads(data)
                 return {
                     'student_id': qr_json.get('student_id'),
-                    'test_id': qr_json.get('test_id')
+                    'test_id': qr_json.get('test_id'),  # Para provas do sistema
+                    'gabarito_id': qr_json.get('gabarito_id')  # Para cartões resposta
                 }
             except json.JSONDecodeError:
                 # Se não for JSON, tratar como student_id direto
                 return {
                     'student_id': data.strip(),
-                    'test_id': None
+                    'test_id': None,
+                    'gabarito_id': None
                 }
                 
         except Exception as e:

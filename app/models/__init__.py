@@ -28,6 +28,8 @@ from .formCoordinates import FormCoordinates
 from .studentPasswordLog import StudentPasswordLog
 from .user_settings import UserSettings
 from .reportAggregate import ReportAggregate
+from .answerSheetGabarito import AnswerSheetGabarito
+from .answerSheetResult import AnswerSheetResult
 
 from .calendar_event import CalendarEvent, CalendarVisibilityScope
 from .calendar_event_target import CalendarEventTarget, CalendarTargetType

@@ -35,3 +35,5 @@ from .calendar_event import CalendarEvent, CalendarVisibilityScope
 from .calendar_event_target import CalendarEventTarget, CalendarTargetType
 from .calendar_event_user import CalendarEventUser
 
+from app.play_tv.models import PlayTvVideo, PlayTvVideoSchool
+

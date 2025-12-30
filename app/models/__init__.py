@@ -35,3 +35,6 @@ from .calendar_event import CalendarEvent, CalendarVisibilityScope
 from .calendar_event_target import CalendarEventTarget, CalendarTargetType
 from .calendar_event_user import CalendarEventUser
 
+# Formulários Socioeconômicos
+from app.socioeconomic_forms.models import Form, FormQuestion, FormRecipient, FormResponse
+

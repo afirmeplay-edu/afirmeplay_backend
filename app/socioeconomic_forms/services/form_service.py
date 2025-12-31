@@ -5,6 +5,10 @@ Serviço para gerenciamento de formulários socioeconômicos
 
 from app import db
 from app.socioeconomic_forms.models import Form, FormQuestion
+from app.models.city import City
+from app.models.school import School
+from app.models.grades import Grade
+from app.models.studentClass import Class
 from sqlalchemy.exc import SQLAlchemyError
 import logging
 from datetime import datetime
@@ -12,6 +16,204 @@ from datetime import datetime
 
 class FormService:
     """Serviço para operações CRUD de formulários"""
+    
+    # Mapeamento de education_stage_id para formType
+    EDUCATION_STAGE_TO_FORM_TYPE = {
+        # aluno-jovem
+        'd1142d12-ed98-46f4-ae78-62c963371464': 'aluno-jovem',  # Educação Infantil
+        '614b7d10-b758-42ec-a04e-86f78dc7740a': 'aluno-jovem',  # Anos Iniciais
+        '63cb6876-3221-4fa2-89e8-a82ad1733032': 'aluno-jovem',  # EJA períodos 1-5 (frontend envia IDs corretos)
+        # aluno-velho
+        'c78fcd8e-00a1-485d-8c03-70bcf59e3025': 'aluno-velho',  # Anos Finais
+        # EJA períodos 6-9 também usa '63cb6876-3221-4fa2-89e8-a82ad1733032' mas frontend envia IDs corretos
+    }
+    
+    @staticmethod
+    def _validate_filters(filters):
+        """
+        Valida filtros hierárquicos
+        
+        Args:
+            filters: Dicionário com filtros {estado, municipio, escola, serie, turma}
+            
+        Raises:
+            ValueError: Se validação falhar
+        """
+        if not filters:
+            return
+        
+        # Validar filtros obrigatórios
+        if not filters.get('estado'):
+            raise ValueError("Estado é obrigatório nos filtros")
+        if not filters.get('municipio'):
+            raise ValueError("Município é obrigatório nos filtros")
+        if not filters.get('escola'):
+            raise ValueError("Escola é obrigatória nos filtros")
+        
+        # Validar que município existe e pertence ao estado
+        municipio = City.query.get(filters['municipio'])
+        if not municipio:
+            raise ValueError("Município não encontrado")
+        if municipio.state != filters['estado']:
+            raise ValueError("Município não pertence ao estado informado")
+        
+        # Validar que escola existe e pertence ao município
+        escola = School.query.get(filters['escola'])
+        if not escola:
+            raise ValueError("Escola não encontrada")
+        if escola.city_id != filters['municipio']:
+            raise ValueError("Escola não pertence ao município informado")
+        
+        # Validar série se fornecida
+        if filters.get('serie'):
+            # Converter string para UUID se necessário
+            import uuid as uuid_lib
+            serie_id = filters['serie']
+            try:
+                if isinstance(serie_id, str):
+                    serie_uuid = uuid_lib.UUID(serie_id)
+                else:
+                    serie_uuid = serie_id
+            except (ValueError, AttributeError):
+                serie_uuid = serie_id
+            
+            grade = Grade.query.get(serie_uuid)
+            if not grade:
+                raise ValueError("Série não encontrada")
+            # Verificar se a série tem turmas na escola
+            classes = Class.query.filter_by(
+                grade_id=serie_uuid,
+                school_id=filters['escola']
+            ).first()
+            if not classes:
+                raise ValueError("Série não possui turmas na escola informada")
+        
+        # Validar turma se fornecida
+        if filters.get('turma'):
+            turma = Class.query.get(filters['turma'])
+            if not turma:
+                raise ValueError("Turma não encontrada")
+            if turma.school_id != filters['escola']:
+                raise ValueError("Turma não pertence à escola informada")
+            if filters.get('serie'):
+                # Converter para comparar corretamente
+                import uuid as uuid_lib
+                serie_id = filters['serie']
+                try:
+                    if isinstance(serie_id, str):
+                        serie_uuid = uuid_lib.UUID(serie_id)
+                    else:
+                        serie_uuid = serie_id
+                except (ValueError, AttributeError):
+                    serie_uuid = serie_id
+                
+                if turma.grade_id != serie_uuid:
+                    raise ValueError("Turma não pertence à série informada")
+    
+    @staticmethod
+    def _validate_form_type_vs_grades(form_type, grade_ids):
+        """
+        Valida se o tipo de formulário corresponde ao education_stage_id das séries
+        
+        Args:
+            form_type: Tipo do formulário (aluno-jovem, aluno-velho, etc.)
+            grade_ids: Lista de IDs de séries
+            
+        Raises:
+            ValueError: Se validação falhar
+        """
+        if not grade_ids or form_type not in ['aluno-jovem', 'aluno-velho']:
+            return
+        
+        # Converter strings para UUID se necessário
+        import uuid as uuid_lib
+        grade_uuids = []
+        for g in grade_ids:
+            if isinstance(g, str):
+                try:
+                    uuid_obj = uuid_lib.UUID(g)
+                    grade_uuids.append(uuid_obj)
+                except (ValueError, AttributeError):
+                    grade_uuids.append(g)
+            else:
+                grade_uuids.append(g)
+        
+        grades = Grade.query.filter(Grade.id.in_(grade_uuids)).all()
+        if len(grades) != len(grade_ids):
+            raise ValueError("Uma ou mais séries não foram encontradas")
+        
+        for grade in grades:
+            education_stage_id = str(grade.education_stage_id)
+            expected_form_type = FormService.EDUCATION_STAGE_TO_FORM_TYPE.get(education_stage_id)
+            
+            # Para EJA, o mesmo education_stage_id pode ser usado para ambos os tipos
+            # O frontend envia os IDs corretos das séries, então validamos apenas se o tipo corresponde
+            if education_stage_id == '63cb6876-3221-4fa2-89e8-a82ad1733032':
+                # EJA - aceitar ambos os tipos pois o frontend já enviou os IDs corretos
+                if form_type not in ['aluno-jovem', 'aluno-velho']:
+                    raise ValueError(f"A série {grade.name} (EJA) não corresponde ao tipo de formulário {form_type}")
+            elif expected_form_type and expected_form_type != form_type:
+                raise ValueError(
+                    f"A série {grade.name} (education_stage_id: {education_stage_id}) "
+                    f"corresponde ao tipo '{expected_form_type}', não '{form_type}'"
+                )
+    
+    @staticmethod
+    def _validate_selections(selected_schools, selected_grades, selected_classes):
+        """
+        Valida seleções de escolas, séries e turmas
+        
+        Args:
+            selected_schools: Lista de IDs de escolas
+            selected_grades: Lista de IDs de séries
+            selected_classes: Lista de IDs de turmas
+            
+        Raises:
+            ValueError: Se validação falhar
+        """
+        if selected_schools:
+            schools = School.query.filter(School.id.in_(selected_schools)).all()
+            if len(schools) != len(selected_schools):
+                raise ValueError("Uma ou mais escolas não foram encontradas")
+        
+        if selected_grades:
+            if not selected_schools:
+                raise ValueError("selectedSchools é obrigatório quando selectedGrades é fornecido")
+            
+            # Converter strings para UUID se necessário
+            import uuid as uuid_lib
+            grade_uuids = []
+            for g in selected_grades:
+                if isinstance(g, str):
+                    try:
+                        uuid_obj = uuid_lib.UUID(g)
+                        grade_uuids.append(uuid_obj)
+                    except (ValueError, AttributeError):
+                        grade_uuids.append(g)
+                else:
+                    grade_uuids.append(g)
+            
+            grades = Grade.query.filter(Grade.id.in_(grade_uuids)).all()
+            if len(grades) != len(selected_grades):
+                raise ValueError("Uma ou mais séries não foram encontradas")
+            # Verificar se as séries têm turmas nas escolas selecionadas
+            classes = Class.query.filter(
+                Class.grade_id.in_(grade_uuids),
+                Class.school_id.in_(selected_schools)
+            ).distinct().all()
+            if not classes:
+                raise ValueError("Nenhuma turma encontrada para as séries e escolas selecionadas")
+        
+        if selected_classes:
+            if not selected_grades:
+                raise ValueError("selectedGrades é obrigatório quando selectedClasses é fornecido")
+            classes = Class.query.filter(Class.id.in_(selected_classes)).all()
+            if len(classes) != len(selected_classes):
+                raise ValueError("Uma ou mais turmas não foram encontradas")
+            # Verificar se as turmas pertencem às séries selecionadas
+            for class_obj in classes:
+                if str(class_obj.grade_id) not in [str(g) for g in selected_grades]:
+                    raise ValueError(f"Turma {class_obj.id} não pertence às séries selecionadas")
     
     @staticmethod
     def create_form(data, created_by):
@@ -28,11 +230,45 @@ class FormService:
         try:
             form_type = data['formType']
             
-            # Validar selectedGrades para tipos de alunos
+            # Validar perguntas
+            questions = data.get('questions', [])
+            if questions:
+                for q in questions:
+                    if not q.get('id') or not q.get('text') or not q.get('type'):
+                        raise ValueError("Perguntas devem ter id, text e type")
+            
+            # Validar filtros se fornecidos
+            filters = data.get('filters')
+            if filters:
+                FormService._validate_filters(filters)
+            
+            # Validar seleções
+            selected_schools = data.get('selectedSchools', [])
+            selected_grades = data.get('selectedGrades', [])
+            selected_classes = data.get('selectedClasses', [])
+            
+            if selected_schools or selected_grades or selected_classes:
+                FormService._validate_selections(selected_schools, selected_grades, selected_classes)
+            
+            # Validar selectedGrades para tipos de alunos (se não vier de filtros)
             if form_type in ['aluno-jovem', 'aluno-velho']:
-                selected_grades = data.get('selectedGrades', [])
-                if not selected_grades or len(selected_grades) == 0:
+                if not filters and (not selected_grades or len(selected_grades) == 0):
                     raise ValueError(f"selectedGrades é obrigatório para formulários do tipo {form_type}")
+            
+            # Validar tipo de formulário vs séries
+            # Remover duplicatas usando set para evitar problemas quando o mesmo ID
+            # aparece tanto em filters.serie quanto em selectedGrades
+            grade_ids_to_validate = []
+            if filters and filters.get('serie'):
+                grade_ids_to_validate.append(filters['serie'])
+            if selected_grades:
+                grade_ids_to_validate.extend(selected_grades)
+            
+            # Remover duplicatas mantendo a ordem (usando dict.fromkeys que preserva ordem no Python 3.7+)
+            grade_ids_to_validate = list(dict.fromkeys(grade_ids_to_validate))
+            
+            if grade_ids_to_validate:
+                FormService._validate_form_type_vs_grades(form_type, grade_ids_to_validate)
             
             # Criar formulário
             form = Form(
@@ -40,9 +276,11 @@ class FormService:
                 description=data.get('description'),
                 form_type=form_type,
                 target_groups=data.get('targetGroups', []),
-                selected_schools=data.get('selectedSchools'),
-                selected_grades=data.get('selectedGrades'),
+                selected_schools=selected_schools if selected_schools else None,
+                selected_grades=selected_grades if selected_grades else None,
+                selected_classes=selected_classes if selected_classes else None,
                 selected_tecadmin_users=data.get('selectedTecAdminUsers'),
+                filters=filters if filters else None,
                 is_active=data.get('isActive', True),
                 deadline=datetime.fromisoformat(data['deadline'].replace('Z', '+00:00')) if data.get('deadline') else None,
                 instructions=data.get('instructions'),

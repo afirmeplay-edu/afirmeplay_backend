@@ -376,51 +376,33 @@ def get_video(video_id):
 
 @bp.route('/videos/<string:video_id>', methods=['DELETE'])
 @jwt_required()
-@role_required("admin", "professor", "diretor", "coordenador", "tecadm")
+@role_required("admin")
 def delete_video(video_id):
+    """Deleta um vídeo. Apenas usuários com role admin podem deletar."""
     try:
-        video = PlayTvVideo.query.get(video_id)
-        
-        if not video:
-            return jsonify({"erro": "Vídeo não encontrado"}), 404
-        
-        # Verificar permissões de exclusão
+        # Verificar autenticação
         current_user = get_current_user_from_token()
         if not current_user:
             return jsonify({"erro": "Usuário não autenticado"}), 401
         
-        # Admin pode deletar qualquer vídeo
-        if current_user['role'] not in ['admin', 'tecadm']:
-            # Verificar se é o criador
-            if video.created_by != current_user['id']:
-                # Verificar permissões por role
-                if current_user['role'] == 'tecadm':
-                    city_id = current_user.get('tenant_id') or current_user.get('city_id')
-                    if city_id:
-                        video_school_ids = [vs.school_id for vs in video.video_schools]
-                        schools = School.query.filter(School.id.in_(video_school_ids), School.city_id == city_id).all()
-                        if not schools:
-                            return jsonify({"erro": "Sem permissão para excluir este vídeo"}), 403
-                elif current_user['role'] in ['diretor', 'coordenador']:
-                    manager = Manager.query.filter_by(user_id=current_user['id']).first()
-                    if manager and manager.school_id:
-                        video_school_ids = [vs.school_id for vs in video.video_schools]
-                        if manager.school_id not in video_school_ids:
-                            return jsonify({"erro": "Sem permissão para excluir este vídeo"}), 403
-                elif current_user['role'] == 'professor':
-                    # Professor só pode deletar vídeos que criou
-                    return jsonify({"erro": "Sem permissão para excluir este vídeo"}), 403
+        # Verificar se o vídeo existe
+        video = PlayTvVideo.query.get(video_id)
+        if not video:
+            return jsonify({"erro": "Vídeo não encontrado"}), 404
         
-        # Deletar vídeo (cascade deletará automaticamente os registros em play_tv_video_schools)
+        # Deletar vídeo (cascade deletará automaticamente os registros em play_tv_video_schools e play_tv_video_classes)
         db.session.delete(video)
         db.session.commit()
         
+        logging.info(f"Vídeo {video_id} deletado por usuário {current_user['id']}")
         return jsonify({"mensagem": "Vídeo excluído com sucesso!"}), 200
         
     except SQLAlchemyError as e:
+        db.session.rollback()
         logging.error(f"Erro no banco de dados: {str(e)}")
         return jsonify({"erro": "Erro no banco de dados", "detalhes": str(e)}), 500
     except Exception as e:
+        db.session.rollback()
         logging.error(f"Erro ao excluir vídeo: {str(e)}", exc_info=True)
         return jsonify({"erro": "Erro ao excluir vídeo", "detalhes": str(e)}), 500
 

@@ -95,6 +95,7 @@ def create_app():
     app.register_blueprint(calendar_routes.bp)
     app.register_blueprint(dashboard_routes.bp)
     app.register_blueprint(answer_sheet_routes.bp)
+    app.register_blueprint(socioeconomic_form_routes.bp)
     # Importar modelos para garantir que as tabelas sejam criadas
     from .models import City, School, SchoolTeacher, Teacher, Student, Subject, Class, ClassSubject, ClassTest, Test, EducationStage, Grade, Skill, Question, StudentAnswer, UserQuickLinks, TeacherClass, User, Manager
 

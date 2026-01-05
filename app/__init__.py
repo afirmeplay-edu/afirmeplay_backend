@@ -64,6 +64,7 @@ def create_app():
     from app.socioeconomic_forms.routes import socioeconomic_form_routes
     from app.socioeconomic_forms.routes import filter_routes
     from .play_tv import routes as playtv_routes
+    from .competicoes import routes as competicoes_routes
     
     app.register_blueprint(school_routes.bp)
     app.register_blueprint(test_routes.bp)
@@ -99,8 +100,10 @@ def create_app():
     app.register_blueprint(socioeconomic_form_routes.bp)
     app.register_blueprint(filter_routes.bp)
     app.register_blueprint(playtv_routes.bp)
+    app.register_blueprint(competicoes_routes.bp)
     # Importar modelos para garantir que as tabelas sejam criadas
     from .models import City, School, SchoolTeacher, Teacher, Student, Subject, Class, ClassSubject, ClassTest, Test, EducationStage, Grade, Skill, Question, StudentAnswer, UserQuickLinks, TeacherClass, User, Manager
+    from .competicoes.models import Competition, CompetitionEnrollment, CompetitionResult
 
     # Rota para servir o arquivo swagger.yaml a partir do diretório raiz do projeto
     @app.route('/swagger.yaml')

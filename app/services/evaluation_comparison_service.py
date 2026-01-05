@@ -30,13 +30,19 @@ class EvaluationComparisonService:
         Returns:
             Dicionário com comparação completa ou None se erro
         """
+        import time
+        service_start = time.time()
+        
         try:
+            
             if len(test_ids) < 2:
                 logging.error(f"Mínimo de 2 avaliações necessário. Recebido: {len(test_ids)}")
                 return None
             
             # Buscar todas as avaliações
+            query_start = time.time()
             tests = Test.query.filter(Test.id.in_(test_ids)).all()
+            query_time = time.time() - query_start
             
             if len(tests) != len(test_ids):
                 missing_ids = set(test_ids) - {t.id for t in tests}
@@ -44,6 +50,7 @@ class EvaluationComparisonService:
                 return None
             
             # Buscar datas de aplicação e ordenar cronologicamente
+            dates_start = time.time()
             from app.models.classTest import ClassTest
             tests_with_dates = []
             
@@ -70,11 +77,14 @@ class EvaluationComparisonService:
                     'application_date': application_date
                 })
             
+            dates_time = time.time() - dates_start
+            
             # Ordenar por data de aplicação (primeira aplicada primeiro)
             tests_with_dates.sort(key=lambda x: x['application_date'])
             ordered_tests = [item['test'] for item in tests_with_dates]
             
             # Verificar se todas têm resultados
+            results_start = time.time()
             all_results = {}
             for test in ordered_tests:
                 results = EvaluationResult.query.filter_by(test_id=test.id).all()
@@ -82,6 +92,8 @@ class EvaluationComparisonService:
                     logging.warning(f"Avaliação {test.id} não possui resultados calculados")
                     return None
                 all_results[test.id] = results
+            
+            results_time = time.time() - results_start
             
             # Preparar dados básicos das avaliações ordenadas
             evaluations_data = []
@@ -96,21 +108,32 @@ class EvaluationComparisonService:
                 })
             
             # Fazer comparações sequenciais (1→2, 2→3, 3→4, etc.)
+            comparisons_start = time.time()
             comparisons = []
-            for i in range(len(ordered_tests) - 1):
+            num_comparisons = len(ordered_tests) - 1
+            
+            for i in range(num_comparisons):
+                comp_start = time.time()
                 test_from = ordered_tests[i]
                 test_to = ordered_tests[i + 1]
                 results_from = all_results[test_from.id]
                 results_to = all_results[test_to.id]
                 
+                
                 # Comparação geral
+                gen_start = time.time()
                 general_comparison = EvaluationComparisonService._get_general_comparison(results_from, results_to)
+                gen_time = time.time() - gen_start
                 
                 # Comparação por disciplina
+                subj_start = time.time()
                 subject_comparison = EvaluationComparisonService._get_subject_comparison(test_from, test_to, results_from, results_to)
+                subj_time = time.time() - subj_start
                 
                 # Comparação por habilidade
+                skills_start = time.time()
                 skills_comparison = EvaluationComparisonService._get_skills_comparison(test_from, test_to, results_from, results_to)
+                skills_time = time.time() - skills_start
                 
                 comparisons.append({
                     "from_evaluation": {
@@ -127,12 +150,39 @@ class EvaluationComparisonService:
                     "subject_comparison": subject_comparison,
                     "skills_comparison": skills_comparison
                 })
+                
+                comp_time = time.time() - comp_start
+            
+            comparisons_time = time.time() - comparisons_start
+            
+            # Calcular dados de participação para cada avaliação
+            participation_start = time.time()
+            participation_data = {
+                "general": {},
+                "by_school": {}
+            }
+            
+            for i, test in enumerate(ordered_tests):
+                eval_key = f"evaluation_{i+1}"
+                
+                # Participação geral
+                general_participation = EvaluationComparisonService._get_general_participation(test.id)
+                participation_data["general"][eval_key] = general_participation
+                
+                # Participação por escola
+                school_participation = EvaluationComparisonService._get_participation_by_school(test.id)
+                participation_data["by_school"][eval_key] = school_participation
+                
+            
+            participation_time = time.time() - participation_start
+            total_service_time = time.time() - service_start
             
             return {
                 "evaluations": evaluations_data,
                 "total_evaluations": len(ordered_tests),
                 "comparisons": comparisons,
-                "total_comparisons": len(comparisons)
+                "total_comparisons": len(comparisons),
+                "participation": participation_data
             }
             
         except Exception as e:
@@ -1263,3 +1313,151 @@ class EvaluationComparisonService:
         except Exception as e:
             logging.error(f"Erro ao buscar resultados da habilidade {skill_code} para aluno {student_id}: {str(e)}")
             return None
+    
+    @staticmethod
+    def _get_general_participation(test_id: str) -> Dict[str, Any]:
+        """
+        Calcula taxa de participação geral para uma avaliação
+        
+        Args:
+            test_id: ID da avaliação
+            
+        Returns:
+            {
+                'total_students': int,  # Total de alunos matriculados
+                'participating_students': int,  # Alunos com resultados
+                'participation_rate': float  # Porcentagem
+            }
+        """
+        try:
+            from app.models.classTest import ClassTest
+            from app.models.student import Student
+            from app.models.evaluationResult import EvaluationResult
+            
+            # 1. Buscar ClassTest para esta avaliação
+            class_tests = ClassTest.query.filter_by(test_id=test_id).all()
+            class_ids = [ct.class_id for ct in class_tests if ct.class_id]
+            
+            if not class_ids:
+                return {
+                    'total_students': 0,
+                    'participating_students': 0,
+                    'participation_rate': 0.0
+                }
+            
+            # 2. Buscar todos os alunos dessas turmas
+            total_students = Student.query.filter(Student.class_id.in_(class_ids)).count()
+            
+            # 3. Buscar alunos com resultados
+            participating_students = EvaluationResult.query.filter_by(test_id=test_id).count()
+            
+            # 4. Calcular taxa
+            participation_rate = (participating_students / total_students * 100) if total_students > 0 else 0.0
+            
+            return {
+                'total_students': total_students,
+                'participating_students': participating_students,
+                'participation_rate': round(participation_rate, 2)
+            }
+        except Exception as e:
+            logging.error(f"Erro ao calcular participação geral para avaliação {test_id}: {str(e)}", exc_info=True)
+            return {
+                'total_students': 0,
+                'participating_students': 0,
+                'participation_rate': 0.0
+            }
+    
+    @staticmethod
+    def _get_participation_by_school(test_id: str) -> Dict[str, Dict[str, Any]]:
+        """
+        Calcula taxa de participação por escola para uma avaliação
+        
+        Args:
+            test_id: ID da avaliação
+            
+        Returns:
+            {
+                'school_id_1': {
+                    'school_name': 'Escola A',
+                    'total_students': 100,
+                    'participating_students': 95,
+                    'participation_rate': 95.0
+                },
+                'school_id_2': {...}
+            }
+        """
+        try:
+            from app.models.classTest import ClassTest
+            from app.models.studentClass import Class
+            from app.models.school import School
+            from app.models.student import Student
+            from app.models.evaluationResult import EvaluationResult
+            
+            # 1. Buscar ClassTest para esta avaliação
+            class_tests = ClassTest.query.filter_by(test_id=test_id).all()
+            class_ids = [ct.class_id for ct in class_tests if ct.class_id]
+            
+            if not class_ids:
+                return {}
+            
+            # 2. Buscar Classes e agrupar por escola
+            classes = Class.query.filter(Class.id.in_(class_ids)).all()
+            schools_data = {}
+            
+            for class_obj in classes:
+                if not class_obj.school_id:
+                    continue
+                    
+                school_id = class_obj.school_id
+                
+                if school_id not in schools_data:
+                    school = School.query.get(school_id)
+                    schools_data[school_id] = {
+                        'school_id': school_id,
+                        'school_name': school.name if school else f'Escola {school_id}',
+                        'class_ids': []
+                    }
+                
+                schools_data[school_id]['class_ids'].append(class_obj.id)
+            
+            # 3. Para cada escola, calcular participação
+            participation_by_school = {}
+            
+            for school_id, school_info in schools_data.items():
+                class_ids_school = school_info['class_ids']
+                
+                # Total de alunos da escola (nas turmas onde a avaliação foi aplicada)
+                total_students = Student.query.filter(
+                    Student.class_id.in_(class_ids_school)
+                ).count()
+                
+                if total_students == 0:
+                    continue
+                
+                # IDs dos alunos da escola
+                student_ids = Student.query.filter(
+                    Student.class_id.in_(class_ids_school)
+                ).with_entities(Student.id).all()
+                student_ids = [s[0] for s in student_ids]
+                
+                # Alunos participantes (com resultados)
+                participating_students = EvaluationResult.query.filter(
+                    EvaluationResult.test_id == test_id,
+                    EvaluationResult.student_id.in_(student_ids)
+                ).count()
+                
+                # Calcular taxa
+                participation_rate = (participating_students / total_students * 100) if total_students > 0 else 0.0
+                
+                participation_by_school[school_id] = {
+                    'school_name': school_info['school_name'],
+                    'total_students': total_students,
+                    'participating_students': participating_students,
+                    'participation_rate': round(participation_rate, 2)
+                }
+            
+            return participation_by_school
+            
+        except Exception as e:
+            logging.error(f"Erro ao calcular participação por escola para avaliação {test_id}: {str(e)}", exc_info=True)
+            return {}

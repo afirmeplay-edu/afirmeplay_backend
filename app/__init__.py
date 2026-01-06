@@ -53,20 +53,6 @@ def create_app():
     # Configuração do banco de dados
     app.config['SQLALCHEMY_DATABASE_URI'] = os.getenv('DATABASE_URL')
     app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
-    # Configurações do pool de conexões para evitar erros de conexão fechada
-    app.config['SQLALCHEMY_ENGINE_OPTIONS'] = {
-        'pool_size': 10,
-        'pool_recycle': 3600,  # Reciclar conexões após 1 hora
-        'pool_pre_ping': True,  # Verificar conexões antes de usar
-        'max_overflow': 20,  # Permitir até 20 conexões extras além do pool_size
-        'connect_args': {
-            'connect_timeout': 10,
-            'keepalives': 1,
-            'keepalives_idle': 30,
-            'keepalives_interval': 10,
-            'keepalives_count': 5
-        }
-    }
 
     # Inicialização das extensões
     db.init_app(app)
@@ -115,7 +101,7 @@ def create_app():
     app.register_blueprint(competicoes_routes.bp)
     # Importar modelos para garantir que as tabelas sejam criadas
     from .models import City, School, SchoolTeacher, Teacher, Student, Subject, Class, ClassSubject, ClassTest, Test, EducationStage, Grade, Skill, Question, StudentAnswer, UserQuickLinks, TeacherClass, User, Manager
-    from .competicoes.models import Competition, CompetitionEnrollment, CompetitionResult, CompetitionQuestion
+    from .competicoes.models import Competition, CompetitionEnrollment, CompetitionResult
 
     # Rota para servir o arquivo swagger.yaml a partir do diretório raiz do projeto
     @app.route('/swagger.yaml')

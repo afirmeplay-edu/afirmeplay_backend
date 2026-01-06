@@ -553,7 +553,7 @@ def dados_json(evaluation_id: str):
         except ValueError as e:
             return jsonify({"error": str(e)}), 400
         
-        # Para professores, buscar turmas específicas
+        # Para professores, verificar permissões
         if scope_type == 'teacher':
             from app.permissions.utils import get_teacher_classes
             from app.permissions.rules import can_view_test
@@ -575,109 +575,40 @@ def dados_json(evaluation_id: str):
             
             if not class_tests:
                 return jsonify({"error": "Avaliação não foi aplicada em nenhuma turma do professor"}), 404
-            
-            def build_payload():
-                contexto = _montar_resposta_relatorio_por_turmas(
-                    evaluation_id,
-                    class_tests,
-                    include_ai=False
-                )
-                student_count = (
-                    contexto
-                    .get('total_alunos', {})
-                    .get('total_geral', {})
-                    .get('avaliados', 0)
-                )
-                return contexto, student_count
-            
-            def build_ai_analysis():
-                """Callback para gerar análise de IA para professor"""
-                base_payload = _montar_resposta_relatorio_por_turmas(
-                    evaluation_id,
-                    class_tests,
-                    include_ai=False
-                )
-                
-                from app.services.ai_analysis_service import AIAnalysisService
-                ai_service = AIAnalysisService()
-                return ai_service.analyze_report_data({
-                    "avaliacao": base_payload.get('avaliacao', {}),
-                    "total_alunos": base_payload.get('total_alunos', {}),
-                    "niveis_aprendizagem": base_payload.get('niveis_aprendizagem', {}),
-                    "proficiencia": base_payload.get('proficiencia', {}),
-                    "nota_geral": base_payload.get('nota_geral', {}),
-                    "acertos_por_habilidade": base_payload.get('acertos_por_habilidade', {}),
-                    "scope_type": scope_type,
-                    "scope_id": scope_ref_id
-                })
-        else:
-            # Para outros roles, usar lógica existente
-            school_id = school_id_raw if scope_type == 'school' else None
-            city_id_scope = scope_ref_id if scope_type == 'city' else None
-            
-            def build_payload():
-                contexto = _montar_resposta_relatorio(
-                    evaluation_id,
-                    school_id=school_id,
-                    city_id=city_id_scope,
-                    include_ai=False
-                )
-                student_count = (
-                    contexto
-                    .get('total_alunos', {})
-                    .get('total_geral', {})
-                    .get('avaliados', 0)
-                )
-                return contexto, student_count
-            
-            def build_ai_analysis():
-                """Callback para gerar análise de IA"""
-                base_payload = _montar_resposta_relatorio(
-                    evaluation_id,
-                    school_id=school_id,
-                    city_id=city_id_scope,
-                    include_ai=False
-                )
-                
-                from app.services.ai_analysis_service import AIAnalysisService
-                ai_service = AIAnalysisService()
-                return ai_service.analyze_report_data({
-                    "avaliacao": base_payload.get('avaliacao', {}),
-                    "total_alunos": base_payload.get('total_alunos', {}),
-                    "niveis_aprendizagem": base_payload.get('niveis_aprendizagem', {}),
-                    "proficiencia": base_payload.get('proficiencia', {}),
-                    "nota_geral": base_payload.get('nota_geral', {}),
-                    "acertos_por_habilidade": base_payload.get('acertos_por_habilidade', {}),
-                    "scope_type": scope_type,
-                    "scope_id": scope_ref_id
-                })
         
-        try:
-            # Buscar payload (com cache)
-            resposta = ReportAggregateService.ensure_payload(
-                evaluation_id,
-                scope_type,
-                scope_ref_id,
-                build_payload,
-            )
+        # REFATORADO: Verificar status e usar lógica assíncrona
+        status = ReportAggregateService.get_status(evaluation_id, scope_type, scope_ref_id)
+        
+        if status['status'] != 'ready':
+            # Disparar task assíncrona (com debounce)
+            from app.report_analysis.tasks import trigger_rebuild_if_needed
+            try:
+                trigger_rebuild_if_needed.delay(evaluation_id, scope_type, scope_ref_id)
+            except Exception as e:
+                logging.warning(f"Erro ao disparar task de rebuild: {str(e)}")
+                # Continuar mesmo se falhar (pode ser que Redis não esteja disponível)
             
-            # Buscar análise de IA (compartilhada entre roles)
-            analise_ia = ReportAggregateService.ensure_ai_analysis(
-                evaluation_id,
-                scope_type,
-                scope_ref_id,
-                build_ai_analysis,
-                commit=True
-            )
-            
-            # Adicionar análise de IA ao payload
-            resposta['analise_ia'] = analise_ia
-            
-        except LookupError as lookup_error:
-            # Reproduzir mensagens de não encontrado semelhantes às tratadas anteriormente
-            return jsonify({"error": str(lookup_error)}), 404
-        except ValueError as value_error:
-            return jsonify({"error": str(value_error)}), 404
+            return jsonify({
+                "status": "processing",
+                "message": "Relatório sendo processado em background",
+                "has_payload": status['has_payload'],
+                "has_ai_analysis": status['has_ai_analysis'],
+                "is_dirty": status['is_dirty'],
+                "ai_analysis_is_dirty": status['ai_analysis_is_dirty'],
+                "last_update": status['last_update'].isoformat() if status['last_update'] else None,
+                "evaluation_id": evaluation_id,
+                "scope_type": scope_type,
+                "scope_id": scope_ref_id
+            }), 202  # HTTP 202 Accepted
+        
+        # Relatório está pronto - buscar do cache
+        aggregate = ReportAggregateService.get(evaluation_id, scope_type, scope_ref_id)
+        if not aggregate:
+            return jsonify({"error": "Relatório não encontrado"}), 404
+        
+        resposta = aggregate.payload or {}
+        analise_ia = aggregate.ai_analysis or {}
+        resposta['analise_ia'] = analise_ia
         
         return jsonify(resposta), 200
         
@@ -1006,7 +937,7 @@ def relatorio_pdf(evaluation_id: str):
         except ValueError as e:
             return jsonify({"error": str(e)}), 400
         
-        # Para professores, buscar turmas específicas
+        # Para professores, verificar permissões
         if scope_type == 'teacher':
             from app.permissions.utils import get_teacher_classes
             from app.permissions.rules import can_view_test
@@ -1028,101 +959,28 @@ def relatorio_pdf(evaluation_id: str):
             
             if not class_tests:
                 return jsonify({"error": "Avaliação não foi aplicada em nenhuma turma do professor"}), 404
-            
-            def build_payload():
-                contexto = _montar_resposta_relatorio_por_turmas(
-                    evaluation_id,
-                    class_tests,
-                    include_ai=False
-                )
-                student_count = (
-                    contexto
-                    .get('total_alunos', {})
-                    .get('total_geral', {})
-                    .get('avaliados', 0)
-                )
-                return contexto, student_count
-            
-            def build_ai_analysis():
-                """Callback para gerar análise de IA para professor"""
-                base_payload = _montar_resposta_relatorio_por_turmas(
-                    evaluation_id,
-                    class_tests,
-                    include_ai=False
-                )
-                
-                from app.services.ai_analysis_service import AIAnalysisService
-                ai_service = AIAnalysisService()
-                return ai_service.analyze_report_data({
-                    "avaliacao": base_payload.get('avaliacao', {}),
-                    "total_alunos": base_payload.get('total_alunos', {}),
-                    "niveis_aprendizagem": base_payload.get('niveis_aprendizagem', {}),
-                    "proficiencia": base_payload.get('proficiencia', {}),
-                    "nota_geral": base_payload.get('nota_geral', {}),
-                    "acertos_por_habilidade": base_payload.get('acertos_por_habilidade', {}),
-                    "scope_type": scope_type,
-                    "scope_id": scope_ref_id
-                })
-        else:
-            # Para outros roles, usar lógica existente
-            school_id = school_id_raw if scope_type == 'school' else None
-            city_id_scope = scope_ref_id if scope_type == 'city' else None
-            
-            def build_payload():
-                contexto = _montar_resposta_relatorio(
-                    evaluation_id,
-                    school_id=school_id,
-                    city_id=city_id_scope,
-                    include_ai=False
-                )
-                student_count = (
-                    contexto
-                    .get('total_alunos', {})
-                    .get('total_geral', {})
-                    .get('avaliados', 0)
-                )
-                return contexto, student_count
-            
-            def build_ai_analysis():
-                """Callback para gerar análise de IA"""
-                base_payload = _montar_resposta_relatorio(
-                    evaluation_id,
-                    school_id=school_id,
-                    city_id=city_id_scope,
-                    include_ai=False
-                )
-                
-                from app.services.ai_analysis_service import AIAnalysisService
-                ai_service = AIAnalysisService()
-                return ai_service.analyze_report_data({
-                    "avaliacao": base_payload.get('avaliacao', {}),
-                    "total_alunos": base_payload.get('total_alunos', {}),
-                    "niveis_aprendizagem": base_payload.get('niveis_aprendizagem', {}),
-                    "proficiencia": base_payload.get('proficiencia', {}),
-                    "nota_geral": base_payload.get('nota_geral', {}),
-                    "acertos_por_habilidade": base_payload.get('acertos_por_habilidade', {}),
-                    "scope_type": scope_type,
-                    "scope_id": scope_ref_id
-                })
         
-        # Buscar payload (com cache)
-        context = ReportAggregateService.ensure_payload(
-            evaluation_id,
-            scope_type,
-            scope_ref_id,
-            build_payload,
-        )
+        # REFATORADO: Verificar se relatório está pronto antes de gerar PDF
+        status = ReportAggregateService.get_status(evaluation_id, scope_type, scope_ref_id)
         
-        # Buscar análise de IA (compartilhada entre roles)
-        analise_ia = ReportAggregateService.ensure_ai_analysis(
-            evaluation_id,
-            scope_type,
-            scope_ref_id,
-            build_ai_analysis,
-            commit=True
-        )
+        if status['status'] != 'ready':
+            # PDF só pode ser gerado se relatório estiver pronto
+            return jsonify({
+                "error": "Relatório ainda está sendo processado",
+                "status": "processing",
+                "message": "Aguarde o processamento concluir antes de gerar o PDF. Tente novamente em alguns instantes.",
+                "has_payload": status['has_payload'],
+                "has_ai_analysis": status['has_ai_analysis'],
+                "last_update": status['last_update'].isoformat() if status['last_update'] else None
+            }), 409  # HTTP 409 Conflict
         
-        # Adicionar análise de IA ao contexto
+        # Buscar dados do cache
+        aggregate = ReportAggregateService.get(evaluation_id, scope_type, scope_ref_id)
+        if not aggregate:
+            return jsonify({"error": "Relatório não encontrado"}), 404
+        
+        context = aggregate.payload or {}
+        analise_ia = aggregate.ai_analysis or {}
         context['analise_ia'] = analise_ia
         
         # Adicionar logo padrão ao contexto (para templates que precisam)

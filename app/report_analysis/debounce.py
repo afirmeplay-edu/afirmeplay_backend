@@ -29,6 +29,18 @@ class ReportDebounceService:
         if cls._redis_client is None:
             try:
                 redis_url = os.getenv('REDIS_URL', 'redis://localhost:6379/0')
+                
+                # Se houver senha do Redis separada, adicionar à URL
+                redis_password = os.getenv('REDIS_PASSWORD')
+                if redis_password and '@' not in redis_url:
+                    # Adicionar senha à URL do Redis
+                    # Formato: redis://:password@host:port/db
+                    if redis_url.startswith('redis://'):
+                        parts = redis_url.replace('redis://', '').split('/')
+                        host_port = parts[0]
+                        db = parts[1] if len(parts) > 1 else '0'
+                        redis_url = f'redis://:{redis_password}@{host_port}/{db}'
+                
                 cls._redis_client = redis.from_url(redis_url, decode_responses=True)
                 # Testar conexão
                 cls._redis_client.ping()

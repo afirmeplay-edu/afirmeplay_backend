@@ -98,9 +98,11 @@ def create_app():
     app.register_blueprint(student_answer_routes.bp)
     app.register_blueprint(userQuickLinks_routes.bp)
     app.register_blueprint(evaluation_results_routes.bp)
-    app.register_blueprint(report_routes.bp)
-    # Registrar blueprint de report_analysis (sobrescreve algumas rotas com versão assíncrona)
+    # Registrar blueprint de report_analysis ANTES (para sobrescrever rotas antigas)
+    from app.report_analysis import routes as report_analysis_routes
     app.register_blueprint(report_analysis_routes.bp)
+    # Depois registrar report_routes (rotas antigas ficam como fallback para outras rotas)
+    app.register_blueprint(report_routes.bp)
     app.register_blueprint(basic_endpoints.bp)
     app.register_blueprint(game_routes.bp)
     app.register_blueprint(manager_routes.bp)

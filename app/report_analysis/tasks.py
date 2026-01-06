@@ -70,10 +70,8 @@ def rebuild_report_for_scope(
             ).all()
         else:
             # Para outros escopos, usar função existente
-            school_id = scope_id if scope_type == 'school' else None
-            city_id = scope_id if scope_type == 'city' else None
-            _, normalized_scope_id = _determinar_escopo_relatorio(school_id, city_id)
-            class_tests = _buscar_turmas_por_escopo(test_id, scope_type, normalized_scope_id)
+            # CORRIGIDO: Para 'overall', scope_id é None. Para 'city' e 'school', usar scope_id diretamente
+            class_tests = _buscar_turmas_por_escopo(test_id, scope_type, scope_id)
         
         if not class_tests:
             logger.warning(f"Nenhuma turma encontrada para test_id={test_id}, scope_type={scope_type}, scope_id={scope_id}")

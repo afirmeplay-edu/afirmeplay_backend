@@ -179,3 +179,69 @@ def get_report_status(evaluation_id: str):
         logger.error(f"Erro ao obter status do relatório: {str(e)}", exc_info=True)
         return jsonify({"error": "Erro interno do servidor", "details": str(e)}), 500
 
+
+@bp.route('/force-rebuild/<string:evaluation_id>', methods=['POST'])
+@jwt_required()
+@role_required("admin")
+def force_rebuild(evaluation_id: str):
+    """
+    Força rebuild manual de um relatório (apenas admin).
+    Útil quando relatório fica travado em "processing".
+    
+    Query Parameters:
+        school_id: ID da escola (opcional)
+        city_id: ID do município (opcional)
+        sync: bool (default: false) - Se true, processa síncrono
+    """
+    try:
+        test = Test.query.get(evaluation_id)
+        if not test:
+            return jsonify({"error": "Avaliação não encontrada"}), 404
+        
+        user = get_current_user_from_token()
+        school_id = request.args.get('school_id')
+        city_id = request.args.get('city_id')
+        use_sync = request.args.get('sync', 'false').lower() == 'true'
+        
+        # Determinar escopo
+        try:
+            scope_type, scope_ref_id = _determinar_escopo_por_role(user, school_id, city_id)
+        except ValueError as e:
+            return jsonify({"error": str(e)}), 400
+        
+        # Limpar debounce
+        from app.report_analysis.debounce import ReportDebounceService
+        ReportDebounceService.clear_debounce(evaluation_id)
+        
+        if use_sync:
+            # Processar síncrono
+            from app.report_analysis.tasks import rebuild_report_for_scope
+            result = rebuild_report_for_scope(evaluation_id, scope_type, scope_ref_id)
+            
+            if result.get('success'):
+                return jsonify({
+                    "message": "Rebuild concluído com sucesso",
+                    "result": result
+                }), 200
+            else:
+                return jsonify({
+                    "error": "Erro ao processar rebuild",
+                    "result": result
+                }), 500
+        else:
+            # Processar assíncrono
+            from app.report_analysis.tasks import rebuild_report_for_scope
+            task = rebuild_report_for_scope.delay(evaluation_id, scope_type, scope_ref_id)
+            
+            return jsonify({
+                "message": "Rebuild forçado agendado",
+                "task_id": task.id,
+                "evaluation_id": evaluation_id,
+                "scope_type": scope_type,
+                "scope_id": scope_ref_id
+            }), 200
+            
+    except Exception as e:
+        logger.error(f"Erro ao forçar rebuild: {str(e)}", exc_info=True)
+        return jsonify({"error": str(e)}), 500
+

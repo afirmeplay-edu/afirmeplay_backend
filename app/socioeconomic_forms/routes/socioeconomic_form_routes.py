@@ -54,22 +54,63 @@ def create_form():
         if not data.get('formType'):
             return jsonify({"error": "Tipo de formulário é obrigatório"}), 400
         
-        # Validação específica para selectedGrades
-        form_type = data.get('formType')
-        if form_type in ['aluno-jovem', 'aluno-velho']:
-            selected_grades = data.get('selectedGrades', [])
-            if not selected_grades or len(selected_grades) == 0:
-                return jsonify({
-                    "error": f"selectedGrades é obrigatório e não pode estar vazio para formulários do tipo {form_type}"
-                }), 400
-        
+        # Criar formulário
         form = FormService.create_form(data, user['id'])
         
-        return jsonify(form.to_dict(include_questions=True)), 201
+        # Se filtros ou seleções estiverem presentes, enviar automaticamente
+        filters = data.get('filters')
+        selected_schools = data.get('selectedSchools', [])
+        selected_grades = data.get('selectedGrades', [])
+        selected_classes = data.get('selectedClasses', [])
+        
+        recipients_count = 0
+        sent_at = None
+        
+        if filters or selected_schools or selected_grades or selected_classes:
+            # Determinar destinatários e enviar
+            recipients_data = DistributionService.determine_recipients_by_filters(
+                form.form_type,
+                filters=filters,
+                selected_schools=selected_schools if selected_schools else None,
+                selected_grades=selected_grades if selected_grades else None,
+                selected_classes=selected_classes if selected_classes else None
+            )
+            
+            # Criar registros de FormRecipient
+            sent_at = datetime.utcnow()
+            for recipient_data in recipients_data:
+                # Verificar se já existe (evitar duplicatas)
+                existing = FormRecipient.query.filter_by(
+                    form_id=form.id,
+                    user_id=recipient_data['user_id']
+                ).first()
+                
+                if not existing:
+                    recipient = FormRecipient(
+                        form_id=form.id,
+                        user_id=recipient_data['user_id'],
+                        school_id=recipient_data.get('school_id'),
+                        status='pending',
+                        sent_at=sent_at
+                    )
+                    db.session.add(recipient)
+                    recipients_count += 1
+            
+            db.session.commit()
+        
+        # Preparar resposta
+        response_data = form.to_dict(include_questions=True)
+        if recipients_count > 0:
+            response_data['recipientsCount'] = recipients_count
+            response_data['sentAt'] = sent_at.isoformat() if sent_at else None
+        
+        return jsonify(response_data), 201
         
     except ValueError as e:
+        db.session.rollback()
         return jsonify({"error": str(e)}), 400
     except Exception as e:
+        db.session.rollback()
         logging.error(f"Erro ao criar formulário: {str(e)}", exc_info=True)
         return jsonify({"error": "Erro ao criar formulário", "details": str(e)}), 500
 

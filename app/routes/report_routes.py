@@ -42,7 +42,7 @@ from reportlab.pdfgen.canvas import Canvas
 from io import BytesIO
 from app.services.ai_analysis_service import AIAnalysisService
 from app.services.evaluation_result_service import EvaluationResultService
-from app.services.report_aggregate_service import ReportAggregateService
+from app.report_analysis.services import ReportAggregateService
 from weasyprint import HTML
 import base64
 

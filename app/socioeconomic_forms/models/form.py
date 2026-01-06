@@ -37,7 +37,9 @@ class Form(db.Model):
     target_groups = db.Column(JSON, nullable=False, default=list)  # ["alunos"], ["professores"], etc.
     selected_schools = db.Column(JSON, nullable=True)  # Lista de IDs de escolas
     selected_grades = db.Column(JSON, nullable=True)  # Lista de IDs de séries (apenas para aluno-jovem e aluno-velho)
+    selected_classes = db.Column(JSON, nullable=True)  # Lista de IDs de turmas
     selected_tecadmin_users = db.Column(JSON, nullable=True)  # Lista de IDs de usuários TecAdmin (para secretários)
+    filters = db.Column(JSON, nullable=True)  # Filtros hierárquicos: {estado, municipio, escola, serie, turma}
     
     # Status e prazos
     is_active = db.Column(db.Boolean, default=True, nullable=False)
@@ -64,7 +66,9 @@ class Form(db.Model):
             'targetGroups': self.target_groups or [],
             'selectedSchools': self.selected_schools or [],
             'selectedGrades': self.selected_grades or [],
+            'selectedClasses': self.selected_classes or [],
             'selectedTecAdminUsers': self.selected_tecadmin_users or [],
+            'filters': self.filters or {},
             'isActive': self.is_active,
             'deadline': self.deadline.isoformat() if self.deadline else None,
             'instructions': self.instructions,
@@ -72,6 +76,13 @@ class Form(db.Model):
             'updatedAt': self.updated_at.isoformat() if self.updated_at else None,
             'createdBy': self.created_by
         }
+        
+        # Adicionar informações de envio se houver recipients
+        if self.recipients:
+            data['recipientsCount'] = len(self.recipients)
+            first_sent = min([r.sent_at for r in self.recipients if r.sent_at], default=None)
+            if first_sent:
+                data['sentAt'] = first_sent.isoformat()
         
         if include_questions:
             data['questions'] = [q.to_dict() for q in self.questions]

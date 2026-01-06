@@ -113,6 +113,8 @@ class ReportService:
             
             # Converter defaultdict para dict normal
             if question.sub_questions:
+                # Incluir subperguntas no payload para que o frontend tenha acesso aos textos
+                question_stats['subQuestions'] = question.sub_questions
                 question_stats['responses'] = {
                     sub_id: dict(counts) if isinstance(counts, defaultdict) else counts
                     for sub_id, counts in response_counts.items()

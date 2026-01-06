@@ -166,7 +166,7 @@ def criar_professor():
 
 @bp.route('/school/<string:school_id>', methods=['GET'])
 @jwt_required()
-@role_required("admin", "diretor", "coordenador", "professor", "tecadm")
+@role_required("admin", "diretor", "coordenador", "professor", "tecadm", "aluno")
 def listar_professores_por_escola(school_id):
     try:
         user = get_current_user_from_token()
@@ -179,7 +179,19 @@ def listar_professores_por_escola(school_id):
             return jsonify({"erro": "Escola não encontrada"}), 404
 
         # Verificar permissões
-        if user['role'] == "professor":
+        if user['role'] == "admin":
+            # Admin pode ver professores de qualquer escola
+            pass
+        elif user['role'] == "aluno":
+            # Aluno só pode ver professores da sua própria escola
+            student = Student.query.filter_by(user_id=user['id']).first()
+            
+            if not student:
+                return jsonify({"erro": "Aluno não encontrado"}), 404
+            
+            if not student.school_id or student.school_id != school_id:
+                return jsonify({"erro": "Você não tem permissão para ver professores desta escola"}), 403
+        elif user['role'] == "professor":
             # Professor só pode ver professores da sua própria escola
             teacher = Teacher.query.filter_by(user_id=user['id']).first()
             
@@ -195,6 +207,11 @@ def listar_professores_por_escola(school_id):
             if not user.get('city_id'):
                 return jsonify({"erro": "Usuário não tem city_id atribuído"}), 400
             if escola.city_id != user['city_id']:
+                return jsonify({"erro": "Você não tem permissão para ver professores desta escola"}), 403
+        else:
+            # TecAdmin só pode ver escolas do seu município
+            city_id = user.get('tenant_id') or user.get('city_id')
+            if not city_id or escola.city_id != city_id:
                 return jsonify({"erro": "Você não tem permissão para ver professores desta escola"}), 403
 
         # Buscar professores da escola

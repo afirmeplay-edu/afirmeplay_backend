@@ -12,6 +12,8 @@ from app.models.schoolTeacher import SchoolTeacher
 from app.models.grades import Grade
 from app.models.educationStage import EducationStage
 from app.models.studentClass import Class
+from app.models.school import School
+from app.models.city import City
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import joinedload
 import logging
@@ -22,7 +24,7 @@ class DistributionService:
     """Serviço para distribuição de formulários para destinatários"""
     
     @staticmethod
-    def get_aluno_jovem_recipients(school_ids, selected_grades):
+    def get_aluno_jovem_recipients(school_ids, selected_grades, selected_classes=None):
         """
         Obtém destinatários para questionários de alunos jovens (anos iniciais)
         
@@ -87,7 +89,7 @@ class DistributionService:
             raise
     
     @staticmethod
-    def get_aluno_velho_recipients(school_ids, selected_grades):
+    def get_aluno_velho_recipients(school_ids, selected_grades, selected_classes=None):
         """
         Obtém destinatários para questionários de alunos velhos (anos finais)
         
@@ -122,10 +124,27 @@ class DistributionService:
                     grade_uuids.append(g)
             
             # 1. Buscar todas as turmas que pertencem às séries selecionadas e escolas selecionadas
-            classes = Class.query.filter(
+            query = Class.query.filter(
                 Class.grade_id.in_(grade_uuids),
                 Class.school_id.in_(school_ids)
-            ).all()
+            )
+            
+            # Se selected_classes for fornecido, filtrar apenas essas turmas
+            if selected_classes:
+                import uuid as uuid_lib
+                class_uuids = []
+                for c in selected_classes:
+                    if isinstance(c, str):
+                        try:
+                            uuid_obj = uuid_lib.UUID(c)
+                            class_uuids.append(uuid_obj)
+                        except (ValueError, AttributeError):
+                            class_uuids.append(c)
+                    else:
+                        class_uuids.append(c)
+                query = query.filter(Class.id.in_(class_uuids))
+            
+            classes = query.all()
             
             if not classes:
                 return recipients  # Nenhuma turma encontrada
@@ -282,6 +301,107 @@ class DistributionService:
             raise
     
     @staticmethod
+    def determine_recipients_by_filters(form_type, filters=None, selected_schools=None, 
+                                         selected_grades=None, selected_classes=None):
+        """
+        Determina destinatários baseado em filtros hierárquicos e seleções
+        
+        Args:
+            form_type: Tipo do formulário (aluno-jovem, aluno-velho, professor, diretor, secretario)
+            filters: Dicionário com filtros {estado, municipio, escola, serie, turma}
+            selected_schools: Lista de IDs de escolas
+            selected_grades: Lista de IDs de séries
+            selected_classes: Lista de IDs de turmas
+            
+        Returns:
+            list: Lista de dicionários com user_id e school_id
+        """
+        try:
+            # Determinar escolas baseado nos filtros
+            school_ids = []
+            
+            if filters:
+                # Prioridade: turma > serie > escola > municipio > estado
+                if filters.get('turma'):
+                    # Filtrar apenas pela turma específica
+                    turma = Class.query.get(filters['turma'])
+                    if turma and turma.school_id:
+                        school_ids = [turma.school_id]
+                elif filters.get('serie'):
+                    # Filtrar por série na escola
+                    if filters.get('escola'):
+                        school_ids = [filters['escola']]
+                    else:
+                        # Buscar todas as escolas que têm turmas dessa série
+                        classes = Class.query.filter_by(grade_id=filters['serie']).all()
+                        school_ids = list(set([c.school_id for c in classes if c.school_id]))
+                elif filters.get('escola'):
+                    school_ids = [filters['escola']]
+                elif filters.get('municipio'):
+                    # Buscar todas as escolas do município
+                    schools = School.query.filter_by(city_id=filters['municipio']).all()
+                    school_ids = [s.id for s in schools]
+                elif filters.get('estado'):
+                    # Buscar todas as escolas do estado
+                    cities = City.query.filter_by(state=filters['estado']).all()
+                    city_ids = [c.id for c in cities]
+                    schools = School.query.filter(School.city_id.in_(city_ids)).all()
+                    school_ids = [s.id for s in schools]
+            
+            # Se selected_schools for fornecido, usar essas escolas (ou intersecção)
+            if selected_schools:
+                if school_ids:
+                    # Intersecção: apenas escolas que estão em ambos
+                    school_ids = [s for s in school_ids if s in selected_schools]
+                else:
+                    school_ids = selected_schools
+            
+            if not school_ids:
+                return []
+            
+            # Determinar séries baseado nos filtros
+            grade_ids = []
+            if filters and filters.get('serie'):
+                grade_ids = [filters['serie']]
+            elif selected_grades:
+                grade_ids = selected_grades
+            
+            # Determinar turmas baseado nos filtros
+            class_ids = []
+            if filters and filters.get('turma'):
+                class_ids = [filters['turma']]
+            elif selected_classes:
+                class_ids = selected_classes
+            
+            # Chamar método apropriado baseado no tipo de formulário
+            if form_type == 'aluno-jovem':
+                return DistributionService.get_aluno_jovem_recipients(
+                    school_ids, 
+                    grade_ids if grade_ids else [],
+                    class_ids if class_ids else None
+                )
+            elif form_type == 'aluno-velho':
+                return DistributionService.get_aluno_velho_recipients(
+                    school_ids,
+                    grade_ids if grade_ids else [],
+                    class_ids if class_ids else None
+                )
+            elif form_type == 'professor':
+                return DistributionService.get_professor_recipients(school_ids)
+            elif form_type == 'diretor':
+                return DistributionService.get_diretor_recipients(school_ids)
+            elif form_type == 'secretario':
+                # Para secretários, não usa filtros de escola
+                # Precisa de selected_tecadmin_users que vem do form
+                return []
+            else:
+                return []
+                
+        except SQLAlchemyError as e:
+            logging.error(f"Erro ao determinar destinatários por filtros: {str(e)}")
+            raise
+    
+    @staticmethod
     def send_form_to_recipients(form_id, notify_users=True):
         """
         Envia formulário para todos os destinatários baseado no tipo
@@ -309,7 +429,16 @@ class DistributionService:
             # Identificar destinatários baseado no tipo
             recipients_data = []
             
-            if form.form_type == 'aluno-jovem':
+            # Usar filtros se disponíveis, senão usar método tradicional
+            if form.filters or form.selected_classes:
+                recipients_data = DistributionService.determine_recipients_by_filters(
+                    form.form_type,
+                    filters=form.filters,
+                    selected_schools=form.selected_schools,
+                    selected_grades=form.selected_grades,
+                    selected_classes=form.selected_classes
+                )
+            elif form.form_type == 'aluno-jovem':
                 if not form.selected_schools:
                     raise ValueError("Escolas devem ser selecionadas para questionários de alunos")
                 if not form.selected_grades:

@@ -2992,12 +2992,21 @@ def comparar_avaliacoes():
     Mínimo de 2 avaliações.
     Retorna comparação geral, por disciplina e por habilidade.
     """
+    import time
+    start_time = time.time()
+    
     try:
+        print(f"[COMPARE] Iniciando comparação de avaliações - Tempo: {time.time() - start_time:.2f}s")
+        
         from app.services.evaluation_comparison_service import EvaluationComparisonService
+        
+        print(f"[COMPARE] Importando EvaluationComparisonService - Tempo: {time.time() - start_time:.2f}s")
         
         user = get_current_user_from_token()
         if not user:
             return jsonify({"error": "Usuário não encontrado"}), 401
+        
+        print(f"[COMPARE] Usuário autenticado: {user.get('id')} - Tempo: {time.time() - start_time:.2f}s")
         
         # Obter test_ids do body JSON
         data = request.get_json()
@@ -3008,6 +3017,8 @@ def comparar_avaliacoes():
             return jsonify({"error": "Campo 'test_ids' é obrigatório no body JSON"}), 400
         
         test_ids = data['test_ids']
+        
+        print(f"[COMPARE] Recebidos {len(test_ids)} test_ids: {test_ids} - Tempo: {time.time() - start_time:.2f}s")
         
         # Validar se test_ids é uma lista
         if not isinstance(test_ids, list):
@@ -3022,8 +3033,14 @@ def comparar_avaliacoes():
         if len(test_ids) != len(set(test_ids)):
             return jsonify({"error": "IDs de avaliações duplicados encontrados"}), 400
         
+        print(f"[COMPARE] Validação de test_ids concluída - Tempo: {time.time() - start_time:.2f}s")
+        
         # Buscar todas as avaliações para verificar se existem
+        query_start = time.time()
         tests = Test.query.filter(Test.id.in_(test_ids)).all()
+        query_time = time.time() - query_start
+        print(f"[COMPARE] Query de Test concluída - {len(tests)} avaliações encontradas - Tempo query: {query_time:.2f}s - Tempo total: {time.time() - start_time:.2f}s")
+        
         found_test_ids = {test.id for test in tests}
         missing_test_ids = set(test_ids) - found_test_ids
         
@@ -3031,6 +3048,7 @@ def comparar_avaliacoes():
             return jsonify({"error": f"Avaliações não encontradas: {list(missing_test_ids)}"}), 404
         
         # Verificar permissões do usuário para todas as avaliações
+        perm_start = time.time()
         if user['role'] == 'professor':
             # Professor pode comparar avaliações aplicadas nas suas turmas específicas
             from app.routes.evaluation_results_routes import professor_pode_ver_avaliacao_turmas
@@ -3063,18 +3081,35 @@ def comparar_avaliacoes():
                 unauthorized_ids = [test.id for test in unauthorized_tests]
                 return jsonify({"error": f"Você só pode comparar avaliações aplicadas na sua escola. IDs não autorizados: {unauthorized_ids}"}), 403
         
+        perm_time = time.time() - perm_start
+        print(f"[COMPARE] Verificação de permissões concluída - Tempo: {perm_time:.2f}s - Tempo total: {time.time() - start_time:.2f}s")
+        
         # Verificar se todas as avaliações têm resultados calculados
+        results_check_start = time.time()
         from app.models.evaluationResult import EvaluationResult
         for test_id in test_ids:
             results = EvaluationResult.query.filter_by(test_id=test_id).all()
             if not results:
                 return jsonify({"error": f"Avaliação {test_id} não possui resultados calculados"}), 400
         
+        results_check_time = time.time() - results_check_start
+        print(f"[COMPARE] Verificação de resultados concluída - Tempo: {results_check_time:.2f}s - Tempo total: {time.time() - start_time:.2f}s")
+        
         # Executar comparação
+        comparison_start = time.time()
+        print(f"[COMPARE] Iniciando EvaluationComparisonService.compare_evaluations - Tempo: {time.time() - start_time:.2f}s")
+        
         comparison_result = EvaluationComparisonService.compare_evaluations(test_ids)
+        
+        comparison_time = time.time() - comparison_start
+        print(f"[COMPARE] EvaluationComparisonService.compare_evaluations concluído - Tempo: {comparison_time:.2f}s - Tempo total: {time.time() - start_time:.2f}s")
         
         if not comparison_result:
             return jsonify({"error": "Erro ao realizar comparação das avaliações"}), 500
+        
+        total_time = time.time() - start_time
+        print(f"[COMPARE] Comparação concluída com sucesso - Tempo total: {total_time:.2f}s")
+        print(f"[COMPARE] Resumo de tempos - Query Test: {query_time:.2f}s, Permissões: {perm_time:.2f}s, Resultados: {results_check_time:.2f}s, Comparação: {comparison_time:.2f}s")
         
         return jsonify(comparison_result), 200
         
@@ -3082,6 +3117,94 @@ def comparar_avaliacoes():
         test_ids_for_log = test_ids if 'test_ids' in locals() else 'N/A'
         logging.error(f"Erro ao comparar avaliações {test_ids_for_log}: {str(e)}", exc_info=True)
         return jsonify({"error": "Erro ao comparar avaliações", "details": str(e)}), 500
+
+
+@bp.route('/evolution/export-excel', methods=['POST'])
+@jwt_required()
+@role_required("admin", "professor", "coordenador", "diretor", "tecadm")
+def export_evolution_excel():
+    """
+    Exporta relatório de evolução de múltiplas avaliações para Excel.
+    Aceita IDs das avaliações no body como JSON: {"test_ids": ["id1", "id2", "id3"]}
+    Mínimo de 2 avaliações.
+    Retorna arquivo Excel formatado com gráficos e tabelas.
+    """
+    try:
+        from app.excel_export import ExcelEvolutionExporter
+        
+        user = get_current_user_from_token()
+        if not user:
+            return jsonify({"error": "Usuário não encontrado"}), 401
+        
+        # Obter test_ids do body JSON
+        data = request.get_json()
+        if not data:
+            return jsonify({"error": "Body JSON é obrigatório"}), 400
+        
+        if 'test_ids' not in data:
+            return jsonify({"error": "Campo 'test_ids' é obrigatório no body JSON"}), 400
+        
+        test_ids = data['test_ids']
+        
+        # Validar se test_ids é uma lista
+        if not isinstance(test_ids, list):
+            return jsonify({"error": "Campo 'test_ids' deve ser uma lista de strings"}), 400
+        
+        # Filtrar IDs vazios e validar formato
+        test_ids = [test_id.strip() for test_id in test_ids if test_id and isinstance(test_id, str) and test_id.strip()]
+        
+        if len(test_ids) < 2:
+            return jsonify({"error": "Mínimo de 2 avaliações necessário para exportação"}), 400
+        
+        if len(test_ids) != len(set(test_ids)):
+            return jsonify({"error": "IDs de avaliações duplicados encontrados"}), 400
+        
+        # Buscar todas as avaliações para verificar se existem
+        tests = Test.query.filter(Test.id.in_(test_ids)).all()
+        found_test_ids = {test.id for test in tests}
+        missing_test_ids = set(test_ids) - found_test_ids
+        
+        if missing_test_ids:
+            return jsonify({"error": f"Avaliações não encontradas: {list(missing_test_ids)}"}), 404
+        
+        # Verificar permissões do usuário para todas as avaliações
+        if user['role'] == 'professor':
+            from app.permissions.rules import professor_pode_ver_avaliacao
+            for test in tests:
+                if not professor_pode_ver_avaliacao(user['id'], test.id):
+                    return jsonify({"error": f"Acesso negado à avaliação {test.id}"}), 403
+        
+        # Obter informações opcionais
+        municipality = data.get('municipality')
+        state = data.get('state')
+        department = data.get('department')
+        
+        # Exportar para Excel
+        exporter = ExcelEvolutionExporter()
+        excel_file = exporter.export(test_ids, municipality, state, department)
+        
+        # Gerar nome do arquivo
+        from datetime import datetime
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        filename = f"relatorio_evolucao_{timestamp}.xlsx"
+        
+        # Retornar arquivo
+        from flask import Response
+        return Response(
+            excel_file.getvalue(),
+            mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+            headers={
+                'Content-Disposition': f'attachment; filename="{filename}"',
+                'Content-Type': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+            }
+        )
+        
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        test_ids_for_log = test_ids if 'test_ids' in locals() else 'N/A'
+        logging.error(f"Erro ao exportar relatório Excel {test_ids_for_log}: {str(e)}", exc_info=True)
+        return jsonify({"error": "Erro ao exportar relatório Excel", "details": str(e)}), 500
 
 
 @bp.route('/student/compare', methods=['POST'])

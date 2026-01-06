@@ -16,7 +16,7 @@ from app.services.evaluation_filters import EvaluationFilters
 from app.services.evaluation_aggregator import EvaluationAggregator
 from app.services.evaluation_result_service import EvaluationResultService
 from app.services.student_ranking_service import StudentRankingService
-from app.services.report_aggregate_service import ReportAggregateService
+from app.report_analysis.services import ReportAggregateService
 from app.models.test import Test
 from app.models.student import Student
 from app.models.studentAnswer import StudentAnswer

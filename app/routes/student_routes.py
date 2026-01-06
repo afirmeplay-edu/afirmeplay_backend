@@ -338,6 +338,166 @@ def listar_alunos():
         logging.error(f"Erro inesperado na rota listar_alunos: {e}", exc_info=True)
         return jsonify({"message": "Ocorreu um erro inesperado no servidor"}), 500
 
+# GET - Obter dados completos de um aluno específico
+@bp.route('/<string:student_id>', methods=['GET'])
+@jwt_required()
+@role_required("admin", "diretor", "coordenador", "professor", "tecadm", "aluno")
+def obter_aluno_completo(student_id):
+    """
+    Retorna todos os dados do aluno incluindo:
+    - Nome completo
+    - Escola
+    - Estado e Município
+    - Turma atrelada
+    - Série
+    - Professores vinculados à turma
+    """
+    try:
+        user = get_current_user_from_token()
+        if not user:
+            return jsonify({"message": "Usuário não encontrado"}), 404
+
+        # Buscar o aluno com todas as relações
+        # IMPORTANTE: student_id é na verdade o user_id (ID da tabela users)
+        student = db.session.query(
+            Student,
+            User,
+            School,
+            Class,
+            Grade
+        ).join(
+            User, Student.user_id == User.id
+        ).outerjoin(
+            School, Student.school_id == School.id
+        ).outerjoin(
+            Class, Student.class_id == Class.id
+        ).outerjoin(
+            Grade, Student.grade_id == Grade.id
+        ).filter(
+            Student.user_id == student_id
+        ).first()
+
+        if not student:
+            return jsonify({"message": "Aluno não encontrado"}), 404
+
+        student_obj, user_obj, school, class_obj, grade = student
+
+        # Verificar permissões
+        if user['role'] == "aluno":
+            # Aluno só pode ver seus próprios dados
+            if student_obj.user_id != user['id']:
+                return jsonify({"message": "Você não tem permissão para visualizar este aluno"}), 403
+        elif user['role'] == "professor":
+            # Professor só pode ver alunos das escolas onde está vinculado
+            from app.models.teacher import Teacher
+            from app.models.schoolTeacher import SchoolTeacher
+            
+            teacher = Teacher.query.filter_by(user_id=user['id']).first()
+            if not teacher:
+                return jsonify({"message": "Professor não encontrado"}), 404
+            
+            teacher_schools = SchoolTeacher.query.filter_by(teacher_id=teacher.id).all()
+            school_ids = [ts.school_id for ts in teacher_schools]
+            
+            if not school_ids or (student_obj.school_id and student_obj.school_id not in school_ids):
+                return jsonify({"message": "Você não tem permissão para visualizar este aluno"}), 403
+        elif user['role'] in ["diretor", "coordenador"]:
+            # Diretor e coordenador só podem ver alunos de sua escola
+            from app.models.teacher import Teacher
+            from app.models.schoolTeacher import SchoolTeacher
+            
+            teacher = Teacher.query.filter_by(user_id=user['id']).first()
+            if not teacher:
+                return jsonify({"message": "Usuário não encontrado como diretor/coordenador"}), 404
+            
+            teacher_school = SchoolTeacher.query.filter_by(teacher_id=teacher.id).first()
+            if not teacher_school or student_obj.school_id != teacher_school.school_id:
+                return jsonify({"message": "Você não tem permissão para visualizar este aluno"}), 403
+        elif user['role'] == "tecadm":
+            # TecAdmin só pode ver alunos do seu município
+            city_id = user.get('tenant_id') or user.get('city_id')
+            if not city_id:
+                return jsonify({"message": "ID da cidade não disponível para este usuário"}), 400
+            
+            if school and school.city_id != city_id:
+                return jsonify({"message": "Você não tem permissão para visualizar este aluno"}), 403
+
+        # Buscar município e estado através da escola
+        city = None
+        if school and school.city_id:
+            city = City.query.get(school.city_id)
+
+        # Buscar professores vinculados à turma do aluno
+        teachers_data = []
+        if class_obj:
+            teacher_classes = TeacherClass.query.filter_by(class_id=class_obj.id).all()
+            
+            for tc in teacher_classes:
+                teacher = Teacher.query.get(tc.teacher_id)
+                if teacher:
+                    teacher_user = User.query.get(teacher.user_id)
+                    teachers_data.append({
+                        "id": teacher.id,
+                        "name": teacher.name,
+                        "email": teacher_user.email if teacher_user else None,
+                        "registration": teacher.registration,
+                        "user_id": teacher.user_id
+                    })
+
+        # Montar resposta completa
+        response_data = {
+            "id": student_obj.id,
+            "name": student_obj.name or user_obj.name,
+            "full_name": user_obj.name,  # Nome completo do usuário
+            "email": user_obj.email,
+            "registration": student_obj.registration or user_obj.registration,
+            "birth_date": student_obj.birth_date.isoformat() if student_obj.birth_date else None,
+            "address": user_obj.address,  # Endereço do aluno
+            "created_at": student_obj.created_at.isoformat() if student_obj.created_at else None,
+            "school": {
+                "id": school.id,
+                "name": school.name,
+                "address": school.address,
+                "domain": school.domain
+            } if school else None,
+            "city": {
+                "id": city.id,
+                "name": city.name,
+                "state": city.state
+            } if city else None,
+            "municipio": city.name if city else None,  # Nome do município
+            "estado": city.state if city else None,  # Estado
+            "class": {
+                "id": class_obj.id,
+                "name": class_obj.name,
+                "school_id": class_obj.school_id
+            } if class_obj else None,
+            "turma": {
+                "id": class_obj.id,
+                "name": class_obj.name,
+                "school_id": class_obj.school_id
+            } if class_obj else None,  # Turma atrelada
+            "grade": {
+                "id": str(grade.id),
+                "name": grade.name
+            } if grade else None,
+            "serie": {
+                "id": str(grade.id),
+                "name": grade.name
+            } if grade else None,  # Série
+            "teachers": teachers_data,  # Professores vinculados à turma
+            "professores": teachers_data  # Alias para professores
+        }
+
+        return jsonify(response_data), 200
+
+    except SQLAlchemyError as e:
+        logging.error(f"Erro no banco de dados ao obter aluno completo: {str(e)}")
+        return jsonify({"message": "Erro interno do servidor ao consultar dados", "details": str(e)}), 500
+    except Exception as e:
+        logging.error(f"Erro inesperado na rota obter_aluno_completo: {str(e)}", exc_info=True)
+        return jsonify({"message": "Ocorreu um erro inesperado no servidor", "details": str(e)}), 500
+
 @bp.route('/<string:student_id>/<string:class_id>', methods=['PUT'])
 @jwt_required()
 @role_required("admin", "professor", "coordenador", "diretor")
@@ -854,14 +1014,15 @@ def get_student_class(student_id):
 @role_required("aluno")
 def get_current_student():
     """
-    Retorna os dados do aluno atual baseado no token JWT
+    Retorna os dados completos do aluno atual baseado no token JWT
+    Inclui: nome completo, escola, estado, município, turma, série e professores
     """
     try:
         user = get_current_user_from_token()
         if not user:
             return jsonify({"error": "Usuário não encontrado"}), 404
 
-        # Buscar aluno pelo user_id
+        # Buscar aluno pelo user_id com todas as relações
         student = db.session.query(
             Student,
             User,
@@ -870,9 +1031,9 @@ def get_current_student():
             Grade
         ).join(
             User, Student.user_id == User.id
-        ).join(
+        ).outerjoin(
             School, Student.school_id == School.id
-        ).join(
+        ).outerjoin(
             Class, Student.class_id == Class.id
         ).outerjoin(
             Grade, Student.grade_id == Grade.id
@@ -885,8 +1046,78 @@ def get_current_student():
 
         student_obj, user_obj, school, class_obj, grade = student
 
-        return jsonify(format_student_details(student_obj, user_obj, school, class_obj, grade)), 200
+        # Buscar município e estado através da escola
+        city = None
+        if school and school.city_id:
+            city = City.query.get(school.city_id)
 
+        # Buscar professores vinculados à turma do aluno
+        teachers_data = []
+        if class_obj:
+            teacher_classes = TeacherClass.query.filter_by(class_id=class_obj.id).all()
+            
+            for tc in teacher_classes:
+                teacher = Teacher.query.get(tc.teacher_id)
+                if teacher:
+                    teacher_user = User.query.get(teacher.user_id)
+                    teachers_data.append({
+                        "id": teacher.id,
+                        "name": teacher.name,
+                        "email": teacher_user.email if teacher_user else None,
+                        "registration": teacher.registration,
+                        "user_id": teacher.user_id
+                    })
+
+        # Montar resposta completa (mesmo formato da rota /students/<student_id>)
+        response_data = {
+            "id": student_obj.id,
+            "name": student_obj.name or user_obj.name,
+            "full_name": user_obj.name,  # Nome completo do usuário
+            "email": user_obj.email,
+            "registration": student_obj.registration or user_obj.registration,
+            "birth_date": student_obj.birth_date.isoformat() if student_obj.birth_date else None,
+            "address": user_obj.address,  # Endereço do aluno
+            "created_at": student_obj.created_at.isoformat() if student_obj.created_at else None,
+            "school": {
+                "id": school.id,
+                "name": school.name,
+                "address": school.address,
+                "domain": school.domain
+            } if school else None,
+            "city": {
+                "id": city.id,
+                "name": city.name,
+                "state": city.state
+            } if city else None,
+            "municipio": city.name if city else None,  # Nome do município
+            "estado": city.state if city else None,  # Estado
+            "class": {
+                "id": class_obj.id,
+                "name": class_obj.name,
+                "school_id": class_obj.school_id
+            } if class_obj else None,
+            "turma": {
+                "id": class_obj.id,
+                "name": class_obj.name,
+                "school_id": class_obj.school_id
+            } if class_obj else None,  # Turma atrelada
+            "grade": {
+                "id": str(grade.id),
+                "name": grade.name
+            } if grade else None,
+            "serie": {
+                "id": str(grade.id),
+                "name": grade.name
+            } if grade else None,  # Série
+            "teachers": teachers_data,  # Professores vinculados à turma
+            "professores": teachers_data  # Alias para professores
+        }
+
+        return jsonify(response_data), 200
+
+    except SQLAlchemyError as e:
+        logging.error(f"Erro no banco de dados ao obter dados do aluno atual: {str(e)}")
+        return jsonify({"message": "Erro interno do servidor ao consultar dados", "details": str(e)}), 500
     except Exception as e:
         logging.error(f"Erro ao obter dados do aluno atual: {str(e)}", exc_info=True)
         return jsonify({"error": "Erro ao obter dados do aluno", "details": str(e)}), 500

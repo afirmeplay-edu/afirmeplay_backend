@@ -26,7 +26,6 @@ def register_routes(app: Flask):
         user_routes,
         userQuickLinks_routes,
         evaluation_results_routes,
-        game_routes, 
         manager_routes,
         physical_test_routes
     )
@@ -56,7 +55,6 @@ def register_routes(app: Flask):
     app.register_blueprint(user_routes.bp)
     app.register_blueprint(userQuickLinks_routes.bp)
     app.register_blueprint(evaluation_results_routes.bp)
-    app.register_blueprint(game_routes.bp)
     app.register_blueprint(manager_routes.bp)
     app.register_blueprint(physical_test_routes.bp)
     app.register_blueprint(playtv_routes.bp)

@@ -59,11 +59,22 @@ def create_app():
     jwt.init_app(app)
     migrate.init_app(app, db)
     
+    # Inicializar Celery (para processamento assíncrono de relatórios)
+    try:
+        from app.report_analysis.celery_app import init_celery
+        init_celery(app)
+        app.logger.info("Celery inicializado com sucesso")
+    except Exception as e:
+        app.logger.warning(f"Celery não pôde ser inicializado: {str(e)}. Processamento assíncrono desabilitado.")
+    
     # Importar rotas
     from .routes import school_routes, test_routes, question_routes, login, logout, admin_route, educationStage_routes, grades_routes, persistUser_routes, city_routes, student_routes, user_routes, class_routes, schoolTeacher, teacherClass, professor_route, subject_routes, skill_routes,student_answer_routes, userQuickLinks_routes, evaluation_results_routes, basic_endpoints, evaluation_routes, game_routes, manager_routes, report_routes, physical_test_routes, student_grades_routes, calendar_routes, dashboard_routes, answer_sheet_routes
     from app.socioeconomic_forms.routes import socioeconomic_form_routes
+    from app.socioeconomic_forms.routes import filter_routes
     from .play_tv import routes as playtv_routes
     from .competicoes import routes as competicoes_routes
+    # Importar rotas de report_analysis (processamento assíncrono)
+    from app.report_analysis import routes as report_analysis_routes
     
     app.register_blueprint(school_routes.bp)
     app.register_blueprint(test_routes.bp)
@@ -88,6 +99,8 @@ def create_app():
     app.register_blueprint(userQuickLinks_routes.bp)
     app.register_blueprint(evaluation_results_routes.bp)
     app.register_blueprint(report_routes.bp)
+    # Registrar blueprint de report_analysis (sobrescreve algumas rotas com versão assíncrona)
+    app.register_blueprint(report_analysis_routes.bp)
     app.register_blueprint(basic_endpoints.bp)
     app.register_blueprint(game_routes.bp)
     app.register_blueprint(manager_routes.bp)
@@ -97,6 +110,7 @@ def create_app():
     app.register_blueprint(dashboard_routes.bp)
     app.register_blueprint(answer_sheet_routes.bp)
     app.register_blueprint(socioeconomic_form_routes.bp)
+    app.register_blueprint(filter_routes.bp)
     app.register_blueprint(playtv_routes.bp)
     app.register_blueprint(competicoes_routes.bp)
     # Importar modelos para garantir que as tabelas sejam criadas

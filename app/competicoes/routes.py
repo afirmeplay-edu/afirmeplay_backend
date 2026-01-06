@@ -7,13 +7,11 @@ from flask import Blueprint, request, jsonify
 from flask_jwt_extended import jwt_required
 from app import db
 from app.decorators.role_required import role_required, get_current_user_from_token
-from app.competicoes.models import Competition, CompetitionEnrollment, CompetitionResult
+from app.competicoes.models import Competition, CompetitionEnrollment, CompetitionResult, CompetitionQuestion
 from app.models.testSession import TestSession
 from app.models.studentAnswer import StudentAnswer
 from app.models.student import Student
 from app.models.question import Question
-from app.models.testQuestion import TestQuestion
-from app.models.classTest import ClassTest
 from app.models.skill import Skill
 from app.models.subject import Subject
 from app.models.studentClass import Class
@@ -31,6 +29,7 @@ from sqlalchemy.dialects.postgresql import JSONB
 from datetime import datetime
 import logging
 from typing import Dict, Any, List, Optional
+import dateutil.parser
 
 bp = Blueprint('competitions', __name__, url_prefix='/competitions')
 
@@ -62,6 +61,7 @@ def criar_competicao():
     """Cria uma nova competição"""
     try:
         data = request.get_json()
+        logging.info(f"Recebendo dados para criar competição: {data}")
         if not data:
             return jsonify({"erro": "Dados não fornecidos"}), 400
         
@@ -69,67 +69,117 @@ def criar_competicao():
         if not user:
             return jsonify({"erro": "Usuário não encontrado"}), 404
         
+        logging.info(f"Usuário autenticado: {user.get('id')}, role: {user.get('role')}")
+        
         # Campos obrigatórios
         required_fields = ['title']
         for field in required_fields:
             if field not in data:
                 return jsonify({"erro": f"Campo obrigatório ausente: {field}"}), 400
         
+        # Processar datas com tratamento de erro
+        time_limit_dt = None
+        end_time_dt = None
+        
+        if data.get('time_limit'):
+            try:
+                time_limit_str = data.get('time_limit')
+                # Tentar parse com fromisoformat primeiro
+                try:
+                    time_limit_dt = datetime.fromisoformat(time_limit_str.replace('Z', '+00:00'))
+                except (ValueError, AttributeError):
+                    # Se falhar, usar dateutil.parser
+                    import dateutil.parser
+                    time_limit_dt = dateutil.parser.parse(time_limit_str)
+            except Exception as e:
+                logging.warning(f"Erro ao parsear time_limit: {str(e)}")
+                return jsonify({"erro": f"Formato de data inválido para time_limit: {str(e)}"}), 400
+        
+        if data.get('end_time'):
+            try:
+                end_time_str = data.get('end_time')
+                # Tentar parse com fromisoformat primeiro
+                try:
+                    end_time_dt = datetime.fromisoformat(end_time_str.replace('Z', '+00:00'))
+                except (ValueError, AttributeError):
+                    # Se falhar, usar dateutil.parser
+                    import dateutil.parser
+                    end_time_dt = dateutil.parser.parse(end_time_str)
+            except Exception as e:
+                logging.warning(f"Erro ao parsear end_time: {str(e)}")
+                return jsonify({"erro": f"Formato de data inválido para end_time: {str(e)}"}), 400
+        
         # Criar competição
-        competition = Competition(
-            title=data.get('title'),
-            description=data.get('description'),
-            instrucoes=data.get('instrucoes'),
-            recompensas=data.get('recompensas'),  # {ouro: 100, prata: 50, bronze: 25, participacao: 10}
-            modo_selecao=data.get('modo_selecao', 'manual'),
-            icone=data.get('icone'),
-            cor=data.get('cor'),
-            dificuldade=data.get('dificuldade'),  # ['facil', 'medio', 'dificil']
-            type=data.get('type'),
-            max_score=data.get('max_score'),
-            time_limit=datetime.fromisoformat(data.get('time_limit')) if data.get('time_limit') else None,
-            end_time=datetime.fromisoformat(data.get('end_time')) if data.get('end_time') else None,
-            duration=data.get('duration'),
-            evaluation_mode=data.get('evaluation_mode', 'virtual'),
-            created_by=user['id'],
-            subject=data.get('subject'),
-            grade_id=data.get('grade') or data.get('grade_id'),
-            municipalities=data.get('municipalities'),
-            schools=data.get('schools'),
-            classes=data.get('classes'),
-            course=data.get('course'),
-            model=data.get('model'),
-            subjects_info=data.get('subjects_info'),
-            status=data.get('status', 'agendada'),
-            max_participantes=data.get('max_participantes')
-        )
+        logging.info("Criando objeto Competition...")
+        try:
+            competition = Competition(
+                title=data.get('title'),
+                description=data.get('description'),
+                instrucoes=data.get('instrucoes'),
+                recompensas=data.get('recompensas'),  # {ouro: 100, prata: 50, bronze: 25, participacao: 10}
+                modo_selecao=data.get('modo_selecao', 'manual'),
+                icone=data.get('icone'),
+                cor=data.get('cor'),
+                dificuldade=data.get('dificuldade'),  # ['facil', 'medio', 'dificil']
+                type=data.get('type'),
+                max_score=data.get('max_score'),
+                time_limit=time_limit_dt,
+                end_time=end_time_dt,
+                duration=data.get('duration'),
+                evaluation_mode=data.get('evaluation_mode', 'virtual'),
+                created_by=user['id'],
+                subject=data.get('subject'),
+                grade_id=data.get('grade') or data.get('grade_id'),
+                municipalities=data.get('municipalities'),
+                schools=data.get('schools'),
+                classes=data.get('classes'),
+                course=data.get('course'),
+                model=data.get('model'),
+                subjects_info=data.get('subjects_info'),
+                status=data.get('status', 'agendada'),
+                grade_calculation_type=data.get('grade_calculation_type', 'complex'),
+                max_participantes=data.get('max_participantes')
+            )
+            logging.info(f"Objeto Competition criado com ID: {competition.id}")
+        except Exception as e:
+            logging.error(f"Erro ao criar objeto Competition: {str(e)}", exc_info=True)
+            raise
         
-        db.session.add(competition)
-        db.session.flush()
+        try:
+            db.session.add(competition)
+            db.session.flush()
+            logging.info(f"Competition adicionada ao session, ID: {competition.id}")
+        except Exception as e:
+            logging.error(f"Erro ao adicionar competition ao session: {str(e)}", exc_info=True)
+            raise
         
-        # Adicionar questões se fornecidas (reutiliza TestQuestion)
+        # Adicionar questões se fornecidas (usando CompetitionQuestion)
         if 'questions' in data and isinstance(data['questions'], list):
+            logging.info(f"Adicionando {len(data['questions'])} questões à competição")
             for index, question_id in enumerate(data['questions']):
-                test_question = TestQuestion(
-                    test_id=competition.id,
-                    question_id=question_id if isinstance(question_id, str) else question_id.get('id'),
-                    order=index + 1
-                )
-                db.session.add(test_question)
+                try:
+                    q_id = question_id if isinstance(question_id, str) else question_id.get('id')
+                    competition_question = CompetitionQuestion(
+                        competition_id=competition.id,
+                        question_id=q_id,
+                        order=index + 1
+                    )
+                    db.session.add(competition_question)
+                    logging.info(f"Questão {q_id} adicionada na posição {index + 1}")
+                except Exception as e:
+                    logging.error(f"Erro ao adicionar questão {question_id}: {str(e)}", exc_info=True)
+                    raise
         
-        # Adicionar turmas se fornecidas (reutiliza ClassTest)
-        if 'classes' in data and isinstance(data['classes'], list):
-            for class_id in data['classes']:
-                class_test = ClassTest(
-                    class_id=class_id if isinstance(class_id, str) else class_id.get('id'),
-                    test_id=competition.id,
-                    status='agendada',
-                    application=data.get('time_limit', ''),
-                    expiration=data.get('end_time', '')
-                )
-                db.session.add(class_test)
+        # REMOVIDO: ClassTest tem foreign key para 'test', não para 'competition'
+        # As turmas já são armazenadas no campo JSON 'classes' da competição (linha 131)
+        # Não é necessário criar ClassTest para competições
         
-        db.session.commit()
+        try:
+            db.session.commit()
+            logging.info(f"Competição {competition.id} criada com sucesso")
+        except Exception as e:
+            logging.error(f"Erro ao fazer commit: {str(e)}", exc_info=True)
+            raise
         
         return jsonify({
             "mensagem": "Competição criada com sucesso",
@@ -139,10 +189,22 @@ def criar_competicao():
             }
         }), 201
         
+    except ValueError as e:
+        db.session.rollback()
+        logging.error(f"Erro de validação ao criar competição: {str(e)}", exc_info=True)
+        return jsonify({"erro": "Erro de validação", "detalhes": str(e)}), 400
+    except IntegrityError as e:
+        db.session.rollback()
+        logging.error(f"Erro de integridade ao criar competição: {str(e)}", exc_info=True)
+        return jsonify({"erro": "Erro de integridade de dados", "detalhes": str(e)}), 400
+    except SQLAlchemyError as e:
+        db.session.rollback()
+        logging.error(f"Erro de banco de dados ao criar competição: {str(e)}", exc_info=True)
+        return jsonify({"erro": "Erro no banco de dados", "detalhes": str(e)}), 500
     except Exception as e:
         db.session.rollback()
-        logging.error(f"Erro ao criar competição: {str(e)}", exc_info=True)
-        return jsonify({"erro": "Erro ao criar competição", "detalhes": str(e)}), 500
+        logging.error(f"Erro inesperado ao criar competição: {str(e)}", exc_info=True)
+        return jsonify({"erro": "Erro interno do servidor", "detalhes": str(e)}), 500
 
 
 @bp.route('/', methods=['GET'])
@@ -198,12 +260,12 @@ def listar_competicoes():
         elif user['role'] in ['student', 'aluno']:
             student = Student.query.filter_by(user_id=user['id']).first()
             if student and student.class_id:
-                # Filtrar por competições que têm a turma do aluno
-                class_test_ids = [ct.test_id for ct in ClassTest.query.filter_by(class_id=student.class_id).all()]
-                if class_test_ids:
-                    query = query.filter(Competition.id.in_(class_test_ids))
-                else:
-                    query = query.filter(False)  # Não tem acesso
+                # Filtrar por competições que têm a turma do aluno (usando campo JSON 'classes')
+                query = query.filter(
+                    cast(Competition.classes, JSONB).op('@>')([student.class_id])
+                )
+            else:
+                query = query.filter(False)  # Aluno sem turma não tem acesso
         
         competitions = query.all()
         
@@ -240,15 +302,15 @@ def obter_competicao(competition_id):
         if not competition:
             return jsonify({"erro": "Competição não encontrada"}), 404
         
-        # Buscar questões (usando query direta pois relacionamento é viewonly)
+        # Buscar questões (usando query direta)
         questions = []
-        test_questions = TestQuestion.query.filter_by(test_id=competition.id).order_by(TestQuestion.order).all()
-        for tq in test_questions:
-            if tq.question:
+        competition_questions = CompetitionQuestion.query.filter_by(competition_id=competition.id).order_by(CompetitionQuestion.order).all()
+        for cq in competition_questions:
+            if cq.question:
                 questions.append({
-                    "id": tq.question.id,
-                    "number": tq.order,
-                    "text": tq.question.text
+                    "id": cq.question.id,
+                    "number": cq.order,
+                    "text": cq.question.text
                 })
         
         return jsonify({
@@ -381,10 +443,14 @@ def listar_competicoes_disponiveis():
             )
         )
         
-        # Filtrar por turmas do aluno
-        class_tests = ClassTest.query.filter_by(class_id=student.class_id).all()
-        competition_ids = [ct.test_id for ct in class_tests]
-        query = query.filter(Competition.id.in_(competition_ids))
+        # Filtrar por turmas do aluno (usando campo JSON 'classes' da competição)
+        # Usar operador PostgreSQL @> para verificar se o array JSON contém a turma do aluno
+        if student.class_id:
+            query = query.filter(
+                cast(Competition.classes, JSONB).op('@>')([student.class_id])
+            )
+        else:
+            query = query.filter(False)  # Aluno sem turma não pode ver competições
         
         # Filtrar por limite de participantes
         query = query.filter(
@@ -450,12 +516,11 @@ def inscrever_em_competicao(competition_id):
         if competition.max_participantes and competition.participantes_atual >= competition.max_participantes:
             return jsonify({"erro": "Competição atingiu o limite de participantes"}), 400
         
-        # Verificar se aluno pertence a uma das turmas
-        class_test = ClassTest.query.filter_by(
-            test_id=competition_id,
-            class_id=student.class_id
-        ).first()
-        if not class_test:
+        # Verificar se aluno pertence a uma das turmas (usando campo JSON 'classes')
+        if not competition.classes or not isinstance(competition.classes, list):
+            return jsonify({"erro": "Competição não tem turmas definidas"}), 400
+        
+        if student.class_id not in competition.classes:
             return jsonify({"erro": "Você não pertence a uma turma elegível para esta competição"}), 403
         
         # Verificar se já está inscrito
@@ -658,13 +723,13 @@ def iniciar_competicao(competition_id):
         
         # Buscar questões (embaralhadas se necessário)
         questions = []
-        test_questions = TestQuestion.query.filter_by(test_id=competition_id).order_by(TestQuestion.order).all()
+        competition_questions = CompetitionQuestion.query.filter_by(competition_id=competition_id).order_by(CompetitionQuestion.order).all()
         
-        for tq in test_questions:
-            question = tq.question
+        for cq in competition_questions:
+            question = cq.question
             questions.append({
                 "id": question.id,
-                "number": tq.order,
+                "number": cq.order,
                 "text": question.text,
                 "formatted_text": question.formatted_text,
                 "alternatives": question.alternatives,
@@ -738,9 +803,8 @@ def submeter_competicao():
                 db.session.add(student_answer)
         
         # Calcular resultados usando EvaluationResultService
-        from app.models.testQuestion import TestQuestion
-        test_questions = TestQuestion.query.filter_by(test_id=competition.id).all()
-        questions = [tq.question for tq in test_questions]
+        competition_questions = CompetitionQuestion.query.filter_by(competition_id=competition.id).all()
+        questions = [cq.question for cq in competition_questions]
         
         student_answers = StudentAnswer.query.filter_by(
             student_id=session.student_id,
@@ -756,20 +820,28 @@ def submeter_competicao():
             answers=student_answers
         )
         
+        # Calcular questões respondidas e em branco
+        total_questions = len(questions)
+        total_answered = len(student_answers)
+        em_branco = total_questions - total_answered
+        
+        # Calcular erros (total respondidas - acertos)
+        erros = total_answered - result['correct_answers']
+        
         # Criar CompetitionResult
         competition_result = CompetitionResult(
             competition_id=competition.id,
             student_id=session.student_id,
             session_id=session_id,
             correct_answers=result['correct_answers'],
-            total_questions=result['total_questions'],
+            total_questions=total_questions,  # Total de questões da competição
             score_percentage=result['score_percentage'],
             grade=result['grade'],
             proficiency=result['proficiency'],
             classification=result['classification'],
             acertos=result['correct_answers'],
-            erros=result['total_questions'] - result['correct_answers'],
-            em_branco=0  # Será calculado depois
+            erros=erros,
+            em_branco=em_branco
         )
         
         # Calcular tempo gasto
@@ -847,17 +919,17 @@ def _gerar_tabela_detalhada_competicao(competition_id: str) -> Dict[str, Any]:
         
         # Buscar questões da competição
         questoes_por_disciplina = {}
-        test_questions = TestQuestion.query.filter_by(
-            test_id=competition_id
+        competition_questions = CompetitionQuestion.query.filter_by(
+            competition_id=competition_id
         ).join(Question).options(
-            joinedload(TestQuestion.question).joinedload(Question.subject)
-        ).order_by(TestQuestion.order).all()
+            joinedload(CompetitionQuestion.question).joinedload(Question.subject)
+        ).order_by(CompetitionQuestion.order).all()
         
         # Buscar habilidades
         skill_ids = set()
-        for test_question in test_questions:
-            if test_question.question.skill:
-                clean_skill_id = test_question.question.skill.replace('{', '').replace('}', '')
+        for competition_question in competition_questions:
+            if competition_question.question.skill:
+                clean_skill_id = competition_question.question.skill.replace('{', '').replace('}', '')
                 skill_ids.add(clean_skill_id)
         
         skills_dict = {}
@@ -865,8 +937,8 @@ def _gerar_tabela_detalhada_competicao(competition_id: str) -> Dict[str, Any]:
             skills = Skill.query.filter(Skill.id.in_(skill_ids)).all()
             skills_dict = {str(skill.id): skill for skill in skills}
         
-        for test_question in test_questions:
-            question = test_question.question
+        for competition_question in competition_questions:
+            question = competition_question.question
             subject_id = str(question.subject_id) if question.subject_id else 'sem_disciplina'
             subject_name = question.subject.name if question.subject else 'Sem Disciplina'
             
@@ -891,7 +963,7 @@ def _gerar_tabela_detalhada_competicao(competition_id: str) -> Dict[str, Any]:
                 }
             
             questoes_por_disciplina[subject_id]["questoes"].append({
-                "numero": test_question.order or 1,
+                "numero": competition_question.order or 1,
                 "habilidade": skill_description,
                 "codigo_habilidade": skill_code,
                 "question_id": question.id

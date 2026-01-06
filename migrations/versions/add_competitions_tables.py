@@ -71,6 +71,22 @@ def upgrade():
     op.create_index(op.f('ix_competitions_grade_id'), 'competitions', ['grade_id'], unique=False)
     op.create_index(op.f('ix_competitions_status'), 'competitions', ['status'], unique=False)
     
+    # Criar tabela competition_questions
+    op.create_table('competition_questions',
+        sa.Column('id', sa.String(), nullable=False),
+        sa.Column('competition_id', sa.String(), nullable=False),
+        sa.Column('question_id', sa.String(), nullable=False),
+        sa.Column('order', sa.Integer(), nullable=True),
+        sa.Column('created_at', sa.TIMESTAMP(), server_default=sa.text('CURRENT_TIMESTAMP'), nullable=True),
+        sa.ForeignKeyConstraint(['competition_id'], ['competitions.id'], ondelete='CASCADE'),
+        sa.ForeignKeyConstraint(['question_id'], ['question.id'], ondelete='CASCADE'),
+        sa.PrimaryKeyConstraint('id')
+    )
+    
+    # Criar índices para competition_questions
+    op.create_index(op.f('ix_competition_questions_competition_id'), 'competition_questions', ['competition_id'], unique=False)
+    op.create_index(op.f('ix_competition_questions_question_id'), 'competition_questions', ['question_id'], unique=False)
+    
     # Criar tabela competition_enrollments
     op.create_table('competition_enrollments',
         sa.Column('id', sa.String(), nullable=False),
@@ -130,6 +146,13 @@ def upgrade():
 
 
 def downgrade():
+    # Remover índices de competition_questions
+    op.drop_index(op.f('ix_competition_questions_question_id'), table_name='competition_questions')
+    op.drop_index(op.f('ix_competition_questions_competition_id'), table_name='competition_questions')
+    
+    # Remover tabela competition_questions
+    op.drop_table('competition_questions')
+    
     # Remover índices de competition_results
     op.drop_index(op.f('ix_competition_results_grade'), table_name='competition_results')
     op.drop_index(op.f('ix_competition_results_posicao'), table_name='competition_results')

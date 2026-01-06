@@ -87,10 +87,8 @@ class Competition(db.Model):
     # Reutiliza ClassTest - relacionamento via test_id (competition.id será usado como test_id)
     class_tests = db.relationship("ClassTest", foreign_keys="ClassTest.test_id", primaryjoin="Competition.id == ClassTest.test_id", viewonly=True)
     
-    # Relacionamento many-to-many com Question através da tabela de associação (reutiliza TestQuestion)
-    # Nota: TestQuestion.test_id referencia 'test.id', mas podemos usar competition.id como test_id
-    # Isso requer que competition.id seja compatível com test.id (mesmo formato UUID)
-    test_questions = db.relationship('TestQuestion', foreign_keys="TestQuestion.test_id", primaryjoin="Competition.id == TestQuestion.test_id", viewonly=True)
+    # Relacionamento many-to-many com Question através da tabela de associação específica para competições
+    competition_questions = db.relationship('CompetitionQuestion', back_populates='competition', cascade='all, delete-orphan')
     
     # Relacionamentos específicos de competição
     enrollments = db.relationship('CompetitionEnrollment', back_populates='competition', cascade='all, delete-orphan')
@@ -98,12 +96,11 @@ class Competition(db.Model):
     
     @property
     def questions(self):
-        """Retorna as questões ordenadas (reutiliza lógica de Test)"""
+        """Retorna as questões ordenadas"""
         from app.models.question import Question
-        from app.models.testQuestion import TestQuestion
         
-        test_questions = TestQuestion.query.filter_by(test_id=self.id).order_by(TestQuestion.order).all()
-        question_ids = [tq.question_id for tq in test_questions]
+        competition_questions = CompetitionQuestion.query.filter_by(competition_id=self.id).order_by(CompetitionQuestion.order).all()
+        question_ids = [cq.question_id for cq in competition_questions]
         
         if not question_ids:
             return []
@@ -111,14 +108,35 @@ class Competition(db.Model):
         questions = Question.query.filter(Question.id.in_(question_ids)).all()
         questions_dict = {q.id: q for q in questions}
         ordered_questions = []
-        for tq in test_questions:
-            if tq.question_id in questions_dict:
-                ordered_questions.append(questions_dict[tq.question_id])
+        for cq in competition_questions:
+            if cq.question_id in questions_dict:
+                ordered_questions.append(questions_dict[cq.question_id])
         
         return ordered_questions
     
     def __repr__(self):
         return f'<Competition {self.id}: {self.title}>'
+
+
+class CompetitionQuestion(db.Model):
+    """
+    Modelo para associação de questões com competições
+    Similar a TestQuestion, mas específico para competições
+    """
+    __tablename__ = 'competition_questions'
+    
+    id = db.Column(db.String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    competition_id = db.Column(db.String, db.ForeignKey('competitions.id'), nullable=False)
+    question_id = db.Column(db.String, db.ForeignKey('question.id'), nullable=False)
+    order = db.Column(db.Integer, nullable=True)  # Para manter ordem das questões
+    created_at = db.Column(db.TIMESTAMP, server_default=db.text('CURRENT_TIMESTAMP'))
+    
+    # Relacionamentos
+    competition = db.relationship('Competition', back_populates='competition_questions')
+    question = db.relationship('Question', backref='competition_questions')
+    
+    def __repr__(self):
+        return f'<CompetitionQuestion {self.competition_id} - {self.question_id}>'
 
 
 class CompetitionEnrollment(db.Model):

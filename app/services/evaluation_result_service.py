@@ -11,7 +11,7 @@ from app.models.school import School
 from app.models.studentClass import Class
 from app.models.studentAnswer import StudentAnswer
 from app.services.evaluation_calculator import EvaluationCalculator
-from app.services.report_aggregate_service import ReportAggregateService
+from app.report_analysis.services import ReportAggregateService
 from datetime import datetime
 import logging
 from typing import Dict, Any, Optional, List
@@ -331,11 +331,17 @@ class EvaluationResultService:
                     else:
                         scope_city_id = None
 
+            # Marcar todos os escopos como dirty
             ReportAggregateService.mark_dirty(test_id, 'overall', None, commit=False)
+            ReportAggregateService.mark_ai_dirty(test_id, 'overall', None, commit=False)
+            
             if scope_school_id:
                 ReportAggregateService.mark_dirty(test_id, 'school', scope_school_id, commit=False)
+                ReportAggregateService.mark_ai_dirty(test_id, 'school', scope_school_id, commit=False)
+            
             if scope_city_id:
                 ReportAggregateService.mark_dirty(test_id, 'city', scope_city_id, commit=False)
+                ReportAggregateService.mark_ai_dirty(test_id, 'city', scope_city_id, commit=False)
             
             # Marcar dirty para professores vinculados às turmas do aluno
             if class_identifier:
@@ -348,8 +354,18 @@ class EvaluationResultService:
                 # Marcar dirty para cada professor
                 for teacher_id in teacher_ids:
                     ReportAggregateService.mark_dirty(test_id, 'teacher', teacher_id, commit=False)
+                    ReportAggregateService.mark_ai_dirty(test_id, 'teacher', teacher_id, commit=False)
             
             db.session.commit()
+            
+            # NOVO: Disparar task Celery para rebuild (com debounce)
+            try:
+                from app.report_analysis.tasks import rebuild_reports_for_test
+                rebuild_reports_for_test.delay(test_id)
+                logger.info(f"Task de rebuild agendada para test_id={test_id}")
+            except Exception as e:
+                logger.warning(f"Erro ao agendar task de rebuild: {str(e)}. Continuando sem rebuild automático.")
+                # Não falhar se Celery não estiver disponível
             
             # Preparar resposta com informações adicionais se houver múltiplas disciplinas
             response_data = {

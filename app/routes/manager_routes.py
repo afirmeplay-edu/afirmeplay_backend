@@ -395,7 +395,7 @@ def list_all_managers():
 # GET - Listar managers por escola
 @bp.route('/school/<string:school_id>', methods=['GET'])
 @jwt_required()
-@role_required("admin", "diretor", "coordenador", "professor", "tecadm")
+@role_required("admin", "diretor", "coordenador", "professor", "tecadm", "aluno")
 def get_managers_by_school(school_id):
     try:
         user = get_current_user_from_token()
@@ -411,11 +411,20 @@ def get_managers_by_school(school_id):
         from app.models.teacher import Teacher
         from app.models.schoolTeacher import SchoolTeacher
         from app.models.manager import Manager
+        from app.models.student import Student
         
         # Verificar permissões
         if user['role'] == "admin":
             # Admin pode ver managers de qualquer escola
             pass
+        elif user['role'] == "aluno":
+            # Aluno só pode ver managers da sua própria escola
+            student = Student.query.filter_by(user_id=user['id']).first()
+            if not student:
+                return jsonify({"error": "Aluno não encontrado"}), 404
+            
+            if not student.school_id or student.school_id != school_id:
+                return jsonify({"error": "Você não tem permissão para visualizar managers desta escola"}), 403
         elif user['role'] == "professor":
             # Professor só pode ver managers da sua escola
             

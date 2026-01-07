@@ -17,7 +17,8 @@ class Student(db.Model):
     user = db.relationship('User', back_populates='student')
     grade_id = db.Column(UUID(as_uuid=True), db.ForeignKey('grade.id'))
     class_id = db.Column(UUID(as_uuid=True), db.ForeignKey('class.id'))
-    school_id = db.Column(db.String, db.ForeignKey('school.id'))
+    # ✅ CORRIGIDO: Explicitamente String(36) para garantir tipo correto
+    school_id = db.Column(db.String(36), db.ForeignKey('school.id'))
 
     # Relacionamento com StudentAnswer para permitir exclusão em cascata
     student_answers = db.relationship('StudentAnswer', backref='student', cascade='all, delete-orphan')

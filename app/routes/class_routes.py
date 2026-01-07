@@ -314,7 +314,8 @@ def get_classes():
             if not city_id:
                 return jsonify({"error": "ID da cidade não disponível"}), 400
             
-            classes = query.join(School).filter(School.city_id == city_id).all()
+            # A query já tem JOIN com School usando cast, então apenas filtrar
+            classes = query.filter(School.city_id == city_id).all()
 
         return jsonify([{
             "id": c.id,

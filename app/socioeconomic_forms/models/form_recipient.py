@@ -20,7 +20,8 @@ class FormRecipient(db.Model):
     # Vinculação com formulário e usuário
     form_id = db.Column(db.String, db.ForeignKey('forms.id', ondelete='CASCADE'), nullable=False)
     user_id = db.Column(db.String, db.ForeignKey('users.id', ondelete='CASCADE'), nullable=False)
-    school_id = db.Column(db.String, db.ForeignKey('school.id', ondelete='SET NULL'), nullable=True)
+    # ✅ CORRIGIDO: Explicitamente String(36) para garantir tipo correto
+    school_id = db.Column(db.String(36), db.ForeignKey('school.id', ondelete='SET NULL'), nullable=True)
     
     # Status da resposta
     status = db.Column(db.String(20), default='pending', nullable=False)  # pending, in_progress, completed

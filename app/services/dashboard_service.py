@@ -23,7 +23,7 @@ from app.models.test import Test
 from app.models.testSession import TestSession
 from app.models.user import User
 from app.models.evaluationResult import EvaluationResult
-from app.utils.uuid_helpers import ensure_uuid_list
+from app.utils.uuid_helpers import ensure_uuid_list, uuid_list_to_str
 from app.permissions.utils import (
     get_manager_school,
     get_teacher,
@@ -132,12 +132,16 @@ class DashboardService:
             if not city_id:
                 return []
             schools = School.query.filter(School.city_id == city_id).with_entities(School.id).all()
-            return [row.id for row in schools]
+            # Garantir que todos os IDs sejam strings (School.id é VARCHAR)
+            result = [str(row.id) for row in schools]
+            return result
         if scope["scope"] == "escola":
             school_ids = scope.get("school_ids") or []
             if not school_ids and scope.get("school_id"):
                 school_ids = [scope["school_id"]]
-            return school_ids
+            # Garantir que todos os IDs sejam strings (School.id é VARCHAR)
+            result = [str(sid) if sid else sid for sid in school_ids]
+            return result
         return []
 
     @staticmethod
@@ -150,9 +154,9 @@ class DashboardService:
         if not school_ids:
             return []
 
-        # Converter school_ids para UUID (Class.school_id é UUID)
-        school_ids_uuids = ensure_uuid_list(school_ids)
-        classes = Class.query.filter(Class.school_id.in_(school_ids_uuids)).with_entities(Class.id).all()
+        # ✅ CORRIGIDO: Converter school_ids para strings (Class.school_id é VARCHAR, igual School.id)
+        school_ids_str = uuid_list_to_str(school_ids) if school_ids else []
+        classes = Class.query.filter(Class.school_id.in_(school_ids_str)).with_entities(Class.id).all() if school_ids_str else []
         return [row.id for row in classes]
 
     # ------------------------------------------------------------------ #
@@ -251,21 +255,25 @@ class DashboardService:
         if scope["scope"] == "municipio" and scope.get("city_id"):
             city_school_ids = cls._extract_school_ids(scope) or []
             if city_school_ids:
+                # ✅ CORRIGIDO: Class.school_id é VARCHAR, converter para strings
+                city_school_ids_str = uuid_list_to_str(city_school_ids) if city_school_ids else []
                 test_query = (
                     test_query.join(ClassTest, ClassTest.test_id == Test.id)
                     .join(Class, Class.id == ClassTest.class_id)
-                    .filter(Class.school_id.in_(ensure_uuid_list(city_school_ids)))
+                    .filter(Class.school_id.in_(city_school_ids_str))
                     .distinct()
-                )
+                ) if city_school_ids_str else test_query.filter(False)
         elif scope["scope"] == "escola":
             school_ids = scope.get("school_ids") or []
             if school_ids:
+                # ✅ CORRIGIDO: Class.school_id é VARCHAR, converter para strings
+                school_ids_str = uuid_list_to_str(school_ids) if school_ids else []
                 test_query = (
                     test_query.join(ClassTest, ClassTest.test_id == Test.id)
                     .join(Class, Class.id == ClassTest.class_id)
-                    .filter(Class.school_id.in_(ensure_uuid_list(school_ids)))
+                    .filter(Class.school_id.in_(school_ids_str))
                     .distinct()
-                )
+                ) if school_ids_str else test_query.filter(False)
 
         # Obter IDs únicos (ordenados por created_at)
         test_ids = [row.id for row in test_query.limit(limit).all()]
@@ -311,7 +319,12 @@ class DashboardService:
             )
 
             class_name = class_tests[0].class_.name if class_tests else None
-            school_name = class_tests[0].class_.school.name if class_tests and class_tests[0].class_.school else None
+            if class_tests and class_tests[0].class_:
+                class_obj = class_tests[0].class_
+                school_obj = class_obj.school
+                school_name = school_obj.name if school_obj else None
+            else:
+                school_name = None
 
             if class_tests and class_tests[0].application:
                 application = class_tests[0].application
@@ -365,7 +378,9 @@ class DashboardService:
         school_ids = {student.school_id for student in students if getattr(student, "school_id", None)}
         school_map = {}
         if school_ids:
-            school_records = School.query.filter(School.id.in_(school_ids)).with_entities(School.id, School.name).all()
+            # Converter school_ids para strings (School.id é VARCHAR, student.school_id pode ser UUID)
+            school_ids_str = uuid_list_to_str(list(school_ids))
+            school_records = School.query.filter(School.id.in_(school_ids_str)).with_entities(School.id, School.name).all()
             school_map = {school_id: school_name for school_id, school_name in school_records}
 
         for student in students:
@@ -456,15 +471,17 @@ class DashboardService:
         if school_ids is None:
             school_query = School.query
         else:
-            school_query = School.query.filter(School.id.in_(school_ids)) if school_ids else School.query.filter(False)
+            # Converter school_ids para strings (School.id é VARCHAR)
+            school_ids_str = uuid_list_to_str(school_ids) if school_ids else []
+            school_query = School.query.filter(School.id.in_(school_ids_str)) if school_ids_str else School.query.filter(False)
 
         schools = [{"id": school.id, "name": school.name} for school in school_query.order_by(School.name.asc()).all()]
 
         class_query = Class.query
         if school_ids:
-            # Converter school_ids para UUID (Class.school_id é UUID)
-            school_ids_uuids = ensure_uuid_list(school_ids)
-            class_query = class_query.filter(Class.school_id.in_(school_ids_uuids))
+            # ✅ CORRIGIDO: Converter school_ids para strings (Class.school_id é VARCHAR)
+            school_ids_str = uuid_list_to_str(school_ids) if school_ids else []
+            class_query = class_query.filter(Class.school_id.in_(school_ids_str)) if school_ids_str else class_query.filter(False)
 
         classes = [{"id": class_.id, "name": class_.name} for class_ in class_query.order_by(Class.name.asc()).all()]
 
@@ -528,7 +545,9 @@ class DashboardService:
             return query
         if not school_ids:
             return query.filter(False)
-        return query.filter(School.id.in_(school_ids))
+        # Converter school_ids para strings (School.id é VARCHAR)
+        school_ids_str = uuid_list_to_str(school_ids)
+        return query.filter(School.id.in_(school_ids_str))
 
     @classmethod
     def _count_students(cls, scope: Dict[str, Any]) -> int:
@@ -548,7 +567,9 @@ class DashboardService:
             query = query.filter(School.city_id == scope["city_id"])
         elif scope["scope"] == "escola":
             school_ids = scope.get("school_ids") or []
-            query = query.filter(School.id.in_(school_ids)) if school_ids else query.filter(False)
+            # Converter school_ids para strings (School.id é VARCHAR)
+            school_ids_str = uuid_list_to_str(school_ids) if school_ids else []
+            query = query.filter(School.id.in_(school_ids_str)) if school_ids_str else query.filter(False)
         return query.count()
 
     @classmethod
@@ -558,21 +579,25 @@ class DashboardService:
         if scope["scope"] == "municipio":
             school_ids = cls._extract_school_ids(scope) or []
             if school_ids:
+                # ✅ CORRIGIDO: Class.school_id é VARCHAR, converter para strings
+                school_ids_str = uuid_list_to_str(school_ids) if school_ids else []
                 query = (
                     query.join(ClassTest, ClassTest.test_id == Test.id)
                     .join(Class, Class.id == ClassTest.class_id)
-                    .filter(Class.school_id.in_(ensure_uuid_list(school_ids)))
-                )
+                    .filter(Class.school_id.in_(school_ids_str))
+                ) if school_ids_str else query.filter(False)
             else:
                 query = query.filter(False)
         elif scope["scope"] == "escola":
             school_ids = scope.get("school_ids") or []
             if school_ids:
+                # ✅ CORRIGIDO: Class.school_id é VARCHAR, converter para strings
+                school_ids_str = uuid_list_to_str(school_ids) if school_ids else []
                 query = (
                     query.join(ClassTest, ClassTest.test_id == Test.id)
                     .join(Class, Class.id == ClassTest.class_id)
-                    .filter(Class.school_id.in_(ensure_uuid_list(school_ids)))
-                )
+                    .filter(Class.school_id.in_(school_ids_str))
+                ) if school_ids_str else query.filter(False)
             else:
                 query = query.filter(False)
 
@@ -597,17 +622,19 @@ class DashboardService:
         elif scope["scope"] == "escola":
             school_ids = scope.get("school_ids") or []
             if school_ids:
+                # Converter school_ids para strings (Student.school_id, SchoolTeacher.school_id, Manager.school_id são VARCHAR)
+                school_ids_str = uuid_list_to_str(school_ids) if school_ids else []
                 student_ids = (
-                    Student.query.filter(Student.school_id.in_(school_ids)).with_entities(Student.user_id).all()
+                    Student.query.filter(Student.school_id.in_(school_ids_str)).with_entities(Student.user_id).all()
                 )
                 teacher_ids = (
                     Teacher.query.join(SchoolTeacher, SchoolTeacher.teacher_id == Teacher.id)
-                    .filter(SchoolTeacher.school_id.in_(school_ids))
+                    .filter(SchoolTeacher.school_id.in_(school_ids_str))
                     .with_entities(Teacher.user_id)
                     .all()
                 )
                 manager_ids = (
-                    Manager.query.filter(Manager.school_id.in_(school_ids)).with_entities(Manager.user_id).all()
+                    Manager.query.filter(Manager.school_id.in_(school_ids_str)).with_entities(Manager.user_id).all()
                 )
                 user_ids = {row.user_id for row in student_ids + teacher_ids + manager_ids if row.user_id}
                 if not user_ids:
@@ -625,9 +652,11 @@ class DashboardService:
         elif scope["scope"] == "escola":
             school_ids = scope.get("school_ids") or []
             if school_ids:
+                # Converter school_ids para strings (SchoolTeacher.school_id é VARCHAR)
+                school_ids_str = uuid_list_to_str(school_ids) if school_ids else []
                 teacher_ids = (
                     Teacher.query.join(SchoolTeacher, SchoolTeacher.teacher_id == Teacher.id)
-                    .filter(SchoolTeacher.school_id.in_(school_ids))
+                    .filter(SchoolTeacher.school_id.in_(school_ids_str))
                     .with_entities(Teacher.user_id)
                     .all()
                 )
@@ -645,14 +674,14 @@ class DashboardService:
         query = Class.query
         if scope["scope"] == "municipio":
             school_ids = cls._extract_school_ids(scope) or []
-            # Converter school_ids para UUID (Class.school_id é UUID)
-            school_ids_uuids = ensure_uuid_list(school_ids) if school_ids else []
-            query = query.filter(Class.school_id.in_(school_ids_uuids)) if school_ids_uuids else query.filter(False)
+            # ✅ CORRIGIDO: Converter school_ids para strings (Class.school_id é VARCHAR)
+            school_ids_str = uuid_list_to_str(school_ids) if school_ids else []
+            query = query.filter(Class.school_id.in_(school_ids_str)) if school_ids_str else query.filter(False)
         elif scope["scope"] == "escola":
             school_ids = scope.get("school_ids") or []
-            # Converter school_ids para UUID (Class.school_id é UUID)
-            school_ids_uuids = ensure_uuid_list(school_ids) if school_ids else []
-            query = query.filter(Class.school_id.in_(school_ids_uuids)) if school_ids_uuids else query.filter(False)
+            # ✅ CORRIGIDO: Converter school_ids para strings (Class.school_id é VARCHAR)
+            school_ids_str = uuid_list_to_str(school_ids) if school_ids else []
+            query = query.filter(Class.school_id.in_(school_ids_str)) if school_ids_str else query.filter(False)
         return query.count()
 
     @classmethod
@@ -660,18 +689,22 @@ class DashboardService:
         teacher_query = Teacher.query
         if scope["scope"] == "municipio":
             school_ids = cls._extract_school_ids(scope) or []
+            # Converter school_ids para strings (SchoolTeacher.school_id é VARCHAR)
+            school_ids_str = uuid_list_to_str(school_ids) if school_ids else []
             teacher_query = (
                 teacher_query.join(SchoolTeacher, SchoolTeacher.teacher_id == Teacher.id)
-                .filter(SchoolTeacher.school_id.in_(school_ids))
-                if school_ids
+                .filter(SchoolTeacher.school_id.in_(school_ids_str))
+                if school_ids_str
                 else teacher_query.filter(False)
             )
         elif scope["scope"] == "escola":
             school_ids = scope.get("school_ids") or []
+            # Converter school_ids para strings (SchoolTeacher.school_id é VARCHAR)
+            school_ids_str = uuid_list_to_str(school_ids) if school_ids else []
             teacher_query = (
                 teacher_query.join(SchoolTeacher, SchoolTeacher.teacher_id == Teacher.id)
-                .filter(SchoolTeacher.school_id.in_(school_ids))
-                if school_ids
+                .filter(SchoolTeacher.school_id.in_(school_ids_str))
+                if school_ids_str
                 else teacher_query.filter(False)
             )
         return teacher_query.distinct().count()
@@ -737,67 +770,83 @@ class DashboardService:
 
     @classmethod
     def _build_school_rankings(cls, scope: Dict[str, Any]) -> List[Dict[str, Any]]:
-        school_ids = cls._extract_school_ids(scope)
-        query = (
-            db.session.query(
-                School.id.label("school_id"),
-                School.name.label("school_name"),
-                City.name.label("municipality"),
-                func.count(distinct(Student.id)).label("total_students"),
-                func.coalesce(func.avg(EvaluationResult.score_percentage), 0).label("average_score"),
-                func.count(distinct(EvaluationResult.test_id)).label("total_evaluations"),
+        from sqlalchemy.exc import SQLAlchemyError
+        from sqlalchemy import cast
+        from sqlalchemy.dialects.postgresql import VARCHAR
+        
+        try:
+            school_ids = cls._extract_school_ids(scope)
+            query = (
+                db.session.query(
+                    School.id.label("school_id"),
+                    School.name.label("school_name"),
+                    City.name.label("municipality"),
+                    func.count(distinct(Student.id)).label("total_students"),
+                    func.coalesce(func.avg(EvaluationResult.score_percentage), 0).label("average_score"),
+                    func.count(distinct(EvaluationResult.test_id)).label("total_evaluations"),
+                )
+                # ✅ CORRIGIDO: Garantir que ambos sejam strings no join (School.id é VARCHAR)
+                .join(Student, cast(Student.school_id, VARCHAR) == cast(School.id, VARCHAR))
+                .outerjoin(EvaluationResult, EvaluationResult.student_id == Student.id)
+                .outerjoin(City, City.id == School.city_id)
             )
-            .join(Student, Student.school_id == School.id)
-            .outerjoin(EvaluationResult, EvaluationResult.student_id == Student.id)
-            .outerjoin(City, City.id == School.city_id)
-        )
 
-        if scope["scope"] == "municipio" and scope.get("city_id"):
-            query = query.filter(School.city_id == scope["city_id"])
-        elif school_ids is not None:
-            query = query.filter(School.id.in_(school_ids)) if school_ids else query.filter(False)
+            if scope["scope"] == "municipio" and scope.get("city_id"):
+                query = query.filter(School.city_id == scope["city_id"])
+            elif school_ids is not None:
+                # Converter school_ids para strings (School.id é VARCHAR)
+                school_ids_str = uuid_list_to_str(school_ids) if school_ids else []
+                query = query.filter(School.id.in_(school_ids_str)) if school_ids_str else query.filter(False)
 
-        query = query.group_by(School.id, School.name, City.name).order_by(func.coalesce(func.avg(EvaluationResult.score_percentage), 0).desc())
+            query = query.group_by(School.id, School.name, City.name).order_by(func.coalesce(func.avg(EvaluationResult.score_percentage), 0).desc())
 
-        school_stats = query.limit(cls.MAX_LIST_SIZE).all()
+            school_stats = query.limit(cls.MAX_LIST_SIZE).all()
 
-        completion_subquery = (
-            db.session.query(
-                Student.school_id.label("school_id"),
-                func.sum(case((TestSession.submitted_at.isnot(None), 1), else_=0)).label("completed_sessions"),
-                func.count(TestSession.id).label("total_sessions"),
+            completion_subquery = (
+                db.session.query(
+                    cast(Student.school_id, VARCHAR).label("school_id"),
+                    func.sum(case((TestSession.submitted_at.isnot(None), 1), else_=0)).label("completed_sessions"),
+                    func.count(TestSession.id).label("total_sessions"),
+                )
+                .join(Student, Student.id == TestSession.student_id)
+                .group_by(Student.school_id)
+                .subquery()
             )
-            .join(Student, Student.id == TestSession.student_id)
-            .group_by(Student.school_id)
-            .subquery()
-        )
 
-        completion_map = {
-            row.school_id: (row.completed_sessions or 0, row.total_sessions or 0)
-            for row in db.session.query(completion_subquery).all()
-        }
+            completion_map = {
+                str(row.school_id): (row.completed_sessions or 0, row.total_sessions or 0)
+                for row in db.session.query(completion_subquery).all()
+            }
 
-        rankings = []
-        for idx, row in enumerate(school_stats):
-            completed, total = completion_map.get(row.school_id, (0, 0))
-            completion_rate = round((completed / total) * 100, 2) if total else 0.0
+            rankings = []
+            for idx, row in enumerate(school_stats):
+                # ✅ CORRIGIDO: Garantir string para comparação
+                school_id_str = str(row.school_id)
+                completed, total = completion_map.get(school_id_str, (0, 0))
+                completion_rate = round((completed / total) * 100, 2) if total else 0.0
 
-            rankings.append(
-                {
-                    "position": idx + 1,
-                    "school_id": row.school_id,
-                    "school_name": row.school_name,
-                    "municipality": row.municipality,
-                    "average_score": round(row.average_score or 0, 2),
-                    "completion_rate": completion_rate,
-                    "total_students": int(row.total_students or 0),
-                    "total_evaluations": int(row.total_evaluations or 0),
-                }
-            )
-        return rankings
+                rankings.append(
+                    {
+                        "position": idx + 1,
+                        "school_id": school_id_str,
+                        "school_name": row.school_name,
+                        "municipality": row.municipality,
+                        "average_score": round(row.average_score or 0, 2),
+                        "completion_rate": completion_rate,
+                        "total_students": int(row.total_students or 0),
+                        "total_evaluations": int(row.total_evaluations or 0),
+                    }
+                )
+            return rankings
+        except SQLAlchemyError as e:
+            db.session.rollback()
+            raise
 
     @classmethod
     def _build_student_rankings(cls, scope: Dict[str, Any]) -> List[Dict[str, Any]]:
+        from sqlalchemy import cast
+        from sqlalchemy.dialects.postgresql import VARCHAR
+        
         school_alias = aliased(School)
         class_alias = aliased(Class)
 
@@ -811,7 +860,8 @@ class DashboardService:
                 func.count(distinct(EvaluationResult.test_id)).label("completed_evaluations"),
             )
             .join(EvaluationResult, EvaluationResult.student_id == Student.id)
-            .outerjoin(school_alias, school_alias.id == Student.school_id)
+            # ✅ CORRIGIDO: Garantir que ambos sejam strings no join (School.id é VARCHAR)
+            .outerjoin(school_alias, cast(school_alias.id, VARCHAR) == cast(Student.school_id, VARCHAR))
             .outerjoin(class_alias, class_alias.id == Student.class_id)
             .group_by(Student.id, Student.name, school_alias.name, class_alias.name)
             .order_by(func.avg(EvaluationResult.grade).desc())
@@ -821,7 +871,9 @@ class DashboardService:
             query = query.filter(school_alias.city_id == scope["city_id"])
         elif scope["scope"] == "escola":
             school_ids = scope.get("school_ids") or []
-            query = query.filter(Student.school_id.in_(school_ids)) if school_ids else query.filter(False)
+            # ✅ CORRIGIDO: Converter school_ids para strings (Student.school_id é VARCHAR)
+            school_ids_str = uuid_list_to_str(school_ids) if school_ids else []
+            query = query.filter(Student.school_id.in_(school_ids_str)) if school_ids_str else query.filter(False)
 
         ranking = []
         for idx, row in enumerate(query.limit(DashboardService.MAX_LIST_SIZE).all()):
@@ -859,21 +911,25 @@ class DashboardService:
         if scope["scope"] == "municipio":
             school_ids = cls._extract_school_ids(scope) or []
             if school_ids:
+                # ✅ CORRIGIDO: Class.school_id é VARCHAR, converter para strings
+                school_ids_str = uuid_list_to_str(school_ids) if school_ids else []
                 query = (
                     query.join(ClassTest, ClassTest.test_id == Test.id)
                     .join(Class, Class.id == ClassTest.class_id)
-                    .filter(Class.school_id.in_(ensure_uuid_list(school_ids)))
-                )
+                    .filter(Class.school_id.in_(school_ids_str))
+                ) if school_ids_str else query.filter(False)
             else:
                 return []
         elif scope["scope"] == "escola":
             school_ids = scope.get("school_ids") or []
             if school_ids:
+                # ✅ CORRIGIDO: Class.school_id é VARCHAR, converter para strings
+                school_ids_str = uuid_list_to_str(school_ids) if school_ids else []
                 query = (
                     query.join(ClassTest, ClassTest.test_id == Test.id)
                     .join(Class, Class.id == ClassTest.class_id)
-                    .filter(Class.school_id.in_(ensure_uuid_list(school_ids)))
-                )
+                    .filter(Class.school_id.in_(school_ids_str))
+                ) if school_ids_str else query.filter(False)
             else:
                 return []
 
@@ -992,8 +1048,10 @@ class DashboardService:
 
         school_ids = scope.get("school_ids") or []
         if school_ids:
+            # Converter school_ids para strings (SchoolTeacher.school_id é VARCHAR)
+            school_ids_str = uuid_list_to_str(school_ids) if school_ids else []
             query = query.join(SchoolTeacher, SchoolTeacher.teacher_id == teacher_alias.id).filter(
-                SchoolTeacher.school_id.in_(school_ids)
+                SchoolTeacher.school_id.in_(school_ids_str)
             )
         else:
             return []

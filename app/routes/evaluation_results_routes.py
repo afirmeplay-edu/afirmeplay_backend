@@ -97,7 +97,8 @@ def professor_pode_ver_avaliacao(user_id: str, test_id: str) -> bool:
             return False
         
         # Buscar turmas onde a avaliação foi aplicada
-        class_tests = ClassTest.query.filter_by(test_id=test_id).all()
+        # ✅ CORRIGIDO: ClassTest.test_id é VARCHAR, converter test_id para string
+        class_tests = ClassTest.query.filter_by(test_id=str(test_id)).all()
         class_ids = [ct.class_id for ct in class_tests]
         
         if not class_ids:
@@ -156,7 +157,8 @@ def professor_pode_ver_avaliacao_turmas(user_id: str, test_id: str) -> bool:
             return False
         
         # Buscar turmas onde a avaliação foi aplicada
-        class_tests = ClassTest.query.filter_by(test_id=test_id).all()
+        # ✅ CORRIGIDO: ClassTest.test_id é VARCHAR, converter test_id para string
+        class_tests = ClassTest.query.filter_by(test_id=str(test_id)).all()
         class_ids = [ct.class_id for ct in class_tests]
         
         if not class_ids:
@@ -767,8 +769,8 @@ def listar_avaliacoes():
                                        .join(City, School.city_id == City.id)\
                                        .options(
                                            joinedload(ClassTest.test).joinedload(Test.subject_rel),
-                                           joinedload(ClassTest.class_).joinedload(Class.grade),
-                                           joinedload(ClassTest.class_).joinedload(Class.school).joinedload(School.city)
+                                           joinedload(ClassTest.class_).joinedload(Class.grade)
+                                           # ❌ REMOVIDO: joinedload(ClassTest.class_).joinedload(Class.school).joinedload(School.city) - Class.school é property
                                        )
             
             # ✅ ALTERADO: Aplicar filtros usando o novo módulo de permissões
@@ -849,7 +851,10 @@ def listar_avaliacoes():
             
             if escola and escola.lower() != 'all':
                 # Tentar filtrar por ID primeiro, depois por nome
-                school_filter = School.query.get(escola)
+                # ✅ CORRIGIDO: Converter para string (School.id é VARCHAR)
+                from app.utils.uuid_helpers import uuid_to_str
+                escola_str = uuid_to_str(escola)
+                school_filter = School.query.filter(School.id == escola_str).first() if escola_str else None
                 if school_filter:
                     query_base = query_base.filter(School.id == escola)
                 else:
@@ -929,8 +934,8 @@ def listar_avaliacoes():
                                                .join(City, School.city_id == City.id)\
                                                .options(
                                                    joinedload(ClassTest.test).joinedload(Test.subject_rel),
-                                                   joinedload(ClassTest.class_).joinedload(Class.grade),
-                                                   joinedload(ClassTest.class_).joinedload(Class.school).joinedload(School.city)
+                                                   joinedload(ClassTest.class_).joinedload(Class.grade)
+                                                   # ❌ REMOVIDO: joinedload(ClassTest.class_).joinedload(Class.school).joinedload(School.city) - Class.school é property
                                                )
                     # Reaplicar filtros
                     if estado and estado.lower() != 'all':
@@ -1015,8 +1020,8 @@ def listar_avaliacoes():
                                                .join(City, School.city_id == City.id)\
                                                .options(
                                                    joinedload(ClassTest.test).joinedload(Test.subject_rel),
-                                                   joinedload(ClassTest.class_).joinedload(Class.grade),
-                                                   joinedload(ClassTest.class_).joinedload(Class.school).joinedload(School.city)
+                                                   joinedload(ClassTest.class_).joinedload(Class.grade)
+                                                   # ❌ REMOVIDO: joinedload(ClassTest.class_).joinedload(Class.school).joinedload(School.city) - Class.school é property
                                                )
                     # Reaplicar filtros
                     if estado and estado.lower() != 'all':
@@ -1598,7 +1603,8 @@ def _calculate_evaluation_stats_frontend(test_id: str) -> Dict[str, Any]:
         return _empty_stats()
     
     # Buscar TODOS os alunos das turmas onde a avaliação foi aplicada
-    class_tests = ClassTest.query.filter_by(test_id=test_id).all()
+    # ✅ CORRIGIDO: ClassTest.test_id é VARCHAR, converter test_id para string
+    class_tests = ClassTest.query.filter_by(test_id=str(test_id)).all()
     class_ids = [ct.class_id for ct in class_tests]
     
     if not class_ids:
@@ -2044,7 +2050,8 @@ def _determinar_escopo_busca(estado, municipio, escola, serie, turma, avaliacao,
         # Se uma avaliação específica foi selecionada, buscar as escolas onde ela foi aplicada
         if is_valid_filter(avaliacao):
             # Buscar na tabela class_test todas as entradas para esta avaliação
-            class_tests_avaliacao = ClassTest.query.filter_by(test_id=avaliacao).all()
+            # ✅ CORRIGIDO: ClassTest.test_id é VARCHAR, converter avaliacao para string
+            class_tests_avaliacao = ClassTest.query.filter_by(test_id=str(avaliacao)).all()
             
             if class_tests_avaliacao:
                 # Extrair os class_ids únicos
@@ -2074,7 +2081,10 @@ def _determinar_escopo_busca(estado, municipio, escola, serie, turma, avaliacao,
             # Se não há avaliação específica, usar a lógica original
             if is_valid_filter(escola):
                 # Escola específica
-                school = School.query.get(escola)
+                # ✅ CORRIGIDO: Converter para string (School.id é VARCHAR)
+                from app.utils.uuid_helpers import uuid_to_str
+                escola_str = uuid_to_str(escola)
+                school = School.query.filter(School.id == escola_str).first() if escola_str else None
                 if not school:
                     school = School.query.filter(School.name.ilike(f"%{escola}%")).first()
                 if school:
@@ -2324,7 +2334,11 @@ def _calcular_estatisticas_gerais(class_tests: list, scope_info, nivel_granulari
         serie_info = None
         
         if scope_info.get('escola') and scope_info.get('escola') != 'all':
-            escola_obj = School.query.get(scope_info.get('escola'))
+            # ✅ CORRIGIDO: Converter para string (School.id é VARCHAR)
+            from app.utils.uuid_helpers import uuid_to_str
+            escola_id = scope_info.get('escola')
+            escola_id_str = uuid_to_str(escola_id) if escola_id else None
+            escola_obj = School.query.filter(School.id == escola_id_str).first() if escola_id_str else None
             if escola_obj:
                 escola_info = escola_obj.name
         
@@ -2660,7 +2674,8 @@ def listar_alunos():
         
         # Buscar TODOS os alunos das turmas onde a avaliação foi aplicada
         # Primeiro, buscar as turmas onde a avaliação foi aplicada
-        class_tests = ClassTest.query.filter_by(test_id=avaliacao_id).all()
+        # ✅ CORRIGIDO: ClassTest.test_id é VARCHAR, converter avaliacao_id para string
+        class_tests = ClassTest.query.filter_by(test_id=str(avaliacao_id)).all()
         class_ids = [ct.class_id for ct in class_tests]
         
         if not class_ids:
@@ -2777,7 +2792,10 @@ def get_evaluation_by_id(evaluation_id: str):
                     school_id = test.schools
                 
                 if school_id:
-                    school = School.query.get(school_id)
+                    # ✅ CORRIGIDO: Converter para string (School.id é VARCHAR)
+                    from app.utils.uuid_helpers import uuid_to_str
+                    school_id_str = uuid_to_str(school_id)
+                    school = School.query.filter(School.id == school_id_str).first() if school_id_str else None
                     if school:
                         escola_nome = school.name
                         if school.city:
@@ -2907,7 +2925,8 @@ def relatorio_detalhado(evaluation_id: str):
         from app.models.evaluationResult import EvaluationResult
         
         # Buscar TODOS os alunos das turmas onde a avaliação foi aplicada
-        class_tests = ClassTest.query.filter_by(test_id=evaluation_id).all()
+        # ✅ CORRIGIDO: ClassTest.test_id é VARCHAR, converter evaluation_id para string
+        class_tests = ClassTest.query.filter_by(test_id=str(evaluation_id)).all()
         class_ids = [ct.class_id for ct in class_tests]
         
         if not class_ids:
@@ -3166,7 +3185,8 @@ def rebuild_report_cache(test_id: str):
         build_and_save('overall', None)
 
         # 2. Identificar escolas e municípios ligados à avaliação
-        class_tests = ClassTest.query.filter_by(test_id=test_id).all()
+        # ✅ CORRIGIDO: ClassTest.test_id é VARCHAR, converter test_id para string
+        class_tests = ClassTest.query.filter_by(test_id=str(test_id)).all()
         school_ids = set()
         city_ids = set()
         teacher_ids = set()
@@ -3175,7 +3195,10 @@ def rebuild_report_cache(test_id: str):
             turma = Class.query.get(class_test.class_id)
             if turma and turma.school_id:
                 school_ids.add(turma.school_id)
-                escola = School.query.get(turma.school_id)
+                # ✅ CORRIGIDO: Converter para string (School.id é VARCHAR)
+                from app.utils.uuid_helpers import uuid_to_str
+                school_id_str = uuid_to_str(turma.school_id)
+                escola = School.query.filter(School.id == school_id_str).first() if school_id_str else None
                 if escola and escola.city_id:
                     city_ids.add(escola.city_id)
             
@@ -3274,7 +3297,8 @@ def _rebuild_all_tests_cache():
                     logging.error(f"Erro ao processar overall para {test_id}: {str(e)}")
                 
                 # 2. Buscar escolas, municípios e professores
-                class_tests = ClassTest.query.filter_by(test_id=test_id).all()
+                # ✅ CORRIGIDO: ClassTest.test_id é VARCHAR, converter test_id para string
+                class_tests = ClassTest.query.filter_by(test_id=str(test_id)).all()
                 school_ids = set()
                 city_ids = set()
                 teacher_ids = set()
@@ -3283,9 +3307,13 @@ def _rebuild_all_tests_cache():
                     turma = Class.query.get(class_test.class_id)
                     if turma and turma.school_id:
                         school_ids.add(turma.school_id)
-                        escola = School.query.get(turma.school_id)
-                        if escola and escola.city_id:
-                            city_ids.add(escola.city_id)
+                        # ✅ CORRIGIDO: Converter para string (School.id é VARCHAR)
+                        from app.utils.uuid_helpers import uuid_to_str
+                        school_id_str = uuid_to_str(turma.school_id)
+                        if school_id_str:
+                            escola = School.query.filter(School.id == school_id_str).first()
+                            if escola and escola.city_id:
+                                city_ids.add(escola.city_id)
                     
                     # Buscar professores vinculados à turma
                     teacher_classes = TeacherClass.query.filter_by(class_id=class_test.class_id).all()
@@ -3418,7 +3446,8 @@ def finalizar_avaliacao(test_id):
             return jsonify({"error": "Você só pode finalizar avaliações que criou"}), 403
         
         # Buscar ClassTest para esta avaliação
-        class_tests = ClassTest.query.filter_by(test_id=test_id).all()
+        # ✅ CORRIGIDO: ClassTest.test_id é VARCHAR, converter test_id para string
+        class_tests = ClassTest.query.filter_by(test_id=str(test_id)).all()
         
         if not class_tests:
             return jsonify({"error": "Avaliação não foi aplicada em nenhuma turma"}), 404
@@ -4638,7 +4667,8 @@ def relatorio_detalhado_filtrado(evaluation_id: str):
         # Buscar alunos e resultados
         from app.models.evaluationResult import EvaluationResult
         
-        class_tests = ClassTest.query.filter_by(test_id=evaluation_id).all()
+        # ✅ CORRIGIDO: ClassTest.test_id é VARCHAR, converter evaluation_id para string
+        class_tests = ClassTest.query.filter_by(test_id=str(evaluation_id)).all()
         class_ids = [ct.class_id for ct in class_tests]
         
         if not class_ids:
@@ -4896,7 +4926,7 @@ def _obter_escolas_por_avaliacao(avaliacao_id: str, municipio_id: str, user: dic
     
     # Buscar escolas onde a avaliação foi aplicada no município
     query_escolas = School.query.with_entities(School.id, School.name)\
-                           .join(Class, School.id == Class.school_id)\
+                           .join(Class, cast(School.id, PostgresUUID) == Class.school_id)\
                            .join(ClassTest, Class.id == ClassTest.class_id)\
                            .join(Test, ClassTest.test_id == Test.id)\
                            .join(City, School.city_id == City.id)\
@@ -4961,7 +4991,7 @@ def _obter_series_por_escola(avaliacao_id: str, escola_id: str, municipio_id: st
                          .join(Class, Grade.id == Class.grade_id)\
                          .join(ClassTest, Class.id == ClassTest.class_id)\
                          .join(Test, ClassTest.test_id == Test.id)\
-                         .join(School, Class.school_id == School.id)\
+                         .join(School, Class.school_id == cast(School.id, PostgresUUID))\
                          .join(City, School.city_id == City.id)\
                          .filter(Test.id == avaliacao_id)\
                          .filter(School.id == escola_id)\
@@ -4998,7 +5028,7 @@ def _obter_turmas_por_serie(avaliacao_id: str, escola_id: str, serie_id: str, mu
     query_turmas = Class.query.with_entities(Class.id, Class.name)\
                          .join(ClassTest, Class.id == ClassTest.class_id)\
                          .join(Test, ClassTest.test_id == Test.id)\
-                         .join(School, Class.school_id == School.id)\
+                         .join(School, Class.school_id == cast(School.id, PostgresUUID))\
                          .join(City, School.city_id == City.id)\
                          .join(Grade, Class.grade_id == Grade.id)\
                          .filter(Test.id == avaliacao_id)\
@@ -5071,7 +5101,8 @@ def opcoes_filtros(evaluation_id: str):
         
         # Buscar níveis dos alunos
         niveis = []
-        class_tests = ClassTest.query.filter_by(test_id=evaluation_id).all()
+        # ✅ CORRIGIDO: ClassTest.test_id é VARCHAR, converter evaluation_id para string
+        class_tests = ClassTest.query.filter_by(test_id=str(evaluation_id)).all()
         class_ids = [ct.class_id for ct in class_tests]
         
         if class_ids:
@@ -5143,7 +5174,8 @@ def _check_and_update_evaluation_status(test_id: str) -> Dict[str, Any]:
             return {"error": "Avaliação não encontrada"}
         
         # Buscar todas as aplicações da avaliação
-        class_tests = ClassTest.query.filter_by(test_id=test_id).all()
+        # ✅ CORRIGIDO: ClassTest.test_id é VARCHAR, converter test_id para string
+        class_tests = ClassTest.query.filter_by(test_id=str(test_id)).all()
         if not class_tests:
             return {"error": "Avaliação não foi aplicada em nenhuma turma"}
         
@@ -5221,7 +5253,8 @@ def _get_evaluation_status_summary(test_id: str) -> Dict[str, Any]:
         import dateutil.parser
         
         # Buscar aplicações da avaliação
-        class_tests = ClassTest.query.filter_by(test_id=test_id).all()
+        # ✅ CORRIGIDO: ClassTest.test_id é VARCHAR, converter test_id para string
+        class_tests = ClassTest.query.filter_by(test_id=str(test_id)).all()
         
         # Buscar sessões
         sessions = TestSession.query.filter_by(test_id=test_id).all()
@@ -5499,7 +5532,8 @@ def obter_estatisticas_status():
         total_tests = len(tests)
         
         for test in tests:
-            class_tests = ClassTest.query.filter_by(test_id=test.id).all()
+            # ✅ CORRIGIDO: ClassTest.test_id é VARCHAR, converter test.id para string
+            class_tests = ClassTest.query.filter_by(test_id=str(test.id)).all()
             if class_tests:
                 # Usar o status da primeira aplicação como representativo
                 status = class_tests[0].status
@@ -5736,7 +5770,11 @@ def _calcular_estatisticas_consolidadas_por_escopo(class_tests: list, scope_info
         serie_info = None
         
         if scope_info.get('escola') and scope_info.get('escola') != 'all':
-            escola_obj = School.query.get(scope_info.get('escola'))
+            # ✅ CORRIGIDO: Converter para string (School.id é VARCHAR)
+            from app.utils.uuid_helpers import uuid_to_str
+            escola_id = scope_info.get('escola')
+            escola_id_str = uuid_to_str(escola_id) if escola_id else None
+            escola_obj = School.query.filter(School.id == escola_id_str).first() if escola_id_str else None
             if escola_obj:
                 escola_info = escola_obj.name
         
@@ -5825,13 +5863,14 @@ def _buscar_alunos_por_escopo(escopo_calculo: dict) -> List[Student]:
         
         if escopo_calculo['tipo'] == "municipio":
             # Todos os alunos do município (com filtro de avaliação se especificada)
-            query = Student.query.join(Class).join(School).join(City)\
+            query = Student.query.join(Class).join(School, Class.school_id == cast(School.id, PostgresUUID)).join(City)\
                                .filter(City.id == escopo_calculo['municipio_id'])
             
             # Se há avaliação específica, filtrar apenas turmas onde foi aplicada
             if escopo_calculo.get('avaliacao_id'):
                 from app.models.classTest import ClassTest
-                class_tests = ClassTest.query.filter_by(test_id=escopo_calculo['avaliacao_id']).all()
+                # ✅ CORRIGIDO: ClassTest.test_id é VARCHAR, converter para string
+                class_tests = ClassTest.query.filter_by(test_id=str(escopo_calculo['avaliacao_id'])).all()
                 class_ids = [ct.class_id for ct in class_tests]
                 if class_ids:
                     query = query.filter(Student.class_id.in_(class_ids))
@@ -5842,13 +5881,14 @@ def _buscar_alunos_por_escopo(escopo_calculo: dict) -> List[Student]:
         
         elif escopo_calculo['tipo'] == "escola":
             # Todos os alunos da escola (com filtro de avaliação se especificada)
-            query = Student.query.join(Class).join(School)\
+            query = Student.query.join(Class).join(School, Class.school_id == cast(School.id, PostgresUUID))\
                                .filter(School.id == escopo_calculo['escola_id'])
             
             # Se há avaliação específica, filtrar apenas turmas onde foi aplicada
             if escopo_calculo.get('avaliacao_id'):
                 from app.models.classTest import ClassTest
-                class_tests = ClassTest.query.filter_by(test_id=escopo_calculo['avaliacao_id']).all()
+                # ✅ CORRIGIDO: ClassTest.test_id é VARCHAR, converter para string
+                class_tests = ClassTest.query.filter_by(test_id=str(escopo_calculo['avaliacao_id'])).all()
                 class_ids = [ct.class_id for ct in class_tests]
                 if class_ids:
                     query = query.filter(Student.class_id.in_(class_ids))
@@ -5869,7 +5909,8 @@ def _buscar_alunos_por_escopo(escopo_calculo: dict) -> List[Student]:
             # Se há avaliação específica, filtrar apenas turmas onde foi aplicada
             if escopo_calculo.get('avaliacao_id'):
                 from app.models.classTest import ClassTest
-                class_tests = ClassTest.query.filter_by(test_id=escopo_calculo['avaliacao_id']).all()
+                # ✅ CORRIGIDO: ClassTest.test_id é VARCHAR, converter para string
+                class_tests = ClassTest.query.filter_by(test_id=str(escopo_calculo['avaliacao_id'])).all()
                 class_ids = [ct.class_id for ct in class_tests]
                 if class_ids:
                     query = query.filter(Student.class_id.in_(class_ids))

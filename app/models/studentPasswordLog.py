@@ -16,7 +16,8 @@ class StudentPasswordLog(db.Model):
     student_id = db.Column(db.String, db.ForeignKey('student.id'), nullable=True)
     class_id = db.Column(UUID(as_uuid=True), db.ForeignKey('class.id'), nullable=True)
     grade_id = db.Column(UUID(as_uuid=True), db.ForeignKey('grade.id'), nullable=True)
-    school_id = db.Column(db.String, db.ForeignKey('school.id'), nullable=True)
+    # ✅ CORRIGIDO: Explicitamente String(36) para garantir tipo correto
+    school_id = db.Column(db.String(36), db.ForeignKey('school.id'), nullable=True)
     city_id = db.Column(db.String, db.ForeignKey('city.id'), nullable=True)
     
     created_at = db.Column(db.TIMESTAMP, server_default=db.func.now())

@@ -41,8 +41,8 @@ class Question(db.Model):
     topics = db.Column(db.JSON)  # Array de tópicos
     version = db.Column(db.Integer, default=1)  # Versão da questão
     created_by = db.Column(db.String, db.ForeignKey('users.id'))
-    created_at = db.Column(db.DateTime, server_default=db.text('CURRENT_TIMESTAMP'))
-    updated_at = db.Column(db.DateTime, server_default=db.text('CURRENT_TIMESTAMP'), onupdate=db.text('CURRENT_TIMESTAMP'))
+    created_at = db.Column(db.TIMESTAMP, server_default=db.text('CURRENT_TIMESTAMP'))
+    updated_at = db.Column(db.TIMESTAMP, server_default=db.text('CURRENT_TIMESTAMP'), onupdate=db.text('CURRENT_TIMESTAMP'))
     last_modified_by = db.Column(db.String, db.ForeignKey('users.id'))
     
     # Relacionamentos
@@ -53,6 +53,9 @@ class Question(db.Model):
     
     # Relacionamento many-to-many com Test através da tabela de associação
     test_questions = db.relationship('TestQuestion', back_populates='question', cascade='all, delete-orphan')
+
+    # Relacionamento com StudentAnswer para permitir exclusão em cascata
+    student_answers = db.relationship('StudentAnswer', backref='question', cascade='all, delete-orphan')
     
     @property
     def tests(self):

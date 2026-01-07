@@ -2,6 +2,9 @@
 __pycache__/
 *.py[cod]
 *$py.class
+debug_corrections/
+debug_bubbles/
+generated_pdfs/
 
 # C extensions
 *.so
@@ -124,7 +127,8 @@ __pypackages__/
 # Celery stuff
 celerybeat-schedule
 celerybeat.pid
-
+debug_corrections/
+debug_*/
 # SageMath parsed files
 *.sage.py
 

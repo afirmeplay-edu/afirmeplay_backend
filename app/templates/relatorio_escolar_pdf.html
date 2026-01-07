@@ -1,0 +1,900 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+	<head>
+		<meta charset="utf-8" />
+		<title>Relatório Escolar</title>
+		<style>
+			@page {
+				size: A4;
+				margin: 1.2cm 1.5cm 1.8cm 1.5cm;
+				@bottom-left {
+					content: "InnovPlay: Sistema de Ensino e Avaliação";
+					font-size: 9px;
+					font-family: "Inter", "Helvetica Neue", Arial, sans-serif;
+					color: #9ca3af;
+				}
+				@bottom-center {
+					content: "Página " counter(page) " de " counter(pages);
+					font-size: 9px;
+					font-family: "Inter", "Helvetica Neue", Arial, sans-serif;
+					color: #9ca3af;
+				}
+				@bottom-right {
+					content: "Gerado em {{ generated_at }}";
+					font-size: 9px;
+					font-family: "Inter", "Helvetica Neue", Arial, sans-serif;
+					color: #9ca3af;
+				}
+			}
+
+			body {
+				font-family: "Inter", "Helvetica Neue", Arial, sans-serif;
+				color: #111827;
+				font-size: 11px;
+				line-height: 1.4;
+				margin: 0;
+				padding: 0;
+			}
+
+			.page {
+				display: flex;
+				flex-direction: column;
+				gap: 12px;
+			}
+
+			.report-header {
+				text-align: center;
+				margin-bottom: 12px;
+				padding-bottom: 10px;
+			}
+
+			.report-header .logo {
+				display: inline-block;
+				font-size: 12px;
+				font-weight: 700;
+				color: #ffffff;
+				background: #7c3aed;
+				padding: 12px;
+				border-radius: 10px;
+				margin-bottom: 8px;
+				text-transform: uppercase;
+				letter-spacing: 0.5px;
+				line-height: 1.3;
+				text-align: center;
+				min-width: 60px;
+				width: 60px;
+				height: 60px;
+				display: inline-flex;
+				align-items: center;
+				justify-content: center;
+			}
+
+			.report-header .municipality {
+				font-size: 11px;
+				font-weight: 600;
+				color: #374151;
+				margin: 2px 0;
+				text-transform: uppercase;
+			}
+
+			.report-header .secretary {
+				font-size: 10px;
+				font-weight: 600;
+				color: #6b7280;
+				margin: 2px 0;
+				text-transform: uppercase;
+			}
+
+			.report-header .school-name {
+				font-size: 11px;
+				font-weight: 600;
+				color: #374151;
+				margin: 4px 0 2px 0;
+				text-transform: uppercase;
+			}
+
+			.report-header .evaluation-name {
+				font-size: 10px;
+				font-weight: 600;
+				color: #6b7280;
+				margin: 2px 0;
+				text-transform: uppercase;
+			}
+
+			.header {
+				display: flex;
+				justify-content: space-between;
+				align-items: flex-start;
+				margin-bottom: 8px;
+			}
+
+			.header h1 {
+				margin: 0;
+				font-size: 20px;
+				font-weight: 700;
+				color: #111827;
+			}
+
+			.header p {
+				margin: 2px 0 0 0;
+				color: #4b5563;
+				font-size: 11px;
+			}
+
+			.meta-info {
+				text-align: right;
+				color: #6b7280;
+				font-size: 10px;
+			}
+
+			/* Cards Grid */
+			.cards-grid {
+				display: grid;
+				grid-template-columns: repeat(4, 1fr);
+				gap: 10px;
+				margin-bottom: 4px;
+			}
+
+			.card {
+				border: 1px solid #e5e7eb;
+				border-radius: 8px;
+				padding: 10px;
+				background: #ffffff;
+				box-shadow: 0 1px 3px 0 rgba(0, 0, 0, 0.1);
+			}
+
+			.card-header {
+				font-size: 10px;
+				font-weight: 600;
+				color: #6b7280;
+				text-transform: none;
+				letter-spacing: 0;
+				margin-bottom: 8px;
+				display: block;
+				white-space: nowrap;
+				overflow: hidden;
+				text-overflow: ellipsis;
+			}
+
+			.card-value-container {
+				display: flex;
+				align-items: center;
+				gap: 8px;
+			}
+
+			.card-value {
+				font-size: 28px;
+				font-weight: 700;
+				color: #111827;
+				line-height: 1;
+			}
+
+			.card-badge {
+				display: inline-block;
+				padding: 4px 10px;
+				border-radius: 4px;
+				font-size: 10px;
+				font-weight: 600;
+			}
+
+			.badge-lp {
+				background: #ede9fe;
+				color: #7c3aed;
+			}
+
+			.badge-mat {
+				background: #fef3c7;
+				color: #d97706;
+			}
+
+			.badge-todas {
+				background: #e0e7ff;
+				color: #4f46e5;
+			}
+
+			.badge-adequado {
+				background: #d1fae5;
+				color: #065f46;
+			}
+
+			.badge-basico {
+				background: #fef3c7;
+				color: #92400e;
+			}
+
+			.badge-abaixo {
+				background: #fee2e2;
+				color: #991b1b;
+			}
+
+			.badge-avancado {
+				background: #d1fae5;
+				color: #065f46;
+			}
+
+			/* Section Title */
+			.section-title {
+				font-size: 14px;
+				font-weight: 700;
+				color: #7c3aed;
+				margin: 8px 0 6px 0;
+			}
+
+			/* Table Styles */
+			.table-section {
+				margin-top: 4px;
+			}
+
+			.table-card {
+				background: #ffffff;
+				border: 1px solid #e5e7eb;
+				border-radius: 12px;
+				box-shadow: 0 8px 18px rgba(17, 24, 39, 0.06);
+				padding: 16px;
+			}
+
+			.performance-table {
+				width: 100%;
+				border-collapse: separate;
+				border-spacing: 0;
+				background: transparent;
+			}
+
+			.performance-table thead th {
+				background: #7c3aed;
+				color: #ffffff;
+				padding: 10px 8px;
+				text-transform: uppercase;
+				letter-spacing: 0.05em;
+				font-size: 9px;
+				font-weight: 600;
+				text-align: center;
+			}
+
+			.performance-table thead th:first-child {
+				text-align: left;
+				padding-left: 16px;
+				border-top-left-radius: 10px;
+			}
+
+			.performance-table thead th:last-child {
+				border-top-right-radius: 10px;
+			}
+
+			.performance-table tbody tr {
+				background: #ffffff;
+			}
+
+			.performance-table tbody tr:nth-child(even) {
+				background: #f8fafc;
+			}
+
+			.performance-table tbody tr td {
+				padding: 10px 8px;
+				border-bottom: 1px solid #e5e7eb;
+				text-align: center;
+				font-size: 10px;
+				color: #374151;
+			}
+
+			.performance-table tbody tr td:first-child {
+				text-align: left;
+				font-weight: 600;
+				color: #111827;
+				padding-left: 16px;
+			}
+
+			.performance-table tbody tr:last-child td {
+				border-bottom: none;
+			}
+
+			.performance-table tr.total-row {
+				background: #eef2ff;
+				font-weight: 600;
+			}
+
+			.performance-table tr.total-row td {
+				color: #111827;
+				padding-top: 12px;
+				padding-bottom: 12px;
+			}
+
+			.table-badge {
+				display: inline-flex;
+				align-items: center;
+				justify-content: center;
+				padding: 3px 12px;
+				border-radius: 999px;
+				font-size: 9px;
+				font-weight: 700;
+				text-transform: uppercase;
+				letter-spacing: 0.05em;
+			}
+
+			/* Charts Grid */
+			.charts-section {
+				margin-top: 4px;
+			}
+
+			.charts-table {
+				width: 100%;
+				border-collapse: separate;
+				border-spacing: 0;
+				margin-top: 6px;
+			}
+
+			.charts-table tr {
+				width: 100%;
+			}
+
+			.chart-cell {
+				width: 50%;
+				vertical-align: top;
+			}
+
+			.charts-table td {
+				padding: 0 12px 12px 12px;
+			}
+
+			.chart-cell:first-child {
+				padding-left: 0;
+			}
+
+			.chart-cell:last-child {
+				padding-right: 0;
+			}
+
+			.chart-summary-wrapper {
+				margin-top: 12px;
+			}
+
+			.charts-summary {
+				width: 100%;
+				box-sizing: border-box;
+				padding: 16px;
+				background: #ffffff;
+				border: 1px solid #e5e7eb;
+				border-radius: 12px;
+				box-shadow: 0 8px 18px rgba(17, 24, 39, 0.06);
+				text-align: center;
+				font-size: 9px;
+				color: #6b7280;
+				letter-spacing: 0.02em;
+			}
+
+			.chart-card {
+				border: 1px solid #e5e7eb;
+				border-radius: 8px;
+				padding: 12px;
+				background: #ffffff;
+				box-shadow: 0 1px 3px 0 rgba(0, 0, 0, 0.1);
+				overflow: hidden;
+			}
+
+			.chart-title {
+				font-size: 11px;
+				font-weight: 700;
+				color: #111827;
+				margin-bottom: 10px;
+				text-transform: uppercase;
+				letter-spacing: 0.05em;
+				text-align: center;
+			}
+
+			.chart-content {
+				margin: 0;
+				padding: 0;
+				text-align: center;
+			}
+
+			.bar-chart {
+				display: flex;
+				flex-direction: column;
+				gap: 10px;
+				width: 100%;
+				margin: 0;
+				padding: 0;
+			}
+
+			.bar-item {
+				display: grid;
+				grid-template-columns: 120px 1fr 40px;
+				align-items: center;
+				gap: 10px;
+			}
+
+			.bar-label {
+				font-size: 9px;
+				font-weight: 600;
+				color: #374151;
+				text-align: left;
+				line-height: 1.2;
+			}
+
+			.bar-container {
+				position: relative;
+				width: 100%;
+				height: 14px;
+				background-color: #f1f5f9;
+				border-radius: 999px;
+				overflow: hidden;
+			}
+
+			.bar-fill {
+				height: 100%;
+				border-radius: 999px;
+				display: flex;
+				align-items: center;
+				justify-content: flex-end;
+				padding-right: 6px;
+				color: #ffffff;
+				font-size: 9px;
+				font-weight: 700;
+			}
+
+			.bar-fill.bar-zero {
+				width: 4px !important;
+				min-width: 4px;
+				padding-right: 0;
+				color: inherit;
+				position: relative;
+			}
+
+			.bar-fill.bar-zero::after {
+				content: "";
+				position: absolute;
+				inset: 0;
+				background-color: currentColor;
+			}
+
+			.bar-value {
+				font-size: 9px;
+				font-weight: 700;
+				color: #ffffff;
+				text-align: right;
+			}
+
+			.bar-value-static {
+				font-size: 9px;
+				font-weight: 600;
+				color: #4b5563;
+				text-align: right;
+			}
+
+			.chart-total {
+				margin-top: 8px;
+				font-size: 9px;
+				color: #6b7280;
+				text-align: center;
+			}
+
+			/* Proficiency Distribution */
+			.page-break {
+				page-break-before: always;
+				break-before: page;
+				margin-top: 0;
+			}
+
+			.proficiency-wrapper {
+				page-break-before: always;
+				break-before: page;
+				padding-top: 12px;
+			}
+
+			.proficiency-section {
+				display: flex;
+				flex-direction: column;
+				gap: 16px;
+				margin-top: 12px;
+			}
+
+			.proficiency-card {
+				background: #ffffff;
+				border: 1px solid #e5e7eb;
+				border-radius: 12px;
+				box-shadow: 0 10px 25px rgba(17, 24, 39, 0.08);
+				padding: 20px;
+			}
+
+			.proficiency-title {
+				font-size: 14px;
+				font-weight: 700;
+				color: #111827;
+				text-transform: uppercase;
+				letter-spacing: 0.05em;
+				text-align: center;
+				margin-bottom: 18px;
+			}
+
+			.proficiency-table {
+				width: 100%;
+				border-collapse: separate;
+				border-spacing: 0;
+				margin-bottom: 18px;
+			}
+
+			.proficiency-table thead th {
+				color: #ffffff;
+				padding: 8px;
+				font-size: 9px;
+				font-weight: 700;
+				text-align: center;
+				text-transform: uppercase;
+				letter-spacing: 0.05em;
+			}
+
+			.proficiency-table thead th:first-child {
+				text-align: left;
+				padding-left: 12px;
+			}
+
+			.proficiency-table tbody td {
+				font-size: 9px;
+				color: #374151;
+				text-align: center;
+				padding: 8px;
+				border-bottom: 1px solid #e5e7eb;
+			}
+
+			.proficiency-table tbody tr:nth-child(even) {
+				background: #f8fafc;
+			}
+
+			.proficiency-table tbody td:first-child {
+				text-align: left;
+				font-weight: 600;
+				color: #111827;
+				padding-left: 12px;
+			}
+
+			.proficiency-table tbody tr:last-child td {
+				border-bottom: none;
+			}
+
+			.proficiency-chart {
+				margin-top: 10px;
+			}
+
+			.proficiency-bars {
+				display: flex;
+				align-items: flex-end;
+				justify-content: space-between;
+				gap: 16px;
+				min-height: 170px;
+				padding: 0 10px;
+			}
+
+			.proficiency-bar-wrapper {
+				display: flex;
+				flex-direction: column;
+				align-items: center;
+				gap: 6px;
+				flex: 1;
+			}
+
+			.proficiency-bar-number {
+				font-size: 9px;
+				font-weight: 600;
+				transform: rotate(-55deg);
+				transform-origin: center;
+				color: #1f2937;
+			}
+
+			.proficiency-bar {
+				width: 26px;
+				border-radius: 6px 6px 0 0;
+				display: flex;
+				align-items: flex-end;
+				justify-content: center;
+				box-shadow: inset 0 -2px 4px rgba(0, 0, 0, 0.1);
+			}
+
+			.proficiency-bar-label {
+				font-size: 9px;
+				font-weight: 600;
+				color: #374151;
+				margin-top: 4px;
+			}
+
+			/* Footer */
+			.footer-info {
+				font-size: 9px;
+				color: #6b7280;
+				text-align: center;
+				margin-top: 8px;
+				padding-top: 8px;
+				border-top: 1px solid #e5e7eb;
+			}
+
+			/* Empty State */
+			.empty-state {
+				padding: 20px;
+				text-align: center;
+				color: #6b7280;
+				border: 2px dashed #e5e7eb;
+				border-radius: 8px;
+				background: #f9fafb;
+				margin-top: 8px;
+				font-size: 10px;
+			}
+
+			/* Level Colors */
+			.color-abaixo-basico {
+				fill: #ef4444;
+				background-color: #ef4444;
+			}
+			.color-basico {
+				fill: #fbbf24;
+				background-color: #fbbf24;
+			}
+			.color-adequado {
+				fill: #84cc16;
+				background-color: #84cc16;
+			}
+			.color-avancado {
+				fill: #16a34a;
+				background-color: #16a34a;
+			}
+		</style>
+	</head>
+	<body>
+		<div class="page">
+			<!-- Report Header -->
+			<div class="report-header">
+				<div class="logo">INNOV PLAY</div>
+				<div class="municipality">{{ municipality }} - {{ state }}</div>
+				<div class="secretary">SECRETARIA MUNICIPAL DE EDUCAÇÃO</div>
+				<div class="school-name">
+					{% if metadata.scope == 'municipio' %} RELATÓRIO MUNICIPAL
+					{% else %} {{ school_name }} {% endif %}
+				</div>
+				<div class="evaluation-name">
+					{{ evaluation.title or 'AVALIAÇÃO' }}
+				</div>
+			</div>
+
+			<!-- Summary Cards -->
+			{% if summary %}
+			<div class="cards-grid">
+				<div class="card">
+					<div class="card-header">MÉDIA GERAL LP</div>
+					<div class="card-value-container">
+						<div class="card-value">{{ summary.media_lp }}</div>
+						<span class="card-badge badge-lp">LP</span>
+					</div>
+				</div>
+				<div class="card">
+					<div class="card-header">MÉDIA GERAL MAT</div>
+					<div class="card-value-container">
+						<div class="card-value">{{ summary.media_mat }}</div>
+						<span class="card-badge badge-mat">MAT</span>
+					</div>
+				</div>
+				<div class="card">
+					<div class="card-header">MÉDIA GERAL</div>
+					<div class="card-value-container">
+						<div class="card-value">{{ summary.media_geral }}</div>
+						<span class="card-badge badge-todas">Todas</span>
+					</div>
+				</div>
+				<div class="card">
+					<div class="card-header">PROFICIÊNCIA MÉDIA</div>
+					<div class="card-value-container">
+						<div class="card-value">
+							{{ summary.proficiencia_media }}
+						</div>
+						{% if summary.badge %}
+						<span
+							class="card-badge"
+							style="background: {{ summary.badge.bg }}; color: {{ summary.badge.text }};"
+							>{{ summary.badge.label }}</span
+						>
+						{% endif %}
+					</div>
+				</div>
+			</div>
+			{% endif %}
+
+			<!-- Performance Table -->
+			<div class="table-section">
+				<h2 class="section-title">
+					Desempenho por {{ 'Escola' if metadata.scope == 'municipio'
+					else 'Turma' }}
+				</h2>
+				{% if class_rows %}
+				<div class="table-card">
+					<table class="performance-table">
+						<thead>
+							<tr>
+								<th>
+									{{ 'ESCOLA' if metadata.scope == 'municipio'
+									else 'TURMA' }}
+								</th>
+								<th>MÉDIA LP</th>
+								<th>MÉDIA MAT</th>
+								<th>MÉDIA GERAL</th>
+								<th>COMPARECIMENTO</th>
+								<th>PROFICIÊNCIA MÉDIA</th>
+								<th>NÍVEL DE PROFICIÊNCIA</th>
+							</tr>
+						</thead>
+						<tbody>
+							{% for row in class_rows %}
+							<tr>
+								<td>{{ row.turma }}</td>
+								<td>{{ row.media_lp }}</td>
+								<td>{{ row.media_mat }}</td>
+								<td>{{ row.media_geral }}</td>
+								<td>
+									{{ (row.comparecimento | format_float(1))
+									}}%
+								</td>
+								<td>{{ row.proficiencia_media }}</td>
+								<td>
+									{% if row.badge %}
+									<span
+										class="table-badge"
+										style="background: {{ row.badge.bg }}; color: {{ row.badge.text }};"
+										>{{ row.badge.label }}</span
+									>
+									{% else %} -- {% endif %}
+								</td>
+							</tr>
+							{% endfor %} {% if total_row %}
+							<tr class="total-row">
+								<td>
+									{{ 'Total Município' if metadata.scope ==
+									'municipio' else total_row.turma }}
+								</td>
+								<td>{{ total_row.media_lp }}</td>
+								<td>{{ total_row.media_mat }}</td>
+								<td>{{ total_row.media_geral }}</td>
+								<td>
+									{{ (total_row.comparecimento |
+									format_float(1)) }}%
+								</td>
+								<td>{{ total_row.proficiencia_media }}</td>
+								<td>
+									{% if total_row.badge %}
+									<span
+										class="table-badge"
+										style="background: {{ total_row.badge.bg }}; color: {{ total_row.badge.text }};"
+										>{{ total_row.badge.label }}</span
+									>
+									{% else %} -- {% endif %}
+								</td>
+							</tr>
+							{% endif %}
+						</tbody>
+					</table>
+				</div>
+				{% else %}
+				<div class="empty-state">
+					Sem dados de turma disponíveis para esta combinação de
+					filtros.
+				</div>
+				{% endif %}
+			</div>
+
+			<!-- Pie Charts -->
+			{% if charts %}
+			<div class="charts-section">
+				<h2 class="section-title">
+					Distribuição Percentual por Nível de Proficiência
+				</h2>
+				<table class="charts-table">
+					{% for row in charts|batch(2, None) %}
+					<tr>
+						{% for chart in row %}
+						<td class="chart-cell">
+							{% if chart %}
+							<div class="chart-card">
+								<div class="chart-title">{{ chart.title }}</div>
+								<div class="chart-content">
+									<div class="bar-chart">
+										{% for item in chart.legend %} {% set
+										percentage = item.percentage %} {% set
+										is_zero = percentage == 0 %} {% set
+										bar_width = (percentage|string + '%') if
+										not is_zero else '4px' %}
+										<div class="bar-item">
+											<div class="bar-label">
+												{{ item.label }}
+											</div>
+											<div class="bar-container">
+												<div
+													class="bar-fill {% if is_zero %}bar-zero{% endif %}"
+													style="width: {{ bar_width }}; background-color: {{ item.color }}; color: {{ item.color }};">
+													{% if not is_zero %}
+													<span class="bar-value"
+														>{{ item.value }}</span
+													>
+													{% endif %}
+												</div>
+											</div>
+											<div class="bar-value-static">
+												{{ (percentage |
+												format_float(1)) }}%
+											</div>
+										</div>
+										{% endfor %}
+									</div>
+									<div class="chart-total">
+										Total: {{ chart.total }}
+									</div>
+								</div>
+							</div>
+							{% endif %}
+						</td>
+						{% endfor %}
+					</tr>
+					{% endfor %}
+				</table>
+				<div class="chart-summary-wrapper">
+					<div class="charts-summary">
+						Matrículas: {{ totals.matriculados }} · Avaliados: {{
+						totals.avaliados }} · Comparecimento: {{
+						(totals.percentual | format_float(1)) }}%
+					</div>
+				</div>
+			</div>
+			{% endif %} {% if proficiency_distributions %}
+			<div class="page-break proficiency-wrapper">
+				<div class="proficiency-section">
+					{% for distribution in proficiency_distributions %}
+					<div class="proficiency-card">
+						<h2 class="proficiency-title">
+							{{ distribution.title }}
+						</h2>
+						<table class="proficiency-table">
+							<thead>
+								<tr>
+									<th
+										style="background: {{ distribution.color }};"></th>
+									{% for column in distribution.columns %}
+									<th
+										style="background: {{ distribution.color }};">
+										{{ column }}
+									</th>
+									{% endfor %}
+								</tr>
+							</thead>
+							<tbody>
+								{% for row in distribution.rows %}
+								<tr>
+									<td>{{ row.label }}</td>
+									{% for value in row.data %}
+									<td>{{ (value | format_float(2)) }}%</td>
+									{% endfor %}
+								</tr>
+								{% endfor %}
+							</tbody>
+						</table>
+
+						<div class="proficiency-chart">
+							<div class="proficiency-bars">
+								{% for bar in distribution.bars %}
+								<div class="proficiency-bar-wrapper">
+									<div
+										class="proficiency-bar-number"
+										style="color: {{ distribution.color }};">
+										{{ (bar.value | format_float(2)) }}
+									</div>
+									<div
+										class="proficiency-bar"
+										style="background: {{ distribution.color }}; height: {{ bar.height if bar.height > 0 else 4 }}px;"></div>
+									<div class="proficiency-bar-label">
+										{{ bar.label }}
+									</div>
+								</div>
+								{% endfor %}
+							</div>
+						</div>
+					</div>
+					{% endfor %}
+				</div>
+			</div>
+			{% endif %}
+		</div>
+	</body>
+</html>

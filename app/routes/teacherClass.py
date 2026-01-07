@@ -45,6 +45,39 @@ def create_teacher_class():
         class_id = data.get('class_id')
         logging.info(f"Vincular professor {teacher_id} à turma {class_id}")
         
+        # NOVA VALIDAÇÃO: Verificar se professor tem SchoolTeacher na escola da turma
+        from app.models.studentClass import Class
+        from app.models.schoolTeacher import SchoolTeacher
+        
+        # Buscar a turma e sua escola
+        class_obj = Class.query.get(class_id)
+        if not class_obj:
+            logging.error(f"Turma não encontrada: {class_id}")
+            return jsonify({"erro": "Turma não encontrada"}), 404
+        
+        school_id = class_obj.school_id
+        logging.info(f"Turma {class_id} pertence à escola {school_id}")
+        
+        # Verificar se professor tem SchoolTeacher na escola da turma
+        school_teacher = SchoolTeacher.query.filter_by(
+            teacher_id=teacher_id,
+            school_id=school_id
+        ).first()
+        
+        if not school_teacher:
+            logging.warning(f"Professor {teacher_id} não está vinculado à escola {school_id} da turma {class_id}")
+            return jsonify({
+                "erro": "Professor não está vinculado à escola desta turma. Primeiro vincule o professor à escola.",
+                "detalhes": {
+                    "teacher_id": teacher_id,
+                    "class_id": class_id,
+                    "school_id": school_id,
+                    "sugestao": "Use o endpoint POST /school-teacher para vincular o professor à escola primeiro"
+                }
+            }), 400
+        
+        logging.info(f"Validação aprovada: Professor {teacher_id} está vinculado à escola {school_id}")
+        
         # Verificar se já existe o vínculo
         existing_vinculo = TeacherClass.query.filter_by(
             teacher_id=teacher_id,

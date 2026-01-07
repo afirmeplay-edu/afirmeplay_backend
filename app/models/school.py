@@ -9,8 +9,10 @@ class School(db.Model):
     name = db.Column(db.String(100))
     address = db.Column(db.String(200))
     domain = db.Column(db.String(100))
-    created_at = db.Column(db.DateTime, server_default=db.func.now())
+    created_at = db.Column(db.TIMESTAMP, server_default=db.func.now())
 
     city_id = db.Column(db.String, db.ForeignKey('city.id'))
     classes = db.relationship("Class", backref="school")
     school_teachers = db.relationship("SchoolTeacher", backref="school")
+    students = db.relationship("Student", backref="school")
+    # Relacionamento com cursos vinculados (não usar backref aqui para evitar conflito)

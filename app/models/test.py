@@ -12,19 +12,20 @@ class Test(db.Model):
     intructions = db.Column(db.String(500))
     type = db.Column(db.String)
     max_score = db.Column(db.Float)
-    time_limit = db.Column(db.DateTime)
-    end_time = db.Column(db.DateTime)
+    time_limit = db.Column(db.TIMESTAMP)
+    end_time = db.Column(db.TIMESTAMP)
     duration = db.Column(db.Integer)  # Duração em minutos
     evaluation_mode = db.Column(db.String(20), default='virtual')  # virtual, physical
     created_by = db.Column(db.String, db.ForeignKey('users.id'))
-    created_at = db.Column(db.DateTime, server_default=db.text('CURRENT_TIMESTAMP'))
-    updated_at = db.Column(db.DateTime, server_default=db.text('CURRENT_TIMESTAMP'), onupdate=db.text('CURRENT_TIMESTAMP'))
+    created_at = db.Column(db.TIMESTAMP, server_default=db.text('CURRENT_TIMESTAMP'))
+    updated_at = db.Column(db.TIMESTAMP, server_default=db.text('CURRENT_TIMESTAMP'), onupdate=db.text('CURRENT_TIMESTAMP'))
     subject = db.Column(db.String, db.ForeignKey('subject.id'), nullable=True)
     grade_id = db.Column(UUID(as_uuid=True), db.ForeignKey("grade.id"))
     
     # Novos campos
     municipalities = db.Column(JSON)  # Lista de municípios
     schools = db.Column(JSON)  # Lista de escolas
+    classes = db.Column(JSON)  # Lista de classes específicas
     course = db.Column(db.String(100))  # Curso (Ensino Fundamental, etc)
     model = db.Column(db.String(50))  # SAEB, PROVA, etc
     subjects_info = db.Column(JSON)  # Informações sobre as disciplinas e quantidade de questões
@@ -39,11 +40,34 @@ class Test(db.Model):
     
     # Relacionamento many-to-many com Question através da tabela de associação
     test_questions = db.relationship('TestQuestion', back_populates='test', cascade='all, delete-orphan')
+
+    # Relacionamento com StudentAnswer para permitir exclusão em cascata
+    student_answers = db.relationship('StudentAnswer', backref='test', cascade='all, delete-orphan')
     
     @property
     def questions(self):
         """Retorna as questões ordenadas"""
-        return [tq.question for tq in sorted(self.test_questions, key=lambda x: x.order or 0)]
+        from app.models.question import Question
+        from app.models.testQuestion import TestQuestion
+        
+        # Query direta para evitar problemas de relacionamento circular
+        test_questions = TestQuestion.query.filter_by(test_id=self.id).order_by(TestQuestion.order).all()
+        question_ids = [tq.question_id for tq in test_questions]
+        
+        if not question_ids:
+            return []
+        
+        # Buscar questões diretamente
+        questions = Question.query.filter(Question.id.in_(question_ids)).all()
+        
+        # Ordenar pela ordem original
+        questions_dict = {q.id: q for q in questions}
+        ordered_questions = []
+        for tq in test_questions:
+            if tq.question_id in questions_dict:
+                ordered_questions.append(questions_dict[tq.question_id])
+        
+        return ordered_questions
     
     # Relacionamento para acessar as classes onde a avaliação foi aplicada
     @property

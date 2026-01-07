@@ -6,6 +6,7 @@ from app.models.educationStage import EducationStage
 from app.models.test import Test
 from app.models.testQuestion import TestQuestion
 from app.models.user import User
+from app.models.studentAnswer import StudentAnswer
 from app import db
 from app.decorators.role_required import get_current_tenant_id
 from flask_jwt_extended import jwt_required
@@ -122,6 +123,17 @@ def create_question():
             if not any(alt.get('isCorrect') for alt in data['options']):
                 return jsonify({"error": "At least one alternative must be marked as correct"}), 400
 
+        # Normalizar skills: aceitar apenas 1 skill (UUID como string)
+        skills_input = data.get('skills')
+        skill_value = None
+        if skills_input:
+            if isinstance(skills_input, list):
+                # Se vier array, pegar apenas o primeiro elemento
+                skill_value = skills_input[0] if skills_input else None
+            else:
+                # Se vier string, usar diretamente
+                skill_value = skills_input
+        
         question = Question(
             number=data.get('number'),
             text=data.get('text'),
@@ -134,12 +146,11 @@ def create_question():
             command=data.get('command'),
             subtitle=data.get('subtitle'),
             alternatives=data.get('options'),
-            skill=data.get('skills'),
+            skill=skill_value,
             grade_level=data.get('grade'),
             difficulty_level=data.get('difficulty'),
             correct_answer=data.get('solution'),
             formatted_solution=data.get('formattedSolution'),
-            # test_id=data.get('test_id'),  # REMOVIDO - agora usamos tabela de associação
             question_type=data.get('type'),
             value=data.get('value'),
             topics=data.get('topics'),
@@ -294,6 +305,16 @@ def update_question(question_id):
         for json_key, model_attr in field_map.items():
             if json_key in data:
                 setattr(question, model_attr, data[json_key])
+        
+        # Tratar skills separadamente para normalizar (apenas 1 skill permitida)
+        if 'skills' in data:
+            skills_input = data['skills']
+            if isinstance(skills_input, list):
+                # Se vier array, pegar apenas o primeiro elemento
+                question.skill = skills_input[0] if skills_input else None
+            else:
+                # Se vier string, usar diretamente
+                question.skill = skills_input
         
         question.version += 1
 

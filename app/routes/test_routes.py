@@ -18,12 +18,72 @@ from datetime import datetime, timedelta
 import logging
 import json
 import dateutil.parser
+import base64
+import uuid
+import os
+from PIL import Image
+import io
 from app.utils.response_formatters import format_test_response
 from sqlalchemy.orm import joinedload, subqueryload
 from sqlalchemy import cast
 from sqlalchemy.dialects.postgresql import JSONB
+from app.models.studentAnswer import StudentAnswer
+from app.models.skill import Skill
+from app.models.subject import Subject
 
 bp = Blueprint('tests', __name__, url_prefix="/test")
+
+def process_image(image_data, image_type):
+    """
+    Processa uma imagem em base64 e retorna um dicionário com suas informações
+    """
+    try:
+        # Remove o cabeçalho do base64 se existir
+        if ',' in image_data:
+            image_data = image_data.split(',')[1]
+        
+        # Decodifica o base64
+        image_bytes = base64.b64decode(image_data)
+        
+        # Abre a imagem com PIL para processamento
+        image = Image.open(io.BytesIO(image_bytes))
+        
+        # Gera um ID único para a imagem
+        image_id = str(uuid.uuid4())
+        
+        # Obtém informações da imagem
+        image_info = {
+            "id": image_id,
+            "type": image_type,
+            "size": len(image_bytes),
+            "width": image.width,
+            "height": image.height,
+            "data": image_data  # Mantém o base64 para armazenamento
+        }
+        
+        return image_info
+    except Exception as e:
+        logging.error(f"Error processing image: {str(e)}")
+        raise
+
+def extract_images_from_html(html_content):
+    """
+    Extrai imagens em base64 do conteúdo HTML
+    """
+    import re
+    images = []
+    
+    # Procura por tags img com src em base64
+    img_pattern = r'<img[^>]+src="(data:image/[^;]+;base64,[^"]+)"[^>]*>'
+    matches = re.finditer(img_pattern, html_content)
+    
+    for match in matches:
+        base64_data = match.group(1)
+        image_type = base64_data.split(';')[0].split(':')[1]
+        image_info = process_image(base64_data, image_type)
+        images.append(image_info)
+    
+    return images
 
 def process_subjects_for_test(test):
     """
@@ -121,6 +181,7 @@ def criar_avaliacao():
             # Se turmas foram especificadas, extrair as escolas das turmas
             school_ids_from_classes = list(set([c.school_id for c in existing_classes]))
             data['schools'] = school_ids_from_classes
+            data['classes'] = class_ids  # Salvar as classes específicas
 
         logging.info("Criando nova avaliação com os dados fornecidos")
         print(data)
@@ -139,6 +200,7 @@ def criar_avaliacao():
             created_by=data.get('created_by'),
             municipalities=data.get('municipalities'),
             schools=data.get('schools'),
+            classes=data.get('classes'),  # Salvar as classes específicas
             course=data.get('course'),
             model=data.get('model'),
             subjects_info=data.get('subjects') or data.get('subjects_info'),  # Aceita tanto 'subjects' quanto 'subjects_info'
@@ -173,18 +235,39 @@ def criar_avaliacao():
                     if isinstance(grade_level, dict) and 'id' in grade_level:
                         grade_level = grade_level['id']
                     
+                    # Processa imagens do texto formatado
+                    images = []
+                    if question_data.get('formattedText'):
+                        images.extend(extract_images_from_html(question_data['formattedText']))
+                    
+                    # Processa imagens da solução formatada
+                    if question_data.get('formattedSolution'):
+                        images.extend(extract_images_from_html(question_data['formattedSolution']))
+                    
+                    # Normalizar skills: aceitar apenas 1 skill (UUID como string)
+                    skills_input = question_data.get('skills')
+                    skill_value = None
+                    if skills_input:
+                        if isinstance(skills_input, list):
+                            # Se vier array, pegar apenas o primeiro elemento
+                            skill_value = skills_input[0] if skills_input else None
+                        else:
+                            # Se vier string, usar diretamente
+                            skill_value = skills_input
+                    
                     question = Question(
                         number=question_data.get('number'),
                         text=question_data.get('text'),
                         formatted_text=question_data.get('formattedText'),
+                        secondstatement=question_data.get('secondStatement'),
+                        images=images,
                         subject_id=question_data.get('subjectId') or question_data.get('subject_id'),
                         title=question_data.get('title'),
                         description=question_data.get('description'),
                         command=question_data.get('command'),
-                        secondstatement=question_data.get('secondStatement'),
                         subtitle=question_data.get('subtitle'),
                         alternatives=question_data.get('options'),
-                        skill=question_data.get('skills'),
+                        skill=skill_value,
                         grade_level=grade_level,
                         difficulty_level=question_data.get('difficulty'),
                         correct_answer=question_data.get('solution'),
@@ -192,7 +275,9 @@ def criar_avaliacao():
                         question_type=question_data.get('type'),
                         value=question_data.get('value'),
                         topics=question_data.get('topics'),
-                        created_by=question_data.get('created_by') or data.get('created_by')
+                        education_stage_id=question_data.get('educationStageId'),
+                        created_by=question_data.get('created_by') or data.get('created_by'),
+                        last_modified_by=question_data.get('lastModifiedBy') or data.get('lastModifiedBy')
                     )
                     db.session.add(question)
                     db.session.flush()  # Para obter o ID da questão
@@ -310,6 +395,65 @@ def listar_avaliacoes():
         # Se o usuário for professor, filtra para ver apenas os seus testes
         if user['role'] == 'professor':
             query = query.filter(Test.created_by == user['id'])
+        
+        # Filtrar por município se for diretor ou coordenador
+        elif user['role'] in ["diretor", "coordenador"]:
+            # Buscar o município do diretor/coordenador através da escola onde trabalha
+            from app.models.manager import Manager
+            
+            manager = Manager.query.filter_by(user_id=user['id']).first()
+            if not manager or not manager.school_id:
+                return jsonify({"error": "Diretor/Coordenador não encontrado ou não vinculado a uma escola"}), 404
+            
+            # Buscar a escola para obter o city_id
+            school = School.query.get(manager.school_id)
+            if not school or not school.city_id:
+                return jsonify({"error": "Escola do diretor/coordenador não encontrada ou sem município"}), 404
+            
+            city_id = school.city_id
+            logging.info(f"Diretor/Coordenador {user['id']} - filtrando por município: {city_id}")
+            
+            # Obter escolas do município
+            schools_in_city = School.query.filter_by(city_id=city_id).with_entities(School.id).all()
+            school_ids = [school.id for school in schools_in_city]
+            
+            # Criar lista de filtros para usar com db.or_
+            filters = []
+            
+            # Critério 1: Avaliações criadas pelo próprio usuário diretor/coordenador
+            filters.append(Test.created_by == user['id'])
+            
+            # Critério 2: Avaliações criadas por usuários da cidade
+            if school_ids:
+                # Buscar usuários que estão nas escolas da cidade
+                from app.models.schoolTeacher import SchoolTeacher
+                from app.models.teacher import Teacher
+                
+                # Obter IDs de professores das escolas da cidade
+                teacher_ids = db.session.query(SchoolTeacher.teacher_id).filter(
+                    SchoolTeacher.school_id.in_(school_ids)
+                ).distinct().all()
+                teacher_ids = [t[0] for t in teacher_ids]
+                
+                # Obter IDs de usuários que são professores das escolas da cidade
+                if teacher_ids:
+                    user_ids_in_city = db.session.query(Teacher.user_id).filter(
+                        Teacher.id.in_(teacher_ids)
+                    ).distinct().all()
+                    user_ids_in_city = [u[0] for u in user_ids_in_city]
+                    
+                    # Adicionar filtro para avaliações criadas por usuários da cidade
+                    if user_ids_in_city:
+                        filters.append(Test.created_by.in_(user_ids_in_city))
+                
+                # Critério 3: Avaliações que têm escolas especificadas da cidade
+                for school_id in school_ids:
+                    filters.append(cast(Test.schools, JSONB).op('@>')([school_id]))
+            
+            # Aplicar filtros se houver algum
+            if filters:
+                query = query.filter(db.or_(*filters))
+                logging.info(f"Aplicados {len(filters)} filtros para diretor/coordenador")
 
         # Filtros
         status_filter = request.args.get('status')
@@ -455,6 +599,25 @@ def listar_avaliacoes_por_escola(school_id):
             ).first()
             if not teacher_school:
                 return jsonify({"error": "You don't have permission to view tests for this school"}), 403
+        
+        elif user['role'] in ["diretor", "coordenador"]:
+            # Diretor e coordenador só podem ver avaliações de escolas do seu município
+            from app.models.manager import Manager
+            
+            manager = Manager.query.filter_by(user_id=user['id']).first()
+            if not manager or not manager.school_id:
+                return jsonify({"error": "Diretor/Coordenador não encontrado ou não vinculado a uma escola"}), 404
+            
+            # Buscar a escola do diretor/coordenador para obter o city_id
+            manager_school = School.query.get(manager.school_id)
+            if not manager_school or not manager_school.city_id:
+                return jsonify({"error": "Escola do diretor/coordenador não encontrada ou sem município"}), 404
+            
+            # Verificar se a escola solicitada é do mesmo município
+            if school.city_id != manager_school.city_id:
+                return jsonify({"error": "Você só pode visualizar avaliações de escolas do seu município"}), 403
+            
+            logging.info(f"Diretor/Coordenador {user['id']} - verificando escola {school_id} do município {manager_school.city_id}")
 
         # Buscar avaliações que incluem esta escola
         query = Test.query.options(
@@ -529,6 +692,27 @@ def listar_avaliacoes_por_aluno(student_id):
             ).first()
             if not teacher_school:
                 return jsonify({"error": "You don't have permission to view tests for this student"}), 403
+        
+        elif user['role'] in ["diretor", "coordenador"]:
+            # Diretor e coordenador só podem ver alunos de escolas do seu município
+            from app.models.manager import Manager
+            
+            manager = Manager.query.filter_by(user_id=user['id']).first()
+            if not manager or not manager.school_id:
+                return jsonify({"error": "Diretor/Coordenador não encontrado ou não vinculado a uma escola"}), 404
+            
+            # Buscar a escola do diretor/coordenador para obter o city_id
+            manager_school = School.query.get(manager.school_id)
+            if not manager_school or not manager_school.city_id:
+                return jsonify({"error": "Escola do diretor/coordenador não encontrada ou sem município"}), 404
+            
+            # Verificar se a escola do aluno é do mesmo município
+            if student.school_id:
+                student_school = School.query.get(student.school_id)
+                if student_school and student_school.city_id != manager_school.city_id:
+                    return jsonify({"error": "Você só pode visualizar avaliações de alunos de escolas do seu município"}), 403
+            
+            logging.info(f"Diretor/Coordenador {user['id']} - verificando aluno {student_id} do município {manager_school.city_id}")
 
         # Buscar avaliações que incluem a escola do aluno
         query = Test.query.options(
@@ -632,7 +816,7 @@ def obter_avaliacao(test_id):
 
 @bp.route('/<string:test_id>/details', methods=['GET'])
 @jwt_required()
-@role_required("admin", "professor", "coordenador", "diretor", "aluno")
+@role_required("admin", "professor", "coordenador", "diretor", "aluno", "tecadm")
 def get_test_details(test_id):
     """
     Alias para /test/<test_id> - Detalhes completos da avaliação
@@ -667,11 +851,28 @@ def atualizar_avaliacao(test_id):
                     logging.error("Disciplina ou disciplinas ausentes para tipo AVALIACAO")
                     return jsonify({"error": "Subject or subjects array is required for AVALIACAO type"}), 400
 
+        # Validação de turmas se fornecidas
+        if 'classes' in data and data.get('classes'):
+            if isinstance(data['classes'], list):
+                class_ids = [c.get('id') if isinstance(c, dict) else c for c in data['classes']]
+            else:
+                class_ids = [data['classes']]
+            
+            # Verificar se todas as turmas existem
+            existing_classes = Class.query.filter(Class.id.in_(class_ids)).all()
+            if len(existing_classes) != len(class_ids):
+                return jsonify({"error": "Uma ou mais turmas não foram encontradas"}), 400
+            
+            # Se turmas foram especificadas, extrair as escolas das turmas
+            school_ids_from_classes = list(set([c.school_id for c in existing_classes]))
+            data['schools'] = school_ids_from_classes
+            data['classes'] = class_ids  # Salvar as classes específicas
+
         # Campos que podem ser atualizados
         campos = [
             'title', 'description', 'type', 'subject', 'grade_id',
             'max_score', 'time_limit', 'end_time', 'duration', 'evaluation_mode', 'intructions', 'municipalities',
-            'schools', 'course', 'model', 'subjects_info'
+            'schools', 'classes', 'course', 'model', 'subjects_info'
         ]
 
         for campo in campos:
@@ -765,19 +966,67 @@ def bulk_delete_tests():
                 db.session.delete(answer)
             logging.info(f"🗑️ Excluídas {len(student_answers)} respostas de alunos para teste {test.id}")
             
-            # 2. Excluir sessões de teste
+            # 2. Excluir formulários físicos e suas respostas
+            from app.models.physicalTestForm import PhysicalTestForm
+            from app.models.physicalTestAnswer import PhysicalTestAnswer
+            
+            # Buscar formulários físicos
+            physical_forms = PhysicalTestForm.query.filter_by(test_id=test.id).all()
+            total_physical_answers_deleted = 0
+            
+            for physical_form in physical_forms:
+                # Excluir respostas físicas relacionadas
+                physical_answers = PhysicalTestAnswer.query.filter_by(
+                    physical_form_id=physical_form.id
+                ).all()
+                
+                for answer in physical_answers:
+                    db.session.delete(answer)
+                
+                total_physical_answers_deleted += len(physical_answers)
+                
+                # Excluir formulário físico
+                db.session.delete(physical_form)
+            
+            # Excluir coordenadas do formulário (FormCoordinates)
+            from app.models.formCoordinates import FormCoordinates
+            form_coordinates = FormCoordinates.query.filter_by(
+                test_id=test.id,
+                form_type='physical_test'
+            ).all()
+            
+            for coord in form_coordinates:
+                db.session.delete(coord)
+            
+            logging.info(f"🗑️ Excluídos {len(physical_forms)} formulários físicos, {total_physical_answers_deleted} respostas físicas e {len(form_coordinates)} coordenadas para teste {test.id}")
+            
+            # 3. Excluir resultados de avaliação
+            from app.models.evaluationResult import EvaluationResult
+            evaluation_results = EvaluationResult.query.filter_by(test_id=test.id).all()
+            for result in evaluation_results:
+                db.session.delete(result)
+            logging.info(f"🗑️ Excluídos {len(evaluation_results)} resultados de avaliação para teste {test.id}")
+            
+            # 4. Excluir agregados de relatórios (report_aggregates)
+            from app.models.reportAggregate import ReportAggregate
+            report_aggregates = ReportAggregate.query.filter_by(test_id=test.id).all()
+            for aggregate in report_aggregates:
+                db.session.delete(aggregate)
+            logging.info(f"🗑️ Excluídos {len(report_aggregates)} agregados de relatórios para teste {test.id}")
+            
+            # 5. Excluir sessões de teste
             test_sessions = TestSession.query.filter_by(test_id=test.id).all()
             for session in test_sessions:
                 db.session.delete(session)
             logging.info(f"🗑️ Excluídas {len(test_sessions)} sessões de teste para teste {test.id}")
             
-            # 3. Excluir aplicações de classe
+            # 6. Excluir aplicações de classe
             class_tests = ClassTest.query.filter_by(test_id=test.id).all()
             for class_test in class_tests:
                 db.session.delete(class_test)
             logging.info(f"🗑️ Excluídas {len(class_tests)} aplicações de classe para teste {test.id}")
             
-            # 4. Excluir apenas as associações de questões (test_questions)
+            # 7. Excluir apenas as associações de questões (test_questions)
             # As questões permanecem no banco para reutilização futura
             from app.models.testQuestion import TestQuestion
             test_questions = TestQuestion.query.filter_by(test_id=test.id).all()
@@ -786,7 +1035,7 @@ def bulk_delete_tests():
                 db.session.delete(test_question)
             logging.info(f"🗑️ Removidas {len(test_questions)} associações de questões para teste {test.id} (questões preservadas)")
             
-            # 5. Finalmente, excluir o teste
+            # 8. Finalmente, excluir o teste
             db.session.delete(test)
             logging.info(f"🗑️ Teste {test.id} marcado para exclusão")
         
@@ -838,20 +1087,68 @@ def deletar_avaliacao(test_id):
             db.session.delete(answer)
         logging.info(f"🗑️ Excluídas {len(student_answers)} respostas de alunos")
         
-        # 2. Excluir sessões de teste
+        # 2. Excluir formulários físicos e suas respostas
+        from app.models.physicalTestForm import PhysicalTestForm
+        from app.models.physicalTestAnswer import PhysicalTestAnswer
+        
+        # Buscar formulários físicos
+        physical_forms = PhysicalTestForm.query.filter_by(test_id=test_id).all()
+        total_physical_answers_deleted = 0
+        
+        for physical_form in physical_forms:
+            # Excluir respostas físicas relacionadas
+            physical_answers = PhysicalTestAnswer.query.filter_by(
+                physical_form_id=physical_form.id
+            ).all()
+            
+            for answer in physical_answers:
+                db.session.delete(answer)
+            
+            total_physical_answers_deleted += len(physical_answers)
+            
+            # Excluir formulário físico
+            db.session.delete(physical_form)
+        
+        # Excluir coordenadas do formulário (FormCoordinates)
+        from app.models.formCoordinates import FormCoordinates
+        form_coordinates = FormCoordinates.query.filter_by(
+            test_id=test_id,
+            form_type='physical_test'
+        ).all()
+        
+        for coord in form_coordinates:
+            db.session.delete(coord)
+        
+        logging.info(f"🗑️ Excluídos {len(physical_forms)} formulários físicos, {total_physical_answers_deleted} respostas físicas e {len(form_coordinates)} coordenadas")
+        
+        # 3. Excluir resultados de avaliação (antes das sessões)
+        from app.models.evaluationResult import EvaluationResult
+        evaluation_results = EvaluationResult.query.filter_by(test_id=test_id).all()
+        for result in evaluation_results:
+            db.session.delete(result)
+        logging.info(f"🗑️ Excluídos {len(evaluation_results)} resultados de avaliação")
+        
+        # 4. Excluir agregados de relatórios (report_aggregates)
+        from app.models.reportAggregate import ReportAggregate
+        report_aggregates = ReportAggregate.query.filter_by(test_id=test_id).all()
+        for aggregate in report_aggregates:
+            db.session.delete(aggregate)
+        logging.info(f"🗑️ Excluídos {len(report_aggregates)} agregados de relatórios")
+        
+        # 5. Excluir sessões de teste
         from app.models.testSession import TestSession
         test_sessions = TestSession.query.filter_by(test_id=test_id).all()
         for session in test_sessions:
             db.session.delete(session)
         logging.info(f"🗑️ Excluídas {len(test_sessions)} sessões de teste")
         
-        # 3. Excluir aplicações de classe
+        # 6. Excluir aplicações de classe
         class_tests = ClassTest.query.filter_by(test_id=test_id).all()
         for class_test in class_tests:
             db.session.delete(class_test)
         logging.info(f"🗑️ Excluídas {len(class_tests)} aplicações de classe")
         
-        # 4. Excluir apenas as associações de questões (test_questions)
+        # 7. Excluir apenas as associações de questões (test_questions)
         # As questões permanecem no banco para reutilização futura
         from app.models.testQuestion import TestQuestion
         test_questions = TestQuestion.query.filter_by(test_id=test_id).all()
@@ -860,7 +1157,7 @@ def deletar_avaliacao(test_id):
             db.session.delete(test_question)
         logging.info(f"🗑️ Removidas {len(test_questions)} associações de questões (questões preservadas)")
         
-        # 5. Finalmente, excluir o teste
+        # 8. Finalmente, excluir o teste
         db.session.delete(test)
         logging.info("🗑️ Excluindo a avaliação principal...")
         
@@ -877,11 +1174,9 @@ def deletar_avaliacao(test_id):
 
 @bp.route('/<string:test_id>/apply', methods=['POST'])
 @jwt_required()
-@role_required("admin", "professor", "coordenador", "diretor")
+@role_required("admin", "professor", "coordenador", "diretor","tecadm")
 def aplicar_avaliacao_classe(test_id):
     """Aplica uma avaliação a uma ou múltiplas classes."""
-    print(test_id)
-    print(request.get_json())
     try:
         data = request.get_json()
         if not data:
@@ -1025,7 +1320,7 @@ def aplicar_avaliacao_classe(test_id):
 
 @bp.route('/<string:test_id>/classes', methods=['GET'])
 @jwt_required()
-@role_required("admin", "professor", "coordenador", "diretor")
+@role_required("admin", "professor", "coordenador", "diretor",'tecadm')
 def listar_classes_avaliacao(test_id):
     """Lista todas as classes onde uma avaliação foi aplicada ou está configurada para aplicação."""
     try:
@@ -1071,7 +1366,59 @@ def listar_classes_avaliacao(test_id):
                         "status": "applied"  # Indica que foi aplicada
                     })
         
-        # Segunda prioridade: usar schools (quando a avaliação foi criada mas não aplicada)
+        # Segunda prioridade: usar classes específicas salvas na criação
+        elif test.classes:
+            logging.info(f"Nenhuma aplicação encontrada, buscando classes específicas do campo classes: {test.classes}")
+            
+            # Converter classes para lista se for string
+            if isinstance(test.classes, str):
+                import json
+                try:
+                    class_ids = json.loads(test.classes)
+                    if not isinstance(class_ids, list):
+                        class_ids = [class_ids]
+                except:
+                    class_ids = [test.classes]
+            elif isinstance(test.classes, list):
+                class_ids = test.classes
+            else:
+                class_ids = []
+            
+            logging.info(f"Class IDs para buscar: {class_ids}")
+            
+            # Buscar apenas as classes específicas
+            if class_ids:
+                specific_classes = Class.query.filter(Class.id.in_(class_ids)).all()
+                logging.info(f"Encontradas {len(specific_classes)} classes específicas")
+                
+                for class_obj in specific_classes:
+                    school_obj = School.query.get(class_obj.school_id)
+                    grade_obj = Grade.query.get(class_obj.grade_id)
+                    
+                    # Contar alunos na turma
+                    students_count = len(class_obj.students) if class_obj.students else 0
+                    
+                    classes_info.append({
+                        "class_test_id": None,  # Não há registro em ClassTest ainda
+                        "class": {
+                            "id": class_obj.id,
+                            "name": class_obj.name,
+                            "school": {
+                                "id": school_obj.id,
+                                "name": school_obj.name
+                            } if school_obj else None,
+                            "grade": {
+                                "id": grade_obj.id,
+                                "name": grade_obj.name
+                            } if grade_obj else None
+                        },
+                        "students_count": students_count,
+                        "application": None,  # Não foi aplicada ainda
+                        "expiration": None,   # Não foi aplicada ainda
+                        "status": "configured"  # Indica que foi configurada mas não aplicada
+                    })
+        
+        # Terceira prioridade (fallback): usar schools quando não há class_tests nem classes específicas
         elif test.schools:
             logging.info(f"Nenhuma aplicação encontrada, buscando turmas do campo schools: {test.schools}")
             
@@ -2536,3 +2883,822 @@ def debug_test_availability(test_id):
     except Exception as e:
         logging.error(f"Erro no debug de disponibilidade: {str(e)}", exc_info=True)
         return jsonify({"error": "Erro no debug", "details": str(e)}), 500
+
+
+@bp.route('/<string:test_id>/pdf-data', methods=['GET'])
+@jwt_required()
+@role_required("admin", "professor", "coordenador", "diretor", "aluno", "tecadm")
+def get_test_pdf_data(test_id):
+    """
+    Retorna os dados necessários para geração do PDF institucional:
+    - test_data: metadados da avaliação (com subjects_info resolvido)
+    - questions_data: lista de questões na ordem (sem respostas corretas ou soluções)
+
+    Observação: não inclui insumos externos (logo, geração de formulário, mapeamento de coordenadas).
+    """
+    try:
+        # Carregar teste com relacionamentos essenciais
+        test = Test.query.options(
+            joinedload(Test.grade),
+            joinedload(Test.subject_rel),
+            subqueryload(Test.test_questions).subqueryload(TestQuestion.question).options(
+                joinedload(Question.subject)
+            )
+        ).get(test_id)
+
+        if not test:
+            return jsonify({"error": "Test not found"}), 404
+
+        # subjects_info com nomes resolvidos
+        subjects_info = process_subjects_for_test(test) or []
+
+        # Montar test_data com fallbacks compatíveis com o gerador
+        grade_name = test.grade.name if getattr(test, 'grade', None) and getattr(test.grade, 'name', None) else '9° ANO'
+        education_stage_name = 'ENSINO FUNDAMENTAL'
+        course_name = test.course if getattr(test, 'course', None) else 'ANOS FINAIS'
+
+        test_data = {
+            "id": test.id,
+            "title": test.title,
+            "grade_name": grade_name,
+            "education_stage_name": education_stage_name,
+            "course_name": course_name,
+            "subjects_info": subjects_info
+        }
+
+        # Ordenar questões pela ordem definida em TestQuestion
+        test_questions = sorted(test.test_questions, key=lambda tq: tq.order if getattr(tq, 'order', None) is not None else 0)
+
+        questions_data = []
+        for tq in test_questions:
+            q = tq.question
+            if not q:
+                continue
+
+            # Buscar skill code
+            skill_code = None
+            if q.skill:
+                skill_id_clean = q.skill.strip('{}')
+                skill_obj = None
+                try:
+                    # Tentar buscar por ID (UUID)
+                    skill_uuid = uuid.UUID(skill_id_clean)
+                    skill_obj = Skill.query.filter_by(id=str(skill_uuid)).first()
+                except (ValueError, AttributeError):
+                    pass
+                
+                # Se não encontrou por ID, tentar por código
+                if not skill_obj:
+                    skill_obj = Skill.query.filter_by(code=skill_id_clean).first()
+                
+                if skill_obj:
+                    skill_code = skill_obj.code
+            
+            # Buscar subject name
+            subject_name = None
+            if q.subject_id:
+                subject = q.subject
+                if subject:
+                    subject_name = subject.name
+
+            questions_data.append({
+                "id": q.id,
+                "subject_id": q.subject_id,
+                "subject_name": subject_name,
+                "skill": q.skill,
+                "skill_code": skill_code,
+                "formatted_text": q.formatted_text,
+                "text": q.text,
+                "secondstatement": q.secondstatement,
+                "alternatives": q.alternatives
+            })
+
+        return jsonify({
+            "test_data": test_data,
+            "questions_data": questions_data
+        }), 200
+
+    except Exception as e:
+        logging.error(f"Error getting test pdf data: {str(e)}", exc_info=True)
+        return jsonify({"error": "Error getting test pdf data", "details": str(e)}), 500
+
+@bp.route('/compare', methods=['POST'])
+@jwt_required()
+@role_required("admin", "professor", "coordenador", "diretor", "tecadm")
+def comparar_avaliacoes():
+    """
+    Compara múltiplas avaliações e mostra a evolução sequencial entre elas.
+    Aceita IDs das avaliações no body como JSON: {"test_ids": ["id1", "id2", "id3"]}
+    Mínimo de 2 avaliações.
+    Retorna comparação geral, por disciplina e por habilidade.
+    """
+    import time
+    start_time = time.time()
+    
+    try:
+        print(f"[COMPARE] Iniciando comparação de avaliações - Tempo: {time.time() - start_time:.2f}s")
+        
+        from app.services.evaluation_comparison_service import EvaluationComparisonService
+        
+        print(f"[COMPARE] Importando EvaluationComparisonService - Tempo: {time.time() - start_time:.2f}s")
+        
+        user = get_current_user_from_token()
+        if not user:
+            return jsonify({"error": "Usuário não encontrado"}), 401
+        
+        print(f"[COMPARE] Usuário autenticado: {user.get('id')} - Tempo: {time.time() - start_time:.2f}s")
+        
+        # Obter test_ids do body JSON
+        data = request.get_json()
+        if not data:
+            return jsonify({"error": "Body JSON é obrigatório"}), 400
+        
+        if 'test_ids' not in data:
+            return jsonify({"error": "Campo 'test_ids' é obrigatório no body JSON"}), 400
+        
+        test_ids = data['test_ids']
+        
+        print(f"[COMPARE] Recebidos {len(test_ids)} test_ids: {test_ids} - Tempo: {time.time() - start_time:.2f}s")
+        
+        # Validar se test_ids é uma lista
+        if not isinstance(test_ids, list):
+            return jsonify({"error": "Campo 'test_ids' deve ser uma lista de strings"}), 400
+        
+        # Filtrar IDs vazios e validar formato
+        test_ids = [test_id.strip() for test_id in test_ids if test_id and isinstance(test_id, str) and test_id.strip()]
+        
+        if len(test_ids) < 2:
+            return jsonify({"error": "Mínimo de 2 avaliações necessário para comparação"}), 400
+        
+        if len(test_ids) != len(set(test_ids)):
+            return jsonify({"error": "IDs de avaliações duplicados encontrados"}), 400
+        
+        print(f"[COMPARE] Validação de test_ids concluída - Tempo: {time.time() - start_time:.2f}s")
+        
+        # Buscar todas as avaliações para verificar se existem
+        query_start = time.time()
+        tests = Test.query.filter(Test.id.in_(test_ids)).all()
+        query_time = time.time() - query_start
+        print(f"[COMPARE] Query de Test concluída - {len(tests)} avaliações encontradas - Tempo query: {query_time:.2f}s - Tempo total: {time.time() - start_time:.2f}s")
+        
+        found_test_ids = {test.id for test in tests}
+        missing_test_ids = set(test_ids) - found_test_ids
+        
+        if missing_test_ids:
+            return jsonify({"error": f"Avaliações não encontradas: {list(missing_test_ids)}"}), 404
+        
+        # Verificar permissões do usuário para todas as avaliações
+        perm_start = time.time()
+        if user['role'] == 'professor':
+            # Professor pode comparar avaliações aplicadas nas suas turmas específicas
+            from app.routes.evaluation_results_routes import professor_pode_ver_avaliacao_turmas
+            
+            unauthorized_tests = []
+            for test in tests:
+                if not professor_pode_ver_avaliacao_turmas(user['id'], test.id):
+                    unauthorized_tests.append(test)
+            
+            if unauthorized_tests:
+                unauthorized_ids = [test.id for test in unauthorized_tests]
+                return jsonify({"error": f"Você só pode comparar avaliações aplicadas nas suas turmas. IDs não autorizados: {unauthorized_ids}"}), 403
+        
+        elif user['role'] in ['diretor', 'coordenador']:
+            # Diretor e coordenador podem comparar avaliações aplicadas na sua escola
+            from app.models.manager import Manager
+            from app.routes.evaluation_results_routes import professor_pode_ver_avaliacao
+            
+            manager = Manager.query.filter_by(user_id=user['id']).first()
+            if not manager or not manager.school_id:
+                return jsonify({"error": "Diretor/Coordenador não encontrado ou não vinculado a uma escola"}), 404
+            
+            # Verificar se as avaliações foram aplicadas na escola do diretor/coordenador
+            unauthorized_tests = []
+            for test in tests:
+                if not professor_pode_ver_avaliacao(user['id'], test.id):
+                    unauthorized_tests.append(test)
+            
+            if unauthorized_tests:
+                unauthorized_ids = [test.id for test in unauthorized_tests]
+                return jsonify({"error": f"Você só pode comparar avaliações aplicadas na sua escola. IDs não autorizados: {unauthorized_ids}"}), 403
+        
+        perm_time = time.time() - perm_start
+        print(f"[COMPARE] Verificação de permissões concluída - Tempo: {perm_time:.2f}s - Tempo total: {time.time() - start_time:.2f}s")
+        
+        # Verificar se todas as avaliações têm resultados calculados
+        results_check_start = time.time()
+        from app.models.evaluationResult import EvaluationResult
+        for test_id in test_ids:
+            results = EvaluationResult.query.filter_by(test_id=test_id).all()
+            if not results:
+                return jsonify({"error": f"Avaliação {test_id} não possui resultados calculados"}), 400
+        
+        results_check_time = time.time() - results_check_start
+        print(f"[COMPARE] Verificação de resultados concluída - Tempo: {results_check_time:.2f}s - Tempo total: {time.time() - start_time:.2f}s")
+        
+        # Executar comparação
+        comparison_start = time.time()
+        print(f"[COMPARE] Iniciando EvaluationComparisonService.compare_evaluations - Tempo: {time.time() - start_time:.2f}s")
+        
+        comparison_result = EvaluationComparisonService.compare_evaluations(test_ids)
+        
+        comparison_time = time.time() - comparison_start
+        print(f"[COMPARE] EvaluationComparisonService.compare_evaluations concluído - Tempo: {comparison_time:.2f}s - Tempo total: {time.time() - start_time:.2f}s")
+        
+        if not comparison_result:
+            return jsonify({"error": "Erro ao realizar comparação das avaliações"}), 500
+        
+        total_time = time.time() - start_time
+        print(f"[COMPARE] Comparação concluída com sucesso - Tempo total: {total_time:.2f}s")
+        print(f"[COMPARE] Resumo de tempos - Query Test: {query_time:.2f}s, Permissões: {perm_time:.2f}s, Resultados: {results_check_time:.2f}s, Comparação: {comparison_time:.2f}s")
+        
+        return jsonify(comparison_result), 200
+        
+    except Exception as e:
+        test_ids_for_log = test_ids if 'test_ids' in locals() else 'N/A'
+        logging.error(f"Erro ao comparar avaliações {test_ids_for_log}: {str(e)}", exc_info=True)
+        return jsonify({"error": "Erro ao comparar avaliações", "details": str(e)}), 500
+
+
+@bp.route('/evolution/export-excel', methods=['POST'])
+@jwt_required()
+@role_required("admin", "professor", "coordenador", "diretor", "tecadm")
+def export_evolution_excel():
+    """
+    Exporta relatório de evolução de múltiplas avaliações para Excel.
+    Aceita IDs das avaliações no body como JSON: {"test_ids": ["id1", "id2", "id3"]}
+    Mínimo de 2 avaliações.
+    Retorna arquivo Excel formatado com gráficos e tabelas.
+    """
+    try:
+        from app.excel_export import ExcelEvolutionExporter
+        
+        user = get_current_user_from_token()
+        if not user:
+            return jsonify({"error": "Usuário não encontrado"}), 401
+        
+        # Obter test_ids do body JSON
+        data = request.get_json()
+        if not data:
+            return jsonify({"error": "Body JSON é obrigatório"}), 400
+        
+        if 'test_ids' not in data:
+            return jsonify({"error": "Campo 'test_ids' é obrigatório no body JSON"}), 400
+        
+        test_ids = data['test_ids']
+        
+        # Validar se test_ids é uma lista
+        if not isinstance(test_ids, list):
+            return jsonify({"error": "Campo 'test_ids' deve ser uma lista de strings"}), 400
+        
+        # Filtrar IDs vazios e validar formato
+        test_ids = [test_id.strip() for test_id in test_ids if test_id and isinstance(test_id, str) and test_id.strip()]
+        
+        if len(test_ids) < 2:
+            return jsonify({"error": "Mínimo de 2 avaliações necessário para exportação"}), 400
+        
+        if len(test_ids) != len(set(test_ids)):
+            return jsonify({"error": "IDs de avaliações duplicados encontrados"}), 400
+        
+        # Buscar todas as avaliações para verificar se existem
+        tests = Test.query.filter(Test.id.in_(test_ids)).all()
+        found_test_ids = {test.id for test in tests}
+        missing_test_ids = set(test_ids) - found_test_ids
+        
+        if missing_test_ids:
+            return jsonify({"error": f"Avaliações não encontradas: {list(missing_test_ids)}"}), 404
+        
+        # Verificar permissões do usuário para todas as avaliações
+        if user['role'] == 'professor':
+            from app.permissions.rules import professor_pode_ver_avaliacao
+            for test in tests:
+                if not professor_pode_ver_avaliacao(user['id'], test.id):
+                    return jsonify({"error": f"Acesso negado à avaliação {test.id}"}), 403
+        
+        # Obter informações opcionais
+        municipality = data.get('municipality')
+        state = data.get('state')
+        department = data.get('department')
+        
+        # Exportar para Excel
+        exporter = ExcelEvolutionExporter()
+        excel_file = exporter.export(test_ids, municipality, state, department)
+        
+        # Gerar nome do arquivo
+        from datetime import datetime
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        filename = f"relatorio_evolucao_{timestamp}.xlsx"
+        
+        # Retornar arquivo
+        from flask import Response
+        return Response(
+            excel_file.getvalue(),
+            mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+            headers={
+                'Content-Disposition': f'attachment; filename="{filename}"',
+                'Content-Type': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+            }
+        )
+        
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        test_ids_for_log = test_ids if 'test_ids' in locals() else 'N/A'
+        logging.error(f"Erro ao exportar relatório Excel {test_ids_for_log}: {str(e)}", exc_info=True)
+        return jsonify({"error": "Erro ao exportar relatório Excel", "details": str(e)}), 500
+
+
+@bp.route('/student/compare', methods=['POST'])
+@jwt_required()
+@role_required("aluno")
+def comparar_avaliacoes_aluno_proprio():
+    """
+    Compara múltiplas avaliações de um aluno específico e mostra a evolução sequencial entre elas.
+    Aceita student_id e IDs das avaliações no body como JSON: {"student_id": "user_id", "test_ids": ["id1", "id2", "id3"]}
+    Mínimo de 2 avaliações.
+    Retorna comparação pessoal do aluno, por disciplina e por habilidade.
+    
+    Endpoint: POST /test/student/compare
+    """
+    try:
+        from app.services.evaluation_comparison_service import EvaluationComparisonService
+        
+        user = get_current_user_from_token()
+        if not user:
+            return jsonify({"error": "Usuário não encontrado"}), 401
+        
+        # Obter dados do body JSON
+        data = request.get_json()
+        if not data:
+            return jsonify({"error": "Body JSON é obrigatório"}), 400
+        
+        if 'student_id' not in data:
+            return jsonify({"error": "Campo 'student_id' é obrigatório no body JSON"}), 400
+        
+        if 'test_ids' not in data:
+            return jsonify({"error": "Campo 'test_ids' é obrigatório no body JSON"}), 400
+        
+        student_id = data['student_id']
+        test_ids = data['test_ids']
+        
+        # Validar se test_ids é uma lista
+        if not isinstance(test_ids, list):
+            return jsonify({"error": "Campo 'test_ids' deve ser uma lista de strings"}), 400
+        
+        # Filtrar IDs vazios e validar formato
+        test_ids = [test_id.strip() for test_id in test_ids if test_id and isinstance(test_id, str) and test_id.strip()]
+        
+        if len(test_ids) < 2:
+            return jsonify({"error": "Mínimo de 2 avaliações necessário para comparação"}), 400
+        
+        if len(test_ids) != len(set(test_ids)):
+            return jsonify({"error": "IDs de avaliações duplicados encontrados"}), 400
+        
+        # VALIDAÇÃO DE SEGURANÇA: Aluno só pode comparar suas próprias avaliações
+        if user['id'] != student_id:
+            return jsonify({"error": "Você só pode comparar suas próprias avaliações"}), 403
+        
+        # Buscar o aluno
+        from app.models.student import Student
+        student = Student.query.filter_by(user_id=student_id).first()
+        if not student:
+            return jsonify({"error": "Aluno não encontrado"}), 404
+        
+        # Buscar todas as avaliações para verificar se existem
+        tests = Test.query.filter(Test.id.in_(test_ids)).all()
+        found_test_ids = {test.id for test in tests}
+        missing_test_ids = set(test_ids) - found_test_ids
+        
+        if missing_test_ids:
+            return jsonify({"error": f"Avaliações não encontradas: {list(missing_test_ids)}"}), 404
+        
+        # Verificar se as avaliações foram aplicadas na turma do aluno
+        from app.models.classTest import ClassTest
+        class_tests = ClassTest.query.filter_by(class_id=student.class_id).all()
+        applied_test_ids = {ct.test_id for ct in class_tests}
+        
+        not_applied_tests = set(test_ids) - applied_test_ids
+        if not_applied_tests:
+            return jsonify({"error": f"Avaliações não foram aplicadas na sua turma: {list(not_applied_tests)}"}), 403
+        
+        # Verificar se o aluno completou todas as avaliações
+        from app.models.evaluationResult import EvaluationResult
+        for test_id in test_ids:
+            result = EvaluationResult.query.filter_by(
+                test_id=test_id, 
+                student_id=student.id
+            ).first()
+            
+            if not result:
+                return jsonify({"error": f"Você não completou a avaliação {test_id}"}), 400
+        
+        # Executar comparação usando o método específico para alunos
+        comparison_result = EvaluationComparisonService.compare_student_evaluations_multiple(student_id, test_ids)
+        
+        if not comparison_result:
+            return jsonify({"error": "Erro ao realizar comparação das suas avaliações"}), 500
+        
+        return jsonify(comparison_result), 200
+        
+    except Exception as e:
+        test_ids_for_log = test_ids if 'test_ids' in locals() else 'N/A'
+        student_id_for_log = student_id if 'student_id' in locals() else 'N/A'
+        logging.error(f"Erro ao comparar avaliações do aluno {student_id_for_log} {test_ids_for_log}: {str(e)}", exc_info=True)
+        return jsonify({"error": "Erro ao comparar suas avaliações", "details": str(e)}), 500
+
+
+@bp.route('/student/completed', methods=['GET'])
+@jwt_required()
+@role_required("aluno")
+def listar_avaliacoes_completadas_aluno():
+    """
+    Lista todas as avaliações que o aluno completou e tem resultados.
+    Retorna apenas avaliações com resultados calculados na tabela evaluation_results.
+    
+    Query Parameters:
+    - subject (opcional): Filtrar por disciplina específica
+    - limit (opcional): Limitar número de resultados (padrão: 50)
+    - offset (opcional): Paginação (padrão: 0)
+    
+    Endpoint: GET /test/student/completed
+    """
+    try:
+        user = get_current_user_from_token()
+        if not user:
+            return jsonify({"error": "Usuário não encontrado"}), 401
+        
+        # Buscar o aluno pelo user_id
+        student = Student.query.filter_by(user_id=user['id']).first()
+        if not student:
+            return jsonify({"error": "Aluno não encontrado"}), 404
+        
+        # Parâmetros de query
+        subject_filter = request.args.get('subject')
+        limit = int(request.args.get('limit', 50))
+        offset = int(request.args.get('offset', 0))
+        
+        # Buscar resultados do aluno
+        from app.models.evaluationResult import EvaluationResult
+        
+        query = EvaluationResult.query.filter_by(student_id=student.id)
+        
+        # Aplicar filtro por disciplina se fornecido
+        if subject_filter and subject_filter != 'all':
+            # Buscar testes que têm a disciplina especificada
+            tests_with_subject = Test.query.filter(
+                Test.subjects_info.contains([{"id": subject_filter}])
+            ).all()
+            test_ids = [test.id for test in tests_with_subject]
+            if test_ids:
+                query = query.filter(EvaluationResult.test_id.in_(test_ids))
+            else:
+                # Se não encontrou testes com essa disciplina, retornar lista vazia
+                return jsonify({
+                    "student": {
+                        "id": student.id,
+                        "name": student.name,
+                        "user_id": student.user_id
+                    },
+                    "total_completed": 0,
+                    "evaluations": []
+                }), 200
+        
+        # Ordenar por data de cálculo (mais recente primeiro)
+        results = query.order_by(EvaluationResult.calculated_at.desc()).limit(limit).offset(offset).all()
+        
+        if not results:
+            return jsonify({
+                "student": {
+                    "id": student.id,
+                    "name": student.name,
+                    "user_id": student.user_id
+                },
+                "total_completed": 0,
+                "evaluations": []
+            }), 200
+        
+        # Buscar informações dos testes
+        test_ids = [result.test_id for result in results]
+        tests = Test.query.filter(Test.id.in_(test_ids)).all()
+        tests_dict = {test.id: test for test in tests}
+        
+        # Buscar informações das turmas para obter datas de aplicação
+        from app.models.classTest import ClassTest
+        class_tests = ClassTest.query.filter_by(class_id=student.class_id).all()
+        class_test_dict = {ct.test_id: ct for ct in class_tests}
+        
+        # Preparar lista de avaliações completadas
+        evaluations = []
+        for result in results:
+            test = tests_dict.get(result.test_id)
+            if not test:
+                continue
+                
+            class_test = class_test_dict.get(result.test_id)
+            
+            evaluation_info = {
+                "test_id": test.id,
+                "title": test.title,
+                "description": test.description,
+                "type": test.type,
+                "subject": {
+                    "id": test.subject_rel.id,
+                    "name": test.subject_rel.name
+                } if test.subject_rel else None,
+                "grade": {
+                    "id": test.grade.id,
+                    "name": test.grade.name
+                } if test.grade else None,
+                "subjects_info": test.subjects_info if test.subjects_info else [],
+                "total_questions": result.total_questions,
+                "application_info": {
+                    "application": class_test.application if class_test else None,
+                    "expiration": class_test.expiration if class_test else None
+                },
+                "student_results": {
+                    "correct_answers": result.correct_answers,
+                    "total_questions": result.total_questions,
+                    "score_percentage": round(result.score_percentage, 2),
+                    "grade": round(result.grade, 2),
+                    "proficiency": round(result.proficiency, 2),
+                    "classification": result.classification,
+                    "calculated_at": result.calculated_at.isoformat() if result.calculated_at else None
+                }
+            }
+            evaluations.append(evaluation_info)
+        
+        # Contar total de avaliações completadas (sem paginação)
+        total_completed = EvaluationResult.query.filter_by(student_id=student.id).count()
+        
+        return jsonify({
+            "student": {
+                "id": student.id,
+                "name": student.name,
+                "user_id": student.user_id
+            },
+            "total_completed": total_completed,
+            "returned_count": len(evaluations),
+            "pagination": {
+                "limit": limit,
+                "offset": offset,
+                "has_more": (offset + limit) < total_completed
+            },
+            "evaluations": evaluations
+        }), 200
+        
+    except Exception as e:
+        logging.error(f"Erro ao listar avaliações completadas do aluno {user['id'] if 'user' in locals() else 'N/A'}: {str(e)}", exc_info=True)
+        return jsonify({"error": "Erro ao listar suas avaliações completadas", "details": str(e)}), 500
+
+
+@bp.route('/debug/comparison/<string:test_id_1>/vs/<string:test_id_2>', methods=['GET'])
+@jwt_required()
+@role_required("admin", "professor", "coordenador", "diretor", "tecadm")
+def debug_comparison(test_id_1, test_id_2):
+    """
+    Rota de debug para investigar problemas na comparação de avaliações
+    """
+    try:
+        from app.services.evaluation_comparison_service import EvaluationComparisonService
+        from app.models.testQuestion import TestQuestion
+        
+        user = get_current_user_from_token()
+        if not user:
+            return jsonify({"error": "Usuário não encontrado"}), 401
+        
+        # Verificar se as avaliações existem
+        test_1 = Test.query.get(test_id_1)
+        test_2 = Test.query.get(test_id_2)
+        
+        if not test_1 or not test_2:
+            return jsonify({"error": "Uma das avaliações não foi encontrada"}), 404
+        
+        # Informações básicas dos testes
+        debug_info = {
+            "test_1": {
+                "id": test_1.id,
+                "title": test_1.title,
+                "subjects_info": test_1.subjects_info,
+                "subject": test_1.subject
+            },
+            "test_2": {
+                "id": test_2.id,
+                "title": test_2.title,
+                "subjects_info": test_2.subjects_info,
+                "subject": test_2.subject
+            }
+        }
+        
+        # Extrair disciplinas de ambos os testes
+        subjects_1 = EvaluationComparisonService._extract_subjects_from_test(test_1)
+        subjects_2 = EvaluationComparisonService._extract_subjects_from_test(test_2)
+        
+        debug_info["extracted_subjects"] = {
+            "test_1": subjects_1,
+            "test_2": subjects_2
+        }
+        
+        # Verificar questões de cada teste
+        test_question_ids_1 = [tq.question_id for tq in TestQuestion.query.filter_by(test_id=test_id_1).all()]
+        test_question_ids_2 = [tq.question_id for tq in TestQuestion.query.filter_by(test_id=test_id_2).all()]
+        
+        questions_1 = Question.query.filter(Question.id.in_(test_question_ids_1)).all() if test_question_ids_1 else []
+        questions_2 = Question.query.filter(Question.id.in_(test_question_ids_2)).all() if test_question_ids_2 else []
+        
+        # Agrupar questões por disciplina
+        questions_by_subject_1 = {}
+        questions_by_subject_2 = {}
+        
+        for q in questions_1:
+            subject_id = q.subject_id or "sem_disciplina"
+            if subject_id not in questions_by_subject_1:
+                questions_by_subject_1[subject_id] = []
+            questions_by_subject_1[subject_id].append({
+                "id": q.id,
+                "subject_id": q.subject_id,
+                "skill": q.skill,
+                "question_type": q.question_type
+            })
+        
+        for q in questions_2:
+            subject_id = q.subject_id or "sem_disciplina"
+            if subject_id not in questions_by_subject_2:
+                questions_by_subject_2[subject_id] = []
+            questions_by_subject_2[subject_id].append({
+                "id": q.id,
+                "subject_id": q.subject_id,
+                "skill": q.skill,
+                "question_type": q.question_type
+            })
+        
+        debug_info["questions_analysis"] = {
+            "test_1": {
+                "total_questions": len(questions_1),
+                "questions_by_subject": questions_by_subject_1
+            },
+            "test_2": {
+                "total_questions": len(questions_2),
+                "questions_by_subject": questions_by_subject_2
+            }
+        }
+        
+        # Verificar skills únicas
+        skills_1 = set()
+        skills_2 = set()
+        
+        for q in questions_1:
+            if q.skill:
+                skill_list = [s.strip() for s in q.skill.split(',') if s.strip()]
+                skills_1.update(skill_list)
+        
+        for q in questions_2:
+            if q.skill:
+                skill_list = [s.strip() for s in q.skill.split(',') if s.strip()]
+                skills_2.update(skill_list)
+        
+        debug_info["skills_analysis"] = {
+            "test_1_skills": list(skills_1),
+            "test_2_skills": list(skills_2),
+            "common_skills": list(skills_1.intersection(skills_2))
+        }
+        
+        return jsonify(debug_info), 200
+        
+    except Exception as e:
+        logging.error(f"Erro no debug de comparação: {str(e)}", exc_info=True)
+        return jsonify({"error": "Erro no debug", "details": str(e)}), 500
+
+@bp.route('/student/<string:student_id>/compare', methods=['POST'])
+@jwt_required()
+@role_required("admin", "professor", "coordenador", "diretor", "tecadm", "aluno")
+def comparar_avaliacoes_aluno(student_id):
+    """
+    Compara múltiplas avaliações específicas de um aluno, mostrando evolução individual.
+    Aceita IDs das avaliações no body como JSON: {"test_ids": ["id1", "id2", "id3"]}
+    O student_id pode ser um user_id (vai buscar o student_id correspondente) ou um student_id direto.
+    Mínimo de 2 avaliações que o aluno realizou.
+    """
+    try:
+        from app.services.evaluation_comparison_service import EvaluationComparisonService
+        from app.models.student import Student
+        from app.models.classTest import ClassTest
+        
+        user = get_current_user_from_token()
+        if not user:
+            return jsonify({"error": "Usuário não encontrado"}), 401
+        
+        # Resolver student_id - tentar como user_id primeiro, depois como student_id
+        student_obj = Student.query.filter_by(user_id=student_id).first()
+        if not student_obj:
+            # Fallback: assumir que é um student_id direto
+            student_obj = Student.query.get(student_id)
+        
+        if not student_obj:
+            return jsonify({"error": f"Aluno não encontrado: {student_id}"}), 404
+        
+        actual_student_id = student_obj.id
+        
+        # Obter test_ids do body JSON
+        data = request.get_json()
+        if not data:
+            return jsonify({"error": "Body JSON é obrigatório"}), 400
+        
+        if 'test_ids' not in data:
+            return jsonify({"error": "Campo 'test_ids' é obrigatório no body JSON"}), 400
+        
+        test_ids = data['test_ids']
+        
+        # Validar se test_ids é uma lista
+        if not isinstance(test_ids, list):
+            return jsonify({"error": "Campo 'test_ids' deve ser uma lista de strings"}), 400
+        
+        # Filtrar IDs vazios e validar formato
+        test_ids = [test_id.strip() for test_id in test_ids if test_id and isinstance(test_id, str) and test_id.strip()]
+        
+        if len(test_ids) < 2:
+            return jsonify({"error": "Mínimo de 2 avaliações necessário para comparação"}), 400
+        
+        if len(test_ids) != len(set(test_ids)):
+            return jsonify({"error": "IDs de avaliações duplicados encontrados"}), 400
+        
+        # Buscar todas as avaliações para verificar se existem
+        tests = Test.query.filter(Test.id.in_(test_ids)).all()
+        found_test_ids = {test.id for test in tests}
+        missing_test_ids = set(test_ids) - found_test_ids
+        
+        if missing_test_ids:
+            return jsonify({"error": f"Avaliações não encontradas: {list(missing_test_ids)}"}), 404
+        
+        # Verificar permissões do usuário
+        if user['role'] == 'aluno':
+            # Aluno só pode comparar suas próprias avaliações
+            if student_obj.user_id != user['id']:
+                return jsonify({"error": "Você só pode comparar suas próprias avaliações"}), 403
+        
+        elif user['role'] == 'professor':
+            # Professor só pode comparar avaliações de alunos da sua escola
+            teacher = Teacher.query.filter_by(user_id=user['id']).first()
+            if not teacher:
+                return jsonify({"error": "Professor não encontrado"}), 404
+            
+            # Verificar se o professor está na escola do aluno
+            from app.models.schoolTeacher import SchoolTeacher
+            teacher_school = SchoolTeacher.query.filter_by(
+                teacher_id=teacher.id,
+                school_id=student_obj.school_id
+            ).first()
+            if not teacher_school:
+                return jsonify({"error": "Você não tem permissão para comparar avaliações deste aluno"}), 403
+        
+        elif user['role'] in ['diretor', 'coordenador']:
+            # Diretor/Coordenador pode comparar alunos do seu município
+            from app.models.manager import Manager
+            
+            manager = Manager.query.filter_by(user_id=user['id']).first()
+            if not manager or not manager.school_id:
+                return jsonify({"error": "Diretor/Coordenador não encontrado ou não vinculado a uma escola"}), 404
+            
+            # Buscar escola do manager para obter city_id
+            manager_school = School.query.get(manager.school_id)
+            if not manager_school or not manager_school.city_id:
+                return jsonify({"error": "Escola do manager não encontrada ou sem município"}), 404
+            
+            # Buscar escola do aluno
+            student_school = School.query.get(student_obj.school_id)
+            if not student_school or student_school.city_id != manager_school.city_id:
+                return jsonify({"error": "Você só pode comparar avaliações de alunos do seu município"}), 403
+        
+        # Verificar se todas as avaliações foram aplicadas à classe do aluno
+        class_tests = ClassTest.query.filter_by(class_id=student_obj.class_id).all()
+        applied_test_ids = {ct.test_id for ct in class_tests}
+        
+        not_applied_tests = set(test_ids) - applied_test_ids
+        if not_applied_tests:
+            return jsonify({"error": f"Avaliações não aplicadas à classe do aluno: {list(not_applied_tests)}"}), 400
+        
+        # Verificar se o aluno completou todas as avaliações
+        from app.models.evaluationResult import EvaluationResult
+        incomplete_tests = []
+        for test_id in test_ids:
+            result = EvaluationResult.query.filter_by(
+                test_id=test_id,
+                student_id=actual_student_id
+            ).first()
+            
+            if not result:
+                incomplete_tests.append(test_id)
+        
+        if incomplete_tests:
+            return jsonify({"error": f"Aluno não completou as seguintes avaliações: {incomplete_tests}"}), 400
+        
+        # Executar comparação
+        comparison_result = EvaluationComparisonService.compare_student_evaluations_multiple(student_id, test_ids)
+        
+        if not comparison_result:
+            return jsonify({"error": "Erro ao realizar comparação das avaliações do aluno"}), 500
+        
+        return jsonify(comparison_result), 200
+        
+    except Exception as e:
+        test_ids_for_log = test_ids if 'test_ids' in locals() else 'N/A'
+        logging.error(f"Erro ao comparar avaliações do aluno {student_id} {test_ids_for_log}: {str(e)}", exc_info=True)
+        return jsonify({"error": "Erro ao comparar avaliações do aluno", "details": str(e)}), 500

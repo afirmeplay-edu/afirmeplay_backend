@@ -10,5 +10,5 @@ class SchoolTeacher(db.Model):
     registration = db.Column(db.String)
     school_id = db.Column(db.String, db.ForeignKey('school.id'))
     teacher_id = db.Column(db.String, db.ForeignKey('teacher.id'))
-    created_at = db.Column(db.DateTime, server_default=db.text('CURRENT_TIMESTAMP'))
-    updated_at = db.Column(db.DateTime, server_default=db.text('CURRENT_TIMESTAMP'), onupdate=db.text('CURRENT_TIMESTAMP'))
+    created_at = db.Column(db.TIMESTAMP, server_default=db.text('CURRENT_TIMESTAMP'))
+    updated_at = db.Column(db.TIMESTAMP, server_default=db.text('CURRENT_TIMESTAMP'), onupdate=db.text('CURRENT_TIMESTAMP'))

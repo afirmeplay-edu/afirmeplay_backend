@@ -1,0 +1,242 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Capa - {{ avaliacao.titulo }}</title>
+    <style>
+        @page {
+            size: A4;
+            margin: 0;
+        }
+
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Helvetica', Arial, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            height: 297mm;
+            width: 210mm;
+            display: flex;
+            flex-direction: column;
+            position: relative;
+        }
+
+        /* Topo - Cidade e Estado */
+        .header {
+            text-align: center;
+            padding: 30px 40px;
+            background: rgba(255, 255, 255, 0.1);
+            backdrop-filter: blur(10px);
+        }
+
+        .location {
+            font-size: 18pt;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 2px;
+            text-shadow: 2px 2px 4px rgba(0, 0, 0, 0.3);
+        }
+
+        /* Centro - Conteúdo Principal */
+        .content {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            padding: 40px;
+            text-align: center;
+        }
+
+        .logo-container {
+            margin-bottom: 40px;
+        }
+
+        .logo {
+            width: 120px;
+            height: 120px;
+            background: white;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            margin: 0 auto;
+            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.3);
+        }
+
+        .logo-text {
+            font-size: 24pt;
+            font-weight: bold;
+            color: #667eea;
+        }
+
+        .title-section {
+            margin-bottom: 50px;
+        }
+
+        .report-label {
+            font-size: 14pt;
+            font-weight: 300;
+            letter-spacing: 3px;
+            text-transform: uppercase;
+            margin-bottom: 15px;
+            opacity: 0.9;
+        }
+
+        .report-title {
+            font-size: 36pt;
+            font-weight: bold;
+            line-height: 1.2;
+            margin-bottom: 30px;
+            text-shadow: 3px 3px 6px rgba(0, 0, 0, 0.4);
+        }
+
+        .school-section {
+            background: rgba(255, 255, 255, 0.15);
+            backdrop-filter: blur(10px);
+            padding: 30px 40px;
+            border-radius: 15px;
+            border: 2px solid rgba(255, 255, 255, 0.3);
+            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.2);
+            max-width: 600px;
+        }
+
+        .school-label {
+            font-size: 11pt;
+            font-weight: 300;
+            letter-spacing: 2px;
+            text-transform: uppercase;
+            margin-bottom: 10px;
+            opacity: 0.9;
+        }
+
+        .school-name {
+            font-size: 24pt;
+            font-weight: bold;
+            line-height: 1.3;
+            text-shadow: 2px 2px 4px rgba(0, 0, 0, 0.3);
+        }
+
+        /* Rodapé */
+        .footer {
+            text-align: center;
+            padding: 30px 40px;
+            background: rgba(0, 0, 0, 0.2);
+            backdrop-filter: blur(10px);
+        }
+
+        .footer-content {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            max-width: 800px;
+            margin: 0 auto;
+        }
+
+        .footer-date {
+            font-size: 14pt;
+            font-weight: 500;
+            letter-spacing: 1px;
+        }
+
+        .footer-branding {
+            font-size: 11pt;
+            opacity: 0.8;
+        }
+
+        /* Decoração */
+        .decorative-line {
+            width: 100px;
+            height: 3px;
+            background: white;
+            margin: 20px auto;
+            opacity: 0.6;
+        }
+
+        /* Elementos decorativos de fundo */
+        .bg-decoration {
+            position: absolute;
+            border-radius: 50%;
+            opacity: 0.1;
+        }
+
+        .circle-1 {
+            width: 300px;
+            height: 300px;
+            background: white;
+            top: -100px;
+            right: -100px;
+        }
+
+        .circle-2 {
+            width: 200px;
+            height: 200px;
+            background: white;
+            bottom: 50px;
+            left: -50px;
+        }
+
+        .circle-3 {
+            width: 150px;
+            height: 150px;
+            background: white;
+            top: 40%;
+            right: 50px;
+        }
+    </style>
+</head>
+<body>
+    <!-- Elementos decorativos de fundo -->
+    <div class="bg-decoration circle-1"></div>
+    <div class="bg-decoration circle-2"></div>
+    <div class="bg-decoration circle-3"></div>
+
+    <!-- Topo - Cidade e Estado -->
+    <div class="header">
+        <div class="location">
+            {{ metadados.municipio or 'Município' }} - {{ metadados.uf or 'Estado' }}
+        </div>
+    </div>
+
+    <!-- Centro - Conteúdo Principal -->
+    <div class="content">
+        <!-- Logo -->
+        <div class="logo-container">
+            <div class="logo">
+                {% if metadados.logo %}
+                <img src="{{ metadados.logo }}" alt="Logo" style="width: 100%; height: 100%; object-fit: contain; border-radius: 50%;">
+                {% else %}
+                <span class="logo-text">IP</span>
+                {% endif %}
+            </div>
+        </div>
+
+        <!-- Título do Relatório -->
+        <div class="title-section">
+            <div class="report-label">Relatório da Avaliação</div>
+            <div class="decorative-line"></div>
+            <h1 class="report-title">{{ avaliacao.titulo or 'NOVA PROVA' }}</h1>
+        </div>
+
+        <!-- Nome da Escola -->
+        <div class="school-section">
+            <div class="school-label">Escola</div>
+            <div class="school-name">{{ metadados.escola or 'ESCOLA MUNICIPAL RUI PALMEIRA' }}</div>
+        </div>
+    </div>
+
+    <!-- Rodapé -->
+    <div class="footer">
+        <div class="footer-content">
+            <div class="footer-date">Novembro / 2025</div>
+            <div class="footer-branding">InnovPlay - Sistema de Avaliação</div>
+        </div>
+    </div>
+</body>
+</html>

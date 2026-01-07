@@ -4410,6 +4410,101 @@ paths:
         '500':
           $ref: '#/responses/InternalServerError'
 
+  /dashboard/admin:
+    get:
+      tags: [Dashboard]
+      summary: Get dashboard information for administrators
+      description: Returns aggregated metrics, rankings and lists for the Admin dashboard.
+      responses:
+        '200':
+          description: Admin dashboard payload
+          content:
+            application/json:
+              schema:
+                $ref: '#/schemas/DashboardAdminResponse'
+        '401':
+          $ref: '#/responses/UnauthorizedError'
+        '403':
+          $ref: '#/responses/ForbiddenError'
+        '500':
+          $ref: '#/responses/InternalServerError'
+
+  /dashboard/tecadm:
+    get:
+      tags: [Dashboard]
+      summary: Get dashboard information for municipal managers (TecAdm)
+      description: Returns aggregated metrics scoped to the authenticated TecAdm municipality.
+      responses:
+        '200':
+          description: TecAdm dashboard payload
+          content:
+            application/json:
+              schema:
+                $ref: '#/schemas/DashboardAdminResponse'
+        '401':
+          $ref: '#/responses/UnauthorizedError'
+        '403':
+          $ref: '#/responses/ForbiddenError'
+        '500':
+          $ref: '#/responses/InternalServerError'
+
+  /dashboard/diretor:
+    get:
+      tags: [Dashboard]
+      summary: Get dashboard information for school directors
+      description: Returns metrics and rankings scoped to the director's school.
+      responses:
+        '200':
+          description: Director dashboard payload
+          content:
+            application/json:
+              schema:
+                $ref: '#/schemas/DashboardSchoolResponse'
+        '401':
+          $ref: '#/responses/UnauthorizedError'
+        '403':
+          $ref: '#/responses/ForbiddenError'
+        '500':
+          $ref: '#/responses/InternalServerError'
+
+  /dashboard/coordenador:
+    get:
+      tags: [Dashboard]
+      summary: Get dashboard information for school coordinators
+      description: Returns metrics and rankings scoped to the coordinator's school.
+      responses:
+        '200':
+          description: Coordinator dashboard payload
+          content:
+            application/json:
+              schema:
+                $ref: '#/schemas/DashboardSchoolResponse'
+        '401':
+          $ref: '#/responses/UnauthorizedError'
+        '403':
+          $ref: '#/responses/ForbiddenError'
+        '500':
+          $ref: '#/responses/InternalServerError'
+
+  /dashboard/professor:
+    get:
+      tags: [Dashboard]
+      summary: Get dashboard information for professors
+      description: Returns metrics, classes and evaluations scoped to the authenticated professor.
+      responses:
+        '200':
+          description: Professor dashboard payload
+          content:
+            application/json:
+              schema:
+                $ref: '#/schemas/DashboardProfessorResponse'
+        '401':
+          $ref: '#/responses/UnauthorizedError'
+        '403':
+          $ref: '#/responses/ForbiddenError'
+        '500':
+          $ref: '#/responses/InternalServerError'
+
   /evaluations/stats:
     get:
       summary: Get evaluations statistics
@@ -4431,6 +4526,80 @@ paths:
                     type: number
         '401':
           $ref: '#/responses/UnauthorizedError'
+        '500':
+          $ref: '#/responses/InternalServerError'
+
+  # ==================== SCHEDULER ENDPOINTS ====================
+
+  /scheduler/status:
+    get:
+      tags: [Scheduler]
+      summary: Get scheduler status
+      description: Retorna o status do scheduler de tarefas agendadas. Útil para verificar se o cronjob está funcionando.
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: Status do scheduler obtido com sucesso
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                    example: Status do scheduler obtido com sucesso
+                  scheduler:
+                    type: object
+                    properties:
+                      running:
+                        type: boolean
+                        description: Indica se o scheduler está em execução
+                      jobs:
+                        type: array
+                        items:
+                          type: object
+                          properties:
+                            id:
+                              type: string
+                              example: check_expired_evaluations
+                            name:
+                              type: string
+                              example: Verificar avaliações expiradas
+                            next_run_time:
+                              type: string
+                              format: date-time
+                              nullable: true
+                              description: Próxima execução agendada
+        '401':
+          $ref: '#/responses/UnauthorizedError'
+        '403':
+          $ref: '#/responses/ForbiddenError'
+        '500':
+          $ref: '#/responses/InternalServerError'
+
+  /scheduler/check-expired:
+    post:
+      tags: [Scheduler]
+      summary: Manually check expired evaluations
+      description: Executa manualmente a verificação de avaliações expiradas. Útil para testes ou execução manual.
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: Verificação executada com sucesso
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                    example: Verificação de avaliações expiradas executada com sucesso
+        '401':
+          $ref: '#/responses/UnauthorizedError'
+        '403':
+          $ref: '#/responses/ForbiddenError'
         '500':
           $ref: '#/responses/InternalServerError'
 
@@ -5363,6 +5532,516 @@ schemas:
         - proficiency
         - classification
 
+    DashboardSummary:
+      type: object
+      properties:
+        students:
+          type: integer
+        schools:
+          type: integer
+        evaluations:
+          type: integer
+        games:
+          type: integer
+        users:
+          type: integer
+        questions:
+          type: integer
+        classes:
+          type: integer
+        teachers:
+          type: integer
+        active_students:
+          type: integer
+          nullable: true
+        last_sync:
+          type: string
+          format: date-time
+
+    DashboardTrend:
+      type: object
+      properties:
+        current:
+          type: number
+        previous:
+          type: number
+
+    DashboardKpi:
+      type: object
+      properties:
+        id:
+          type: string
+        label:
+          type: string
+        value:
+          type: number
+        trend:
+          $ref: '#/schemas/DashboardTrend'
+        active_this_week:
+          type: integer
+        created_this_month:
+          type: integer
+        pending_corrections:
+          type: integer
+        trend_percentage:
+          type: number
+      required:
+        - id
+        - label
+        - value
+
+    DashboardSecondaryCard:
+      type: object
+      properties:
+        id:
+          type: string
+        label:
+          type: string
+        value:
+          type: number
+          nullable: true
+        status:
+          type: string
+          nullable: true
+      required:
+        - id
+        - label
+
+    DashboardSchoolRankingEntry:
+      type: object
+      properties:
+        position:
+          type: integer
+        school_id:
+          type: string
+        school_name:
+          type: string
+        municipality:
+          type: string
+          nullable: true
+        average_score:
+          type: number
+        completion_rate:
+          type: number
+        total_students:
+          type: integer
+        total_evaluations:
+          type: integer
+
+    DashboardStudentRankingEntry:
+      type: object
+      properties:
+        position:
+          type: integer
+        student_id:
+          type: string
+        name:
+          type: string
+        school_name:
+          type: string
+          nullable: true
+        class_name:
+          type: string
+          nullable: true
+        average_score:
+          type: number
+        completed_evaluations:
+          type: integer
+
+    DashboardRankings:
+      type: object
+      properties:
+        schools:
+          type: array
+          items:
+            $ref: '#/schemas/DashboardSchoolRankingEntry'
+        students:
+          type: array
+          items:
+            $ref: '#/schemas/DashboardStudentRankingEntry'
+        teacher_rankings:
+          type: array
+          items:
+            type: object
+            properties:
+              position:
+                type: integer
+              teacher_id:
+                type: string
+              teacher_name:
+                type: string
+              average_score:
+                type: number
+              total_evaluations:
+                type: integer
+              classes_count:
+                type: integer
+      required:
+        - schools
+        - students
+        - teacher_rankings
+
+    DashboardRecentEvaluation:
+      type: object
+      properties:
+        evaluation_id:
+          type: string
+        title:
+          type: string
+        subject:
+          type: string
+          nullable: true
+        school:
+          type: string
+          nullable: true
+        class_name:
+          type: string
+          nullable: true
+        status:
+          type: string
+        progress_percentage:
+          type: number
+        total_students:
+          type: integer
+        completed_students:
+          type: integer
+        average_score:
+          type: number
+        start_date:
+          type: string
+          format: date-time
+          nullable: true
+        end_date:
+          type: string
+          format: date-time
+          nullable: true
+
+    DashboardRecentStudent:
+      type: object
+      properties:
+        student_id:
+          type: string
+        name:
+          type: string
+        email:
+          type: string
+          format: email
+          nullable: true
+        registration:
+          type: string
+          nullable: true
+        school:
+          type: string
+          nullable: true
+        class:
+          type: string
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+          nullable: true
+
+    DashboardEngagementActiveUsers:
+      type: object
+      properties:
+        today:
+          type: integer
+        this_week:
+          type: integer
+        this_month:
+          type: integer
+        growth_percentage:
+          type: number
+
+    DashboardEngagementSessionTime:
+      type: object
+      properties:
+        average_minutes:
+          type: number
+        total_minutes:
+          type: integer
+        growth_percentage:
+          type: number
+
+    DashboardEngagementPopularEvaluation:
+      type: object
+      properties:
+        evaluation_id:
+          type: string
+        title:
+          type: string
+        views:
+          type: integer
+        completions:
+          type: integer
+
+    DashboardEngagementReturnRate:
+      type: object
+      properties:
+        percentage:
+          type: number
+        total_users:
+          type: integer
+        returning_users:
+          type: integer
+        growth_percentage:
+          type: number
+
+    DashboardEngagement:
+      type: object
+      properties:
+        active_users:
+          $ref: '#/schemas/DashboardEngagementActiveUsers'
+        session_time:
+          $ref: '#/schemas/DashboardEngagementSessionTime'
+        popular_evaluations:
+          type: array
+          items:
+            $ref: '#/schemas/DashboardEngagementPopularEvaluation'
+        return_rate:
+          $ref: '#/schemas/DashboardEngagementReturnRate'
+
+    DashboardMetaSection:
+      type: object
+      properties:
+        total:
+          type: integer
+        page:
+          type: integer
+        per_page:
+          type: integer
+
+    DashboardMeta:
+      type: object
+      properties:
+        recent_evaluations:
+          $ref: '#/schemas/DashboardMetaSection'
+        recent_students:
+          $ref: '#/schemas/DashboardMetaSection'
+
+    DashboardErrorRecovery:
+      type: object
+      additionalProperties:
+        type: string
+
+    DashboardFilters:
+      type: object
+      properties:
+        municipalities:
+          type: array
+          items:
+            $ref: '#/schemas/CityDetails'
+        schools:
+          type: array
+          items:
+            $ref: '#/schemas/SchoolDetails'
+        classes:
+          type: array
+          items:
+            $ref: '#/schemas/ClassDetails'
+        subjects:
+          type: array
+          items:
+            type: object
+            properties:
+              id:
+                type: string
+              name:
+                type: string
+
+    DashboardAdminResponse:
+      type: object
+      properties:
+        summary:
+          $ref: '#/schemas/DashboardSummary'
+        kpis:
+          type: array
+          items:
+            $ref: '#/schemas/DashboardKpi'
+        secondary_cards:
+          type: array
+          items:
+            $ref: '#/schemas/DashboardSecondaryCard'
+        rankings:
+          $ref: '#/schemas/DashboardRankings'
+        recent_evaluations:
+          type: array
+          items:
+            $ref: '#/schemas/DashboardRecentEvaluation'
+        recent_students:
+          type: array
+          items:
+            $ref: '#/schemas/DashboardRecentStudent'
+        engagement:
+          $ref: '#/schemas/DashboardEngagement'
+        filters_available:
+          $ref: '#/schemas/DashboardFilters'
+        meta:
+          $ref: '#/schemas/DashboardMeta'
+        error_recovery:
+          $ref: '#/schemas/DashboardErrorRecovery'
+
+    DashboardSchoolResponse:
+      type: object
+      properties:
+        summary:
+          $ref: '#/schemas/DashboardSummary'
+        kpis:
+          type: array
+          items:
+            $ref: '#/schemas/DashboardKpi'
+        class_ranking:
+          type: array
+          items:
+            $ref: '#/schemas/DashboardSchoolRankingEntry'
+        teacher_ranking:
+          type: array
+          items:
+            type: object
+            properties:
+              position:
+                type: integer
+              teacher_id:
+                type: string
+              teacher_name:
+                type: string
+              average_score:
+                type: number
+              total_evaluations:
+                type: integer
+              classes_count:
+                type: integer
+        recent_evaluations:
+          type: array
+          items:
+            $ref: '#/schemas/DashboardRecentEvaluation'
+        students_overview:
+          type: object
+          properties:
+            new_students:
+              type: array
+              items:
+                $ref: '#/schemas/DashboardRecentStudent'
+            inactive_students:
+              type: array
+              items:
+                type: object
+                properties:
+                  student_id:
+                    type: string
+                  name:
+                    type: string
+                  last_login:
+                    type: string
+                    format: date-time
+                    nullable: true
+        notifications:
+          type: array
+          items:
+            type: object
+            properties:
+              id:
+                type: string
+              type:
+                type: string
+              title:
+                type: string
+              message:
+                type: string
+              created_at:
+                type: string
+                format: date-time
+              priority:
+                type: string
+              is_read:
+                type: boolean
+                nullable: true
+        filters_available:
+          $ref: '#/schemas/DashboardFilters'
+        meta:
+          $ref: '#/schemas/DashboardMeta'
+        error_recovery:
+          $ref: '#/schemas/DashboardErrorRecovery'
+
+    DashboardProfessorClass:
+      type: object
+      properties:
+        class_id:
+          type: string
+        class_name:
+          type: string
+        students:
+          type: integer
+        active_students:
+          type: integer
+        average_score:
+          type: number
+        pending_evaluations:
+          type: integer
+
+    DashboardProfessorEvaluation:
+      type: object
+      properties:
+        evaluation_id:
+          type: string
+        title:
+          type: string
+        class_name:
+          type: string
+          nullable: true
+        status:
+          type: string
+        total_questions:
+          type: integer
+        total_students:
+          type: integer
+        completed_students:
+          type: integer
+        created_at:
+          type: string
+          format: date-time
+          nullable: true
+        due_date:
+          type: string
+          format: date-time
+          nullable: true
+        average_score:
+          type: number
+
+    DashboardProfessorResponse:
+      type: object
+      properties:
+        summary:
+          $ref: '#/schemas/DashboardSummary'
+        kpis:
+          type: array
+          items:
+            $ref: '#/schemas/DashboardKpi'
+        classes:
+          type: array
+          items:
+            $ref: '#/schemas/DashboardProfessorClass'
+        evaluations:
+          type: array
+          items:
+            $ref: '#/schemas/DashboardProfessorEvaluation'
+        notifications:
+          type: array
+          items:
+            type: object
+        filters_available:
+          $ref: '#/schemas/DashboardFilters'
+        meta:
+          $ref: '#/schemas/DashboardMeta'
+        error_recovery:
+          $ref: '#/schemas/DashboardErrorRecovery'
+
+tags:
+  - name: Dashboard
+    description: Endpoints relacionados ao dashboard e estatísticas
+  - name: Scheduler
+    description: Endpoints para gerenciamento e monitoramento do scheduler de tarefas agendadas
+
 responses:
     UnauthorizedError:
       description: Authentication required or invalid token
@@ -5373,6 +6052,8 @@ responses:
             properties:
               message:
                 type: string
+                description: Mensagem explicando o motivo da falha de autenticação.
+                example: Token inválido ou expirado.
     ForbiddenError:
       description: User does not have the necessary permissions
       content:
@@ -5382,6 +6063,8 @@ responses:
             properties:
               message:
                 type: string
+                description: Mensagem indicando que o usuário não tem permissão.
+                example: Acesso negado para o recurso solicitado.
     NotFoundError:
       description: Resource not found
       content:
@@ -5391,6 +6074,8 @@ responses:
             properties:
               error:
                 type: string
+                description: Mensagem sobre o recurso não encontrado.
+                example: Recurso solicitado não foi encontrado.
     BadRequestError:
       description: Invalid request payload or parameters
       content:
@@ -5400,8 +6085,14 @@ responses:
             properties:
               error:
                 type: string
+                description: Mensagem descrevendo o erro de validação.
+                example: Dados inválidos enviados na requisição.
               details:
                 type: object # Can be a string or a more detailed object
+                description: Detalhes adicionais sobre o erro.
+                example:
+                  campo: email
+                  problema: Formato inválido.
     InternalServerError:
       description: Unexpected server error
       content:
@@ -5411,5 +6102,9 @@ responses:
             properties:
               error:
                 type: string
+                description: Mensagem genérica de erro.
+                example: Ocorreu um erro inesperado.
               details:
                 type: string
+                description: Descrição detalhada do erro para depuração.
+                example: Consulte os logs do servidor para mais informações.

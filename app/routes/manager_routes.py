@@ -30,10 +30,10 @@ def handle_generic_error(error):
     logging.error(f"Unexpected error: {str(error)}", exc_info=True)
     return jsonify({"error": "An unexpected error occurred", "details": str(error)}), 500
 
-# POST - Criar manager (diretor, coordenador, tecadm)
+# POST - Criar manager (diretor, coordenador, tecadm, admin)
 @bp.route('', methods=['POST'])
 @jwt_required()
-@role_required("admin", "tecadm")
+@role_required("admin", "tecadm", "diretor", "coordenador")
 def create_manager():
     try:
         data = request.get_json()
@@ -45,10 +45,37 @@ def create_manager():
             if field not in data:
                 return jsonify({"error": f"Missing required field: {field}"}), 400
 
-        # Validar role
-        valid_roles = ["diretor", "coordenador", "tecadm"]
+        # Validar role (roles válidas para criação nesta rota)
+        valid_roles = ["diretor", "coordenador", "tecadm", "admin"]
         if data["role"] not in valid_roles:
             return jsonify({"error": f"Invalid role. Must be one of: {valid_roles}"}), 400
+
+        # Obter usuário atual para verificar permissões
+        current_user = get_current_user_from_token()
+        if not current_user:
+            return jsonify({"error": "User not found"}), 404
+
+        # Validar permissões baseadas na role do usuário atual
+        current_role = current_user['role']
+        role_to_create = data["role"]
+        
+        if current_role == "diretor" or current_role == "coordenador":
+            # Diretor e Coordenador só podem criar diretores e coordenadores
+            if role_to_create not in ["diretor", "coordenador"]:
+                return jsonify({
+                    "error": f"{current_role.capitalize()} can only create diretor or coordenador roles"
+                }), 403
+        elif current_role == "tecadm":
+            # Tecadm pode criar diretores, coordenadores e outros tecadms
+            if role_to_create not in ["diretor", "coordenador", "tecadm"]:
+                return jsonify({
+                    "error": "tecadm can only create diretor, coordenador or tecadm roles"
+                }), 403
+        elif current_role == "admin":
+            # Admin pode criar todos os roles
+            pass
+        else:
+            return jsonify({"error": "Unauthorized role"}), 403
 
         # Verificar se email já existe
         if User.query.filter_by(email=data["email"]).first():
@@ -58,21 +85,25 @@ def create_manager():
         if data.get("registration") and User.query.filter_by(registration=data["registration"]).first():
             return jsonify({"error": "Registration number already exists"}), 400
 
-        # Obter usuário atual para verificar permissões
-        current_user = get_current_user_from_token()
-        if not current_user:
-            return jsonify({"error": "User not found"}), 404
-
-        # Determinar city_id baseado na role
+        # Determinar city_id baseado na role do usuário atual
         city_id = None
-        if data["role"] == "tecadm":
-            # Tecadm precisa de city_id
+        if current_user['role'] == "admin":
+            # Admin pode escolher qualquer city_id
             city_id = data.get("city_id")
             if not city_id:
-                return jsonify({"error": "city_id is required for tecadm"}), 400
+                return jsonify({"error": "city_id is required for admin creating managers"}), 400
         else:
-            # Diretor e coordenador não precisam de city_id inicialmente
-            city_id = None
+            # Tecadm, Diretor e Coordenador usam seu próprio city_id
+            city_id = current_user.get("city_id")
+            
+            # Verificação adicional: buscar city_id diretamente do banco
+            if not city_id:
+                user_from_db = User.query.get(current_user['id'])
+                if user_from_db and user_from_db.city_id:
+                    city_id = user_from_db.city_id
+                    logging.info(f"City_id recuperado do banco para usuário {current_user['id']}: {city_id}")
+                else:
+                    return jsonify({"error": "User does not have city_id assigned"}), 400
 
         # Criar usuário
         novo_usuario = User(
@@ -238,71 +269,7 @@ def unlink_manager_from_school(user_id):
         logging.error(f"Unexpected error: {str(e)}", exc_info=True)
         return jsonify({"error": "Unexpected error occurred", "details": str(e)}), 500
 
-# GET - Listar diretores/coordenadores por escola
-@bp.route('/school/<string:school_id>', methods=['GET'])
-@jwt_required()
-@role_required("admin", "diretor", "coordenador", "tecadm", "professor")
-def get_managers_by_school(school_id):
-    try:
-        # Verificar se escola existe
-        school = School.query.get(school_id)
-        if not school:
-            return jsonify({"error": "School not found"}), 404
 
-        # Buscar managers da escola
-        managers = db.session.query(
-            Manager,
-            User,
-            School
-        ).join(
-            User, Manager.user_id == User.id
-        ).join(
-            School, Manager.school_id == School.id
-        ).filter(
-            Manager.school_id == school_id,
-            User.role.in_([RoleEnum.DIRETOR, RoleEnum.COORDENADOR])
-        ).all()
-
-        resultado = []
-        for manager, user, school in managers:
-            resultado.append({
-                "manager": {
-                    "id": manager.id,
-                    "name": manager.name,
-                    "registration": manager.registration,
-                    "birth_date": str(manager.birth_date) if manager.birth_date else None,
-                    "profile_picture": manager.profile_picture,
-                    "school_id": manager.school_id
-                },
-                "user": {
-                    "id": user.id,
-                    "name": user.name,
-                    "email": user.email,
-                    "registration": user.registration,
-                    "role": user.role.value
-                },
-                "school": {
-                    "id": school.id,
-                    "name": school.name
-                }
-            })
-
-        return jsonify({
-            "message": "Managers found successfully",
-            "school": {
-                "id": school.id,
-                "name": school.name
-            },
-            "managers": resultado,
-            "total": len(resultado)
-        }), 200
-
-    except SQLAlchemyError as e:
-        logging.error(f"Database error: {str(e)}")
-        return jsonify({"error": "Database error occurred", "details": str(e)}), 500
-    except Exception as e:
-        logging.error(f"Unexpected error: {str(e)}", exc_info=True)
-        return jsonify({"error": "Unexpected error occurred", "details": str(e)}), 500
 
 # GET - Listar diretores/coordenadores por cidade
 @bp.route('/city/<string:city_id>', methods=['GET'])
@@ -414,6 +381,121 @@ def list_all_managers():
 
         return jsonify({
             "message": "All managers found successfully",
+            "managers": resultado,
+            "total": len(resultado)
+        }), 200
+
+    except SQLAlchemyError as e:
+        logging.error(f"Database error: {str(e)}")
+        return jsonify({"error": "Database error occurred", "details": str(e)}), 500
+    except Exception as e:
+        logging.error(f"Unexpected error: {str(e)}", exc_info=True)
+        return jsonify({"error": "Unexpected error occurred", "details": str(e)}), 500
+
+# GET - Listar managers por escola
+@bp.route('/school/<string:school_id>', methods=['GET'])
+@jwt_required()
+@role_required("admin", "diretor", "coordenador", "professor", "tecadm", "aluno")
+def get_managers_by_school(school_id):
+    try:
+        user = get_current_user_from_token()
+        if not user:
+            return jsonify({"error": "Usuário não encontrado"}), 404
+
+        # Verificar se a escola existe
+        school = School.query.get(school_id)
+        if not school:
+            return jsonify({"error": "Escola não encontrada"}), 404
+
+        # Importar modelos necessários
+        from app.models.teacher import Teacher
+        from app.models.schoolTeacher import SchoolTeacher
+        from app.models.manager import Manager
+        from app.models.student import Student
+        
+        # Verificar permissões
+        if user['role'] == "admin":
+            # Admin pode ver managers de qualquer escola
+            pass
+        elif user['role'] == "aluno":
+            # Aluno só pode ver managers da sua própria escola
+            student = Student.query.filter_by(user_id=user['id']).first()
+            if not student:
+                return jsonify({"error": "Aluno não encontrado"}), 404
+            
+            if not student.school_id or student.school_id != school_id:
+                return jsonify({"error": "Você não tem permissão para visualizar managers desta escola"}), 403
+        elif user['role'] == "professor":
+            # Professor só pode ver managers da sua escola
+            
+            teacher = Teacher.query.filter_by(user_id=user['id']).first()
+            if not teacher:
+                return jsonify({"error": "Professor não encontrado"}), 404
+            
+            teacher_schools = SchoolTeacher.query.filter_by(teacher_id=teacher.id).all()
+            teacher_school_ids = [ts.school_id for ts in teacher_schools]
+            
+            if school_id not in teacher_school_ids:
+                return jsonify({"error": "Você não tem permissão para visualizar managers desta escola"}), 403
+        elif user['role'] in ["diretor", "coordenador"]:
+            # Diretor e coordenador só podem ver managers da sua escola
+            
+            manager = Manager.query.filter_by(user_id=user['id']).first()
+            if not manager:
+                return jsonify({"error": "Diretor/Coordenador não encontrado na tabela manager"}), 404
+            
+            if not manager.school_id or manager.school_id != school_id:
+                return jsonify({"error": "Você não tem permissão para visualizar managers desta escola"}), 403
+        else:
+            # TecAdmin só pode ver escolas do seu município
+            city_id = user.get('tenant_id') or user.get('city_id')
+            if not city_id or school.city_id != city_id:
+                return jsonify({"error": "Você não tem permissão para visualizar managers desta escola"}), 403
+
+        # Buscar managers da escola
+        managers = db.session.query(
+            Manager,
+            User,
+            School
+        ).join(
+            User, Manager.user_id == User.id
+        ).join(
+            School, Manager.school_id == School.id
+        ).filter(
+            Manager.school_id == school_id,
+            User.role.in_([RoleEnum.DIRETOR, RoleEnum.COORDENADOR])
+        ).all()
+
+        resultado = []
+        for manager_obj, user_obj, school_obj in managers:
+            resultado.append({
+                "manager": {
+                    "id": manager_obj.id,
+                    "name": manager_obj.name,
+                    "registration": manager_obj.registration,
+                    "birth_date": str(manager_obj.birth_date) if manager_obj.birth_date else None,
+                    "profile_picture": manager_obj.profile_picture,
+                    "school_id": manager_obj.school_id
+                },
+                "user": {
+                    "id": user_obj.id,
+                    "name": user_obj.name,
+                    "email": user_obj.email,
+                    "registration": user_obj.registration,
+                    "role": user_obj.role.value
+                },
+                "school": {
+                    "id": school_obj.id,
+                    "name": school_obj.name
+                }
+            })
+
+        return jsonify({
+            "message": "Managers found successfully",
+            "school": {
+                "id": school.id,
+                "name": school.name
+            },
             "managers": resultado,
             "total": len(resultado)
         }), 200

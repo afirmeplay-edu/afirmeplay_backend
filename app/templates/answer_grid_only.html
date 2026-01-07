@@ -1,0 +1,169 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+	<head>
+		<meta charset="UTF-8" />
+		<style>
+			@page {
+				size: A4 portrait;
+				margin: 0;
+			}
+
+			* {
+				margin: 0;
+				padding: 0;
+				box-sizing: border-box;
+			}
+
+			body {
+				font-family: "Helvetica", Arial, sans-serif;
+				padding: 10px;
+				background: white;
+			}
+
+			/* Grade de respostas - APENAS ESTA SEÇÃO */
+			.answer-grid-container {
+				margin: 10px 0;
+				display: grid;
+				grid-template-columns: repeat(4, 1fr);
+				gap: 8px;
+				/* BORDA GROSSA PRETA AO REDOR DE TODOS OS BLOCOS - USADA PARA DETECÇÃO OMR */
+				border: 5px solid #000000;
+				padding: 5px;
+			}
+
+			.answer-block {
+				border: 1px solid #333;
+				padding: 5px;
+			}
+
+			.block-header {
+				text-align: center;
+				font-weight: bold;
+				font-size: 8pt;
+				margin: 0 0 2px 0;
+				padding: 4px;
+				background: white;
+			}
+
+			.bubble-headers {
+				display: flex;
+				align-items: center;
+				margin: 3px 0 3px 0;
+				padding: 0;
+				font-size: 7pt;
+				font-weight: bold;
+			}
+
+			.bubble-headers .header-spacer {
+				width: 22px;
+				flex-shrink: 0;
+			}
+
+			.bubble-headers .header-bubbles {
+				display: flex;
+				gap: 6px;
+				justify-content: space-between;
+				flex: 1;
+			}
+
+			.bubble-headers .header-bubbles span {
+				width: 18px;
+				text-align: center;
+				flex-shrink: 0;
+			}
+
+			.answer-row {
+				display: flex;
+				align-items: center;
+				margin: 2px 0;
+				padding: 1px 0;
+			}
+
+			.question-num {
+				font-size: 7pt;
+				font-weight: bold;
+				width: 22px;
+				text-align: left;
+				flex-shrink: 0;
+			}
+
+			.bubbles {
+				display: flex;
+				gap: 6px;
+				justify-content: space-between;
+				flex: 1;
+			}
+
+			.bubble-container {
+				width: 18px;
+				display: flex;
+				justify-content: center;
+				flex-shrink: 0;
+			}
+
+			.bubble {
+				width: 18px;
+				height: 18px;
+				border: 1px solid #333;
+				border-radius: 50%;
+				display: inline-block;
+			}
+		</style>
+	</head>
+	<body>
+		<!-- Grade de Respostas DINÂMICA - APENAS ESTA SEÇÃO -->
+		<div class="answer-grid-container">
+			{% set questions_per_block = 12 %} 
+			{% set num_blocks = ((total_questions - 1) // questions_per_block) + 1 %} 
+			{% if num_blocks == 0 %}{% set num_blocks = 1 %}{% endif %}
+			
+			{% for block in range(1, num_blocks + 1) %} 
+				{% set start_question = (block - 1) * questions_per_block + 1 %} 
+				{% set end_question = [block * questions_per_block, total_questions] | min %} 
+				{% set questions_in_block = end_question - start_question + 1 %} 
+				
+				{% if questions_in_block > 0 %}
+				<div class="answer-block">
+					<div class="block-header">
+						BLOCO {{ "%02d"|format(block) }}
+					</div>
+
+					<!-- Cabeçalho com letras A B C D -->
+					<div class="bubble-headers">
+						<div class="header-spacer"></div>
+						<div class="header-bubbles">
+							<span>A</span>
+							<span>B</span>
+							<span>C</span>
+							<span>D</span>
+						</div>
+					</div>
+
+					<!-- Linhas de resposta DINÂMICAS -->
+					{% for q in range(1, questions_in_block + 1) %} 
+						{% set question_num = start_question + q - 1 %}
+						<div class="answer-row">
+							<span class="question-num">{{ question_num }}.</span>
+							<div class="bubbles">
+								<div class="bubble-container">
+									<div class="bubble"></div>
+								</div>
+								<div class="bubble-container">
+									<div class="bubble"></div>
+								</div>
+								<div class="bubble-container">
+									<div class="bubble"></div>
+								</div>
+								<div class="bubble-container">
+									<div class="bubble"></div>
+								</div>
+							</div>
+						</div>
+					{% endfor %}
+				</div>
+				{% endif %} 
+			{% endfor %}
+		</div>
+	</body>
+</html>
+

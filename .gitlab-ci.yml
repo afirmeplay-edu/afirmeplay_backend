@@ -116,6 +116,10 @@ image_build:
             echo "SENDGRID_API_KEY=$SENDGRID_API_KEY" >> app/.env
             echo "SENDGRID_FROM_EMAIL=$SENDGRID_FROM_EMAIL" >> app/.env
 
+            echo "TELEGRAM_BOT_TOKEN=$TELEGRAM_BOT_TOKEN" >> app/.env
+            echo "TELEGRAM_GROUP_ID=$TELEGRAM_GROUP_ID" >> app/.env
+            echo "TELEGRAM_ALERT_ENABLED=$TELEGRAM_ALERT_ENABLED" >> app/.env
+
             docker build --no-cache -t "$IMAGE_TAG" .
 
             IMAGE_ID=$(docker image ls -f reference="$IMAGE_TAG" -q)

@@ -15,6 +15,7 @@ import logging
 
 from app.report_analysis.services import ReportAggregateService
 from app.report_analysis.tasks import trigger_rebuild_if_needed
+from app import db
 
 logger = logging.getLogger(__name__)
 
@@ -82,17 +83,24 @@ def dados_json(evaluation_id: str):
                 return jsonify({"error": "Avaliação não foi aplicada em nenhuma turma do professor"}), 404
         
         # Verificar status do relatório
+        # Forçar refresh para garantir que estamos lendo dados atualizados do banco
+        # Isso resolve problemas de cache quando o worker atualiza os dados
+        db.session.expire_all()
         aggregate = ReportAggregateService.get(evaluation_id, scope_type, scope_ref_id)
         status = ReportAggregateService.get_status(evaluation_id, scope_type, scope_ref_id)
         
         # Se não está pronto, disparar task (com debounce) e retornar status
         if status['status'] != 'ready':
+            print(f"[ROUTES] 🔄 Relatório não está pronto para {scope_type}:{scope_ref_id}. Disparando rebuild.")
             logger.info(f"Relatório não está pronto para {scope_type}:{scope_ref_id}. Disparando rebuild.")
             
             # Disparar task assíncrona (com debounce)
             try:
-                trigger_rebuild_if_needed.delay(evaluation_id, scope_type, scope_ref_id)
+                print(f"[ROUTES] 📤 Enviando task trigger_rebuild_if_needed.delay({evaluation_id}, {scope_type}, {scope_ref_id})")
+                task_result = trigger_rebuild_if_needed.delay(evaluation_id, scope_type, scope_ref_id)
+                print(f"[ROUTES] ✅ Task enviada com sucesso! Task ID: {task_result.id}")
             except Exception as e:
+                print(f"[ROUTES] ❌ Erro ao disparar task de rebuild: {type(e).__name__}: {str(e)}")
                 logger.error(f"Erro ao disparar task de rebuild: {str(e)}")
                 # Continuar mesmo se falhar (pode ser que Redis não esteja disponível)
             
@@ -165,6 +173,8 @@ def get_report_status(evaluation_id: str):
             return jsonify({"error": str(e)}), 400
         
         # Obter status
+        # Forçar refresh para garantir que estamos lendo dados atualizados do banco
+        db.session.expire_all()
         status = ReportAggregateService.get_status(evaluation_id, scope_type, scope_ref_id)
         
         return jsonify({

@@ -23,6 +23,7 @@ from app.models.test import Test
 from app.models.testSession import TestSession
 from app.models.user import User
 from app.models.evaluationResult import EvaluationResult
+from app.utils.uuid_helpers import ensure_uuid_list
 from app.permissions.utils import (
     get_manager_school,
     get_teacher,
@@ -149,7 +150,9 @@ class DashboardService:
         if not school_ids:
             return []
 
-        classes = Class.query.filter(Class.school_id.in_(school_ids)).with_entities(Class.id).all()
+        # Converter school_ids para UUID (Class.school_id é UUID)
+        school_ids_uuids = ensure_uuid_list(school_ids)
+        classes = Class.query.filter(Class.school_id.in_(school_ids_uuids)).with_entities(Class.id).all()
         return [row.id for row in classes]
 
     # ------------------------------------------------------------------ #
@@ -251,7 +254,7 @@ class DashboardService:
                 test_query = (
                     test_query.join(ClassTest, ClassTest.test_id == Test.id)
                     .join(Class, Class.id == ClassTest.class_id)
-                    .filter(Class.school_id.in_(city_school_ids))
+                    .filter(Class.school_id.in_(ensure_uuid_list(city_school_ids)))
                     .distinct()
                 )
         elif scope["scope"] == "escola":
@@ -260,7 +263,7 @@ class DashboardService:
                 test_query = (
                     test_query.join(ClassTest, ClassTest.test_id == Test.id)
                     .join(Class, Class.id == ClassTest.class_id)
-                    .filter(Class.school_id.in_(school_ids))
+                    .filter(Class.school_id.in_(ensure_uuid_list(school_ids)))
                     .distinct()
                 )
 
@@ -459,7 +462,9 @@ class DashboardService:
 
         class_query = Class.query
         if school_ids:
-            class_query = class_query.filter(Class.school_id.in_(school_ids))
+            # Converter school_ids para UUID (Class.school_id é UUID)
+            school_ids_uuids = ensure_uuid_list(school_ids)
+            class_query = class_query.filter(Class.school_id.in_(school_ids_uuids))
 
         classes = [{"id": class_.id, "name": class_.name} for class_ in class_query.order_by(Class.name.asc()).all()]
 
@@ -556,7 +561,7 @@ class DashboardService:
                 query = (
                     query.join(ClassTest, ClassTest.test_id == Test.id)
                     .join(Class, Class.id == ClassTest.class_id)
-                    .filter(Class.school_id.in_(school_ids))
+                    .filter(Class.school_id.in_(ensure_uuid_list(school_ids)))
                 )
             else:
                 query = query.filter(False)
@@ -566,7 +571,7 @@ class DashboardService:
                 query = (
                     query.join(ClassTest, ClassTest.test_id == Test.id)
                     .join(Class, Class.id == ClassTest.class_id)
-                    .filter(Class.school_id.in_(school_ids))
+                    .filter(Class.school_id.in_(ensure_uuid_list(school_ids)))
                 )
             else:
                 query = query.filter(False)
@@ -640,10 +645,14 @@ class DashboardService:
         query = Class.query
         if scope["scope"] == "municipio":
             school_ids = cls._extract_school_ids(scope) or []
-            query = query.filter(Class.school_id.in_(school_ids)) if school_ids else query.filter(False)
+            # Converter school_ids para UUID (Class.school_id é UUID)
+            school_ids_uuids = ensure_uuid_list(school_ids) if school_ids else []
+            query = query.filter(Class.school_id.in_(school_ids_uuids)) if school_ids_uuids else query.filter(False)
         elif scope["scope"] == "escola":
             school_ids = scope.get("school_ids") or []
-            query = query.filter(Class.school_id.in_(school_ids)) if school_ids else query.filter(False)
+            # Converter school_ids para UUID (Class.school_id é UUID)
+            school_ids_uuids = ensure_uuid_list(school_ids) if school_ids else []
+            query = query.filter(Class.school_id.in_(school_ids_uuids)) if school_ids_uuids else query.filter(False)
         return query.count()
 
     @classmethod
@@ -853,7 +862,7 @@ class DashboardService:
                 query = (
                     query.join(ClassTest, ClassTest.test_id == Test.id)
                     .join(Class, Class.id == ClassTest.class_id)
-                    .filter(Class.school_id.in_(school_ids))
+                    .filter(Class.school_id.in_(ensure_uuid_list(school_ids)))
                 )
             else:
                 return []
@@ -863,7 +872,7 @@ class DashboardService:
                 query = (
                     query.join(ClassTest, ClassTest.test_id == Test.id)
                     .join(Class, Class.id == ClassTest.class_id)
-                    .filter(Class.school_id.in_(school_ids))
+                    .filter(Class.school_id.in_(ensure_uuid_list(school_ids)))
                 )
             else:
                 return []

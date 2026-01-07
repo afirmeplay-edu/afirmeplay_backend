@@ -14,6 +14,8 @@ from datetime import datetime
 from app import db
 from flask_jwt_extended import jwt_required
 from app.decorators.role_required import role_required, get_current_user_from_token
+from sqlalchemy import cast
+from sqlalchemy.dialects.postgresql import UUID as PostgresUUID
 import logging
 from sqlalchemy.exc import SQLAlchemyError, IntegrityError
 from sqlalchemy.orm import joinedload
@@ -922,7 +924,7 @@ def get_teacher_profile(user_id):
         ).join(
             Class, TeacherClass.class_id == Class.id
         ).join(
-            School, Class.school_id == School.id
+            School, Class.school_id == cast(School.id, PostgresUUID)
         ).outerjoin(
             Grade, Class.grade_id == Grade.id
         ).filter(

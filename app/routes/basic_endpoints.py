@@ -14,6 +14,7 @@ from app.models.test import Test
 from app.models.student import Student
 from app.models.studentAnswer import StudentAnswer
 from app.models.testSession import TestSession
+from app.utils.uuid_helpers import ensure_uuid, ensure_uuid_list
 from app import db
 from sqlalchemy import func
 from datetime import datetime, timedelta
@@ -110,7 +111,7 @@ def dashboard_stats():
                 # Filtrar testes que têm turmas das escolas da cidade
                 class_tests = ClassTest.query.filter(
                     ClassTest.class_id.in_(
-                        Class.query.filter(Class.school_id.in_(school_ids)).with_entities(Class.id)
+                        Class.query.filter(Class.school_id.in_(ensure_uuid_list(school_ids))).with_entities(Class.id)
                     )
                 ).with_entities(ClassTest.test_id).all()
                 test_ids = [ct.test_id for ct in class_tests]
@@ -158,7 +159,7 @@ def dashboard_stats():
             # Filtrar testes que têm turmas da escola
             class_tests = ClassTest.query.filter(
                 ClassTest.class_id.in_(
-                    Class.query.filter_by(school_id=school.id).with_entities(Class.id)
+                    Class.query.filter_by(school_id=ensure_uuid(school.id)).with_entities(Class.id)
                 )
             ).with_entities(ClassTest.test_id).all()
             test_ids = [ct.test_id for ct in class_tests]
@@ -193,7 +194,7 @@ def dashboard_stats():
                 # Filtrar testes que têm turmas das escolas da cidade
                 class_tests = ClassTest.query.filter(
                     ClassTest.class_id.in_(
-                        Class.query.filter(Class.school_id.in_(school_ids)).with_entities(Class.id)
+                        Class.query.filter(Class.school_id.in_(ensure_uuid_list(school_ids))).with_entities(Class.id)
                     )
                 ).with_entities(ClassTest.test_id).all()
                 test_ids = [ct.test_id for ct in class_tests]
@@ -327,7 +328,7 @@ def comprehensive_dashboard_stats():
                 student_query = student_query.filter(Student.school_id.in_(school_ids))
                 
                 # Filtrar turmas por escolas da cidade
-                class_query = class_query.filter(Class.school_id.in_(school_ids))
+                class_query = class_query.filter(Class.school_id.in_(ensure_uuid_list(school_ids)))
                 
                 # Filtrar professores por escolas da cidade através da tabela de associação
                 teacher_query = teacher_query.join(SchoolTeacher).filter(SchoolTeacher.school_id.in_(school_ids))
@@ -335,7 +336,7 @@ def comprehensive_dashboard_stats():
                 # Filtrar testes que têm turmas das escolas da cidade
                 class_tests = ClassTest.query.filter(
                     ClassTest.class_id.in_(
-                        Class.query.filter(Class.school_id.in_(school_ids)).with_entities(Class.id)
+                        Class.query.filter(Class.school_id.in_(ensure_uuid_list(school_ids))).with_entities(Class.id)
                     )
                 ).with_entities(ClassTest.test_id).all()
                 test_ids = [ct.test_id for ct in class_tests]
@@ -390,7 +391,7 @@ def comprehensive_dashboard_stats():
             student_query = student_query.filter_by(school_id=school.id)
             
             # Filtrar turmas por escola
-            class_query = class_query.filter_by(school_id=school.id)
+            class_query = class_query.filter_by(school_id=ensure_uuid(school.id))
             
             # Filtrar professores por escola através da tabela de associação
             teacher_query = teacher_query.join(SchoolTeacher).filter(SchoolTeacher.school_id == school.id)
@@ -398,7 +399,7 @@ def comprehensive_dashboard_stats():
             # Filtrar testes que têm turmas da escola
             class_tests = ClassTest.query.filter(
                 ClassTest.class_id.in_(
-                    Class.query.filter_by(school_id=school.id).with_entities(Class.id)
+                    Class.query.filter_by(school_id=ensure_uuid(school.id)).with_entities(Class.id)
                 )
             ).with_entities(ClassTest.test_id).all()
             test_ids = [ct.test_id for ct in class_tests]
@@ -437,7 +438,7 @@ def comprehensive_dashboard_stats():
                 student_query = student_query.filter(Student.school_id.in_(school_ids))
                 
                 # Filtrar turmas por escolas da cidade
-                class_query = class_query.filter(Class.school_id.in_(school_ids))
+                class_query = class_query.filter(Class.school_id.in_(ensure_uuid_list(school_ids)))
                 
                 # Filtrar professores por escolas da cidade através da tabela de associação
                 teacher_query = teacher_query.join(SchoolTeacher).filter(SchoolTeacher.school_id.in_(school_ids))
@@ -445,7 +446,7 @@ def comprehensive_dashboard_stats():
                 # Filtrar testes que têm turmas das escolas da cidade
                 class_tests = ClassTest.query.filter(
                     ClassTest.class_id.in_(
-                        Class.query.filter(Class.school_id.in_(school_ids)).with_entities(Class.id)
+                        Class.query.filter(Class.school_id.in_(ensure_uuid_list(school_ids))).with_entities(Class.id)
                     )
                 ).with_entities(ClassTest.test_id).all()
                 test_ids = [ct.test_id for ct in class_tests]
@@ -553,7 +554,7 @@ def evaluations_stats():
                 # Filtrar testes que têm turmas das escolas da cidade
                 class_tests = ClassTest.query.filter(
                     ClassTest.class_id.in_(
-                        Class.query.filter(Class.school_id.in_(school_ids)).with_entities(Class.id)
+                        Class.query.filter(Class.school_id.in_(ensure_uuid_list(school_ids))).with_entities(Class.id)
                     )
                 ).with_entities(ClassTest.test_id).all()
                 test_ids = [ct.test_id for ct in class_tests]
@@ -609,7 +610,7 @@ def evaluations_stats():
             # Filtrar testes que têm turmas da escola
             class_tests = ClassTest.query.filter(
                 ClassTest.class_id.in_(
-                    Class.query.filter_by(school_id=school.id).with_entities(Class.id)
+                    Class.query.filter_by(school_id=ensure_uuid(school.id)).with_entities(Class.id)
                 )
             ).with_entities(ClassTest.test_id).all()
             test_ids = [ct.test_id for ct in class_tests]
@@ -648,7 +649,7 @@ def evaluations_stats():
                 # Filtrar testes que têm turmas das escolas da cidade
                 class_tests = ClassTest.query.filter(
                     ClassTest.class_id.in_(
-                        Class.query.filter(Class.school_id.in_(school_ids)).with_entities(Class.id)
+                        Class.query.filter(Class.school_id.in_(ensure_uuid_list(school_ids))).with_entities(Class.id)
                     )
                 ).with_entities(ClassTest.test_id).all()
                 test_ids = [ct.test_id for ct in class_tests]
@@ -1652,7 +1653,9 @@ def list_classes():
         ]
     """
     try:
-        classes = Class.query.join(School).join(Grade).all()
+        from sqlalchemy import cast
+        from sqlalchemy.dialects.postgresql import UUID as PostgresUUID
+        classes = Class.query.join(School, Class.school_id == cast(School.id, PostgresUUID)).join(Grade).all()
         
         results = []
         for class_obj in classes:
@@ -1775,7 +1778,7 @@ def recent_schools():
         for school in recent_schools:
             # Contar alunos e turmas desta escola
             students_count = Student.query.filter_by(school_id=school.id).count()
-            classes_count = Class.query.filter_by(school_id=school.id).count()
+            classes_count = Class.query.filter_by(school_id=ensure_uuid(school.id)).count()
             
             school_data = {
                 "id": school.id,
@@ -2102,7 +2105,7 @@ def get_evaluation_results_stats():
                 # Filtrar testes que têm turmas das escolas da cidade
                 class_tests = ClassTest.query.filter(
                     ClassTest.class_id.in_(
-                        Class.query.filter(Class.school_id.in_(school_ids)).with_entities(Class.id)
+                        Class.query.filter(Class.school_id.in_(ensure_uuid_list(school_ids))).with_entities(Class.id)
                     )
                 ).with_entities(ClassTest.test_id).all()
                 test_ids = [ct.test_id for ct in class_tests]
@@ -2152,7 +2155,7 @@ def get_evaluation_results_stats():
             # Filtrar testes que têm turmas da escola
             class_tests = ClassTest.query.filter(
                 ClassTest.class_id.in_(
-                    Class.query.filter_by(school_id=school.id).with_entities(Class.id)
+                    Class.query.filter_by(school_id=ensure_uuid(school.id)).with_entities(Class.id)
                 )
             ).with_entities(ClassTest.test_id).all()
             test_ids = [ct.test_id for ct in class_tests]
@@ -2188,7 +2191,7 @@ def get_evaluation_results_stats():
                 # Filtrar testes que têm turmas das escolas da cidade
                 class_tests = ClassTest.query.filter(
                     ClassTest.class_id.in_(
-                        Class.query.filter(Class.school_id.in_(school_ids)).with_entities(Class.id)
+                        Class.query.filter(Class.school_id.in_(ensure_uuid_list(school_ids))).with_entities(Class.id)
                     )
                 ).with_entities(ClassTest.test_id).all()
                 test_ids = [ct.test_id for ct in class_tests]

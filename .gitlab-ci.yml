@@ -120,6 +120,11 @@ image_build:
             echo "TELEGRAM_GROUP_ID=$TELEGRAM_GROUP_ID" >> app/.env
             echo "TELEGRAM_ALERT_ENABLED=$TELEGRAM_ALERT_ENABLED" >> app/.env
 
+            echo "CELERY_BROKER_URL=$CELERY_BROKER_URL" >> app/.env
+            echo "CELERY_RESULT_BACKEND=$CELERY_RESULT_BACKEND" >> app/.env
+            echo "REDIS_URL=$REDIS_URL" >> app/.env
+            echo "REDIS_PASSWORD=$REDIS_PASSWORD" >> app/.env
+
             docker build --no-cache -t "$IMAGE_TAG" .
 
             IMAGE_ID=$(docker image ls -f reference="$IMAGE_TAG" -q)
@@ -238,6 +243,48 @@ container_run:
                     echo "$(date '+[%Y-%m-%d %H:%M:%S]') - O container '$CONTAINER_NAME' foi criado mas parou."
                     exit 1
                 fi
+            fi
+
+container_run_celery:
+    stage: deploy
+    extends:
+        - .set_runner_tag
+        - .set_none_git_strategy
+    environment:
+        name: $ENVIRONMENT
+    script:
+        - |
+            set -e
+
+            CELERY_CONTAINER_NAME="${CONTAINER_NAME}-celery"
+
+            echo "Iniciando Celery Worker: $CELERY_CONTAINER_NAME"
+
+            # Remove worker antigo se existir
+            if docker container ls -a -f name="^${CELERY_CONTAINER_NAME}$" -q; then
+                echo "Removendo container Celery antigo..."
+                docker stop "$CELERY_CONTAINER_NAME" || true
+                docker rm "$CELERY_CONTAINER_NAME" || true
+            fi
+
+            # Subir Celery Worker
+            docker run -d \
+              --name "$CELERY_CONTAINER_NAME" \
+              --network "$ENVIRONMENT" \
+              "$IMAGE_TAG" \
+              celery -A app.report_analysis.celery_app worker \
+              --loglevel=info \
+              --concurrency=2
+
+            sleep 10
+
+            # Verificar se o worker está rodando
+            if docker inspect -f "{{.State.Running}}" "$CELERY_CONTAINER_NAME" | grep true; then
+                echo "Celery worker iniciado com sucesso."
+            else
+                echo "Falha ao iniciar o Celery worker."
+                docker logs "$CELERY_CONTAINER_NAME"
+                exit 1
             fi
 
 environment_clean:

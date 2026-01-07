@@ -19,12 +19,14 @@ from app.models.studentClass import Class
 from app.models.grades import Grade
 from app.models.classTest import ClassTest
 from app.models.evaluationResult import EvaluationResult
+from app.utils.uuid_helpers import ensure_uuid, ensure_uuid_list
 from app import db
 import logging
 from typing import Dict, Any, List, Optional, Union
 import math
 import unicodedata
-from sqlalchemy import func, case, desc
+from sqlalchemy import func, case, desc, cast
+from sqlalchemy.dialects.postgresql import UUID as PostgresUUID
 from datetime import datetime
 from sqlalchemy.orm import joinedload
 from collections import defaultdict, OrderedDict
@@ -854,8 +856,10 @@ def _montar_resposta_relatorio_por_turmas(
     # Tentar obter informações da escola e município da primeira turma
     try:
         if unique_class_ids:
+            # unique_class_ids já são UUIDs (vêm de ClassTest.class_id que é UUID)
             first_class = Class.query.get(unique_class_ids[0])
             if first_class and first_class.school_id:
+                # first_class.school_id já é UUID
                 school = School.query.get(first_class.school_id)
                 if school:
                     metadados.update({
@@ -1761,7 +1765,10 @@ def _buscar_turmas_por_escopo(evaluation_id: str, scope_type: str, scope_id: str
     
     if scope_type == 'school':
         # Filtrar por escola específica
-        query = query.join(Class).filter(Class.school_id == scope_id)
+        # Converter scope_id para UUID (Class.school_id é UUID)
+        school_id_uuid = ensure_uuid(scope_id)
+        if school_id_uuid:
+            query = query.join(Class).filter(Class.school_id == school_id_uuid)
     elif scope_type == 'city':
         # Filtrar por município (todas as escolas do município)
         query = query.join(Class).join(School).filter(School.city_id == scope_id)
@@ -5569,7 +5576,7 @@ def _calcular_media_municipal(evaluation_id: str) -> float:
         ).join(
             Class, Student.class_id == Class.id
         ).join(
-            School, Class.school_id == School.id
+            School, Class.school_id == cast(School.id, PostgresUUID)
         ).filter(
             School.city_id == city_id,
             EvaluationResult.test_id == evaluation_id
@@ -5612,7 +5619,7 @@ def _calcular_media_municipal_nota(evaluation_id: str) -> float:
         ).join(
             Class, Student.class_id == Class.id
         ).join(
-            School, Class.school_id == School.id
+            School, Class.school_id == cast(School.id, PostgresUUID)
         ).filter(
             School.city_id == city_id,
             EvaluationResult.test_id == evaluation_id
@@ -5655,7 +5662,7 @@ def _calcular_media_municipal_por_disciplina(evaluation_id: str, question_discip
         ).join(
             Class, Student.class_id == Class.id
         ).join(
-            School, Class.school_id == School.id
+            School, Class.school_id == cast(School.id, PostgresUUID)
         ).filter(
             School.city_id == city_id,
             EvaluationResult.test_id == evaluation_id
@@ -5756,7 +5763,7 @@ def _calcular_media_municipal_nota_por_disciplina(evaluation_id: str, question_d
         ).join(
             Class, Student.class_id == Class.id
         ).join(
-            School, Class.school_id == School.id
+            School, Class.school_id == cast(School.id, PostgresUUID)
         ).filter(
             School.city_id == city_id,
             EvaluationResult.test_id == evaluation_id

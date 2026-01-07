@@ -4,6 +4,8 @@ from app.permissions.rules import get_user_permission_scope
 from app import db
 from app.models import CalendarEvent, CalendarEventUser, City, School, Grade, Class
 from app.services.calendar_event_service import CalendarEventService
+from sqlalchemy import cast
+from sqlalchemy.dialects.postgresql import UUID as PostgresUUID
 from datetime import datetime
 from typing import List, Dict, Any
 
@@ -284,7 +286,7 @@ def _obter_escolas_por_municipio(city_id: str) -> List[Dict[str, Any]]:
 
 def _obter_turmas_por_municipio_formatadas(city_id: str) -> List[Dict[str, Any]]:
     """Retorna turmas do município formatadas como 'Série - Turma'."""
-    turmas = Class.query.join(School, Class.school_id == School.id)\
+    turmas = Class.query.join(School, Class.school_id == cast(School.id, PostgresUUID))\
                         .join(Grade, Class.grade_id == Grade.id)\
                         .filter(School.city_id == city_id).all()
     result = []

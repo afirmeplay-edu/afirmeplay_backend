@@ -286,6 +286,9 @@ class ReportAggregateService:
         """Commit seguro com tratamento de erros"""
         try:
             db.session.commit()
+            # Forçar refresh de todos os objetos para garantir que mudanças sejam visíveis
+            # Isso resolve problemas de cache/isolamento de transação entre worker e servidor web
+            db.session.expire_all()
         except SQLAlchemyError:
             logger.exception("Falha ao salvar agregados de relatório")
             db.session.rollback()

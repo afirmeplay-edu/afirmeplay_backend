@@ -1,9 +1,4 @@
-from app import create_app, db
-
-# from . import create_app, db
-import requests
-import os
-import threading
+from app import create_app
 import logging
 
 # Importar o script de inicialização do banco
@@ -27,19 +22,19 @@ if __name__ == "__main__":
     with app.app_context():
         check_and_init_database()
         
-        # Iniciar scheduler de tarefas agendadas
+        # Iniciar scheduler de tarefas agendadas (passar app)
         try:
-            start_scheduler()
+            start_scheduler(app)
         except Exception as e:
-            logging.error(f"Erro ao iniciar scheduler: {str(e)}", exc_info=True)
+            logging.error("Erro ao iniciar scheduler", exc_info=True)
     
     try:
-        app.run(debug=True, host="0.0.0.0", port=5000)
+        app.run(host="0.0.0.0", port=5000)
     except KeyboardInterrupt:
-        logging.info("Aplicação interrompida pelo usuário")
+        logging.info("Aplicação interrompida")
     finally:
         # Parar scheduler quando a aplicação for encerrada
         try:
             stop_scheduler()
-        except Exception as e:
-            logging.error(f"Erro ao parar scheduler: {str(e)}", exc_info=True)
+        except Exception:
+            logging.error("Erro ao parar scheduler", exc_info=True)

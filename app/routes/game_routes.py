@@ -7,6 +7,7 @@ from app.models.teacherClass import TeacherClass
 from app.models.manager import Manager
 from app.models.student import Student
 from app.models.school import School
+from app.utils.uuid_helpers import ensure_uuid, ensure_uuid_list
 from app.decorators.role_required import role_required, get_current_user_from_token
 from flask_jwt_extended import jwt_required
 from sqlalchemy.exc import SQLAlchemyError
@@ -52,7 +53,9 @@ def validate_and_collect_classes(data, user_role, current_user):
     
     # 1. Processar class_ids (turmas específicas) - maior prioridade
     if class_ids:
-        classes = Class.query.filter(Class.id.in_(class_ids)).all()
+        # Converter class_ids para UUID (Class.id é UUID)
+        class_ids_uuids = ensure_uuid_list(class_ids)
+        classes = Class.query.filter(Class.id.in_(class_ids_uuids)).all()
         found_ids = {c.id for c in classes}
         missing_ids = set(class_ids) - found_ids
         
@@ -98,7 +101,12 @@ def validate_and_collect_classes(data, user_role, current_user):
                     continue
             
             for grade_id in grade_ids:
-                classes = Class.query.filter_by(school_id=school_id, grade_id=grade_id).all()
+                # Converter school_id para UUID (Class.school_id é UUID)
+                school_id_uuid = ensure_uuid(school_id)
+                if school_id_uuid:
+                    classes = Class.query.filter_by(school_id=school_id_uuid, grade_id=grade_id).all()
+                else:
+                    continue
                 for class_obj in classes:
                     class_ids_to_link.add(class_obj.id)
     
@@ -117,7 +125,12 @@ def validate_and_collect_classes(data, user_role, current_user):
                     errors.append(f"Escola {school.name} não pertence ao seu município")
                     continue
             
-            classes = Class.query.filter_by(school_id=school_id).all()
+            # Converter school_id para UUID (Class.school_id é UUID)
+            school_id_uuid = ensure_uuid(school_id)
+            if school_id_uuid:
+                classes = Class.query.filter_by(school_id=school_id_uuid).all()
+            else:
+                continue
             for class_obj in classes:
                 class_ids_to_link.add(class_obj.id)
     
@@ -128,7 +141,12 @@ def validate_and_collect_classes(data, user_role, current_user):
             errors.append("Você não está vinculado a uma escola")
         else:
             for grade_id in grade_ids:
-                classes = Class.query.filter_by(school_id=manager.school_id, grade_id=grade_id).all()
+                # manager.school_id pode ser string, converter para UUID (Class.school_id é UUID)
+                manager_school_id_uuid = ensure_uuid(manager.school_id)
+                if manager_school_id_uuid:
+                    classes = Class.query.filter_by(school_id=manager_school_id_uuid, grade_id=grade_id).all()
+                else:
+                    continue
                 for class_obj in classes:
                     class_ids_to_link.add(class_obj.id)
     

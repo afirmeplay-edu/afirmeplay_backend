@@ -11,6 +11,7 @@ from app.models.schoolTeacher import SchoolTeacher
 from app.models.teacher import Teacher
 from app import db
 from app.decorators.role_required import get_current_tenant_id
+from app.utils.uuid_helpers import ensure_uuid, ensure_uuid_list
 from flask_jwt_extended import jwt_required
 from app.decorators.role_required import role_required, get_current_user_from_token
 from sqlalchemy.exc import SQLAlchemyError, IntegrityError
@@ -174,14 +175,18 @@ def criar_avaliacao():
                 class_ids = [data['classes']]
             
             # Verificar se todas as turmas existem
-            existing_classes = Class.query.filter(Class.id.in_(class_ids)).all()
-            if len(existing_classes) != len(class_ids):
+            # Converter class_ids para UUID (Class.id é UUID)
+            class_ids_uuids = ensure_uuid_list(class_ids)
+            existing_classes = Class.query.filter(Class.id.in_(class_ids_uuids)).all()
+            if len(existing_classes) != len(class_ids_uuids):
                 return jsonify({"error": "Uma ou mais turmas não foram encontradas"}), 400
             
             # Se turmas foram especificadas, extrair as escolas das turmas
             school_ids_from_classes = list(set([c.school_id for c in existing_classes]))
-            data['schools'] = school_ids_from_classes
-            data['classes'] = class_ids  # Salvar as classes específicas
+            # Converter UUIDs para strings para salvar no campo JSON
+            from app.utils.uuid_helpers import uuid_list_to_str
+            data['schools'] = uuid_list_to_str(school_ids_from_classes) if school_ids_from_classes else []
+            data['classes'] = uuid_list_to_str(class_ids_uuids)  # Salvar as classes específicas como strings
 
         logging.info("Criando nova avaliação com os dados fornecidos")
         print(data)
@@ -330,11 +335,13 @@ def listar_avaliacoes():
             query = Test.query
         else:
             # Para dados completos, carregar apenas relacionamentos essenciais
+            # Não carregar class_tests aqui para evitar problemas de transação
             query = Test.query.options(
                 joinedload(Test.creator),
                 joinedload(Test.subject_rel),
                 joinedload(Test.grade)
                 # Remover subqueryload de questions para melhor performance
+                # Não carregar class_tests aqui - será carregado sob demanda em format_test_response
             )
 
         # Filtrar por município se for tecadm
@@ -386,7 +393,9 @@ def listar_avaliacoes():
                 for school_id in school_ids:
                     # Fazer cast explícito para JSONB na coluna e usar operador @> para verificar se contém o valor
                     # Usar cast() para converter a coluna para JSONB e passar o valor como lista Python
-                    filters.append(cast(Test.schools, JSONB).op('@>')([school_id]))
+                    # Garantir que school_id seja string (JSONB sempre armazena strings)
+                    school_id_str = str(school_id)
+                    filters.append(cast(Test.schools, JSONB).op('@>')([school_id_str]))
             
             # Aplicar filtros se houver algum
             if filters:
@@ -448,7 +457,9 @@ def listar_avaliacoes():
                 
                 # Critério 3: Avaliações que têm escolas especificadas da cidade
                 for school_id in school_ids:
-                    filters.append(cast(Test.schools, JSONB).op('@>')([school_id]))
+                    # Garantir que school_id seja string (JSONB sempre armazena strings)
+                    school_id_str = str(school_id)
+                    filters.append(cast(Test.schools, JSONB).op('@>')([school_id_str]))
             
             # Aplicar filtros se houver algum
             if filters:
@@ -532,6 +543,7 @@ def listar_avaliacoes():
         return jsonify(response_data), 200
 
     except Exception as e:
+        db.session.rollback()
         logging.error(f"Error listing tests: {str(e)}", exc_info=True)
         return jsonify({"error": "Error listing tests", "details": str(e)}), 500
 
@@ -859,14 +871,18 @@ def atualizar_avaliacao(test_id):
                 class_ids = [data['classes']]
             
             # Verificar se todas as turmas existem
-            existing_classes = Class.query.filter(Class.id.in_(class_ids)).all()
-            if len(existing_classes) != len(class_ids):
+            # Converter class_ids para UUID (Class.id é UUID)
+            class_ids_uuids = ensure_uuid_list(class_ids)
+            existing_classes = Class.query.filter(Class.id.in_(class_ids_uuids)).all()
+            if len(existing_classes) != len(class_ids_uuids):
                 return jsonify({"error": "Uma ou mais turmas não foram encontradas"}), 400
             
             # Se turmas foram especificadas, extrair as escolas das turmas
             school_ids_from_classes = list(set([c.school_id for c in existing_classes]))
-            data['schools'] = school_ids_from_classes
-            data['classes'] = class_ids  # Salvar as classes específicas
+            # Converter UUIDs para strings para salvar no campo JSON
+            from app.utils.uuid_helpers import uuid_list_to_str
+            data['schools'] = uuid_list_to_str(school_ids_from_classes) if school_ids_from_classes else []
+            data['classes'] = uuid_list_to_str(class_ids_uuids)  # Salvar as classes específicas como strings
 
         # Campos que podem ser atualizados
         campos = [
@@ -1021,7 +1037,7 @@ def bulk_delete_tests():
             logging.info(f"🗑️ Excluídas {len(test_sessions)} sessões de teste para teste {test.id}")
             
             # 6. Excluir aplicações de classe
-            class_tests = ClassTest.query.filter_by(test_id=test.id).all()
+            class_tests = ClassTest.query.filter_by(test_id=str(test.id)).all()
             for class_test in class_tests:
                 db.session.delete(class_test)
             logging.info(f"🗑️ Excluídas {len(class_tests)} aplicações de classe para teste {test.id}")
@@ -1143,7 +1159,7 @@ def deletar_avaliacao(test_id):
         logging.info(f"🗑️ Excluídas {len(test_sessions)} sessões de teste")
         
         # 6. Excluir aplicações de classe
-        class_tests = ClassTest.query.filter_by(test_id=test_id).all()
+        class_tests = ClassTest.query.filter_by(test_id=str(test_id)).all()
         for class_test in class_tests:
             db.session.delete(class_test)
         logging.info(f"🗑️ Excluídas {len(class_tests)} aplicações de classe")
@@ -1211,10 +1227,16 @@ def aplicar_avaliacao_classe(test_id):
                 errors.append("class_id is required for each class")
                 continue
 
+            # Converter class_id para UUID (ClassTest.class_id é UUID)
+            class_id_uuid = ensure_uuid(class_id)
+            if not class_id_uuid:
+                errors.append(f"class_id inválido: {class_id}")
+                continue
+            
             # Verificar se já existe uma aplicação para esta classe e avaliação
             existing_application = ClassTest.query.filter_by(
-                class_id=class_id,
-                test_id=test_id
+                class_id=class_id_uuid,
+                test_id=str(test_id)
             ).first()
 
             if existing_application:
@@ -1250,7 +1272,7 @@ def aplicar_avaliacao_classe(test_id):
                     # ✅ REGRA 3: Salvar o nome do timezone
                     existing_application.timezone = timezone
                         
-                    applied_classes.append(class_id)
+                    applied_classes.append(str(class_id_uuid))
                 except ValueError as e:
                     errors.append(f"Invalid date format for class {class_id}: {str(e)}")
                 except Exception as e:
@@ -1282,7 +1304,7 @@ def aplicar_avaliacao_classe(test_id):
                         expiration_dt = expiration_dt.replace(tzinfo=target_tz)
                 
                 class_test = ClassTest(
-                    class_id=class_id,
+                    class_id=class_id_uuid,
                     test_id=test_id,
                     application=application_dt.isoformat() if application_dt else None,
                     expiration=expiration_dt.isoformat() if expiration_dt else None,
@@ -1330,7 +1352,7 @@ def listar_classes_avaliacao(test_id):
             return jsonify({"error": "Test not found"}), 404
 
         # Buscar todas as aplicações da avaliação
-        class_tests = ClassTest.query.filter_by(test_id=test_id).all()
+        class_tests = ClassTest.query.filter_by(test_id=str(test_id)).all()
         
         classes_info = []
         
@@ -1340,7 +1362,8 @@ def listar_classes_avaliacao(test_id):
                 # Buscar informações da classe
                 class_obj = Class.query.get(ct.class_id)
                 if class_obj:
-                    school_obj = School.query.get(class_obj.school_id)
+                    # class_obj.school_id é UUID, School.id é VARCHAR - converter para string
+                    school_obj = School.query.filter(School.id == str(class_obj.school_id)).first()
                     grade_obj = Grade.query.get(class_obj.grade_id)
                     
                     # Contar alunos na turma
@@ -1392,7 +1415,8 @@ def listar_classes_avaliacao(test_id):
                 logging.info(f"Encontradas {len(specific_classes)} classes específicas")
                 
                 for class_obj in specific_classes:
-                    school_obj = School.query.get(class_obj.school_id)
+                    # class_obj.school_id é UUID, School.id é VARCHAR - converter para string
+                    school_obj = School.query.filter(School.id == str(class_obj.school_id)).first()
                     grade_obj = Grade.query.get(class_obj.grade_id)
                     
                     # Contar alunos na turma
@@ -1444,7 +1468,8 @@ def listar_classes_avaliacao(test_id):
                 logging.info(f"Encontradas {len(all_classes)} turmas nas escolas")
                 
                 for class_obj in all_classes:
-                    school_obj = School.query.get(class_obj.school_id)
+                    # class_obj.school_id é UUID, School.id é VARCHAR - converter para string
+                    school_obj = School.query.filter(School.id == str(class_obj.school_id)).first()
                     grade_obj = Grade.query.get(class_obj.grade_id)
                     
                     # Contar alunos na turma
@@ -1483,10 +1508,15 @@ def listar_classes_avaliacao(test_id):
 def remover_aplicacao_avaliacao(test_id, class_id):
     """Remove a aplicação de uma avaliação de uma classe específica."""
     try:
+        # Converter class_id para UUID (ClassTest.class_id é UUID)
+        class_id_uuid = ensure_uuid(class_id)
+        if not class_id_uuid:
+            return jsonify({"error": "ID de turma inválido"}), 400
+        
         # Verificar se a aplicação existe
         class_test = ClassTest.query.filter_by(
-            test_id=test_id,
-            class_id=class_id
+            test_id=str(test_id),
+            class_id=class_id_uuid
         ).first()
 
         if not class_test:
@@ -1534,10 +1564,16 @@ def remover_aplicacoes_avaliacao_multiplas(test_id):
                 errors.append("class_id cannot be empty")
                 continue
 
+            # Converter class_id para UUID (ClassTest.class_id é UUID)
+            class_id_uuid = ensure_uuid(class_id)
+            if not class_id_uuid:
+                not_found_classes.append(class_id)
+                continue
+            
             # Verificar se a aplicação existe
             class_test = ClassTest.query.filter_by(
-                test_id=test_id,
-                class_id=class_id
+                test_id=str(test_id),
+                class_id=class_id_uuid
             ).first()
 
             if not class_test:
@@ -1587,8 +1623,13 @@ def obter_avaliacoes_completas_classe(class_id):
         if not user:
             return jsonify({"error": "User not found or token invalid"}), 401
 
+        # Converter class_id para UUID (Class.id é UUID)
+        class_id_uuid = ensure_uuid(class_id)
+        if not class_id_uuid:
+            return jsonify({"error": "ID de turma inválido"}), 400
+        
         # Verificar se a classe existe
-        class_obj = Class.query.get(class_id)
+        class_obj = Class.query.get(class_id_uuid)
         if not class_obj:
             return jsonify({"error": "Class not found"}), 404
 
@@ -1596,7 +1637,7 @@ def obter_avaliacoes_completas_classe(class_id):
         if user['role'] == 'aluno':
             # Aluno só pode ver avaliações da sua própria classe
             student = Student.query.filter_by(user_id=user['id']).first()
-            if not student or student.class_id != class_id:
+            if not student or student.class_id != class_id_uuid:
                 return jsonify({"error": "You can only access tests from your own class"}), 403
         elif user['role'] == 'professor':
             # Professor só pode ver avaliações de classes onde está alocado
@@ -1612,7 +1653,7 @@ def obter_avaliacoes_completas_classe(class_id):
                 return jsonify({"error": "You don't have permission to view tests for this class"}), 403
 
         # Buscar todas as avaliações aplicadas nesta classe na tabela class_test
-        class_tests = ClassTest.query.filter_by(class_id=class_id).all()
+        class_tests = ClassTest.query.filter_by(class_id=class_id_uuid).all()
         
         if not class_tests:
             return jsonify({
@@ -1626,7 +1667,8 @@ def obter_avaliacoes_completas_classe(class_id):
             }), 200
 
         # Buscar informações da escola e série
-        school_obj = School.query.get(class_obj.school_id)
+        # class_obj.school_id é UUID, School.id é VARCHAR - converter para string
+        school_obj = School.query.filter(School.id == str(class_obj.school_id)).first()
         grade_obj = Grade.query.get(class_obj.grade_id)
 
         # Buscar todas as avaliações com seus dados completos
@@ -1830,8 +1872,13 @@ def listar_avaliacoes_por_classe(class_id):
         if not user:
             return jsonify({"error": "User not found or token invalid"}), 401
 
+        # Converter class_id para UUID (Class.id é UUID)
+        class_id_uuid = ensure_uuid(class_id)
+        if not class_id_uuid:
+            return jsonify({"error": "ID de turma inválido"}), 400
+        
         # Verificar se a classe existe
-        class_obj = Class.query.get(class_id)
+        class_obj = Class.query.get(class_id_uuid)
         if not class_obj:
             return jsonify({"error": "Class not found"}), 404
 
@@ -1850,7 +1897,7 @@ def listar_avaliacoes_por_classe(class_id):
                 return jsonify({"error": "You don't have permission to view tests for this class"}), 403
 
         # Buscar todas as aplicações de avaliações nesta classe
-        class_tests = ClassTest.query.filter_by(class_id=class_id).all()
+        class_tests = ClassTest.query.filter_by(class_id=class_id_uuid).all()
         
         if not class_tests:
             return jsonify({
@@ -1864,7 +1911,8 @@ def listar_avaliacoes_por_classe(class_id):
             }), 200
 
         # Buscar informações da escola e série
-        school_obj = School.query.get(class_obj.school_id)
+        # class_obj.school_id é UUID, School.id é VARCHAR - converter para string
+        school_obj = School.query.filter(School.id == str(class_obj.school_id)).first()
         grade_obj = Grade.query.get(class_obj.grade_id)
 
         # Buscar todas as avaliações aplicadas
@@ -1996,7 +2044,8 @@ def listar_avaliacoes_minha_classe():
             }), 200
 
         # Buscar informações da escola e série
-        school_obj = School.query.get(class_obj.school_id)
+        # class_obj.school_id é UUID, School.id é VARCHAR - converter para string
+        school_obj = School.query.filter(School.id == str(class_obj.school_id)).first()
         grade_obj = Grade.query.get(class_obj.grade_id)
 
         # Buscar todas as avaliações aplicadas
@@ -2550,7 +2599,7 @@ def debug_test_dates(test_id):
             return jsonify({'error': 'Teste não encontrado'}), 404
         
         # Buscar aplicações do teste
-        class_tests = ClassTest.query.filter_by(test_id=test_id).all()
+        class_tests = ClassTest.query.filter_by(test_id=str(test_id)).all()
         
         # ✅ REGRA 4: Obter tempo atual no timezone da aplicação (se disponível)
         current_time = None
@@ -2775,7 +2824,7 @@ def debug_test_availability(test_id):
             return jsonify({'error': 'Teste não encontrado'}), 404
         
         # Buscar aplicações do teste
-        class_tests = ClassTest.query.filter_by(test_id=test_id).all()
+        class_tests = ClassTest.query.filter_by(test_id=str(test_id)).all()
         
         # ✅ REGRA 4: Obter tempo atual no timezone da aplicação (se disponível)
         current_time = None

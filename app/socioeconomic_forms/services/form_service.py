@@ -9,6 +9,7 @@ from app.models.city import City
 from app.models.school import School
 from app.models.grades import Grade
 from app.models.studentClass import Class
+from app.utils.uuid_helpers import ensure_uuid, ensure_uuid_list
 from sqlalchemy.exc import SQLAlchemyError
 import logging
 from datetime import datetime
@@ -81,19 +82,25 @@ class FormService:
             if not grade:
                 raise ValueError("Série não encontrada")
             # Verificar se a série tem turmas na escola
+            # Converter school_id para UUID (Class.school_id é UUID)
+            school_id_uuid = ensure_uuid(filters['escola'])
             classes = Class.query.filter_by(
                 grade_id=serie_uuid,
-                school_id=filters['escola']
+                school_id=school_id_uuid
             ).first()
             if not classes:
                 raise ValueError("Série não possui turmas na escola informada")
         
         # Validar turma se fornecida
         if filters.get('turma'):
-            turma = Class.query.get(filters['turma'])
+            # Converter turma_id para UUID (Class.id é UUID)
+            turma_id_uuid = ensure_uuid(filters['turma'])
+            turma = Class.query.get(turma_id_uuid)
             if not turma:
                 raise ValueError("Turma não encontrada")
-            if turma.school_id != filters['escola']:
+            # Converter school_id para UUID para comparação (Class.school_id é UUID)
+            escola_id_uuid = ensure_uuid(filters['escola'])
+            if turma.school_id != escola_id_uuid:
                 raise ValueError("Turma não pertence à escola informada")
             if filters.get('serie'):
                 # Converter para comparar corretamente
@@ -197,9 +204,11 @@ class FormService:
             if len(grades) != len(selected_grades):
                 raise ValueError("Uma ou mais séries não foram encontradas")
             # Verificar se as séries têm turmas nas escolas selecionadas
+            # Converter school_ids para UUID (Class.school_id é UUID)
+            school_ids_uuids = ensure_uuid_list(selected_schools)
             classes = Class.query.filter(
                 Class.grade_id.in_(grade_uuids),
-                Class.school_id.in_(selected_schools)
+                Class.school_id.in_(school_ids_uuids)
             ).distinct().all()
             if not classes:
                 raise ValueError("Nenhuma turma encontrada para as séries e escolas selecionadas")
@@ -207,7 +216,12 @@ class FormService:
         if selected_classes:
             if not selected_grades:
                 raise ValueError("selectedGrades é obrigatório quando selectedClasses é fornecido")
-            classes = Class.query.filter(Class.id.in_(selected_classes)).all()
+            # Converter class_ids para UUID (Class.id é UUID)
+            class_ids_uuids = ensure_uuid_list(selected_classes)
+            if len(class_ids_uuids) == 1:
+                classes = Class.query.filter(Class.id == class_ids_uuids[0]).all()
+            else:
+                classes = Class.query.filter(Class.id.in_(class_ids_uuids)).all()
             if len(classes) != len(selected_classes):
                 raise ValueError("Uma ou mais turmas não foram encontradas")
             # Verificar se as turmas pertencem às séries selecionadas

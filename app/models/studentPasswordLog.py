@@ -14,7 +14,7 @@ class StudentPasswordLog(db.Model):
     # Relacionamentos com outras tabelas
     user_id = db.Column(db.String, db.ForeignKey('users.id'), nullable=True)
     student_id = db.Column(db.String, db.ForeignKey('student.id'), nullable=True)
-    class_id = db.Column(db.String, db.ForeignKey('class.id'), nullable=True)
+    class_id = db.Column(UUID(as_uuid=True), db.ForeignKey('class.id'), nullable=True)
     grade_id = db.Column(UUID(as_uuid=True), db.ForeignKey('grade.id'), nullable=True)
     school_id = db.Column(db.String, db.ForeignKey('school.id'), nullable=True)
     city_id = db.Column(db.String, db.ForeignKey('city.id'), nullable=True)

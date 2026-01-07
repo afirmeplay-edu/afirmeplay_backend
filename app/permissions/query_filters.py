@@ -98,13 +98,16 @@ def filter_classes_by_user(query: Query, user: dict) -> Query:
     
     # Diretor e Coordenador: apenas turmas de sua escola
     elif role in [Roles.DIRETOR, Roles.COORDENADOR]:
+        from app.utils.uuid_helpers import ensure_uuid
         school_id = get_manager_school(user['id'])
         if school_id:
-            return query.filter(ClassModel.school_id == school_id)
-        else:
-            return query.filter(ClassModel.school_id == None)
+            # Converter school_id para UUID (Class.school_id é UUID)
+            school_id_uuid = ensure_uuid(school_id)
+            if school_id_uuid:
+                return query.filter(ClassModel.school_id == school_id_uuid)
+        return query.filter(ClassModel.school_id == None)
     
-        # Professor: apenas turmas onde está vinculado
+    # Professor: apenas turmas onde está vinculado
     elif role == Roles.PROFESSOR:
         teacher = get_teacher(user['id'])
         if teacher:
@@ -113,6 +116,7 @@ def filter_classes_by_user(query: Query, user: dict) -> Query:
             class_ids = [tc.class_id for tc in teacher_classes]
             
             if class_ids:
+                # class_ids já são UUIDs (TeacherClass.class_id é UUID)
                 return query.filter(ClassModel.id.in_(class_ids))
         
         return query.filter(ClassModel.id == None)

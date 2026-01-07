@@ -28,6 +28,9 @@ from app.models.school import School
 from app.models.city import City
 from app.models.studentClass import Class
 from app.models.grades import Grade
+from app.utils.uuid_helpers import ensure_uuid, ensure_uuid_list
+from sqlalchemy import cast
+from sqlalchemy.dialects.postgresql import UUID as PostgresUUID
 from app.models.classTest import ClassTest
 from app.models.schoolTeacher import SchoolTeacher
 from app.models.skill import Skill
@@ -760,7 +763,7 @@ def listar_avaliacoes():
             query_base = ClassTest.query.join(Test, ClassTest.test_id == Test.id)\
                                        .join(Class, ClassTest.class_id == Class.id)\
                                        .join(Grade, Class.grade_id == Grade.id)\
-                                       .join(School, Class.school_id == School.id)\
+                                       .join(School, Class.school_id == cast(School.id, PostgresUUID))\
                                        .join(City, School.city_id == City.id)\
                                        .options(
                                            joinedload(ClassTest.test).joinedload(Test.subject_rel),
@@ -922,7 +925,7 @@ def listar_avaliacoes():
                     query_base = ClassTest.query.join(Test, ClassTest.test_id == Test.id)\
                                                .join(Class, ClassTest.class_id == Class.id)\
                                                .join(Grade, Class.grade_id == Grade.id)\
-                                               .join(School, Class.school_id == School.id)\
+                                               .join(School, Class.school_id == cast(School.id, PostgresUUID))\
                                                .join(City, School.city_id == City.id)\
                                                .options(
                                                    joinedload(ClassTest.test).joinedload(Test.subject_rel),
@@ -1008,7 +1011,7 @@ def listar_avaliacoes():
                     query_base = ClassTest.query.join(Test, ClassTest.test_id == Test.id)\
                                                .join(Class, ClassTest.class_id == Class.id)\
                                                .join(Grade, Class.grade_id == Grade.id)\
-                                               .join(School, Class.school_id == School.id)\
+                                               .join(School, Class.school_id == cast(School.id, PostgresUUID))\
                                                .join(City, School.city_id == City.id)\
                                                .options(
                                                    joinedload(ClassTest.test).joinedload(Test.subject_rel),
@@ -2450,7 +2453,7 @@ def _gerar_opcoes_proximos_filtros(scope_info, nivel_granularidade, user=None):
                 query_avaliacoes = Test.query.with_entities(Test.id, Test.title)\
                                             .join(ClassTest, Test.id == ClassTest.test_id)\
                                             .join(Class, ClassTest.class_id == Class.id)\
-                                            .join(School, Class.school_id == School.id)\
+                                            .join(School, Class.school_id == cast(School.id, PostgresUUID))\
                                             .join(City, School.city_id == City.id)\
                                             .filter(City.id == municipio_id)\
                                             .distinct()
@@ -2468,7 +2471,7 @@ def _gerar_opcoes_proximos_filtros(scope_info, nivel_granularidade, user=None):
             municipio_id = scope_info.get('municipio_id')
             if avaliacao_id and municipio_id:
                 query_escolas = School.query.with_entities(School.id, School.name)\
-                                           .join(Class, School.id == Class.school_id)\
+                                           .join(Class, cast(School.id, PostgresUUID) == Class.school_id)\
                                            .join(ClassTest, Class.id == ClassTest.class_id)\
                                            .join(Test, ClassTest.test_id == Test.id)\
                                            .join(City, School.city_id == City.id)\
@@ -2523,7 +2526,7 @@ def _gerar_opcoes_proximos_filtros(scope_info, nivel_granularidade, user=None):
                                              .join(Class, Grade.id == Class.grade_id)\
                                              .join(ClassTest, Class.id == ClassTest.class_id)\
                                              .join(Test, ClassTest.test_id == Test.id)\
-                                             .join(School, Class.school_id == School.id)\
+                                             .join(School, Class.school_id == cast(School.id, PostgresUUID))\
                                              .join(City, School.city_id == City.id)\
                                              .filter(Test.id == avaliacao_id)\
                                              .filter(School.id == escola_id)\
@@ -2536,7 +2539,7 @@ def _gerar_opcoes_proximos_filtros(scope_info, nivel_granularidade, user=None):
                                              .join(Class, Grade.id == Class.grade_id)\
                                              .join(ClassTest, Class.id == ClassTest.class_id)\
                                              .join(Test, ClassTest.test_id == Test.id)\
-                                             .join(School, Class.school_id == School.id)\
+                                             .join(School, Class.school_id == cast(School.id, PostgresUUID))\
                                              .join(City, School.city_id == City.id)\
                                              .filter(Test.id == avaliacao_id)\
                                              .filter(City.id == municipio_id)\
@@ -2562,7 +2565,7 @@ def _gerar_opcoes_proximos_filtros(scope_info, nivel_granularidade, user=None):
                     query_turmas = Class.query.with_entities(Class.id, Class.name)\
                                              .join(ClassTest, Class.id == ClassTest.class_id)\
                                              .join(Test, ClassTest.test_id == Test.id)\
-                                             .join(School, Class.school_id == School.id)\
+                                             .join(School, Class.school_id == cast(School.id, PostgresUUID))\
                                              .join(City, School.city_id == City.id)\
                                              .join(Grade, Class.grade_id == Grade.id)\
                                              .filter(Test.id == avaliacao_id)\
@@ -2575,7 +2578,7 @@ def _gerar_opcoes_proximos_filtros(scope_info, nivel_granularidade, user=None):
                     query_turmas = Class.query.with_entities(Class.id, Class.name)\
                                              .join(ClassTest, Class.id == ClassTest.class_id)\
                                              .join(Test, ClassTest.test_id == Test.id)\
-                                             .join(School, Class.school_id == School.id)\
+                                             .join(School, Class.school_id == cast(School.id, PostgresUUID))\
                                              .join(City, School.city_id == City.id)\
                                              .filter(Test.id == avaliacao_id)\
                                              .filter(School.id == escola_id)\
@@ -2586,7 +2589,7 @@ def _gerar_opcoes_proximos_filtros(scope_info, nivel_granularidade, user=None):
                     query_turmas = Class.query.with_entities(Class.id, Class.name)\
                                              .join(ClassTest, Class.id == ClassTest.class_id)\
                                              .join(Test, ClassTest.test_id == Test.id)\
-                                             .join(School, Class.school_id == School.id)\
+                                             .join(School, Class.school_id == cast(School.id, PostgresUUID))\
                                              .join(City, School.city_id == City.id)\
                                              .join(Grade, Class.grade_id == Grade.id)\
                                              .filter(Test.id == avaliacao_id)\
@@ -2598,7 +2601,7 @@ def _gerar_opcoes_proximos_filtros(scope_info, nivel_granularidade, user=None):
                     query_turmas = Class.query.with_entities(Class.id, Class.name)\
                                              .join(ClassTest, Class.id == ClassTest.class_id)\
                                              .join(Test, ClassTest.test_id == Test.id)\
-                                             .join(School, Class.school_id == School.id)\
+                                             .join(School, Class.school_id == cast(School.id, PostgresUUID))\
                                              .join(City, School.city_id == City.id)\
                                              .filter(Test.id == avaliacao_id)\
                                              .filter(City.id == municipio_id)\
@@ -4851,7 +4854,7 @@ def _obter_avaliacoes_por_municipio(municipio_id: str, user: dict, permissao: di
         # Aplicar joins para filtrar por município
         test_query = test_query.join(ClassTest, Test.id == ClassTest.test_id)
         test_query = test_query.join(Class, ClassTest.class_id == Class.id)
-        test_query = test_query.join(School, Class.school_id == School.id)
+        test_query = test_query.join(School, Class.school_id == cast(School.id, PostgresUUID))
         test_query = test_query.join(City, School.city_id == City.id)
         test_query = test_query.filter(City.id == city.id)
         
@@ -4861,7 +4864,7 @@ def _obter_avaliacoes_por_municipio(municipio_id: str, user: dict, permissao: di
         query_avaliacoes = Test.query.with_entities(Test.id, Test.title)\
                             .join(ClassTest, Test.id == ClassTest.test_id)\
                             .join(Class, ClassTest.class_id == Class.id)\
-                            .join(School, Class.school_id == School.id)\
+                            .join(School, Class.school_id == cast(School.id, PostgresUUID))\
                             .join(City, School.city_id == City.id)\
                             .filter(City.id == city.id)
         
@@ -6522,7 +6525,7 @@ def obter_opcoes_filtros_comparacao():
                             query_avaliacoes = Test.query.with_entities(Test.id, Test.title)\
                                                         .join(ClassTest, Test.id == ClassTest.test_id)\
                                                         .join(Class, ClassTest.class_id == Class.id)\
-                                                        .join(School, Class.school_id == School.id)\
+                                                        .join(School, Class.school_id == cast(School.id, PostgresUUID))\
                                                         .join(City, School.city_id == City.id)\
                                                         .join(EvaluationResult, Test.id == EvaluationResult.test_id)\
                                                         .filter(or_(*filters))\
@@ -6545,7 +6548,7 @@ def obter_opcoes_filtros_comparacao():
                             query_avaliacoes = Test.query.with_entities(Test.id, Test.title)\
                                                         .join(ClassTest, Test.id == ClassTest.test_id)\
                                                         .join(Class, ClassTest.class_id == Class.id)\
-                                                        .join(School, Class.school_id == School.id)\
+                                                        .join(School, Class.school_id == cast(School.id, PostgresUUID))\
                                                         .join(City, School.city_id == City.id)\
                                                         .join(EvaluationResult, Test.id == EvaluationResult.test_id)\
                                                         .filter(Class.school_id == manager.school_id)\
@@ -6556,7 +6559,7 @@ def obter_opcoes_filtros_comparacao():
                     query_avaliacoes = Test.query.with_entities(Test.id, Test.title)\
                                                 .join(ClassTest, Test.id == ClassTest.test_id)\
                                                 .join(Class, ClassTest.class_id == Class.id)\
-                                                .join(School, Class.school_id == School.id)\
+                                                .join(School, Class.school_id == cast(School.id, PostgresUUID))\
                                                 .join(City, School.city_id == City.id)\
                                                 .join(EvaluationResult, Test.id == EvaluationResult.test_id)\
                                                 .filter(City.id == city.id)
@@ -6596,7 +6599,7 @@ def obter_opcoes_filtros_comparacao():
                 
                 # Buscar escolas onde as avaliações selecionadas foram aplicadas E TÊM RESULTADOS
                 query_escolas = School.query.with_entities(School.id, School.name)\
-                                           .join(Class, School.id == Class.school_id)\
+                                           .join(Class, cast(School.id, PostgresUUID) == Class.school_id)\
                                            .join(ClassTest, Class.id == ClassTest.class_id)\
                                            .join(Test, ClassTest.test_id == Test.id)\
                                            .join(EvaluationResult, Test.id == EvaluationResult.test_id)\

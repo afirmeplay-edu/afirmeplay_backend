@@ -14,6 +14,7 @@ from app.models.educationStage import EducationStage
 from app.models.studentClass import Class
 from app.models.school import School
 from app.models.city import City
+from app.utils.uuid_helpers import ensure_uuid, ensure_uuid_list
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import joinedload
 import logging
@@ -59,9 +60,11 @@ class DistributionService:
                     grade_uuids.append(g)
             
             # 1. Buscar todas as turmas que pertencem às séries selecionadas e escolas selecionadas
+            # Converter school_ids para UUID (Class.school_id é UUID)
+            school_ids_uuids = ensure_uuid_list(school_ids)
             classes = Class.query.filter(
                 Class.grade_id.in_(grade_uuids),
-                Class.school_id.in_(school_ids)
+                Class.school_id.in_(school_ids_uuids)
             ).all()
             
             if not classes:
@@ -124,25 +127,28 @@ class DistributionService:
                     grade_uuids.append(g)
             
             # 1. Buscar todas as turmas que pertencem às séries selecionadas e escolas selecionadas
-            query = Class.query.filter(
-                Class.grade_id.in_(grade_uuids),
-                Class.school_id.in_(school_ids)
-            )
+            # Converter school_ids para UUID (Class.school_id é UUID)
+            school_ids_uuids = ensure_uuid_list(school_ids)
+            
+            # Construir query de forma que evite inferência de tipo incorreta quando há apenas 1 elemento
+            # Começar sempre com grade_id (que é UUID) para estabelecer o contexto correto
+            query = Class.query.filter(Class.grade_id.in_(grade_uuids))
+            
+            # Adicionar filtro de school_id - usar == quando há apenas 1 elemento
+            if len(school_ids_uuids) == 1:
+                query = query.filter(Class.school_id == school_ids_uuids[0])
+            else:
+                query = query.filter(Class.school_id.in_(school_ids_uuids))
             
             # Se selected_classes for fornecido, filtrar apenas essas turmas
+            # Converter class_ids para UUID (Class.id é UUID)
             if selected_classes:
-                import uuid as uuid_lib
-                class_uuids = []
-                for c in selected_classes:
-                    if isinstance(c, str):
-                        try:
-                            uuid_obj = uuid_lib.UUID(c)
-                            class_uuids.append(uuid_obj)
-                        except (ValueError, AttributeError):
-                            class_uuids.append(c)
-                    else:
-                        class_uuids.append(c)
-                query = query.filter(Class.id.in_(class_uuids))
+                class_ids_uuids = ensure_uuid_list(selected_classes)
+                # Usar == quando há apenas 1 elemento para evitar inferência de tipo incorreta
+                if len(class_ids_uuids) == 1:
+                    query = query.filter(Class.id == class_ids_uuids[0])
+                else:
+                    query = query.filter(Class.id.in_(class_ids_uuids))
             
             classes = query.all()
             
@@ -324,7 +330,9 @@ class DistributionService:
                 # Prioridade: turma > serie > escola > municipio > estado
                 if filters.get('turma'):
                     # Filtrar apenas pela turma específica
-                    turma = Class.query.get(filters['turma'])
+                    # Converter turma_id para UUID (Class.id é UUID)
+                    turma_id_uuid = ensure_uuid(filters['turma'])
+                    turma = Class.query.get(turma_id_uuid)
                     if turma and turma.school_id:
                         school_ids = [turma.school_id]
                 elif filters.get('serie'):

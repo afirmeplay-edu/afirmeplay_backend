@@ -51,7 +51,7 @@ class PlayTvVideoClass(db.Model):
     
     id = db.Column(db.String, primary_key=True, default=lambda: str(uuid.uuid4()))
     video_id = db.Column(db.String, db.ForeignKey('play_tv_videos.id'), nullable=False)
-    class_id = db.Column(db.String, db.ForeignKey('class.id'), nullable=False)
+    class_id = db.Column(UUID(as_uuid=True), db.ForeignKey('class.id'), nullable=False)
     created_at = db.Column(db.TIMESTAMP, server_default=db.text('CURRENT_TIMESTAMP'))
     
     # Relacionamentos

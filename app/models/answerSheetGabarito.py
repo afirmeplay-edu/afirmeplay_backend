@@ -4,8 +4,8 @@ Modelo para armazenar gabaritos de cartões resposta
 """
 
 from app import db
+from sqlalchemy.dialects.postgresql import UUID, JSON
 import uuid
-from sqlalchemy.dialects.postgresql import JSON
 from datetime import datetime
 
 
@@ -20,7 +20,7 @@ class AnswerSheetGabarito(db.Model):
     
     # Vinculação opcional com prova ou turma
     test_id = db.Column(db.String, db.ForeignKey('test.id'), nullable=True)
-    class_id = db.Column(db.String, db.ForeignKey('class.id'), nullable=True)
+    class_id = db.Column(UUID(as_uuid=True), db.ForeignKey('class.id'), nullable=True)
     
     # Configuração do cartão
     num_questions = db.Column(db.Integer, nullable=False)

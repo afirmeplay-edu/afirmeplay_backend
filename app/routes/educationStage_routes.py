@@ -6,9 +6,12 @@ from app.models.manager import Manager
 from app.models.schoolTeacher import SchoolTeacher
 from app.models.studentClass import Class
 from app.models.school import School
+from app.utils.uuid_helpers import ensure_uuid, ensure_uuid_list
 from app import db
 from flask_jwt_extended import jwt_required
 from app.decorators.role_required import role_required, get_current_user_from_token
+from sqlalchemy import cast
+from sqlalchemy.dialects.postgresql import UUID as PostgresUUID
 import logging
 
 bp = Blueprint('education_stages', __name__, url_prefix="/education_stages")
@@ -24,12 +27,13 @@ def getEducationStages():
             return jsonify({"error": "Usuário não encontrado"}), 404
         
         # Query base: buscar education_stages que têm grades com classes em escolas
+        # Converter School.id para UUID para comparar com Class.school_id (UUID)
         query = db.session.query(EducationStage).distinct().join(
             Grade, Grade.education_stage_id == EducationStage.id
         ).join(
             Class, Class.grade_id == Grade.id
         ).join(
-            School, Class.school_id == School.id
+            School, Class.school_id == cast(School.id, PostgresUUID)
         )
         
         # Aplicar filtros baseados na role
@@ -47,7 +51,10 @@ def getEducationStages():
             manager = Manager.query.filter_by(user_id=user['id']).first()
             if not manager or not manager.school_id:
                 return jsonify([]), 200
-            query = query.filter(School.id == manager.school_id)
+            # Converter manager.school_id para UUID para comparar com School.id (que será convertido)
+            manager_school_id_uuid = ensure_uuid(manager.school_id)
+            if manager_school_id_uuid:
+                query = query.filter(cast(School.id, PostgresUUID) == manager_school_id_uuid)
         elif user['role'] == "professor":
             # Filtrar pelas escolas onde o professor está vinculado
             teacher = Teacher.query.filter_by(user_id=user['id']).first()
@@ -59,7 +66,10 @@ def getEducationStages():
             
             if not school_ids:
                 return jsonify([]), 200
-            query = query.filter(School.id.in_(school_ids))
+            # Converter school_ids para UUID para comparar com School.id (que será convertido)
+            school_ids_uuids = ensure_uuid_list(school_ids)
+            if school_ids_uuids:
+                query = query.filter(cast(School.id, PostgresUUID).in_(school_ids_uuids))
         
         stages = query.all()
         result = [{"id": str(s.id), "name": s.name} for s in stages]

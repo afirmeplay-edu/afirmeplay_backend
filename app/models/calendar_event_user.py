@@ -1,4 +1,5 @@
 from app import db
+from sqlalchemy.dialects.postgresql import UUID
 import uuid
 
 
@@ -10,7 +11,7 @@ class CalendarEventUser(db.Model):
     user_id = db.Column(db.String, db.ForeignKey('users.id'), nullable=False)
 
     school_id = db.Column(db.String, db.ForeignKey('school.id'), nullable=True)
-    class_id = db.Column(db.String, db.ForeignKey('class.id'), nullable=True)
+    class_id = db.Column(UUID(as_uuid=True), db.ForeignKey('class.id'), nullable=True)
     role_snapshot = db.Column(db.String(32), nullable=True)
 
     read_at = db.Column(db.TIMESTAMP(timezone=True), nullable=True)

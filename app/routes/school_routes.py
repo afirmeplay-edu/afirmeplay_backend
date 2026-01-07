@@ -143,7 +143,10 @@ def listar_escolas():
             if not manager.school_id:
                 return jsonify({"error": "Diretor/Coordenador não está vinculado a nenhuma escola"}), 400
             
-            schools = query.filter(School.id == manager.school_id).all()
+            # ✅ CORRIGIDO: School.id é VARCHAR, converter manager.school_id para string
+            from app.utils.uuid_helpers import uuid_to_str
+            school_id_str = uuid_to_str(manager.school_id)
+            schools = query.filter(School.id == school_id_str).all() if school_id_str else []
         else:
             # TecAdmin vê escolas do município
             city_id = user.get('tenant_id') or user.get('city_id')
@@ -528,7 +531,10 @@ def buscar_escolas_por_serie(grade_id):
             if not manager.school_id:
                 return jsonify({"error": "Diretor/Coordenador não está vinculado a nenhuma escola"}), 400
             
-            schools = query.filter(School.id == manager.school_id).all()
+            # ✅ CORRIGIDO: School.id é VARCHAR, converter manager.school_id para string
+            from app.utils.uuid_helpers import uuid_to_str
+            school_id_str = uuid_to_str(manager.school_id)
+            schools = query.filter(School.id == school_id_str).all() if school_id_str else []
         else:
             # TecAdmin vê escolas do município
             city_id = user.get('tenant_id') or user.get('city_id')

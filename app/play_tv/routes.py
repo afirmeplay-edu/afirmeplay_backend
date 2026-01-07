@@ -12,6 +12,8 @@ from app.models.student import Student
 from app.decorators.role_required import role_required, get_current_user_from_token
 from flask_jwt_extended import jwt_required
 from sqlalchemy.exc import SQLAlchemyError, IntegrityError
+from sqlalchemy import cast
+from sqlalchemy.dialects.postgresql import UUID as PostgresUUID
 from app import db
 import logging
 from urllib.parse import urlparse
@@ -65,7 +67,7 @@ def list_videos():
         ).join(
             Subject, PlayTvVideo.subject_id == Subject.id
         ).outerjoin(
-            Class, (Class.school_id == School.id) & (Class.grade_id == Grade.id)
+            Class, (Class.school_id == cast(School.id, PostgresUUID)) & (Class.grade_id == Grade.id)
         ).distinct()
         
         # Aplicar filtros hierárquicos (query parameters)

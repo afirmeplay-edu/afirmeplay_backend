@@ -10,7 +10,8 @@ class CalendarEventUser(db.Model):
     event_id = db.Column(db.String, db.ForeignKey('calendar_events.id'), nullable=False)
     user_id = db.Column(db.String, db.ForeignKey('users.id'), nullable=False)
 
-    school_id = db.Column(db.String, db.ForeignKey('school.id'), nullable=True)
+    # ✅ CORRIGIDO: Explicitamente String(36) para garantir tipo correto
+    school_id = db.Column(db.String(36), db.ForeignKey('school.id'), nullable=True)
     class_id = db.Column(UUID(as_uuid=True), db.ForeignKey('class.id'), nullable=True)
     role_snapshot = db.Column(db.String(32), nullable=True)
 

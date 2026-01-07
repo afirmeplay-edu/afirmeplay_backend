@@ -36,7 +36,8 @@ class AnswerSheetGabarito(db.Model):
     created_by = db.Column(db.String, db.ForeignKey('users.id'), nullable=True)
     
     # Informações adicionais da avaliação (para relatórios e identificação)
-    school_id = db.Column(db.String, db.ForeignKey('school.id'), nullable=True)
+    # ✅ CORRIGIDO: Explicitamente String(36) para garantir tipo correto
+    school_id = db.Column(db.String(36), db.ForeignKey('school.id'), nullable=True)
     school_name = db.Column(db.String(200), nullable=True)  # Nome da escola
     municipality = db.Column(db.String(200), nullable=True)  # Município
     state = db.Column(db.String(100), nullable=True)  # Estado

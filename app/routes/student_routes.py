@@ -68,7 +68,10 @@ def criar_usuario_e_aluno():
             return jsonify({"error": "Class not found"}), 404
         
         # Buscar escola da turma
-        school = School.query.get(class_obj.school_id)
+        # ✅ CORRIGIDO: Converter para string (School.id é VARCHAR)
+        from app.utils.uuid_helpers import uuid_to_str
+        school_id_str = uuid_to_str(class_obj.school_id)
+        school = School.query.filter(School.id == school_id_str).first() if school_id_str else None
         if not school:
             return jsonify({"error": "School not found for the specified class"}), 404
         
@@ -534,7 +537,10 @@ def atualizar_aluno(student_id, class_id):
 
         # Atualizar city_id do usuário se o aluno foi movido para outra escola
         if aluno.school_id:
-            school = School.query.get(aluno.school_id)
+            # ✅ CORRIGIDO: Converter para string (School.id é VARCHAR)
+            from app.utils.uuid_helpers import uuid_to_str
+            school_id_str = uuid_to_str(aluno.school_id)
+            school = School.query.filter(School.id == school_id_str).first() if school_id_str else None
             if school and school.city_id != usuario.city_id:
                 usuario.city_id = school.city_id
                 logging.info(f"Atualizando city_id do aluno {usuario.id} para {school.city_id}")
@@ -922,7 +928,10 @@ def get_students_by_school_and_class(school_id, class_id):
         formatted_students = []
         for student in students:
             user = User.query.get(student.user_id)
-            school = School.query.get(student.school_id)
+            # ✅ CORRIGIDO: Converter para string (School.id é VARCHAR)
+            from app.utils.uuid_helpers import uuid_to_str
+            school_id_str = uuid_to_str(student.school_id)
+            school = School.query.filter(School.id == school_id_str).first() if school_id_str else None
             class_obj = Class.query.get(student.class_id)
             grade = Grade.query.get(student.grade_id) if student.grade_id else None
             

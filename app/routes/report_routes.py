@@ -450,7 +450,8 @@ def relatorio_completo(evaluation_id: str):
 #             return jsonify({"error": "Avaliação não encontrada"}), 404
 #         
 #         # Buscar turmas onde a avaliação foi aplicada
-#         class_tests = ClassTest.query.filter_by(test_id=evaluation_id).all()
+#         # ✅ CORRIGIDO: ClassTest.test_id é VARCHAR, converter evaluation_id para string
+        class_tests = ClassTest.query.filter_by(test_id=str(evaluation_id)).all()
 #         if not class_tests:
 #             return jsonify({"error": "Avaliação não foi aplicada em nenhuma turma"}), 404
 #         
@@ -1293,7 +1294,8 @@ def test_html_template(evaluation_id: str):
             return jsonify({"error": "Avaliação não encontrada"}), 404
         
         # Buscar turmas onde a avaliação foi aplicada
-        class_tests = ClassTest.query.filter_by(test_id=evaluation_id).all()
+        # ✅ CORRIGIDO: ClassTest.test_id é VARCHAR, converter evaluation_id para string
+        class_tests = ClassTest.query.filter_by(test_id=str(evaluation_id)).all()
         if not class_tests:
             return jsonify({"error": "Avaliação não foi aplicada em nenhuma turma"}), 404
         
@@ -1761,7 +1763,8 @@ def _buscar_turmas_por_escopo(evaluation_id: str, scope_type: str, scope_id: str
     Returns:
         List[ClassTest]: Lista de turmas filtradas
     """
-    query = ClassTest.query.filter_by(test_id=evaluation_id)
+    # ✅ CORRIGIDO: ClassTest.test_id é VARCHAR, converter evaluation_id para string
+    query = ClassTest.query.filter_by(test_id=str(evaluation_id))
     
     if scope_type == 'school':
         # Filtrar por escola específica
@@ -1771,7 +1774,7 @@ def _buscar_turmas_por_escopo(evaluation_id: str, scope_type: str, scope_id: str
             query = query.join(Class).filter(Class.school_id == school_id_uuid)
     elif scope_type == 'city':
         # Filtrar por município (todas as escolas do município)
-        query = query.join(Class).join(School).filter(School.city_id == scope_id)
+        query = query.join(Class).join(School, Class.school_id == cast(School.id, PostgresUUID)).filter(School.city_id == scope_id)
     # Se scope_type == 'all', não aplicar filtros adicionais
     
     return query.all()
@@ -3255,8 +3258,8 @@ def _calcular_totais_alunos_por_municipio(evaluation_id: str, class_tests: List[
     # Buscar todos os alunos das turmas onde a avaliação foi aplicada
     from sqlalchemy.orm import joinedload as jl
     students = Student.query.options(
-        jl(Student.class_),
-        jl(Student.class_, Class.school)
+        jl(Student.class_)
+        # ❌ REMOVIDO: jl(Student.class_, Class.school) - Class.school é property, não relationship
     ).filter(Student.class_id.in_(class_ids)).all()
     
     # Buscar resultados da avaliação (alunos que realizaram)
@@ -3475,8 +3478,8 @@ def _calcular_niveis_aprendizagem_por_municipio(evaluation_id: str, class_tests:
     from sqlalchemy.orm import joinedload as jl
     evaluation_results = EvaluationResult.query.options(
         jl(EvaluationResult.student),
-        jl(EvaluationResult.student, Student.class_),
-        jl(EvaluationResult.student, Student.class_, Class.school)
+        jl(EvaluationResult.student, Student.class_)
+        # ❌ REMOVIDO: jl(EvaluationResult.student, Student.class_, Class.school) - Class.school é property
     ).filter_by(test_id=evaluation_id).all()
     
     # Agrupar por escola e disciplina
@@ -3567,7 +3570,8 @@ def _calcular_niveis_aprendizagem_por_municipio(evaluation_id: str, class_tests:
     escolas_no_escopo: Dict[str, School] = {}
     class_ids_escopo = [ct.class_id for ct in class_tests if getattr(ct, "class_id", None)]
     if class_ids_escopo:
-        classes = Class.query.options(joinedload(Class.school)).filter(Class.id.in_(class_ids_escopo)).all()
+        # ❌ REMOVIDO: joinedload(Class.school) - Class.school é property, não relationship
+        classes = Class.query.filter(Class.id.in_(class_ids_escopo)).all()
         for cls in classes:
             if cls and cls.school:
                 escolas_no_escopo[str(cls.school.id)] = cls.school
@@ -4117,8 +4121,8 @@ def _calcular_proficiencia_por_municipio(evaluation_id: str, class_tests: List[C
     from sqlalchemy.orm import joinedload as jl
     evaluation_results = EvaluationResult.query.options(
         jl(EvaluationResult.student),
-        jl(EvaluationResult.student, Student.class_),
-        jl(EvaluationResult.student, Student.class_, Class.school)
+        jl(EvaluationResult.student, Student.class_)
+        # ❌ REMOVIDO: jl(EvaluationResult.student, Student.class_, Class.school) - Class.school é property
     ).filter_by(test_id=evaluation_id).all()
 
     # Buscar respostas dos alunos
@@ -4690,8 +4694,8 @@ def _calcular_nota_geral_por_municipio(evaluation_id: str, class_tests: List[Cla
     from sqlalchemy.orm import joinedload as jl
     evaluation_results = EvaluationResult.query.options(
         jl(EvaluationResult.student),
-        jl(EvaluationResult.student, Student.class_),
-        jl(EvaluationResult.student, Student.class_, Class.school)
+        jl(EvaluationResult.student, Student.class_)
+        # ❌ REMOVIDO: jl(EvaluationResult.student, Student.class_, Class.school) - Class.school é property
     ).filter_by(test_id=evaluation_id).all()
 
     # Buscar respostas dos alunos
@@ -5559,7 +5563,8 @@ def _calcular_media_municipal(evaluation_id: str) -> float:
             return 0.0
         
         # Buscar turmas da avaliação
-        class_tests = ClassTest.query.filter_by(test_id=evaluation_id).all()
+        # ✅ CORRIGIDO: ClassTest.test_id é VARCHAR, converter evaluation_id para string
+        class_tests = ClassTest.query.filter_by(test_id=str(evaluation_id)).all()
         if not class_tests:
             return 0.0
         
@@ -5602,7 +5607,8 @@ def _calcular_media_municipal_nota(evaluation_id: str) -> float:
             return 0.0
         
         # Buscar turmas da avaliação
-        class_tests = ClassTest.query.filter_by(test_id=evaluation_id).all()
+        # ✅ CORRIGIDO: ClassTest.test_id é VARCHAR, converter evaluation_id para string
+        class_tests = ClassTest.query.filter_by(test_id=str(evaluation_id)).all()
         if not class_tests:
             return 0.0
         
@@ -5645,7 +5651,8 @@ def _calcular_media_municipal_por_disciplina(evaluation_id: str, question_discip
             return {}
         
         # Buscar turmas da avaliação
-        class_tests = ClassTest.query.filter_by(test_id=evaluation_id).all()
+        # ✅ CORRIGIDO: ClassTest.test_id é VARCHAR, converter evaluation_id para string
+        class_tests = ClassTest.query.filter_by(test_id=str(evaluation_id)).all()
         if not class_tests:
             return {}
         
@@ -5746,7 +5753,8 @@ def _calcular_media_municipal_nota_por_disciplina(evaluation_id: str, question_d
             return {}
         
         # Buscar turmas da avaliação
-        class_tests = ClassTest.query.filter_by(test_id=evaluation_id).all()
+        # ✅ CORRIGIDO: ClassTest.test_id é VARCHAR, converter evaluation_id para string
+        class_tests = ClassTest.query.filter_by(test_id=str(evaluation_id)).all()
         if not class_tests:
             return {}
         

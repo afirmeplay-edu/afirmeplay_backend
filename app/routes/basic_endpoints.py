@@ -152,7 +152,10 @@ def dashboard_stats():
                 return jsonify({"erro": "Usuário não está vinculado a nenhuma escola"}), 400
             
             # Buscar a escola do manager
-            school = School.query.get(manager.school_id)
+            # ✅ CORRIGIDO: Converter para string (School.id é VARCHAR)
+            from app.utils.uuid_helpers import uuid_to_str
+            school_id_str = uuid_to_str(manager.school_id)
+            school = School.query.filter(School.id == school_id_str).first() if school_id_str else None
             if not school:
                 return jsonify({"erro": "Escola não encontrada"}), 400
             
@@ -380,7 +383,10 @@ def comprehensive_dashboard_stats():
                 return jsonify({"erro": "Usuário não está vinculado a nenhuma escola"}), 400
             
             # Buscar a escola do manager
-            school = School.query.get(manager.school_id)
+            # ✅ CORRIGIDO: Converter para string (School.id é VARCHAR)
+            from app.utils.uuid_helpers import uuid_to_str
+            school_id_str = uuid_to_str(manager.school_id)
+            school = School.query.filter(School.id == school_id_str).first() if school_id_str else None
             if not school:
                 return jsonify({"erro": "Escola não encontrada"}), 400
             
@@ -603,7 +609,10 @@ def evaluations_stats():
                 return jsonify({"erro": "Usuário não está vinculado a nenhuma escola"}), 400
             
             # Buscar a escola do manager
-            school = School.query.get(manager.school_id)
+            # ✅ CORRIGIDO: Converter para string (School.id é VARCHAR)
+            from app.utils.uuid_helpers import uuid_to_str
+            school_id_str = uuid_to_str(manager.school_id)
+            school = School.query.filter(School.id == school_id_str).first() if school_id_str else None
             if not school:
                 return jsonify({"erro": "Escola não encontrada"}), 400
             
@@ -1755,7 +1764,10 @@ def recent_schools():
                 return jsonify({"erro": "Usuário não está vinculado a nenhuma escola"}), 400
             
             # Buscar a escola do manager
-            school = School.query.get(manager.school_id)
+            # ✅ CORRIGIDO: Converter para string (School.id é VARCHAR)
+            from app.utils.uuid_helpers import uuid_to_str
+            school_id_str = uuid_to_str(manager.school_id)
+            school = School.query.filter(School.id == school_id_str).first() if school_id_str else None
             if not school:
                 return jsonify({"erro": "Escola não encontrada"}), 400
             
@@ -1860,7 +1872,10 @@ def recent_students():
                 return jsonify({"erro": "Usuário não está vinculado a nenhuma escola"}), 400
             
             # Buscar a escola do manager
-            school = School.query.get(manager.school_id)
+            # ✅ CORRIGIDO: Converter para string (School.id é VARCHAR)
+            from app.utils.uuid_helpers import uuid_to_str
+            school_id_str = uuid_to_str(manager.school_id)
+            school = School.query.filter(School.id == school_id_str).first() if school_id_str else None
             if not school:
                 return jsonify({"erro": "Escola não encontrada"}), 400
             
@@ -1986,7 +2001,10 @@ def recent_questions():
                 return jsonify({"erro": "Usuário não está vinculado a nenhuma escola"}), 400
             
             # Buscar a escola do manager
-            school = School.query.get(manager.school_id)
+            # ✅ CORRIGIDO: Converter para string (School.id é VARCHAR)
+            from app.utils.uuid_helpers import uuid_to_str
+            school_id_str = uuid_to_str(manager.school_id)
+            school = School.query.filter(School.id == school_id_str).first() if school_id_str else None
             if not school:
                 return jsonify({"erro": "Escola não encontrada"}), 400
             
@@ -2148,7 +2166,10 @@ def get_evaluation_results_stats():
                 return jsonify({"erro": "Usuário não está vinculado a nenhuma escola"}), 400
             
             # Buscar a escola do manager
-            school = School.query.get(manager.school_id)
+            # ✅ CORRIGIDO: Converter para string (School.id é VARCHAR)
+            from app.utils.uuid_helpers import uuid_to_str
+            school_id_str = uuid_to_str(manager.school_id)
+            school = School.query.filter(School.id == school_id_str).first() if school_id_str else None
             if not school:
                 return jsonify({"erro": "Escola não encontrada"}), 400
             

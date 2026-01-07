@@ -17,6 +17,8 @@ from app.models.teacher import Teacher
 from app.models.schoolTeacher import SchoolTeacher
 from app.models.manager import Manager
 from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy import cast
+from sqlalchemy.dialects.postgresql import UUID as PostgresUUID
 import logging
 from typing import List, Dict, Any
 
@@ -480,7 +482,7 @@ def buscar_turmas_por_serie(grade_id):
             elif permissao['scope'] == 'municipio':
                 city_id = user.get('city_id')
                 if city_id:
-                    query_turmas = query_turmas.join(School).filter(School.city_id == city_id)
+                    query_turmas = query_turmas.join(School, Class.school_id == cast(School.id, PostgresUUID)).filter(School.city_id == city_id)
             
             turmas_objs = query_turmas.all()
             turmas = [{

@@ -167,6 +167,11 @@ def rebuild_report_for_scope(
                 "scope_id": scope_id
             })
             print(f"[REBUILD] ✅ Análise de IA gerada com sucesso")
+            print(f"[REBUILD] 📊 Resultado da análise:")
+            print(f"  - Participação: {len(ai_analysis.get('participacao', ''))} caracteres")
+            print(f"  - Proficiência: {len(ai_analysis.get('proficiencia', {}))} disciplinas")
+            print(f"  - Notas: {len(ai_analysis.get('notas', ''))} caracteres")
+            print(f"  - Níveis: {len(ai_analysis.get('niveis_aprendizagem', {}))} disciplinas")
             
             # 4. Salvar análise de IA no cache
             print(f"[REBUILD] 💾 ETAPA 4: Salvando análise de IA no cache para {scope_type}:{scope_id}")

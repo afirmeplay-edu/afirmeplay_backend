@@ -3,12 +3,14 @@ from flask_sqlalchemy import SQLAlchemy
 from flask_cors import CORS
 from flask_jwt_extended import JWTManager
 from flask_migrate import Migrate
+from markupsafe import Markup
 
 from .config import Config
 from dotenv import load_dotenv
 import os
 import logging
 import traceback
+import re
 
 # Importar configuração de logging e alertas Telegram
 from .utils.logging_config import setup_logging
@@ -58,6 +60,71 @@ def create_app():
     db.init_app(app)
     jwt.init_app(app)
     migrate.init_app(app, db)
+    
+    # Registrar filtros Jinja2 globais
+    @app.template_filter('formatar_texto_ia')
+    def formatar_texto_ia(texto):
+        """
+        Formata texto da IA para HTML preservando quebras de linha e formatação
+        Converte quebras de linha duplas em parágrafos e simples em <br/>
+        """
+        if not texto:
+            return Markup("")
+        
+        # Se não houver quebras de linha duplas, tentar detectar padrões para quebrar
+        if '\n\n' not in texto:
+            # Detectar padrões de títulos no meio do texto
+            texto = texto.replace('Destaques e Recomendações:', '\n\nDestaques e Recomendações:')
+            texto = texto.replace('Classificação:', '\n\nClassificação:')
+            texto = texto.replace('PARECER TÉCNICO:', '\n\nPARECER TÉCNICO:')
+            # Detectar números como títulos (ex: "1. ", "2. ", "3. ")
+            texto = re.sub(r'(\d+\.\s)', r'\n\n\1', texto)
+            # Detectar títulos em maiúsculas seguidas de dois pontos
+            texto = re.sub(r'([A-ZÁÊÔÇ][A-ZÁÊÔÇ\s]{10,}:)', r'\n\n\1', texto)
+        
+        # Dividir por quebras de linha duplas (parágrafos)
+        paragrafos = texto.split('\n\n')
+        
+        resultado = []
+        for paragrafo in paragrafos:
+            paragrafo = paragrafo.strip()
+            if not paragrafo:
+                continue
+            
+            # Verificar se é um título (maiúsculas seguidas de dois pontos, ou números como "1. ", "2. ")
+            if (len(paragrafo) > 10 and paragrafo.isupper() and paragrafo.endswith(':')) or \
+               (len(paragrafo) > 2 and paragrafo[0].isdigit() and paragrafo[1] == '.' and paragrafo[2] == ' '):
+                # É um título - converter para negrito
+                resultado.append(f'<p style="font-weight: bold; margin-top: 12px; margin-bottom: 8px;">{paragrafo}</p>')
+            # Verificar se começa com títulos específicos
+            elif paragrafo.startswith('Destaques e Recomendações:') or \
+                 paragrafo.startswith('Classificação:') or \
+                 paragrafo.startswith('PARECER TÉCNICO:') or \
+                 paragrafo.startswith('PARECER TÉCNICO DE PARTICIPAÇÃO:') or \
+                 paragrafo.startswith('PARECER TÉCNICO: NOTA IDAV:'):
+                # É um título - converter para negrito
+                resultado.append(f'<p style="font-weight: bold; margin-top: 12px; margin-bottom: 8px;">{paragrafo}</p>')
+            # Verificar se contém bullets (•) - converter em lista
+            elif '•' in paragrafo:
+                # Dividir por bullets
+                partes = paragrafo.split('•')
+                primeira_parte = partes[0].strip()
+                itens_lista = [item.strip() for item in partes[1:] if item.strip()]
+                
+                if primeira_parte:
+                    resultado.append(f'<p>{primeira_parte}</p>')
+                
+                if itens_lista:
+                    resultado.append('<ul style="margin-left: 20px; margin-top: 8px; margin-bottom: 8px;">')
+                    for item in itens_lista:
+                        resultado.append(f'<li style="margin-bottom: 4px;">{item}</li>')
+                    resultado.append('</ul>')
+            else:
+                # Parágrafo normal - converter quebras de linha simples em <br/>
+                paragrafo_html = paragrafo.replace('\n', '<br/>')
+                resultado.append(f'<p style="margin-top: 8px; margin-bottom: 8px;">{paragrafo_html}</p>')
+        
+        return Markup(''.join(resultado)) if resultado else Markup("")
     
     # Inicializar Celery (para processamento assíncrono de relatórios)
     try:

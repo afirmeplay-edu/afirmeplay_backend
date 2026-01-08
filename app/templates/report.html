@@ -440,6 +440,33 @@
 				font-weight: 700;
 				color: #1e293b;
 			}
+			/* Blocos de página - cada um fecha uma página */
+			.page-block {
+				page-break-after: always;
+			}
+			.page-block:last-of-type {
+				page-break-after: auto;
+			}
+			.data-block {
+				page-break-inside: avoid;
+			}
+			.analysis-block {
+				page-break-inside: avoid;
+				background: #f8fafc;
+				border-left: 4px solid #6366f1;
+				padding: 16px 20px;
+				border-radius: 6px;
+				margin-top: 16px;
+			}
+			/* Container para análises da IA (mantido para compatibilidade) */
+			.ai-analysis-block {
+				margin-top: 16px;
+				padding: 16px 20px;
+				background: #f8fafc;
+				border-left: 4px solid #6366f1;
+				border-radius: 6px;
+				page-break-inside: avoid;
+			}
 			.analysis-list {
 				margin: 8px 0 0 20px;
 				padding: 0;
@@ -738,24 +765,19 @@
 		Geral') if series_label else ('Municipal Geral' if metadados.scope_type
 		== 'city' else 'Geral')) %} {% set general_label_text = general_label or
 		'Geral' %} {% set municipal_label = 'Município de ' ~
-		metadados.municipio if metadados.municipio else 'Rede Municipal' %}
-		{# Determinar série dinâmica para substituir "9º GERAL" #}
-		{% if is_school_scope %}
-			{% if avaliacao.series_label %}
-				{% set serie_geral_label = (avaliacao.series_label ~ ' GERAL') | upper %}
-			{% elif metadados.series_label %}
-				{% set serie_geral_label = (metadados.series_label ~ ' GERAL') | upper %}
-			{% elif avaliacao.series and avaliacao.series|length > 0 %}
-				{% set serie_geral_label = (avaliacao.series | join(', ') ~ ' GERAL') | upper %}
-			{% elif metadados.series and metadados.series|length > 0 %}
-				{% set serie_geral_label = (metadados.series | join(', ') ~ ' GERAL') | upper %}
-			{% else %}
-				{% set serie_geral_label = 'GERAL' %}
-			{% endif %}
-		{% else %}
-			{% set serie_geral_label = 'MUNICIPAL GERAL' %}
-		{% endif %} {#
-		Macro para criar gráfico doughnut com paths SVG #} {% macro
+		metadados.municipio if metadados.municipio else 'Rede Municipal' %} {#
+		Determinar série dinâmica para substituir "9º GERAL" #} {% if
+		is_school_scope %} {% if avaliacao.series_label %} {% set
+		serie_geral_label = (avaliacao.series_label ~ ' GERAL') | upper %} {%
+		elif metadados.series_label %} {% set serie_geral_label =
+		(metadados.series_label ~ ' GERAL') | upper %} {% elif avaliacao.series
+		and avaliacao.series|length > 0 %} {% set serie_geral_label =
+		(avaliacao.series | join(', ') ~ ' GERAL') | upper %} {% elif
+		metadados.series and metadados.series|length > 0 %} {% set
+		serie_geral_label = (metadados.series | join(', ') ~ ' GERAL') | upper
+		%} {% else %} {% set serie_geral_label = 'GERAL' %} {% endif %} {% else
+		%} {% set serie_geral_label = 'MUNICIPAL GERAL' %} {% endif %} {# Macro
+		para criar gráfico doughnut com paths SVG #} {% macro
 		doughnut_chart(items_list, colors) %} {% set total = items_list |
 		sum_values('value') %}
 
@@ -816,10 +838,27 @@
 			{# Seção 1: Topo - Logo roxo + Município + Secretaria #}
 			<div class="cover-top-section">
 				<div class="cover-logo-box">
-					{% if metadados.logo and metadados.logo != '' and metadados.logo != None %}
-					<img src="{{ metadados.logo }}" alt="Logo" style="width: 100%; height: 100%; object-fit: contain; border-radius: 8px;">
+					{% if metadados.logo and metadados.logo != '' and
+					metadados.logo != None %}
+					<img
+						src="{{ metadados.logo }}"
+						alt="Logo"
+						style="
+							width: 100%;
+							height: 100%;
+							object-fit: contain;
+							border-radius: 8px;
+						" />
 					{% elif default_logo %}
-					<img src="data:image/png;base64,{{ default_logo }}" alt="Logo" style="width: 100%; height: 100%; object-fit: contain; border-radius: 8px;">
+					<img
+						src="data:image/png;base64,{{ default_logo }}"
+						alt="Logo"
+						style="
+							width: 100%;
+							height: 100%;
+							object-fit: contain;
+							border-radius: 8px;
+						" />
 					{% else %}
 					<div class="cover-logo-text">AfirmePlay<br />PLAY</div>
 					{% endif %}
@@ -842,20 +881,18 @@
 					style="margin-top: 55px; margin-bottom: 20px">
 					{{ avaliacao.titulo or 'AVALIAÇÃO DIAGNÓSTICA' }}
 				</div>
-				{% if avaliacao.series_label or metadados.series_label or (avaliacao.series and avaliacao.series|length > 0) or (metadados.series and metadados.series|length > 0) %}
+				{% if avaliacao.series_label or metadados.series_label or
+				(avaliacao.series and avaliacao.series|length > 0) or
+				(metadados.series and metadados.series|length > 0) %}
 				<div class="cover-series">
-					{% if avaliacao.series_label %}
-						{{ avaliacao.series_label }}
-					{% elif metadados.series_label %}
-						{{ metadados.series_label }}
-					{% elif avaliacao.series and avaliacao.series|length > 0 %}
-						{{ avaliacao.series | join(', ') }}
-					{% elif metadados.series and metadados.series|length > 0 %}
-						{{ metadados.series | join(', ') }}
-					{% endif %}
+					{% if avaliacao.series_label %} {{ avaliacao.series_label }}
+					{% elif metadados.series_label %} {{ metadados.series_label
+					}} {% elif avaliacao.series and avaliacao.series|length > 0
+					%} {{ avaliacao.series | join(', ') }} {% elif
+					metadados.series and metadados.series|length > 0 %} {{
+					metadados.series | join(', ') }} {% endif %}
 				</div>
-				{% endif %}
-				{% if avaliacao.disciplinas %}
+				{% endif %} {% if avaliacao.disciplinas %}
 				<div class="cover-disciplinas">
 					{{ avaliacao.disciplinas | join(', ') }}
 				</div>
@@ -991,32 +1028,35 @@
 		</section>
 
 		<section class="section page-break">
-			<h2>
-				1. PARTICIPAÇÃO DA REDE NO PROCESSO DE AVALIAÇÃO DIAGNÓSTICA
-			</h2>
+			{# ===== DADOS ===== #}
+			<div class="page-block data-block">
+				<h2>
+					1. PARTICIPAÇÃO DA REDE NO PROCESSO DE AVALIAÇÃO DIAGNÓSTICA
+				</h2>
 
-			<table class="data-table">
-				<thead>
-					<tr>
-						<th class="table-title" colspan="5">
-							TOTAL DE ALUNOS QUE REALIZARAM A AVALIAÇÃO
-							DIAGNÓSTICA
-						</th>
-					</tr>
-					<tr>
-						<th>
-							{% if metadados.scope_type == 'school' %}SÉRIE/TURNO{% else %}ESCOLA{% endif %}
-						</th>
-						<th>MATRICULADOS</th>
-						<th>AVALIADOS</th>
-						<th>PERCENTUAL</th>
-						<th>FALTOSOS</th>
-					</tr>
-				</thead>
-				<tbody>
-					{% if metadados.scope_type == 'school' %}
-						{# Relatório por escola: mostrar turmas #}
-						{% for t in (total_alunos.por_turma or []) %}
+				<table class="data-table">
+					<thead>
+						<tr>
+							<th class="table-title" colspan="5">
+								TOTAL DE ALUNOS QUE REALIZARAM A AVALIAÇÃO
+								DIAGNÓSTICA
+							</th>
+						</tr>
+						<tr>
+							<th>
+								{% if metadados.scope_type == 'school'
+								%}SÉRIE/TURNO{% else %}ESCOLA{% endif %}
+							</th>
+							<th>MATRICULADOS</th>
+							<th>AVALIADOS</th>
+							<th>PERCENTUAL</th>
+							<th>FALTOSOS</th>
+						</tr>
+					</thead>
+					<tbody>
+						{% if metadados.scope_type == 'school' %} {# Relatório
+						por escola: mostrar turmas #} {% for t in
+						(total_alunos.por_turma or []) %}
 						<tr>
 							<td>{{ t.turma }}</td>
 							<td>{{ t.matriculados }}</td>
@@ -1024,10 +1064,9 @@
 							<td>{{ '%.0f' % (t.percentual or 0) }}%</td>
 							<td>{{ t.faltosos }}</td>
 						</tr>
-						{% endfor %}
-					{% else %}
-						{# Relatório municipal: mostrar escolas #}
-						{% for e in (total_alunos.por_escola or []) %}
+						{% endfor %} {% else %} {# Relatório municipal: mostrar
+						escolas #} {% for e in (total_alunos.por_escola or [])
+						%}
 						<tr>
 							<td style="text-align: left">{{ e.escola }}</td>
 							<td>{{ e.matriculados }}</td>
@@ -1035,73 +1074,78 @@
 							<td>{{ '%.0f' % (e.percentual or 0) }}%</td>
 							<td>{{ e.faltosos }}</td>
 						</tr>
-						{% endfor %}
-					{% endif %}
-					{% if total_alunos.total_geral %}
-					<tr>
-						<th>
-							{{ serie_geral_label }}
-						</th>
-						<th>{{ total_alunos.total_geral.matriculados }}</th>
-						<th>{{ total_alunos.total_geral.avaliados }}</th>
-						<th>
-							{{ '%.0f' % (total_alunos.total_geral.percentual or
-							0) }}%
-						</th>
-						<th>{{ total_alunos.total_geral.faltosos }}</th>
-					</tr>
-					{% endif %}
-				</tbody>
-			</table>
+						{% endfor %} {% endif %} {% if total_alunos.total_geral
+						%}
+						<tr>
+							<th>{{ serie_geral_label }}</th>
+							<th>{{ total_alunos.total_geral.matriculados }}</th>
+							<th>{{ total_alunos.total_geral.avaliados }}</th>
+							<th>
+								{{ '%.0f' % (total_alunos.total_geral.percentual
+								or 0) }}%
+							</th>
+							<th>{{ total_alunos.total_geral.faltosos }}</th>
+						</tr>
+						{% endif %}
+					</tbody>
+				</table>
 
-			{# Análise da IA para participação #} 			{% if analise_ia and
-			analise_ia.participacao %}
-			<div class="analysis-text">
-				{{ analise_ia.participacao|safe }}
+				{% if not analise_ia or not analise_ia.participacao %} {% if
+				total_alunos.total_geral %}
+				<div class="analysis-text">
+					A escola avaliou
+					<strong
+						>{{ total_alunos.total_geral.avaliados }} alunos</strong
+					>
+					{% if serie_geral_label and serie_geral_label != 'MUNICIPAL
+					GERAL' %} {{ serie_geral_label | replace(' GERAL', '') |
+					lower }}, o que representa {% else %} avaliados, o que
+					representa {% endif %}
+					<strong
+						>{{ '%.0f' % (total_alunos.total_geral.percentual or 0)
+						}}%</strong
+					>
+					do total de
+					<strong>{{ total_alunos.total_geral.matriculados }}</strong>
+					alunos matriculados. Registrou-se um total de
+					<strong>{{ total_alunos.total_geral.faltosos }}</strong>
+					alunos faltosos. A taxa de participação de
+					<strong
+						>{{ '%.0f' % (total_alunos.total_geral.percentual or 0)
+						}}%</strong
+					>
+					é boa, indicando um bom engajamento geral. Contudo, a
+					ausência de
+					<strong>{{ total_alunos.total_geral.faltosos }}</strong>
+					alunos é um número considerável. Recomenda-se a investigação
+					das causas dessas ausências, um contato proativo com as
+					famílias para elevar a participação em futuras avaliações e
+					o planejamento de uma reposição diagnóstica para os alunos
+					faltosos, visando obter um panorama mais completo da
+					aprendizagem na série.
+				</div>
+				{% endif %} {% endif %}
 			</div>
-			{% elif total_alunos.total_geral %}
-			<div class="analysis-text">
-				A escola avaliou
-				<strong>{{ total_alunos.total_geral.avaliados }} alunos</strong>
-				{% if serie_geral_label and serie_geral_label != 'MUNICIPAL GERAL' %}
-				{{ serie_geral_label | replace(' GERAL', '') | lower }}, o que representa
-				{% else %}
-				avaliados, o que representa
-				{% endif %}
-				<strong
-					>{{ '%.0f' % (total_alunos.total_geral.percentual or 0)
-					}}%</strong
-				>
-				do total de
-				<strong>{{ total_alunos.total_geral.matriculados }}</strong>
-				alunos matriculados. Registrou-se um total de
-				<strong>{{ total_alunos.total_geral.faltosos }}</strong> alunos
-				faltosos. A taxa de participação de
-				<strong
-					>{{ '%.0f' % (total_alunos.total_geral.percentual or 0)
-					}}%</strong
-				>
-				é boa, indicando um bom engajamento geral. Contudo, a ausência
-				de
-				<strong>{{ total_alunos.total_geral.faltosos }}</strong> alunos
-				é um número considerável. Recomenda-se a investigação das causas
-				dessas ausências, um contato proativo com as famílias para
-				elevar a participação em futuras avaliações e o planejamento de
-				uma reposição diagnóstica para os alunos faltosos, visando obter
-				um panorama mais completo da aprendizagem na série.
+
+			{# ===== ANÁLISE ===== #} {% if analise_ia and
+			analise_ia.participacao %}
+			<div class="page-block analysis-block">
+				<div class="analysis-text">
+					{{ analise_ia.participacao | formatar_texto_ia }}
+				</div>
 			</div>
 			{% endif %}
 		</section>
 
 		<section class="section page-break">
 			{% for disc, bloco in niveis_aprendizagem.items() %} {% set
-			disc_nome = disc.upper() if disc else 'DISCIPLINA' %} {% if
-			'português' in disc.lower() or 'portugues' in disc.lower() %} {% set
-			disc_nome = 'PORTUGUÊS' %} {% elif 'matemática' in disc.lower() or
-			'matematica' in disc.lower() %} {% set disc_nome = 'MATEMÁTICA' %}
-			{% endif %}
-			<div
-				style="page-break-before: {% if loop.first %}auto{% else %}always{% endif %}; page-break-inside: avoid;">
+			disc_nome = disc.upper() if disc else 'DISCIPLINA' %} {% if disc ==
+			'GERAL' or disc.upper() == 'GERAL' %} {% set disc_nome = 'GERAL' %}
+			{% elif 'português' in disc.lower() or 'portugues' in disc.lower()
+			%} {% set disc_nome = 'PORTUGUÊS' %} {% elif 'matemática' in
+			disc.lower() or 'matematica' in disc.lower() %} {% set disc_nome =
+			'MATEMÁTICA' %} {% endif %} {# ===== DADOS ===== #}
+			<div class="page-block data-block">
 				<table class="data-table">
 					<thead>
 						<tr>
@@ -1149,9 +1193,7 @@
 						{% endfor %} {% endif %} {% if bloco.geral or
 						bloco.total_geral %}
 						<tr>
-							<th>
-								{{ serie_geral_label }}
-							</th>
+							<th>{{ serie_geral_label }}</th>
 							<th>
 								{{ (bloco.geral.abaixo_do_basico if bloco.geral
 								else bloco.total_geral.abaixo_do_basico) }}
@@ -1259,507 +1301,555 @@
 						</div>
 					</div>
 				</div>
-				{% endif %} {# Análise da IA para níveis de aprendizagem #} {%
-				if analise_ia and analise_ia.niveis_aprendizagem and
-				analise_ia.niveis_aprendizagem[disc] %}
-				<div
-					class="analysis-text"
-					style="margin-top: 16px;">
-					{{ analise_ia.niveis_aprendizagem[disc]|safe }}
+				{% endif %}
+			</div>
+
+			{# ===== ANÁLISE ===== #} {% if analise_ia and
+			analise_ia.niveis_aprendizagem and
+			analise_ia.niveis_aprendizagem.get(disc) %}
+			<div class="page-block analysis-block">
+				<div class="analysis-text">
+					{{ analise_ia.niveis_aprendizagem[disc] | formatar_texto_ia
+					}}
+				</div>
+			</div>
+			{% endif %} {% endfor %}
+		</section>
+
+		<section class="section page-break">
+			{# ===== DADOS ===== #}
+			<div class="page-block data-block">
+				{% if proficiencia.por_disciplina %} {# Identificar disciplinas
+				usando namespace para manter escopo #} {% set ns_prof =
+				namespace(disc_portugues=None, disc_matematica=None) %} {% for
+				disc, bloco in proficiencia.por_disciplina.items() %} {% if disc
+				!= 'GERAL' %} {% set disc_lower = disc.lower() %} {% if
+				'português' in disc_lower or 'portugues' in disc_lower or
+				disc_lower == 'português' or disc_lower == 'portugues' %} {% set
+				ns_prof.disc_portugues = disc %} {% elif 'matemática' in
+				disc_lower or 'matematica' in disc_lower %} {% set
+				ns_prof.disc_matematica = disc %} {% endif %} {% endif %} {%
+				endfor %} {# Obter dados da seção GERAL #} {% set dados_geral =
+				proficiencia.por_disciplina.get('GERAL', {}) %} {% set
+				media_geral_proficiencia = dados_geral.get('media_geral', 0) %}
+				{# Calcular média municipal (média das disciplinas ou
+				proficiência geral) #} {% set media_municipal =
+				media_geral_proficiencia %} {% if
+				proficiencia.media_municipal_por_disciplina %} {% set
+				soma_municipal = 0 %} {% set count_municipal = 0 %} {% for
+				disc_key, valor in
+				proficiencia.media_municipal_por_disciplina.items() %} {% if
+				disc_key != 'GERAL' %} {% set soma_municipal = soma_municipal +
+				valor %} {% set count_municipal = count_municipal + 1 %} {%
+				endif %} {% endfor %} {% if count_municipal > 0 %} {% set
+				media_municipal = soma_municipal / count_municipal %} {% endif
+				%} {% endif %}
+
+				<table class="data-table">
+					<thead>
+						<tr>
+							<th class="table-title" colspan="5">
+								{% if metadados.scope_type == 'school' %}
+								PROFICIÊNCIA POR TURMA/GERAL – {{
+								avaliacao.titulo or 'AVALIAÇÃO DIAGNÓSTICA' }}
+								{% else %} PROFICIÊNCIA POR ESCOLA/GERAL – {{
+								avaliacao.titulo or 'AVALIAÇÃO DIAGNÓSTICA' }}
+								{% endif %}
+							</th>
+						</tr>
+						<tr>
+							<th>
+								{% if metadados.scope_type == 'school'
+								%}SÉRIE/TURNO{% else %}ESCOLA{% endif %}
+							</th>
+							<th>LÍNGUA PORTUGUESA</th>
+							<th>MATEMÁTICA</th>
+							<th>MÉDIA</th>
+							<th>MÉDIA MUNICIPAL</th>
+						</tr>
+					</thead>
+					<tbody>
+						{# Iterar sobre turmas ou escolas dependendo do escopo
+						#} {% if metadados.scope_type == 'school' %} {% set
+						lista_entidades = total_alunos.por_turma or [] %} {%
+						else %} {% set lista_entidades = total_alunos.por_escola
+						or [] %} {% endif %} {% if lista_entidades %} {% for t
+						in lista_entidades %} {% if metadados.scope_type ==
+						'school' %} {% set turma_nome =
+						(t.turma|string|trim)|upper %} {% set
+						entidade_nome_display = t.turma %} {% else %} {% set
+						turma_nome = (t.escola|string|trim)|upper %} {% set
+						entidade_nome_display = t.escola %} {% endif %} {% set
+						ns_turma_prof = namespace(portugues=0, matematica=0) %}
+						{# Buscar proficiência de Português #} {% if
+						ns_prof.disc_portugues %} {% set bloco_pt =
+						proficiencia.por_disciplina[ns_prof.disc_portugues] %}
+						{% if metadados.scope_type == 'school' %} {% for t_pt in
+						(bloco_pt.por_turma or []) %} {% set t_pt_nome =
+						(t_pt.turma|string|trim)|upper %} {% if t_pt_nome ==
+						turma_nome %} {% set ns_turma_prof.portugues =
+						t_pt.proficiencia or 0 %} {% endif %} {% endfor %} {%
+						else %} {% for e_pt in (bloco_pt.por_escola or []) %} {%
+						set e_pt_nome = (e_pt.escola|string|trim)|upper %} {% if
+						e_pt_nome == turma_nome %} {% set
+						ns_turma_prof.portugues = e_pt.proficiencia or 0 %} {%
+						endif %} {% endfor %} {% endif %} {% endif %} {# Buscar
+						proficiência de Matemática #} {% if
+						ns_prof.disc_matematica %} {% set bloco_mat =
+						proficiencia.por_disciplina[ns_prof.disc_matematica] %}
+						{% if metadados.scope_type == 'school' %} {% for t_mat
+						in (bloco_mat.por_turma or []) %} {% set t_mat_nome =
+						(t_mat.turma|string|trim)|upper %} {% if t_mat_nome ==
+						turma_nome %} {% set ns_turma_prof.matematica =
+						t_mat.proficiencia or 0 %} {% endif %} {% endfor %} {%
+						else %} {% for e_mat in (bloco_mat.por_escola or []) %}
+						{% set e_mat_nome = (e_mat.escola|string|trim)|upper %}
+						{% if e_mat_nome == turma_nome %} {% set
+						ns_turma_prof.matematica = e_mat.proficiencia or 0 %} {%
+						endif %} {% endfor %} {% endif %} {% endif %} {#
+						Calcular média (média entre Português e Matemática) #}
+						{% set soma_prof = ns_turma_prof.portugues +
+						ns_turma_prof.matematica %} {% set count_disciplinas = 0
+						%} {% if ns_turma_prof.portugues > 0 %}{% set
+						count_disciplinas = count_disciplinas + 1 %}{% endif %}
+						{% if ns_turma_prof.matematica > 0 %}{% set
+						count_disciplinas = count_disciplinas + 1 %}{% endif %}
+						{% if count_disciplinas > 0 %} {% set media_turma =
+						soma_prof / count_disciplinas %} {% else %} {# Se não
+						encontrou proficiência por disciplina, tentar buscar da
+						seção GERAL #} {% set media_turma = 0 %} {% set
+						dados_geral = proficiencia.por_disciplina.get('GERAL',
+						{}) %} {% if metadados.scope_type == 'school' %} {% set
+						prof_entidades_geral = dados_geral.get('por_turma', [])
+						%} {% for t_geral in prof_entidades_geral %} {% set
+						t_geral_nome = (t_geral.turma|string|trim)|upper %} {%
+						if t_geral_nome == turma_nome %} {% set media_turma =
+						t_geral.proficiencia or 0 %} {% endif %} {% endfor %} {%
+						else %} {% set prof_entidades_geral =
+						dados_geral.get('por_escola', []) %} {% for e_geral in
+						prof_entidades_geral %} {% set e_geral_nome =
+						(e_geral.escola|string|trim)|upper %} {% if e_geral_nome
+						== turma_nome %} {% set media_turma =
+						e_geral.proficiencia or 0 %} {% endif %} {% endfor %} {%
+						endif %} {% endif %}
+
+						<tr>
+							<td style="text-align: left">
+								{{ entidade_nome_display }}
+							</td>
+							<td>
+								{{ ('%.1f' %
+								ns_turma_prof.portugues).replace('.', ',') }}
+							</td>
+							<td>
+								{{ ('%.1f' %
+								ns_turma_prof.matematica).replace('.', ',') }}
+							</td>
+							<td>
+								{{ ('%.1f' % media_turma).replace('.', ',') }}
+							</td>
+							{% if loop.first %} {% set count_entidades =
+							lista_entidades|length %}
+							<td
+								rowspan="{{ count_entidades }}"
+								style="
+									vertical-align: middle;
+									font-weight: 700;
+								">
+								{{ ('%.1f' % media_municipal).replace('.', ',')
+								}}
+							</td>
+							{% endif %}
+						</tr>
+						{% endfor %} {% endif %} {# Linha de média geral #} {%
+						set media_pt_geral = 0 %} {% set media_mat_geral = 0 %}
+						{% if ns_prof.disc_portugues %} {% set bloco_pt =
+						proficiencia.por_disciplina[ns_prof.disc_portugues] %}
+						{% set media_pt_geral = bloco_pt.media_geral if
+						bloco_pt.media_geral is not none else 0 %} {% endif %}
+						{% if ns_prof.disc_matematica %} {% set bloco_mat =
+						proficiencia.por_disciplina[ns_prof.disc_matematica] %}
+						{% set media_mat_geral = bloco_mat.media_geral if
+						bloco_mat.media_geral is not none else 0 %} {% endif %}
+
+						<tr>
+							<th style="text-align: left">
+								{{ serie_geral_label }}
+							</th>
+							<th>
+								{{ ('%.1f' % media_pt_geral).replace('.', ',')
+								}}
+							</th>
+							<th>
+								{{ ('%.1f' % media_mat_geral).replace('.', ',')
+								}}
+							</th>
+							<th>
+								{{ ('%.1f' %
+								media_geral_proficiencia).replace('.', ',') }}
+							</th>
+							<th>
+								{{ ('%.1f' % media_municipal).replace('.', ',')
+								}}
+							</th>
+						</tr>
+					</tbody>
+				</table>
+
+				{# Gráfico de barras para proficiência #} {% set max_prof =
+				media_pt_geral %} {% if media_mat_geral > max_prof %} {% set
+				max_prof = media_mat_geral %} {% endif %} {% if
+				media_geral_proficiencia > max_prof %} {% set max_prof =
+				media_geral_proficiencia %} {% endif %} {% if media_municipal >
+				max_prof %} {% set max_prof = media_municipal %} {% endif %} {%
+				if max_prof <= 0 %} {% set max_prof = 500 %} {% endif %} {% set
+				percent_pt_prof = ((media_pt_geral / max_prof * 100) if max_prof
+				> 0 else 0) %} {% set percent_mat_prof = ((media_mat_geral /
+				max_prof * 100) if max_prof > 0 else 0) %} {% set
+				percent_media_prof = ((media_geral_proficiencia / max_prof *
+				100) if max_prof > 0 else 0) %} {% set percent_municipal_prof =
+				((media_municipal / max_prof * 100) if max_prof > 0 else 0) %}
+
+				<div class="bar-chart-card">
+					<div
+						class="analysis-text"
+						style="margin-top: 0; margin-bottom: 8px">
+						<strong
+							>Proficiência Geral ({{ serie_geral_label
+							}})</strong
+						>
+					</div>
+					<div class="bar-chart-container">
+						<div class="bar-item">
+							<div class="bar-wrapper">
+								<div
+									class="bar-fill bar-blue"
+									style="height: {{ percent_pt_prof }}%;">
+									{% if percent_pt_prof > 5 %}{{ ('%.1f' %
+									media_pt_geral).replace('.', ',') }}{% endif
+									%}
+								</div>
+							</div>
+							<div class="bar-label">Língua Portuguesa</div>
+							<div class="bar-value">
+								{{ ('%.1f' % media_pt_geral).replace('.', ',')
+								}}
+							</div>
+						</div>
+						<div class="bar-item">
+							<div class="bar-wrapper">
+								<div
+									class="bar-fill bar-purple"
+									style="height: {{ percent_mat_prof }}%;">
+									{% if percent_mat_prof > 5 %}{{ ('%.1f' %
+									media_mat_geral).replace('.', ',') }}{%
+									endif %}
+								</div>
+							</div>
+							<div class="bar-label">Matemática</div>
+							<div class="bar-value">
+								{{ ('%.1f' % media_mat_geral).replace('.', ',')
+								}}
+							</div>
+						</div>
+						<div class="bar-item">
+							<div class="bar-wrapper">
+								<div
+									class="bar-fill bar-teal"
+									style="height: {{ percent_media_prof }}%;">
+									{% if percent_media_prof > 5 %}{{ ('%.1f' %
+									media_geral_proficiencia).replace('.', ',')
+									}}{% endif %}
+								</div>
+							</div>
+							<div class="bar-label">Média</div>
+							<div class="bar-value">
+								{{ ('%.1f' %
+								media_geral_proficiencia).replace('.', ',') }}
+							</div>
+						</div>
+						<div class="bar-item">
+							<div class="bar-wrapper">
+								<div
+									class="bar-fill bar-gray"
+									style="height: {{ percent_municipal_prof }}%;">
+									{% if percent_municipal_prof > 5 %}{{
+									('%.1f' % media_municipal).replace('.', ',')
+									}}{% endif %}
+								</div>
+							</div>
+							<div class="bar-label">Média Municipal</div>
+							<div class="bar-value">
+								{{ ('%.1f' % media_municipal).replace('.', ',')
+								}}
+							</div>
+						</div>
+					</div>
 				</div>
 				{% endif %}
 			</div>
-			{% endfor %}
+
+			{# ===== ANÁLISE ===== #} {% if analise_ia and
+			analise_ia.proficiencia %} {% for disc_prof, analise_prof in
+			analise_ia.proficiencia.items() %} {% if disc_prof != 'GERAL' %}
+			<div class="page-block analysis-block">
+				<div class="analysis-text">
+					{{ analise_prof | formatar_texto_ia }}
+				</div>
+			</div>
+			{% endif %} {% endfor %} {% endif %}
 		</section>
 
 		<section class="section page-break">
-			{% if proficiencia.por_disciplina %} {# Identificar disciplinas
-			usando namespace para manter escopo #} {% set ns_prof =
-			namespace(disc_portugues=None, disc_matematica=None) %} {% for disc,
-			bloco in proficiencia.por_disciplina.items() %} {% if disc !=
-			'GERAL' %} {% set disc_lower = disc.lower() %} {% if 'português' in
-			disc_lower or 'portugues' in disc_lower or disc_lower == 'português'
-			or disc_lower == 'portugues' %} {% set ns_prof.disc_portugues = disc
-			%} {% elif 'matemática' in disc_lower or 'matematica' in disc_lower
-			%} {% set ns_prof.disc_matematica = disc %} {% endif %} {% endif %}
-			{% endfor %} {# Obter dados da seção GERAL #} {% set dados_geral =
-			proficiencia.por_disciplina.get('GERAL', {}) %} {% set
-			media_geral_proficiencia = dados_geral.get('media_geral', 0) %} {#
-			Calcular média municipal (média das disciplinas ou proficiência
-			geral) #} {% set media_municipal = media_geral_proficiencia %} {% if
-			proficiencia.media_municipal_por_disciplina %} {% set soma_municipal
-			= 0 %} {% set count_municipal = 0 %} {% for disc_key, valor in
-			proficiencia.media_municipal_por_disciplina.items() %} {% if
-			disc_key != 'GERAL' %} {% set soma_municipal = soma_municipal +
-			valor %} {% set count_municipal = count_municipal + 1 %} {% endif %}
-			{% endfor %} {% if count_municipal > 0 %} {% set media_municipal =
-			soma_municipal / count_municipal %} {% endif %} {% endif %}
+			{# ===== DADOS ===== #}
+			<div class="page-block data-block">
+				{% if nota_geral.por_disciplina %} {# Identificar disciplinas
+				usando namespace para manter escopo #} {% set ns_nota =
+				namespace(disc_portugues=None, disc_matematica=None) %} {% for
+				disc, bloco in nota_geral.por_disciplina.items() %} {% if disc
+				!= 'GERAL' %} {% set disc_lower = disc.lower() %} {% if
+				'português' in disc_lower or 'portugues' in disc_lower or
+				disc_lower == 'português' or disc_lower == 'portugues' %} {% set
+				ns_nota.disc_portugues = disc %} {% elif 'matemática' in
+				disc_lower or 'matematica' in disc_lower %} {% set
+				ns_nota.disc_matematica = disc %} {% endif %} {% endif %} {%
+				endfor %} {# Obter dados da seção GERAL #} {% set
+				nota_dados_geral = nota_geral.por_disciplina.get('GERAL', {}) %}
+				{% set nota_media_geral = nota_dados_geral.get('media_geral', 0)
+				%} {# Calcular média municipal (média das disciplinas ou nota
+				geral) #} {% set nota_media_municipal = nota_media_geral %} {%
+				if nota_geral.media_municipal_por_disciplina %} {% set
+				soma_municipal_nota = 0 %} {% set count_municipal_nota = 0 %} {%
+				for disc_key, valor in
+				nota_geral.media_municipal_por_disciplina.items() %} {% if
+				disc_key != 'GERAL' %} {% set soma_municipal_nota =
+				soma_municipal_nota + valor %} {% set count_municipal_nota =
+				count_municipal_nota + 1 %} {% endif %} {% endfor %} {% if
+				count_municipal_nota > 0 %} {% set nota_media_municipal =
+				soma_municipal_nota / count_municipal_nota %} {% endif %} {%
+				endif %}
 
-			<table class="data-table">
-				<thead>
-					<tr>
-						<th class="table-title" colspan="5">
-							{% if metadados.scope_type == 'school' %}
-							PROFICIÊNCIA POR TURMA/GERAL – {{ avaliacao.titulo
-							or 'AVALIAÇÃO DIAGNÓSTICA' }} {% else %}
-							PROFICIÊNCIA POR ESCOLA/GERAL – {{ avaliacao.titulo
-							or 'AVALIAÇÃO DIAGNÓSTICA' }} {% endif %}
-						</th>
-					</tr>
-					<tr>
-						<th>
-							{% if metadados.scope_type == 'school'
-							%}SÉRIE/TURNO{% else %}ESCOLA{% endif %}
-						</th>
-						<th>LÍNGUA PORTUGUESA</th>
-						<th>MATEMÁTICA</th>
-						<th>MÉDIA</th>
-						<th>MÉDIA MUNICIPAL</th>
-					</tr>
-				</thead>
-				<tbody>
-					{# Iterar sobre turmas ou escolas dependendo do escopo #} {%
-					if metadados.scope_type == 'school' %} {% set
-					lista_entidades = total_alunos.por_turma or [] %} {% else %}
-					{% set lista_entidades = total_alunos.por_escola or [] %} {%
-					endif %} {% if lista_entidades %} {% for t in
-					lista_entidades %} {% if metadados.scope_type == 'school' %}
-					{% set turma_nome = (t.turma|string|trim)|upper %} {% set entidade_nome_display = t.turma %} {% else
-					%} {% set turma_nome = (t.escola|string|trim)|upper %} {% set entidade_nome_display = t.escola %} {%
-					endif %} {% set ns_turma_prof = namespace(portugues=0,
-					matematica=0) %} {# Buscar proficiência de Português #} {%
-					if ns_prof.disc_portugues %} {% set bloco_pt =
-					proficiencia.por_disciplina[ns_prof.disc_portugues] %} {% if
-					metadados.scope_type == 'school' %} {% for t_pt in
-					(bloco_pt.por_turma or []) %} {% set t_pt_nome =
-					(t_pt.turma|string|trim)|upper %} {% if t_pt_nome ==
-					turma_nome %} {% set ns_turma_prof.portugues =
-					t_pt.proficiencia or 0 %} {% endif %} {% endfor %} {% else
-					%} {% for e_pt in (bloco_pt.por_escola or []) %} {% set
-					e_pt_nome = (e_pt.escola|string|trim)|upper %} {% if
-					e_pt_nome == turma_nome %} {% set ns_turma_prof.portugues =
-					e_pt.proficiencia or 0 %} {% endif %} {% endfor %} {% endif
-					%} {% endif %} {# Buscar proficiência de Matemática #} {% if
-					ns_prof.disc_matematica %} {% set bloco_mat =
-					proficiencia.por_disciplina[ns_prof.disc_matematica] %} {%
-					if metadados.scope_type == 'school' %} {% for t_mat in
-					(bloco_mat.por_turma or []) %} {% set t_mat_nome =
-					(t_mat.turma|string|trim)|upper %} {% if t_mat_nome ==
-					turma_nome %} {% set ns_turma_prof.matematica =
-					t_mat.proficiencia or 0 %} {% endif %} {% endfor %} {% else
-					%} {% for e_mat in (bloco_mat.por_escola or []) %} {% set
-					e_mat_nome = (e_mat.escola|string|trim)|upper %} {% if
-					e_mat_nome == turma_nome %} {% set ns_turma_prof.matematica
-					= e_mat.proficiencia or 0 %} {% endif %} {% endfor %} {%
-					endif %} {% endif %} {# Calcular média (média entre
-					Português e Matemática) #} {% set soma_prof =
-					ns_turma_prof.portugues + ns_turma_prof.matematica %} {% set
-					count_disciplinas = 0 %} {% if ns_turma_prof.portugues > 0
-					%}{% set count_disciplinas = count_disciplinas + 1 %}{%
-					endif %} {% if ns_turma_prof.matematica > 0 %}{% set
-					count_disciplinas = count_disciplinas + 1 %}{% endif %} {%
-					if count_disciplinas > 0 %} {% set media_turma = soma_prof /
-					count_disciplinas %} {% else %} {# Se não encontrou
-					proficiência por disciplina, tentar buscar da seção GERAL #}
-					{% set media_turma = 0 %} {% set dados_geral =
-					proficiencia.por_disciplina.get('GERAL', {}) %} {% if
-					metadados.scope_type == 'school' %} {% set
-					prof_entidades_geral = dados_geral.get('por_turma', []) %}
-					{% for t_geral in prof_entidades_geral %} {% set
-					t_geral_nome = (t_geral.turma|string|trim)|upper %} {% if
-					t_geral_nome == turma_nome %} {% set media_turma =
-					t_geral.proficiencia or 0 %} {% endif %} {% endfor %} {%
-					else %} {% set prof_entidades_geral =
-					dados_geral.get('por_escola', []) %} {% for e_geral in
-					prof_entidades_geral %} {% set e_geral_nome =
-					(e_geral.escola|string|trim)|upper %} {% if e_geral_nome ==
-					turma_nome %} {% set media_turma = e_geral.proficiencia or 0
-					%} {% endif %} {% endfor %} {% endif %} {% endif %}
+				<table class="data-table">
+					<thead>
+						<tr>
+							<th class="table-title" colspan="5">
+								{% if metadados.scope_type == 'school' %} NOTA
+								POR TURMA/GERAL – {{ avaliacao.titulo or
+								'AVALIAÇÃO DIAGNÓSTICA' }} {% else %} NOTA POR
+								ESCOLA/GERAL – {{ avaliacao.titulo or 'AVALIAÇÃO
+								DIAGNÓSTICA' }} {% endif %}
+							</th>
+						</tr>
+						<tr>
+							<th>
+								{% if metadados.scope_type == 'school'
+								%}SÉRIE/TURNO{% else %}ESCOLA{% endif %}
+							</th>
+							<th>LÍNGUA PORTUGUESA</th>
+							<th>MATEMÁTICA</th>
+							<th>MÉDIA</th>
+							<th>MÉDIA MUNICIPAL</th>
+						</tr>
+					</thead>
+					<tbody>
+						{# Iterar sobre turmas ou escolas dependendo do escopo
+						#} {% if metadados.scope_type == 'school' %} {% set
+						lista_entidades = total_alunos.por_turma or [] %} {%
+						else %} {% set lista_entidades = total_alunos.por_escola
+						or [] %} {% endif %} {% if lista_entidades %} {% for t
+						in lista_entidades %} {% if metadados.scope_type ==
+						'school' %} {% set turma_nome =
+						(t.turma|string|trim)|upper %} {% set
+						entidade_nome_display = t.turma %} {% else %} {% set
+						turma_nome = (t.escola|string|trim)|upper %} {% set
+						entidade_nome_display = t.escola %} {% endif %} {% set
+						ns_turma_nota = namespace(portugues=0, matematica=0) %}
+						{# Buscar nota de Português #} {% if
+						ns_nota.disc_portugues %} {% set bloco_pt =
+						nota_geral.por_disciplina[ns_nota.disc_portugues] %} {%
+						if metadados.scope_type == 'school' %} {% for t_pt in
+						(bloco_pt.por_turma or []) %} {% set t_pt_nome =
+						(t_pt.turma|string|trim)|upper %} {% if t_pt_nome ==
+						turma_nome %} {% set ns_turma_nota.portugues = t_pt.nota
+						or 0 %} {% endif %} {% endfor %} {% else %} {% for e_pt
+						in (bloco_pt.por_escola or []) %} {% set e_pt_nome =
+						(e_pt.escola|string|trim)|upper %} {% if e_pt_nome ==
+						turma_nome %} {% set ns_turma_nota.portugues = e_pt.nota
+						or 0 %} {% endif %} {% endfor %} {% endif %} {% endif %}
+						{# Buscar nota de Matemática #} {% if
+						ns_nota.disc_matematica %} {% set bloco_mat =
+						nota_geral.por_disciplina[ns_nota.disc_matematica] %} {%
+						if metadados.scope_type == 'school' %} {% for t_mat in
+						(bloco_mat.por_turma or []) %} {% set t_mat_nome =
+						(t_mat.turma|string|trim)|upper %} {% if t_mat_nome ==
+						turma_nome %} {% set ns_turma_nota.matematica =
+						t_mat.nota or 0 %} {% endif %} {% endfor %} {% else %}
+						{% for e_mat in (bloco_mat.por_escola or []) %} {% set
+						e_mat_nome = (e_mat.escola|string|trim)|upper %} {% if
+						e_mat_nome == turma_nome %} {% set
+						ns_turma_nota.matematica = e_mat.nota or 0 %} {% endif
+						%} {% endfor %} {% endif %} {% endif %} {# Calcular
+						média da turma (média entre Português e Matemática) #}
+						{% set soma_notas = ns_turma_nota.portugues +
+						ns_turma_nota.matematica %} {% set count_disciplinas = 0
+						%} {% if ns_turma_nota.portugues > 0 %}{% set
+						count_disciplinas = count_disciplinas + 1 %}{% endif %}
+						{% if ns_turma_nota.matematica > 0 %}{% set
+						count_disciplinas = count_disciplinas + 1 %}{% endif %}
+						{% if count_disciplinas > 0 %} {% set nota_media_turma =
+						soma_notas / count_disciplinas %} {% else %} {# Se não
+						encontrou notas por disciplina, tentar buscar da seção
+						GERAL #} {% set nota_media_turma = 0 %} {% set
+						nota_dados_geral =
+						nota_geral.por_disciplina.get('GERAL', {}) %} {% if
+						metadados.scope_type == 'school' %} {% set
+						nota_entidades_geral = nota_dados_geral.get('por_turma',
+						[]) %} {% for t_geral in nota_entidades_geral %} {% set
+						t_geral_nome = (t_geral.turma|string|trim)|upper %} {%
+						if t_geral_nome == turma_nome %} {% set nota_media_turma
+						= t_geral.nota or 0 %} {% endif %} {% endfor %} {% else
+						%} {% set nota_entidades_geral =
+						nota_dados_geral.get('por_escola', []) %} {% for e_geral
+						in nota_entidades_geral %} {% set e_geral_nome =
+						(e_geral.escola|string|trim)|upper %} {% if e_geral_nome
+						== turma_nome %} {% set nota_media_turma = e_geral.nota
+						or 0 %} {% endif %} {% endfor %} {% endif %} {% endif %}
 
-					<tr>
-						<td style="text-align: left">{{ entidade_nome_display }}</td>
-						<td>
-							{{ ('%.1f' % ns_turma_prof.portugues).replace('.',
-							',') }}
-						</td>
-						<td>
-							{{ ('%.1f' % ns_turma_prof.matematica).replace('.',
-							',') }}
-						</td>
-						<td>{{ ('%.1f' % media_turma).replace('.', ',') }}</td>
-						{% if loop.first %} {% set count_entidades =
-						lista_entidades|length %}
-						<td
-							rowspan="{{ count_entidades }}"
-							style="vertical-align: middle; font-weight: 700">
-							{{ ('%.1f' % media_municipal).replace('.', ',') }}
-						</td>
-						{% endif %}
-					</tr>
-					{% endfor %} {% endif %} {# Linha de média geral #} {% set
-					media_pt_geral = 0 %} {% set media_mat_geral = 0 %} {% if
-					ns_prof.disc_portugues %} {% set bloco_pt =
-					proficiencia.por_disciplina[ns_prof.disc_portugues] %} {%
-					set media_pt_geral = bloco_pt.media_geral if
-					bloco_pt.media_geral is not none else 0 %} {% endif %} {% if
-					ns_prof.disc_matematica %} {% set bloco_mat =
-					proficiencia.por_disciplina[ns_prof.disc_matematica] %} {%
-					set media_mat_geral = bloco_mat.media_geral if
-					bloco_mat.media_geral is not none else 0 %} {% endif %}
+						<tr>
+							<td style="text-align: left">
+								{{ entidade_nome_display }}
+							</td>
+							<td>
+								{{ ('%.1f' %
+								ns_turma_nota.portugues).replace('.', ',') }}
+							</td>
+							<td>
+								{{ ('%.1f' %
+								ns_turma_nota.matematica).replace('.', ',') }}
+							</td>
+							<td>
+								{{ ('%.1f' % nota_media_turma).replace('.', ',')
+								}}
+							</td>
+							{% if loop.first %} {% set count_entidades_nota =
+							lista_entidades|length %}
+							<td
+								rowspan="{{ count_entidades_nota + 1 }}"
+								style="
+									vertical-align: middle;
+									font-weight: 700;
+								">
+								{{ ('%.1f' % nota_media_municipal).replace('.',
+								',') }}
+							</td>
+							{% endif %}
+						</tr>
+						{% endfor %} {% endif %} {# Linha de média geral #} {%
+						set nota_media_pt_geral = 0 %} {% set
+						nota_media_mat_geral = 0 %} {% if ns_nota.disc_portugues
+						%} {% set bloco_pt =
+						nota_geral.por_disciplina[ns_nota.disc_portugues] %} {%
+						set nota_media_pt_geral = bloco_pt.media_geral if
+						bloco_pt.media_geral is not none else 0 %} {% endif %}
+						{% if ns_nota.disc_matematica %} {% set bloco_mat =
+						nota_geral.por_disciplina[ns_nota.disc_matematica] %} {%
+						set nota_media_mat_geral = bloco_mat.media_geral if
+						bloco_mat.media_geral is not none else 0 %} {% endif %}
 
-					<tr>
-						<th style="text-align: left">
-							{{ serie_geral_label }}
-						</th>
-						<th>
-							{{ ('%.1f' % media_pt_geral).replace('.', ',') }}
-						</th>
-						<th>
-							{{ ('%.1f' % media_mat_geral).replace('.', ',') }}
-						</th>
-						<th>
-							{{ ('%.1f' % media_geral_proficiencia).replace('.',
-							',') }}
-						</th>
-						<th>
-							{{ ('%.1f' % media_municipal).replace('.', ',') }}
-						</th>
-					</tr>
-				</tbody>
-			</table>
+						<tr>
+							<th style="text-align: left">
+								{{ serie_geral_label }}
+							</th>
+							<th>
+								{{ ('%.1f' % nota_media_pt_geral).replace('.',
+								',') }}
+							</th>
+							<th>
+								{{ ('%.1f' % nota_media_mat_geral).replace('.',
+								',') }}
+							</th>
+							<th>
+								{{ ('%.1f' % nota_media_geral).replace('.', ',')
+								}}
+							</th>
+							{# A célula de MÉDIA MUNICIPAL já foi adicionada com
+							rowspan na primeira linha #}
+						</tr>
+					</tbody>
+				</table>
 
-			{# Gráfico de barras para proficiência #} {% set max_prof =
-			media_pt_geral %} {% if media_mat_geral > max_prof %} {% set
-			max_prof = media_mat_geral %} {% endif %} {% if
-			media_geral_proficiencia > max_prof %} {% set max_prof =
-			media_geral_proficiencia %} {% endif %} {% if media_municipal >
-			max_prof %} {% set max_prof = media_municipal %} {% endif %} {% if
-			max_prof <= 0 %} {% set max_prof = 500 %} {% endif %} {% set
-			percent_pt_prof = ((media_pt_geral / max_prof * 100) if max_prof > 0
-			else 0) %} {% set percent_mat_prof = ((media_mat_geral / max_prof *
-			100) if max_prof > 0 else 0) %} {% set percent_media_prof =
-			((media_geral_proficiencia / max_prof * 100) if max_prof > 0 else 0)
-			%} {% set percent_municipal_prof = ((media_municipal / max_prof *
-			100) if max_prof > 0 else 0) %}
+				{# Gráfico de barras para nota - Língua Portuguesa, Matemática e
+				Média Geral #} {% set max_nota = 10 %} {% set percent_pt_nota =
+				((nota_media_pt_geral / max_nota * 100) if max_nota > 0 else 0)
+				%} {% set percent_mat_nota = ((nota_media_mat_geral / max_nota *
+				100) if max_nota > 0 else 0) %} {% set percent_nota_geral =
+				((nota_media_geral / max_nota * 100) if max_nota > 0 else 0) %}
 
-			<div class="bar-chart-card">
-				<div
-					class="analysis-text"
-					style="margin-top: 0; margin-bottom: 8px">
-					<strong
-						>Proficiência Geral ({{ serie_geral_label }})</strong
-					>
-				</div>
-				<div class="bar-chart-container">
-					<div class="bar-item">
-						<div class="bar-wrapper">
-							<div
-								class="bar-fill bar-blue"
-								style="height: {{ percent_pt_prof }}%;">
-								{% if percent_pt_prof > 5 %}{{ ('%.1f' %
-								media_pt_geral).replace('.', ',') }}{% endif %}
-							</div>
-						</div>
-						<div class="bar-label">Língua Portuguesa</div>
-						<div class="bar-value">
-							{{ ('%.1f' % media_pt_geral).replace('.', ',') }}
-						</div>
+				<div class="bar-chart-card">
+					<div
+						class="analysis-text"
+						style="margin-top: 0; margin-bottom: 8px">
+						<strong>Média Geral</strong>
 					</div>
-					<div class="bar-item">
-						<div class="bar-wrapper">
-							<div
-								class="bar-fill bar-purple"
-								style="height: {{ percent_mat_prof }}%;">
-								{% if percent_mat_prof > 5 %}{{ ('%.1f' %
-								media_mat_geral).replace('.', ',') }}{% endif %}
+					<div class="bar-chart-container">
+						<div class="bar-item">
+							<div class="bar-wrapper">
+								<div
+									class="bar-fill bar-blue"
+									style="height: {{ percent_pt_nota }}%;">
+									{% if percent_pt_nota > 5 %}{{ ('%.1f' %
+									nota_media_pt_geral).replace('.', ',') }}{%
+									endif %}
+								</div>
+							</div>
+							<div class="bar-label">Língua Portuguesa</div>
+							<div class="bar-value">
+								{{ ('%.1f' % nota_media_pt_geral).replace('.',
+								',') }}
 							</div>
 						</div>
-						<div class="bar-label">Matemática</div>
-						<div class="bar-value">
-							{{ ('%.1f' % media_mat_geral).replace('.', ',') }}
-						</div>
-					</div>
-					<div class="bar-item">
-						<div class="bar-wrapper">
-							<div
-								class="bar-fill bar-teal"
-								style="height: {{ percent_media_prof }}%;">
-								{% if percent_media_prof > 5 %}{{ ('%.1f' %
-								media_geral_proficiencia).replace('.', ',') }}{%
-								endif %}
+						<div class="bar-item">
+							<div class="bar-wrapper">
+								<div
+									class="bar-fill bar-purple"
+									style="height: {{ percent_mat_nota }}%;">
+									{% if percent_mat_nota > 5 %}{{ ('%.1f' %
+									nota_media_mat_geral).replace('.', ',') }}{%
+									endif %}
+								</div>
+							</div>
+							<div class="bar-label">Matemática</div>
+							<div class="bar-value">
+								{{ ('%.1f' % nota_media_mat_geral).replace('.',
+								',') }}
 							</div>
 						</div>
-						<div class="bar-label">Média</div>
-						<div class="bar-value">
-							{{ ('%.1f' % media_geral_proficiencia).replace('.',
-							',') }}
-						</div>
-					</div>
-					<div class="bar-item">
-						<div class="bar-wrapper">
-							<div
-								class="bar-fill bar-gray"
-								style="height: {{ percent_municipal_prof }}%;">
-								{% if percent_municipal_prof > 5 %}{{ ('%.1f' %
-								media_municipal).replace('.', ',') }}{% endif %}
+						<div class="bar-item">
+							<div class="bar-wrapper">
+								<div
+									class="bar-fill bar-teal"
+									style="height: {{ percent_nota_geral }}%;">
+									{% if percent_nota_geral > 5 %}{{ ('%.1f' %
+									nota_media_geral).replace('.', ',') }}{%
+									endif %}
+								</div>
 							</div>
-						</div>
-						<div class="bar-label">Média Municipal</div>
-						<div class="bar-value">
-							{{ ('%.1f' % media_municipal).replace('.', ',') }}
-						</div>
-					</div>
-				</div>
-			</div>
-			{% endif %} {# Análises da IA para proficiência por disciplina #} {%
-			if analise_ia and analise_ia.proficiencia %} {% if
-			ns_prof.disc_portugues and
-			analise_ia.proficiencia[ns_prof.disc_portugues] %}
-			<div
-				class="analysis-text"
-				style="margin-top: 16px;">
-				{{ analise_ia.proficiencia[ns_prof.disc_portugues]|safe }}
-			</div>
-			{% endif %} {% if ns_prof.disc_matematica and
-			analise_ia.proficiencia[ns_prof.disc_matematica] %}
-			<div
-				class="analysis-text"
-				style="margin-top: 16px;">
-				{{ analise_ia.proficiencia[ns_prof.disc_matematica]|safe }}
-			</div>
-			{% endif %} {% endif %}
-		</section>
-
-		<section class="section page-break">
-			{% if nota_geral.por_disciplina %} {# Identificar disciplinas usando
-			namespace para manter escopo #} {% set ns_nota =
-			namespace(disc_portugues=None, disc_matematica=None) %} {% for disc,
-			bloco in nota_geral.por_disciplina.items() %} {% if disc != 'GERAL'
-			%} {% set disc_lower = disc.lower() %} {% if 'português' in
-			disc_lower or 'portugues' in disc_lower or disc_lower == 'português'
-			or disc_lower == 'portugues' %} {% set ns_nota.disc_portugues = disc
-			%} {% elif 'matemática' in disc_lower or 'matematica' in disc_lower
-			%} {% set ns_nota.disc_matematica = disc %} {% endif %} {% endif %}
-			{% endfor %} {# Obter dados da seção GERAL #} {% set
-			nota_dados_geral = nota_geral.por_disciplina.get('GERAL', {}) %} {%
-			set nota_media_geral = nota_dados_geral.get('media_geral', 0) %} {#
-			Calcular média municipal (média das disciplinas ou nota geral) #} {%
-			set nota_media_municipal = nota_media_geral %} {% if
-			nota_geral.media_municipal_por_disciplina %} {% set
-			soma_municipal_nota = 0 %} {% set count_municipal_nota = 0 %} {% for
-			disc_key, valor in nota_geral.media_municipal_por_disciplina.items()
-			%} {% if disc_key != 'GERAL' %} {% set soma_municipal_nota =
-			soma_municipal_nota + valor %} {% set count_municipal_nota =
-			count_municipal_nota + 1 %} {% endif %} {% endfor %} {% if
-			count_municipal_nota > 0 %} {% set nota_media_municipal =
-			soma_municipal_nota / count_municipal_nota %} {% endif %} {% endif
-			%}
-
-			<table class="data-table">
-				<thead>
-					<tr>
-						<th class="table-title" colspan="5">
-							{% if metadados.scope_type == 'school' %} NOTA POR
-							TURMA/GERAL – {{ avaliacao.titulo or 'AVALIAÇÃO
-							DIAGNÓSTICA' }} {% else %} NOTA POR ESCOLA/GERAL –
-							{{ avaliacao.titulo or 'AVALIAÇÃO DIAGNÓSTICA' }} {%
-							endif %}
-						</th>
-					</tr>
-					<tr>
-						<th>
-							{% if metadados.scope_type == 'school'
-							%}SÉRIE/TURNO{% else %}ESCOLA{% endif %}
-						</th>
-						<th>LÍNGUA PORTUGUESA</th>
-						<th>MATEMÁTICA</th>
-						<th>MÉDIA</th>
-						<th>MÉDIA MUNICIPAL</th>
-					</tr>
-				</thead>
-				<tbody>
-					{# Iterar sobre turmas ou escolas dependendo do escopo #} {%
-					if metadados.scope_type == 'school' %} {% set
-					lista_entidades = total_alunos.por_turma or [] %} {% else %}
-					{% set lista_entidades = total_alunos.por_escola or [] %} {%
-					endif %} {% if lista_entidades %} {% for t in
-					lista_entidades %} {% if metadados.scope_type == 'school' %}
-					{% set turma_nome = (t.turma|string|trim)|upper %} {% set entidade_nome_display = t.turma %} {% else
-					%} {% set turma_nome = (t.escola|string|trim)|upper %} {% set entidade_nome_display = t.escola %} {%
-					endif %} {% set ns_turma_nota = namespace(portugues=0,
-					matematica=0) %} {# Buscar nota de Português #} {% if
-					ns_nota.disc_portugues %} {% set bloco_pt =
-					nota_geral.por_disciplina[ns_nota.disc_portugues] %} {% if
-					metadados.scope_type == 'school' %} {% for t_pt in
-					(bloco_pt.por_turma or []) %} {% set t_pt_nome =
-					(t_pt.turma|string|trim)|upper %} {% if t_pt_nome ==
-					turma_nome %} {% set ns_turma_nota.portugues = t_pt.nota or
-					0 %} {% endif %} {% endfor %} {% else %} {% for e_pt in
-					(bloco_pt.por_escola or []) %} {% set e_pt_nome =
-					(e_pt.escola|string|trim)|upper %} {% if e_pt_nome ==
-					turma_nome %} {% set ns_turma_nota.portugues = e_pt.nota or
-					0 %} {% endif %} {% endfor %} {% endif %} {% endif %} {#
-					Buscar nota de Matemática #} {% if ns_nota.disc_matematica
-					%} {% set bloco_mat =
-					nota_geral.por_disciplina[ns_nota.disc_matematica] %} {% if
-					metadados.scope_type == 'school' %} {% for t_mat in
-					(bloco_mat.por_turma or []) %} {% set t_mat_nome =
-					(t_mat.turma|string|trim)|upper %} {% if t_mat_nome ==
-					turma_nome %} {% set ns_turma_nota.matematica = t_mat.nota
-					or 0 %} {% endif %} {% endfor %} {% else %} {% for e_mat in
-					(bloco_mat.por_escola or []) %} {% set e_mat_nome =
-					(e_mat.escola|string|trim)|upper %} {% if e_mat_nome ==
-					turma_nome %} {% set ns_turma_nota.matematica = e_mat.nota
-					or 0 %} {% endif %} {% endfor %} {% endif %} {% endif %} {#
-					Calcular média da turma (média entre Português e Matemática)
-					#} {% set soma_notas = ns_turma_nota.portugues +
-					ns_turma_nota.matematica %} {% set count_disciplinas = 0 %}
-					{% if ns_turma_nota.portugues > 0 %}{% set count_disciplinas
-					= count_disciplinas + 1 %}{% endif %} {% if
-					ns_turma_nota.matematica > 0 %}{% set count_disciplinas =
-					count_disciplinas + 1 %}{% endif %} {% if count_disciplinas
-					> 0 %} {% set nota_media_turma = soma_notas /
-					count_disciplinas %} {% else %} {# Se não encontrou notas
-					por disciplina, tentar buscar da seção GERAL #} {% set
-					nota_media_turma = 0 %} {% set nota_dados_geral =
-					nota_geral.por_disciplina.get('GERAL', {}) %} {% if
-					metadados.scope_type == 'school' %} {% set
-					nota_entidades_geral = nota_dados_geral.get('por_turma', [])
-					%} {% for t_geral in nota_entidades_geral %} {% set
-					t_geral_nome = (t_geral.turma|string|trim)|upper %} {% if
-					t_geral_nome == turma_nome %} {% set nota_media_turma =
-					t_geral.nota or 0 %} {% endif %} {% endfor %} {% else %} {%
-					set nota_entidades_geral =
-					nota_dados_geral.get('por_escola', []) %} {% for e_geral in
-					nota_entidades_geral %} {% set e_geral_nome =
-					(e_geral.escola|string|trim)|upper %} {% if e_geral_nome ==
-					turma_nome %} {% set nota_media_turma = e_geral.nota or 0 %}
-					{% endif %} {% endfor %} {% endif %} {% endif %}
-
-					<tr>
-						<td style="text-align: left">{{ entidade_nome_display }}</td>
-						<td>
-							{{ ('%.1f' % ns_turma_nota.portugues).replace('.',
-							',') }}
-						</td>
-						<td>
-							{{ ('%.1f' % ns_turma_nota.matematica).replace('.',
-							',') }}
-						</td>
-						<td>
-							{{ ('%.1f' % nota_media_turma).replace('.', ',') }}
-						</td>
-						{% if loop.first %} {% set count_entidades_nota =
-						lista_entidades|length %}
-						<td
-							rowspan="{{ count_entidades_nota + 1 }}"
-							style="vertical-align: middle; font-weight: 700">
-							{{ ('%.1f' % nota_media_municipal).replace('.', ',')
-							}}
-						</td>
-						{% endif %}
-					</tr>
-					{% endfor %} {% endif %} {# Linha de média geral #} {% set
-					nota_media_pt_geral = 0 %} {% set nota_media_mat_geral = 0
-					%} {% if ns_nota.disc_portugues %} {% set bloco_pt =
-					nota_geral.por_disciplina[ns_nota.disc_portugues] %} {% set
-					nota_media_pt_geral = bloco_pt.media_geral if
-					bloco_pt.media_geral is not none else 0 %} {% endif %} {% if
-					ns_nota.disc_matematica %} {% set bloco_mat =
-					nota_geral.por_disciplina[ns_nota.disc_matematica] %} {% set
-					nota_media_mat_geral = bloco_mat.media_geral if
-					bloco_mat.media_geral is not none else 0 %} {% endif %}
-
-					<tr>
-						<th style="text-align: left">
-							{{ serie_geral_label }}
-						</th>
-						<th>
-							{{ ('%.1f' % nota_media_pt_geral).replace('.', ',')
-							}}
-						</th>
-						<th>
-							{{ ('%.1f' % nota_media_mat_geral).replace('.', ',')
-							}}
-						</th>
-						<th>
-							{{ ('%.1f' % nota_media_geral).replace('.', ',') }}
-						</th>
-						{# A célula de MÉDIA MUNICIPAL já foi adicionada com
-						rowspan na primeira linha #}
-					</tr>
-				</tbody>
-			</table>
-
-			{# Gráfico de barras para nota - Língua Portuguesa, Matemática e
-			Média Geral #} {% set max_nota = 10 %} {% set percent_pt_nota =
-			((nota_media_pt_geral / max_nota * 100) if max_nota > 0 else 0) %}
-			{% set percent_mat_nota = ((nota_media_mat_geral / max_nota * 100)
-			if max_nota > 0 else 0) %} {% set percent_nota_geral =
-			((nota_media_geral / max_nota * 100) if max_nota > 0 else 0) %}
-
-			<div class="bar-chart-card">
-				<div
-					class="analysis-text"
-					style="margin-top: 0; margin-bottom: 8px">
-					<strong>Média Geral</strong>
-				</div>
-				<div class="bar-chart-container">
-					<div class="bar-item">
-						<div class="bar-wrapper">
-							<div
-								class="bar-fill bar-blue"
-								style="height: {{ percent_pt_nota }}%;">
-								{% if percent_pt_nota > 5 %}{{ ('%.1f' %
-								nota_media_pt_geral).replace('.', ',') }}{%
-								endif %}
+							<div class="bar-label">Média Geral</div>
+							<div class="bar-value">
+								{{ ('%.1f' % nota_media_geral).replace('.', ',')
+								}}
 							</div>
-						</div>
-						<div class="bar-label">Língua Portuguesa</div>
-						<div class="bar-value">
-							{{ ('%.1f' % nota_media_pt_geral).replace('.', ',')
-							}}
-						</div>
-					</div>
-					<div class="bar-item">
-						<div class="bar-wrapper">
-							<div
-								class="bar-fill bar-purple"
-								style="height: {{ percent_mat_nota }}%;">
-								{% if percent_mat_nota > 5 %}{{ ('%.1f' %
-								nota_media_mat_geral).replace('.', ',') }}{%
-								endif %}
-							</div>
-						</div>
-						<div class="bar-label">Matemática</div>
-						<div class="bar-value">
-							{{ ('%.1f' % nota_media_mat_geral).replace('.', ',')
-							}}
-						</div>
-					</div>
-					<div class="bar-item">
-						<div class="bar-wrapper">
-							<div
-								class="bar-fill bar-teal"
-								style="height: {{ percent_nota_geral }}%;">
-								{% if percent_nota_geral > 5 %}{{ ('%.1f' %
-								nota_media_geral).replace('.', ',') }}{% endif
-								%}
-							</div>
-						</div>
-						<div class="bar-label">Média Geral</div>
-						<div class="bar-value">
-							{{ ('%.1f' % nota_media_geral).replace('.', ',') }}
 						</div>
 					</div>
 				</div>
+				{% endif %}
 			</div>
-			{% endif %} {# Análise da IA para notas #} {% if analise_ia and
-			analise_ia.notas %}
-			<div
-				class="analysis-text"
-				style="margin-top: 16px;">
-				{{ analise_ia.notas|safe }}
+
+			{# ===== ANÁLISE ===== #} {% if analise_ia and analise_ia.notas %}
+			<div class="page-block analysis-block">
+				<div class="analysis-text">
+					{{ analise_ia.notas | formatar_texto_ia }}
+				</div>
 			</div>
 			{% endif %}
 		</section>
@@ -1876,14 +1966,6 @@
 							{% endfor %}
 						</tbody>
 					</table>
-				</div>
-				{% endif %} {# Análise da IA para acertos por habilidade #} {%
-				if analise_ia and analise_ia.acertos_habilidade and
-				analise_ia.acertos_habilidade[disc] %}
-				<div
-					class="analysis-text"
-					style="margin-top: 16px;">
-					{{ analise_ia.acertos_habilidade[disc]|safe }}
 				</div>
 				{% endif %}
 			</div>

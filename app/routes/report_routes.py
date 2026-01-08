@@ -24,6 +24,7 @@ from app import db
 import logging
 from typing import Dict, Any, List, Optional, Union
 import math
+import re
 import unicodedata
 from sqlalchemy import func, case, desc, cast
 from sqlalchemy.dialects.postgresql import UUID as PostgresUUID
@@ -46,6 +47,7 @@ from app.services.ai_analysis_service import AIAnalysisService
 from app.services.evaluation_result_service import EvaluationResultService
 from app.report_analysis.services import ReportAggregateService
 from weasyprint import HTML
+from markupsafe import Markup
 import base64
 
 # Importar docxtpl para template Word (comentado - usando PDF agora)
@@ -994,8 +996,6 @@ def relatorio_pdf(evaluation_id: str):
         templates_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'templates')
         env = Environment(loader=FileSystemLoader(templates_dir), autoescape=select_autoescape(['html', 'xml']))
 
-        import math
-
         def sum_values(items, attr='value'):
             try:
                 return sum(item.get(attr, 0) if isinstance(item, dict) else getattr(item, attr, 0) for item in items)
@@ -1014,9 +1014,75 @@ def relatorio_pdf(evaluation_id: str):
             except (TypeError, ValueError):
                 return 0
 
+        def formatar_texto_ia(texto):
+            """
+            Formata texto da IA para HTML preservando quebras de linha e formatação
+            Converte quebras de linha duplas em parágrafos e simples em <br/>
+            """
+            if not texto:
+                return Markup("")
+            
+            # Se não houver quebras de linha duplas, tentar detectar padrões para quebrar
+            if '\n\n' not in texto:
+                # Detectar padrões de títulos no meio do texto
+                texto = texto.replace('Destaques e Recomendações:', '\n\nDestaques e Recomendações:')
+                texto = texto.replace('Classificação:', '\n\nClassificação:')
+                texto = texto.replace('PARECER TÉCNICO:', '\n\nPARECER TÉCNICO:')
+                # Detectar números como títulos (ex: "1. ", "2. ", "3. ")
+                texto = re.sub(r'(\d+\.\s)', r'\n\n\1', texto)
+                # Detectar títulos em maiúsculas seguidas de dois pontos
+                texto = re.sub(r'([A-ZÁÊÔÇ][A-ZÁÊÔÇ\s]{10,}:)', r'\n\n\1', texto)
+            
+            # Dividir por quebras de linha duplas (parágrafos)
+            paragrafos = texto.split('\n\n')
+            
+            resultado = []
+            for paragrafo in paragrafos:
+                paragrafo = paragrafo.strip()
+                if not paragrafo:
+                    continue
+                
+                # Verificar se é um título (maiúsculas seguidas de dois pontos, ou números como "1. ", "2. ")
+                if (len(paragrafo) > 10 and paragrafo.isupper() and paragrafo.endswith(':')) or \
+                   (len(paragrafo) > 2 and paragrafo[0].isdigit() and paragrafo[1] == '.' and paragrafo[2] == ' '):
+                    # É um título - converter para negrito
+                    resultado.append(f'<p style="font-weight: bold; margin-top: 12px; margin-bottom: 8px;">{paragrafo}</p>')
+                # Verificar se começa com títulos específicos
+                elif paragrafo.startswith('Destaques e Recomendações:') or \
+                     paragrafo.startswith('Classificação:') or \
+                     paragrafo.startswith('PARECER TÉCNICO:') or \
+                     paragrafo.startswith('PARECER TÉCNICO DE PARTICIPAÇÃO:') or \
+                     paragrafo.startswith('PARECER TÉCNICO: NOTA IDAV:'):
+                    # É um título - converter para negrito
+                    resultado.append(f'<p style="font-weight: bold; margin-top: 12px; margin-bottom: 8px;">{paragrafo}</p>')
+                # Verificar se contém bullets (•) - converter em lista
+                elif '•' in paragrafo:
+                    # Dividir por bullets
+                    partes = paragrafo.split('•')
+                    primeira_parte = partes[0].strip()
+                    itens_lista = [item.strip() for item in partes[1:] if item.strip()]
+                    
+                    if primeira_parte:
+                        resultado.append(f'<p>{primeira_parte}</p>')
+                    
+                    if itens_lista:
+                        resultado.append('<ul style="margin-left: 20px; margin-top: 8px; margin-bottom: 8px;">')
+                        for item in itens_lista:
+                            resultado.append(f'<li style="margin-bottom: 4px;">{item}</li>')
+                        resultado.append('</ul>')
+                else:
+                    # Parágrafo normal - converter quebras de linha simples em <br/>
+                    paragrafo_html = paragrafo.replace('\n', '<br/>')
+                    resultado.append(f'<p style="margin-top: 8px; margin-bottom: 8px;">{paragrafo_html}</p>')
+            
+            return Markup(''.join(resultado)) if resultado else Markup("")
+
         env.filters['sum_values'] = sum_values
         env.filters['cos'] = cos_filter
         env.filters['sin'] = sin_filter
+        # formatar_texto_ia está registrado globalmente no Flask app.jinja_env
+        # Mas também registramos aqui para garantir compatibilidade com Environment customizado
+        env.filters['formatar_texto_ia'] = formatar_texto_ia
 
         template = env.get_template('report.html')
         html_content = template.render(**context)

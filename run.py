@@ -29,7 +29,7 @@ if __name__ == "__main__":
             logging.error("Erro ao iniciar scheduler", exc_info=True)
     
     try:
-        app.run(host="0.0.0.0", port=5000)
+        app.run(host="0.0.0.0", port=5000, debug=True, use_reloader=True)
     except KeyboardInterrupt:
         logging.info("Aplicação interrompida")
     finally:

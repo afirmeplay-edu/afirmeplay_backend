@@ -579,7 +579,7 @@ class AIAnalysisService:
     
     def _analyze_niveis_aprendizagem_disciplinas(self, report_data: Dict[str, Any], avaliacao_titulo: str = "") -> Dict[str, str]:
         """
-        Analisa níveis de aprendizagem por disciplina (exceto GERAL)
+        Analisa níveis de aprendizagem por disciplina (incluindo GERAL)
         
         Args:
             report_data: Dados completos do relatório
@@ -596,10 +596,8 @@ class AIAnalysisService:
             
             analises_por_disciplina = {}
             
-            # Processar cada disciplina (exceto GERAL)
+            # Processar cada disciplina (incluindo GERAL)
             for disciplina, dados in niveis_aprendizagem.items():
-                if disciplina == 'GERAL':
-                    continue
                 
                 # Obter dados gerais da disciplina (total)
                 disc_data = dados.get('geral') or dados.get('total_geral', {})
@@ -623,22 +621,26 @@ class AIAnalysisService:
                 perc_adequado = (adequado / total_alunos * 100) if total_alunos > 0 else 0
                 perc_avancado = (avancado / total_alunos * 100) if total_alunos > 0 else 0
                 
+                # Ajustar nome da disciplina para GERAL
+                disciplina_nome = "GERAL" if disciplina == 'GERAL' else disciplina
+                disciplina_label = "GERAL (Todas as Disciplinas)" if disciplina == 'GERAL' else disciplina
+                
                 # Preencher o template do prompt (ordem importa)
                 prompt = NIVEIS_APRENDIZAGEM_ANALYSIS_PROMPT_TEMPLATE.replace(
                     "[DISCIPLINA]",
-                    disciplina
+                    disciplina_label
                 ).replace(
                     "[Avaliação]",
                     avaliacao_titulo or "Avaliação Diagnóstica"
                 ).replace(
                     "[Disciplina]",
-                    disciplina
+                    disciplina_label
                 ).replace(
                     "[Série/Ano]",
                     "9º ano"  # Pode ser ajustado dinamicamente no futuro
                 ).replace(
                     "- Disciplina: [PREENCHER DISCIPLINA: ex: Matemática / Língua Portuguesa]",
-                    f"- Disciplina: {disciplina}"
+                    f"- Disciplina: {disciplina_label}"
                 ).replace(
                     "- Avaliação: [AVALIAÇÃO: ex: Avaliação Diagnóstica 2025.1]",
                     f"- Avaliação: {avaliacao_titulo or 'Avaliação Diagnóstica'}"
@@ -661,6 +663,7 @@ class AIAnalysisService:
                 
                 try:
                     response = self._call_openai(prompt)
+                    # Usar a chave original da disciplina (incluindo 'GERAL')
                     analises_por_disciplina[disciplina] = response.strip()
                 except Exception as e:
                     self.logger.error(f"Erro ao gerar análise de níveis para {disciplina}: {str(e)}")
@@ -1035,11 +1038,9 @@ e recomendações práticas para a escola.
                 notas_data_str += f"  - Média Municipal: {media_municipal_disc:.2f}\n"
             notas_data_str += f"  - Notas por {unidade_label}:\n{detalhes_str}\n"
         
-        # Dados de níveis de aprendizagem por disciplina
+        # Dados de níveis de aprendizagem por disciplina (incluindo GERAL)
         niveis_data_str = ""
         for disciplina, dados in niveis_aprendizagem.items():
-            if disciplina == 'GERAL':
-                continue
             disc_data = dados.get('geral') or dados.get('total_geral', {})
             if not disc_data:
                 continue
@@ -1054,7 +1055,9 @@ e recomendações práticas para a escola.
             perc_basico = (basico / total_alunos * 100) if total_alunos > 0 else 0
             perc_adequado = (adequado / total_alunos * 100) if total_alunos > 0 else 0
             perc_avancado = (avancado / total_alunos * 100) if total_alunos > 0 else 0
-            niveis_data_str += f"\n{disciplina}:\n"
+            # Ajustar nome da disciplina para GERAL
+            disciplina_label = "GERAL (Todas as Disciplinas)" if disciplina == 'GERAL' else disciplina
+            niveis_data_str += f"\n{disciplina_label}:\n"
             niveis_data_str += f"  - Total de alunos: {total_alunos}\n"
             niveis_data_str += f"  - Abaixo do Básico: {abaixo_basico} alunos ({perc_abaixo:.1f}%)\n"
             niveis_data_str += f"  - Básico: {basico} alunos ({perc_basico:.1f}%)\n"
@@ -1267,22 +1270,64 @@ IMPORTANTE: Use os marcadores exatos [MARCADOR: PARTICIPACAO], [MARCADOR: PROFIC
             'niveis_aprendizagem': {}
         }
         
+        print("=" * 80)
+        print("DEBUG: Iniciando parsing da resposta da IA")
+        print(f"DEBUG: Tamanho total da resposta: {len(unified_response)} caracteres")
+        print(f"DEBUG: Primeiros 200 caracteres: {unified_response[:200]}")
+        print(f"DEBUG: Últimos 200 caracteres: {unified_response[-200:]}")
+        print("=" * 80)
+        
         try:
+            # Verificar presença dos marcadores
+            marcadores = {
+                'PARTICIPACAO': '[MARCADOR: PARTICIPACAO]' in unified_response,
+                'PROFICIENCIA': '[MARCADOR: PROFICIENCIA]' in unified_response,
+                'NOTAS': '[MARCADOR: NOTAS]' in unified_response,
+                'NIVEIS': '[MARCADOR: NIVEIS]' in unified_response
+            }
+            print("DEBUG: Marcadores encontrados:")
+            for marcador, encontrado in marcadores.items():
+                print(f"  - {marcador}: {encontrado}")
+            print("=" * 80)
+            
             # Extrair seção de participação
             if '[MARCADOR: PARTICIPACAO]' in unified_response:
                 parts = unified_response.split('[MARCADOR: PARTICIPACAO]', 1)
+                print(f"DEBUG: Split PARTICIPACAO - partes encontradas: {len(parts)}")
                 if len(parts) > 1:
-                    participacao_section = parts[1].split('[MARCADOR: PROFICIENCIA]', 1)[0]
-                    result['participacao'] = participacao_section.strip()
+                    print(f"DEBUG: Tamanho da parte após PARTICIPACAO: {len(parts[1])} caracteres")
+                    if '[MARCADOR: PROFICIENCIA]' in parts[1]:
+                        participacao_section = parts[1].split('[MARCADOR: PROFICIENCIA]', 1)[0]
+                        result['participacao'] = participacao_section.strip()
+                        print(f"DEBUG: Participação extraída - tamanho: {len(result['participacao'])} caracteres")
+                        print(f"DEBUG: Primeiros 150 caracteres da participação: {result['participacao'][:150]}")
+                        print(f"DEBUG: Últimos 150 caracteres da participação: {result['participacao'][-150:]}")
+                    else:
+                        print("DEBUG: ERRO - Marcador [MARCADOR: PROFICIENCIA] NÃO encontrado após PARTICIPACAO!")
+                        print(f"DEBUG: Primeiros 500 caracteres após PARTICIPACAO: {parts[1][:500]}")
+                        result['participacao'] = parts[1].strip()
+                else:
+                    print("DEBUG: ERRO - Split PARTICIPACAO não retornou partes suficientes")
+            else:
+                print("DEBUG: Marcador [MARCADOR: PARTICIPACAO] NÃO encontrado na resposta!")
+            print("=" * 80)
             
             # Extrair seção de proficiência
             if '[MARCADOR: PROFICIENCIA]' in unified_response:
                 parts = unified_response.split('[MARCADOR: PROFICIENCIA]', 1)
+                print(f"DEBUG: Split PROFICIENCIA - partes encontradas: {len(parts)}")
                 if len(parts) > 1:
-                    prof_section = parts[1].split('[MARCADOR: NOTAS]', 1)[0]
+                    print(f"DEBUG: Tamanho da parte após PROFICIENCIA: {len(parts[1])} caracteres")
+                    if '[MARCADOR: NOTAS]' in parts[1]:
+                        prof_section = parts[1].split('[MARCADOR: NOTAS]', 1)[0]
+                        print(f"DEBUG: Seção de proficiência extraída - tamanho: {len(prof_section)} caracteres")
+                    else:
+                        print("DEBUG: ERRO - Marcador [MARCADOR: NOTAS] NÃO encontrado após PROFICIENCIA!")
+                        prof_section = parts[1]
                     # Extrair todas as disciplinas usando regex
                     disciplina_pattern = r'\[DISCIPLINA:\s*([^\]]+)\]'
-                    matches = re.finditer(disciplina_pattern, prof_section)
+                    matches = list(re.finditer(disciplina_pattern, prof_section))
+                    print(f"DEBUG: Disciplinas encontradas em PROFICIENCIA: {len(matches)}")
                     for match in matches:
                         disciplina_nome = match.group(1).strip()
                         start_pos = match.end()
@@ -1293,23 +1338,46 @@ IMPORTANTE: Use os marcadores exatos [MARCADOR: PARTICIPACAO], [MARCADOR: PROFIC
                         else:
                             end_pos = len(prof_section)
                         disc_analysis = prof_section[start_pos:end_pos].strip()
-                        result['proficiencia'][disciplina_nome] = disc_analysis
+                        # Mapear "GERAL (Todas as Disciplinas)" de volta para "GERAL" se necessário
+                        disciplina_key = 'GERAL' if disciplina_nome.startswith('GERAL') else disciplina_nome
+                        result['proficiencia'][disciplina_key] = disc_analysis
+                        print(f"DEBUG: Proficiência extraída para {disciplina_key} - tamanho: {len(disc_analysis)} caracteres")
+                else:
+                    print("DEBUG: ERRO - Split PROFICIENCIA não retornou partes suficientes")
+            else:
+                print("DEBUG: Marcador [MARCADOR: PROFICIENCIA] NÃO encontrado na resposta!")
+            print("=" * 80)
             
             # Extrair seção de notas
             if '[MARCADOR: NOTAS]' in unified_response:
                 parts = unified_response.split('[MARCADOR: NOTAS]', 1)
+                print(f"DEBUG: Split NOTAS - partes encontradas: {len(parts)}")
                 if len(parts) > 1:
-                    notas_section = parts[1].split('[MARCADOR: NIVEIS]', 1)[0]
-                    result['notas'] = notas_section.strip()
+                    print(f"DEBUG: Tamanho da parte após NOTAS: {len(parts[1])} caracteres")
+                    if '[MARCADOR: NIVEIS]' in parts[1]:
+                        notas_section = parts[1].split('[MARCADOR: NIVEIS]', 1)[0]
+                        result['notas'] = notas_section.strip()
+                        print(f"DEBUG: Notas extraídas - tamanho: {len(result['notas'])} caracteres")
+                    else:
+                        print("DEBUG: ERRO - Marcador [MARCADOR: NIVEIS] NÃO encontrado após NOTAS!")
+                        result['notas'] = parts[1].strip()
+                else:
+                    print("DEBUG: ERRO - Split NOTAS não retornou partes suficientes")
+            else:
+                print("DEBUG: Marcador [MARCADOR: NOTAS] NÃO encontrado na resposta!")
+            print("=" * 80)
             
             # Extrair seção de níveis
             if '[MARCADOR: NIVEIS]' in unified_response:
                 parts = unified_response.split('[MARCADOR: NIVEIS]', 1)
+                print(f"DEBUG: Split NIVEIS - partes encontradas: {len(parts)}")
                 if len(parts) > 1:
                     niveis_section = parts[1]
+                    print(f"DEBUG: Tamanho da seção de níveis: {len(niveis_section)} caracteres")
                     # Extrair todas as disciplinas usando regex
                     disciplina_pattern = r'\[DISCIPLINA:\s*([^\]]+)\]'
-                    matches = re.finditer(disciplina_pattern, niveis_section)
+                    matches = list(re.finditer(disciplina_pattern, niveis_section))
+                    print(f"DEBUG: Disciplinas encontradas em NIVEIS: {len(matches)}")
                     for match in matches:
                         disciplina_nome = match.group(1).strip()
                         start_pos = match.end()
@@ -1320,7 +1388,15 @@ IMPORTANTE: Use os marcadores exatos [MARCADOR: PARTICIPACAO], [MARCADOR: PROFIC
                         else:
                             end_pos = len(niveis_section)
                         disc_analysis = niveis_section[start_pos:end_pos].strip()
-                        result['niveis_aprendizagem'][disciplina_nome] = disc_analysis
+                        # Mapear "GERAL (Todas as Disciplinas)" de volta para "GERAL"
+                        disciplina_key = 'GERAL' if disciplina_nome.startswith('GERAL') else disciplina_nome
+                        result['niveis_aprendizagem'][disciplina_key] = disc_analysis
+                        print(f"DEBUG: Níveis extraídos para {disciplina_key} - tamanho: {len(disc_analysis)} caracteres")
+                else:
+                    print("DEBUG: ERRO - Split NIVEIS não retornou partes suficientes")
+            else:
+                print("DEBUG: Marcador [MARCADOR: NIVEIS] NÃO encontrado na resposta!")
+            print("=" * 80)
             
             # Fallback: se não encontrou marcadores, tentar parsing mais flexível
             if not result['participacao'] and not result['proficiencia']:
@@ -1338,6 +1414,22 @@ IMPORTANTE: Use os marcadores exatos [MARCADOR: PARTICIPACAO], [MARCADOR: PROFIC
             return self._get_fallback_texts()
         
         # Garantir que pelo menos temos fallback para campos vazios
+        print("DEBUG: Resultado final do parsing (ANTES da formatação HTML):")
+        print(f"  - Participação: {len(result['participacao'])} caracteres")
+        print(f"  - Proficiência: {len(result['proficiencia'])} disciplinas")
+        print(f"  - Notas: {len(result['notas'])} caracteres")
+        print(f"  - Níveis: {len(result['niveis_aprendizagem'])} disciplinas")
+        print("=" * 80)
+        
+        # DEBUG: Verificar conteúdo da participação ANTES da formatação
+        print("DEBUG: Conteúdo da participação ANTES da formatação HTML:")
+        print(f"  - Primeiros 300 caracteres: {result['participacao'][:300]}")
+        print(f"  - Últimos 300 caracteres: {result['participacao'][-300:]}")
+        print(f"  - Contém '[MARCADOR: PROFICIENCIA]'? {('[MARCADOR: PROFICIENCIA]' in result['participacao'])}")
+        print(f"  - Contém '[MARCADOR: NOTAS]'? {('[MARCADOR: NOTAS]' in result['participacao'])}")
+        print(f"  - Contém '[MARCADOR: NIVEIS]'? {('[MARCADOR: NIVEIS]' in result['participacao'])}")
+        print("=" * 80)
+        
         if not result['participacao']:
             result['participacao'] = 'Análise de participação não disponível no momento.'
         if not result['notas']:
@@ -1349,22 +1441,51 @@ IMPORTANTE: Use os marcadores exatos [MARCADOR: PARTICIPACAO], [MARCADOR: PROFIC
                 if disciplina != 'GERAL':
                     result['proficiencia'][disciplina] = f'Análise de proficiência não disponível para {disciplina}.'
         if not result['niveis_aprendizagem']:
-            # Tentar obter disciplinas do report_data
+            # Tentar obter disciplinas do report_data (incluindo GERAL)
             niveis_disciplinas = report_data.get('niveis_aprendizagem', {})
             for disciplina in niveis_disciplinas.keys():
-                if disciplina != 'GERAL':
-                    result['niveis_aprendizagem'][disciplina] = f'Análise de níveis não disponível para {disciplina}.'
+                result['niveis_aprendizagem'][disciplina] = f'Análise de níveis não disponível para {disciplina}.'
         
         # Formatar todas as análises em HTML
+        participacao_antes_format = result['participacao']
+        notas_antes_format = result['notas']
+        
         result['participacao'] = self._format_ai_text(result['participacao'])
         result['notas'] = self._format_ai_text(result['notas'])
         
-        # Formatar análises por disciplina
-        for disciplina in result['proficiencia']:
-            result['proficiencia'][disciplina] = self._format_ai_text(result['proficiencia'][disciplina])
+        # DEBUG: Verificar conteúdo DEPOIS da formatação HTML
+        print("DEBUG: Resultado final do parsing (DEPOIS da formatação HTML):")
+        print(f"  - Participação: {len(result['participacao'])} caracteres (era {len(participacao_antes_format)})")
+        print(f"  - Notas: {len(result['notas'])} caracteres (era {len(notas_antes_format)})")
+        print("=" * 80)
+        print("DEBUG: Conteúdo da participação DEPOIS da formatação HTML:")
+        print(f"  - Primeiros 500 caracteres: {result['participacao'][:500]}")
+        print(f"  - Últimos 500 caracteres: {result['participacao'][-500:]}")
+        print(f"  - Contém '[MARCADOR: PROFICIENCIA]'? {('[MARCADOR: PROFICIENCIA]' in result['participacao'])}")
+        print(f"  - Contém '[MARCADOR: NOTAS]'? {('[MARCADOR: NOTAS]' in result['participacao'])}")
+        print(f"  - Contém '[MARCADOR: NIVEIS]'? {('[MARCADOR: NIVEIS]' in result['participacao'])}")
+        print("=" * 80)
         
+        # Formatar análises por disciplina
+        print("DEBUG: Formatando proficiência por disciplina:")
+        for disciplina in result['proficiencia']:
+            antes = result['proficiencia'][disciplina]
+            result['proficiencia'][disciplina] = self._format_ai_text(result['proficiencia'][disciplina])
+            print(f"  - {disciplina}: {len(antes)} → {len(result['proficiencia'][disciplina])} caracteres")
+        
+        print("DEBUG: Formatando níveis por disciplina:")
         for disciplina in result['niveis_aprendizagem']:
+            antes = result['niveis_aprendizagem'][disciplina]
             result['niveis_aprendizagem'][disciplina] = self._format_ai_text(result['niveis_aprendizagem'][disciplina])
+            print(f"  - {disciplina}: {len(antes)} → {len(result['niveis_aprendizagem'][disciplina])} caracteres")
+        
+        print("=" * 80)
+        print("DEBUG: RESULTADO FINAL COMPLETO:")
+        print(f"  - Participação: {len(result['participacao'])} caracteres")
+        print(f"  - Proficiência: {list(result['proficiencia'].keys())}")
+        print(f"  - Notas: {len(result['notas'])} caracteres")
+        print(f"  - Níveis: {list(result['niveis_aprendizagem'].keys())}")
+        print("=" * 80)
         
         # Formatar acertos por habilidade se existir
         if 'acertos_habilidade' in result:

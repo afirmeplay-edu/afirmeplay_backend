@@ -158,31 +158,34 @@ class ResponseService:
             for question in form.questions:
                 if question.sub_questions:
                     # Questão com subperguntas: conta como 1 campo
-                    # (para multipla_escolha, basta responder pelo menos 1 subpergunta)
+                    # (todas as subperguntas devem estar respondidas)
                     total_fields += 1
                 else:
                     # Questão simples: conta 1
                     total_fields += 1
             
             # Contar campos respondidos usando as respostas finais
-            # Para questões com subperguntas, verificar se pelo menos 1 foi respondida
+            # Para questões com subperguntas, verificar se todas foram respondidas
             answered_fields = 0
             
             for question in form.questions:
                 question_id = question.question_id
                 
                 if question.sub_questions:
-                    # Para questões com subperguntas, verificar se pelo menos 1 subpergunta foi respondida
-                    has_any_response = False
+                    # Para questões com subperguntas, verificar se todas as subperguntas foram respondidas
+                    all_subquestions_answered = True
                     for sub_q in question.sub_questions:
                         sub_id = sub_q.get('id')
-                        if sub_id and sub_id in final_responses:
+                        if sub_id:
+                            if sub_id not in final_responses:
+                                all_subquestions_answered = False
+                                break
                             value = final_responses.get(sub_id)
-                            if value is not None and value != '':
-                                has_any_response = True
+                            if value is None or value == '':
+                                all_subquestions_answered = False
                                 break
                     
-                    if has_any_response:
+                    if all_subquestions_answered:
                         answered_fields += 1
                 else:
                     # Questão simples: verificar se foi respondida
@@ -318,16 +321,22 @@ class ResponseService:
             question_id = question.question_id
             has_response = False
             
-            # Se a questão tem subperguntas, verificar se pelo menos uma foi respondida
+            # Se a questão tem subperguntas, verificar se todas foram respondidas
             if question.sub_questions:
+                all_subquestions_answered = True
                 for sub_q in question.sub_questions:
                     sub_id = sub_q.get('id')
-                    if sub_id and sub_id in responses_data:
-                        if is_valid_response(responses_data.get(sub_id)):
-                            has_response = True
+                    if sub_id:
+                        if sub_id not in responses_data:
+                            all_subquestions_answered = False
+                            break
+                        if not is_valid_response(responses_data.get(sub_id)):
+                            all_subquestions_answered = False
                             break
                 
-                if not has_response:
+                if all_subquestions_answered:
+                    has_response = True
+                else:
                     missing_questions.append(question.text)
             
             # Se a questão não tem subperguntas, verificar se a questão principal foi respondida

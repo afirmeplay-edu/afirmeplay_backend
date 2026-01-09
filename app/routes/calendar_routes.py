@@ -20,9 +20,11 @@ def to_fullcalendar_event(e: CalendarEvent, user_rec: CalendarEventUser = None) 
         "start": e.start_at.isoformat() if e.start_at else None,
         "end": e.end_at.isoformat() if e.end_at else None,
         "allDay": bool(e.all_day),
+        "timezone": e.timezone,
         "extendedProps": {
             "description": e.description,
             "location": e.location,
+            "recurrence_rule": e.recurrence_rule,
             "read": bool(user_rec.read_at) if user_rec else False,
             "eventId": e.id,
             "metadata": e.metadata_json or {},
@@ -252,9 +254,19 @@ def _obter_todos_municipios() -> List[Dict[str, Any]]:
 
 
 def _obter_todas_escolas() -> List[Dict[str, Any]]:
-    """Retorna todas as escolas."""
+    """Retorna todas as escolas com relacionamento ao município."""
     escolas = School.query.all()
-    return [{"id": str(e.id), "nome": e.name, "target_type": "SCHOOL"} for e in escolas]
+    result = []
+    for escola in escolas:
+        municipio = escola.city if escola.city else None
+        result.append({
+            "id": str(escola.id),
+            "nome": escola.name,
+            "target_type": "SCHOOL",
+            "city_id": str(escola.city_id) if escola.city_id else None,
+            "municipio_nome": municipio.name if municipio else None
+        })
+    return result
 
 
 def _obter_todas_turmas_formatadas() -> List[Dict[str, Any]]:
@@ -279,9 +291,22 @@ def _obter_todas_turmas_formatadas() -> List[Dict[str, Any]]:
 
 
 def _obter_escolas_por_municipio(city_id: str) -> List[Dict[str, Any]]:
-    """Retorna escolas de um município."""
+    """Retorna escolas de um município com relacionamento ao município."""
     escolas = School.query.filter_by(city_id=city_id).all()
-    return [{"id": str(e.id), "nome": e.name, "target_type": "SCHOOL"} for e in escolas]
+    # Buscar o município uma vez para evitar queries repetidas
+    municipio = City.query.get(city_id)
+    municipio_nome = municipio.name if municipio else None
+    
+    result = []
+    for escola in escolas:
+        result.append({
+            "id": str(escola.id),
+            "nome": escola.name,
+            "target_type": "SCHOOL",
+            "city_id": str(city_id),
+            "municipio_nome": municipio_nome
+        })
+    return result
 
 
 def _obter_turmas_por_municipio_formatadas(city_id: str) -> List[Dict[str, Any]]:
@@ -311,6 +336,10 @@ def _obter_turmas_por_escola_formatadas(school_id: str) -> List[Dict[str, Any]]:
     """Retorna turmas da escola formatadas como 'Série - Turma'."""
     turmas = Class.query.join(Grade, Class.grade_id == Grade.id)\
                         .filter(Class.school_id == school_id).all()
+    # Buscar a escola uma vez para evitar queries repetidas
+    escola = School.query.get(school_id)
+    escola_nome = escola.name if escola else None
+    
     result = []
     for turma in turmas:
         serie_nome = turma.grade.name if turma.grade else "Sem série"
@@ -322,15 +351,27 @@ def _obter_turmas_por_escola_formatadas(school_id: str) -> List[Dict[str, Any]]:
             "nome": nome_formatado,
             "target_type": "CLASS",
             "serie_id": str(turma.grade_id) if turma.grade_id else None,
-            "serie_nome": serie_nome
+            "serie_nome": serie_nome,
+            "escola_id": str(school_id),
+            "escola_nome": escola_nome
         })
     return result
 
 
 def _obter_escolas_por_ids(school_ids: List[str]) -> List[Dict[str, Any]]:
-    """Retorna escolas por IDs."""
+    """Retorna escolas por IDs com relacionamento ao município."""
     escolas = School.query.filter(School.id.in_(school_ids)).all()
-    return [{"id": str(e.id), "nome": e.name, "target_type": "SCHOOL"} for e in escolas]
+    result = []
+    for escola in escolas:
+        municipio = escola.city if escola.city else None
+        result.append({
+            "id": str(escola.id),
+            "nome": escola.name,
+            "target_type": "SCHOOL",
+            "city_id": str(escola.city_id) if escola.city_id else None,
+            "municipio_nome": municipio.name if municipio else None
+        })
+    return result
 
 
 def _obter_turmas_por_ids_formatadas(class_ids: List[str]) -> List[Dict[str, Any]]:

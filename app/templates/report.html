@@ -218,13 +218,34 @@
 				margin: 24px 0;
 				page-break-inside: avoid;
 			}
+			/* Blocos de página - cada um fecha uma página */
+			.page-block {
+				page-break-after: always;
+			}
+			.page-block:last-of-type {
+				page-break-after: auto;
+			}
+			.data-block {
+				page-break-inside: avoid;
+			}
+			/* Data block sem quebra quando seguido de análise */
+			.data-block-no-break {
+				page-break-inside: avoid;
+				page-break-after: auto;
+			}
+			/* Análise sempre em nova página */
+			.analysis-block {
+				page-break-before: always;
+				page-break-inside: avoid;
+				background: #f8fafc;
+				border-left: 4px solid #6366f1;
+				padding: 16px 20px;
+				border-radius: 6px;
+				margin-top: 0;
+			}
 			.justified {
 				text-align: justify;
 				line-height: 1.8;
-			}
-			/* Controle de quebras de página */
-			.page-break {
-				page-break-before: always;
 			}
 			.keep-with-next {
 				page-break-after: avoid;
@@ -440,25 +461,22 @@
 				font-weight: 700;
 				color: #1e293b;
 			}
-			/* Blocos de página - cada um fecha uma página */
-			.page-block {
-				page-break-after: always;
-			}
-			.page-block:last-of-type {
-				page-break-after: auto;
-			}
-			.data-block {
-				page-break-inside: avoid;
-			}
-			.analysis-block {
-				page-break-inside: avoid;
+			/* Visual da análise */
+			.analysis-page {
 				background: #f8fafc;
 				border-left: 4px solid #6366f1;
 				padding: 16px 20px;
 				border-radius: 6px;
-				margin-top: 16px;
 			}
 			/* Container para análises da IA (mantido para compatibilidade) */
+			.ai-analysis-block {
+				margin-top: 16px;
+				padding: 16px 20px;
+				background: #f8fafc;
+				border-left: 4px solid #6366f1;
+				padding: 16px 20px;
+				border-radius: 6px;
+			}
 			.ai-analysis-block {
 				margin-top: 16px;
 				padding: 16px 20px;
@@ -1029,7 +1047,8 @@
 
 		<section class="section page-break">
 			{# ===== DADOS ===== #}
-			<div class="page-block data-block">
+			<div
+				class="{% if analise_ia and analise_ia.participacao %}data-block-no-break{% else %}page-block data-block{% endif %}">
 				<h2>
 					1. PARTICIPAÇÃO DA REDE NO PROCESSO DE AVALIAÇÃO DIAGNÓSTICA
 				</h2>
@@ -1129,7 +1148,7 @@
 
 			{# ===== ANÁLISE ===== #} {% if analise_ia and
 			analise_ia.participacao %}
-			<div class="page-block analysis-block">
+			<div class="analysis-block">
 				<div class="analysis-text">
 					{{ analise_ia.participacao | formatar_texto_ia }}
 				</div>
@@ -1144,8 +1163,12 @@
 			{% elif 'português' in disc.lower() or 'portugues' in disc.lower()
 			%} {% set disc_nome = 'PORTUGUÊS' %} {% elif 'matemática' in
 			disc.lower() or 'matematica' in disc.lower() %} {% set disc_nome =
-			'MATEMÁTICA' %} {% endif %} {# ===== DADOS ===== #}
-			<div class="page-block data-block">
+			'MATEMÁTICA' %} {% endif %} {# Verificar se há análise para esta
+			disciplina #} {% set tem_analise = analise_ia and
+			analise_ia.niveis_aprendizagem and
+			analise_ia.niveis_aprendizagem.get(disc) %} {# ===== DADOS ===== #}
+			<div
+				class="{% if tem_analise %}data-block-no-break{% else %}page-block data-block{% endif %}">
 				<table class="data-table">
 					<thead>
 						<tr>
@@ -1307,7 +1330,7 @@
 			{# ===== ANÁLISE ===== #} {% if analise_ia and
 			analise_ia.niveis_aprendizagem and
 			analise_ia.niveis_aprendizagem.get(disc) %}
-			<div class="page-block analysis-block">
+			<div class="analysis-block">
 				<div class="analysis-text">
 					{{ analise_ia.niveis_aprendizagem[disc] | formatar_texto_ia
 					}}
@@ -1317,8 +1340,11 @@
 		</section>
 
 		<section class="section page-break">
-			{# ===== DADOS ===== #}
-			<div class="page-block data-block">
+			{# ===== DADOS ===== #} {% set tem_analise_proficiencia = analise_ia
+			and analise_ia.proficiencia and analise_ia.proficiencia|length > 0
+			%}
+			<div
+				class="{% if tem_analise_proficiencia %}data-block-no-break{% else %}page-block data-block{% endif %}">
 				{% if proficiencia.por_disciplina %} {# Identificar disciplinas
 				usando namespace para manter escopo #} {% set ns_prof =
 				namespace(disc_portugues=None, disc_matematica=None) %} {% for
@@ -1591,8 +1617,9 @@
 
 			{# ===== ANÁLISE ===== #} {% if analise_ia and
 			analise_ia.proficiencia %} {% for disc_prof, analise_prof in
-			analise_ia.proficiencia.items() %} {% if disc_prof != 'GERAL' %}
-			<div class="page-block analysis-block">
+			analise_ia.proficiencia.items() %} {% if disc_prof != 'GERAL' and
+			analise_prof %}
+			<div class="analysis-block">
 				<div class="analysis-text">
 					{{ analise_prof | formatar_texto_ia }}
 				</div>
@@ -1601,8 +1628,10 @@
 		</section>
 
 		<section class="section page-break">
-			{# ===== DADOS ===== #}
-			<div class="page-block data-block">
+			{# ===== DADOS ===== #} {% set tem_analise_notas = analise_ia and
+			analise_ia.notas %}
+			<div
+				class="{% if tem_analise_notas %}data-block-no-break{% else %}page-block data-block{% endif %}">
 				{% if nota_geral.por_disciplina %} {# Identificar disciplinas
 				usando namespace para manter escopo #} {% set ns_nota =
 				namespace(disc_portugues=None, disc_matematica=None) %} {% for
@@ -1846,7 +1875,7 @@
 			</div>
 
 			{# ===== ANÁLISE ===== #} {% if analise_ia and analise_ia.notas %}
-			<div class="page-block analysis-block">
+			<div class="analysis-block">
 				<div class="analysis-text">
 					{{ analise_ia.notas | formatar_texto_ia }}
 				</div>

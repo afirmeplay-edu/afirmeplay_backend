@@ -35,6 +35,7 @@ import os
 from jinja2 import Template
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 import tempfile
+from pathlib import Path
 from reportlab.lib.pagesizes import A4
 from reportlab.platypus import BaseDocTemplate, PageTemplate, Frame, Paragraph, Spacer, Table, TableStyle, PageBreak, KeepTogether, Image
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
@@ -1084,10 +1085,28 @@ def relatorio_pdf(evaluation_id: str):
         # Mas também registramos aqui para garantir compatibilidade com Environment customizado
         env.filters['formatar_texto_ia'] = formatar_texto_ia
 
-        template = env.get_template('report.html')
+        template = env.get_template('report_organized.html')
         html_content = template.render(**context)
 
-        pdf_content = HTML(string=html_content, base_url=templates_dir).write_pdf()
+        # SOLUÇÃO: Salvar HTML em arquivo temporário e usar filename em vez de string
+        # Isso faz o WeasyPrint processar o documento como arquivo, preservando a ordem semântica
+        # e evitando que o layout engine reorganize os blocos (DADOS/ANÁLISE)
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.html', delete=False, encoding='utf-8') as temp_html:
+            temp_html.write(html_content)
+            temp_html_path = temp_html.name
+        
+        try:
+            # Usar filename em vez de string para preservar ordem semântica do documento
+            pdf_content = HTML(
+                filename=temp_html_path,
+                base_url=templates_dir
+            ).write_pdf()
+        finally:
+            # Limpar arquivo temporário
+            try:
+                os.unlink(temp_html_path)
+            except OSError:
+                pass  # Ignorar erros ao deletar arquivo temporário
 
         test = Test.query.get(evaluation_id)
         nome_avaliacao = (test.title if test else 'relatorio')
@@ -1324,8 +1343,25 @@ def relatorio_escolar_pdf():
         template = env.get_template('relatorio_escolar_pdf.html')
         html_content = template.render(**template_data)
         
-        # Gerar PDF com WeasyPrint
-        pdf_content = HTML(string=html_content, base_url=templates_dir).write_pdf()
+        # SOLUÇÃO: Salvar HTML em arquivo temporário e usar filename em vez de string
+        # Isso faz o WeasyPrint processar o documento como arquivo, preservando a ordem semântica
+        # e evitando que o layout engine reorganize os blocos
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.html', delete=False, encoding='utf-8') as temp_html:
+            temp_html.write(html_content)
+            temp_html_path = temp_html.name
+        
+        try:
+            # Usar filename em vez de string para preservar ordem semântica do documento
+            pdf_content = HTML(
+                filename=temp_html_path,
+                base_url=templates_dir
+            ).write_pdf()
+        finally:
+            # Limpar arquivo temporário
+            try:
+                os.unlink(temp_html_path)
+            except OSError:
+                pass  # Ignorar erros ao deletar arquivo temporário
         
         # Preparar nome do arquivo
         evaluation_title = template_data.get('evaluation', {}).get('title', 'relatorio')

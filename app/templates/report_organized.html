@@ -1,0 +1,1751 @@
+<!DOCTYPE html>
+<html lang="pt-br">
+	<head>
+		<meta charset="utf-8" />
+		<title>{{ avaliacao.titulo or 'Relatório de Avaliação' }}</title>
+		<style>
+			/* Reset e Base */
+			* {
+				margin: 0;
+				padding: 0;
+				box-sizing: border-box;
+			}
+
+			@page: first {
+				size: A4;
+				margin: 1cm;
+			}
+
+			@page {
+				size: A4;
+				margin: 1cm;
+				@bottom-left {
+					content: "AfirmePlay: Sistema de Ensino e Avaliação";
+					font-size: 8pt;
+					font-family: "Inter", -apple-system, BlinkMacSystemFont,
+						"Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+					color: #9ca3af;
+				}
+				@bottom-center {
+					content: "Página " counter(page);
+					font-size: 8pt;
+					font-family: "Inter", -apple-system, BlinkMacSystemFont,
+						"Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+					color: #9ca3af;
+				}
+				@bottom-right {
+					content: "Gerado em "
+						"{{ metadados.data_geracao or 'DD/MM/AAAA HH:MM' }}";
+					font-size: 8pt;
+					font-family: "Inter", -apple-system, BlinkMacSystemFont,
+						"Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+					color: #9ca3af;
+				}
+			}
+
+			body {
+				font-family: "Inter", -apple-system, BlinkMacSystemFont,
+					"Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+				color: #1e293b;
+				font-size: 11pt;
+				line-height: 1.6;
+				background: #ffffff;
+			}
+
+			/* Tipografia Moderna */
+			h1 {
+				font-size: 32pt;
+				font-weight: 800;
+				color: #0f172a;
+				letter-spacing: -0.02em;
+				margin-bottom: 8px;
+			}
+			h2 {
+				font-size: 12pt;
+				font-weight: 700;
+				color: #1e293b;
+				margin: 24px 0 12px 0;
+				padding-bottom: 0;
+			}
+			h3 {
+				font-size: 12pt;
+				font-weight: 600;
+				color: #475569;
+				margin: 16px 0 12px 0;
+			}
+
+			/* Capa Institucional */
+			.cover-page {
+				page-break-after: always;
+				min-height: 100vh;
+				display: flex;
+				flex-direction: column;
+				background: white;
+				color: #000000;
+				text-align: center;
+				padding: 40px 60px;
+				justify-content: space-between;
+			}
+			.cover-top-section {
+				flex: 0 0 auto;
+				padding: 20px 0;
+			}
+			.cover-logo-box {
+				width: 200px;
+				height: 200px;
+				background: transparent;
+				border-radius: 8px;
+				display: inline-flex;
+				flex-direction: column;
+				align-items: center;
+				justify-content: center;
+				margin-bottom: 24px;
+			}
+			.cover-logo-text {
+				color: white;
+				font-size: 16pt;
+				font-weight: 700;
+				letter-spacing: 0.05em;
+				text-transform: uppercase;
+				font-family: sans-serif;
+				line-height: 1.2;
+				text-align: center;
+			}
+			.cover-municipio {
+				font-size: 15pt;
+				font-weight: 700;
+				color: #6b21a8;
+				text-transform: uppercase;
+				margin-bottom: 8px;
+				letter-spacing: 0.03em;
+			}
+			.cover-secretaria {
+				font-size: 11pt;
+				font-weight: 400;
+				color: #6b7280;
+				text-transform: uppercase;
+				letter-spacing: 0.02em;
+			}
+			.cover-middle-section {
+				flex: 1 1 auto;
+				display: flex;
+				flex-direction: column;
+				justify-content: center;
+				align-items: center;
+				padding: 40px 0;
+			}
+			.cover-title {
+				font-size: 36pt;
+				font-weight: 700;
+				letter-spacing: 0.05em;
+				text-transform: uppercase;
+				color: #1e293b;
+				text-align: center;
+				font-family: sans-serif;
+				margin-bottom: 12px;
+			}
+			.cover-subtitle {
+				font-size: 18pt;
+				font-weight: 700;
+				letter-spacing: 0.05em;
+				text-transform: uppercase;
+				color: #1e293b;
+				text-align: center;
+				font-family: sans-serif;
+			}
+			.cover-series {
+				font-size: 16pt;
+				font-weight: 600;
+				color: #6b21a8;
+				text-align: center;
+				font-family: sans-serif;
+				margin-top: 15px;
+				margin-bottom: 15px;
+				text-transform: uppercase;
+				letter-spacing: 0.02em;
+			}
+			.cover-disciplinas {
+				font-size: 14pt;
+				font-weight: 500;
+				color: #475569;
+				text-align: center;
+				font-family: sans-serif;
+				margin-top: 20px;
+				max-width: 100%;
+				word-wrap: break-word;
+				overflow-wrap: break-word;
+				line-height: 1.6;
+			}
+			.cover-bottom-section {
+				flex: 0 0 auto;
+				padding: 40px 0 60px 0;
+			}
+			.cover-info-box {
+				display: block;
+				width: 100%;
+				background: white;
+				border: 1px solid #d1d5db;
+				border-radius: 8px;
+				box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+				padding: 24px 32px;
+				text-align: left;
+				margin: 0;
+			}
+			.cover-info-item {
+				display: flex;
+				justify-content: space-between;
+				padding: 12px 0;
+				font-size: 12pt;
+				border-bottom: 1px solid #e5e7eb;
+			}
+			.cover-info-item:last-child {
+				border-bottom: none;
+				padding-bottom: 0;
+			}
+			.cover-info-label {
+				color: #6b21a8;
+				font-weight: 700;
+				text-transform: uppercase;
+			}
+			.cover-info-value {
+				color: #1e293b;
+				font-weight: 400;
+				text-align: left;
+			}
+
+			/* Estrutura de Dados e Análise - Baseado na documentação WeasyPrint */
+			/* Usar page-break-after: always no container de dados para forçar nova página antes da análise */
+			.data-section {
+				page-break-after: always;
+				page-break-inside: avoid;
+				margin: 24px 0;
+			}
+
+			/* Análise sempre começa em nova página (garantido pelo page-break-after do data-section anterior) */
+			.analysis-section {
+				page-break-inside: avoid;
+				background: #f8fafc;
+				border-left: 4px solid #6366f1;
+				padding: 16px 20px;
+				border-radius: 6px;
+				margin: 24px 0;
+			}
+
+			/* Títulos não devem quebrar sozinhos */
+			h2 {
+				page-break-after: avoid;
+			}
+
+			/* Tabelas não devem quebrar internamente */
+			table {
+				page-break-inside: avoid;
+			}
+
+			/* Seções gerais */
+			.section {
+				margin: 24px 0;
+			}
+
+			.justified {
+				text-align: justify;
+				line-height: 1.8;
+			}
+
+			/* Tabelas Modernas - Copiado do report.html original */
+			.data-table {
+				width: 100%;
+				border-collapse: collapse;
+				border-spacing: 0;
+				border: 1px solid #e2e8f0;
+				box-shadow: 0 2px 8px rgba(0, 0, 0, 0.04);
+				margin: 16px 0;
+				page-break-inside: avoid;
+			}
+			.data-table thead th {
+				background: #6b21a8;
+				color: #ffffff;
+				text-align: center;
+				font-weight: 700;
+				letter-spacing: 0.03em;
+				font-size: 10pt;
+				padding: 8px 16px;
+				text-transform: uppercase;
+			}
+			/* Título da tabela como primeira linha */
+			.data-table thead th.table-title {
+				background: #e5e7eb;
+				color: #1e293b;
+				font-size: 11pt;
+				padding: 6px 16px;
+				text-transform: none;
+				border-bottom: none;
+				text-align: center;
+			}
+			/* Primeira coluna do cabeçalho (ESCOLA/SÉRIE/TURNO) alinhada à esquerda - exceto table-title */
+			.data-table thead tr:not(:first-child) th:first-child,
+			.data-table thead th:first-child:not(.table-title) {
+				text-align: left;
+			}
+			.data-table tbody td {
+				padding: 12px 16px;
+				font-size: 10pt;
+				border-top: 1px solid #f1f5f9;
+				color: #334155;
+				text-align: center;
+			}
+			.data-table tbody tr:nth-child(even) {
+				background: #f8fafc;
+			}
+			.data-table tbody tr:nth-child(odd) {
+				background: #ffffff;
+			}
+			.data-table tbody tr th {
+				background: #e5e7eb;
+				font-weight: 700;
+				color: #1e293b;
+				padding: 6px 16px;
+				text-align: center;
+			}
+			/* Primeira célula th no tbody (MUNICIPAL GERAL/9º GERAL) alinhada à esquerda */
+			.data-table tbody tr th:first-child {
+				text-align: left;
+			}
+
+			/* Estilos para cabeçalhos coloridos dos níveis de aprendizagem */
+			.data-table thead th.header-red {
+				background: #dc2626 !important;
+				color: #ffffff !important;
+			}
+			.data-table thead th.header-orange {
+				background: #eab308 !important;
+				color: #ffffff !important;
+			}
+			.data-table thead th.header-light-green {
+				background: #84cc16 !important;
+				color: #ffffff !important;
+			}
+			.data-table thead th.header-dark-green {
+				background: #059669 !important;
+				color: #ffffff !important;
+			}
+
+			/* Estilos específicos para tabela de Acertos por Habilidade */
+			.data-table.acertos-habilidade-table tbody td {
+				padding: 10px 12px;
+				font-size: 9.5pt;
+			}
+			.data-table.acertos-habilidade-table thead th {
+				font-size: 9.5pt;
+				padding: 6px 10px;
+			}
+			/* Coluna de descrição com melhor distribuição de texto - apenas para tabela de acertos */
+			.data-table.acertos-habilidade-table tbody td:nth-child(3) {
+				text-align: left;
+				width: 32%;
+				word-wrap: break-word;
+				word-break: normal;
+				hyphens: auto;
+				line-height: 1.6;
+				padding: 10px 12px;
+			}
+			.data-table.acertos-habilidade-table thead th:nth-child(3) {
+				text-align: center;
+				width: 32%;
+				padding: 6px 10px;
+			}
+			/* Ajustar largura das outras colunas para balancear - apenas para tabela de acertos */
+			.data-table.acertos-habilidade-table tbody td:nth-child(1),
+			.data-table.acertos-habilidade-table thead th:nth-child(1) {
+				width: 5%;
+				padding: 10px 8px;
+			}
+			.data-table.acertos-habilidade-table tbody td:nth-child(2),
+			.data-table.acertos-habilidade-table thead th:nth-child(2) {
+				width: 8%;
+				padding: 10px 8px;
+			}
+			.data-table.acertos-habilidade-table tbody td:nth-child(4),
+			.data-table.acertos-habilidade-table thead th:nth-child(4),
+			.data-table.acertos-habilidade-table tbody td:nth-child(5),
+			.data-table.acertos-habilidade-table thead th:nth-child(5) {
+				width: 7%;
+				padding: 10px 8px;
+			}
+			.data-table.acertos-habilidade-table tbody td:nth-child(6),
+			.data-table.acertos-habilidade-table thead th:nth-child(6) {
+				width: 6%;
+				padding: 10px 8px;
+			}
+			.data-table.acertos-habilidade-table tbody td:nth-child(7),
+			.data-table.acertos-habilidade-table thead th:nth-child(7) {
+				width: 15%;
+				padding: 10px 10px;
+			}
+			/* Ajustar padding do cabeçalho também - apenas para tabela de acertos */
+			.data-table.acertos-habilidade-table thead th:nth-child(1),
+			.data-table.acertos-habilidade-table thead th:nth-child(2),
+			.data-table.acertos-habilidade-table thead th:nth-child(4),
+			.data-table.acertos-habilidade-table thead th:nth-child(5),
+			.data-table.acertos-habilidade-table thead th:nth-child(6),
+			.data-table.acertos-habilidade-table thead th:nth-child(7) {
+				padding: 6px 8px;
+			}
+
+			/* Gráfico de barras verticais para níveis de aprendizagem */
+			.bar-chart-card {
+				background: white;
+				border: 1px solid #e2e8f0;
+				border-radius: 8px;
+				padding: 20px;
+				margin: 20px 0;
+				box-shadow: 0 2px 8px rgba(0, 0, 0, 0.04);
+				page-break-inside: avoid;
+			}
+			.bar-chart-container {
+				margin-top: 16px;
+				display: flex;
+				justify-content: space-around;
+				align-items: flex-end;
+				height: 250px;
+				padding: 0 20px;
+				position: relative;
+			}
+			.bar-item {
+				display: flex;
+				flex-direction: column;
+				align-items: center;
+				flex: 1;
+				max-width: 120px;
+				height: 100%;
+				margin: 0 8px;
+			}
+			.bar-wrapper {
+				width: 100%;
+				height: 200px;
+				position: relative;
+				background: #f1f5f9;
+				border-radius: 4px 4px 0 0;
+				overflow: hidden;
+				display: flex;
+				align-items: flex-end;
+				margin-bottom: 8px;
+			}
+			.bar-fill {
+				width: 100%;
+				display: flex;
+				align-items: center;
+				justify-content: center;
+				font-size: 9pt;
+				font-weight: 700;
+				color: #ffffff;
+				transition: height 0.3s ease;
+				min-height: 20px;
+				border-radius: 4px 4px 0 0;
+			}
+			.bar-label {
+				font-size: 9pt;
+				font-weight: 600;
+				color: #1e293b;
+				text-align: center;
+				margin-top: 8px;
+				line-height: 1.2;
+			}
+			.bar-fill.bar-red {
+				background: #dc2626;
+			}
+			.bar-fill.bar-orange {
+				background: #eab308;
+			}
+			.bar-fill.bar-light-green {
+				background: #84cc16;
+			}
+			.bar-fill.bar-dark-green {
+				background: #059669;
+			}
+			.bar-value {
+				font-size: 9pt;
+				font-weight: 600;
+				color: #475569;
+				text-align: center;
+				margin-top: 4px;
+			}
+			/* Gráfico de barras para proficiência e nota */
+			.bar-fill.bar-blue {
+				background: #3b82f6;
+			}
+			.bar-fill.bar-purple {
+				background: #8b5cf6;
+			}
+			.bar-fill.bar-teal {
+				background: #14b8a6;
+			}
+			.bar-fill.bar-gray {
+				background: #6b7280;
+			}
+
+			/* Estilos para tabela horizontal de acertos por habilidade */
+			.skills-table-container {
+				margin: 20px 0;
+				overflow-x: auto;
+				page-break-inside: avoid;
+			}
+			.skills-horizontal-table {
+				width: 100%;
+				border-collapse: collapse;
+				margin: 0;
+				min-width: fit-content;
+			}
+			.skills-horizontal-table td {
+				padding: 8px 6px;
+				text-align: center;
+				font-size: 9pt;
+				border: 1px solid #e2e8f0;
+			}
+			.skills-horizontal-table .question-number {
+				background: #6b21a8;
+				color: #ffffff;
+				font-weight: 700;
+				font-size: 9pt;
+			}
+			/* Título da disciplina dentro da tabela horizontal */
+			.skills-horizontal-table .skills-discipline-title-table {
+				background: #e5e7eb;
+				color: #1e293b;
+				font-weight: 700;
+				font-size: 12pt;
+				padding: 6px 16px;
+				text-align: center;
+				text-transform: uppercase;
+				border: 1px solid #e2e8f0;
+				border-bottom: none;
+			}
+			.skills-horizontal-table .skill-code {
+				background: #ffffff;
+				color: #000000;
+				font-weight: 600;
+				font-size: 9pt;
+			}
+			.skills-horizontal-table .percentage-green {
+				background: #22c55e;
+				color: #ffffff;
+				font-weight: 700;
+				font-size: 9pt;
+			}
+			.skills-horizontal-table .percentage-red {
+				background: #dc2626;
+				color: #ffffff;
+				font-weight: 700;
+				font-size: 9pt;
+			}
+			.skills-legend {
+				margin-top: 12px;
+				display: flex;
+				align-items: center;
+				justify-content: center;
+				gap: 16px;
+				font-size: 9pt;
+			}
+			.skills-legend-item {
+				display: flex;
+				align-items: center;
+				gap: 6px;
+			}
+			.skills-legend-square {
+				width: 16px;
+				height: 16px;
+				border: 1px solid #e2e8f0;
+			}
+			.skills-legend-square.green {
+				background: #22c55e;
+			}
+			.skills-legend-square.red {
+				background: #dc2626;
+			}
+			.skills-discipline-title {
+				background: #e5e7eb;
+				padding: 6px 16px;
+				text-align: center;
+				font-weight: 700;
+				font-size: 12pt;
+				color: #1e293b;
+				margin: 24px 0 16px 0;
+				text-transform: uppercase;
+			}
+
+			/* Badges de classificação */
+			.classification-badge {
+				display: inline-block;
+				padding: 4px 12px;
+				border-radius: 12px;
+				font-size: 7.5pt;
+				font-weight: 700;
+				text-align: center;
+				text-transform: uppercase;
+				letter-spacing: 0.03em;
+				white-space: nowrap;
+			}
+			.classification-badge.revisar {
+				background: #dc2626;
+				color: #ffffff;
+			}
+			.classification-badge.reaplicar {
+				background: #f59e0b;
+				color: #ffffff;
+			}
+			.classification-badge.concluido {
+				background: #22c55e;
+				color: #ffffff;
+			}
+
+			/* Estilos para textos descritivos */
+			.analysis-text {
+				margin-top: 16px;
+				font-size: 11pt;
+			}
+			.analysis-text p {
+				margin-top: 8px;
+				margin-bottom: 8px;
+				text-align: justify;
+				line-height: 1.8;
+			}
+			.analysis-text ul {
+				margin: 8px 0 8px 20px;
+				padding-left: 20px;
+				list-style-type: disc;
+				text-align: left;
+			}
+			.analysis-text li {
+				margin: 6px 0;
+				line-height: 1.6;
+				text-align: left;
+			}
+			.analysis-text strong {
+				font-weight: 700;
+				color: #1e293b;
+			}
+		</style>
+	</head>
+	<body>
+		{% set is_school_scope = metadados.scope_type == 'school' %} {% set
+		raw_series_label = avaliacao.series_label or metadados.series_label %}
+		{% set series_label = raw_series_label if is_school_scope else None %}
+		{% set general_label = metadados.general_label or ((series_label ~ ' -
+		Geral') if series_label else ('Municipal Geral' if metadados.scope_type
+		== 'city' else 'Geral')) %} {% set general_label_text = general_label or
+		'Geral' %} {% set municipal_label = 'Município de ' ~
+		metadados.municipio if metadados.municipio else 'Rede Municipal' %} {#
+		Determinar série dinâmica para substituir "9º GERAL" #} {% if
+		is_school_scope %} {% if avaliacao.series_label %} {% set
+		serie_geral_label = (avaliacao.series_label ~ ' GERAL') | upper %} {%
+		elif metadados.series_label %} {% set serie_geral_label =
+		(metadados.series_label ~ ' GERAL') | upper %} {% elif avaliacao.series
+		and avaliacao.series|length > 0 %} {% set serie_geral_label =
+		(avaliacao.series | join(', ') ~ ' GERAL') | upper %} {% elif
+		metadados.series and metadados.series|length > 0 %} {% set
+		serie_geral_label = (metadados.series | join(', ') ~ ' GERAL') | upper
+		%} {% else %} {% set serie_geral_label = 'GERAL' %} {% endif %} {% else
+		%} {% set serie_geral_label = 'MUNICIPAL GERAL' %} {% endif %} {# Capa
+		Institucional - Baseada na imagem #}
+		<div class="cover-page">
+			{# Seção 1: Topo - Logo roxo + Município + Secretaria #}
+			<div class="cover-top-section">
+				<div class="cover-logo-box">
+					{% if metadados.logo and metadados.logo != '' and
+					metadados.logo != None %}
+					<img
+						src="{{ metadados.logo }}"
+						alt="Logo"
+						style="
+							width: 100%;
+							height: 100%;
+							object-fit: contain;
+							border-radius: 8px;
+						" />
+					{% elif default_logo %}
+					<img
+						src="data:image/png;base64,{{ default_logo }}"
+						alt="Logo"
+						style="
+							width: 100%;
+							height: 100%;
+							object-fit: contain;
+							border-radius: 8px;
+						" />
+					{% else %}
+					<div class="cover-logo-text">AfirmePlay<br />PLAY</div>
+					{% endif %}
+				</div>
+				{% if metadados.municipio %}
+				<div class="cover-municipio">
+					{{ metadados.municipio }}{% if metadados.uf %} - {{
+					metadados.uf }}{% endif %}
+				</div>
+				{% endif %}
+				<div class="cover-secretaria" style="margin-top: 5px">
+					SECRETARIA MUNICIPAL DE EDUCAÇÃO
+				</div>
+			</div>
+
+			{# Seção 2: Centro - Título da avaliação #}
+			<div class="cover-middle-section">
+				<div
+					class="cover-title"
+					style="margin-top: 55px; margin-bottom: 20px">
+					{{ avaliacao.titulo or 'AVALIAÇÃO DIAGNÓSTICA' }}
+				</div>
+				{% if avaliacao.series_label or metadados.series_label or
+				(avaliacao.series and avaliacao.series|length > 0) or
+				(metadados.series and metadados.series|length > 0) %}
+				<div class="cover-series">
+					{% if avaliacao.series_label %} {{ avaliacao.series_label }}
+					{% elif metadados.series_label %} {{ metadados.series_label
+					}} {% elif avaliacao.series and avaliacao.series|length > 0
+					%} {{ avaliacao.series | join(', ') }} {% elif
+					metadados.series and metadados.series|length > 0 %} {{
+					metadados.series | join(', ') }} {% endif %}
+				</div>
+				{% endif %} {% if avaliacao.disciplinas %}
+				<div class="cover-disciplinas">
+					{{ avaliacao.disciplinas | join(', ') }}
+				</div>
+				{% endif %}
+			</div>
+
+			{# Seção 3: Rodapé - Card com ESCOLA e SÉRIE (ou MUNICÍPIO para
+			relatório municipal) #}
+			<div class="cover-bottom-section">
+				<div class="cover-info-box">
+					{% if metadados.scope_type == 'school' and metadados.escola
+					%}
+					<div class="cover-info-item">
+						<span class="cover-info-label">ESCOLA:</span>
+						<span class="cover-info-value"
+							>{{ metadados.escola }}</span
+						>
+					</div>
+					{% elif metadados.scope_type in ['city', 'all'] and
+					metadados.municipio %}
+					<div class="cover-info-item">
+						<span class="cover-info-label">MUNICÍPIO:</span>
+						<span class="cover-info-value"
+							>{{ metadados.municipio }}</span
+						>
+					</div>
+					{% endif %} {% if avaliacao.serie or metadados.serie %}
+					<div class="cover-info-item">
+						<span class="cover-info-label">SÉRIE:</span>
+						<span class="cover-info-value"
+							>{{ avaliacao.serie or metadados.serie or '9º Ano'
+							}}</span
+						>
+					</div>
+					{% endif %}
+				</div>
+			</div>
+		</div>
+
+		{# Página de Apresentação #}
+		<section class="section">
+			<h2>1. APRESENTAÇÃO</h2>
+			<div class="justified" style="margin-top: 8px">
+				{% if is_school_scope %} {% set turmas_text = 'às turmas ' ~
+				series_label if series_label else 'às turmas avaliadas' %} Este
+				relatório apresenta os resultados do
+				<strong>{{ avaliacao.titulo }}</strong> referentes {{
+				turmas_text }} do ano de {{ metadados.ano }} na
+				<strong>{{ metadados.escola or 'ESCOLA' }}</strong>. Foram
+				avaliados
+				<strong
+					>{{ total_alunos.total_geral.avaliados if
+					total_alunos.total_geral else 0 }} alunos</strong
+				>, o que corresponde a
+				<strong
+					>{{ '%.0f' % (total_alunos.total_geral.percentual if
+					total_alunos.total_geral else 0) }}%</strong
+				>
+				do total de estudantes contemplados. {% elif
+				metadados.scope_type == 'city' %} Este relatório apresenta os
+				resultados consolidados do
+				<strong>{{ avaliacao.titulo }}</strong> referentes à rede
+				municipal de ensino de
+				<strong>{{ metadados.municipio or 'MUNICÍPIO' }}</strong> no ano
+				de {{ metadados.ano }}. Foram avaliados
+				<strong
+					>{{ total_alunos.total_geral.avaliados if
+					total_alunos.total_geral else 0 }} alunos</strong
+				>
+				em
+				<strong
+					>{{ total_alunos.por_escola|length if
+					total_alunos.por_escola else 0 }} escolas</strong
+				>, o que corresponde a
+				<strong
+					>{{ '%.0f' % (total_alunos.total_geral.percentual if
+					total_alunos.total_geral else 0) }}%</strong
+				>
+				do total de estudantes da rede. {% else %} Este relatório
+				apresenta os resultados consolidados do
+				<strong>{{ avaliacao.titulo }}</strong> para todas as turmas
+				avaliadas no ano de {{ metadados.ano }}. Foram avaliados
+				<strong
+					>{{ total_alunos.total_geral.avaliados if
+					total_alunos.total_geral else 0 }} alunos</strong
+				>, o que corresponde a
+				<strong
+					>{{ '%.0f' % (total_alunos.total_geral.percentual if
+					total_alunos.total_geral else 0) }}%</strong
+				>
+				do total de estudantes participantes. {% endif %}
+			</div>
+			<div class="justified" style="margin-top: 8px">
+				Para a análise, utilizamos:
+			</div>
+			<ul style="margin: 6px 0 0 18px; list-style-type: square">
+				<li>Frequência absoluta (número de alunos)</li>
+				<li>Frequência relativa (percentual)</li>
+				<li>Média aritmética simples</li>
+			</ul>
+			<div class="justified" style="margin-top: 8px">
+				As competências avaliadas foram
+				<strong
+					>{{ avaliacao.disciplinas | join(' e ') if
+					avaliacao.disciplinas else 'Língua Portuguesa e Matemática'
+					}}</strong
+				>, com dados apresentados por turma, por série e consolidado
+				para toda a rede. Gráficos nominais por aluno e rendimento de
+				cada turma estão disponíveis na
+				<strong>Plataforma AfirmePlay</strong>, nas respectivas unidades
+				de ensino.
+			</div>
+			<div class="justified" style="margin-top: 8px">
+				A escala de cores das médias variou do vermelho
+				<strong>(0)</strong> ao verde <strong>(10)</strong>. Para
+				identificar descritores/habilidades com índice de erro superior
+				a 40%, registramos esses itens em destaque vermelho, sinalizando
+				prioridades de intervenção pedagógica.
+			</div>
+		</section>
+
+		<section class="section">
+			<h2>2. CONSIDERAÇÕES GERAIS</h2>
+			<div class="justified" style="margin-top: 8px">
+				Antes de olharmos os resultados é importante nos atentarmos que
+				cada escola tem suas especificidades, assim como cada turma.
+				Existem resultados que só serão explicados considerando estas
+				especificidades.
+			</div>
+			<div class="justified" style="margin-top: 8px">
+				As turmas são únicas e, portanto, a observação das necessidades
+				de cada turma deve ser analisada através do sistema.
+			</div>
+		</section>
+
+		{# ===== SEÇÃO 1: PARTICIPAÇÃO ===== #} {# DADOS: Participação #}
+		<div class="data-section">
+			<h2>
+				1. PARTICIPAÇÃO DA REDE NO PROCESSO DE AVALIAÇÃO DIAGNÓSTICA
+			</h2>
+
+			<table class="data-table">
+				<thead>
+					<tr>
+						<th class="table-title" colspan="5">
+							TOTAL DE ALUNOS QUE REALIZARAM A AVALIAÇÃO
+							DIAGNÓSTICA
+						</th>
+					</tr>
+					<tr>
+						<th>
+							{% if metadados.scope_type == 'school'
+							%}SÉRIE/TURNO{% else %}ESCOLA{% endif %}
+						</th>
+						<th>MATRICULADOS</th>
+						<th>AVALIADOS</th>
+						<th>PERCENTUAL</th>
+						<th>FALTOSOS</th>
+					</tr>
+				</thead>
+				<tbody>
+					{% if metadados.scope_type == 'school' %} {% for t in
+					(total_alunos.por_turma or []) %}
+					<tr>
+						<td>{{ t.turma }}</td>
+						<td>{{ t.matriculados }}</td>
+						<td>{{ t.avaliados }}</td>
+						<td>{{ '%.0f' % (t.percentual or 0) }}%</td>
+						<td>{{ t.faltosos }}</td>
+					</tr>
+					{% endfor %} {% else %} {% for e in (total_alunos.por_escola
+					or []) %}
+					<tr>
+						<td style="text-align: left">{{ e.escola }}</td>
+						<td>{{ e.matriculados }}</td>
+						<td>{{ e.avaliados }}</td>
+						<td>{{ '%.0f' % (e.percentual or 0) }}%</td>
+						<td>{{ e.faltosos }}</td>
+					</tr>
+					{% endfor %} {% endif %} {% if total_alunos.total_geral %}
+					<tr>
+						<th>{{ serie_geral_label }}</th>
+						<th>{{ total_alunos.total_geral.matriculados }}</th>
+						<th>{{ total_alunos.total_geral.avaliados }}</th>
+						<th>
+							{{ '%.0f' % (total_alunos.total_geral.percentual or
+							0) }}%
+						</th>
+						<th>{{ total_alunos.total_geral.faltosos }}</th>
+					</tr>
+					{% endif %}
+				</tbody>
+			</table>
+		</div>
+
+		{# ANÁLISE: Participação #}
+		<div class="analysis-section">
+			<h2>PARECER TÉCNICO DE PARTICIPAÇÃO</h2>
+			<div class="analysis-text">
+				{% if analise_ia and analise_ia.participacao %} {{
+				analise_ia.participacao | formatar_texto_ia }} {% elif
+				total_alunos.total_geral %}
+				<p>
+					A escola avaliou
+					<strong
+						>{{ total_alunos.total_geral.avaliados }} alunos</strong
+					>
+					{% if serie_geral_label and serie_geral_label != 'MUNICIPAL
+					GERAL' %} {{ serie_geral_label | replace(' GERAL', '') |
+					lower }}, o que representa {% else %} avaliados, o que
+					representa {% endif %}
+					<strong
+						>{{ '%.0f' % (total_alunos.total_geral.percentual or 0)
+						}}%</strong
+					>
+					do total de
+					<strong>{{ total_alunos.total_geral.matriculados }}</strong>
+					alunos matriculados. Registrou-se um total de
+					<strong>{{ total_alunos.total_geral.faltosos }}</strong>
+					alunos faltosos. A taxa de participação de
+					<strong
+						>{{ '%.0f' % (total_alunos.total_geral.percentual or 0)
+						}}%</strong
+					>
+					é boa, indicando um bom engajamento geral. Contudo, a
+					ausência de
+					<strong>{{ total_alunos.total_geral.faltosos }}</strong>
+					alunos é um número considerável. Recomenda-se a investigação
+					das causas dessas ausências, um contato proativo com as
+					famílias para elevar a participação em futuras avaliações e
+					o planejamento de uma reposição diagnóstica para os alunos
+					faltosos, visando obter um panorama mais completo da
+					aprendizagem na série.
+				</p>
+				{% else %}
+				<p>Análise de participação não disponível no momento.</p>
+				{% endif %}
+			</div>
+		</div>
+
+		{# ===== SEÇÃO 2: NÍVEIS DE APRENDIZAGEM (TODAS AS DISCIPLINAS) ===== #}
+		{% if niveis_aprendizagem %} {% for disc, bloco in
+		niveis_aprendizagem.items() %} {% set disc_nome = disc.upper() if disc
+		else 'DISCIPLINA' %} {% if disc == 'GERAL' or disc.upper() == 'GERAL' %}
+		{% set disc_nome = 'GERAL' %} {% elif 'português' in disc.lower() or
+		'portugues' in disc.lower() %} {% set disc_nome = 'PORTUGUÊS' %} {% elif
+		'matemática' in disc.lower() or 'matematica' in disc.lower() %} {% set
+		disc_nome = 'MATEMÁTICA' %} {% endif %} {% set tem_analise = analise_ia
+		and analise_ia.niveis_aprendizagem and
+		analise_ia.niveis_aprendizagem.get(disc) %} {# DADOS: Níveis de
+		Aprendizagem #}
+		<div class="data-section">
+			<h2>
+				NÍVEIS DE APRENDIZAGEM POR {% if metadados.scope_type ==
+				'school' %}TURMA/GERAL{% else %}ESCOLA/GERAL{% endif %} – {{
+				avaliacao.titulo or 'AVALIAÇÃO DIAGNÓSTICA' }} {{ disc_nome }}
+			</h2>
+
+			<table class="data-table">
+				<thead>
+					<tr>
+						<th>
+							{% if metadados.scope_type == 'school'
+							%}SÉRIE/TURNO{% else %}ESCOLA{% endif %}
+						</th>
+						<th class="header-red">ABAIXO DO BÁSICO</th>
+						<th class="header-orange">BÁSICO</th>
+						<th class="header-light-green">ADEQUADO</th>
+						<th class="header-dark-green">AVANÇADO</th>
+					</tr>
+				</thead>
+				<tbody>
+					{% if metadados.scope_type == 'school' %} {% for t in
+					(bloco.por_turma or []) %}
+					<tr>
+						<td>{{ t.turma }}</td>
+						<td>{{ t.abaixo_do_basico }}</td>
+						<td>{{ t.basico }}</td>
+						<td>{{ t.adequado }}</td>
+						<td>{{ t.avancado }}</td>
+					</tr>
+					{% endfor %} {% else %} {% for e in (bloco.por_escola or [])
+					%}
+					<tr>
+						<td style="text-align: left">{{ e.escola }}</td>
+						<td>{{ e.abaixo_do_basico }}</td>
+						<td>{{ e.basico }}</td>
+						<td>{{ e.adequado }}</td>
+						<td>{{ e.avancado }}</td>
+					</tr>
+					{% endfor %} {% endif %} {% if bloco.geral or
+					bloco.total_geral %} {% set dados_gerais = bloco.geral if
+					bloco.geral else bloco.total_geral %}
+					<tr>
+						<th>{{ serie_geral_label }}</th>
+						<th>{{ dados_gerais.abaixo_do_basico }}</th>
+						<th>{{ dados_gerais.basico }}</th>
+						<th>{{ dados_gerais.adequado }}</th>
+						<th>{{ dados_gerais.avancado }}</th>
+					</tr>
+					{% endif %}
+				</tbody>
+			</table>
+
+			{# Gráfico de barras para níveis #} {% if dados_gerais %} {% set
+			total_alunos_disc = dados_gerais.total %} {% set percent_abaixo =
+			((dados_gerais.abaixo_do_basico / total_alunos_disc * 100) if
+			total_alunos_disc > 0 else 0) %} {% set percent_basico =
+			((dados_gerais.basico / total_alunos_disc * 100) if
+			total_alunos_disc > 0 else 0) %} {% set percent_adequado =
+			((dados_gerais.adequado / total_alunos_disc * 100) if
+			total_alunos_disc > 0 else 0) %} {% set percent_avancado =
+			((dados_gerais.avancado / total_alunos_disc * 100) if
+			total_alunos_disc > 0 else 0) %}
+
+			<div class="bar-chart-card">
+				<div
+					class="analysis-text"
+					style="margin-top: 0; margin-bottom: 8px">
+					<strong
+						>{{ disc_nome }} (total de {{ total_alunos_disc }}
+						alunos avaliados)</strong
+					>
+				</div>
+				<div class="bar-chart-container">
+					<div class="bar-item">
+						<div class="bar-wrapper">
+							<div
+								class="bar-fill bar-red"
+								style="height: {{ percent_abaixo }}%;">
+								{% if percent_abaixo > 5 %}{{ '%.1f' %
+								percent_abaixo }}%{% endif %}
+							</div>
+						</div>
+						<div class="bar-label">Abaixo do Básico</div>
+						<div class="bar-value">
+							{{ dados_gerais.abaixo_do_basico }}<br />({{ '%.1f'
+							% percent_abaixo }}%)
+						</div>
+					</div>
+					<div class="bar-item">
+						<div class="bar-wrapper">
+							<div
+								class="bar-fill bar-orange"
+								style="height: {{ percent_basico }}%;">
+								{% if percent_basico > 5 %}{{ '%.1f' %
+								percent_basico }}%{% endif %}
+							</div>
+						</div>
+						<div class="bar-label">Básico</div>
+						<div class="bar-value">
+							{{ dados_gerais.basico }}<br />({{ '%.1f' %
+							percent_basico }}%)
+						</div>
+					</div>
+					<div class="bar-item">
+						<div class="bar-wrapper">
+							<div
+								class="bar-fill bar-light-green"
+								style="height: {{ percent_adequado }}%;">
+								{% if percent_adequado > 5 %}{{ '%.1f' %
+								percent_adequado }}%{% endif %}
+							</div>
+						</div>
+						<div class="bar-label">Adequado</div>
+						<div class="bar-value">
+							{{ dados_gerais.adequado }}<br />({{ '%.1f' %
+							percent_adequado }}%)
+						</div>
+					</div>
+					<div class="bar-item">
+						<div class="bar-wrapper">
+							<div
+								class="bar-fill bar-dark-green"
+								style="height: {{ percent_avancado }}%;">
+								{% if percent_avancado > 5 %}{{ '%.1f' %
+								percent_avancado }}%{% endif %}
+							</div>
+						</div>
+						<div class="bar-label">Avançado</div>
+						<div class="bar-value">
+							{{ dados_gerais.avancado }}<br />({{ '%.1f' %
+							percent_avancado }}%)
+						</div>
+					</div>
+				</div>
+			</div>
+			{% endif %}
+		</div>
+
+		{# ANÁLISE: Níveis de Aprendizagem #} {% if tem_analise %}
+		<div class="analysis-section">
+			<h2>
+				PARECER TÉCNICO: NÍVEIS DE APRENDIZAGEM EM {{ disc_nome }} ({{
+				avaliacao.titulo or 'AVALIAÇÃO DIAGNÓSTICA' }})
+			</h2>
+			<div class="analysis-text">
+				{{ analise_ia.niveis_aprendizagem[disc] | formatar_texto_ia }}
+			</div>
+		</div>
+		{% endif %} {% endfor %} {% endif %} {# ===== SEÇÃO 3: PROFICIÊNCIA
+		===== #} {% if proficiencia and proficiencia.por_disciplina %} {% set
+		tem_analise_proficiencia = analise_ia and analise_ia.proficiencia and
+		analise_ia.proficiencia|length > 0 %} {% set ns_prof =
+		namespace(disc_portugues=None, disc_matematica=None) %} {% for disc,
+		bloco in proficiencia.por_disciplina.items() %} {% if disc != 'GERAL' %}
+		{% set disc_lower = disc.lower() %} {% if 'português' in disc_lower or
+		'portugues' in disc_lower or disc_lower == 'português' or disc_lower ==
+		'portugues' %} {% set ns_prof.disc_portugues = disc %} {% elif
+		'matemática' in disc_lower or 'matematica' in disc_lower %} {% set
+		ns_prof.disc_matematica = disc %} {% endif %} {% endif %} {% endfor %}
+		{% set dados_geral = proficiencia.por_disciplina.get('GERAL', {}) %} {%
+		set media_geral_proficiencia = dados_geral.get('media_geral', 0) %} {%
+		set media_municipal = media_geral_proficiencia %} {% if
+		proficiencia.media_municipal_por_disciplina %} {% set soma_municipal = 0
+		%} {% set count_municipal = 0 %} {% for disc_key, valor in
+		proficiencia.media_municipal_por_disciplina.items() %} {% if disc_key !=
+		'GERAL' %} {% set soma_municipal = soma_municipal + valor %} {% set
+		count_municipal = count_municipal + 1 %} {% endif %} {% endfor %} {% if
+		count_municipal > 0 %} {% set media_municipal = soma_municipal /
+		count_municipal %} {% endif %} {% endif %} {# DADOS: Proficiência #}
+		<div class="data-section">
+			<h2>
+				PROFICIÊNCIA POR {% if metadados.scope_type == 'school'
+				%}TURMA/GERAL{% else %}ESCOLA/GERAL{% endif %} – {{
+				avaliacao.titulo or 'AVALIAÇÃO DIAGNÓSTICA' }}
+			</h2>
+
+			<table class="data-table">
+				<thead>
+					<tr>
+						<th class="table-title" colspan="5">
+							{% if metadados.scope_type == 'school' %}
+							PROFICIÊNCIA POR TURMA/GERAL – {{ avaliacao.titulo
+							or 'AVALIAÇÃO DIAGNÓSTICA' }} {% else %}
+							PROFICIÊNCIA POR ESCOLA/GERAL – {{ avaliacao.titulo
+							or 'AVALIAÇÃO DIAGNÓSTICA' }} {% endif %}
+						</th>
+					</tr>
+					<tr>
+						<th>
+							{% if metadados.scope_type == 'school'
+							%}SÉRIE/TURNO{% else %}ESCOLA{% endif %}
+						</th>
+						<th>LÍNGUA PORTUGUESA</th>
+						<th>MATEMÁTICA</th>
+						<th>MÉDIA</th>
+						<th>MÉDIA MUNICIPAL</th>
+					</tr>
+				</thead>
+				<tbody>
+					{% if metadados.scope_type == 'school' %} {% set
+					lista_entidades = total_alunos.por_turma or [] %} {% else %}
+					{% set lista_entidades = total_alunos.por_escola or [] %} {%
+					endif %} {% if lista_entidades %} {% for t in
+					lista_entidades %} {% if metadados.scope_type == 'school' %}
+					{% set turma_nome = (t.turma|string|trim)|upper %} {% set
+					entidade_nome_display = t.turma %} {% else %} {% set
+					turma_nome = (t.escola|string|trim)|upper %} {% set
+					entidade_nome_display = t.escola %} {% endif %} {% set
+					ns_turma_prof = namespace(portugues=0, matematica=0) %} {%
+					if ns_prof.disc_portugues %} {% set bloco_pt =
+					proficiencia.por_disciplina[ns_prof.disc_portugues] %} {% if
+					metadados.scope_type == 'school' %} {% for t_pt in
+					(bloco_pt.por_turma or []) %} {% set t_pt_nome =
+					(t_pt.turma|string|trim)|upper %} {% if t_pt_nome ==
+					turma_nome %} {% set ns_turma_prof.portugues =
+					t_pt.proficiencia or 0 %} {% endif %} {% endfor %} {% else
+					%} {% for e_pt in (bloco_pt.por_escola or []) %} {% set
+					e_pt_nome = (e_pt.escola|string|trim)|upper %} {% if
+					e_pt_nome == turma_nome %} {% set ns_turma_prof.portugues =
+					e_pt.proficiencia or 0 %} {% endif %} {% endfor %} {% endif
+					%} {% endif %} {% if ns_prof.disc_matematica %} {% set
+					bloco_mat =
+					proficiencia.por_disciplina[ns_prof.disc_matematica] %} {%
+					if metadados.scope_type == 'school' %} {% for t_mat in
+					(bloco_mat.por_turma or []) %} {% set t_mat_nome =
+					(t_mat.turma|string|trim)|upper %} {% if t_mat_nome ==
+					turma_nome %} {% set ns_turma_prof.matematica =
+					t_mat.proficiencia or 0 %} {% endif %} {% endfor %} {% else
+					%} {% for e_mat in (bloco_mat.por_escola or []) %} {% set
+					e_mat_nome = (e_mat.escola|string|trim)|upper %} {% if
+					e_mat_nome == turma_nome %} {% set ns_turma_prof.matematica
+					= e_mat.proficiencia or 0 %} {% endif %} {% endfor %} {%
+					endif %} {% endif %} {% set soma_prof =
+					ns_turma_prof.portugues + ns_turma_prof.matematica %} {% set
+					count_disciplinas = 0 %} {% if ns_turma_prof.portugues > 0
+					%}{% set count_disciplinas = count_disciplinas + 1 %}{%
+					endif %} {% if ns_turma_prof.matematica > 0 %}{% set
+					count_disciplinas = count_disciplinas + 1 %}{% endif %} {%
+					if count_disciplinas > 0 %} {% set media_turma = soma_prof /
+					count_disciplinas %} {% else %} {% set media_turma = 0 %} {%
+					set dados_geral = proficiencia.por_disciplina.get('GERAL',
+					{}) %} {% if metadados.scope_type == 'school' %} {% set
+					prof_entidades_geral = dados_geral.get('por_turma', []) %}
+					{% for t_geral in prof_entidades_geral %} {% set
+					t_geral_nome = (t_geral.turma|string|trim)|upper %} {% if
+					t_geral_nome == turma_nome %} {% set media_turma =
+					t_geral.proficiencia or 0 %} {% endif %} {% endfor %} {%
+					else %} {% set prof_entidades_geral =
+					dados_geral.get('por_escola', []) %} {% for e_geral in
+					prof_entidades_geral %} {% set e_geral_nome =
+					(e_geral.escola|string|trim)|upper %} {% if e_geral_nome ==
+					turma_nome %} {% set media_turma = e_geral.proficiencia or 0
+					%} {% endif %} {% endfor %} {% endif %} {% endif %}
+
+					<tr>
+						<td style="text-align: left">
+							{{ entidade_nome_display }}
+						</td>
+						<td>
+							{{ ('%.1f' % ns_turma_prof.portugues).replace('.',
+							',') }}
+						</td>
+						<td>
+							{{ ('%.1f' % ns_turma_prof.matematica).replace('.',
+							',') }}
+						</td>
+						<td>{{ ('%.1f' % media_turma).replace('.', ',') }}</td>
+						{% if loop.first %} {% set count_entidades =
+						lista_entidades|length %}
+						<td
+							rowspan="{{ count_entidades }}"
+							style="vertical-align: middle; font-weight: 700">
+							{{ ('%.1f' % media_municipal).replace('.', ',') }}
+						</td>
+						{% endif %}
+					</tr>
+					{% endfor %} {% endif %} {% set media_pt_geral = 0 %} {% set
+					media_mat_geral = 0 %} {% if ns_prof.disc_portugues %} {%
+					set bloco_pt =
+					proficiencia.por_disciplina[ns_prof.disc_portugues] %} {%
+					set media_pt_geral = bloco_pt.media_geral if
+					bloco_pt.media_geral is not none else 0 %} {% endif %} {% if
+					ns_prof.disc_matematica %} {% set bloco_mat =
+					proficiencia.por_disciplina[ns_prof.disc_matematica] %} {%
+					set media_mat_geral = bloco_mat.media_geral if
+					bloco_mat.media_geral is not none else 0 %} {% endif %}
+
+					<tr>
+						<th style="text-align: left">
+							{{ serie_geral_label }}
+						</th>
+						<th>
+							{{ ('%.1f' % media_pt_geral).replace('.', ',') }}
+						</th>
+						<th>
+							{{ ('%.1f' % media_mat_geral).replace('.', ',') }}
+						</th>
+						<th>
+							{{ ('%.1f' % media_geral_proficiencia).replace('.',
+							',') }}
+						</th>
+						<th>
+							{{ ('%.1f' % media_municipal).replace('.', ',') }}
+						</th>
+					</tr>
+				</tbody>
+			</table>
+
+			{# Gráfico de barras para proficiência #} {% set max_prof =
+			media_pt_geral %} {% if media_mat_geral > max_prof %}{% set max_prof
+			= media_mat_geral %}{% endif %} {% if media_geral_proficiencia >
+			max_prof %}{% set max_prof = media_geral_proficiencia %}{% endif %}
+			{% if media_municipal > max_prof %}{% set max_prof = media_municipal
+			%}{% endif %} {% if max_prof <= 0 %}{% set max_prof = 500 %}{% endif
+			%} {% set percent_pt_prof = ((media_pt_geral / max_prof * 100) if
+			max_prof > 0 else 0) %} {% set percent_mat_prof = ((media_mat_geral
+			/ max_prof * 100) if max_prof > 0 else 0) %} {% set
+			percent_media_prof = ((media_geral_proficiencia / max_prof * 100) if
+			max_prof > 0 else 0) %} {% set percent_municipal_prof =
+			((media_municipal / max_prof * 100) if max_prof > 0 else 0) %}
+
+			<div class="bar-chart-card">
+				<div
+					class="analysis-text"
+					style="margin-top: 0; margin-bottom: 8px">
+					<strong
+						>Proficiência Geral ({{ serie_geral_label }})</strong
+					>
+				</div>
+				<div class="bar-chart-container">
+					<div class="bar-item">
+						<div class="bar-wrapper">
+							<div
+								class="bar-fill bar-blue"
+								style="height: {{ percent_pt_prof }}%;">
+								{% if percent_pt_prof > 5 %}{{ ('%.1f' %
+								media_pt_geral).replace('.', ',') }}{% endif %}
+							</div>
+						</div>
+						<div class="bar-label">Língua Portuguesa</div>
+						<div class="bar-value">
+							{{ ('%.1f' % media_pt_geral).replace('.', ',') }}
+						</div>
+					</div>
+					<div class="bar-item">
+						<div class="bar-wrapper">
+							<div
+								class="bar-fill bar-purple"
+								style="height: {{ percent_mat_prof }}%;">
+								{% if percent_mat_prof > 5 %}{{ ('%.1f' %
+								media_mat_geral).replace('.', ',') }}{% endif %}
+							</div>
+						</div>
+						<div class="bar-label">Matemática</div>
+						<div class="bar-value">
+							{{ ('%.1f' % media_mat_geral).replace('.', ',') }}
+						</div>
+					</div>
+					<div class="bar-item">
+						<div class="bar-wrapper">
+							<div
+								class="bar-fill bar-teal"
+								style="height: {{ percent_media_prof }}%;">
+								{% if percent_media_prof > 5 %}{{ ('%.1f' %
+								media_geral_proficiencia).replace('.', ',') }}{%
+								endif %}
+							</div>
+						</div>
+						<div class="bar-label">Média</div>
+						<div class="bar-value">
+							{{ ('%.1f' % media_geral_proficiencia).replace('.',
+							',') }}
+						</div>
+					</div>
+					<div class="bar-item">
+						<div class="bar-wrapper">
+							<div
+								class="bar-fill bar-gray"
+								style="height: {{ percent_municipal_prof }}%;">
+								{% if percent_municipal_prof > 5 %}{{ ('%.1f' %
+								media_municipal).replace('.', ',') }}{% endif %}
+							</div>
+						</div>
+						<div class="bar-label">Média Municipal</div>
+						<div class="bar-value">
+							{{ ('%.1f' % media_municipal).replace('.', ',') }}
+						</div>
+					</div>
+				</div>
+			</div>
+		</div>
+
+		{# ANÁLISE: Proficiência (por disciplina) #} {% if analise_ia and
+		analise_ia.proficiencia %} {% for disc_prof, analise_prof in
+		analise_ia.proficiencia.items() %} {% if disc_prof != 'GERAL' and
+		analise_prof %}
+		<div class="analysis-section">
+			<h2>
+				PARECER TÉCNICO: PROFICIÊNCIA EM {{ disc_prof }} ({{
+				avaliacao.titulo or 'AVALIAÇÃO DIAGNÓSTICA' }})
+			</h2>
+			<div class="analysis-text">
+				{{ analise_prof | formatar_texto_ia }}
+			</div>
+		</div>
+		{% endif %} {% endfor %} {% endif %} {% endif %} {# ===== SEÇÃO 4: NOTAS
+		===== #} {% if nota_geral and nota_geral.por_disciplina %} {% set
+		tem_analise_notas = analise_ia and analise_ia.notas %} {% set ns_nota =
+		namespace(disc_portugues=None, disc_matematica=None) %} {% for disc,
+		bloco in nota_geral.por_disciplina.items() %} {% if disc != 'GERAL' %}
+		{% set disc_lower = disc.lower() %} {% if 'português' in disc_lower or
+		'portugues' in disc_lower or disc_lower == 'português' or disc_lower ==
+		'portugues' %} {% set ns_nota.disc_portugues = disc %} {% elif
+		'matemática' in disc_lower or 'matematica' in disc_lower %} {% set
+		ns_nota.disc_matematica = disc %} {% endif %} {% endif %} {% endfor %}
+		{% set nota_dados_geral = nota_geral.por_disciplina.get('GERAL', {}) %}
+		{% set nota_media_geral = nota_dados_geral.get('media_geral', 0) %} {%
+		set nota_media_municipal = nota_media_geral %} {% if
+		nota_geral.media_municipal_por_disciplina %} {% set soma_municipal_nota
+		= 0 %} {% set count_municipal_nota = 0 %} {% for disc_key, valor in
+		nota_geral.media_municipal_por_disciplina.items() %} {% if disc_key !=
+		'GERAL' %} {% set soma_municipal_nota = soma_municipal_nota + valor %}
+		{% set count_municipal_nota = count_municipal_nota + 1 %} {% endif %} {%
+		endfor %} {% if count_municipal_nota > 0 %} {% set nota_media_municipal
+		= soma_municipal_nota / count_municipal_nota %} {% endif %} {% endif %}
+		{# DADOS: Notas #}
+		<div class="data-section">
+			<h2>
+				NOTA POR {% if metadados.scope_type == 'school' %}TURMA/GERAL{%
+				else %}ESCOLA/GERAL{% endif %} – {{ avaliacao.titulo or
+				'AVALIAÇÃO DIAGNÓSTICA' }}
+			</h2>
+
+			<table class="data-table">
+				<thead>
+					<tr>
+						<th class="table-title" colspan="5">
+							{% if metadados.scope_type == 'school' %} NOTA POR
+							TURMA/GERAL – {{ avaliacao.titulo or 'AVALIAÇÃO
+							DIAGNÓSTICA' }} {% else %} NOTA POR ESCOLA/GERAL –
+							{{ avaliacao.titulo or 'AVALIAÇÃO DIAGNÓSTICA' }} {%
+							endif %}
+						</th>
+					</tr>
+					<tr>
+						<th>
+							{% if metadados.scope_type == 'school'
+							%}SÉRIE/TURNO{% else %}ESCOLA{% endif %}
+						</th>
+						<th>LÍNGUA PORTUGUESA</th>
+						<th>MATEMÁTICA</th>
+						<th>MÉDIA</th>
+						<th>MÉDIA MUNICIPAL</th>
+					</tr>
+				</thead>
+				<tbody>
+					{% if metadados.scope_type == 'school' %} {% set
+					lista_entidades = total_alunos.por_turma or [] %} {% else %}
+					{% set lista_entidades = total_alunos.por_escola or [] %} {%
+					endif %} {% if lista_entidades %} {% for t in
+					lista_entidades %} {% if metadados.scope_type == 'school' %}
+					{% set turma_nome = (t.turma|string|trim)|upper %} {% set
+					entidade_nome_display = t.turma %} {% else %} {% set
+					turma_nome = (t.escola|string|trim)|upper %} {% set
+					entidade_nome_display = t.escola %} {% endif %} {% set
+					ns_turma_nota = namespace(portugues=0, matematica=0) %} {%
+					if ns_nota.disc_portugues %} {% set bloco_pt =
+					nota_geral.por_disciplina[ns_nota.disc_portugues] %} {% if
+					metadados.scope_type == 'school' %} {% for t_pt in
+					(bloco_pt.por_turma or []) %} {% set t_pt_nome =
+					(t_pt.turma|string|trim)|upper %} {% if t_pt_nome ==
+					turma_nome %} {% set ns_turma_nota.portugues = t_pt.nota or
+					0 %} {% endif %} {% endfor %} {% else %} {% for e_pt in
+					(bloco_pt.por_escola or []) %} {% set e_pt_nome =
+					(e_pt.escola|string|trim)|upper %} {% if e_pt_nome ==
+					turma_nome %} {% set ns_turma_nota.portugues = e_pt.nota or
+					0 %} {% endif %} {% endfor %} {% endif %} {% endif %} {% if
+					ns_nota.disc_matematica %} {% set bloco_mat =
+					nota_geral.por_disciplina[ns_nota.disc_matematica] %} {% if
+					metadados.scope_type == 'school' %} {% for t_mat in
+					(bloco_mat.por_turma or []) %} {% set t_mat_nome =
+					(t_mat.turma|string|trim)|upper %} {% if t_mat_nome ==
+					turma_nome %} {% set ns_turma_nota.matematica = t_mat.nota
+					or 0 %} {% endif %} {% endfor %} {% else %} {% for e_mat in
+					(bloco_mat.por_escola or []) %} {% set e_mat_nome =
+					(e_mat.escola|string|trim)|upper %} {% if e_mat_nome ==
+					turma_nome %} {% set ns_turma_nota.matematica = e_mat.nota
+					or 0 %} {% endif %} {% endfor %} {% endif %} {% endif %} {%
+					set soma_notas = ns_turma_nota.portugues +
+					ns_turma_nota.matematica %} {% set count_disciplinas = 0 %}
+					{% if ns_turma_nota.portugues > 0 %}{% set count_disciplinas
+					= count_disciplinas + 1 %}{% endif %} {% if
+					ns_turma_nota.matematica > 0 %}{% set count_disciplinas =
+					count_disciplinas + 1 %}{% endif %} {% if count_disciplinas
+					> 0 %} {% set nota_media_turma = soma_notas /
+					count_disciplinas %} {% else %} {% set nota_media_turma = 0
+					%} {% set nota_dados_geral =
+					nota_geral.por_disciplina.get('GERAL', {}) %} {% if
+					metadados.scope_type == 'school' %} {% set
+					nota_entidades_geral = nota_dados_geral.get('por_turma', [])
+					%} {% for t_geral in nota_entidades_geral %} {% set
+					t_geral_nome = (t_geral.turma|string|trim)|upper %} {% if
+					t_geral_nome == turma_nome %} {% set nota_media_turma =
+					t_geral.nota or 0 %} {% endif %} {% endfor %} {% else %} {%
+					set nota_entidades_geral =
+					nota_dados_geral.get('por_escola', []) %} {% for e_geral in
+					nota_entidades_geral %} {% set e_geral_nome =
+					(e_geral.escola|string|trim)|upper %} {% if e_geral_nome ==
+					turma_nome %} {% set nota_media_turma = e_geral.nota or 0 %}
+					{% endif %} {% endfor %} {% endif %} {% endif %}
+
+					<tr>
+						<td style="text-align: left">
+							{{ entidade_nome_display }}
+						</td>
+						<td>
+							{{ ('%.1f' % ns_turma_nota.portugues).replace('.',
+							',') }}
+						</td>
+						<td>
+							{{ ('%.1f' % ns_turma_nota.matematica).replace('.',
+							',') }}
+						</td>
+						<td>
+							{{ ('%.1f' % nota_media_turma).replace('.', ',') }}
+						</td>
+						{% if loop.first %} {% set count_entidades_nota =
+						lista_entidades|length %}
+						<td
+							rowspan="{{ count_entidades_nota + 1 }}"
+							style="vertical-align: middle; font-weight: 700">
+							{{ ('%.1f' % nota_media_municipal).replace('.', ',')
+							}}
+						</td>
+						{% endif %}
+					</tr>
+					{% endfor %} {% endif %} {% set nota_media_pt_geral = 0 %}
+					{% set nota_media_mat_geral = 0 %} {% if
+					ns_nota.disc_portugues %} {% set bloco_pt =
+					nota_geral.por_disciplina[ns_nota.disc_portugues] %} {% set
+					nota_media_pt_geral = bloco_pt.media_geral if
+					bloco_pt.media_geral is not none else 0 %} {% endif %} {% if
+					ns_nota.disc_matematica %} {% set bloco_mat =
+					nota_geral.por_disciplina[ns_nota.disc_matematica] %} {% set
+					nota_media_mat_geral = bloco_mat.media_geral if
+					bloco_mat.media_geral is not none else 0 %} {% endif %}
+
+					<tr>
+						<th style="text-align: left">
+							{{ serie_geral_label }}
+						</th>
+						<th>
+							{{ ('%.1f' % nota_media_pt_geral).replace('.', ',')
+							}}
+						</th>
+						<th>
+							{{ ('%.1f' % nota_media_mat_geral).replace('.', ',')
+							}}
+						</th>
+						<th>
+							{{ ('%.1f' % nota_media_geral).replace('.', ',') }}
+						</th>
+					</tr>
+				</tbody>
+			</table>
+
+			{# Gráfico de barras para nota #} {% set max_nota = 10 %} {% set
+			percent_pt_nota = ((nota_media_pt_geral / max_nota * 100) if
+			max_nota > 0 else 0) %} {% set percent_mat_nota =
+			((nota_media_mat_geral / max_nota * 100) if max_nota > 0 else 0) %}
+			{% set percent_nota_geral = ((nota_media_geral / max_nota * 100) if
+			max_nota > 0 else 0) %}
+
+			<div class="bar-chart-card">
+				<div
+					class="analysis-text"
+					style="margin-top: 0; margin-bottom: 8px">
+					<strong>Média Geral</strong>
+				</div>
+				<div class="bar-chart-container">
+					<div class="bar-item">
+						<div class="bar-wrapper">
+							<div
+								class="bar-fill bar-blue"
+								style="height: {{ percent_pt_nota }}%;">
+								{% if percent_pt_nota > 5 %}{{ ('%.1f' %
+								nota_media_pt_geral).replace('.', ',') }}{%
+								endif %}
+							</div>
+						</div>
+						<div class="bar-label">Língua Portuguesa</div>
+						<div class="bar-value">
+							{{ ('%.1f' % nota_media_pt_geral).replace('.', ',')
+							}}
+						</div>
+					</div>
+					<div class="bar-item">
+						<div class="bar-wrapper">
+							<div
+								class="bar-fill bar-purple"
+								style="height: {{ percent_mat_nota }}%;">
+								{% if percent_mat_nota > 5 %}{{ ('%.1f' %
+								nota_media_mat_geral).replace('.', ',') }}{%
+								endif %}
+							</div>
+						</div>
+						<div class="bar-label">Matemática</div>
+						<div class="bar-value">
+							{{ ('%.1f' % nota_media_mat_geral).replace('.', ',')
+							}}
+						</div>
+					</div>
+					<div class="bar-item">
+						<div class="bar-wrapper">
+							<div
+								class="bar-fill bar-teal"
+								style="height: {{ percent_nota_geral }}%;">
+								{% if percent_nota_geral > 5 %}{{ ('%.1f' %
+								nota_media_geral).replace('.', ',') }}{% endif
+								%}
+							</div>
+						</div>
+						<div class="bar-label">Média Geral</div>
+						<div class="bar-value">
+							{{ ('%.1f' % nota_media_geral).replace('.', ',') }}
+						</div>
+					</div>
+				</div>
+			</div>
+		</div>
+
+		{# ANÁLISE: Notas #} {% if tem_analise_notas %}
+		<div class="analysis-section">
+			<h2>
+				PARECER TÉCNICO: NOTA (0-10) - {{ avaliacao.titulo or 'AVALIAÇÃO
+				DIAGNÓSTICA' }}
+			</h2>
+			<div class="analysis-text">
+				{{ analise_ia.notas | formatar_texto_ia }}
+			</div>
+		</div>
+		{% endif %} {% endif %} {# ===== SEÇÃO 5: ACERTOS POR HABILIDADE (SEM
+		ANÁLISE) ===== #} {% if acertos_por_habilidade %}
+		<div class="data-section">
+			<h2>Acertos por Habilidade</h2>
+
+			{% set disciplinas_ordenadas = [] %} {% for disc in
+			acertos_por_habilidade.keys() %} {% if disc != 'GERAL' %} {% set _ =
+			disciplinas_ordenadas.append(disc) %} {% endif %} {% endfor %} {%
+			for disc in disciplinas_ordenadas %} {% set bloco =
+			acertos_por_habilidade[disc] %} {% set disc_nome = disc.upper() if
+			disc else 'DISCIPLINA' %} {% if 'português' in disc.lower() or
+			'portugues' in disc.lower() %} {% set disc_nome = 'PORTUGUÊS' %} {%
+			elif 'matemática' in disc.lower() or 'matematica' in disc.lower() %}
+			{% set disc_nome = 'MATEMÁTICA' %} {% endif %}
+
+			<div
+				style="margin-top: {% if loop.first %}0{% else %}32px{% endif %};">
+				{% if bloco.questoes and bloco.questoes|length > 0 %} {# Tabela
+				horizontal #}
+				<div class="skills-table-container">
+					<table class="skills-horizontal-table">
+						<tr>
+							<td
+								class="skills-discipline-title-table"
+								colspan="{{ bloco.questoes|length }}">
+								{{ disc_nome }}
+							</td>
+						</tr>
+						<tr>
+							{% for q in bloco.questoes %}
+							<td class="question-number">
+								{{ q.numero_questao }}ª Q
+							</td>
+							{% endfor %}
+						</tr>
+						<tr>
+							{% for q in bloco.questoes %}
+							<td class="skill-code">{{ q.codigo }}</td>
+							{% endfor %}
+						</tr>
+						<tr>
+							{% for q in bloco.questoes %} {% set percent =
+							q.percentual or 0 %} {% if percent >= 70 %}
+							<td class="percentage-green">
+								{{ '%.1f' % percent }}%
+							</td>
+							{% else %}
+							<td class="percentage-red">
+								{{ '%.1f' % percent }}%
+							</td>
+							{% endif %} {% endfor %}
+						</tr>
+					</table>
+					<div class="skills-legend">
+						<div class="skills-legend-item">
+							<div class="skills-legend-square green"></div>
+							<span>≥ 70%</span>
+						</div>
+						<div class="skills-legend-item">
+							<div class="skills-legend-square red"></div>
+							<span>&lt; 70%</span>
+						</div>
+					</div>
+				</div>
+
+				{# Tabela vertical #}
+				<div style="margin-top: 24px">
+					<table class="data-table acertos-habilidade-table">
+						<thead>
+							<tr>
+								<th>Questão</th>
+								<th>Código</th>
+								<th>Descrição</th>
+								<th>Acertos</th>
+								<th>Total</th>
+								<th>%</th>
+								<th>Classificação</th>
+							</tr>
+						</thead>
+						<tbody>
+							{% for q in bloco.questoes %} {% set percent =
+							q.percentual or 0 %} {% if percent <= 50 %} {% set
+							classificacao = 'revisar' %} {% set
+							texto_classificacao = 'Revisar e Reavaliar' %} {%
+							elif percent <= 80 %} {% set classificacao =
+							'reaplicar' %} {% set texto_classificacao =
+							'Reavaliar' %} {% else %} {% set classificacao =
+							'concluido' %} {% set texto_classificacao =
+							'Concluído' %} {% endif %}
+							<tr>
+								<td>{{ q.numero_questao }}</td>
+								<td>{{ q.codigo }}</td>
+								<td>{{ q.descricao }}</td>
+								<td>{{ q.acertos }}</td>
+								<td>{{ q.total }}</td>
+								<td>{{ '%.1f' % percent }}%</td>
+								<td>
+									<span
+										class="classification-badge {{ classificacao }}"
+										>{{ texto_classificacao }}</span
+									>
+								</td>
+							</tr>
+							{% endfor %}
+						</tbody>
+					</table>
+				</div>
+				{% endif %} {# ===== ANÁLISE DE IA PARA HABILIDADES ===== #} {%
+				set tem_analise_habilidades = analise_ia and
+				analise_ia.habilidades and analise_ia.habilidades.get(disc) %}
+				{% if tem_analise_habilidades %}
+				<div class="analysis-section" style="margin-top: 32px">
+					<h2>
+						PARECER PEDAGÓGICO: ACERTOS POR HABILIDADE EM {{
+						disc_nome }} ({{ avaliacao.titulo or 'AVALIAÇÃO
+						DIAGNÓSTICA' }})
+					</h2>
+					<div class="analysis-text">
+						{{ analise_ia.habilidades[disc] | formatar_texto_ia }}
+					</div>
+				</div>
+				{% endif %}
+			</div>
+			{% endfor %} {# ===== ANÁLISE DE IA PARA GERAL (se existir) ===== #}
+			{% if acertos_por_habilidade.get('GERAL') %} {% set
+			tem_analise_geral = analise_ia and analise_ia.habilidades and
+			analise_ia.habilidades.get('GERAL') %} {% if tem_analise_geral %}
+			<div class="analysis-section" style="margin-top: 32px">
+				<h2>
+					PARECER PEDAGÓGICO: ACERTOS POR HABILIDADE EM GERAL (TODAS
+					AS DISCIPLINAS) ({{ avaliacao.titulo or 'AVALIAÇÃO
+					DIAGNÓSTICA' }})
+				</h2>
+				<div class="analysis-text">
+					{{ analise_ia.habilidades['GERAL'] | formatar_texto_ia }}
+				</div>
+			</div>
+			{% endif %} {% endif %}
+		</div>
+		{% endif %} {# ===== CONCLUSÃO ===== #}
+		<div class="data-section">
+			<h2>3. CONCLUSÃO E RECOMENDAÇÃO</h2>
+			<div>
+				Esta seção sintetiza os principais achados do relatório e
+				apresenta recomendações práticas para intervenção pedagógica com
+				base nos resultados observados nas turmas e no consolidado
+				geral.
+			</div>
+		</div>
+	</body>
+</html>

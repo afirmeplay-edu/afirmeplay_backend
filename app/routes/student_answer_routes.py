@@ -249,12 +249,20 @@ def submit_answers():
         
         if class_test and class_test.expiration:
             current_time = datetime.utcnow()
+            
             # Garantir que ambas as datas estejam em UTC para comparação
-
             import dateutil.parser
+            from datetime import timezone as tz
             expiration_dt = dateutil.parser.parse(class_test.expiration)
-            expiration_utc = expiration_dt.replace(tzinfo=None) if expiration_dt.tzinfo else expiration_dt
+            
+            # ✅ CORREÇÃO: Converter para UTC antes de remover timezone
+            if expiration_dt.tzinfo:
+                expiration_utc = expiration_dt.astimezone(tz.utc).replace(tzinfo=None)
+            else:
+                expiration_utc = expiration_dt
+            
             current_utc = current_time.replace(tzinfo=None) if current_time.tzinfo else current_time
+            
             if current_utc > expiration_utc:
                 session.status = 'expirada'
                 db.session.commit()
@@ -363,15 +371,23 @@ def submit_answers():
         # ✅ NOVO: Calcular resultado completo e salvar
         from app.services.evaluation_result_service import EvaluationResultService
         
-        evaluation_result = EvaluationResultService.calculate_and_save_result(
-            test_id=session.test_id,
-            student_id=session.student_id,
-            session_id=session.id
-        )
+        try:
+            evaluation_result = EvaluationResultService.calculate_and_save_result(
+                test_id=session.test_id,
+                student_id=session.student_id,
+                session_id=session.id
+            )
+        except Exception as calc_error:
+            logging.error(f"Erro ao calcular resultado: {str(calc_error)}", exc_info=True)
+            evaluation_result = None
         
         # Não alterar o status global da avaliação
         # Cada aluno tem seu próprio status individual
-        db.session.commit()
+        try:
+            db.session.commit()
+        except Exception as commit_error:
+            logging.error(f"Erro no commit: {str(commit_error)}", exc_info=True)
+            raise
         
         # ✅ NOVO: Retornar resultados completos calculados
         if evaluation_result:
@@ -456,8 +472,13 @@ def save_partial_answers():
             # Garantir que ambas as datas estejam em UTC para comparação
 
             import dateutil.parser
+            from datetime import timezone as tz
             expiration_dt = dateutil.parser.parse(class_test.expiration)
-            expiration_utc = expiration_dt.replace(tzinfo=None) if expiration_dt.tzinfo else expiration_dt
+            # ✅ CORREÇÃO: Converter para UTC antes de remover timezone
+            if expiration_dt.tzinfo:
+                expiration_utc = expiration_dt.astimezone(tz.utc).replace(tzinfo=None)
+            else:
+                expiration_utc = expiration_dt
             current_utc = current_time.replace(tzinfo=None) if current_time.tzinfo else current_time
             if current_utc > expiration_utc:
                 session.status = 'expirada'

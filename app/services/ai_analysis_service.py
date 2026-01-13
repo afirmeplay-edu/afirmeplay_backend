@@ -50,6 +50,19 @@ class AIAnalysisService:
             }
         """
         try:
+            # Validar que temos dados mínimos necessários
+            if not report_data:
+                self.logger.error("report_data está vazio")
+                return self._get_fallback_texts(report_data)
+            
+            # Validar presença de dados principais
+            has_participacao = bool(report_data.get('total_alunos', {}).get('total_geral', {}).get('avaliados', 0) > 0)
+            has_proficiencia = bool(report_data.get('proficiencia', {}).get('por_disciplina', {}))
+            has_notas = bool(report_data.get('nota_geral', {}).get('por_disciplina', {}))
+            has_niveis = bool(report_data.get('niveis_aprendizagem', {}))
+            
+            self.logger.info(f"Validação de dados: participacao={has_participacao}, proficiencia={has_proficiencia}, notas={has_notas}, niveis={has_niveis}")
+            
             # Preparar dados para análise
             analysis_data = self._prepare_analysis_data(report_data)
             avaliacao_titulo = report_data.get('avaliacao', {}).get('titulo', '') or report_data.get('avaliacao', {}).get('title', '')
@@ -64,11 +77,14 @@ class AIAnalysisService:
             # Processar resposta e extrair as diferentes seções
             analysis_texts = self._parse_unified_response(unified_response, report_data)
             
+            # Validação final: garantir que todas as seções esperadas foram geradas
+            self._validate_analysis_completeness(analysis_texts, report_data)
+            
             return analysis_texts
             
         except Exception as e:
             self.logger.error(f"Erro na análise da IA: {str(e)}", exc_info=True)
-            return self._get_fallback_texts()
+            return self._get_fallback_texts(report_data)
     
     def _prepare_analysis_data(self, report_data: Dict[str, Any]) -> Dict[str, Any]:
         """Prepara dados para análise da IA"""
@@ -1410,8 +1426,8 @@ IMPORTANTE: Use os marcadores exatos [MARCADOR: PARTICIPACAO], [MARCADOR: PROFIC
             
         except Exception as e:
             self.logger.error(f"Erro ao processar resposta unificada: {str(e)}", exc_info=True)
-            # Retornar fallback
-            return self._get_fallback_texts()
+            # Retornar fallback com dados do report_data
+            return self._get_fallback_texts(report_data)
         
         # Garantir que pelo menos temos fallback para campos vazios
         print("DEBUG: Resultado final do parsing (ANTES da formatação HTML):")
@@ -1430,21 +1446,39 @@ IMPORTANTE: Use os marcadores exatos [MARCADOR: PARTICIPACAO], [MARCADOR: PROFIC
         print(f"  - Contém '[MARCADOR: NIVEIS]'? {('[MARCADOR: NIVEIS]' in result['participacao'])}")
         print("=" * 80)
         
+        # Garantir que todas as seções tenham conteúdo, mesmo que vazio
+        # Seção de participação
         if not result['participacao']:
             result['participacao'] = 'Análise de participação não disponível no momento.'
+        
+        # Seção de notas
         if not result['notas']:
             result['notas'] = 'Análise de notas não disponível no momento.'
-        if not result['proficiencia']:
-            # Tentar obter disciplinas do report_data
-            prof_disciplinas = report_data.get('proficiencia', {}).get('por_disciplina', {})
+        
+        # Seção de proficiência - garantir que todas as disciplinas tenham análise
+        prof_disciplinas = report_data.get('proficiencia', {}).get('por_disciplina', {})
+        if prof_disciplinas:
             for disciplina in prof_disciplinas.keys():
                 if disciplina != 'GERAL':
-                    result['proficiencia'][disciplina] = f'Análise de proficiência não disponível para {disciplina}.'
-        if not result['niveis_aprendizagem']:
-            # Tentar obter disciplinas do report_data (incluindo GERAL)
-            niveis_disciplinas = report_data.get('niveis_aprendizagem', {})
+                    # Se não foi extraída, criar fallback
+                    if disciplina not in result['proficiencia']:
+                        result['proficiencia'][disciplina] = f'Análise de proficiência não disponível para {disciplina}.'
+                        self.logger.warning(f"Análise de proficiência não encontrada para disciplina: {disciplina}")
+        elif not result['proficiencia']:
+            # Se não há dados de proficiência, manter dict vazio
+            result['proficiencia'] = {}
+        
+        # Seção de níveis de aprendizagem - garantir que todas as disciplinas tenham análise
+        niveis_disciplinas = report_data.get('niveis_aprendizagem', {})
+        if niveis_disciplinas:
             for disciplina in niveis_disciplinas.keys():
-                result['niveis_aprendizagem'][disciplina] = f'Análise de níveis não disponível para {disciplina}.'
+                # Se não foi extraída, criar fallback (incluindo GERAL)
+                if disciplina not in result['niveis_aprendizagem']:
+                    result['niveis_aprendizagem'][disciplina] = f'Análise de níveis não disponível para {disciplina}.'
+                    self.logger.warning(f"Análise de níveis não encontrada para disciplina: {disciplina}")
+        elif not result['niveis_aprendizagem']:
+            # Se não há dados de níveis, manter dict vazio
+            result['niveis_aprendizagem'] = {}
         
         # Formatar todas as análises em HTML
         participacao_antes_format = result['participacao']
@@ -1650,11 +1684,84 @@ IMPORTANTE: Use os marcadores exatos [MARCADOR: PARTICIPACAO], [MARCADOR: PROFIC
         
         return text
     
-    def _get_fallback_texts(self) -> Dict[str, Any]:
-        """Retorna textos padrão em caso de erro"""
-        return {
+    def _get_fallback_texts(self, report_data: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """
+        Retorna textos padrão em caso de erro.
+        Se report_data for fornecido, cria fallbacks para todas as disciplinas encontradas.
+        
+        Args:
+            report_data: Dados do relatório (opcional) para criar fallbacks por disciplina
+            
+        Returns:
+            Dict com textos padrão, incluindo entradas para todas as disciplinas se report_data fornecido
+        """
+        result = {
             'participacao': 'Análise de participação não disponível no momento.',
             'proficiencia': {},
             'notas': 'Análise de notas não disponível no momento.',
             'niveis_aprendizagem': {}
         }
+        
+        # Se report_data fornecido, criar fallbacks para todas as disciplinas
+        if report_data:
+            # Proficiência - criar fallback para cada disciplina (exceto GERAL)
+            prof_disciplinas = report_data.get('proficiencia', {}).get('por_disciplina', {})
+            if prof_disciplinas:
+                for disciplina in prof_disciplinas.keys():
+                    if disciplina != 'GERAL':
+                        result['proficiencia'][disciplina] = f'Análise de proficiência não disponível para {disciplina}.'
+                        self.logger.warning(f"Fallback criado para proficiência: {disciplina}")
+            
+            # Níveis de aprendizagem - criar fallback para cada disciplina (incluindo GERAL)
+            niveis_disciplinas = report_data.get('niveis_aprendizagem', {})
+            if niveis_disciplinas:
+                for disciplina in niveis_disciplinas.keys():
+                    result['niveis_aprendizagem'][disciplina] = f'Análise de níveis não disponível para {disciplina}.'
+                    self.logger.warning(f"Fallback criado para níveis: {disciplina}")
+        
+        return result
+    
+    def _validate_analysis_completeness(self, analysis_texts: Dict[str, Any], report_data: Dict[str, Any]) -> None:
+        """
+        Valida se todas as seções esperadas foram geradas corretamente.
+        Se alguma estiver faltando, cria fallbacks apropriados.
+        
+        Args:
+            analysis_texts: Resultado da análise gerada
+            report_data: Dados originais do relatório
+        """
+        # Validar participação
+        if not analysis_texts.get('participacao'):
+            self.logger.warning("Análise de participação está vazia, criando fallback")
+            analysis_texts['participacao'] = 'Análise de participação não disponível no momento.'
+        
+        # Validar notas
+        if not analysis_texts.get('notas'):
+            self.logger.warning("Análise de notas está vazia, criando fallback")
+            analysis_texts['notas'] = 'Análise de notas não disponível no momento.'
+        
+        # Validar proficiência - verificar se todas as disciplinas têm análise
+        prof_disciplinas = report_data.get('proficiencia', {}).get('por_disciplina', {})
+        if prof_disciplinas:
+            for disciplina in prof_disciplinas.keys():
+                if disciplina != 'GERAL' and disciplina not in analysis_texts.get('proficiencia', {}):
+                    self.logger.warning(f"Análise de proficiência faltando para disciplina: {disciplina}")
+                    if 'proficiencia' not in analysis_texts:
+                        analysis_texts['proficiencia'] = {}
+                    analysis_texts['proficiencia'][disciplina] = f'Análise de proficiência não disponível para {disciplina}.'
+        
+        # Validar níveis de aprendizagem - verificar se todas as disciplinas têm análise
+        niveis_disciplinas = report_data.get('niveis_aprendizagem', {})
+        if niveis_disciplinas:
+            for disciplina in niveis_disciplinas.keys():
+                if disciplina not in analysis_texts.get('niveis_aprendizagem', {}):
+                    self.logger.warning(f"Análise de níveis faltando para disciplina: {disciplina}")
+                    if 'niveis_aprendizagem' not in analysis_texts:
+                        analysis_texts['niveis_aprendizagem'] = {}
+                    analysis_texts['niveis_aprendizagem'][disciplina] = f'Análise de níveis não disponível para {disciplina}.'
+        
+        # Log final de validação
+        self.logger.info(f"Validação completa: participacao={bool(analysis_texts.get('participacao'))}, "
+                        f"notas={bool(analysis_texts.get('notas'))}, "
+                        f"proficiencia={len(analysis_texts.get('proficiencia', {}))} disciplinas, "
+                        f"niveis={len(analysis_texts.get('niveis_aprendizagem', {}))} disciplinas")

@@ -1031,10 +1031,11 @@ def bulk_delete_tests():
             logging.info(f"🗑️ Excluídos {len(report_aggregates)} agregados de relatórios para teste {test.id}")
             
             # 5. Excluir sessões de teste
-            test_sessions = TestSession.query.filter_by(test_id=test.id).all()
-            for session in test_sessions:
-                db.session.delete(session)
-            logging.info(f"🗑️ Excluídas {len(test_sessions)} sessões de teste para teste {test.id}")
+            # IMPORTANTE: Usar query.delete() para evitar lazy loading do relacionamento competition_results
+            # que não deve ser acessado ao deletar testes (apenas AVALIACAO e OLIMPIADA, não competições)
+            sessions_count = TestSession.query.filter_by(test_id=test.id).count()
+            TestSession.query.filter_by(test_id=test.id).delete()
+            logging.info(f"🗑️ Excluídas {sessions_count} sessões de teste para teste {test.id}")
             
             # 6. Excluir aplicações de classe
             class_tests = ClassTest.query.filter_by(test_id=str(test.id)).all()
@@ -1152,11 +1153,12 @@ def deletar_avaliacao(test_id):
         logging.info(f"🗑️ Excluídos {len(report_aggregates)} agregados de relatórios")
         
         # 5. Excluir sessões de teste
+        # IMPORTANTE: Usar query.delete() para evitar lazy loading do relacionamento competition_results
+        # que não deve ser acessado ao deletar testes (apenas AVALIACAO e OLIMPIADA, não competições)
         from app.models.testSession import TestSession
-        test_sessions = TestSession.query.filter_by(test_id=test_id).all()
-        for session in test_sessions:
-            db.session.delete(session)
-        logging.info(f"🗑️ Excluídas {len(test_sessions)} sessões de teste")
+        sessions_count = TestSession.query.filter_by(test_id=test_id).count()
+        TestSession.query.filter_by(test_id=test_id).delete()
+        logging.info(f"🗑️ Excluídas {sessions_count} sessões de teste")
         
         # 6. Excluir aplicações de classe
         class_tests = ClassTest.query.filter_by(test_id=str(test_id)).all()

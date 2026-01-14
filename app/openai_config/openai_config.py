@@ -9,7 +9,7 @@ from openai import OpenAI
 OPENROUTER_API_KEY = "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"
 
 # Configurações do modelo OpenRouter
-OPENROUTER_MODEL = "nex-agi/deepseek-v3.1-nex-n1:free"
+OPENROUTER_MODEL = "xiaomi/mimo-v2-flash:free"
 OPENROUTER_MAX_TOKENS = 8192
 OPENROUTER_TEMPERATURE = 0.7
 

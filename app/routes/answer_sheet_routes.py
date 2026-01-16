@@ -13,10 +13,12 @@ from app.models.student import Student
 from app.models.user import User
 from app.services.cartao_resposta.answer_sheet_generator import AnswerSheetGenerator
 from app.services.cartao_resposta.answer_sheet_correction_service import AnswerSheetCorrectionService
+from app.services.cartao_resposta.correction_n import AnswerSheetCorrectionN
 from app.services.progress_store import (
     create_job, update_item_processing, update_item_done,
     update_item_error, complete_job, get_job
 )
+from typing import Dict
 import logging
 import base64
 import io
@@ -26,6 +28,93 @@ import uuid
 from io import BytesIO
 
 bp = Blueprint('answer_sheets', __name__, url_prefix='/answer-sheets')
+
+
+def _generate_complete_structure(num_questions: int, use_blocks: bool,
+                                 blocks_config: Dict, questions_options: Dict = None) -> Dict:
+    """
+    Gera estrutura completa de questões e alternativas por bloco
+    Formato (será salvo em blocks_config['topology']):
+    {
+        "blocks": [
+            {
+                "block_id": 1,
+                "questions": [
+                    {"q": 1, "alternatives": ["A", "B"]},
+                    {"q": 2, "alternatives": ["A", "B", "C", "D"]},
+                    ...
+                ]
+            },
+            ...
+        ]
+    }
+    """
+    # Processar questions_options: garantir formato correto
+    questions_map = {}
+    if questions_options:
+        for key, value in questions_options.items():
+            try:
+                q_num = int(key)
+                if isinstance(value, list) and len(value) >= 2:
+                    questions_map[q_num] = value
+                else:
+                    questions_map[q_num] = ['A', 'B', 'C', 'D']
+            except (ValueError, TypeError):
+                continue
+    
+    # Se questions_map vazio, preencher com padrão
+    if not questions_map:
+        for q in range(1, num_questions + 1):
+            questions_map[q] = ['A', 'B', 'C', 'D']
+    else:
+        # Garantir que todas questões existam
+        for q in range(1, num_questions + 1):
+            if q not in questions_map:
+                questions_map[q] = ['A', 'B', 'C', 'D']
+    
+    # Estrutura topology (sem use_blocks, apenas blocks)
+    topology = {}
+    
+    if use_blocks:
+        # Organizar por blocos
+        num_blocks = blocks_config.get('num_blocks', 1)
+        questions_per_block = blocks_config.get('questions_per_block', 12)
+        
+        blocks = []
+        for block_num in range(1, num_blocks + 1):
+            start_question = (block_num - 1) * questions_per_block + 1
+            end_question = min(block_num * questions_per_block, num_questions)
+            
+            questions = []
+            for q_num in range(start_question, end_question + 1):
+                alternatives = questions_map.get(q_num, ['A', 'B', 'C', 'D'])
+                questions.append({
+                    "q": q_num,
+                    "alternatives": alternatives
+                })
+            
+            blocks.append({
+                "block_id": block_num,
+                "questions": questions
+            })
+        
+        topology["blocks"] = blocks
+    else:
+        # Sem blocos: um único bloco com todas questões
+        questions = []
+        for q_num in range(1, num_questions + 1):
+            alternatives = questions_map.get(q_num, ['A', 'B', 'C', 'D'])
+            questions.append({
+                "q": q_num,
+                "alternatives": alternatives
+            })
+        
+        topology["blocks"] = [{
+            "block_id": 1,
+            "questions": questions
+        }]
+    
+    return topology
 
 
 @bp.route('/generate', methods=['POST'])
@@ -50,6 +139,11 @@ def generate_answer_sheets():
                 "2": "B",
                 ...
             },
+            "questions_options": {
+                "1": ["A", "B", "C"],
+                "2": ["A", "B", "C", "D"],
+                ...
+            } (opcional - se omitido, usa A, B, C, D para todas),
             "test_data": {
                 "title": "Nome da Prova",
                 "municipality": "...",
@@ -76,6 +170,7 @@ def generate_answer_sheets():
         class_id = data.get('class_id')
         num_questions = data.get('num_questions')
         correct_answers = data.get('correct_answers')
+        questions_options = data.get('questions_options')  # Opcional
         test_data = data.get('test_data', {})
         
         if not class_id:
@@ -115,6 +210,19 @@ def generate_answer_sheets():
             if 'questions_per_block' not in blocks_config:
                 blocks_config['questions_per_block'] = 12
         
+        # Gerar estrutura completa de questões e alternativas por bloco
+        # Isso será usado na correção como "contrato" da estrutura
+        questions_options = data.get('questions_options', {})
+        complete_structure = _generate_complete_structure(
+            num_questions=num_questions,
+            use_blocks=use_blocks,
+            blocks_config=blocks_config,
+            questions_options=questions_options
+        )
+        
+        # Adicionar estrutura completa ao blocks_config como 'topology'
+        blocks_config['topology'] = complete_structure
+        
         # Buscar informações da turma e escola para salvar no gabarito
         school_id = None
         school_name = ''
@@ -125,18 +233,18 @@ def generate_answer_sheets():
                 school_id = school.id
                 school_name = school.name or ''
         
-        # Salvar gabarito no banco
+        # Salvar gabarito no banco (garantir que UUIDs sejam strings)
         gabarito = AnswerSheetGabarito(
-            test_id=data.get('test_id'),
-            class_id=class_id,
+            test_id=str(data.get('test_id')) if data.get('test_id') else None,
+            class_id=class_id,  # Já é UUID pelo modelo
             num_questions=num_questions,
             use_blocks=use_blocks,
             blocks_config=blocks_config,
             correct_answers=correct_answers,
             title=test_data.get('title', 'Cartão Resposta'),
-            created_by=user['id'],
+            created_by=str(user['id']) if user.get('id') else None,
             # Campos adicionais
-            school_id=school_id,
+            school_id=str(school_id) if school_id else None,
             school_name=school_name,
             municipality=test_data.get('municipality', ''),
             state=test_data.get('state', ''),
@@ -145,6 +253,27 @@ def generate_answer_sheets():
         )
         db.session.add(gabarito)
         db.session.commit()
+        
+        # Gerar coordenadas automaticamente
+        try:
+            from app.services.cartao_resposta.coordinate_generator import CoordinateGenerator
+            
+            coord_generator = CoordinateGenerator()
+            coordinates = coord_generator.generate_coordinates(
+                num_questions=num_questions,
+                use_blocks=use_blocks,
+                blocks_config=blocks_config,
+                questions_options=questions_options
+            )
+            
+            # Salvar coordenadas no gabarito
+            gabarito.coordinates = coordinates
+            db.session.commit()
+            
+            logging.info(f"✅ Coordenadas geradas e salvas para gabarito {str(gabarito.id)}")
+        except Exception as e:
+            logging.error(f"Erro ao gerar coordenadas: {str(e)}", exc_info=True)
+            # Continuar mesmo se falhar (usará método antigo na correção)
         
         # Preparar test_data completo
         test_data_complete = {
@@ -167,7 +296,8 @@ def generate_answer_sheets():
             use_blocks=use_blocks,
             blocks_config=blocks_config,
             correct_answers=correct_answers,
-            gabarito_id=gabarito.id
+            gabarito_id=str(gabarito.id),
+            questions_options=questions_options
         )
         
         if not generated_files:
@@ -194,9 +324,9 @@ def generate_answer_sheets():
             
             # Adicionar arquivo de metadados com informações do gabarito
             metadata = {
-                "gabarito_id": gabarito.id,
-                "test_id": gabarito.test_id,
-                "class_id": gabarito.class_id,
+                "gabarito_id": str(gabarito.id),
+                "test_id": str(gabarito.test_id) if gabarito.test_id else None,
+                "class_id": str(gabarito.class_id) if gabarito.class_id else None,
                 "title": gabarito.title,
                 "num_questions": gabarito.num_questions,
                 "use_blocks": gabarito.use_blocks,
@@ -210,7 +340,7 @@ def generate_answer_sheets():
         zip_buffer.seek(0)
         
         # Nome do arquivo ZIP
-        zip_filename = f"cartoes_resposta_{test_data_complete.get('title', 'CartaoResposta')}_{gabarito.id[:8]}.zip"
+        zip_filename = f"cartoes_resposta_{test_data_complete.get('title', 'CartaoResposta')}_{str(gabarito.id)[:8]}.zip"
         # Limpar caracteres inválidos
         zip_filename = "".join(c for c in zip_filename if c.isalnum() or c in (' ', '-', '_', '.')).rstrip()
         zip_filename = zip_filename.replace(' ', '_')
@@ -247,7 +377,8 @@ def process_answer_sheet_batch_in_background(job_id: str, images: list = None):
     
     with app.app_context():
         try:
-            correction_service = AnswerSheetCorrectionService(debug=True)
+            # Usando nova implementação correction_n para teste
+            correction_service = AnswerSheetCorrectionN(debug=True)
             
             for i, image_base64 in enumerate(images):
                 try:
@@ -380,7 +511,8 @@ def correct_answer_sheet():
             image_data = base64.b64decode(single_image_clean)
             
             # Processar correção (gabarito_id vem do QR code)
-            correction_service = AnswerSheetCorrectionService(debug=True)
+            # Usando nova implementação correction_n para teste
+            correction_service = AnswerSheetCorrectionN(debug=True)
             resultado = correction_service.corrigir_cartao_resposta(
                 image_data=image_data
             )
@@ -388,7 +520,7 @@ def correct_answer_sheet():
             if resultado.get('success'):
                 return jsonify({
                     "message": "Correção processada com sucesso",
-                    "system": "geometric",
+                    "system": resultado.get('detection_method', 'geometric_n'),
                     "student_id": resultado.get('student_id'),
                     "gabarito_id": resultado.get('gabarito_id'),
                     "test_id": resultado.get('test_id'),
@@ -406,7 +538,7 @@ def correct_answer_sheet():
             else:
                 return jsonify({
                     "error": resultado.get('error', 'Erro desconhecido na correção'),
-                    "system": "geometric"
+                    "system": "geometric_n"
                 }), 500
         
         # ==================================================================

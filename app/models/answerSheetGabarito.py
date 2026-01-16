@@ -30,6 +30,9 @@ class AnswerSheetGabarito(db.Model):
     # Gabarito: {1: "A", 2: "B", ...}
     correct_answers = db.Column(JSON, nullable=False)
     
+    # Coordenadas ROI das bolhas (geradas automaticamente)
+    coordinates = db.Column(JSON, nullable=True)  # {"warped_size": [w, h], "questions": {...}}
+    
     # Metadados
     title = db.Column(db.String(200), nullable=True)  # Título do cartão resposta
     created_at = db.Column(db.TIMESTAMP, server_default=db.text('CURRENT_TIMESTAMP'))

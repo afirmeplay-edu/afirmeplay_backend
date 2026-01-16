@@ -1259,10 +1259,14 @@
 							</span>
 
 							<div class="bubbles">
+								{% if questions_map and questions_map[question.question_number] %} {% for opt in questions_map[question.question_number] %}
+								<div class="bubble">{{ opt }}</div>
+								{% endfor %} {% else %}
 								<div class="bubble">A</div>
 								<div class="bubble">B</div>
 								<div class="bubble">C</div>
 								<div class="bubble">D</div>
+								{% endif %}
 							</div>
 						</div>
 						{% endfor %}
@@ -1285,38 +1289,57 @@
 								>
 							</span>
 							<div class="bubbles">
+								{% if questions_map and questions_map[q_num] %} {% for opt in questions_map[q_num] %}
+								<div class="bubble">{{ opt }}</div>
+								{% endfor %} {% else %}
 								<div class="bubble">A</div>
 								<div class="bubble">B</div>
 								<div class="bubble">C</div>
 								<div class="bubble">D</div>
+								{% endif %}
 							</div>
 						</div>
 						{% endfor %}
 					</div>
-					{% endfor %} {% endif %} {% else %} {% for subject_name,
-					subject_questions in questions_by_subject.items() %}
+					{% endfor %} {% endif %} {% else %} {% set
+					questions_per_block = 12 %} {% set total_questions =
+					total_questions | default(48) %} {% set num_blocks =
+					((total_questions - 1) // questions_per_block) + 1 %} {% if
+					num_blocks == 0 %}{% set num_blocks = 1 %}{% endif %} {% for
+					block in range(1, num_blocks + 1) %} {% set start_question =
+					(block - 1) * questions_per_block + 1 %} {% set end_question
+					= [block * questions_per_block, total_questions] | min %} {%
+					set questions_in_block = end_question - start_question + 1
+					%} {% if questions_in_block > 0 %}
 					<div class="answer-block">
 						<div class="block-header">
-							BLOCO 0{{ loop.index }} - {{ subject_name }}
+							BLOCO {{ "%02d"|format(block) }}
 						</div>
 
-						{% for question in subject_questions %}
+						{% for q in range(1, questions_in_block + 1) %} {% set
+						question_num = start_question + q - 1 %}
 						<div class="answer-row">
 							<span class="question-num">
 								<span class="question-num-text"
-									>{{ question.question_number }}.</span
+									>{{ question_num }}.</span
 								>
 							</span>
 							<div class="bubbles">
+								{% if questions_map and
+								questions_map[question_num] %} {% for opt in
+								questions_map[question_num] %}
+								<div class="bubble">{{ opt }}</div>
+								{% endfor %} {% else %}
 								<div class="bubble">A</div>
 								<div class="bubble">B</div>
 								<div class="bubble">C</div>
 								<div class="bubble">D</div>
+								{% endif %}
 							</div>
 						</div>
 						{% endfor %}
 					</div>
-					{% endfor %} {% endif %}
+					{% endif %} {% endfor %} {% endif %}
 				</div>
 				<!-- Fim do answer-grid-container -->
 			</div>

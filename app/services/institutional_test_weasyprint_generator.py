@@ -120,11 +120,13 @@ class InstitutionalTestWeasyPrintGenerator:
                 student, questions_data, test_data
             )
             
-            # Gerar QR code no formato ultra-compacto (reduz densidade)
-            # Formato: s12345678t87654321 (últimos 8 caracteres de cada UUID)
+            # Gerar QR code no formato JSON (igual ao answer_sheet.html)
+            # Formato: {"student_id": "...", "test_id": "..."}
+            # O correction_n.py buscará o gabarito pelo test_id
             import qrcode
             from io import BytesIO
             import base64
+            import json
             
             total_questions = len(questions_data)
             
@@ -132,20 +134,20 @@ class InstitutionalTestWeasyPrintGenerator:
             student_id = str(student.get('id', ''))
             test_id = str(test_data.get('id', ''))
             
-            # Encurtar IDs: usar últimos 8 caracteres (sem hífens)
-            # Exemplo: "a1b2c3d4-e5f6-7890-abcd-ef1234567890" -> "12345678"
-            short_student_id = student_id.replace('-', '')[-8:] if student_id else ''
-            short_test_id = test_id.replace('-', '')[-8:] if test_id else ''
+            # Criar metadados do QR code no formato JSON
+            qr_metadata = {
+                "student_id": student_id,
+                "test_id": test_id  # Usar test_id para buscar gabarito depois
+            }
             
-            # Formato ultra-compacto: s12345678t87654321
-            qr_data = f"s{short_student_id}t{short_test_id}"
+            # Converter para JSON
+            qr_data = json.dumps(qr_metadata)
             
-            # Gerar QR code com formato ultra-compacto
-            # box_size aumentado para facilitar leitura mesmo com qualidade ruim
+            # Gerar QR code
             qr = qrcode.QRCode(
                 version=1,
                 error_correction=qrcode.constants.ERROR_CORRECT_L,
-                box_size=12,  # Aumentado de 10 para 12 (módulos maiores)
+                box_size=10,  # Tamanho padrão (pode ajustar se necessário)
                 border=2,
             )
             qr.add_data(qr_data)
@@ -167,6 +169,39 @@ class InstitutionalTestWeasyPrintGenerator:
             # Carregar logo padrão (afirme_logo.png) se não houver logo do município
             default_logo_base64 = self._load_default_logo()
             
+            # Gerar questions_map: mapear número da questão para lista de letras das alternativas
+            # Formato: {1: ["A", "B", "C"], 2: ["A", "B", "C", "D"], ...}
+            questions_map = {}
+            letters = ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H']
+            
+            for question in questions_data:
+                question_num = question.get('question_number')
+                if not question_num:
+                    continue
+                
+                alternatives = question.get('alternatives', [])
+                if isinstance(alternatives, str):
+                    try:
+                        alternatives = json.loads(alternatives)
+                    except:
+                        alternatives = []
+                
+                # Extrair letras das alternativas
+                options_list = []
+                if isinstance(alternatives, list) and len(alternatives) > 0:
+                    for idx, alt in enumerate(alternatives):
+                        if idx < len(letters):
+                            options_list.append(letters[idx])
+                else:
+                    # Se não tem alternativas definidas, usar padrão A, B, C, D
+                    options_list = ['A', 'B', 'C', 'D']
+                
+                # Garantir pelo menos 2 alternativas
+                if len(options_list) < 2:
+                    options_list = ['A', 'B', 'C', 'D']
+                
+                questions_map[question_num] = options_list
+            
             # Preparar dados para o template
             template_data = {
                 'test_data': test_data,
@@ -174,6 +209,7 @@ class InstitutionalTestWeasyPrintGenerator:
                 'questions_by_subject': questions_by_subject,  # Mantido para compatibilidade
                 'questions_by_block': questions_by_block,  # Nova estrutura de blocos
                 'blocks_config': blocks_config,  # Configuração de blocos
+                'questions_map': questions_map,  # Mapa de alternativas por questão (igual ao answer_sheet.html)
                 'answer_sheet_image': answer_sheet_image,
                 'total_questions': total_questions,
                 'datetime': datetime,

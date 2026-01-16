@@ -450,23 +450,36 @@
 						</div>
 						<div class="header-info-line">
 							<span class="label">NOME COMPLETO:</span>
-							<span class="value">{{ student.name or student.nome }}</span>
+							<span class="value"
+								>{{ student.name or student.nome }}</span
+							>
 						</div>
 						<div class="header-info-line">
 							<span class="label">ESTADO:</span>
-							<span class="value">{{ test_data.state or 'ALAGOAS' }}</span>
+							<span class="value"
+								>{{ test_data.state or 'ALAGOAS' }}</span
+							>
 						</div>
 						<div class="header-info-line">
 							<span class="label">MUNICÍPIO:</span>
-							<span class="value">{{ test_data.municipality or 'SÃO MIGUEL DOS CAMPOS' }}</span>
+							<span class="value"
+								>{{ test_data.municipality or 'SÃO MIGUEL DOS
+								CAMPOS' }}</span
+							>
 						</div>
 						<div class="header-info-line">
 							<span class="label">ESCOLA:</span>
-							<span class="value">{{ student.school_name or 'Não informado' }}</span>
+							<span class="value"
+								>{{ student.school_name or 'Não informado'
+								}}</span
+							>
 						</div>
 						<div class="header-info-line">
 							<span class="label">TURMA:</span>
-							<span class="value">{{ student.class_name or 'Não informado' }}</span>
+							<span class="value"
+								>{{ student.class_name or 'Não informado'
+								}}</span
+							>
 						</div>
 					</div>
 					<div class="student-name-grid">
@@ -615,94 +628,113 @@
 
 				<!-- GRID DE RESPOSTAS -->
 				<div class="answer-grid-container">
-					{% if blocks_config and blocks_config.use_blocks %}
-					{% set num_blocks = blocks_config.num_blocks | default(1) %}
-					{% set questions_per_block = blocks_config.questions_per_block | default(12) %}
-					{% if questions_by_block %}
-					{% for block in questions_by_block %}
-					{% set questions_in_block = block.questions | length %}
-					{% if questions_in_block > 0 %}
+					{% if blocks_config and blocks_config.use_blocks %} {% set
+					num_blocks = blocks_config.num_blocks | default(1) %} {% set
+					questions_per_block = blocks_config.questions_per_block |
+					default(12) %} {% if questions_by_block %} {% for block in
+					questions_by_block %} {% set questions_in_block =
+					block.questions | length %} {% if questions_in_block > 0 %}
 					<div class="answer-block">
 						<div class="block-header">
-							BLOCO {{ "%02d"|format(block.block_number) }}{% if block.subject_name %} - {{ block.subject_name }}{% endif %}
+							BLOCO {{ "%02d"|format(block.block_number) }}{% if
+							block.subject_name %} - {{ block.subject_name }}{%
+							endif %}
 						</div>
 
 						<!-- Linhas de resposta -->
 						{% for question in block.questions %}
 						<div class="answer-row">
 							<span class="question-num">
-								<span class="question-num-text">{{ question.question_number }}.</span>
+								<span class="question-num-text"
+									>{{ question.question_number }}.</span
+								>
 							</span>
 
 							<div class="bubbles">
+								{% if question.options %} {% for opt in
+								question.options %}
+								<div class="bubble">{{ opt }}</div>
+								{% endfor %} {% else %}
 								<div class="bubble">A</div>
 								<div class="bubble">B</div>
 								<div class="bubble">C</div>
 								<div class="bubble">D</div>
+								{% endif %}
 							</div>
 						</div>
 						{% endfor %}
 					</div>
-					{% endif %}
-					{% endfor %}
-					{% else %}
-					{% for block_num in range(1, num_blocks + 1) %}
-					{% set start_question = (block_num - 1) * questions_per_block + 1 %}
-					{% set end_question = [block_num * questions_per_block, total_questions] | min %}
+					{% endif %} {% endfor %} {% else %} {% for block_num in
+					range(1, num_blocks + 1) %} {% set start_question =
+					(block_num - 1) * questions_per_block + 1 %} {% set
+					end_question = [block_num * questions_per_block,
+					total_questions] | min %}
 					<div class="answer-block">
 						<div class="block-header">
 							BLOCO {{ "%02d"|format(block_num) }}
 						</div>
 
-						{% for q_num in range(start_question, end_question + 1) %}
+						{% for q_num in range(start_question, end_question + 1)
+						%}
 						<div class="answer-row">
 							<span class="question-num">
-								<span class="question-num-text">{{ q_num }}.</span>
+								<span class="question-num-text"
+									>{{ q_num }}.</span
+								>
 							</span>
 							<div class="bubbles">
+								{% if questions_map and questions_map[q_num] %}
+								{% for opt in questions_map[q_num] %}
+								<div class="bubble">{{ opt }}</div>
+								{% endfor %} {% else %}
 								<div class="bubble">A</div>
 								<div class="bubble">B</div>
 								<div class="bubble">C</div>
 								<div class="bubble">D</div>
+								{% endif %}
 							</div>
 						</div>
 						{% endfor %}
 					</div>
-					{% endfor %}
-					{% endif %}
-					{% else %}
-					{% set questions_per_block = 12 %}
-					{% set total_questions = total_questions | default(48) %}
-					{% set num_blocks = ((total_questions - 1) // questions_per_block) + 1 %}
-					{% if num_blocks == 0 %}{% set num_blocks = 1 %}{% endif %}
-					{% for block in range(1, num_blocks + 1) %}
-					{% set start_question = (block - 1) * questions_per_block + 1 %}
-					{% set end_question = [block * questions_per_block, total_questions] | min %}
-					{% set questions_in_block = end_question - start_question + 1 %}
-					{% if questions_in_block > 0 %}
+					{% endfor %} {% endif %} {% else %} {% set
+					questions_per_block = 12 %} {% set total_questions =
+					total_questions | default(48) %} {% set num_blocks =
+					((total_questions - 1) // questions_per_block) + 1 %} {% if
+					num_blocks == 0 %}{% set num_blocks = 1 %}{% endif %} {% for
+					block in range(1, num_blocks + 1) %} {% set start_question =
+					(block - 1) * questions_per_block + 1 %} {% set end_question
+					= [block * questions_per_block, total_questions] | min %} {%
+					set questions_in_block = end_question - start_question + 1
+					%} {% if questions_in_block > 0 %}
 					<div class="answer-block">
 						<div class="block-header">
 							BLOCO {{ "%02d"|format(block) }}
 						</div>
 
-						{% for q in range(1, questions_in_block + 1) %}
-						{% set question_num = start_question + q - 1 %}
+						{% for q in range(1, questions_in_block + 1) %} {% set
+						question_num = start_question + q - 1 %}
 						<div class="answer-row">
 							<span class="question-num">
-								<span class="question-num-text">{{ question_num }}.</span>
+								<span class="question-num-text"
+									>{{ question_num }}.</span
+								>
 							</span>
 							<div class="bubbles">
+								{% if questions_map and
+								questions_map[question_num] %} {% for opt in
+								questions_map[question_num] %}
+								<div class="bubble">{{ opt }}</div>
+								{% endfor %} {% else %}
 								<div class="bubble">A</div>
 								<div class="bubble">B</div>
 								<div class="bubble">C</div>
 								<div class="bubble">D</div>
+								{% endif %}
 							</div>
 						</div>
 						{% endfor %}
 					</div>
-					{% endif %}
-					{% endfor %}
-					{% endif %}
+					{% endif %} {% endfor %} {% endif %}
 				</div>
 			</div>
 		</div>

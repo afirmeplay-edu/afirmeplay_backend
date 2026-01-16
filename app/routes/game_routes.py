@@ -55,12 +55,26 @@ def validate_and_collect_classes(data, user_role, current_user):
     if class_ids:
         # Converter class_ids para UUID (Class.id é UUID)
         class_ids_uuids = ensure_uuid_list(class_ids)
-        classes = Class.query.filter(Class.id.in_(class_ids_uuids)).all()
-        found_ids = {c.id for c in classes}
-        missing_ids = set(class_ids) - found_ids
         
-        if missing_ids:
-            errors.append(f"Turmas não encontradas: {', '.join(missing_ids)}")
+        # Verificar se todos os class_ids foram convertidos corretamente
+        if len(class_ids_uuids) != len(class_ids):
+            invalid_ids = []
+            for class_id in class_ids:
+                uuid_val = ensure_uuid(class_id)
+                if uuid_val is None:
+                    invalid_ids.append(str(class_id))
+            if invalid_ids:
+                errors.append(f"IDs de turma inválidos: {', '.join(invalid_ids)}")
+        
+        if class_ids_uuids:
+            classes = Class.query.filter(Class.id.in_(class_ids_uuids)).all()
+            found_ids = {c.id for c in classes}
+            missing_ids = set(class_ids_uuids) - found_ids
+            
+            if missing_ids:
+                # Converter UUIDs para string para exibição
+                missing_ids_str = [str(uuid) for uuid in missing_ids]
+                errors.append(f"Turmas não encontradas: {', '.join(missing_ids_str)}")
         
         # Validar permissões por role
         for class_obj in classes:

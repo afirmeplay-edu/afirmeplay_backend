@@ -35,7 +35,7 @@ class AnswerSheetGenerator:
     def generate_answer_sheets(self, class_id: str, test_data: Dict, 
                               num_questions: int, use_blocks: bool,
                               blocks_config: Dict, correct_answers: Dict,
-                              gabarito_id: str = None) -> List[Dict]:
+                              gabarito_id: str = None, questions_options: Dict = None) -> List[Dict]:
         """
         Gera PDFs de cartões resposta para todos os alunos de uma turma
 
@@ -47,6 +47,8 @@ class AnswerSheetGenerator:
             blocks_config: Configuração de blocos {num_blocks, questions_per_block, separate_by_subject}
             correct_answers: Dict com respostas corretas {1: "A", 2: "B", ...}
             gabarito_id: ID do gabarito salvo (opcional)
+            questions_options: Dict com alternativas de cada questão {1: ['A', 'B', 'C'], 2: ['A', 'B', 'C', 'D'], ...}
+                              Se não fornecido, usa padrão A, B, C, D para todas
 
         Returns:
             Lista com informações dos PDFs gerados
@@ -67,11 +69,34 @@ class AnswerSheetGenerator:
 
             generated_files = []
 
+            # Processar questions_options: converter chaves string para int
+            questions_map = {}
+            if questions_options:
+                for key, value in questions_options.items():
+                    try:
+                        q_num = int(key)  # Converter "1" -> 1
+                        if isinstance(value, list) and len(value) >= 2:
+                            questions_map[q_num] = value
+                        else:
+                            questions_map[q_num] = ['A', 'B', 'C', 'D']
+                    except (ValueError, TypeError):
+                        continue
+            
+            # Se questions_map vazio, preencher com padrão
+            if not questions_map:
+                for q in range(1, num_questions + 1):
+                    questions_map[q] = ['A', 'B', 'C', 'D']
+            else:
+                # Garantir que todas questões existam
+                for q in range(1, num_questions + 1):
+                    if q not in questions_map:
+                        questions_map[q] = ['A', 'B', 'C', 'D']
+
             # Organizar questões por blocos se necessário
             questions_by_block = None
             if use_blocks:
                 questions_by_block = self._organize_questions_by_blocks(
-                    num_questions, blocks_config
+                    num_questions, blocks_config, questions_map
                 )
 
             for student in students:
@@ -79,7 +104,7 @@ class AnswerSheetGenerator:
                     # Gerar PDF individual para cada aluno
                     pdf_data = self._generate_individual_answer_sheet(
                         student, test_data, num_questions, use_blocks,
-                        blocks_config, questions_by_block, gabarito_id
+                        blocks_config, questions_by_block, gabarito_id, questions_map
                     )
 
                     if pdf_data:
@@ -107,9 +132,12 @@ class AnswerSheetGenerator:
     def _generate_individual_answer_sheet(self, student: Dict, test_data: Dict,
                                          num_questions: int, use_blocks: bool,
                                          blocks_config: Dict, questions_by_block: List[Dict],
-                                         gabarito_id: str = None) -> Optional[bytes]:
+                                         gabarito_id: str = None, questions_map: Dict = None) -> Optional[bytes]:
         """
         Gera PDF individual de cartão resposta para um aluno
+        
+        Args:
+            questions_map: Dict {question_num: [options]} para passar ao template
         """
         try:
             # Buscar dados completos do aluno
@@ -131,6 +159,7 @@ class AnswerSheetGenerator:
                 'test_data': test_data,
                 'student': student_with_qr,
                 'questions_by_block': questions_by_block,
+                'questions_map': questions_map or {},  # Mapa de alternativas por questão
                 'blocks_config': blocks_config if use_blocks else None,
                 'total_questions': num_questions,
                 'datetime': datetime,
@@ -154,18 +183,20 @@ class AnswerSheetGenerator:
             logging.error(traceback.format_exc())
             return None
 
-    def _organize_questions_by_blocks(self, num_questions: int, blocks_config: Dict) -> List[Dict]:
+    def _organize_questions_by_blocks(self, num_questions: int, blocks_config: Dict, 
+                                      questions_map: Dict = None) -> List[Dict]:
         """
         Organiza questões por blocos conforme configuração
         
         Args:
             num_questions: Total de questões
             blocks_config: Configuração de blocos
+            questions_map: Dict {question_num: [options]} com alternativas de cada questão
             
         Returns:
             Lista de blocos, cada um contendo:
             - block_number: número do bloco
-            - questions: lista de questões do bloco (apenas números)
+            - questions: lista de questões com {question_number, options}
             - start_question_num: número da primeira questão
             - end_question_num: número da última questão
         """
@@ -174,6 +205,10 @@ class AnswerSheetGenerator:
         num_blocks = blocks_config.get('num_blocks', 1)
         questions_per_block = blocks_config.get('questions_per_block', 12)
         separate_by_subject = blocks_config.get('separate_by_subject', False)
+        
+        # Garantir questions_map
+        if questions_map is None:
+            questions_map = {}
         
         if separate_by_subject:
             # Se separar por disciplina, precisaríamos de dados de disciplinas
@@ -186,11 +221,14 @@ class AnswerSheetGenerator:
             start_question = (block_num - 1) * questions_per_block + 1
             end_question = min(block_num * questions_per_block, num_questions)
             
-            # Criar lista de questões (apenas números para o template)
+            # Criar lista de questões com alternativas
             questions = []
             for q_num in range(start_question, end_question + 1):
+                # Buscar alternativas da questão ou usar padrão
+                options = questions_map.get(q_num, ['A', 'B', 'C', 'D'])
                 questions.append({
-                    'question_number': q_num
+                    'question_number': q_num,
+                    'options': options
                 })
             
             if questions:
@@ -206,8 +244,10 @@ class AnswerSheetGenerator:
         if not blocks:
             questions = []
             for q_num in range(1, num_questions + 1):
+                options = questions_map.get(q_num, ['A', 'B', 'C', 'D'])
                 questions.append({
-                    'question_number': q_num
+                    'question_number': q_num,
+                    'options': options
                 })
             
             if questions:

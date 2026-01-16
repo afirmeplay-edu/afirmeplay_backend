@@ -1,26 +1,31 @@
 # -*- coding: utf-8 -*-
 """
 Rotas para formulários físicos
-Sistema de correção: CorrecaoHybrid (detecção geométrica)
+Sistema de correção: AnswerSheetCorrectionN (mesmo sistema de cartões resposta)
 Suporta correção única (síncrona) e em lote (assíncrona com polling)
 """
 
 from flask import Blueprint, request, jsonify, send_file
 from flask_jwt_extended import jwt_required, get_jwt_identity
 from app.decorators.role_required import role_required
+from app import db
 from app.models.test import Test
 from app.models.student import Student
 from app.models.user import User
 from app.models.evaluationResult import EvaluationResult
 from app.models.physicalTestForm import PhysicalTestForm
 from app.models.classTest import ClassTest
+from app.models.testQuestion import TestQuestion
+from app.models.question import Question
+from app.models.answerSheetGabarito import AnswerSheetGabarito
 from app.services.physical_test_pdf_generator import PhysicalTestPDFGenerator
 from app.services.physical_test_form_service import PhysicalTestFormService
-from app.services.correcao_hybrid import CorrecaoHybrid  # ÚNICO SISTEMA DE CORREÇÃO
+from app.services.cartao_resposta.correction_n import AnswerSheetCorrectionN  # NOVO SISTEMA DE CORREÇÃO
 from app.services.progress_store import (
     create_job, update_item_processing, update_item_done,
     update_item_error, complete_job, get_job
 )
+from typing import Dict, List, Optional
 import tempfile
 import threading
 import uuid
@@ -30,6 +35,258 @@ import os
 import json
 
 bp = Blueprint('physical_tests', __name__, url_prefix='/physical-tests')
+
+
+# ============================================================================
+# FUNÇÕES AUXILIARES
+# ============================================================================
+
+def _generate_complete_structure(num_questions: int, use_blocks: bool,
+                                 blocks_config: Dict, questions_options: Dict = None) -> Dict:
+    """
+    Gera estrutura completa de questões e alternativas por bloco
+    Formato (será salvo em blocks_config['topology']):
+    {
+        "blocks": [
+            {
+                "block_id": 1,
+                "questions": [
+                    {"q": 1, "alternatives": ["A", "B"]},
+                    {"q": 2, "alternatives": ["A", "B", "C", "D"]},
+                    ...
+                ]
+            },
+            ...
+        ]
+    }
+    """
+    # Processar questions_options: garantir formato correto
+    questions_map = {}
+    if questions_options:
+        for key, value in questions_options.items():
+            try:
+                q_num = int(key)
+                if isinstance(value, list) and len(value) >= 2:
+                    questions_map[q_num] = value
+                else:
+                    questions_map[q_num] = ['A', 'B', 'C', 'D']
+            except (ValueError, TypeError):
+                continue
+    
+    # Se questions_map vazio, preencher com padrão
+    if not questions_map:
+        for q in range(1, num_questions + 1):
+            questions_map[q] = ['A', 'B', 'C', 'D']
+    else:
+        # Garantir que todas questões existam
+        for q in range(1, num_questions + 1):
+            if q not in questions_map:
+                questions_map[q] = ['A', 'B', 'C', 'D']
+    
+    # Estrutura topology (sem use_blocks, apenas blocks)
+    topology = {}
+    
+    if use_blocks:
+        # Organizar por blocos
+        num_blocks = blocks_config.get('num_blocks', 1)
+        questions_per_block = blocks_config.get('questions_per_block', 12)
+        
+        blocks = []
+        for block_num in range(1, num_blocks + 1):
+            start_question = (block_num - 1) * questions_per_block + 1
+            end_question = min(block_num * questions_per_block, num_questions)
+            
+            questions = []
+            for q_num in range(start_question, end_question + 1):
+                alternatives = questions_map.get(q_num, ['A', 'B', 'C', 'D'])
+                questions.append({
+                    "q": q_num,
+                    "alternatives": alternatives
+                })
+            
+            blocks.append({
+                "block_id": block_num,
+                "questions": questions
+            })
+        
+        topology["blocks"] = blocks
+    else:
+        # Sem blocos: um único bloco com todas questões
+        questions = []
+        for q_num in range(1, num_questions + 1):
+            alternatives = questions_map.get(q_num, ['A', 'B', 'C', 'D'])
+            questions.append({
+                "q": q_num,
+                "alternatives": alternatives
+            })
+        
+        topology["blocks"] = [{
+            "block_id": 1,
+            "questions": questions
+        }]
+    
+    return topology
+
+
+def _extrair_respostas_corretas(test_id: str) -> Dict[int, str]:
+    """
+    Extrai respostas corretas das questões da prova e converte para formato {1: "A", 2: "B", ...}
+    
+    Args:
+        test_id: ID da prova
+        
+    Returns:
+        Dict com número da questão (order) como chave e letra correta como valor
+    """
+    letters = ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H']
+    correct_answers = {}
+    
+    # Buscar questões da prova ordenadas por TestQuestion.order
+    test_questions = TestQuestion.query.filter_by(test_id=test_id).order_by(TestQuestion.order).all()
+    if not test_questions:
+        logging.warning(f"Nenhuma questão encontrada para prova {test_id}")
+        return correct_answers
+    
+    # Buscar questões completas
+    question_ids = [tq.question_id for tq in test_questions]
+    questions = Question.query.filter(Question.id.in_(question_ids)).all()
+    questions_dict = {q.id: q for q in questions}
+    
+    # Para cada questão, converter correct_answer para letra
+    for tq in test_questions:
+        question = questions_dict.get(tq.question_id)
+        if not question or not question.correct_answer:
+            logging.warning(f"Questão {tq.question_id} não encontrada ou sem correct_answer")
+            continue
+        
+        question_num = tq.order  # Número da questão na prova (baseado em order)
+        correct_answer = str(question.correct_answer).strip()
+        letter = None
+        
+        # Caso 1: Já é uma letra (A, B, C, D...)
+        if correct_answer.upper() in letters:
+            letter = correct_answer.upper()
+        
+        # Caso 2: É um ID do tipo "option-0", "option-1", etc.
+        elif correct_answer.startswith('option-'):
+            try:
+                index = int(correct_answer.split('-')[1])
+                if 0 <= index < len(letters):
+                    letter = letters[index]
+            except (ValueError, IndexError):
+                pass
+        
+        # Caso 3: É um UUID ou outro ID - buscar nas alternativas
+        if not letter and question.alternatives:
+            alternatives = question.alternatives
+            if isinstance(alternatives, str):
+                try:
+                    alternatives = json.loads(alternatives)
+                except:
+                    alternatives = []
+            
+            if isinstance(alternatives, list):
+                for idx, alt in enumerate(alternatives):
+                    if isinstance(alt, dict):
+                        alt_id = alt.get('id', '')
+                        if alt_id == correct_answer:
+                            if idx < len(letters):
+                                letter = letters[idx]
+                                break
+                    elif isinstance(alt, str):
+                        # Se alternativa é string e correct_answer também, comparar
+                        if correct_answer.lower() == alt.strip().lower():
+                            if idx < len(letters):
+                                letter = letters[idx]
+                                break
+        
+        # Caso 4: É texto - buscar nas alternativas por texto
+        if not letter and question.alternatives:
+            alternatives = question.alternatives
+            if isinstance(alternatives, str):
+                try:
+                    alternatives = json.loads(alternatives)
+                except:
+                    alternatives = []
+            
+            if isinstance(alternatives, list):
+                for idx, alt in enumerate(alternatives):
+                    alt_text = ''
+                    if isinstance(alt, dict):
+                        alt_text = alt.get('text', alt.get('answer', ''))
+                    elif isinstance(alt, str):
+                        alt_text = alt
+                    
+                    if alt_text and correct_answer.lower() == alt_text.strip().lower():
+                        if idx < len(letters):
+                            letter = letters[idx]
+                            break
+        
+        if letter:
+            correct_answers[question_num] = letter
+        else:
+            logging.warning(f"Questão {question_num} (ID: {question.id}): Não foi possível converter correct_answer '{correct_answer}' para letra")
+    
+    return correct_answers
+
+
+def _extrair_questions_options(test_id: str) -> Dict[int, List[str]]:
+    """
+    Extrai alternativas disponíveis por questão
+    Retorna: {1: ["A", "B", "C"], 2: ["A", "B", "C", "D"], ...}
+    
+    Args:
+        test_id: ID da prova
+        
+    Returns:
+        Dict com número da questão como chave e lista de letras como valor
+    """
+    letters = ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H']
+    questions_options = {}
+    
+    # Buscar questões da prova ordenadas por TestQuestion.order
+    test_questions = TestQuestion.query.filter_by(test_id=test_id).order_by(TestQuestion.order).all()
+    if not test_questions:
+        return questions_options
+    
+    # Buscar questões completas
+    question_ids = [tq.question_id for tq in test_questions]
+    questions = Question.query.filter(Question.id.in_(question_ids)).all()
+    questions_dict = {q.id: q for q in questions}
+    
+    # Para cada questão, extrair alternativas
+    for tq in test_questions:
+        question = questions_dict.get(tq.question_id)
+        if not question:
+            continue
+        
+        question_num = tq.order
+        alternatives_list = []
+        
+        if question.alternatives:
+            alternatives = question.alternatives
+            if isinstance(alternatives, str):
+                try:
+                    alternatives = json.loads(alternatives)
+                except:
+                    alternatives = []
+            
+            if isinstance(alternatives, list):
+                for idx, alt in enumerate(alternatives):
+                    if idx < len(letters):
+                        alternatives_list.append(letters[idx])
+        else:
+            # Se não tem alternativas definidas, usar padrão A, B, C, D
+            alternatives_list = ['A', 'B', 'C', 'D']
+        
+        # Garantir pelo menos 2 alternativas
+        if len(alternatives_list) < 2:
+            alternatives_list = ['A', 'B', 'C', 'D']
+        
+        questions_options[question_num] = alternatives_list
+    
+    return questions_options
+
 
 def get_current_user_from_token():
     """Extrai informações do usuário do token JWT"""
@@ -107,8 +364,6 @@ def generate_physical_forms(test_id):
             }
         
         # Buscar questões da prova
-        from app.models.testQuestion import TestQuestion
-        from app.models.question import Question
         from app.models.subject import Subject
         
         test_question_ids = [tq.question_id for tq in TestQuestion.query.filter_by(test_id=test_id).order_by(TestQuestion.order).all()]
@@ -117,13 +372,69 @@ def generate_physical_forms(test_id):
         if not questions:
             return jsonify({"error": "Nenhuma questão encontrada para esta prova"}), 400
         
+        num_questions = len(questions)
+        
+        # Extrair respostas corretas automaticamente das questões
+        correct_answers = _extrair_respostas_corretas(test_id)
+        if not correct_answers:
+            return jsonify({"error": "Não foi possível extrair respostas corretas das questões. Verifique se todas as questões têm correct_answer definido."}), 400
+        
+        # Extrair alternativas por questão automaticamente
+        questions_options = _extrair_questions_options(test_id)
+        
+        # Validar blocks_config
+        use_blocks = blocks_config.get('use_blocks', False)
+        if use_blocks:
+            if 'num_blocks' not in blocks_config:
+                blocks_config['num_blocks'] = 1
+            if 'questions_per_block' not in blocks_config:
+                blocks_config['questions_per_block'] = 12
+        
+        # Gerar estrutura completa (topology)
+        complete_structure = _generate_complete_structure(
+            num_questions=num_questions,
+            use_blocks=use_blocks,
+            blocks_config=blocks_config,
+            questions_options=questions_options
+        )
+        
+        # Adicionar topology ao blocks_config
+        blocks_config['topology'] = complete_structure
+        
         # Buscar alunos das turmas que aplicaram a prova
-        from app.models.student import Student
         from app.models.studentClass import Class
+        from app.models.school import School
         
         class_tests = ClassTest.query.filter_by(test_id=test_id).all()
         if not class_tests:
             return jsonify({"error": "A prova não foi aplicada em nenhuma turma"}), 400
+        
+        # Usar primeira turma para metadados (escola, município, etc.)
+        first_class_test = class_tests[0]
+        class_id = first_class_test.class_id
+        
+        # Buscar informações da turma e escola
+        class_obj = Class.query.get(class_id)
+        school_id = None
+        school_name = ''
+        municipality = ''
+        state = ''
+        
+        if class_obj:
+            if class_obj.school_id:
+                school = School.query.get(class_obj.school_id)
+                if school:
+                    school_id = school.id
+                    school_name = school.name or ''
+                    # Buscar município e estado através da cidade
+                    if school.city_id:
+                        from app.models.city import City
+                        city = City.query.get(school.city_id)
+                        if city:
+                            municipality = city.name or ''
+                            # City tem campo 'state' como string
+                            if city.state:
+                                state = city.state
         
         class_ids = [ct.class_id for ct in class_tests]
         students = Student.query.filter(Student.class_id.in_(class_ids)).all()
@@ -208,11 +519,50 @@ def generate_physical_forms(test_id):
             }
             questions_data.append(question_data)
         
-        # Obter class_test_id (usar o primeiro se houver múltiplos)
-        class_test_id = class_tests[0].id if class_tests else None
+        # Criar ou atualizar AnswerSheetGabarito para esta prova
+        # Verificar se já existe gabarito para esta prova
+        existing_gabarito = AnswerSheetGabarito.query.filter_by(test_id=test_id).first()
+        
+        if existing_gabarito:
+            # Atualizar gabarito existente
+            existing_gabarito.num_questions = num_questions
+            existing_gabarito.use_blocks = use_blocks
+            existing_gabarito.blocks_config = blocks_config
+            existing_gabarito.correct_answers = correct_answers
+            existing_gabarito.class_id = class_id
+            existing_gabarito.school_id = str(school_id) if school_id else None
+            existing_gabarito.school_name = school_name
+            existing_gabarito.municipality = municipality
+            existing_gabarito.state = state
+            existing_gabarito.grade_name = test.grade.name if test.grade else ''
+            existing_gabarito.title = test.title
+            gabarito = existing_gabarito
+            logging.info(f"✅ Gabarito atualizado para prova {test_id}")
+        else:
+            # Criar novo gabarito
+            gabarito = AnswerSheetGabarito(
+                test_id=test_id,
+                class_id=class_id,
+                num_questions=num_questions,
+                use_blocks=use_blocks,
+                blocks_config=blocks_config,
+                correct_answers=correct_answers,
+                title=test.title,
+                created_by=str(user['id']) if user.get('id') else None,
+                school_id=str(school_id) if school_id else None,
+                school_name=school_name,
+                municipality=municipality,
+                state=state,
+                grade_name=test.grade.name if test.grade else ''
+            )
+            db.session.add(gabarito)
+            logging.info(f"✅ Novo gabarito criado para prova {test_id}")
+        
+        db.session.commit()
+        logging.info(f"✅ Gabarito salvo: {len(correct_answers)} respostas corretas, {num_questions} questões")
         
         # Usar PhysicalTestFormService para gerar formulários
-        print(f"GERANDO FORMULARIOS PARA {len(students_data)} ALUNOS...")
+        logging.info(f"GERANDO FORMULARIOS PARA {len(students_data)} ALUNOS...")
         
         form_service = PhysicalTestFormService()
         
@@ -225,7 +575,7 @@ def generate_physical_forms(test_id):
             )
             
             if result.get('success'):
-                print(f"SUCESSO: {result.get('generated_forms', 0)} formularios gerados")
+                logging.info(f"SUCESSO: {result.get('generated_forms', 0)} formularios gerados")
                 
                 # Buscar formulários gerados para retornar
                 forms = form_service.get_physical_forms_by_test(test_id)
@@ -244,9 +594,10 @@ def generate_physical_forms(test_id):
                     "message": f"Formulários gerados com sucesso para {len(formularios_gerados)} alunos",
                     "test_id": test_id,
                     "test_title": test.title,
-                    "total_questions": len(questions_data),
+                    "total_questions": num_questions,
                     "total_students": len(students_data),
                     "generated_forms": len(formularios_gerados),
+                    "gabarito_id": str(gabarito.id),
                     "forms": formularios_gerados
                 }), 200
             else:
@@ -385,7 +736,7 @@ def generate_individual_physical_form(test_id, student_id):
 
 def process_batch_in_background(job_id: str, test_id: str, images: list):
     """
-    Processa correção em lote em background thread
+    Processa correção em lote em background thread usando AnswerSheetCorrectionN
     
     Args:
         job_id: ID do job para tracking
@@ -399,7 +750,7 @@ def process_batch_in_background(job_id: str, test_id: str, images: list):
     
     with app.app_context():
         try:
-            correcao = CorrecaoHybrid(debug=True)
+            correction_service = AnswerSheetCorrectionN(debug=False)
             
             for i, image_base64 in enumerate(images):
                 try:
@@ -413,10 +764,10 @@ def process_batch_in_background(job_id: str, test_id: str, images: list):
                         image_base64_clean = image_base64
                     image_data = base64.b64decode(image_base64_clean)
                     
-                    # Processar correção com CorrecaoHybrid
-                    result = correcao.corrigir_prova_geometrica(
-                        image_data=image_data,
-                        test_id=test_id
+                    # Processar correção com AnswerSheetCorrectionN
+                    # O test_id e student_id são extraídos automaticamente do QR code
+                    result = correction_service.corrigir_cartao_resposta(
+                        image_data=image_data
                     )
                     
                     if result.get('success'):
@@ -426,7 +777,25 @@ def process_batch_in_background(job_id: str, test_id: str, images: list):
                             if student:
                                 result['student_name'] = student.name
                         
-                        update_item_done(job_id, i, result)
+                        # Adaptar formato do resultado para compatibilidade
+                        adapted_result = {
+                            'student_id': result.get('student_id'),
+                            'student_name': result.get('student_name'),
+                            'test_id': result.get('test_id') or test_id,
+                            'correct': result.get('correction', {}).get('correct', 0),
+                            'total': result.get('correction', {}).get('total_questions', 0),
+                            'percentage': result.get('correction', {}).get('score_percentage', 0),
+                            'grade': result.get('grade', 0),
+                            'proficiency': result.get('proficiency', 0),
+                            'classification': result.get('classification', ''),
+                            'score_percentage': result.get('correction', {}).get('score_percentage', 0),
+                            'answers': result.get('answers', {}),
+                            'correction': result.get('correction', {}),
+                            'saved_answers': result.get('saved_answers', []),
+                            'evaluation_result_id': result.get('evaluation_result_id')
+                        }
+                        
+                        update_item_done(job_id, i, adapted_result)
                         logging.info(f"✅ Job {job_id}: Imagem {i+1} processada com sucesso")
                     else:
                         update_item_error(job_id, i, result.get('error', 'Erro desconhecido'))
@@ -434,14 +803,14 @@ def process_batch_in_background(job_id: str, test_id: str, images: list):
                         
                 except Exception as e:
                     update_item_error(job_id, i, str(e))
-                    logging.error(f"❌ Job {job_id}: Erro na imagem {i+1}: {str(e)}")
+                    logging.error(f"❌ Job {job_id}: Erro na imagem {i+1}: {str(e)}", exc_info=True)
             
             # Marcar job como concluído
             complete_job(job_id)
             logging.info(f"✅ Job {job_id} concluído")
             
         except Exception as e:
-            logging.error(f"❌ Erro crítico no job {job_id}: {str(e)}")
+            logging.error(f"❌ Erro crítico no job {job_id}: {str(e)}", exc_info=True)
             complete_job(job_id)
 
 
@@ -529,7 +898,7 @@ def process_physical_correction(test_id):
         # MODO ÚNICO (1 imagem) - Processamento SÍNCRONO
         # ==================================================================
         if single_image and not images:
-            logging.info(f"🔧 Processando correção única para prova {test_id}")
+            logging.info(f"🔧 Processando correção única para prova física")
             
             # Decodificar imagem
             if single_image.startswith('data:image'):
@@ -538,35 +907,36 @@ def process_physical_correction(test_id):
                 single_image_clean = single_image
             image_data = base64.b64decode(single_image_clean)
             
-            # Processar com CorrecaoHybrid
-            correcao = CorrecaoHybrid(debug=True)
-            result = correcao.corrigir_prova_geometrica(
-                image_data=image_data,
-                test_id=test_id
+            # Processar com AnswerSheetCorrectionN
+            # O test_id e student_id são extraídos automaticamente do QR code
+            correction_service = AnswerSheetCorrectionN(debug=False)
+            result = correction_service.corrigir_cartao_resposta(
+                image_data=image_data
             )
             
             if result.get('success'):
+                # Adaptar formato do resultado para compatibilidade
                 return jsonify({
                     "message": "Correção processada com sucesso",
-                    "system": "hybrid",
+                    "system": "correction_n",
                     "student_id": result.get('student_id'),
-                    "test_id": result.get('test_id'),
-                    "correct": result.get('correct'),
-                    "total": result.get('total'),
-                    "percentage": result.get('percentage'),
-                    "grade": result.get('grade'),
-                    "proficiency": result.get('proficiency'),
-                    "classification": result.get('classification'),
-                    "score_percentage": result.get('score_percentage'),
-                    "answers": result.get('answers'),
-                    "correction": result.get('correction'),
-                    "saved_answers": result.get('saved_answers'),
+                    "test_id": result.get('test_id') or test_id,
+                    "correct": result.get('correction', {}).get('correct', 0),
+                    "total": result.get('correction', {}).get('total_questions', 0),
+                    "percentage": result.get('correction', {}).get('score_percentage', 0),
+                    "grade": result.get('grade', 0),
+                    "proficiency": result.get('proficiency', 0),
+                    "classification": result.get('classification', ''),
+                    "score_percentage": result.get('correction', {}).get('score_percentage', 0),
+                    "answers": result.get('answers', {}),
+                    "correction": result.get('correction', {}),
+                    "saved_answers": result.get('saved_answers', []),
                     "evaluation_result_id": result.get('evaluation_result_id')
                 }), 200
             else:
                 return jsonify({
                     "error": result.get('error', 'Erro desconhecido na correção'),
-                    "system": "hybrid"
+                    "system": "correction_n"
                 }), 500
         
         # ==================================================================

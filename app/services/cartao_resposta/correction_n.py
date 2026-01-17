@@ -36,6 +36,10 @@ class AnswerSheetCorrectionN:
     # Threshold para agrupamento por linha
     LINE_Y_THRESHOLD = 8  # Reduzido de 15 para 8px - mais preciso para separar questões
     
+    # Tamanho padrão fixo para normalização de blocos (usando tamanho maior do escaneado)
+    STANDARD_BLOCK_WIDTH = 431   # Largura padrão (px) - tamanho do escaneado
+    STANDARD_BLOCK_HEIGHT = 362  # Altura padrão (px) - tamanho do escaneado
+    
     # Threshold mínimo de pixels brancos para considerar bolha marcada
     # REMOVIDO: O código OMR original não usa threshold, sempre seleciona a bolha com mais pixels
     # MIN_MARKED_PIXELS = 30  # Desabilitado - seguindo lógica do OMR original
@@ -48,7 +52,7 @@ class AnswerSheetCorrectionN:
             debug: Se True, gera logs detalhados e salva imagens de debug
         """
         self.debug = debug
-        self.save_debug_images = False  # Desativado: não salvar imagens de debug por padrão
+        self.save_debug_images = False  # Desativado: não salvar imagens de debug em debug_corrections
         self.logger = logging.getLogger(__name__)
         self.debug_dir = "debug_corrections"
         self.debug_timestamp = None
@@ -57,11 +61,10 @@ class AnswerSheetCorrectionN:
         # Diretório para arquivos de alinhamento (mesma pasta do módulo)
         self.alignment_dir = os.path.dirname(os.path.abspath(__file__))
         
-        # Criar diretório de debug se necessário (apenas se debug estiver ativo)
-        if self.save_debug_images:
-            if not os.path.exists(self.debug_dir):
-                os.makedirs(self.debug_dir)
-                self.logger.info(f"📁 Diretório de debug criado: {self.debug_dir}")
+        # Criar diretório de debug se necessário
+        if not os.path.exists(self.debug_dir):
+            os.makedirs(self.debug_dir)
+            self.logger.info(f"📁 Diretório de debug criado: {self.debug_dir}")
     
     def _load_manual_alignment(self, block_num: int = None) -> Optional[Dict]:
         """
@@ -111,10 +114,21 @@ class AnswerSheetCorrectionN:
                 self.logger.info(f"Bloco {block_num}: Alinhamento manual carregado de {config_path}")
                 self.logger.info(f"  Offset do script: X={offset_x_raw:+d}, Y={offset_y_raw:+d}")
                 self.logger.info(f"  Offset aplicado na correção: X={offset_x:+d}, Y={offset_y:+d} (sinal invertido)")
-                return {
+                
+                result = {
                     'offset_x': offset_x,
                     'offset_y': offset_y
                 }
+                
+                # Carregar line_height se disponível
+                line_height = config.get('line_height')
+                if line_height is not None:
+                    result['line_height'] = int(line_height)
+                    self.logger.info(f"  Line Height: {line_height}px (será usado na criação da referência e comparação)")
+                else:
+                    self.logger.info(f"  Line Height: não definido (será calculado automaticamente)")
+                
+                return result
         except Exception as e:
             self.logger.warning(f"Erro ao carregar alinhamento manual de {config_path}: {str(e)}")
             return None
@@ -329,20 +343,7 @@ class AnswerSheetCorrectionN:
                 questions_config = block_config.get('questions', [])
                 self.logger.info(f"Bloco {block_num_detected} (block_id={block_id_topology}): {len(questions_config)} questões esperadas")
                 
-                # 2. Criar imagem de referência deste bloco usando topologia
-                block_height, block_width = block_roi.shape[:2]
-                img_referencia = self._criar_imagem_referencia_bloco(
-                    block_config=block_config,
-                    correct_answers=gabarito,
-                    block_size=(block_width, block_height),
-                    block_num=block_num_detected
-                )
-                
-                if img_referencia is None:
-                    self.logger.error(f"Bloco {block_num_detected}: Erro ao criar imagem de referência")
-                    continue
-                
-                # 3. Detectar borda e extrair área interna do bloco real
+                # 2. Detectar borda e extrair área interna do bloco real
                 border_info = self._detectar_borda_bloco(block_roi, block_num_detected)
                 
                 if border_info is None:
@@ -369,35 +370,94 @@ class AnswerSheetCorrectionN:
                     block_inner = block_gray[y+border_thickness:y+h-border_thickness,
                                             x+border_thickness:x+w-border_thickness]
                 
-                # 4. Redimensionar referência para corresponder ao tamanho do bloco interno
-                ref_h, ref_w = img_referencia.shape[:2]
-                inner_h, inner_w = block_inner.shape[:2]
+                # 3. Normalizar bloco real para tamanho padrão fixo
+                original_inner_h, original_inner_w = block_inner.shape[:2]
+                self.logger.info(f"Bloco {block_num_detected}: Tamanho original interno = {original_inner_w}x{original_inner_h}px")
                 
-                # Extrair área interna da referência
+                # Redimensionar bloco interno para tamanho padrão
+                block_inner_normalized = cv2.resize(
+                    block_inner,
+                    (self.STANDARD_BLOCK_WIDTH, self.STANDARD_BLOCK_HEIGHT),
+                    interpolation=cv2.INTER_AREA
+                )
+                self.logger.info(f"Bloco {block_num_detected}: Normalizado para tamanho padrão = {self.STANDARD_BLOCK_WIDTH}x{self.STANDARD_BLOCK_HEIGHT}px")
+                
+                # SALVAR IMAGEM LIMPA DO BLOCO NORMALIZADO (SEM OVERLAY) - para ajuste de coordenadas
+                # Converter para BGR se necessário para salvar
+                if len(block_inner_normalized.shape) == 2:
+                    block_clean_bgr = cv2.cvtColor(block_inner_normalized, cv2.COLOR_GRAY2BGR)
+                else:
+                    block_clean_bgr = block_inner_normalized.copy()
+                self._save_debug_image(f"04_block_{block_num_detected:02d}_real_only.jpg", block_clean_bgr)
+                
+                # Carregar alinhamento manual (pode conter line_height)
+                manual_offset = self._load_manual_alignment(block_num_detected)
+                manual_line_height = manual_offset.get('line_height') if manual_offset else None
+                
+                # 4. Criar imagem de referência sempre com tamanho padrão fixo
+                img_referencia = self._criar_imagem_referencia_bloco(
+                    block_config=block_config,
+                    correct_answers=gabarito,
+                    block_size=(self.STANDARD_BLOCK_WIDTH, self.STANDARD_BLOCK_HEIGHT),
+                    block_num=block_num_detected,
+                    manual_line_height=manual_line_height
+                )
+                
+                if img_referencia is None:
+                    self.logger.error(f"Bloco {block_num_detected}: Erro ao criar imagem de referência")
+                    continue
+                
+                # 5. Extrair área interna da referência (já está no tamanho padrão)
+                ref_h, ref_w = img_referencia.shape[:2]
                 border_thickness = border_info.get('border_thickness', 2)
                 ref_inner = img_referencia[border_thickness:ref_h-border_thickness,
                                          border_thickness:ref_w-border_thickness]
                 
-                # Redimensionar referência interna para corresponder ao bloco interno real
-                if ref_inner.shape != block_inner.shape:
-                    ref_inner_resized = cv2.resize(ref_inner, 
-                                                  (inner_w, inner_h),
-                                                  interpolation=cv2.INTER_AREA)
-                else:
-                    ref_inner_resized = ref_inner
+                # A referência interna já deve ter o mesmo tamanho do bloco normalizado
+                ref_inner_h, ref_inner_w = ref_inner.shape[:2]
+                if (ref_inner_w, ref_inner_h) != (self.STANDARD_BLOCK_WIDTH, self.STANDARD_BLOCK_HEIGHT):
+                    # Se por algum motivo não estiver no tamanho correto, redimensionar
+                    ref_inner = cv2.resize(ref_inner,
+                                          (self.STANDARD_BLOCK_WIDTH, self.STANDARD_BLOCK_HEIGHT),
+                                          interpolation=cv2.INTER_AREA)
                 
-                # 5. Comparar usando posições fixas da topologia (sem depender de contornos)
+                ref_inner_resized = ref_inner  # Já está no tamanho padrão
+                
+                # SALVAR IMAGEM LIMPA DA REFERÊNCIA NORMALIZADA (SEM OVERLAY) - para ajuste de coordenadas
+                # Converter para BGR se necessário para salvar
+                if len(ref_inner_resized.shape) == 2:
+                    ref_clean_bgr = cv2.cvtColor(ref_inner_resized, cv2.COLOR_GRAY2BGR)
+                else:
+                    ref_clean_bgr = ref_inner_resized.copy()
+                self._save_debug_image(f"08_block_{block_num_detected:02d}_reference_only.jpg", ref_clean_bgr)
+                
+                # 6. Comparar usando posições fixas da topologia (ambos já normalizados)
+                # Criar border_info normalizado (sem offsets, pois já está normalizado)
+                border_info_normalized = {
+                    'border_thickness': border_info.get('border_thickness', 2),
+                    'x': 0,
+                    'y': 0,
+                    'w': self.STANDARD_BLOCK_WIDTH,
+                    'h': self.STANDARD_BLOCK_HEIGHT,
+                    'inner_x': border_info.get('border_thickness', 2),
+                    'inner_y': border_info.get('border_thickness', 2),
+                    'inner_w': self.STANDARD_BLOCK_WIDTH - 2 * border_info.get('border_thickness', 2),
+                    'inner_h': self.STANDARD_BLOCK_HEIGHT - 2 * border_info.get('border_thickness', 2)
+                }
+                
                 block_answers, bubbles_info_block = self._comparar_bloco_com_referencia(
-                    block_real=block_inner,
+                    block_real=block_inner_normalized,
                     block_reference=ref_inner_resized,
                     block_config=block_config,
                     correct_answers=gabarito,
+                    manual_line_height=manual_line_height,
                     block_num=block_num_detected,
-                    border_info=border_info
+                    border_info=border_info_normalized
                 )
                 
-                # 6. Ajustar coordenadas das bolhas para coordenadas absolutas na imagem completa
-                # Coordenadas atuais são relativas ao block_inner, precisamos ajustar para img_warped
+                # 7. Ajustar coordenadas das bolhas para coordenadas absolutas na imagem completa
+                # Coordenadas atuais são relativas ao block_inner_normalized (tamanho padrão)
+                # Precisamos escalar de volta para o tamanho original e depois ajustar para img_warped
                 border_thickness = border_info.get('border_thickness', 0)
                 block_x_offset = x_offset
                 block_y_offset = y_offset
@@ -407,14 +467,27 @@ class AnswerSheetCorrectionN:
                     block_x_offset += border_info['x'] + border_thickness
                     block_y_offset += border_info['y'] + border_thickness
                 
+                # Calcular escala de volta para o tamanho original
+                scale_x = original_inner_w / self.STANDARD_BLOCK_WIDTH
+                scale_y = original_inner_h / self.STANDARD_BLOCK_HEIGHT
+                
                 # Ajustar coordenadas de todas as bolhas deste bloco
                 for bubble_info in bubbles_info_block:
+                    # Escalar coordenadas de volta para o tamanho original
+                    bubble_info['x'] = int(bubble_info['x'] * scale_x)
+                    bubble_info['y'] = int(bubble_info['y'] * scale_y)
+                    
+                    # Adicionar offset do bloco na imagem completa
                     bubble_info['x'] += block_x_offset
                     bubble_info['y'] += block_y_offset
+                    
                     # Ajustar contorno também
                     if 'contour' in bubble_info:
                         contour = bubble_info['contour']
-                        contour_adjusted = contour + np.array([block_x_offset, block_y_offset])
+                        # Escalar contorno
+                        contour_scaled = (contour * np.array([scale_x, scale_y])).astype(np.int32)
+                        # Adicionar offset
+                        contour_adjusted = contour_scaled + np.array([block_x_offset, block_y_offset])
                         bubble_info['contour'] = contour_adjusted
                 
                 # 7. Adicionar respostas ao total
@@ -2034,21 +2107,29 @@ class AnswerSheetCorrectionN:
     # ========================================================================
     
     def _criar_imagem_referencia_bloco(self, block_config: Dict, correct_answers: Dict[int, str],
-                                       block_size: Tuple[int, int], block_num: int = None) -> Optional[np.ndarray]:
+                                       block_size: Tuple[int, int], block_num: int = None,
+                                       manual_line_height: Optional[int] = None) -> Optional[np.ndarray]:
         """
         Cria imagem de referência de um bloco com bolhas corretas marcadas
+        Agora sempre usa tamanho padrão fixo (STANDARD_BLOCK_WIDTH x STANDARD_BLOCK_HEIGHT)
         
         Args:
             block_config: Configuração do bloco da topology {'block_id': 1, 'questions': [...]}
             correct_answers: Dict {q_num: 'A'|'B'|'C'|'D'} com respostas corretas
-            block_size: (width, height) do bloco real detectado
+            block_size: (width, height) - deve ser sempre (STANDARD_BLOCK_WIDTH, STANDARD_BLOCK_HEIGHT)
             block_num: Número do bloco (para debug)
             
         Returns:
-            np.ndarray: Imagem de referência (grayscale, 255=branco, 0=preto)
+            np.ndarray: Imagem de referência (grayscale, 255=branco, 0=preto) no tamanho padrão
         """
         try:
             width, height = block_size
+            
+            # Garantir que está usando tamanho padrão
+            if (width, height) != (self.STANDARD_BLOCK_WIDTH, self.STANDARD_BLOCK_HEIGHT):
+                self.logger.warning(f"Bloco {block_num or 'único'}: Tamanho recebido ({width}x{height}) diferente do padrão ({self.STANDARD_BLOCK_WIDTH}x{self.STANDARD_BLOCK_HEIGHT}). Usando tamanho padrão.")
+                width = self.STANDARD_BLOCK_WIDTH
+                height = self.STANDARD_BLOCK_HEIGHT
             questions_config = block_config.get('questions', [])
             
             # Criar imagem branca
@@ -2069,23 +2150,54 @@ class AnswerSheetCorrectionN:
             inner_height = height - 2 * border_thickness
             
             # Calcular espaçamentos baseados no template
-            # Template: bolhas 15px (alterado de 25px), gap 8px, linha min 33px, padding 8px 10px
-            bubble_size_template = 15  # px no template (alterado de 25px para 15px)
-            bubble_gap_template = 8    # px no template
-            line_height_template = 33  # px no template
-            padding_x_template = 10    # px no template
-            padding_y_template = 8     # px no template
+            # Template: bolhas escaladas proporcionalmente para o novo tamanho padrão (431x362)
+            # Tamanho anterior: 217x127 com bolhas de 15px
+            # Tamanho atual: 431x362 - escala horizontal: 431/217 ≈ 1.99
+            # Bolhas ajustadas: 15px * 1.99 ≈ 30px (proporcional ao novo tamanho)
+            bubble_size_template = 30  # px no template (escalado de 15px para o novo tamanho 431x362)
+            bubble_gap_template = 16   # px no template (escalado de 8px)
+            line_height_template = 66  # px no template (escalado de 33px)
+            padding_x_template = 20    # px no template (escalado de 10px)
+            padding_y_template = 16    # px no template (escalado de 8px)
             
-            # Escalar proporcionalmente ao tamanho do bloco real
-            # Usar altura como referência principal
-            scale_factor = inner_height / (len(questions_config) * line_height_template + 2 * padding_y_template)
-            scale_factor = max(0.5, min(2.0, scale_factor))  # Limitar escala
+            # CORREÇÃO: Usar tamanhos fixos quando normalizado para tamanho padrão
+            # Não aplicar scale_factor para evitar bolhas muito pequenas e espaçamento reduzido
+            # Isso garante que as posições das bolhas sejam sempre consistentes
+            is_standard_size = (width == self.STANDARD_BLOCK_WIDTH and height == self.STANDARD_BLOCK_HEIGHT)
             
-            bubble_size = int(bubble_size_template * scale_factor)
-            bubble_gap = int(bubble_gap_template * scale_factor)
-            line_height = int(line_height_template * scale_factor)
-            padding_x = int(padding_x_template * scale_factor)
-            padding_y = int(padding_y_template * scale_factor)
+            if is_standard_size:
+                # Usar tamanhos fixos do template (sem escalar)
+                bubble_size = bubble_size_template  # 30px fixo (proporcional ao novo tamanho)
+                bubble_gap = bubble_gap_template    # 16px fixo
+                padding_x = padding_x_template      # 20px fixo
+                padding_y = padding_y_template      # 16px fixo
+                
+                # Calcular line_height baseado no espaço disponível OU usar valor manual
+                if manual_line_height is not None:
+                    # Usar line_height do alinhamento manual
+                    line_height = manual_line_height
+                    self.logger.info(f"Bloco {block_num or 'único'}: Usando line_height manual: {line_height}px")
+                else:
+                    # Calcular automaticamente: distribuir o espaço vertical disponível igualmente entre as questões
+                    total_vertical_space = inner_height - 2 * padding_y
+                    if len(questions_config) > 0:
+                        line_height = total_vertical_space // len(questions_config)
+                    else:
+                        line_height = line_height_template
+                
+                self.logger.info(f"Bloco {block_num or 'único'}: Usando tamanhos fixos (normalizado) - bubble_size={bubble_size}px, bubble_gap={bubble_gap}px, line_height={line_height}px")
+            else:
+                # Escalar proporcionalmente (fallback para tamanhos não padrão)
+                scale_factor = inner_height / (len(questions_config) * line_height_template + 2 * padding_y_template)
+                scale_factor = max(0.5, min(2.0, scale_factor))  # Limitar escala
+                
+                bubble_size = int(bubble_size_template * scale_factor)
+                bubble_gap = int(bubble_gap_template * scale_factor)
+                line_height = int(line_height_template * scale_factor)
+                padding_x = int(padding_x_template * scale_factor)
+                padding_y = int(padding_y_template * scale_factor)
+                
+                self.logger.info(f"Bloco {block_num or 'único'}: Usando escala proporcional - scale_factor={scale_factor:.2f}, bubble_size={bubble_size}px, bubble_gap={bubble_gap}px")
             
             # Calcular posições das questões
             start_y = inner_y + padding_y
@@ -2359,7 +2471,8 @@ class AnswerSheetCorrectionN:
     
     def _comparar_bloco_com_referencia(self, block_real: np.ndarray, block_reference: np.ndarray,
                                       block_config: Dict, correct_answers: Dict[int, str],
-                                      block_num: int = None, border_info: Dict = None) -> Tuple[Dict[int, Optional[str]], List[Dict]]:
+                                      block_num: int = None, border_info: Dict = None,
+                                      manual_line_height: Optional[int] = None) -> Tuple[Dict[int, Optional[str]], List[Dict]]:
         """
         Compara bloco real com referência e detecta respostas marcadas
         
@@ -2379,11 +2492,14 @@ class AnswerSheetCorrectionN:
             bubbles_info = []
             questions_config = block_config.get('questions', [])
             
-            # Garantir que ambas as imagens têm o mesmo tamanho (já devem estar alinhadas)
+            # Garantir que ambas as imagens têm o mesmo tamanho (ambos devem estar no tamanho padrão)
             ref_h, ref_w = block_reference.shape[:2]
             real_h, real_w = block_real.shape[:2]
             
+            # Ambos devem estar no tamanho padrão (STANDARD_BLOCK_WIDTH x STANDARD_BLOCK_HEIGHT)
+            # Se não estiverem, redimensionar (fallback de segurança)
             if (ref_h, ref_w) != (real_h, real_w):
+                self.logger.warning(f"Bloco {block_num or 'único'}: Tamanhos diferentes! Referência: {ref_w}x{ref_h}, Real: {real_w}x{real_h}. Redimensionando...")
                 block_real = cv2.resize(block_real, (ref_w, ref_h), interpolation=cv2.INTER_AREA)
                 real_h, real_w = ref_h, ref_w
             
@@ -2410,27 +2526,63 @@ class AnswerSheetCorrectionN:
             
             # Calcular espaçamentos (mesmos da criação da referência)
             # Usar dimensões da área interna para calcular escala
-            bubble_size_template = 15  # px no template (alterado de 25px para 15px)
-            bubble_gap_template = 8
-            line_height_template = 33
-            padding_x_template = 10
-            padding_y_template = 8
+            # Template: bolhas escaladas proporcionalmente para o novo tamanho padrão (431x362)
+            # Tamanho anterior: 217x127 com bolhas de 15px
+            # Tamanho atual: 431x362 - escala horizontal: 431/217 ≈ 1.99
+            # Bolhas ajustadas: 15px * 1.99 ≈ 30px (proporcional ao novo tamanho)
+            bubble_size_template = 30  # px no template (escalado de 15px para o novo tamanho 431x362)
+            bubble_gap_template = 16   # px no template (escalado de 8px)
+            line_height_template = 66  # px no template (escalado de 33px)
+            padding_x_template = 20    # px no template (escalado de 10px)
+            padding_y_template = 16    # px no template (escalado de 8px)
             
-            # Calcular escala baseado na altura disponível
-            total_height_needed = len(questions_config) * line_height_template + 2 * padding_y_template
-            scale_factor = inner_height / total_height_needed if total_height_needed > 0 else 1.0
-            scale_factor = max(0.5, min(2.0, scale_factor))  # Limitar escala
+            # CORREÇÃO: Usar tamanhos fixos quando normalizado para tamanho padrão
+            # Verificar se está no tamanho padrão (já normalizado)
+            is_standard_size = (real_w == self.STANDARD_BLOCK_WIDTH and real_h == self.STANDARD_BLOCK_HEIGHT)
             
-            bubble_size = int(bubble_size_template * scale_factor)
-            bubble_gap = int(bubble_gap_template * scale_factor)
-            line_height = int(line_height_template * scale_factor)
-            padding_x = int(padding_x_template * scale_factor)
-            padding_y = int(padding_y_template * scale_factor)
+            if is_standard_size:
+                # Usar tamanhos fixos do template (sem escalar)
+                bubble_size = bubble_size_template  # 30px fixo (proporcional ao novo tamanho)
+                bubble_gap = bubble_gap_template    # 16px fixo
+                padding_x = padding_x_template      # 20px fixo
+                padding_y = padding_y_template      # 16px fixo
+                
+                # Calcular line_height baseado no espaço disponível OU usar valor manual
+                if manual_line_height is not None:
+                    # Usar line_height do alinhamento manual
+                    line_height = manual_line_height
+                    self.logger.debug(f"Bloco {block_num or 'único'}: Usando line_height manual na comparação: {line_height}px")
+                else:
+                    # Calcular automaticamente: distribuir o espaço vertical disponível igualmente entre as questões
+                    total_vertical_space = inner_height - 2 * padding_y
+                    if len(questions_config) > 0:
+                        line_height = total_vertical_space // len(questions_config)
+                    else:
+                        line_height = line_height_template
+                
+                self.logger.debug(f"Bloco {block_num or 'único'}: Usando tamanhos fixos na comparação - bubble_size={bubble_size}px, bubble_gap={bubble_gap}px")
+            else:
+                # Escalar proporcionalmente (fallback para tamanhos não padrão)
+                total_height_needed = len(questions_config) * line_height_template + 2 * padding_y_template
+                scale_factor = inner_height / total_height_needed if total_height_needed > 0 else 1.0
+                scale_factor = max(0.5, min(2.0, scale_factor))  # Limitar escala
+                
+                bubble_size = int(bubble_size_template * scale_factor)
+                bubble_gap = int(bubble_gap_template * scale_factor)
+                line_height = int(line_height_template * scale_factor)
+                padding_x = int(padding_x_template * scale_factor)
+                padding_y = int(padding_y_template * scale_factor)
+                
+                self.logger.debug(f"Bloco {block_num or 'único'}: Usando escala proporcional na comparação - scale_factor={scale_factor:.2f}")
             
             # Posição inicial Y (dentro da área interna, já considerando padding)
             start_y = inner_y + padding_y
             
-            self.logger.debug(f"Bloco {block_num or 'único'}: Escala={scale_factor:.2f}, bubble_size={bubble_size}px, line_height={line_height}px")
+            # Log apenas se scale_factor foi definido (não está definido quando usa tamanhos fixos)
+            if is_standard_size:
+                self.logger.debug(f"Bloco {block_num or 'único'}: Tamanhos fixos - bubble_size={bubble_size}px, bubble_gap={bubble_gap}px, line_height={line_height}px")
+            else:
+                self.logger.debug(f"Bloco {block_num or 'único'}: Escala={scale_factor:.2f}, bubble_size={bubble_size}px, line_height={line_height}px")
             
             # ====================================================================
             # OPÇÃO A: Detectar primeira bolha (Q1A) e usar como referência
@@ -2445,6 +2597,8 @@ class AnswerSheetCorrectionN:
                 offset_x = manual_offset.get('offset_x', 0)
                 offset_y = manual_offset.get('offset_y', 0)
                 self.logger.info(f"Bloco {block_num or 'único'}: Usando offset manual X={offset_x:+d}px, Y={offset_y:+d}px")
+                if manual_offset.get('line_height'):
+                    self.logger.info(f"Bloco {block_num or 'único'}: Line height manual já foi aplicado na criação da referência")
             
             if questions_config:
                 first_q_config = questions_config[0]

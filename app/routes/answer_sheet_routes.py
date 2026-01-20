@@ -8,6 +8,7 @@ from flask_jwt_extended import jwt_required, get_jwt_identity
 from app.decorators.role_required import role_required, get_current_user_from_token
 from app import db
 from app.models.answerSheetGabarito import AnswerSheetGabarito
+from app.models.answerSheetResult import AnswerSheetResult
 from app.models.studentClass import Class
 from app.models.student import Student
 from app.models.user import User
@@ -26,6 +27,7 @@ import zipfile
 import threading
 import uuid
 from io import BytesIO
+from datetime import datetime
 
 bp = Blueprint('answer_sheets', __name__, url_prefix='/answer-sheets')
 
@@ -634,6 +636,233 @@ def get_answer_sheet_correction_progress(job_id):
     return jsonify(response), 200
 
 
+@bp.route('/gabaritos', methods=['GET'])
+@jwt_required()
+@role_required("admin", "professor", "coordenador", "diretor", "tecadm")
+def list_gabaritos():
+    """
+    Lista os gabaritos (cartões resposta gerados) criados pelo usuário atual com paginação
+    
+    Query Parameters:
+        page: Número da página (padrão: 1)
+        per_page: Itens por página (padrão: 20)
+        class_id: Filtrar por turma (opcional)
+        test_id: Filtrar por prova (opcional)
+        school_id: Filtrar por escola (opcional)
+        title: Filtrar por título (busca parcial, opcional)
+    
+    Returns:
+        Lista de gabaritos criados pelo usuário com informações resumidas
+    """
+    try:
+        user = get_current_user_from_token()
+        if not user:
+            return jsonify({"error": "Usuário não encontrado"}), 401
+        
+        # Obter parâmetros de paginação e filtros
+        page = int(request.args.get('page', 1))
+        per_page = int(request.args.get('per_page', 20))
+        class_id = request.args.get('class_id')
+        test_id = request.args.get('test_id')
+        school_id = request.args.get('school_id')
+        title = request.args.get('title')
+        
+        # Construir query base - filtrar apenas gabaritos criados pelo usuário atual
+        query = AnswerSheetGabarito.query.filter(AnswerSheetGabarito.created_by == str(user['id']))
+        
+        # Aplicar filtros adicionais
+        if class_id:
+            query = query.filter(AnswerSheetGabarito.class_id == class_id)
+        if test_id:
+            query = query.filter(AnswerSheetGabarito.test_id == test_id)
+        if school_id:
+            query = query.filter(AnswerSheetGabarito.school_id == school_id)
+        if title:
+            query = query.filter(AnswerSheetGabarito.title.ilike(f'%{title}%'))
+        
+        # Ordenar por data de criação (mais recentes primeiro)
+        query = query.order_by(AnswerSheetGabarito.created_at.desc())
+        
+        # Paginação
+        pagination = query.paginate(page=page, per_page=per_page, error_out=False)
+        
+        # Formatar resultados
+        gabaritos = []
+        for gabarito in pagination.items:
+            # Buscar informações da turma
+            class_name = None
+            if gabarito.class_id:
+                class_obj = Class.query.get(gabarito.class_id)
+                if class_obj:
+                    class_name = class_obj.name
+            
+            # Buscar informações do criador
+            creator_name = None
+            if gabarito.created_by:
+                creator = User.query.get(gabarito.created_by)
+                if creator:
+                    creator_name = creator.name
+            
+            gabaritos.append({
+                "id": str(gabarito.id),
+                "test_id": str(gabarito.test_id) if gabarito.test_id else None,
+                "class_id": str(gabarito.class_id) if gabarito.class_id else None,
+                "class_name": class_name,
+                "num_questions": gabarito.num_questions,
+                "use_blocks": gabarito.use_blocks,
+                "title": gabarito.title,
+                "school_name": gabarito.school_name,
+                "municipality": gabarito.municipality,
+                "state": gabarito.state,
+                "grade_name": gabarito.grade_name,
+                "institution": gabarito.institution,
+                "created_at": gabarito.created_at.isoformat() if gabarito.created_at else None,
+                "created_by": str(gabarito.created_by) if gabarito.created_by else None,
+                "creator_name": creator_name
+            })
+        
+        return jsonify({
+            "gabaritos": gabaritos,
+            "total": pagination.total,
+            "page": page,
+            "per_page": per_page,
+            "pages": pagination.pages
+        }), 200
+        
+    except Exception as e:
+        logging.error(f"Erro ao listar gabaritos: {str(e)}", exc_info=True)
+        return jsonify({"error": f"Erro ao listar gabaritos: {str(e)}"}), 500
+
+
+@bp.route('/gabarito/<string:gabarito_id>/download', methods=['GET'])
+@jwt_required()
+@role_required("admin", "professor", "coordenador", "diretor", "tecadm")
+def download_gabarito(gabarito_id):
+    """
+    Regenera e baixa os cartões resposta de um gabarito existente
+    
+    Returns:
+        Arquivo ZIP contendo todos os PDFs dos cartões resposta
+    """
+    try:
+        user = get_current_user_from_token()
+        if not user:
+            return jsonify({"error": "Usuário não encontrado"}), 401
+        
+        # Buscar gabarito
+        gabarito = AnswerSheetGabarito.query.get(gabarito_id)
+        if not gabarito:
+            return jsonify({"error": "Gabarito não encontrado"}), 404
+        
+        # Verificar se o gabarito foi criado pelo usuário atual
+        if gabarito.created_by != str(user['id']):
+            return jsonify({"error": "Você não tem permissão para acessar este gabarito"}), 403
+        
+        # Validar que temos class_id
+        if not gabarito.class_id:
+            return jsonify({"error": "Gabarito não possui turma associada"}), 400
+        
+        # Buscar turma
+        class_obj = Class.query.get(gabarito.class_id)
+        if not class_obj:
+            return jsonify({"error": "Turma não encontrada"}), 404
+        
+        # Preparar test_data a partir do gabarito
+        test_data_complete = {
+            'id': gabarito.test_id,
+            'title': gabarito.title or 'Cartão Resposta',
+            'municipality': gabarito.municipality or '',
+            'state': gabarito.state or '',
+            'department': '',  # Não armazenado no gabarito
+            'municipality_logo': None,  # Não armazenado no gabarito
+            'institution': gabarito.institution or '',
+            'grade_name': gabarito.grade_name or ''
+        }
+        
+        # Extrair questions_options do blocks_config se existir
+        questions_options = None
+        if gabarito.blocks_config and 'topology' in gabarito.blocks_config:
+            topology = gabarito.blocks_config.get('topology', {})
+            blocks = topology.get('blocks', [])
+            questions_options = {}
+            for block in blocks:
+                for question in block.get('questions', []):
+                    q_num = question.get('q')
+                    alternatives = question.get('alternatives', ['A', 'B', 'C', 'D'])
+                    if q_num:
+                        questions_options[str(q_num)] = alternatives
+        
+        # Gerar cartões resposta usando os dados do gabarito
+        generator = AnswerSheetGenerator()
+        generated_files = generator.generate_answer_sheets(
+            class_id=str(gabarito.class_id),
+            test_data=test_data_complete,
+            num_questions=gabarito.num_questions,
+            use_blocks=gabarito.use_blocks,
+            blocks_config=gabarito.blocks_config or {},
+            correct_answers=gabarito.correct_answers,
+            gabarito_id=str(gabarito.id),
+            questions_options=questions_options
+        )
+        
+        if not generated_files:
+            return jsonify({"error": "Nenhum cartão resposta foi gerado"}), 400
+        
+        # Criar ZIP em memória
+        zip_buffer = BytesIO()
+        
+        with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
+            # Adicionar cada PDF ao ZIP
+            for file_info in generated_files:
+                pdf_data = file_info.get('pdf_data')
+                if pdf_data:
+                    # Nome do arquivo: cartao_NomeAluno_studentId.pdf
+                    student_name = file_info.get('student_name', 'Aluno')
+                    student_id = file_info.get('student_id', '')
+                    
+                    # Limpar caracteres inválidos do nome do arquivo
+                    safe_name = "".join(c for c in student_name if c.isalnum() or c in (' ', '-', '_')).strip()
+                    safe_name = safe_name.replace(' ', '_')
+                    
+                    filename = f"cartao_{safe_name}_{student_id[:8]}.pdf"
+                    zip_file.writestr(filename, pdf_data)
+            
+            # Adicionar arquivo de metadados com informações do gabarito
+            metadata = {
+                "gabarito_id": str(gabarito.id),
+                "test_id": str(gabarito.test_id) if gabarito.test_id else None,
+                "class_id": str(gabarito.class_id) if gabarito.class_id else None,
+                "title": gabarito.title,
+                "num_questions": gabarito.num_questions,
+                "use_blocks": gabarito.use_blocks,
+                "blocks_config": gabarito.blocks_config,
+                "generated_count": len([f for f in generated_files if f.get('pdf_data')]),
+                "created_at": gabarito.created_at.isoformat() if gabarito.created_at else None,
+                "regenerated_at": datetime.now().isoformat()
+            }
+            import json as json_module
+            zip_file.writestr("metadata.json", json_module.dumps(metadata, indent=2, ensure_ascii=False))
+        
+        zip_buffer.seek(0)
+        
+        # Nome do arquivo ZIP
+        zip_filename = f"cartoes_resposta_{gabarito.title or 'CartaoResposta'}_{str(gabarito.id)[:8]}.zip"
+        # Limpar caracteres inválidos
+        zip_filename = "".join(c for c in zip_filename if c.isalnum() or c in (' ', '-', '_', '.')).rstrip()
+        zip_filename = zip_filename.replace(' ', '_')
+        
+        return send_file(
+            zip_buffer,
+            as_attachment=True,
+            download_name=zip_filename,
+            mimetype='application/zip'
+        )
+        
+    except Exception as e:
+        logging.error(f"Erro ao baixar gabarito: {str(e)}", exc_info=True)
+        return jsonify({"error": f"Erro ao baixar gabarito: {str(e)}"}), 500
+
+
 @bp.route('/gabarito/<string:gabarito_id>', methods=['GET'])
 @jwt_required()
 @role_required("admin", "professor", "coordenador", "diretor", "tecadm")
@@ -668,3 +897,135 @@ def get_gabarito(gabarito_id):
     except Exception as e:
         logging.error(f"Erro ao buscar gabarito: {str(e)}", exc_info=True)
         return jsonify({"error": f"Erro ao buscar gabarito: {str(e)}"}), 500
+
+
+@bp.route('/gabarito/<string:gabarito_id>', methods=['DELETE'])
+@jwt_required()
+@role_required("admin", "professor", "coordenador", "diretor", "tecadm")
+def delete_gabarito(gabarito_id):
+    """
+    Exclui um gabarito individual
+    
+    Returns:
+        Confirmação de exclusão
+    """
+    try:
+        user = get_current_user_from_token()
+        if not user:
+            return jsonify({"error": "Usuário não encontrado"}), 401
+        
+        # Buscar gabarito
+        gabarito = AnswerSheetGabarito.query.get(gabarito_id)
+        if not gabarito:
+            return jsonify({"error": "Gabarito não encontrado"}), 404
+        
+        # Verificar se o gabarito foi criado pelo usuário atual
+        if gabarito.created_by != str(user['id']):
+            return jsonify({"error": "Você não tem permissão para excluir este gabarito"}), 403
+        
+        # Excluir resultados relacionados primeiro
+        results_deleted = AnswerSheetResult.query.filter_by(gabarito_id=gabarito_id).delete()
+        if results_deleted > 0:
+            logging.info(f"Excluídos {results_deleted} resultados relacionados ao gabarito {gabarito_id}")
+        
+        # Excluir gabarito
+        db.session.delete(gabarito)
+        db.session.commit()
+        
+        logging.info(f"Gabarito {gabarito_id} excluído por usuário {user['id']}")
+        
+        return jsonify({
+            "message": "Gabarito excluído com sucesso",
+            "gabarito_id": gabarito_id
+        }), 200
+        
+    except Exception as e:
+        db.session.rollback()
+        logging.error(f"Erro ao excluir gabarito: {str(e)}", exc_info=True)
+        return jsonify({"error": f"Erro ao excluir gabarito: {str(e)}"}), 500
+
+
+@bp.route('/gabaritos', methods=['DELETE'])
+@jwt_required()
+@role_required("admin", "professor", "coordenador", "diretor", "tecadm")
+def bulk_delete_gabaritos():
+    """
+    Exclui múltiplos gabaritos em massa
+    
+    Body (JSON):
+        {
+            "ids": ["gabarito_id_1", "gabarito_id_2", ...]
+        }
+    
+    Returns:
+        Confirmação de exclusão com estatísticas
+    """
+    try:
+        user = get_current_user_from_token()
+        if not user:
+            return jsonify({"error": "Usuário não encontrado"}), 401
+        
+        # Obter dados da requisição
+        data = request.get_json()
+        if not data or 'ids' not in data:
+            return jsonify({"error": "Lista de 'ids' é obrigatória no corpo da requisição"}), 400
+        
+        gabarito_ids = data.get('ids', [])
+        if not isinstance(gabarito_ids, list):
+            return jsonify({"error": "O campo 'ids' deve ser uma lista"}), 400
+        
+        if not gabarito_ids:
+            return jsonify({"message": "Nenhum ID de gabarito fornecido para exclusão"}), 200
+        
+        # Buscar gabaritos que pertencem ao usuário
+        gabaritos_to_delete = AnswerSheetGabarito.query.filter(
+            AnswerSheetGabarito.id.in_(gabarito_ids),
+            AnswerSheetGabarito.created_by == str(user['id'])
+        ).all()
+        
+        if not gabaritos_to_delete:
+            return jsonify({
+                "message": "Nenhum gabarito encontrado ou você não tem permissão para excluir os gabaritos fornecidos",
+                "deleted_count": 0,
+                "requested_count": len(gabarito_ids)
+            }), 200
+        
+        # Contar quantos foram encontrados vs solicitados
+        deleted_ids = [str(g.id) for g in gabaritos_to_delete]
+        not_found_ids = [gid for gid in gabarito_ids if gid not in deleted_ids]
+        
+        # Excluir resultados relacionados primeiro
+        total_results_deleted = 0
+        for gabarito in gabaritos_to_delete:
+            results_deleted = AnswerSheetResult.query.filter_by(gabarito_id=str(gabarito.id)).delete()
+            total_results_deleted += results_deleted
+        
+        # Excluir gabaritos
+        for gabarito in gabaritos_to_delete:
+            db.session.delete(gabarito)
+        
+        db.session.commit()
+        
+        if total_results_deleted > 0:
+            logging.info(f"Excluídos {total_results_deleted} resultados relacionados aos gabaritos")
+        
+        logging.info(f"{len(gabaritos_to_delete)} gabaritos excluídos por usuário {user['id']}")
+        
+        response = {
+            "message": f"{len(gabaritos_to_delete)} gabarito(s) excluído(s) com sucesso",
+            "deleted_count": len(gabaritos_to_delete),
+            "requested_count": len(gabarito_ids),
+            "deleted_ids": deleted_ids,
+            "results_deleted": total_results_deleted
+        }
+        
+        if not_found_ids:
+            response["not_found_or_unauthorized_ids"] = not_found_ids
+            response["message"] += f". {len(not_found_ids)} gabarito(s) não encontrado(s) ou sem permissão"
+        
+        return jsonify(response), 200
+        
+    except Exception as e:
+        db.session.rollback()
+        logging.error(f"Erro ao excluir gabaritos em massa: {str(e)}", exc_info=True)
+        return jsonify({"error": f"Erro ao excluir gabaritos: {str(e)}"}), 500

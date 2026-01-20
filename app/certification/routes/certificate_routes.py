@@ -102,6 +102,31 @@ def save_template():
 
 # ==================== APROVAÇÃO DE CERTIFICADOS ====================
 
+@bp.route('/approved-students/<string:evaluation_id>', methods=['GET'])
+@jwt_required()
+@role_required("admin", "professor", "coordenador", "diretor", "tecadm")
+def get_approved_students(evaluation_id):
+    """Retorna lista de alunos aprovados (grade >= 6) de uma avaliação"""
+    try:
+        user = get_current_user_from_token()
+        if not user:
+            return jsonify({"erro": "Usuário não encontrado"}), 404
+        
+        # Verificar se avaliação existe
+        test = Test.query.get(evaluation_id)
+        if not test:
+            return jsonify({"erro": "Avaliação não encontrada"}), 404
+        
+        # Buscar alunos aprovados
+        approved_students = CertificateService.get_approved_students(evaluation_id)
+        
+        return jsonify(approved_students), 200
+        
+    except Exception as e:
+        logging.error(f"Erro ao buscar alunos aprovados: {str(e)}")
+        return jsonify({"erro": "Erro ao buscar alunos aprovados", "detalhes": str(e)}), 500
+
+
 @bp.route('/approve', methods=['POST'])
 @jwt_required()
 @role_required("admin", "professor", "coordenador", "diretor", "tecadm")

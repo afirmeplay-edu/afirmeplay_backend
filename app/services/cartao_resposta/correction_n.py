@@ -2118,10 +2118,10 @@ class AnswerSheetCorrectionN:
             circles = cv2.HoughCircles(
                 blurred,
                 cv2.HOUGH_GRADIENT,
-                dp=1.2,  # Inverse ratio of accumulator resolution
+                dp=1.0,  # Inverse ratio of accumulator resolution (CORRIGIDO: era 1.2)
                 minDist=15,  # Distância mínima entre centros de círculos
                 param1=50,  # Upper threshold for edge detection
-                param2=30,  # Threshold for center detection (menor = mais círculos)
+                param2=15,  # Threshold for center detection (CORRIGIDO: era 30, muito restritivo!)
                 minRadius=5,  # Raio mínimo (bolhas de 15px = raio ~7px)
                 maxRadius=10  # Raio máximo
             )
@@ -4941,7 +4941,7 @@ class AnswerSheetCorrectionN:
                     dp=1,
                     minDist=expected_radius * 2,
                     param1=50,
-                    param2=25,  # Relaxado de 30 para 25 (mais sensível)
+                    param2=15,  # CORRIGIDO: reduzido de 25 para 15 (mais sensível)
                     minRadius=max(3, expected_radius - 8),  # Relaxado: de -5 para -8
                     maxRadius=expected_radius + 15  # Relaxado: de +10 para +15
                 )

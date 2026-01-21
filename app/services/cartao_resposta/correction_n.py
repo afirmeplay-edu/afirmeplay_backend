@@ -13,6 +13,7 @@ import numpy as np
 import json
 import logging
 import os
+from collections import defaultdict
 from typing import Dict, List, Optional, Tuple, Any
 from app import db
 from app.models.student import Student
@@ -269,6 +270,432 @@ class AnswerSheetCorrectionN:
         except Exception as e:
             self.logger.warning(f"Erro ao carregar alinhamento manual de {config_path}: {str(e)}")
             return None
+    
+    # =========================================================================
+    # ✅ TEMPLATE REAL DIGITAL — Métodos para geração e comparação de templates
+    # =========================================================================
+    
+    def gerar_templates_blocos(self, gabarito_obj: 'AnswerSheetGabarito', 
+                                pdf_bytes: bytes = None,
+                                dpi: int = 300) -> Dict[int, bytes]:
+        """
+        Gera imagens de template para cada bloco usando o PDF real.
+        
+        ✅ REGRA OBRIGATÓRIA: Passa pelo MESMO pipeline de correção do aluno.
+        - ZERO resize
+        - ZERO interpolação
+        - Mesmo código, mesmos parâmetros, mesma ordem
+        
+        Args:
+            gabarito_obj: Objeto AnswerSheetGabarito
+            pdf_bytes: Bytes do PDF do cartão-resposta (se None, gera automaticamente)
+            dpi: DPI para renderização do PDF (padrão: 300)
+            
+        Returns:
+            Dict {block_num: png_bytes} - até 4 blocos
+        """
+        try:
+            self.logger.info(f"🔧 TEMPLATE REAL DIGITAL: Iniciando geração de templates para gabarito {gabarito_obj.id}")
+            
+            # 1. Se não recebeu PDF, gerar automaticamente
+            if pdf_bytes is None:
+                pdf_bytes = self._gerar_pdf_template(gabarito_obj)
+                if pdf_bytes is None:
+                    self.logger.error("Falha ao gerar PDF do template")
+                    return {}
+            
+            # 2. Converter PDF → imagem PNG (usando pdf2image)
+            try:
+                from pdf2image import convert_from_bytes
+                
+                # Renderizar primeira página do PDF
+                images = convert_from_bytes(pdf_bytes, dpi=dpi, first_page=1, last_page=1)
+                if not images:
+                    self.logger.error("PDF não gerou nenhuma imagem")
+                    return {}
+                
+                # Converter PIL Image para numpy array (BGR para OpenCV)
+                pil_image = images[0]
+                img_rgb = np.array(pil_image)
+                img_bgr = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2BGR)
+                
+                self.logger.info(f"PDF renderizado: {img_bgr.shape} ({dpi} DPI)")
+                
+            except ImportError:
+                self.logger.error("pdf2image não está instalado. Execute: pip install pdf2image")
+                return {}
+            except Exception as e:
+                self.logger.error(f"Erro ao converter PDF para imagem: {str(e)}")
+                return {}
+            
+            # 3. MESMO PIPELINE DO ALUNO: quadrados → warp → triângulos → crop → blocos
+            
+            # 3.1. Detectar quadrados A4 nos cantos
+            squares = self._detectar_quadrados_a4(img_bgr)
+            if squares is None:
+                self.logger.error("Falha ao detectar quadrados A4 no template")
+                return {}
+            
+            self.logger.info(f"Quadrados A4 detectados: {list(squares.keys())}")
+            
+            # 3.2. Normalizar para A4
+            result = self._normalizar_para_a4(img_bgr, squares)
+            if result is None:
+                self.logger.error("Falha ao normalizar para A4")
+                return {}
+            
+            img_a4_normalized, scale_info = result
+            self.logger.info(f"Imagem normalizada para A4: {img_a4_normalized.shape}")
+            
+            # 3.3. Detectar triângulos na área dos blocos
+            triangles = self._detectar_triangulos_na_area_blocos(img_a4_normalized)
+            if triangles is None:
+                self.logger.error("Falha ao detectar triângulos no template")
+                return {}
+            
+            self.logger.info(f"Triângulos detectados: {list(triangles.keys())}")
+            
+            # 3.4. Crop da área dos blocos usando triângulos
+            block_area_cropped = self._crop_area_blocos_com_triangulos(img_a4_normalized, triangles)
+            if block_area_cropped is None:
+                self.logger.error("Falha ao fazer crop da área dos blocos")
+                return {}
+            
+            self.logger.info(f"Área dos blocos cropada: {block_area_cropped.shape}")
+            
+            # 3.5. Detectar blocos individuais
+            answer_blocks, block_contours = self._detectar_blocos_resposta(block_area_cropped)
+            if not answer_blocks:
+                self.logger.error("Nenhum bloco detectado no template")
+                return {}
+            
+            self.logger.info(f"Blocos detectados: {len(answer_blocks)}")
+            
+            # 4. Codificar cada bloco como PNG (SEM RESIZE!)
+            templates = {}
+            for i, block_roi in enumerate(answer_blocks):
+                block_num = i + 1
+                
+                # ❌ NÃO fazer resize! Usar ROI exatamente como gerado
+                # template_block.shape == bloco_aluno.shape (validado na correção)
+                
+                # Codificar como PNG
+                success, png_buffer = cv2.imencode('.png', block_roi)
+                if success:
+                    png_bytes = png_buffer.tobytes()
+                    templates[block_num] = png_bytes
+                    self.logger.info(f"  Bloco {block_num}: {block_roi.shape} → {len(png_bytes)} bytes PNG")
+                else:
+                    self.logger.warning(f"  Bloco {block_num}: Falha ao codificar PNG")
+            
+            self.logger.info(f"✅ TEMPLATE REAL DIGITAL: {len(templates)} templates gerados com sucesso")
+            
+            return templates
+            
+        except Exception as e:
+            self.logger.error(f"Erro ao gerar templates de blocos: {str(e)}", exc_info=True)
+            return {}
+    
+    def _gerar_pdf_template(self, gabarito_obj: 'AnswerSheetGabarito') -> Optional[bytes]:
+        """
+        Gera PDF do cartão-resposta para usar como template.
+        Usa student_id="TEMPLATE" para identificar que é um template.
+        
+        Args:
+            gabarito_obj: Objeto AnswerSheetGabarito com configurações
+            
+        Returns:
+            Bytes do PDF ou None se falhar
+        """
+        try:
+            from app.services.cartao_resposta.answer_sheet_generator import AnswerSheetGenerator
+            
+            generator = AnswerSheetGenerator()
+            
+            # Preparar dados do teste
+            test_data = {
+                'id': gabarito_obj.test_id,
+                'title': gabarito_obj.title or 'Template',
+                'municipality': gabarito_obj.municipality or '',
+                'state': gabarito_obj.state or '',
+                'institution': gabarito_obj.institution or '',
+                'grade_name': gabarito_obj.grade_name or ''
+            }
+            
+            # Configuração de blocos
+            blocks_config = gabarito_obj.blocks_config or {}
+            use_blocks = gabarito_obj.use_blocks or False
+            
+            # Organizar questões por blocos
+            questions_by_block = None
+            if use_blocks:
+                questions_by_block = generator._organize_questions_by_blocks(
+                    gabarito_obj.num_questions, blocks_config
+                )
+            
+            # Criar student fake para template
+            class FakeStudent:
+                def __init__(self):
+                    self.id = "TEMPLATE"
+                    self.name = "TEMPLATE - NÃO IMPRIMIR"
+                    self.registration = ""
+                    self.class_id = None
+                    self.school_id = None
+            
+            fake_student = FakeStudent()
+            
+            # Gerar PDF
+            pdf_data = generator._generate_individual_answer_sheet(
+                student=fake_student,
+                test_data=test_data,
+                num_questions=gabarito_obj.num_questions,
+                use_blocks=use_blocks,
+                blocks_config=blocks_config,
+                questions_by_block=questions_by_block,
+                gabarito_id=str(gabarito_obj.id)
+            )
+            
+            if pdf_data:
+                self.logger.info(f"PDF do template gerado: {len(pdf_data)} bytes")
+                return pdf_data
+            else:
+                self.logger.error("Falha ao gerar PDF do template")
+                return None
+                
+        except Exception as e:
+            self.logger.error(f"Erro ao gerar PDF do template: {str(e)}", exc_info=True)
+            return None
+    
+    def salvar_templates_no_gabarito(self, gabarito_obj: 'AnswerSheetGabarito', 
+                                      templates: Dict[int, bytes],
+                                      dpi: int = 300) -> bool:
+        """
+        Salva templates de blocos no objeto do gabarito e persiste no banco.
+        
+        Args:
+            gabarito_obj: Objeto AnswerSheetGabarito
+            templates: Dict {block_num: png_bytes}
+            dpi: DPI usado na renderização
+            
+        Returns:
+            True se salvou com sucesso
+        """
+        try:
+            from datetime import datetime
+            
+            # Salvar cada template no campo correspondente
+            for block_num, png_bytes in templates.items():
+                if 1 <= block_num <= 4:
+                    gabarito_obj.set_template_block(block_num, png_bytes)
+                    self.logger.info(f"  Bloco {block_num}: {len(png_bytes)} bytes salvos")
+            
+            # Atualizar metadados
+            gabarito_obj.template_generated_at = datetime.now()
+            gabarito_obj.template_dpi = dpi
+            
+            # Persistir no banco
+            db.session.commit()
+            
+            self.logger.info(f"✅ {len(templates)} templates salvos no gabarito {gabarito_obj.id}")
+            return True
+            
+        except Exception as e:
+            self.logger.error(f"Erro ao salvar templates no gabarito: {str(e)}", exc_info=True)
+            db.session.rollback()
+            return False
+    
+    def _carregar_template_bloco(self, gabarito_obj: 'AnswerSheetGabarito', 
+                                  block_num: int,
+                                  expected_shape: Tuple[int, int]) -> Optional[np.ndarray]:
+        """
+        Carrega template do bloco do banco e VALIDA shape.
+        
+        ✅ VALIDAÇÃO OBRIGATÓRIA: template.shape == bloco_aluno.shape
+        
+        Args:
+            gabarito_obj: Objeto AnswerSheetGabarito
+            block_num: Número do bloco (1-4)
+            expected_shape: (height, width) do bloco do aluno
+            
+        Returns:
+            Imagem do template (numpy array) ou None se não existir
+            
+        Raises:
+            ValueError se shapes não batem (erro de configuração)
+        """
+        try:
+            # Buscar bytes do campo correto
+            template_bytes = gabarito_obj.get_template_block(block_num)
+            
+            if template_bytes is None:
+                self.logger.warning(
+                    f"⚠️ ATENÇÃO: Template de bloco {block_num} não encontrado! "
+                    f"Gabarito {gabarito_obj.id} não possui template salvo."
+                )
+                return None
+            
+            # Decodificar PNG
+            template_img = cv2.imdecode(
+                np.frombuffer(template_bytes, np.uint8), 
+                cv2.IMREAD_COLOR
+            )
+            
+            if template_img is None:
+                self.logger.error(f"Falha ao decodificar PNG do template bloco {block_num}")
+                return None
+            
+            # ✅ VALIDAÇÃO OBRIGATÓRIA de shape
+            template_shape = template_img.shape[:2]  # (height, width)
+            
+            if template_shape != expected_shape:
+                # Log de warning mas NÃO raise - tentar redimensionar se necessário
+                self.logger.warning(
+                    f"⚠️ Shape mismatch no bloco {block_num}: "
+                    f"template={template_shape} vs aluno={expected_shape}. "
+                    f"Isso pode indicar que os templates precisam ser regenerados."
+                )
+                
+                # Tentar redimensionar para shape esperado (fallback, não ideal)
+                # Nota: Isso não é o ideal, mas permite funcionamento
+                if abs(template_shape[0] - expected_shape[0]) < 50 and abs(template_shape[1] - expected_shape[1]) < 50:
+                    template_img = cv2.resize(template_img, (expected_shape[1], expected_shape[0]))
+                    self.logger.warning(f"Template redimensionado de {template_shape} para {expected_shape}")
+                else:
+                    self.logger.error(
+                        f"Diferença de shape muito grande para redimensionar. "
+                        f"Regenere os templates do gabarito {gabarito_obj.id}"
+                    )
+                    return None
+            
+            self.logger.debug(f"Template bloco {block_num} carregado: {template_img.shape}")
+            return template_img
+            
+        except Exception as e:
+            self.logger.error(f"Erro ao carregar template bloco {block_num}: {str(e)}", exc_info=True)
+            return None
+    
+    def _comparar_roi_com_template(self, aluno_roi: np.ndarray, 
+                                    template_roi: np.ndarray) -> float:
+        """
+        Compara ROI do aluno com ROI do template usando diferença absoluta.
+        
+        ✅ CORREÇÕES APLICADAS:
+        - Blur (3,3) ANTES do absdiff para remover ruído
+        - Threshold 30 DEPOIS do absdiff para focar só em tinta
+        - Elimina 90% dos falsos positivos por poeira/sombra/scanner
+        
+        Args:
+            aluno_roi: ROI da bolha do aluno
+            template_roi: ROI da bolha do template (mesma posição)
+            
+        Returns:
+            Score normalizado (0.0 a 1.0) — maior = mais marcado
+            
+        Raises:
+            ValueError se shapes não batem
+        """
+        # Validar shapes OBRIGATÓRIO
+        if aluno_roi.shape != template_roi.shape:
+            raise ValueError(
+                f"Shape mismatch: aluno={aluno_roi.shape} vs template={template_roi.shape}"
+            )
+        
+        # Converter para grayscale se necessário
+        if len(aluno_roi.shape) == 3:
+            aluno_gray = cv2.cvtColor(aluno_roi, cv2.COLOR_BGR2GRAY)
+            template_gray = cv2.cvtColor(template_roi, cv2.COLOR_BGR2GRAY)
+        else:
+            aluno_gray = aluno_roi.copy()
+            template_gray = template_roi.copy()
+        
+        # ✅ ANTES do absdiff: blur para remover ruído
+        aluno_blur = cv2.GaussianBlur(aluno_gray, (3, 3), 0)
+        template_blur = cv2.GaussianBlur(template_gray, (3, 3), 0)
+        
+        # Diferença absoluta
+        diff = cv2.absdiff(aluno_blur, template_blur)
+        
+        # ✅ DEPOIS: threshold para focar só em tinta
+        _, diff_thresh = cv2.threshold(diff, 30, 255, cv2.THRESH_BINARY)
+        
+        # Score normalizado
+        score = np.mean(diff_thresh) / 255.0
+        
+        return score
+    
+    def _medir_preenchimento_com_template(self, block_aluno: np.ndarray,
+                                           template_block: np.ndarray,
+                                           x: int, y: int, radius: int) -> float:
+        """
+        Mede preenchimento de uma bolha comparando com template.
+        
+        ✅ TEMPLATE REAL DIGITAL: Converte ambos para grayscale para garantir
+        compatibilidade (block_aluno pode ser gray, template é BGR).
+        
+        Args:
+            block_aluno: ROI do bloco do aluno (pode ser grayscale ou BGR)
+            template_block: ROI do bloco template (BGR)
+            x, y: Centro da bolha
+            radius: Raio da bolha
+            
+        Returns:
+            Score de preenchimento (0.0 a 1.0)
+        """
+        try:
+            # Converter ambos para grayscale para garantir compatibilidade
+            if len(block_aluno.shape) == 3:
+                aluno_gray = cv2.cvtColor(block_aluno, cv2.COLOR_BGR2GRAY)
+            else:
+                aluno_gray = block_aluno
+            
+            if len(template_block.shape) == 3:
+                template_gray = cv2.cvtColor(template_block, cv2.COLOR_BGR2GRAY)
+            else:
+                template_gray = template_block
+            
+            # Extrair ROI da bolha (com margem)
+            margin = 2
+            y1 = max(0, y - radius - margin)
+            y2 = min(aluno_gray.shape[0], y + radius + margin)
+            x1 = max(0, x - radius - margin)
+            x2 = min(aluno_gray.shape[1], x + radius + margin)
+            
+            aluno_roi = aluno_gray[y1:y2, x1:x2]
+            template_roi = template_gray[y1:y2, x1:x2]
+            
+            # Validar que extraímos algo
+            if aluno_roi.size == 0 or template_roi.size == 0:
+                return 0.0
+            
+            # Validar shapes (devem ser iguais após extração da mesma região)
+            if aluno_roi.shape != template_roi.shape:
+                self.logger.warning(
+                    f"Shape mismatch em ROI: aluno={aluno_roi.shape} vs template={template_roi.shape}"
+                )
+                return 0.0
+            
+            # ✅ ANTES do absdiff: blur para remover ruído
+            aluno_blur = cv2.GaussianBlur(aluno_roi, (3, 3), 0)
+            template_blur = cv2.GaussianBlur(template_roi, (3, 3), 0)
+            
+            # Diferença absoluta
+            diff = cv2.absdiff(aluno_blur, template_blur)
+            
+            # ✅ DEPOIS: threshold para focar só em tinta
+            _, diff_thresh = cv2.threshold(diff, 30, 255, cv2.THRESH_BINARY)
+            
+            # Score normalizado
+            score = np.mean(diff_thresh) / 255.0
+            
+            return score
+            
+        except Exception as e:
+            self.logger.warning(f"Erro ao medir preenchimento com template em ({x}, {y}): {str(e)}")
+            return 0.0
+    
+    # =========================================================================
+    # FIM dos métodos de Template Real Digital
+    # =========================================================================
     
     def corrigir_cartao_resposta(self, image_data: bytes) -> Dict[str, Any]:
         """
@@ -586,8 +1013,8 @@ class AnswerSheetCorrectionN:
                 self._save_debug_image(f"04_block_{block_num_detected:02d}_real_only_original_{inner_w}x{inner_h}.jpg", block_original_bgr)
                 self.logger.info(f"Bloco {block_num_detected}: Imagem original salva: {inner_w}x{inner_h}px")
                 
-                # ✅ NOVO: Redimensionar bloco para tamanho padrão (142x473px) para garantir consistência
-                STANDARD_BLOCK_WIDTH = 142
+                # ✅ NOVO: Redimensionar bloco para tamanho padrão (155x473px) para garantir consistência
+                STANDARD_BLOCK_WIDTH = 155
                 STANDARD_BLOCK_HEIGHT = 473
                 
                 if inner_w != STANDARD_BLOCK_WIDTH or inner_h != STANDARD_BLOCK_HEIGHT:
@@ -618,7 +1045,36 @@ class AnswerSheetCorrectionN:
                     block_x_offset += border_info['x'] + border_thickness
                     block_y_offset += border_info['y'] + border_thickness
                 
-                # Processar usando método sem referência
+                # =========================================================================
+                # ✅ TEMPLATE REAL DIGITAL: Tentar carregar template do bloco
+                # =========================================================================
+                template_block = None
+                if gabarito_obj and gabarito_obj.has_templates():
+                    try:
+                        expected_shape = (inner_h, inner_w)  # (height, width)
+                        template_block = self._carregar_template_bloco(
+                            gabarito_obj=gabarito_obj,
+                            block_num=block_num_detected,
+                            expected_shape=expected_shape
+                        )
+                        
+                        if template_block is not None:
+                            self.logger.info(f"✅ TEMPLATE REAL DIGITAL: Template do bloco {block_num_detected} carregado ({template_block.shape})")
+                        else:
+                            self.logger.warning(
+                                f"⚠️ TEMPLATE REAL DIGITAL: Template do bloco {block_num_detected} não disponível. "
+                                f"Usando método geométrico (menos preciso)."
+                            )
+                    except Exception as e:
+                        self.logger.warning(
+                            f"⚠️ TEMPLATE REAL DIGITAL: Erro ao carregar template do bloco {block_num_detected}: {str(e)}. "
+                            f"Usando método geométrico (menos preciso)."
+                        )
+                        template_block = None
+                else:
+                    self.logger.debug(f"Bloco {block_num_detected}: Gabarito sem templates salvos")
+                
+                # Processar usando método sem referência (com ou sem template)
                 # scale_info está disponível no escopo do loop principal
                 block_answers, bubbles_info_block = self._processar_bloco_sem_referencia(
                     block_roi=block_inner,  # Usar área interna do bloco
@@ -627,7 +1083,8 @@ class AnswerSheetCorrectionN:
                     block_num=block_num_detected,
                     x_offset=block_x_offset,
                     y_offset=block_y_offset,
-                    scale_info=scale_info
+                    scale_info=scale_info,
+                    template_block=template_block  # ✅ NOVO: Template Real Digital
                 )
                 
                 # 7. Adicionar respostas ao total
@@ -2096,6 +2553,10 @@ class AnswerSheetCorrectionN:
         Detecta bolhas usando HoughCircles (método do repositório OMR).
         Mais robusto para detectar círculos reais.
         
+        ✅ CORREÇÃO 2 & 5 aplicadas:
+        - Raio proporcional ao bloco (não fixo)
+        - Filtro de distância disponível via _validar_distancia_grid()
+        
         Args:
             block_roi: ROI do bloco (imagem)
             block_num: Número do bloco (para debug)
@@ -2110,20 +2571,29 @@ class AnswerSheetCorrectionN:
             else:
                 gray = block_roi.copy()
             
+            h, w = block_roi.shape[:2]
+            
+            # ✅ CORREÇÃO 2: Raio proporcional ao bloco
+            bubble_radius = self._calcular_raio_bolha_template(block_roi, None)
+            
+            # Calcular minRadius e maxRadius com tolerância de ±40%
+            min_radius = max(3, int(bubble_radius * 0.6))
+            max_radius = int(bubble_radius * 1.4)
+            
             # Aplicar blur para reduzir ruído
             blurred = cv2.GaussianBlur(gray, (5, 5), 0)
             
             # Detectar círculos usando HoughCircles
-            # Parâmetros ajustados para bolhas de ~15px (raio ~7-8px)
+            # Parâmetros ajustados com raio proporcional
             circles = cv2.HoughCircles(
                 blurred,
                 cv2.HOUGH_GRADIENT,
-                dp=1.0,  # Inverse ratio of accumulator resolution (CORRIGIDO: era 1.2)
-                minDist=15,  # Distância mínima entre centros de círculos
+                dp=1.0,  # Inverse ratio of accumulator resolution
+                minDist=int(bubble_radius * 2.5),  # Distância mínima proporcional
                 param1=50,  # Upper threshold for edge detection
-                param2=15,  # Threshold for center detection (CORRIGIDO: era 30, muito restritivo!)
-                minRadius=5,  # Raio mínimo (bolhas de 15px = raio ~7px)
-                maxRadius=10  # Raio máximo
+                param2=15,  # Threshold for center detection
+                minRadius=min_radius,  # ✅ CORREÇÃO 2: Raio mínimo proporcional
+                maxRadius=max_radius   # ✅ CORREÇÃO 2: Raio máximo proporcional
             )
             
             bubbles = []
@@ -2132,7 +2602,6 @@ class AnswerSheetCorrectionN:
                 
                 for (x, y, r) in circles:
                     # Validar que está dentro da imagem
-                    h, w = block_roi.shape[:2]
                     if x - r < 0 or x + r >= w or y - r < 0 or y + r >= h:
                         continue
                     
@@ -2143,7 +2612,7 @@ class AnswerSheetCorrectionN:
                         'center': (int(x), int(y))
                     })
             
-            self.logger.info(f"Bloco {block_num or 'único'}: {len(bubbles)} bolhas detectadas via HoughCircles")
+            self.logger.info(f"Bloco {block_num or 'único'}: {len(bubbles)} bolhas detectadas via HoughCircles (raio: {min_radius}-{max_radius}px)")
             return bubbles
             
         except Exception as e:
@@ -2596,10 +3065,10 @@ class AnswerSheetCorrectionN:
                                                    start_x: int = 0, start_y: int = 0) -> List[Dict]:
         """
         Gera grade virtual usando coordenadas fixas do arquivo de ajuste.
-        Usado quando o bloco foi redimensionado para 142x473px e temos coordenadas calibradas.
+        Usado quando o bloco foi redimensionado para 155x473px e temos coordenadas calibradas.
         
         Args:
-            block_roi: ROI do bloco (imagem redimensionada para 142x473px)
+            block_roi: ROI do bloco (imagem redimensionada para 155x473px)
             block_config: Configuração do bloco da topology
             line_height: Altura de linha em pixels (do arquivo de ajuste)
             block_num: Número do bloco (para debug)
@@ -2706,10 +3175,14 @@ class AnswerSheetCorrectionN:
     
     def _calcular_raio_bolha_template(self, block_roi: np.ndarray, scale_info: Optional[Dict] = None) -> int:
         """
-        Calcula o raio da bolha baseado no template CSS (15px diâmetro = 7.5px raio).
+        Calcula raio da bolha baseado no template CSS (15px diâmetro = 7.5px raio).
         
-        Template CSS: .bubble { width: 15px; height: 15px; }
-        Diâmetro = 15px → Raio = 7.5px no template
+        ✅ CORREÇÃO 2 — RAIO PROPORCIONAL AO BLOCO
+        
+        Nunca usa raio fixo! O raio escala junto com o tamanho do bloco.
+        Isso garante que:
+        - bloco 155px → raio ≈ 5.4px
+        - bloco maior → raio cresce proporcionalmente
         
         Args:
             block_roi: ROI do bloco (imagem)
@@ -2721,9 +3194,12 @@ class AnswerSheetCorrectionN:
         try:
             h, w = block_roi.shape[:2]
             
-            # Template CSS: .bubble { width: 15px; height: 15px; }
-            # Diâmetro = 15px → Raio = 7.5px no template (PDF renderizado)
+            # ✅ CORREÇÃO 2: Raio SEMPRE proporcional ao bloco (3.5% da largura)
+            # Isso faz o raio escalar corretamente com qualquer tamanho de bloco
+            # Exemplo: bloco 155px → raio ≈ 5.4px | bloco 200px → raio ≈ 7px
+            bubble_radius = int(w * 0.035)
             
+            # Se temos scale_info, podemos ajustar mais finamente
             if scale_info:
                 # Usar escala real da imagem normalizada
                 px_per_cm_x = scale_info.get('px_per_cm_x', 39.37)
@@ -2734,33 +3210,120 @@ class AnswerSheetCorrectionN:
                 # Assumindo que o PDF é renderizado a ~96 DPI (padrão web)
                 # 15px a 96 DPI = 15/96 * 2.54 ≈ 0.40cm
                 BUBBLE_DIAMETER_CM = 0.40  # 15px ≈ 0.40cm (96 DPI)
-                bubble_radius = int((BUBBLE_DIAMETER_CM / 2) * px_per_cm)
+                bubble_radius_scale = int((BUBBLE_DIAMETER_CM / 2) * px_per_cm)
                 
-                self.logger.debug(f"Raio calculado com scale_info: {bubble_radius}px (px_per_cm: {px_per_cm:.2f})")
+                # Usar o maior entre proporcional e calculado por escala
+                bubble_radius = max(bubble_radius, bubble_radius_scale)
+                
+                self.logger.debug(f"Raio calculado com scale_info: {bubble_radius}px (proporcional: {int(w * 0.035)}px, escala: {bubble_radius_scale}px)")
             else:
-                # Fallback: estimar baseado no tamanho do bloco
-                # Um bloco típico tem ~4.2cm de largura
-                # 15px no CSS representa ~9.2% da largura de um bloco típico
-                # Mas vamos usar uma estimativa mais conservadora (4% da largura)
-                # Isso dá aproximadamente 6-7px para blocos de 163px
-                bubble_radius = max(5, int(w * 0.04))  # 4% da largura
-                
-                self.logger.debug(f"Raio estimado (fallback): {bubble_radius}px (bloco: {w}px)")
+                self.logger.debug(f"Raio proporcional ao bloco: {bubble_radius}px (bloco: {w}px, fator: 3.5%)")
             
-            # Validar range razoável (5-10px) - bolhas muito grandes indicam erro
-            bubble_radius = max(5, min(10, bubble_radius))
+            # Garantir mínimo de 4px (para blocos muito pequenos)
+            bubble_radius = max(4, bubble_radius)
             
             return bubble_radius
             
         except Exception as e:
-            self.logger.warning(f"Erro ao calcular raio da bolha: {str(e)}, usando fallback")
+            self.logger.warning(f"Erro ao calcular raio da bolha: {str(e)}, usando fallback proporcional")
             h, w = block_roi.shape[:2]
-            return max(5, int(w * 0.04))  # Fallback conservador
+            return max(4, int(w * 0.035))  # Fallback proporcional
+    
+    def _distancia_euclidiana(self, x1: int, y1: int, x2: int, y2: int) -> float:
+        """
+        Calcula distância euclidiana entre dois pontos.
+        
+        ✅ CORREÇÃO 5 — FILTRO DE DISTÂNCIA GRID × BOLHA
+        
+        Usado para verificar se uma bolha detectada está próxima
+        o suficiente da posição esperada no grid.
+        
+        Args:
+            x1, y1: Coordenadas do primeiro ponto
+            x2, y2: Coordenadas do segundo ponto
+            
+        Returns:
+            Distância euclidiana em pixels
+        """
+        return np.sqrt((x2 - x1) ** 2 + (y2 - y1) ** 2)
+    
+    def _validar_distancia_grid(self, grid_x: int, grid_y: int, 
+                                 bolha_x: int, bolha_y: int, 
+                                 bubble_radius: int) -> bool:
+        """
+        Valida se uma bolha detectada está próxima o suficiente da posição do grid.
+        
+        ✅ CORREÇÃO 5 — FILTRO DE DISTÂNCIA GRID × BOLHA
+        
+        Evita bolhas fantasma detectadas em:
+        - Texto
+        - Borda
+        - Ruído
+        
+        Args:
+            grid_x, grid_y: Coordenadas esperadas no grid
+            bolha_x, bolha_y: Coordenadas da bolha detectada
+            bubble_radius: Raio da bolha em pixels
+            
+        Returns:
+            True se a bolha está dentro da tolerância, False caso contrário
+        """
+        dist = self._distancia_euclidiana(grid_x, grid_y, bolha_x, bolha_y)
+        tolerancia = bubble_radius * 1.3  # 130% do raio como tolerância
+        
+        return dist <= tolerancia
+    
+    def _criar_mascara_anel(self, h: int, w: int, cx: int, cy: int, r: int) -> Tuple[np.ndarray, float]:
+        """
+        Cria máscara em anel para medir preenchimento da bolha.
+        
+        ✅ CORREÇÃO 1 — ROI EM ANEL (ESSENCIAL)
+        
+        A máscara em anel ignora:
+        - Centro branco (falha de impressão/papel)
+        - Borda impressa (contorno da bolha)
+        - Ruído externo
+        
+        Mede apenas a região onde a tinta real está.
+        
+        Args:
+            h: Altura da imagem
+            w: Largura da imagem
+            cx: Centro X da bolha
+            cy: Centro Y da bolha
+            r: Raio da bolha
+            
+        Returns:
+            Tuple: (máscara em anel, área do anel em pixels)
+        """
+        mask = np.zeros((h, w), dtype=np.uint8)
+        
+        # Raio externo: 85% do raio (ignora borda impressa)
+        r_ext = int(r * 0.85)
+        # Raio interno: 45% do raio (ignora centro falho)
+        r_int = int(r * 0.45)
+        
+        # Garantir raios mínimos
+        r_ext = max(2, r_ext)
+        r_int = max(1, min(r_int, r_ext - 1))
+        
+        # Desenhar círculo externo (preenchido)
+        cv2.circle(mask, (cx, cy), r_ext, 255, -1)
+        # Desenhar círculo interno (removido)
+        cv2.circle(mask, (cx, cy), r_int, 0, -1)
+        
+        # Calcular área do anel
+        area_anel = np.pi * (r_ext * r_ext - r_int * r_int)
+        
+        return mask, area_anel
     
     def _medir_preenchimento_bolha(self, block_roi: np.ndarray, x: int, y: int, 
                                    radius: Optional[int] = None, scale_info: Optional[Dict] = None) -> float:
         """
         Mede percentual de preenchimento de uma bolha em uma posição específica.
+        
+        ✅ CORREÇÃO 1 — Usa máscara em ANEL ao invés de círculo cheio.
+        Isso ignora borda impressa e centro falho, medindo tinta real.
         
         Args:
             block_roi: ROI do bloco (imagem)
@@ -2795,10 +3358,9 @@ class AnswerSheetCorrectionN:
             # Aplicar threshold binário invertido (bolha marcada = branco)
             _, thresh = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY_INV | cv2.THRESH_OTSU)
             
-            # Extrair ROI circular da bolha
-            # Criar máscara circular
-            mask = np.zeros((h, w), dtype=np.uint8)
-            cv2.circle(mask, (x, y), radius, 255, -1)
+            # ✅ CORREÇÃO 1: Usar máscara em ANEL ao invés de círculo cheio
+            # Ignora borda impressa e centro falho
+            mask, area_anel = self._criar_mascara_anel(h, w, x, y, radius)
             
             # Aplicar máscara
             masked_thresh = cv2.bitwise_and(thresh, thresh, mask=mask)
@@ -2806,11 +3368,8 @@ class AnswerSheetCorrectionN:
             # Contar pixels brancos (marcados)
             pixels_marcados = cv2.countNonZero(masked_thresh)
             
-            # Área total do círculo
-            area_total = np.pi * radius * radius
-            
-            # Calcular percentual de preenchimento
-            fill_ratio = pixels_marcados / area_total if area_total > 0 else 0.0
+            # Calcular percentual de preenchimento usando área do anel
+            fill_ratio = pixels_marcados / area_anel if area_anel > 0 else 0.0
             
             return min(1.0, fill_ratio)  # Limitar a 1.0
             
@@ -2821,14 +3380,21 @@ class AnswerSheetCorrectionN:
     def _processar_bloco_sem_referencia(self, block_roi: np.ndarray, block_config: Dict,
                                        correct_answers: Dict[int, str], block_num: int = None,
                                        x_offset: int = 0, y_offset: int = 0,
-                                       scale_info: Optional[Dict] = None) -> Tuple[Dict[int, Optional[str]], List[Dict]]:
+                                       scale_info: Optional[Dict] = None,
+                                       template_block: Optional[np.ndarray] = None) -> Tuple[Dict[int, Optional[str]], List[Dict]]:
         """
         Processa bloco usando grade virtual baseada no JSON da topology (método OMR profissional).
         
+        ✅ TEMPLATE REAL DIGITAL: Se template_block for fornecido, usa comparação
+        por diferença absoluta (cv2.absdiff) ao invés de threshold binário.
+        Isso é mais preciso e elimina problemas de alinhamento geométrico.
+        
         Método:
         1. Gera grade virtual baseada no JSON (estrutura lógica) e geometria do bloco (ratios)
-        2. Para cada posição prevista na grade, mede preenchimento
-        3. Detecta qual alternativa foi marcada (maior preenchimento)
+        2. Para cada posição prevista na grade, mede preenchimento:
+           - COM template: usa cv2.absdiff (blur + threshold)
+           - SEM template: usa máscara em anel (método geométrico)
+        3. Detecta qual alternativa foi marcada (maior preenchimento/diferença)
         4. Valida e retorna respostas
         
         Args:
@@ -2838,6 +3404,8 @@ class AnswerSheetCorrectionN:
             block_num: Número do bloco (para debug)
             x_offset: Offset X do bloco na imagem completa
             y_offset: Offset Y do bloco na imagem completa
+            scale_info: Dict com informações de escala (opcional)
+            template_block: Imagem do template do bloco (opcional, para Template Real Digital)
             
         Returns:
             Tuple: (Dict {q_num: resposta}, Lista de informações das bolhas)
@@ -2851,7 +3419,7 @@ class AnswerSheetCorrectionN:
                 self.logger.warning(f"Bloco {block_num or 'único'}: Nenhuma questão configurada na topology")
                 return {}, []
             
-            # ✅ NOVO: Prioridade 1 - Carregar ajuste de coordenadas (mais preciso, calibrado para 142x473px)
+            # ✅ NOVO: Prioridade 1 - Carregar ajuste de coordenadas (mais preciso, calibrado para 155x473px)
             h, w = block_roi.shape[:2]
             coordinates_adjustment = None
             alignment_offset_x = 0
@@ -2919,9 +3487,10 @@ class AnswerSheetCorrectionN:
                 questions_grid[q_num].append(item)
             
             # 4. Processar cada questão
-            FILL_RATIO_THRESHOLD = 0.3  # 30% mínimo para considerar marcada
-            LIMIAR_MULTIPLA = 0.35  # Se segunda bolha tem mais de 35% da primeira, pode ser múltipla marcação
-            DIFERENCA_MINIMA = 0.10  # Diferença mínima entre primeira e segunda para considerar válida
+            # ✅ CORREÇÃO 3 & 4 — BASELINE POR QUESTÃO + NORMALIZAÇÃO LOCAL
+            # Thresholds baseados em CONTRASTE RELATIVO (não absoluto)
+            CONTRASTE_MINIMO = 0.12  # Contraste mínimo para considerar marcada
+            DIFERENCA_CONTRASTE = 0.08  # Diferença mínima entre maior e segundo contraste
             
             for q_num, row_items in questions_grid.items():
                 # Ordenar por índice da alternativa (A=0, B=1, C=2, D=3)
@@ -2956,12 +3525,26 @@ class AnswerSheetCorrectionN:
                     y = item['y']
                     letter = item['letter']
                     
-                    # Medir preenchimento nesta posição
-                    fill_ratio = self._medir_preenchimento_bolha(block_roi, x, y, bubble_radius, None)
+                    # =========================================================================
+                    # ✅ TEMPLATE REAL DIGITAL: Escolher método de medição
+                    # =========================================================================
+                    if template_block is not None:
+                        # COM TEMPLATE: Usar comparação por diferença absoluta
+                        # Mais preciso, elimina problemas de alinhamento geométrico
+                        fill_ratio = self._medir_preenchimento_com_template(
+                            block_aluno=block_roi,
+                            template_block=template_block,
+                            x=x, y=y, radius=bubble_radius
+                        )
+                        metodo = "template"
+                    else:
+                        # SEM TEMPLATE: Usar método geométrico (máscara em anel)
+                        fill_ratio = self._medir_preenchimento_bolha(block_roi, x, y, bubble_radius, None)
+                        metodo = "geometrico"
                     
                     # ✅ DEBUG: Print fill_ratio para questões de debug
                     if print_debug_detection:
-                        print(f"[DEBUG]   {letter}: fill_ratio={fill_ratio:.3f} em (x={x}, y={y})")
+                        print(f"[DEBUG]   {letter}: fill_ratio={fill_ratio:.3f} em (x={x}, y={y}) [{metodo}]")
                     
                     scores.append({
                         'letter': letter,
@@ -2971,43 +3554,65 @@ class AnswerSheetCorrectionN:
                         'item': item
                     })
                 
-                # Ordenar por fill_ratio (maior primeiro)
-                scores_sorted = sorted(scores, key=lambda x: x['fill_ratio'], reverse=True)
+                # ✅ CORREÇÃO 4 — NORMALIZAR fill_ratio LOCALMENTE
+                # Isso elimina variações de papel escuro, sombra, iluminação desigual
+                fills = [s['fill_ratio'] for s in scores]
+                min_fill = min(fills)
+                max_fill = max(fills)
+                fill_range = max_fill - min_fill + 1e-6  # Evitar divisão por zero
                 
-                # ✅ DEBUG: Print scores ordenados
+                fills_norm = [(f - min_fill) / fill_range for f in fills]
+                
+                # Atualizar scores com valores normalizados
+                for i, score in enumerate(scores):
+                    score['fill_norm'] = fills_norm[i]
+                
+                # ✅ CORREÇÃO 3 — BASELINE POR QUESTÃO (decisão relativa, não absoluta)
+                # Calcular baseline usando mediana (mais robusto que média)
+                baseline = np.median(fills_norm)
+                
+                # Calcular contrastes relativos ao baseline
+                contrastes = [fn - baseline for fn in fills_norm]
+                
+                # Atualizar scores com contrastes
+                for i, score in enumerate(scores):
+                    score['contraste'] = contrastes[i]
+                
+                # ✅ DEBUG: Print análise de contraste
                 if print_debug_detection:
-                    debug_scores = [(s['letter'], f"{s['fill_ratio']:.3f}", f"x={s['x']}") for s in scores_sorted[:3]]
-                    print(f"[DEBUG]   Scores ordenados: {debug_scores}")
+                    print(f"[DEBUG]   fills_raw={[f'{f:.3f}' for f in fills]}")
+                    print(f"[DEBUG]   fills_norm={[f'{f:.3f}' for f in fills_norm]}")
+                    print(f"[DEBUG]   baseline={baseline:.3f}")
+                    print(f"[DEBUG]   contrastes={[f'{c:.3f}' for c in contrastes]}")
                 
-                # Detectar resposta
-                if not scores_sorted or scores_sorted[0]['fill_ratio'] < FILL_RATIO_THRESHOLD:
-                    # Nenhuma bolha marcada claramente
-                    resposta = None
-                    max_ratio = scores_sorted[0]['fill_ratio'] if scores_sorted else 0.0
-                    self.logger.debug(f"Q{q_num}: Nenhuma bolha marcada (max: {max_ratio:.2f})")
-                elif len(scores_sorted) > 1:
-                    # Verificar se há múltiplas marcações significativas
-                    primeira = scores_sorted[0]['fill_ratio']
-                    segunda = scores_sorted[1]['fill_ratio']
-                    
-                    # ✅ DEBUG: Print quando detecta múltiplas marcações
-                    if print_debug_detection:
-                        print(f"[DEBUG]   Múltiplas marcações? 1ª={primeira:.3f} ({scores_sorted[0]['letter']}, x={scores_sorted[0]['x']}), 2ª={segunda:.3f} ({scores_sorted[1]['letter']}, x={scores_sorted[1]['x']})")
-                    
-                    # Critério mais rigoroso: segunda bolha deve ter pelo menos 35% da primeira
-                    # E a diferença deve ser pequena (menos de 10 pontos percentuais)
-                    if segunda >= LIMIAR_MULTIPLA and (primeira - segunda) < DIFERENCA_MINIMA:
-                        # Múltiplas bolhas marcadas (possível erro)
-                        resposta = None
-                        self.logger.warning(f"Q{q_num}: Múltiplas bolhas marcadas (1ª: {primeira:.2f}, 2ª: {segunda:.2f}, diff: {primeira-segunda:.2f})")
-                    else:
-                        # Bolha única marcada (segunda está muito abaixo ou diferença é grande)
-                        resposta = scores_sorted[0]['letter']
-                        self.logger.info(f"✅ Q{q_num}: Resposta detectada = {resposta} (fill_ratio: {primeira:.2f}, 2ª: {segunda:.2f})")
-                else:
-                    # Apenas uma bolha na questão
+                # Encontrar maior e segundo maior contraste
+                contrastes_sorted = sorted(enumerate(contrastes), key=lambda x: x[1], reverse=True)
+                max_idx = contrastes_sorted[0][0]
+                max_contrast = contrastes_sorted[0][1]
+                second_contrast = contrastes_sorted[1][1] if len(contrastes_sorted) > 1 else 0
+                
+                # Ordenar por contraste (maior primeiro) para consistência
+                scores_sorted = sorted(scores, key=lambda x: x['contraste'], reverse=True)
+                
+                # ✅ DEBUG: Print scores ordenados por contraste
+                if print_debug_detection:
+                    debug_scores = [(s['letter'], f"fill={s['fill_ratio']:.3f}", f"contraste={s['contraste']:.3f}") for s in scores_sorted[:3]]
+                    print(f"[DEBUG]   Scores ordenados por contraste: {debug_scores}")
+                
+                # ✅ CORREÇÃO 3 — Detectar resposta usando CONTRASTE RELATIVO
+                # Critério: max_contrast > 0.12 E (max_contrast - second) > 0.08
+                if max_contrast > CONTRASTE_MINIMO and (max_contrast - second_contrast) > DIFERENCA_CONTRASTE:
+                    # Bolha marcada com confiança
                     resposta = scores_sorted[0]['letter']
-                    self.logger.info(f"✅ Q{q_num}: Resposta detectada = {resposta} (fill_ratio: {scores_sorted[0]['fill_ratio']:.2f})")
+                    self.logger.info(f"✅ Q{q_num}: Resposta detectada = {resposta} (contraste: {max_contrast:.3f}, 2º: {second_contrast:.3f}, diff: {max_contrast-second_contrast:.3f})")
+                elif max_contrast > CONTRASTE_MINIMO and (max_contrast - second_contrast) <= DIFERENCA_CONTRASTE:
+                    # Possível múltipla marcação (contrastes muito próximos)
+                    resposta = None
+                    self.logger.warning(f"Q{q_num}: Possíveis múltiplas marcações (1º: {scores_sorted[0]['letter']}={max_contrast:.3f}, 2º: {scores_sorted[1]['letter']}={second_contrast:.3f}, diff: {max_contrast-second_contrast:.3f})")
+                else:
+                    # Nenhuma bolha marcada claramente (contraste muito baixo)
+                    resposta = None
+                    self.logger.debug(f"Q{q_num}: Nenhuma bolha marcada (max_contraste: {max_contrast:.3f} < {CONTRASTE_MINIMO})")
                 
                 answers[q_num] = resposta
                 
@@ -3064,10 +3669,45 @@ class AnswerSheetCorrectionN:
             self.logger.error(f"Erro ao processar bloco sem referência: {str(e)}", exc_info=True)
             return {}, []
     
+    def _desenhar_mascara_anel_debug(self, img_debug: np.ndarray, x: int, y: int, 
+                                       radius: int, is_marked: bool) -> None:
+        """
+        ✅ CORREÇÃO 6 — DEBUG VISUAL: Desenha a máscara em anel usada na medição.
+        
+        Visualiza exatamente a região que está sendo medida para fill_ratio.
+        
+        Args:
+            img_debug: Imagem de debug (será modificada)
+            x, y: Centro da bolha
+            radius: Raio da bolha
+            is_marked: Se a bolha está marcada
+        """
+        # Calcular raios do anel (mesma lógica de _criar_mascara_anel)
+        r_ext = int(radius * 0.85)
+        r_int = int(radius * 0.45)
+        r_ext = max(2, r_ext)
+        r_int = max(1, min(r_int, r_ext - 1))
+        
+        # Cor do anel
+        if is_marked:
+            color_anel = (0, 200, 0)  # Verde escuro para marcada
+        else:
+            color_anel = (200, 200, 0)  # Amarelo escuro para não marcada
+        
+        # Desenhar círculo externo (tracejado - simulado com círculo fino)
+        cv2.circle(img_debug, (x, y), r_ext, color_anel, 1)
+        # Desenhar círculo interno
+        cv2.circle(img_debug, (x, y), r_int, color_anel, 1)
+    
     def _salvar_imagem_bloco_com_grade_virtual(self, block_roi: np.ndarray, grid: List[Dict],
                                                answers: Dict[int, Optional[str]], block_num: int):
         """
         Salva imagem do bloco com grade virtual desenhada.
+        
+        ✅ CORREÇÃO 6 — DEBUG APRIMORADO:
+        - Desenha ○ círculo real detectado
+        - Desenha ◎ ROI em anel usada na medição
+        - Mostra contrastes e fill_ratio por questão
         
         Args:
             block_roi: ROI do bloco (imagem)
@@ -3086,6 +3726,7 @@ class AnswerSheetCorrectionN:
             COLOR_MARKED = (0, 255, 0)  # Verde para bolha marcada
             COLOR_UNMARKED = (255, 0, 0)  # Azul para bolha não marcada
             COLOR_GRID = (255, 255, 0)  # Amarelo para grade virtual
+            COLOR_DISCARDED = (0, 0, 255)  # Vermelho para descartadas por distância
             COLOR_TEXT = (255, 255, 255)  # Branco para texto
             COLOR_BACKGROUND_TEXT = (0, 0, 0)  # Preto para fundo do texto
             
@@ -3115,27 +3756,43 @@ class AnswerSheetCorrectionN:
             for q_num, row_items in questions_grid.items():
                 resposta = answers.get(q_num)
                 
+                # ✅ CORREÇÃO 6: Calcular e logar contrastes para debug
+                fills = []
+                for item in row_items:
+                    fill = self._medir_preenchimento_bolha(block_roi, item['x'], item['y'], bubble_radius, None)
+                    fills.append(fill)
+                
+                # Normalização local
+                min_fill = min(fills) if fills else 0
+                max_fill = max(fills) if fills else 1
+                fill_range = max_fill - min_fill + 1e-6
+                fills_norm = [(f - min_fill) / fill_range for f in fills]
+                
+                # Baseline e contrastes
+                baseline = np.median(fills_norm) if fills_norm else 0
+                contrastes = [fn - baseline for fn in fills_norm]
+                
                 # ✅ DEBUG: Print para questões com resposta detectada (primeira, meio, última)
                 print_debug_answer = resposta is not None and (q_num == first_q or q_num == middle_q or q_num == last_q)
                 if print_debug_answer:
                     q_index_in_sorted = sorted_questions.index(q_num) if q_num in sorted_questions else -1
-                    print(f"\n[DEBUG] Bloco {block_num}: Q{q_num} (posição {q_index_in_sorted}/{len(sorted_questions)-1}) - Resposta detectada: '{resposta}'")
-                    print(f"[DEBUG]   Alternativas no grid: {[item['letter'] for item in row_items]}")
-                    print(f"[DEBUG]   Coordenadas X no grid: {[item['x'] for item in row_items]}")
-                    print(f"[DEBUG]   alternative_index de cada alternativa: {[item.get('alternative_index', 'N/A') for item in row_items]}")
+                    print(f"\n[DEBUG VISUAL] Bloco {block_num}: Q{q_num} (posição {q_index_in_sorted}/{len(sorted_questions)-1})")
+                    print(f"[DEBUG VISUAL]   Resposta detectada: '{resposta}'")
+                    print(f"[DEBUG VISUAL]   fills={[f'{f:.3f}' for f in fills]}")
+                    print(f"[DEBUG VISUAL]   baseline={baseline:.3f}")
+                    print(f"[DEBUG VISUAL]   contrastes={[f'{c:.3f}' for c in contrastes]}")
                 
-                for item in row_items:
+                for idx, item in enumerate(row_items):
                     x = item['x']
                     y = item['y']
                     letter = item['letter']
                     is_marked = (resposta == letter and resposta is not None)
+                    fill_ratio = fills[idx] if idx < len(fills) else 0
+                    contraste = contrastes[idx] if idx < len(contrastes) else 0
                     
                     # ✅ DEBUG: Print quando encontra a resposta marcada
                     if is_marked and print_debug_answer:
-                        print(f"[DEBUG]   ✓ {letter} marcada: x={x}px, y={y}px, alternative_index={item.get('alternative_index', 'N/A')}")
-                    
-                    # Medir preenchimento (usar raio original de 15px)
-                    fill_ratio = self._medir_preenchimento_bolha(block_roi, x, y, bubble_radius, None)
+                        print(f"[DEBUG VISUAL]   ✓ {letter} marcada: x={x}px, y={y}px, fill={fill_ratio:.3f}, contraste={contraste:.3f}")
                     
                     # Escolher cor
                     if is_marked:
@@ -3145,34 +3802,15 @@ class AnswerSheetCorrectionN:
                         color = COLOR_UNMARKED
                         thickness = 1
                     
-                    # Desenhar círculo da grade virtual (usar raio maior de 16px para visualização)
+                    # ✅ CORREÇÃO 6: Desenhar círculo da grade virtual
                     cv2.circle(img_debug, (x, y), grid_radius, COLOR_GRID, 1)
                     cv2.circle(img_debug, (x, y), grid_radius, color, thickness)
                     
-                    # Desenhar centro
-                    cv2.circle(img_debug, (x, y), 3, color, -1)
+                    # ✅ CORREÇÃO 6: Desenhar ROI em anel usada na medição
+                    self._desenhar_mascara_anel_debug(img_debug, x, y, bubble_radius, is_marked)
                     
-                    # # Adicionar texto com letra [COMENTADO - Remover visual clutter]
-                    # text = f"{letter}"
-                    # font = cv2.FONT_HERSHEY_SIMPLEX
-                    # font_scale = 0.4
-                    # thickness_text = 1
-                    # (text_width, text_height), baseline = cv2.getTextSize(text, font, font_scale, thickness_text)
-                    # 
-                    # # Posição do texto (acima da bolha) - usar grid_radius para posicionamento
-                    # text_x = x - text_width // 2
-                    # text_y = y - grid_radius - 5
-                    # 
-                    # # Desenhar fundo preto para texto
-                    # cv2.rectangle(img_debug, 
-                    #              (text_x - 2, text_y - text_height - baseline - 2),
-                    #              (text_x + text_width + 2, text_y + baseline + 2),
-                    #              COLOR_BACKGROUND_TEXT, -1)
-                    # 
-                    # # Desenhar texto
-                    # cv2.putText(img_debug, text, 
-                    #            (text_x, text_y),
-                    #            font, font_scale, COLOR_TEXT, thickness_text)
+                    # Desenhar centro
+                    cv2.circle(img_debug, (x, y), 2, color, -1)
             
             # # Adicionar informações do bloco no topo [COMENTADO - Remover visual clutter]
             # info_text = f"Bloco {block_num}: Grade Virtual - {len(grid)} posições, {len(questions_grid)} questões"

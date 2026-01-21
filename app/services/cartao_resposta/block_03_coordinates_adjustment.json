@@ -1,9 +1,9 @@
 {
   "block_num": 1,
-  "start_x": 32,
+  "start_x": 34,
   "start_y": 15,
   "line_height": 18,
-  "block_width_ref": 142,
+  "block_width_ref": 155,
   "block_height_ref": 473,
   "img_real_path": "C:\\Users\\Artur Calderon\\Documents\\Programming\\innovaplay_backend\\debug_corrections\\20260120_230659_540_04_block_01_real_only.jpg",
   "bubble_size": 15,

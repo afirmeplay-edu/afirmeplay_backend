@@ -277,6 +277,40 @@ def generate_answer_sheets():
             logging.error(f"Erro ao gerar coordenadas: {str(e)}", exc_info=True)
             # Continuar mesmo se falhar (usará método antigo na correção)
         
+        # =========================================================================
+        # ✅ TEMPLATE REAL DIGITAL: Gerar templates de blocos
+        # =========================================================================
+        # Renderiza o PDF real e passa pelo MESMO pipeline de correção
+        # para garantir alinhamento perfeito entre template e cartão do aluno.
+        # =========================================================================
+        try:
+            logging.info(f"🔧 TEMPLATE REAL DIGITAL: Iniciando geração de templates para gabarito {str(gabarito.id)}")
+            
+            correction_service = AnswerSheetCorrectionN(debug=False)
+            
+            # Gerar templates de blocos (usa o PDF real passando pelo mesmo pipeline)
+            templates = correction_service.gerar_templates_blocos(gabarito_obj=gabarito, dpi=300)
+            
+            if templates:
+                # Salvar templates no banco
+                success = correction_service.salvar_templates_no_gabarito(
+                    gabarito_obj=gabarito,
+                    templates=templates,
+                    dpi=300
+                )
+                
+                if success:
+                    logging.info(f"✅ TEMPLATE REAL DIGITAL: {len(templates)} templates salvos para gabarito {str(gabarito.id)}")
+                else:
+                    logging.warning(f"⚠️ TEMPLATE REAL DIGITAL: Falha ao salvar templates (continuando sem templates)")
+            else:
+                logging.warning(f"⚠️ TEMPLATE REAL DIGITAL: Nenhum template gerado (continuando sem templates)")
+                
+        except Exception as e:
+            logging.error(f"Erro ao gerar templates de blocos: {str(e)}", exc_info=True)
+            # Continuar mesmo se falhar (usará método geométrico na correção)
+            logging.warning("⚠️ TEMPLATE REAL DIGITAL: Correção usará método geométrico (menos preciso)")
+        
         # Preparar test_data completo
         test_data_complete = {
             'id': data.get('test_id'),

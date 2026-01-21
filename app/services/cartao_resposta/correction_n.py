@@ -133,6 +133,53 @@ class AnswerSheetCorrectionN:
             self.logger.warning(f"Erro ao carregar configuração de grid de {config_path}: {str(e)}")
             return None
     
+    def _load_coordinates_adjustment(self, block_num: int = None) -> Optional[Dict]:
+        """
+        Carrega configuração de ajuste de coordenadas se disponível
+        
+        Args:
+            block_num: Número do bloco
+            
+        Returns:
+            Dict com start_x, start_y, line_height, ou None se não encontrar
+        """
+        if block_num is None:
+            return None
+        
+        config_filename = f"block_{block_num:02d}_coordinates_adjustment.json"
+        
+        # Tentar vários caminhos possíveis
+        possible_paths = [
+            os.path.join(self.alignment_dir, config_filename),
+            os.path.join(self.debug_dir, config_filename),
+            config_filename,
+        ]
+        
+        config_path = None
+        for path in possible_paths:
+            if os.path.exists(path):
+                config_path = path
+                break
+        
+        if not config_path:
+            self.logger.debug(f"Bloco {block_num}: Arquivo de ajuste de coordenadas não encontrado")
+            return None
+        
+        try:
+            with open(config_path, 'r', encoding='utf-8') as f:
+                config = json.load(f)
+                result = {
+                    'start_x': config.get('start_x', 0),
+                    'start_y': config.get('start_y', 0),
+                    'line_height': config.get('line_height'),
+                }
+                self.logger.info(f"Bloco {block_num}: Ajuste de coordenadas carregado de {config_path}")
+                self.logger.info(f"  start_x: {result['start_x']}px, start_y: {result['start_y']}px, line_height: {result.get('line_height', 'N/A')}px")
+                return result
+        except Exception as e:
+            self.logger.warning(f"Erro ao carregar ajuste de coordenadas de {config_path}: {str(e)}")
+            return None
+    
     def _load_manual_alignment(self, block_num: int = None, block_width: int = None, block_height: int = None) -> Optional[Dict]:
         """
         Carrega configuração de alinhamento manual se disponível
@@ -186,19 +233,20 @@ class AnswerSheetCorrectionN:
                             block_width_ref, block_height_ref,
                             block_width, block_height
                         )
+                        # Inverter offsets (como estava antes)
                         offset_x = -offset_x_prop
                         offset_y = -offset_y_prop
                         self.logger.info(f"Bloco {block_num}: Alinhamento manual carregado de {config_path}")
                         self.logger.info(f"  Offset proporcional: X={offset_x_raw:+d}→{offset_x_prop:+d}, Y={offset_y_raw:+d}→{offset_y_prop:+d}")
                         self.logger.info(f"  Bloco: {block_width_ref}x{block_height_ref} → {block_width}x{block_height}")
                     else:
-                        # Usar offsets absolutos (compatibilidade com configurações antigas)
+                        # Usar offsets absolutos (com inversão)
                         offset_x = -offset_x_raw
                         offset_y = -offset_y_raw
                         self.logger.info(f"Bloco {block_num}: Alinhamento manual carregado de {config_path}")
                         self.logger.info(f"  Offset absoluto (sem proporção): X={offset_x_raw:+d}→{offset_x:+d}, Y={offset_y_raw:+d}→{offset_y:+d}")
                 else:
-                    # Sem informações de tamanho, usar offsets absolutos
+                    # Sem informações de tamanho, usar offsets absolutos (com inversão)
                     offset_x = -offset_x_raw
                     offset_y = -offset_y_raw
                     self.logger.info(f"Bloco {block_num}: Alinhamento manual carregado de {config_path}")
@@ -529,7 +577,29 @@ class AnswerSheetCorrectionN:
                 inner_h, inner_w = block_inner.shape[:2]
                 self.logger.info(f"Bloco {block_num_detected}: Tamanho interno = {inner_w}x{inner_h}px")
                 
-                # SALVAR IMAGEM LIMPA DO BLOCO (SEM OVERLAY) - para debug
+                # ✅ SALVAR IMAGEM ORIGINAL ANTES DO REDIMENSIONAMENTO (para saber o tamanho real)
+                # Converter para BGR se necessário para salvar
+                if len(block_inner.shape) == 2:
+                    block_original_bgr = cv2.cvtColor(block_inner, cv2.COLOR_GRAY2BGR)
+                else:
+                    block_original_bgr = block_inner.copy()
+                self._save_debug_image(f"04_block_{block_num_detected:02d}_real_only_original_{inner_w}x{inner_h}.jpg", block_original_bgr)
+                self.logger.info(f"Bloco {block_num_detected}: Imagem original salva: {inner_w}x{inner_h}px")
+                
+                # ✅ NOVO: Redimensionar bloco para tamanho padrão (142x473px) para garantir consistência
+                STANDARD_BLOCK_WIDTH = 142
+                STANDARD_BLOCK_HEIGHT = 473
+                
+                if inner_w != STANDARD_BLOCK_WIDTH or inner_h != STANDARD_BLOCK_HEIGHT:
+                    self.logger.info(f"Bloco {block_num_detected}: Redimensionando de {inner_w}x{inner_h}px para {STANDARD_BLOCK_WIDTH}x{STANDARD_BLOCK_HEIGHT}px")
+                    block_inner = cv2.resize(block_inner, (STANDARD_BLOCK_WIDTH, STANDARD_BLOCK_HEIGHT), interpolation=cv2.INTER_AREA)
+                    inner_w = STANDARD_BLOCK_WIDTH
+                    inner_h = STANDARD_BLOCK_HEIGHT
+                    self.logger.info(f"Bloco {block_num_detected}: Bloco redimensionado para {inner_w}x{inner_h}px")
+                else:
+                    self.logger.debug(f"Bloco {block_num_detected}: Já está no tamanho padrão {STANDARD_BLOCK_WIDTH}x{STANDARD_BLOCK_HEIGHT}px")
+                
+                # SALVAR IMAGEM LIMPA DO BLOCO REDIMENSIONADO (SEM OVERLAY) - para debug
                 # Converter para BGR se necessário para salvar
                 if len(block_inner.shape) == 2:
                     block_clean_bgr = cv2.cvtColor(block_inner, cv2.COLOR_GRAY2BGR)
@@ -838,7 +908,7 @@ class AnswerSheetCorrectionN:
                 self.logger.warning(f"Quadrados ausentes nos cantos: {missing_corners}")
                 return None
             
-            # Para cada canto, pegar o maior quadrado (mais confiável)
+            # Para cada canto, pegar o maior quadrado (mais confiável) e extrair o vértice correto
             ordered_squares = {}
             for corner, items in corners.items():
                 if not items:
@@ -846,19 +916,46 @@ class AnswerSheetCorrectionN:
                     return None
                 # Pegar o maior quadrado do canto
                 best_square = max(items, key=lambda x: x["area"])
-                ordered_squares[corner] = list(best_square["center"])
+                
+                # ✅ CORREÇÃO: Extrair o vértice correto do quadrado ao invés do centro
+                # O vértice correto é aquele que está mais próximo do canto real do documento
+                contour = best_square["contour"]  # approx com 4 vértices
+                vertices = contour.reshape(-1, 2)  # Converter para array de pontos (x, y)
+                
+                # Selecionar o vértice correto baseado no canto
+                # Para cada canto, queremos o vértice que minimiza/maximiza x e y apropriadamente
+                if corner == "TL":  # Top-Left: menor x E menor y
+                    # Encontrar vértice com menor distância ao canto (0, 0)
+                    distances = vertices[:, 0] + vertices[:, 1]
+                    corner_vertex = vertices[np.argmin(distances)]
+                elif corner == "TR":  # Top-Right: maior x E menor y
+                    # Encontrar vértice com maior x e menor y (mais próximo de (width, 0))
+                    # Usar distância ponderada: maximizar x, minimizar y
+                    scores = vertices[:, 0] - vertices[:, 1]
+                    corner_vertex = vertices[np.argmax(scores)]
+                elif corner == "BR":  # Bottom-Right: maior x E maior y
+                    # Encontrar vértice com maior distância ao canto (0, 0)
+                    distances = vertices[:, 0] + vertices[:, 1]
+                    corner_vertex = vertices[np.argmax(distances)]
+                else:  # BL - Bottom-Left: menor x E maior y
+                    # Encontrar vértice com menor x e maior y (mais próximo de (0, height))
+                    # Usar distância ponderada: minimizar x, maximizar y
+                    scores = vertices[:, 0] - vertices[:, 1]
+                    corner_vertex = vertices[np.argmin(scores)]
+                
+                ordered_squares[corner] = [float(corner_vertex[0]), float(corner_vertex[1])]
             
             # Salvar debug
             if self.save_debug_images:
                 img_debug = img.copy()
-                for label, center in ordered_squares.items():
-                    cx, cy = int(center[0]), int(center[1])
-                    cv2.circle(img_debug, (cx, cy), 15, (0, 255, 0), -1)
-                    cv2.putText(img_debug, label, (cx+20, cy), 
+                for label, vertex in ordered_squares.items():
+                    vx, vy = int(vertex[0]), int(vertex[1])
+                    cv2.circle(img_debug, (vx, vy), 15, (0, 255, 0), -1)
+                    cv2.putText(img_debug, label, (vx+20, vy), 
                               cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 255, 0), 3)
                 self._save_debug_image("00_a4_squares_detected.jpg", img_debug)
             
-            self.logger.info(f"✅ 4 quadrados A4 detectados: TL={ordered_squares['TL']}, TR={ordered_squares['TR']}, BR={ordered_squares['BR']}, BL={ordered_squares['BL']}")
+            self.logger.info(f"✅ 4 quadrados A4 detectados (vértices): TL={ordered_squares['TL']}, TR={ordered_squares['TR']}, BR={ordered_squares['BR']}, BL={ordered_squares['BL']}")
             
             return ordered_squares
             
@@ -887,8 +984,9 @@ class AnswerSheetCorrectionN:
             PX_PER_CM = DPI / 2.54  # ~39.37 pixels por cm
             
             # Dimensões do A4 em pixels (tamanho padrão)
-            A4_WIDTH_PX = int(A4_WIDTH_CM * PX_PER_CM)  # ~827px
-            A4_HEIGHT_PX = int(A4_HEIGHT_CM * PX_PER_CM)  # ~1169px
+            # CORRIGIDO: Usar round() ao invés de int() para evitar truncamento
+            A4_WIDTH_PX = round(A4_WIDTH_CM * PX_PER_CM)  # 827px (correto)
+            A4_HEIGHT_PX = round(A4_HEIGHT_CM * PX_PER_CM)  # 1171px (correto)
             
             # Pontos de origem (quadrados detectados)
             src_points = np.array([
@@ -906,11 +1004,30 @@ class AnswerSheetCorrectionN:
                 [0, A4_HEIGHT_PX - 1]            # Bottom-left
             ], dtype="float32")
             
+            # 🔍 DEBUG: Logs detalhados do warpPerspective
+            self.logger.info(f"🔍 DEBUG - Pontos de origem (detectados):")
+            self.logger.info(f"  TL (src): {src_points[0]}")
+            self.logger.info(f"  TR (src): {src_points[1]}")
+            self.logger.info(f"  BR (src): {src_points[2]}")
+            self.logger.info(f"  BL (src): {src_points[3]}")
+            self.logger.info(f"🔍 DEBUG - Pontos de destino (A4 normalizado):")
+            self.logger.info(f"  TL (dst): {dst_points[0]}")
+            self.logger.info(f"  TR (dst): {dst_points[1]}")
+            self.logger.info(f"  BR (dst): {dst_points[2]}")
+            self.logger.info(f"  BL (dst): {dst_points[3]}")
+            
             # Calcular matriz de transformação
             M = cv2.getPerspectiveTransform(src_points, dst_points)
             
+            self.logger.info(f"🔍 DEBUG - Matriz de transformação:")
+            self.logger.info(f"  {M}")
+            
             # Aplicar transformação
             img_normalized = cv2.warpPerspective(img, M, (A4_WIDTH_PX, A4_HEIGHT_PX))
+            
+            self.logger.info(f"🔍 DEBUG - Imagem antes e depois:")
+            self.logger.info(f"  Antes (original): {img.shape}")
+            self.logger.info(f"  Depois (warped): {img_normalized.shape}")
             
             # Calcular escala (pixels por cm)
             # Distância entre quadrados na imagem original
@@ -919,6 +1036,22 @@ class AnswerSheetCorrectionN:
             
             px_per_cm_x = width_original_px / A4_WIDTH_CM
             px_per_cm_y = height_original_px / A4_HEIGHT_CM
+            
+            # 🔍 DEBUG: Verificar escala e quadrados detectados
+            self.logger.info(f"🔍 DEBUG - Quadrados detectados:")
+            self.logger.info(f"  TL: {squares['TL']}")
+            self.logger.info(f"  TR: {squares['TR']}")
+            self.logger.info(f"  BR: {squares['BR']}")
+            self.logger.info(f"  BL: {squares['BL']}")
+            self.logger.info(f"🔍 DEBUG - Dimensões originais:")
+            self.logger.info(f"  Largura: {width_original_px:.2f}px")
+            self.logger.info(f"  Altura: {height_original_px:.2f}px")
+            self.logger.info(f"  Proporção (W/H): {width_original_px/height_original_px:.4f} (esperado ~0.7071 para A4)")
+            self.logger.info(f"🔍 DEBUG - Escala:")
+            self.logger.info(f"  px_per_cm_x: {px_per_cm_x:.2f}")
+            self.logger.info(f"  px_per_cm_y: {px_per_cm_y:.2f}")
+            if abs(px_per_cm_x - px_per_cm_y) > 0.5:
+                self.logger.warning(f"⚠️  ESCALAS DIFERENTES! Proporção Y/X: {px_per_cm_y/px_per_cm_x:.4f} ({((px_per_cm_y/px_per_cm_x - 1) * 100):.1f}%)")
             
             scale_info = {
                 'a4_width_px': A4_WIDTH_PX,
@@ -1254,7 +1387,7 @@ class AnswerSheetCorrectionN:
         # Largura: margem esquerda ~0.6cm, direita ~0.6cm, então área útil ~19.8cm
         
         # Converter para pixels (assumindo escala média)
-        # A4 normalizado: 826x1169px (do log)
+        # A4 normalizado: 827x1171px (CORRIGIDO: era 826x1169px, truncamento de int())
         # Proporções: w/21.0 = px_per_cm_x, h/29.7 = px_per_cm_y
         
         px_per_cm_x = w / 21.0
@@ -1309,6 +1442,28 @@ class AnswerSheetCorrectionN:
             max_x = int(max(triangle_TR[0], triangle_BR[0]))
             min_y = int(min(triangle_TL[1], triangle_TR[1]))
             max_y = int(max(triangle_BL[1], triangle_BR[1]))
+            
+            # ✅ VALIDAÇÃO: Verificar se a altura da área cropada é razoável
+            crop_height = max_y - min_y
+            crop_width = max_x - min_x
+            MIN_CROP_HEIGHT = 200  # Altura mínima esperada (blocos têm ~12.9cm = ~360px)
+            MIN_CROP_WIDTH = 300   # Largura mínima esperada (área útil ~19.8cm = ~550px)
+            
+            if crop_height < MIN_CROP_HEIGHT or crop_width < MIN_CROP_WIDTH:
+                self.logger.warning(f"⚠️ Área cropada muito pequena (w={crop_width}px, h={crop_height}px). Usando área padrão baseada no template.")
+                self.logger.warning(f"   Triângulos detectados: TL={triangles['TL']}, TR={triangles['TR']}, BR={triangles['BR']}, BL={triangles['BL']}")
+                
+                # Usar área padrão baseada no template HTML
+                h, w = gray.shape[:2]
+                area_padrao = self._usar_area_padrao_blocos(w, h)
+                
+                # Recalcular limites usando área padrão
+                min_x = int(min(area_padrao['TL'][0], area_padrao['BL'][0]))
+                max_x = int(max(area_padrao['TR'][0], area_padrao['BR'][0]))
+                min_y = int(min(area_padrao['TL'][1], area_padrao['TR'][1]))
+                max_y = int(max(area_padrao['BL'][1], area_padrao['BR'][1]))
+                
+                self.logger.info(f"✅ Usando área padrão: x={min_x}, y={min_y}, w={max_x-min_x}, h={max_y-min_y}")
             
             # Adicionar pequeno padding para garantir que não cortamos nada
             padding = 10
@@ -2241,7 +2396,8 @@ class AnswerSheetCorrectionN:
         return detected_answer, bubbles_info
     
     def _gerar_grade_virtual(self, block_roi: np.ndarray, block_config: Dict, 
-                            line_height: Optional[int] = None, block_num: int = None) -> List[Dict]:
+                            line_height: Optional[int] = None, block_num: int = None,
+                            offset_x: int = 0, offset_y: int = 0) -> List[Dict]:
         """
         Gera grade virtual de posições das bolhas baseado no JSON da topology e geometria do bloco.
         
@@ -2253,6 +2409,9 @@ class AnswerSheetCorrectionN:
             block_roi: ROI do bloco (imagem)
             block_config: Configuração do bloco da topology
             line_height: Altura de linha em pixels (calculado dinamicamente se None)
+            block_num: Número do bloco (para debug)
+            offset_x: Offset X a ser aplicado nas coordenadas (do arquivo de alinhamento)
+            offset_y: Offset Y a ser aplicado nas coordenadas (do arquivo de alinhamento)
             
         Returns:
             Lista de itens da grade: [{"question": q_num, "letter": "A", "x": x, "y": y, "alternatives": [...]}, ...]
@@ -2294,9 +2453,15 @@ class AnswerSheetCorrectionN:
                     # Calcular Y da linha usando line_height real
                     y = y_start + int(i * line_height)
                     
+                    # ✅ Aplicar offset Y do arquivo de alinhamento
+                    y += offset_y
+                    
                     # Gerar posições para cada alternativa usando medidas reais
                     for j, letter in enumerate(alternatives):
                         x = left_margin_px + int(j * bubble_spacing_px)
+                        
+                        # ✅ Aplicar offset X do arquivo de alinhamento
+                        x += offset_x
                         
                         grid_item = {
                             "question": q_num,
@@ -2309,6 +2474,8 @@ class AnswerSheetCorrectionN:
                         }
                         grid.append(grid_item)
                 
+                if offset_x != 0 or offset_y != 0:
+                    self.logger.info(f"Grade virtual gerada (bolhas reais) com offsets aplicados: X={offset_x:+d}px, Y={offset_y:+d}px")
                 self.logger.info(f"Grade virtual gerada (bolhas reais): {len(grid)} posições para {len(questions_config)} questões")
                 return grid
             
@@ -2391,11 +2558,17 @@ class AnswerSheetCorrectionN:
                 # Calcular Y da linha (centro vertical)
                 y = y_start + int(i * line_height)
                 
+                # ✅ Aplicar offset Y do arquivo de alinhamento
+                y += offset_y
+                
                 # Gerar posições para cada alternativa
                 row = []
                 for j, letter in enumerate(alternatives):
                     # Calcular X da bolha (centro horizontal)
                     x = left_margin + int(j * bubble_spacing)
+                    
+                    # ✅ Aplicar offset X do arquivo de alinhamento
+                    x += offset_x
                     
                     grid_item = {
                         "question": q_num,
@@ -2409,11 +2582,126 @@ class AnswerSheetCorrectionN:
                     grid.append(grid_item)
                     row.append(grid_item)
             
+            if offset_x != 0 or offset_y != 0:
+                self.logger.info(f"Grade virtual gerada (ratios) com offsets aplicados: X={offset_x:+d}px, Y={offset_y:+d}px")
             self.logger.info(f"Grade virtual gerada (ratios): {len(grid)} posições para {len(questions_config)} questões")
             return grid
             
         except Exception as e:
             self.logger.error(f"Erro ao gerar grade virtual: {str(e)}", exc_info=True)
+            return []
+    
+    def _gerar_grade_virtual_com_coordenadas_fixas(self, block_roi: np.ndarray, block_config: Dict,
+                                                   line_height: int, block_num: int = None,
+                                                   start_x: int = 0, start_y: int = 0) -> List[Dict]:
+        """
+        Gera grade virtual usando coordenadas fixas do arquivo de ajuste.
+        Usado quando o bloco foi redimensionado para 142x473px e temos coordenadas calibradas.
+        
+        Args:
+            block_roi: ROI do bloco (imagem redimensionada para 142x473px)
+            block_config: Configuração do bloco da topology
+            line_height: Altura de linha em pixels (do arquivo de ajuste)
+            block_num: Número do bloco (para debug)
+            start_x: Posição X inicial da primeira bolha (do arquivo de ajuste)
+            start_y: Posição Y inicial da primeira linha (do arquivo de ajuste)
+            
+        Returns:
+            Lista de itens da grade: [{"question": q_num, "letter": "A", "x": x, "y": y, ...}, ...]
+        """
+        try:
+            h, w = block_roi.shape[:2]
+            questions_config = block_config.get('questions', [])
+            
+            if not questions_config:
+                return []
+            
+            # Calcular line_height ajustado baseado no tamanho real do bloco para evitar erro acumulado
+            # Padding interno do CSS: 8px top + 8px bottom = 16px total
+            PADDING_TOP = 8
+            PADDING_BOTTOM = 8
+            total_padding = PADDING_TOP + PADDING_BOTTOM
+            usable_height = h - total_padding
+            num_questions = len(questions_config)
+            use_line_height = line_height  # Inicializar com valor padrão
+            
+            # Se temos altura suficiente e número de questões, calcular line_height mais preciso
+            if num_questions > 0 and usable_height > 0:
+                ideal_line_height = usable_height / num_questions
+                # Se o line_height fornecido difere muito do ideal, ajustar para evitar erro acumulado
+                if abs(line_height - ideal_line_height) > 0.5:
+                    adjusted_line_height = round(ideal_line_height)
+                    if adjusted_line_height != line_height:
+                        self.logger.info(f"Bloco {block_num}: Ajustando line_height de {line_height}px para {adjusted_line_height}px (ideal: {ideal_line_height:.2f}px) baseado no tamanho real {w}x{h}px")
+                        use_line_height = adjusted_line_height
+                    else:
+                        use_line_height = line_height
+                else:
+                    use_line_height = line_height
+            
+            # Valores do arquivo de ajuste (assumindo bolhas de 15px com gap de 4px)
+            BUBBLE_SIZE = 15
+            BUBBLE_GAP = 4
+            bubble_spacing = BUBBLE_SIZE + BUBBLE_GAP
+            
+            # ✅ DEBUG: Print dos valores base
+            print(f"\n[DEBUG] Bloco {block_num}: Gerando grade virtual com coordenadas fixas")
+            print(f"[DEBUG]   start_x={start_x}px, start_y={start_y}px, line_height={line_height}px (ajustado: {use_line_height}px)")
+            print(f"[DEBUG]   BUBBLE_SIZE={BUBBLE_SIZE}px, BUBBLE_GAP={BUBBLE_GAP}px, bubble_spacing={bubble_spacing}px")
+            print(f"[DEBUG]   Tamanho do bloco: {w}x{h}px, Número de questões: {len(questions_config)}")
+            
+            grid = []
+            
+            # Gerar grade para cada questão usando coordenadas fixas
+            for i, question_config in enumerate(questions_config):
+                q_num = question_config.get('q')
+                alternatives = question_config.get('alternatives', ['A', 'B', 'C', 'D'])
+                
+                if q_num is None:
+                    continue
+                
+                # ✅ DEBUG: Verificar número de alternativas
+                num_alternatives = len(alternatives)
+                if num_alternatives > 4:
+                    print(f"[DEBUG] ⚠️ Q{q_num}: ATENÇÃO - {num_alternatives} alternativas detectadas (esperado máximo 4): {alternatives}")
+                
+                # Calcular Y da linha usando start_y e line_height ajustado (para evitar erro acumulado)
+                y = start_y + int(i * use_line_height)
+                
+                # ✅ DEBUG: Print para primeira questão, questão do meio e última questão
+                print_debug = (i == 0) or (i == len(questions_config) // 2) or (i == len(questions_config) - 1)
+                if print_debug:
+                    print(f"[DEBUG] Q{q_num} (índice {i}): {num_alternatives} alternativas = {alternatives}, Y={y}px")
+                
+                # Gerar posições para cada alternativa usando start_x e bubble_spacing
+                for j, letter in enumerate(alternatives):
+                    # Calcular X da bolha (centro horizontal)
+                    x = start_x + int(j * bubble_spacing) + BUBBLE_SIZE // 2
+                    
+                    # ✅ DEBUG: Print coordenadas X para primeira questão, questão do meio e última
+                    if print_debug:
+                        print(f"[DEBUG]   {letter} (j={j}): x = {start_x} + {j}*{bubble_spacing} + {BUBBLE_SIZE//2} = {x}px")
+                    
+                    grid_item = {
+                        "question": q_num,
+                        "letter": letter,
+                        "x": x,
+                        "y": y,
+                        "alternatives": alternatives,
+                        "question_index": i,
+                        "alternative_index": j
+                    }
+                    grid.append(grid_item)
+            
+            if use_line_height != line_height:
+                self.logger.info(f"Bloco {block_num or 'N/A'}: Grade virtual gerada com coordenadas fixas (start_x={start_x}px, start_y={start_y}px, line_height={line_height}px → ajustado para {use_line_height}px)")
+            else:
+                self.logger.info(f"Bloco {block_num or 'N/A'}: Grade virtual gerada com coordenadas fixas (start_x={start_x}px, start_y={start_y}px, line_height={line_height}px)")
+            self.logger.info(f"Grade virtual gerada (coordenadas fixas): {len(grid)} posições para {len(questions_config)} questões")
+            return grid
+            
+        except Exception as e:
+            self.logger.error(f"Erro ao gerar grade virtual com coordenadas fixas: {str(e)}", exc_info=True)
             return []
     
     def _calcular_raio_bolha_template(self, block_roi: np.ndarray, scale_info: Optional[Dict] = None) -> int:
@@ -2563,16 +2851,58 @@ class AnswerSheetCorrectionN:
                 self.logger.warning(f"Bloco {block_num or 'único'}: Nenhuma questão configurada na topology")
                 return {}, []
             
-            # 1. Calcular line_height dinamicamente do bloco
-            line_height = self._calcular_line_height_dinamico(block_roi, len(questions_config), block_num)
-            if line_height is None:
-                # Fallback: estimar baseado na altura do bloco
-                h, w = block_roi.shape[:2]
-                line_height = int(h / len(questions_config))
-                self.logger.warning(f"Bloco {block_num or 'único'}: line_height estimado = {line_height}px (fallback)")
+            # ✅ NOVO: Prioridade 1 - Carregar ajuste de coordenadas (mais preciso, calibrado para 142x473px)
+            h, w = block_roi.shape[:2]
+            coordinates_adjustment = None
+            alignment_offset_x = 0
+            alignment_offset_y = 0
+            alignment_line_height = None
+            
+            if block_num is not None:
+                # Tentar carregar coordinates_adjustment.json primeiro (mais preciso)
+                coordinates_adjustment = self._load_coordinates_adjustment(block_num)
+                
+                if coordinates_adjustment:
+                    # Usar valores diretos do arquivo de ajuste de coordenadas
+                    start_x = coordinates_adjustment.get('start_x', 0)
+                    start_y = coordinates_adjustment.get('start_y', 0)
+                    alignment_line_height = coordinates_adjustment.get('line_height')
+                    self.logger.info(f"Bloco {block_num}: Usando ajuste de coordenadas - start_x={start_x}px, start_y={start_y}px, line_height={alignment_line_height or 'N/A'}px")
+                else:
+                    # Fallback: usar arquivo de alinhamento antigo
+                    manual_alignment = self._load_manual_alignment(block_num, w, h)
+                    if manual_alignment:
+                        alignment_offset_x = manual_alignment.get('offset_x', 0)
+                        alignment_offset_y = manual_alignment.get('offset_y', 0)
+                        alignment_line_height = manual_alignment.get('line_height')
+                        self.logger.info(f"Bloco {block_num}: Offsets carregados do arquivo de alinhamento - X={alignment_offset_x:+d}px, Y={alignment_offset_y:+d}px")
+                        if alignment_line_height:
+                            self.logger.info(f"Bloco {block_num}: Line height do arquivo: {alignment_line_height}px")
+            
+            # 1. Calcular line_height (prioridade: coordinates_adjustment > alignment > dinâmico > fallback)
+            line_height = None
+            if alignment_line_height is not None:
+                line_height = alignment_line_height
+                self.logger.info(f"Bloco {block_num or 'único'}: Usando line_height do arquivo: {line_height}px")
+            else:
+                line_height = self._calcular_line_height_dinamico(block_roi, len(questions_config), block_num)
+                if line_height is None:
+                    # Fallback: estimar baseado na altura do bloco
+                    line_height = int(h / len(questions_config))
+                    self.logger.warning(f"Bloco {block_num or 'único'}: line_height estimado = {line_height}px (fallback)")
             
             # 2. Gerar grade virtual baseada no JSON e geometria do bloco
-            grid = self._gerar_grade_virtual(block_roi, block_config, line_height, block_num)
+            # Se temos coordinates_adjustment, usar start_x e start_y diretamente
+            if coordinates_adjustment:
+                grid = self._gerar_grade_virtual_com_coordenadas_fixas(
+                    block_roi, block_config, line_height, block_num,
+                    coordinates_adjustment.get('start_x', 0),
+                    coordinates_adjustment.get('start_y', 0)
+                )
+            else:
+                # Usar método antigo com offsets
+                grid = self._gerar_grade_virtual(block_roi, block_config, line_height, block_num, 
+                                                alignment_offset_x, alignment_offset_y)
             
             if not grid:
                 self.logger.warning(f"Bloco {block_num or 'único'}: Grade virtual vazia")
@@ -2606,6 +2936,21 @@ class AnswerSheetCorrectionN:
                 bubble_radius = self._calcular_raio_bolha_template(block_roi, scale_info)
                 self.logger.debug(f"Bloco {block_num or 'único'}: Raio da bolha calculado = {bubble_radius}px")
                 
+                # ✅ DEBUG: Print para primeira questão, questão do meio e última questão
+                q_index_in_block = None
+                for idx, q_config in enumerate(questions_config):
+                    if q_config.get('q') == q_num:
+                        q_index_in_block = idx
+                        break
+                
+                print_debug_detection = (q_index_in_block == 0) or (q_index_in_block == len(questions_config) // 2) or (q_index_in_block == len(questions_config) - 1)
+                if print_debug_detection:
+                    print(f"\n[DEBUG] Bloco {block_num}: Detectando resposta Q{q_num} (índice {q_index_in_block}/{len(questions_config)-1})")
+                    print(f"[DEBUG]   Alternativas ordenadas: {[item['letter'] for item in row_items_sorted]}")
+                    print(f"[DEBUG]   Coordenadas (x, y) de cada alternativa: {[(item['x'], item['y']) for item in row_items_sorted]}")
+                    print(f"[DEBUG]   alternative_index de cada alternativa: {[item.get('alternative_index', 'N/A') for item in row_items_sorted]}")
+                    print(f"[DEBUG]   bubble_radius usado: {bubble_radius}px")
+                
                 for item in row_items_sorted:
                     x = item['x']
                     y = item['y']
@@ -2613,6 +2958,10 @@ class AnswerSheetCorrectionN:
                     
                     # Medir preenchimento nesta posição
                     fill_ratio = self._medir_preenchimento_bolha(block_roi, x, y, bubble_radius, None)
+                    
+                    # ✅ DEBUG: Print fill_ratio para questões de debug
+                    if print_debug_detection:
+                        print(f"[DEBUG]   {letter}: fill_ratio={fill_ratio:.3f} em (x={x}, y={y})")
                     
                     scores.append({
                         'letter': letter,
@@ -2625,6 +2974,11 @@ class AnswerSheetCorrectionN:
                 # Ordenar por fill_ratio (maior primeiro)
                 scores_sorted = sorted(scores, key=lambda x: x['fill_ratio'], reverse=True)
                 
+                # ✅ DEBUG: Print scores ordenados
+                if print_debug_detection:
+                    debug_scores = [(s['letter'], f"{s['fill_ratio']:.3f}", f"x={s['x']}") for s in scores_sorted[:3]]
+                    print(f"[DEBUG]   Scores ordenados: {debug_scores}")
+                
                 # Detectar resposta
                 if not scores_sorted or scores_sorted[0]['fill_ratio'] < FILL_RATIO_THRESHOLD:
                     # Nenhuma bolha marcada claramente
@@ -2635,6 +2989,10 @@ class AnswerSheetCorrectionN:
                     # Verificar se há múltiplas marcações significativas
                     primeira = scores_sorted[0]['fill_ratio']
                     segunda = scores_sorted[1]['fill_ratio']
+                    
+                    # ✅ DEBUG: Print quando detecta múltiplas marcações
+                    if print_debug_detection:
+                        print(f"[DEBUG]   Múltiplas marcações? 1ª={primeira:.3f} ({scores_sorted[0]['letter']}, x={scores_sorted[0]['x']}), 2ª={segunda:.3f} ({scores_sorted[1]['letter']}, x={scores_sorted[1]['x']})")
                     
                     # Critério mais rigoroso: segunda bolha deve ter pelo menos 35% da primeira
                     # E a diferença deve ser pequena (menos de 10 pontos percentuais)
@@ -2747,15 +3105,34 @@ class AnswerSheetCorrectionN:
             # Usar raio maior apenas para desenho, manter raio original para medição
             grid_radius = int(bubble_radius * (16.0 / 15.0))  # Proporcional: 16px / 15px
             
+            # ✅ DEBUG: Obter lista ordenada de questões para identificar primeira, meio e última
+            sorted_questions = sorted(questions_grid.keys())
+            first_q = sorted_questions[0] if sorted_questions else None
+            middle_q = sorted_questions[len(sorted_questions) // 2] if sorted_questions else None
+            last_q = sorted_questions[-1] if sorted_questions else None
+            
             # Desenhar grade virtual e medir preenchimento
             for q_num, row_items in questions_grid.items():
                 resposta = answers.get(q_num)
+                
+                # ✅ DEBUG: Print para questões com resposta detectada (primeira, meio, última)
+                print_debug_answer = resposta is not None and (q_num == first_q or q_num == middle_q or q_num == last_q)
+                if print_debug_answer:
+                    q_index_in_sorted = sorted_questions.index(q_num) if q_num in sorted_questions else -1
+                    print(f"\n[DEBUG] Bloco {block_num}: Q{q_num} (posição {q_index_in_sorted}/{len(sorted_questions)-1}) - Resposta detectada: '{resposta}'")
+                    print(f"[DEBUG]   Alternativas no grid: {[item['letter'] for item in row_items]}")
+                    print(f"[DEBUG]   Coordenadas X no grid: {[item['x'] for item in row_items]}")
+                    print(f"[DEBUG]   alternative_index de cada alternativa: {[item.get('alternative_index', 'N/A') for item in row_items]}")
                 
                 for item in row_items:
                     x = item['x']
                     y = item['y']
                     letter = item['letter']
                     is_marked = (resposta == letter and resposta is not None)
+                    
+                    # ✅ DEBUG: Print quando encontra a resposta marcada
+                    if is_marked and print_debug_answer:
+                        print(f"[DEBUG]   ✓ {letter} marcada: x={x}px, y={y}px, alternative_index={item.get('alternative_index', 'N/A')}")
                     
                     # Medir preenchimento (usar raio original de 15px)
                     fill_ratio = self._medir_preenchimento_bolha(block_roi, x, y, bubble_radius, None)

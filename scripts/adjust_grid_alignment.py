@@ -249,8 +249,6 @@ class GridAlignmentAdjuster:
         
         # Cores
         COLOR_GRID = (0, 0, 255)  # Vermelho para grid virtual
-        COLOR_TEXT = (255, 255, 255)  # Branco para texto
-        COLOR_BACKGROUND_TEXT = (0, 0, 0)  # Preto para fundo do texto
         COLOR_INFO = (0, 255, 0)  # Verde para informações
         
         # Desenhar grid virtual
@@ -258,33 +256,12 @@ class GridAlignmentAdjuster:
             for item in grid:
                 x = item['x']
                 y = item['y']
-                letter = item['letter']
                 
                 # Desenhar círculo do grid (usar grid_radius de 16px para visualização)
                 cv2.circle(img_bgr, (x, y), grid_radius, COLOR_GRID, 1)
                 
                 # Desenhar centro
                 cv2.circle(img_bgr, (x, y), 2, COLOR_GRID, -1)
-                
-                # Adicionar texto com letra (pequeno, acima da bolha)
-                text = f"{letter}"
-                font = cv2.FONT_HERSHEY_SIMPLEX
-                font_scale = 0.3
-                thickness = 1
-                (text_width, text_height), baseline = cv2.getTextSize(text, font, font_scale, thickness)
-                
-                text_x = x - text_width // 2
-                text_y = y - grid_radius - 3
-                
-                # Fundo preto para texto
-                cv2.rectangle(img_bgr,
-                             (text_x - 1, text_y - text_height - baseline - 1),
-                             (text_x + text_width + 1, text_y + baseline + 1),
-                             COLOR_BACKGROUND_TEXT, -1)
-                
-                # Texto
-                cv2.putText(img_bgr, text, (text_x, text_y),
-                           font, font_scale, COLOR_TEXT, thickness)
         
         # Adicionar informações no topo
         top_padding_px = int(self.h * self.top_padding_ratio) if self.top_padding_ratio is not None else 0

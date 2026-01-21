@@ -478,7 +478,7 @@
 		/* ÁREA ÚTIL - Padding intocável para conteúdo OMR */
 		/* Cria zona morta (clear zone) ao redor do conteúdo */
 		/* ✅ Padding-top reduzido para aproximar conteúdo dos quadrados de cima */
-		padding: 1.8cm 2cm 2.2cm 2cm; /* top right bottom left */
+		padding: 1.2cm 2cm 2.2cm 2cm; /* top right bottom left - reduzido top para subir tudo */
 		box-sizing: border-box;
 			
 			overflow: hidden; /* ✅ PROÍBE quebrar página - OBRIGATÓRIO em OMR */
@@ -497,7 +497,7 @@
 
 		/* Triângulo superior esquerdo - Relativo ao grid */
 		.triangle-top-left {
-			top: 0; /* ✅ Colado na zona morta do wrapper (padding: 0.6cm) */
+			top: 0; /* ✅ Colado na zona morta do wrapper (padding: 0.3cm) */
 			left: 0; /* ✅ Colado na zona morta do wrapper */
 			border-top: 0.6cm solid #000; /* ✅ Tamanho do triângulo */
 			border-right: 0.6cm solid transparent;
@@ -532,7 +532,7 @@
 			border: 1px solid #000;
 			padding: 4px;
 			margin: 0;
-			margin-bottom: 4px;
+			margin-bottom: 2px; /* ✅ Reduzido para subir elementos abaixo */
 			display: flex;
 			justify-content: space-between;
 			align-items: stretch;
@@ -662,7 +662,7 @@
 
 			/* ETAPA 3: Travar altura das instruções (ajustado para não cortar texto) */
 			.instructions-box {
-				margin: 3px 0;
+				margin: 1px 0; /* ✅ Reduzido para subir elementos abaixo */
 				padding: 0;
 				background: white;
 				border: 1px solid #333;
@@ -750,7 +750,7 @@
 			}
 
 			.applicator-box {
-				margin: 3px 0;
+				margin: 1px 0; /* ✅ Reduzido para subir elementos abaixo */
 				padding: 0;
 				background: white;
 				border: 1px solid #333;
@@ -798,30 +798,49 @@
 
 		/* WRAPPER DO GRID COM TRIÂNGULOS FIDUCIAIS */
 		/* PASSO 3: Corrigir wrapper da grade (cálculo REAL atualizado) */
-		/* Cálculo REAL: 29.7cm - 1.8cm (top) - 6.4cm (header) - 3.8cm (instruções) - 2.6cm (aplicador) - 2.2cm (bottom) = 12.9cm */
+		/* Cálculo REAL: 29.7cm - 1.2cm (top) - 6.4cm (header) - 3.8cm (instruções) - 2.6cm (aplicador) - 2.2cm (bottom) = 13.5cm */
 		.answer-grid-wrapper {
 			position: relative; /* 🔴 ESSENCIAL: Para triângulos serem relativos ao grid */
-			padding: 0.6cm 0.6cm 1.2cm 0.6cm; /* ✅ Zona morta: top right bottom left (bottom maior para evitar encostar nos blocos) */
-			margin: 5px 0;
-			height: 12.9cm; /* ✅ Altura REAL recalculada */
-			max-height: 12.9cm; /* ✅ Trava máxima */
+			padding: 0.3cm 0.6cm 1.5cm 0.6cm; /* ✅ Zona morta: top reduzido para subir triângulos, bottom ajustado para garantir borda dos blocos */
+			margin: 2px 0; /* ✅ Reduzido para subir os blocos */
+			height: 13.5cm; /* ✅ Altura REAL recalculada (aumentada devido ao padding-top menor) */
+			max-height: 13.5cm; /* ✅ Trava máxima */
 			overflow: hidden; /* ✅ PROÍBE crescimento */
 		}
 
 			/* Grade de respostas - adaptável para múltiplos blocos */
 			/* ETAPA 6: Grid fixo (não flex solto) */
 			.answer-grid-container {
-				margin: 2px 0 6px 0; /* ✅ Margem superior reduzida para subir os blocos */
+				margin: 0; /* ✅ Sem margem negativa - já ajustado pelo padding do wrapper */
 				display: grid; /* ✅ Grid fixo */
 				grid-template-columns: repeat(4, 1fr); /* ✅ 4 colunas fixas */
 				gap: 0.4cm; /* ✅ Gap controlado */
-				height: 100%; /* ✅ Ocupa toda altura disponível */
+				height: 100%; /* ✅ Altura completa do wrapper */
 			}
+
+		/* Wrapper do bloco com header externo */
+		.block-wrapper {
+			display: flex;
+			flex-direction: column;
+			flex: 1 1 auto;
+			min-width: 0;
+		}
+
+		.block-header {
+			text-align: center;
+			font-weight: bold;
+			font-size: 8pt;
+			margin: 0 0 3px 0; /* ✅ Margem abaixo do header para separar do bloco */
+			padding: 2px;
+			background: transparent; /* ✅ Sem background para ficar fora do quadrado */
+			line-height: 1.2;
+			flex-shrink: 0;
+		}
 
 		/* PASSO 5: Travar bloco para não estourar */
 		.answer-block {
 			border: 2px solid #000;
-			padding: 3px 4px 1px 4px; /* ✅ Padding-bottom reduzido para eliminar espaço extra após última questão */
+			padding: 8px 4px 8px 4px; /* ✅ Padding interno em cima e embaixo para não encostar nas bordas */
 			flex: 1 1 auto; /* Permite que os blocos cresçam e encolham igualmente */
 			min-width: 0; /* Permite que encolham abaixo do conteúdo mínimo */
 			position: relative;
@@ -829,18 +848,6 @@
 			overflow: hidden; /* ✅ PROÍBE crescimento */
 			display: flex;
 			flex-direction: column;
-		}
-
-		.block-header {
-			text-align: center;
-			font-weight: bold;
-			font-size: 8pt;
-			margin: 0 0 2px 0;
-			padding: 2px;
-			background: #f5f5f5;
-			line-height: 1.2;
-			border-bottom: 1px solid #ccc;
-			flex-shrink: 0;
 		}
 
 		/* PASSO 4: Corrigir altura da linha (CRÍTICO para 26 questões) */
@@ -1342,14 +1349,14 @@
 					questions_per_block = blocks_config.questions_per_block |
 					default(12) %} {% if questions_by_block %} {% for block in
 					questions_by_block %} {% set questions_in_block =
-					block.questions | length %} {% if questions_in_block > 0 %}
-					<div class="answer-block">
+					block.questions | length %} 					{% if questions_in_block > 0 %}
+					<div class="block-wrapper">
 						<div class="block-header">
 							BLOCO {{ "%02d"|format(block.block_number) }}{% if
 							block.subject_name %} - {{ block.subject_name }}{%
 							endif %}
 						</div>
-
+						<div class="answer-block">
 						<!-- Linhas de resposta -->
 						{% for question in block.questions %}
 						<div class="answer-row">
@@ -1371,15 +1378,17 @@
 							</div>
 						</div>
 						{% endfor %}
+						</div>
 					</div>
 					{% endif %} {% endfor %} {% else %} {% for block_num in
 					range(1, num_blocks + 1) %} {% set start_question =
 					(block_num - 1) * questions_per_block + 1 %} {% set
 					end_question = block_num * questions_per_block %}
-					<div class="answer-block">
+					<div class="block-wrapper">
 						<div class="block-header">
 							BLOCO {{ "%02d"|format(block_num) }}
 						</div>
+						<div class="answer-block">
 
 						{% for q_num in range(start_question, end_question + 1)
 						%}
@@ -1401,6 +1410,7 @@
 							</div>
 						</div>
 						{% endfor %}
+						</div>
 					</div>
 					{% endfor %} {% endif %} {% else %} {% set
 					questions_per_block = 12 %} {% set total_questions =
@@ -1412,10 +1422,11 @@
 					= [block * questions_per_block, total_questions] | min %} {%
 					set questions_in_block = end_question - start_question + 1
 					%} {% if questions_in_block > 0 %}
-					<div class="answer-block">
+					<div class="block-wrapper">
 						<div class="block-header">
 							BLOCO {{ "%02d"|format(block) }}
 						</div>
+						<div class="answer-block">
 
 						{% for q in range(1, questions_in_block + 1) %} {% set
 						question_num = start_question + q - 1 %}
@@ -1439,6 +1450,7 @@
 							</div>
 						</div>
 						{% endfor %}
+						</div>
 					</div>
 					{% endif %} {% endfor %} {% endif %}
 				</div>

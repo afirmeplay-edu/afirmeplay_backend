@@ -3152,54 +3152,54 @@ class AnswerSheetCorrectionN:
                     # Desenhar centro
                     cv2.circle(img_debug, (x, y), 3, color, -1)
                     
-                    # Adicionar texto com letra
-                    text = f"{letter}"
-                    font = cv2.FONT_HERSHEY_SIMPLEX
-                    font_scale = 0.4
-                    thickness_text = 1
-                    (text_width, text_height), baseline = cv2.getTextSize(text, font, font_scale, thickness_text)
-                    
-                    # Posição do texto (acima da bolha) - usar grid_radius para posicionamento
-                    text_x = x - text_width // 2
-                    text_y = y - grid_radius - 5
-                    
-                    # Desenhar fundo preto para texto
-                    cv2.rectangle(img_debug, 
-                                 (text_x - 2, text_y - text_height - baseline - 2),
-                                 (text_x + text_width + 2, text_y + baseline + 2),
-                                 COLOR_BACKGROUND_TEXT, -1)
-                    
-                    # Desenhar texto
-                    cv2.putText(img_debug, text, 
-                               (text_x, text_y),
-                               font, font_scale, COLOR_TEXT, thickness_text)
+                    # # Adicionar texto com letra [COMENTADO - Remover visual clutter]
+                    # text = f"{letter}"
+                    # font = cv2.FONT_HERSHEY_SIMPLEX
+                    # font_scale = 0.4
+                    # thickness_text = 1
+                    # (text_width, text_height), baseline = cv2.getTextSize(text, font, font_scale, thickness_text)
+                    # 
+                    # # Posição do texto (acima da bolha) - usar grid_radius para posicionamento
+                    # text_x = x - text_width // 2
+                    # text_y = y - grid_radius - 5
+                    # 
+                    # # Desenhar fundo preto para texto
+                    # cv2.rectangle(img_debug, 
+                    #              (text_x - 2, text_y - text_height - baseline - 2),
+                    #              (text_x + text_width + 2, text_y + baseline + 2),
+                    #              COLOR_BACKGROUND_TEXT, -1)
+                    # 
+                    # # Desenhar texto
+                    # cv2.putText(img_debug, text, 
+                    #            (text_x, text_y),
+                    #            font, font_scale, COLOR_TEXT, thickness_text)
             
-            # Adicionar informações do bloco no topo
-            info_text = f"Bloco {block_num}: Grade Virtual - {len(grid)} posições, {len(questions_grid)} questões"
-            font = cv2.FONT_HERSHEY_SIMPLEX
-            font_scale = 0.6
-            thickness = 1
-            (text_width, text_height), baseline = cv2.getTextSize(info_text, font, font_scale, thickness)
-            
-            # Fundo para texto do bloco
-            cv2.rectangle(img_debug, (5, 5), (text_width + 10, text_height + baseline + 10),
-                         COLOR_BACKGROUND_TEXT, -1)
-            cv2.putText(img_debug, info_text, (10, text_height + 5),
-                       font, font_scale, COLOR_TEXT, thickness)
-            
-            # Adicionar respostas detectadas
-            respostas_detectadas = [f"Q{q}={a}" for q, a in sorted(answers.items()) if a is not None]
-            if respostas_detectadas:
-                respostas_text = "Respostas: " + ", ".join(respostas_detectadas[:10])
-                if len(respostas_detectadas) > 10:
-                    respostas_text += f" ... (+{len(respostas_detectadas) - 10} mais)"
-                
-                y_offset = text_height + baseline + 20
-                (text_width2, text_height2), baseline2 = cv2.getTextSize(respostas_text, font, font_scale, thickness)
-                cv2.rectangle(img_debug, (5, y_offset), (min(text_width2 + 10, img_debug.shape[1] - 5), y_offset + text_height2 + baseline2 + 10),
-                             COLOR_BACKGROUND_TEXT, -1)
-                cv2.putText(img_debug, respostas_text, (10, y_offset + text_height2 + 5),
-                           font, font_scale, COLOR_TEXT, thickness)
+            # # Adicionar informações do bloco no topo [COMENTADO - Remover visual clutter]
+            # info_text = f"Bloco {block_num}: Grade Virtual - {len(grid)} posições, {len(questions_grid)} questões"
+            # font = cv2.FONT_HERSHEY_SIMPLEX
+            # font_scale = 0.6
+            # thickness = 1
+            # (text_width, text_height), baseline = cv2.getTextSize(info_text, font, font_scale, thickness)
+            # 
+            # # Fundo para texto do bloco
+            # cv2.rectangle(img_debug, (5, 5), (text_width + 10, text_height + baseline + 10),
+            #              COLOR_BACKGROUND_TEXT, -1)
+            # cv2.putText(img_debug, info_text, (10, text_height + 5),
+            #            font, font_scale, COLOR_TEXT, thickness)
+            # 
+            # # Adicionar respostas detectadas
+            # respostas_detectadas = [f"Q{q}={a}" for q, a in sorted(answers.items()) if a is not None]
+            # if respostas_detectadas:
+            #     respostas_text = "Respostas: " + ", ".join(respostas_detectadas[:10])
+            #     if len(respostas_detectadas) > 10:
+            #         respostas_text += f" ... (+{len(respostas_detectadas) - 10} mais)"
+            #     
+            #     y_offset = text_height + baseline + 20
+            #     (text_width2, text_height2), baseline2 = cv2.getTextSize(respostas_text, font, font_scale, thickness)
+            #     cv2.rectangle(img_debug, (5, y_offset), (min(text_width2 + 10, img_debug.shape[1] - 5), y_offset + text_height2 + baseline2 + 10),
+            #                  COLOR_BACKGROUND_TEXT, -1)
+            #     cv2.putText(img_debug, respostas_text, (10, y_offset + text_height2 + 5),
+            #                font, font_scale, COLOR_TEXT, thickness)
             
             # Salvar imagem
             self._save_debug_image(f"05_block_{block_num:02d}_grade_virtual.jpg", img_debug)
@@ -3294,56 +3294,56 @@ class AnswerSheetCorrectionN:
                     y = bolha['y']
                     cv2.circle(img_debug, (x, y), 4, color, -1)
                     
-                    # Adicionar texto com opção (A, B, C, D) se disponível
-                    if option:
-                        text = f"{option}"
-                        # Calcular tamanho do texto para fundo
-                        font = cv2.FONT_HERSHEY_SIMPLEX
-                        font_scale = 0.5
-                        thickness_text = 1
-                        (text_width, text_height), baseline = cv2.getTextSize(text, font, font_scale, thickness_text)
-                        
-                        # Posição do texto (acima da bolha)
-                        text_x = x - text_width // 2
-                        text_y = y - 8
-                        
-                        # Desenhar fundo preto para texto
-                        cv2.rectangle(img_debug, 
-                                     (text_x - 2, text_y - text_height - baseline - 2),
-                                     (text_x + text_width + 2, text_y + baseline + 2),
-                                     COLOR_BACKGROUND_TEXT, -1)
-                        
-                        # Desenhar texto
-                        cv2.putText(img_debug, text, 
-                                   (text_x, text_y),
-                                   font, font_scale, COLOR_TEXT, thickness_text)
+                    # # Adicionar texto com opção (A, B, C, D) se disponível [COMENTADO - Remover visual clutter]
+                    # if option:
+                    #     text = f"{option}"
+                    #     # Calcular tamanho do texto para fundo
+                    #     font = cv2.FONT_HERSHEY_SIMPLEX
+                    #     font_scale = 0.5
+                    #     thickness_text = 1
+                    #     (text_width, text_height), baseline = cv2.getTextSize(text, font, font_scale, thickness_text)
+                    #     
+                    #     # Posição do texto (acima da bolha)
+                    #     text_x = x - text_width // 2
+                    #     text_y = y - 8
+                    #     
+                    #     # Desenhar fundo preto para texto
+                    #     cv2.rectangle(img_debug, 
+                    #                  (text_x - 2, text_y - text_height - baseline - 2),
+                    #                  (text_x + text_width + 2, text_y + baseline + 2),
+                    #                  COLOR_BACKGROUND_TEXT, -1)
+                    #     
+                    #     # Desenhar texto
+                    #     cv2.putText(img_debug, text, 
+                    #                (text_x, text_y),
+                    #                font, font_scale, COLOR_TEXT, thickness_text)
             
-            # Adicionar informações do bloco no topo
-            info_text = f"Bloco {block_num}: {len(all_bubbles)} bolhas, {len(linhas)} linhas"
-            font = cv2.FONT_HERSHEY_SIMPLEX
-            font_scale = 0.6
-            thickness = 1
-            (text_width, text_height), baseline = cv2.getTextSize(info_text, font, font_scale, thickness)
-            
-            # Fundo para texto do bloco
-            cv2.rectangle(img_debug, (5, 5), (text_width + 10, text_height + baseline + 10),
-                         COLOR_BACKGROUND_TEXT, -1)
-            cv2.putText(img_debug, info_text, (10, text_height + 5),
-                       font, font_scale, COLOR_TEXT, thickness)
-            
-            # Adicionar respostas detectadas
-            respostas_detectadas = [f"Q{q}={a}" for q, a in sorted(answers.items()) if a is not None]
-            if respostas_detectadas:
-                respostas_text = "Respostas: " + ", ".join(respostas_detectadas[:10])  # Limitar a 10 para não ficar muito grande
-                if len(respostas_detectadas) > 10:
-                    respostas_text += f" ... (+{len(respostas_detectadas) - 10} mais)"
-                
-                y_offset = text_height + baseline + 20
-                (text_width2, text_height2), baseline2 = cv2.getTextSize(respostas_text, font, font_scale, thickness)
-                cv2.rectangle(img_debug, (5, y_offset), (min(text_width2 + 10, img_debug.shape[1] - 5), y_offset + text_height2 + baseline2 + 10),
-                             COLOR_BACKGROUND_TEXT, -1)
-                cv2.putText(img_debug, respostas_text, (10, y_offset + text_height2 + 5),
-                           font, font_scale, COLOR_TEXT, thickness)
+            # # Adicionar informações do bloco no topo [COMENTADO - Remover visual clutter]
+            # info_text = f"Bloco {block_num}: {len(all_bubbles)} bolhas, {len(linhas)} linhas"
+            # font = cv2.FONT_HERSHEY_SIMPLEX
+            # font_scale = 0.6
+            # thickness = 1
+            # (text_width, text_height), baseline = cv2.getTextSize(info_text, font, font_scale, thickness)
+            # 
+            # # Fundo para texto do bloco
+            # cv2.rectangle(img_debug, (5, 5), (text_width + 10, text_height + baseline + 10),
+            #              COLOR_BACKGROUND_TEXT, -1)
+            # cv2.putText(img_debug, info_text, (10, text_height + 5),
+            #            font, font_scale, COLOR_TEXT, thickness)
+            # 
+            # # Adicionar respostas detectadas
+            # respostas_detectadas = [f"Q{q}={a}" for q, a in sorted(answers.items()) if a is not None]
+            # if respostas_detectadas:
+            #     respostas_text = "Respostas: " + ", ".join(respostas_detectadas[:10])  # Limitar a 10 para não ficar muito grande
+            #     if len(respostas_detectadas) > 10:
+            #         respostas_text += f" ... (+{len(respostas_detectadas) - 10} mais)"
+            #     
+            #     y_offset = text_height + baseline + 20
+            #     (text_width2, text_height2), baseline2 = cv2.getTextSize(respostas_text, font, font_scale, thickness)
+            #     cv2.rectangle(img_debug, (5, y_offset), (min(text_width2 + 10, img_debug.shape[1] - 5), y_offset + text_height2 + baseline2 + 10),
+            #                  COLOR_BACKGROUND_TEXT, -1)
+            #     cv2.putText(img_debug, respostas_text, (10, y_offset + text_height2 + 5),
+            #                font, font_scale, COLOR_TEXT, thickness)
             
             # Salvar imagem
             self._save_debug_image(f"05_block_{block_num:02d}_bubbles_detected.jpg", img_debug)

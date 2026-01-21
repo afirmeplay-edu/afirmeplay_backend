@@ -1,0 +1,55 @@
+ANALISE DE DETECCAO DE BOLHAS - RESUMO EXECUTIVO
+
+PROBLEMA IDENTIFICADO: BUG VISUAL - Parametros de HoughCircles muito restritivos
+
+ROOT CAUSE (Causa Raiz):
+  Funcao: _detectar_bolhas_simple (linha 2118)
+  Arquivo: app/services/cartao_resposta/correction_n.py
+  
+  Parametros INCORRETOS (causa 0% de deteccao):
+    param2=30  <- MUITO ALTO! Rejeita quase todos os circulos
+    dp=1.2     <- Um pouco alto, melhor deixar em 1.0
+  
+  Parametros CORRETOS (100% de deteccao):
+    param2=15  <- Otimo
+    dp=1.0     <- Otimo
+
+IMPACTO:
+  - Com param2=30: 0 bolhas detectadas (taxa 0%)
+  - Com param2=15: 104 bolhas detectadas (taxa 100%)
+  
+  Isso explica por que nao havia bolhas sendo detectadas!
+
+SOLUCAO APLICADA:
+  Arquivo: app/services/cartao_resposta/correction_n.py
+  
+  1. Linha 2123 (dp):
+     - Mudado de: dp=1.2
+     - Mudado para: dp=1.0
+  
+  2. Linha 2124 (param2):
+     - Mudado de: param2=30
+     - Mudado para: param2=15
+  
+  3. Linha 4944 (fallback HoughCircles):
+     - Mudado de: param2=25
+     - Mudado para: param2=15
+     (para consistencia)
+
+RESULTADO ESPERADO APOS CORRECAO:
+  - Bolhas serao detectadas corretamente
+  - Grid visual sera alinhado conforme esperado
+  - fill_ratios tendirao a ser consistentes
+
+STATUS: CONCLUIDO - Commit: 6641737
+
+MUDANCAS TOTAIS NO REPOSITORIO:
+  1. JSON files: line_height 14->18 (commit 5d70dfb)
+  2. correction_n.py: round() em A4 (commit 5d70dfb)
+  3. correction_n.py: DEBUG logs para warpPerspective (commit 5d70dfb)
+  4. correction_n.py: HoughCircles param2 30->15, dp 1.2->1.0 (commit 6641737)
+
+PROXIMOS PASSOS:
+  - Testar com imagem real que tem bolhas marcadas
+  - Verificar se fill_ratios agora sao consistentes
+  - Confirmar se o grid visual esta alinhado

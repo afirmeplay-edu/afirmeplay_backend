@@ -39,4 +39,7 @@ from .calendar_event_user import CalendarEventUser
 from app.socioeconomic_forms.models import Form, FormQuestion, FormRecipient, FormResponse
 from app.play_tv.models import PlayTvVideo, PlayTvVideoSchool
 
+# Certificados
+from app.certification.models import CertificateTemplate, Certificate
+
 

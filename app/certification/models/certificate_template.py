@@ -1,0 +1,50 @@
+# -*- coding: utf-8 -*-
+"""
+Modelo para templates de certificados
+"""
+from app import db
+import uuid
+from datetime import datetime
+
+class CertificateTemplate(db.Model):
+    __tablename__ = 'certificate_templates'
+    
+    id = db.Column(db.String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    evaluation_id = db.Column(db.String, db.ForeignKey('test.id'), nullable=False)
+    title = db.Column(db.String(255), nullable=True)
+    text_content = db.Column(db.Text, nullable=False)  # Suporta {{nome_aluno}}
+    background_color = db.Column(db.String(7), nullable=False)  # Hex color
+    text_color = db.Column(db.String(7), nullable=False)  # Hex color
+    accent_color = db.Column(db.String(7), nullable=False)  # Hex color
+    logo_url = db.Column(db.String(500), nullable=True)
+    signature_url = db.Column(db.String(500), nullable=True)
+    custom_date = db.Column(db.String(50), nullable=True)
+    created_at = db.Column(db.TIMESTAMP, server_default=db.text('CURRENT_TIMESTAMP'))
+    updated_at = db.Column(db.TIMESTAMP, server_default=db.text('CURRENT_TIMESTAMP'), onupdate=db.text('CURRENT_TIMESTAMP'))
+    
+    # Relacionamentos
+    evaluation = db.relationship('Test', foreign_keys=[evaluation_id])
+    certificates = db.relationship('Certificate', backref='template', cascade='all, delete-orphan')
+    
+    # Constraint único: uma avaliação só pode ter um template
+    __table_args__ = (db.UniqueConstraint('evaluation_id', name='uq_certificate_template_evaluation'),)
+    
+    def to_dict(self):
+        """Converte o objeto para dicionário"""
+        return {
+            'id': self.id,
+            'evaluation_id': self.evaluation_id,
+            'title': self.title,
+            'text_content': self.text_content,
+            'background_color': self.background_color,
+            'text_color': self.text_color,
+            'accent_color': self.accent_color,
+            'logo_url': self.logo_url,
+            'signature_url': self.signature_url,
+            'custom_date': self.custom_date,
+            'created_at': self.created_at.isoformat() if self.created_at else None,
+            'updated_at': self.updated_at.isoformat() if self.updated_at else None
+        }
+    
+    def __repr__(self):
+        return f'<CertificateTemplate {self.id}: Evaluation {self.evaluation_id}>'

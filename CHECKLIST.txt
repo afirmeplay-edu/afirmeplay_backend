@@ -1,0 +1,271 @@
+✅ CHECKLIST FINAL - Scripts de Diagnóstico
+═══════════════════════════════════════════════════════════════
+
+📦 ARQUIVOS CRIADOS:
+─────────────────────────────────────────────────────────────
+
+Scripts Python (6):
+  ✅ diagnose_grid_alignment.py
+  ✅ measure_real_spacing.py
+  ✅ generate_grid_overlay.py
+  ✅ compare_expected_vs_real.py
+  ✅ run_full_diagnostic.py
+  ✅ quick_scenario_test.py
+
+Documentação (2):
+  ✅ DIAGNOSTIC_SCRIPTS_README.md
+  ✅ SCRIPTS_INDEX.py
+
+Arquivos de Guia (2):
+  ✅ 00_LEIA_PRIMEIRO.txt
+  ✅ CHECKLIST.txt (este arquivo)
+
+═══════════════════════════════════════════════════════════════
+
+🚀 COMEÇAR (escolha um):
+─────────────────────────────────────────────────────────────
+
+OPÇÃO 1️⃣ - RÁPIDA (5 minutos, sem imagens)
+  1. python quick_scenario_test.py
+  2. python diagnose_grid_alignment.py
+  3. python compare_expected_vs_real.py
+
+OPÇÃO 2️⃣ - COMPLETA (20 minutos, com visualizações)
+  1. python run.py (com um cartão de teste)
+  2. python run_full_diagnostic.py
+  3. Abrir: debug_corrections/grid_overlay/
+  4. Comparar visualmente
+
+OPÇÃO 3️⃣ - ÍNDICE (veja todos os scripts)
+  1. python SCRIPTS_INDEX.py
+
+═══════════════════════════════════════════════════════════════
+
+📋 O QUE VOCÊ VAI DESCOBRIR:
+─────────────────────────────────────────────────────────────
+
+✓ Se o line_height está sendo ajustado (14px → 18px)
+✓ O impacto acumulado disso (+100px)
+✓ Se a grade esperada bate com a real
+✓ Qual valor deveria ser usado (14px ou 18px)
+✓ Instruções específicas para corrigir
+
+═══════════════════════════════════════════════════════════════
+
+🎯 RESULTADO ESPERADO:
+─────────────────────────────────────────────────────────────
+
+Após rodar os scripts, você terá:
+
+☐ Diagnóstico claro do problema
+☐ Recomendação específica (14px ou 18px)
+☐ Plano de ação detalhado
+☐ Instrução de implementação
+
+═══════════════════════════════════════════════════════════════
+
+⚙️ REQUISITOS:
+─────────────────────────────────────────────────────────────
+
+✓ Python 3.7+
+✓ cv2 (OpenCV)
+✓ numpy
+✓ json (built-in)
+
+Verificar:
+  python --version
+  python -c "import cv2; print(cv2.__version__)"
+  python -c "import numpy; print(numpy.__version__)"
+
+═══════════════════════════════════════════════════════════════
+
+📂 ESTRUTURA ESPERADA:
+─────────────────────────────────────────────────────────────
+
+innovaplay_backend/
+├── diagnose_grid_alignment.py
+├── measure_real_spacing.py
+├── generate_grid_overlay.py
+├── compare_expected_vs_real.py
+├── run_full_diagnostic.py
+├── quick_scenario_test.py
+├── DIAGNOSTIC_SCRIPTS_README.md
+├── SCRIPTS_INDEX.py
+├── 00_LEIA_PRIMEIRO.txt
+├── CHECKLIST.txt (este arquivo)
+├── app/
+│   └── services/
+│       └── cartao_resposta/
+│           ├── block_01_coordinates_adjustment.json
+│           ├── block_02_coordinates_adjustment.json
+│           ├── block_03_coordinates_adjustment.json
+│           ├── block_04_coordinates_adjustment.json
+│           └── correction_n.py
+└── debug_corrections/ (gerado ao rodar run.py)
+    └── grid_overlay/ (gerado pelos scripts)
+
+═══════════════════════════════════════════════════════════════
+
+📊 ROTEIROS RECOMENDADOS:
+─────────────────────────────────────────────────────────────
+
+ROTEIRO 1: Diagnóstico Rápido
+  Tempo: 5 minutos
+  Precisa de imagens: NÃO
+  
+  $ python quick_scenario_test.py
+  └─ Entende o problema teórico
+  
+  $ python diagnose_grid_alignment.py
+  └─ Vê análise técnica
+  
+  $ python compare_expected_vs_real.py
+  └─ Recebe recomendação
+
+  ▶ Próximo passo: Implementar solução
+
+─────────────────────────────────────────────────────────────
+
+ROTEIRO 2: Diagnóstico Completo
+  Tempo: 20 minutos
+  Precisa de imagens: SIM (gere com run.py)
+  
+  $ python run.py
+  └─ Gera debug_corrections/
+  
+  $ python run_full_diagnostic.py
+  └─ Executa todos os testes
+  
+  $ Abrir debug_corrections/grid_overlay/
+  └─ Ver visualizações VERDE (14px) vs VERMELHO (18px)
+  
+  $ python compare_expected_vs_real.py
+  └─ Receber recomendação baseada em evidências
+
+  ▶ Próximo passo: Implementar solução
+
+─────────────────────────────────────────────────────────────
+
+ROTEIRO 3: Exploração Detalhada
+  Tempo: 25 minutos
+  Precisa de imagens: SIM (gere com run.py)
+  
+  $ python quick_scenario_test.py
+  └─ Entender o problema
+  
+  $ python diagnose_grid_alignment.py
+  └─ Análise teórica
+  
+  $ python run.py
+  └─ Gerar imagens de debug
+  
+  $ python measure_real_spacing.py
+  └─ Medir espaçamento real
+  
+  $ python generate_grid_overlay.py
+  └─ Gerar visualizações
+  
+  $ python compare_expected_vs_real.py
+  └─ Análise final e recomendação
+
+  ▶ Próximo passo: Implementar solução
+
+═══════════════════════════════════════════════════════════════
+
+🔍 INTERPRETAÇÃO RÁPIDA:
+─────────────────────────────────────────────────────────────
+
+Se o script disser:
+  "❌ AJUSTE SERÁ ATIVADO"
+  
+Significa:
+  → O código está ajustando 14px → 18px
+  → Isso está CAUSANDO o desalinhamento
+  → Solução: Desabilitar ajuste em correction_n.py
+
+Se o script disser:
+  "✅ Sem ajuste, usando valor do JSON"
+  
+Significa:
+  → O código está usando 14px corretamente
+  → Mas pode haver outro problema
+  → Ver mensagens subsequentes
+
+═══════════════════════════════════════════════════════════════
+
+🔧 IMPLEMENTAÇÃO (Próxima Etapa):
+─────────────────────────────────────────────────────────────
+
+Após executar os scripts:
+
+1. Ler a recomendação em compare_expected_vs_real.py
+2. Seguir o plano de ação específico
+3. Editar app/services/cartao_resposta/correction_n.py
+4. Implementar a solução (desabilitar ajuste OU atualizar JSON)
+5. Testar: python run.py
+6. Verificar se fill_ratios ficaram consistentes
+
+═══════════════════════════════════════════════════════════════
+
+❓ DÚVIDAS FREQUENTES:
+─────────────────────────────────────────────────────────────
+
+P: Por onde começo?
+R: python quick_scenario_test.py
+
+P: Preciso de imagens de debug?
+R: Não para diagnóstico rápido, sim para visualizações
+
+P: Qual é a resposta correta?
+R: O script vai te dizer (14px ou 18px)
+
+P: E se os scripts não rodarem?
+R: Verifique: Python 3.7+, cv2, numpy instalados
+
+P: As imagens estão em branco?
+R: Verifique: debug_corrections/ existe? Imagens dentro?
+
+═══════════════════════════════════════════════════════════════
+
+📞 SUPORTE RÁPIDO:
+─────────────────────────────────────────────────────────────
+
+Erro com imagens?
+  → Primeiro rodar: python run.py
+  → Isso gera debug_corrections/
+
+Confuso com todos os scripts?
+  → Rodar: python SCRIPTS_INDEX.py
+  → Mostra roteiros recomendados
+
+Quer entender tudo?
+  → Abrir: DIAGNOSTIC_SCRIPTS_README.md
+  → Explicação completa
+
+═══════════════════════════════════════════════════════════════
+
+✨ RESUMO EXECUTIVO:
+─────────────────────────────────────────────────────────────
+
+PROBLEMA:
+  Grid desalinha entre Q1 (perfeito) e Q26 (desalinhado)
+
+CAUSA PROVÁVEL:
+  Ajuste dinâmico do line_height (14px → 18px)
+
+SOLUÇÃO:
+  Desabilitar ajuste e usar valor do JSON (14px)
+
+PRÓXIMO PASSO:
+  1. Executar: python quick_scenario_test.py
+  2. Confirmar recomendação
+  3. Implementar solução
+  4. Testar e validar
+
+═══════════════════════════════════════════════════════════════
+
+✅ TODOS OS SCRIPTS ESTÃO PRONTOS!
+
+Execute: python quick_scenario_test.py
+
+═══════════════════════════════════════════════════════════════

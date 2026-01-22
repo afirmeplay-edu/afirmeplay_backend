@@ -7,35 +7,34 @@
 			{{ test_data.title }} - Versão Híbrida (Detecção Geométrica)
 		</title>
 		<style>
-			@page {
-				size: A4 portrait;
-				margin: 0.5cm 0.8cm 1.5cm 0.8cm;
-			}
+		/* PASSO 1: @page SEM margem (controle tudo no layout interno) */
+		/* ✅ REGRA DE OURO OMR: Controle tudo no layout, sem margem no @page */
+		@page {
+			size: A4 portrait;
+			margin: 0; /* ✅ SEM margem - controle tudo no layout interno */
+		}
 
-			@page :first {
-				margin: 0.5cm 0.8cm;
+		@page with-footer {
+			margin: 0; /* ✅ SEM margem - rodapé funciona sem margem */
+			@bottom-left {
+				content: "AfirmePlay Sistema de Ensino e Avaliação";
+				font-family: "Helvetica", Arial, sans-serif;
+				font-size: 7pt;
+				color: #999;
 			}
-
-			@page with-footer {
-				@bottom-left {
-					content: "AfirmePlay Sistema de Ensino e Avaliação";
-					font-family: "Helvetica", Arial, sans-serif;
-					font-size: 7pt;
-					color: #999;
-				}
-				@bottom-center {
-					content: "Página " counter(page);
-					font-family: "Helvetica", Arial, sans-serif;
-					font-size: 7pt;
-					color: #999;
-				}
-				@bottom-right {
-					content: "Gerado em {{ generated_date }}";
-					font-family: "Helvetica", Arial, sans-serif;
-					font-size: 7pt;
-					color: #999;
-				}
+			@bottom-center {
+				content: "Página " counter(page);
+				font-family: "Helvetica", Arial, sans-serif;
+				font-size: 7pt;
+				color: #999;
 			}
+			@bottom-right {
+				content: "Gerado em {{ generated_date }}";
+				font-family: "Helvetica", Arial, sans-serif;
+				font-size: 7pt;
+				color: #999;
+			}
+		}
 
 			* {
 				margin: 0;
@@ -48,6 +47,7 @@
 				font-size: 12pt;
 				color: #374151;
 				line-height: 1.6;
+				position: relative; /* Para posicionar quadrados A4 em relação ao body */
 			}
 
 			.institutional-cover {
@@ -429,66 +429,137 @@
             FORMULÁRIO DE RESPOSTAS - VERSÃO HÍBRIDA
             Com marcadores geométricos para detecção
             ======================================== */
-			.answer-sheet {
-				page: with-footer;
-				page-break-before: always;
-				padding: 0.3cm; /* Padding original - removido o extra que empurrava o conteúdo */
-				position: relative;
-				min-height: 27cm;
+			/* QUADRADOS DE ALINHAMENTO A4 NOS 4 CANTOS DO CARTÃO */
+			/* Posicionados absolutos dentro da página (não fixed para evitar quebra de página) */
+			/* Dentro da área segura de impressão (safe print area) */
+			/* SOLUÇÃO: absolute dentro do .answer-sheet (position: relative) - padrão OMR profissional */
+			.a4-anchor-square {
+				position: absolute; /* ✅ Absolute dentro da página, não fixed (evita quebra) */
+				width: 20px; /* ✅ 20px ≈ 0.53cm (suficiente para OMR) */
+				height: 20px; /* ✅ 20px ≈ 0.53cm (suficiente para OMR) */
+				z-index: 9999;
+				pointer-events: none;
 			}
 
-			/* TRIÂNGULOS DE ALINHAMENTO NOS 4 CANTOS */
-			/* Usando SVG inline para renderização correta no WeasyPrint */
-			.alignment-triangle {
-				position: absolute;
-				width: 30px;
-				height: 30px;
-				z-index: 10;
-				pointer-events: none; /* Não interferir com o layout do grid */
+			.anchor-top-left {
+				/* Topo esquerdo: mínimo de margem para impressão */
+				top: 0.2cm;
+				left: 0.2cm;
 			}
 
-			.triangle-top-left {
-				top: 0;
-				left: 0;
+			.anchor-top-right {
+				/* Topo direito: mínimo de margem para impressão */
+				top: 0.2cm;
+				right: 0.2cm;
 			}
 
-			.triangle-top-right {
-				top: 0;
-				right: 0;
+			.anchor-bottom-left {
+				/* Inferior esquerdo: mínimo de margem para impressão */
+				bottom: 0.2cm;
+				left: 0.2cm;
 			}
 
-			.triangle-bottom-left {
-				bottom: 0;
-				left: 0;
+			.anchor-bottom-right {
+				/* Inferior direito: mínimo de margem para impressão */
+				bottom: 0.2cm;
+				right: 0.2cm;
 			}
 
-			.triangle-bottom-right {
-				bottom: 0;
-				right: 0;
-			}
+			/* PASSO 2: Definir área útil real A4 (sem conflito com @page) */
+		.answer-sheet {
+			page: with-footer;
+			/* ❌ REMOVIDO: page-break-before: always; (causa quebra de página) */
+			position: relative;
+			
+			/* Área útil real A4 completa */
+			width: 21cm;   /* ✅ Largura A4 */
+			height: 29.7cm; /* ✅ Altura A4 completa */
+			
+		/* ÁREA ÚTIL - Padding intocável para conteúdo OMR */
+		/* Cria zona morta (clear zone) ao redor do conteúdo */
+		/* ✅ Padding-top reduzido para aproximar conteúdo dos quadrados de cima */
+		padding: 1.2cm 2cm 2.2cm 2cm; /* top right bottom left - reduzido top para subir tudo */
+		box-sizing: border-box;
+			
+			overflow: hidden; /* ✅ PROÍBE quebrar página - OBRIGATÓRIO em OMR */
+		}
 
-			.answer-sheet-header {
-				border: 1px solid #000;
-				padding: 8px;
-				margin: 0;
-				margin-bottom: 8px;
-				display: flex;
-				justify-content: space-between;
-				align-items: stretch;
-			}
+		/* TRIÂNGULOS DE ALINHAMENTO (FIDUCIAIS DO BLOCO DE QUESTÕES) */
+		/* ✅ REGRA DE OURO OMR: Marcadores fiduciais referenciam o GRID, não a página */
+		/* ✅ Zona morta criada pelo padding do .answer-grid-wrapper (0.6cm) */
+		.alignment-triangle {
+			position: absolute; /* Relativo ao .answer-grid-wrapper (position: relative) */
+			width: 0;
+			height: 0;
+			z-index: 10;
+			pointer-events: none;
+		}
 
-			.header-left {
-				flex: 1;
-				display: flex;
-				flex-direction: column;
-				justify-content: space-between;
-			}
+		/* Triângulo superior esquerdo - Relativo ao grid */
+		.triangle-top-left {
+			top: 0; /* ✅ Colado na zona morta do wrapper (padding: 0.3cm) */
+			left: 0; /* ✅ Colado na zona morta do wrapper */
+			border-top: 0.6cm solid #000; /* ✅ Tamanho do triângulo */
+			border-right: 0.6cm solid transparent;
+		}
 
-			.header-info-line {
-				font-size: 7pt;
-				margin: 1px 0;
-				text-transform: uppercase;
-			}
+		/* Triângulo superior direito - Relativo ao grid */
+		.triangle-top-right {
+			top: 0; /* ✅ Colado na zona morta do wrapper */
+			right: 0; /* ✅ Colado na zona morta do wrapper */
+			border-top: 0.6cm solid #000; /* ✅ Tamanho do triângulo */
+			border-left: 0.6cm solid transparent;
+		}
+
+		/* Triângulo inferior esquerdo - Relativo ao grid */
+		.triangle-bottom-left {
+			bottom: 0; /* ✅ Colado na zona morta do wrapper (fiducial dentro do grid) */
+			left: 0; /* ✅ Colado na zona morta do wrapper */
+			border-bottom: 0.6cm solid #000; /* ✅ Tamanho do triângulo */
+			border-right: 0.6cm solid transparent;
+		}
+
+		/* Triângulo inferior direito - Relativo ao grid */
+		.triangle-bottom-right {
+			bottom: 0; /* ✅ Colado na zona morta do wrapper (fiducial dentro do grid) */
+			right: 0; /* ✅ Colado na zona morta do wrapper */
+			border-bottom: 0.6cm solid #000; /* ✅ Tamanho do triângulo */
+			border-left: 0.6cm solid transparent;
+		}
+
+			/* ETAPA 2: Travar altura do cabeçalho */
+		.answer-sheet-header {
+			border: 1px solid #000;
+			padding: 4px;
+			margin: 0;
+			margin-bottom: 2px; /* ✅ Reduzido para subir elementos abaixo */
+			display: flex;
+			justify-content: space-between;
+			align-items: stretch;
+			height: 6.4cm; /* ✅ Altura fixa */
+			max-height: 6.4cm; /* ✅ Trava máxima */
+			overflow: hidden; /* ✅ PROÍBE crescimento */
+			width: 100%; /* ✅ Ocupa toda largura disponível */
+			box-sizing: border-box; /* ✅ Inclui padding e border no cálculo */
+		}
+
+		.header-left {
+			flex: 1;
+			display: flex;
+			flex-direction: column;
+			justify-content: space-between;
+			min-width: 0; /* ✅ Permite que encolha se necessário */
+			overflow: hidden; /* ✅ Evita que conteúdo ultrapasse */
+		}
+
+		.header-info-line {
+			font-size: 7pt;
+			margin: 0.5px 0;
+			text-transform: uppercase;
+			overflow: hidden; /* ✅ Evita que texto ultrapasse */
+			text-overflow: ellipsis; /* ✅ Mostra "..." se texto for muito longo */
+			white-space: nowrap; /* ✅ Mantém texto em uma linha */
+		}
 
 			.header-info-line .label {
 				font-weight: bold;
@@ -498,12 +569,15 @@
 				font-weight: normal;
 			}
 
-			.student-name-grid {
-				margin-top: 8px;
-				margin-bottom: 20px;
-				border-top: 1px solid #000;
-				padding-top: 5px;
-			}
+		.student-name-grid {
+			margin-top: 4px;
+			margin-bottom: 10px;
+			border-top: 1px solid #000;
+			padding-top: 3px;
+			width: 100%; /* ✅ Ocupa toda largura do .header-left */
+			box-sizing: border-box; /* ✅ Inclui border no cálculo */
+			overflow: hidden; /* ✅ Evita que ultrapasse */
+		}
 
 			.student-name-label {
 				font-size: 7pt;
@@ -531,17 +605,19 @@
 				background: white;
 			}
 
-			.header-right {
-				width: 140px;
-				display: flex;
-				flex-direction: column;
-				align-items: center;
-				justify-content: center;
-				border-left: 1px solid #000;
-				padding-left: 10px;
-				margin-left: 10px;
-				flex-shrink: 0;
-			}
+		.header-right {
+			width: 140px;
+			min-width: 140px; /* ✅ Largura mínima fixa */
+			max-width: 140px; /* ✅ Largura máxima fixa */
+			display: flex;
+			flex-direction: column;
+			align-items: center;
+			justify-content: center;
+			border-left: 1px solid #000;
+			padding-left: 10px;
+			margin-left: 10px;
+			flex-shrink: 0;
+		}
 
 			.qr-code-box {
 				width: 120px;
@@ -567,25 +643,32 @@
 
 			.test-name-section {
 				border-top: 1px solid #000;
-				padding-top: 3px;
-				margin-top: 3px;
-				margin-bottom: 3px;
+				padding-top: 2px;
+				margin-top: 2px;
+				margin-bottom: 2px;
 			}
 
-			.signature-section {
-				border-top: 1px dashed #000;
-				margin-top: 30px;
-				padding-bottom: 0;
-				text-align: center;
-				font-size: 7pt;
-				font-weight: bold;
-			}
+		.signature-section {
+			border-top: 1px dashed #000;
+			margin-top: 15px;
+			padding-bottom: 0;
+			text-align: center;
+			font-size: 7pt;
+			font-weight: bold;
+			width: 100%; /* ✅ Ocupa toda largura do .header-left */
+			box-sizing: border-box; /* ✅ Inclui border no cálculo */
+			overflow: hidden; /* ✅ Evita que ultrapasse */
+		}
 
+			/* ETAPA 3: Travar altura das instruções (ajustado para não cortar texto) */
 			.instructions-box {
-				margin: 6px 0;
+				margin: 1px 0; /* ✅ Reduzido para subir elementos abaixo */
 				padding: 0;
 				background: white;
 				border: 1px solid #333;
+				height: 3.8cm; /* ✅ Altura aumentada para não cortar texto */
+				max-height: 3.8cm; /* ✅ Trava máxima */
+				overflow: visible; /* ✅ Permite ver todo o conteúdo */
 			}
 
 			.instructions-title {
@@ -593,14 +676,14 @@
 				font-weight: bold;
 				text-transform: uppercase;
 				margin: 0;
-				padding: 5px 10px;
+				padding: 3px 8px;
 				color: white;
 				background: #7c3aed;
 				text-align: center;
 			}
 
 			.instructions-content {
-				padding: 6px 10px;
+				padding: 3px 8px;
 			}
 
 			.instructions-box ul {
@@ -611,15 +694,15 @@
 			}
 
 			.instructions-box li {
-				margin: 3px 0;
+				margin: 1.5px 0;
 			}
 
 			.instructions-examples {
 				display: flex;
 				justify-content: center;
 				gap: 20px;
-				margin-top: 6px;
-				padding: 5px;
+				margin-top: 3px;
+				padding: 3px;
 				background: white;
 			}
 
@@ -667,10 +750,13 @@
 			}
 
 			.applicator-box {
-				margin: 6px 0;
+				margin: 1px 0; /* ✅ Reduzido para subir elementos abaixo */
 				padding: 0;
 				background: white;
 				border: 1px solid #333;
+				height: 2.6cm; /* ✅ Altura aumentada para não cortar texto */
+				max-height: 2.6cm; /* ✅ Trava máxima */
+				overflow: visible; /* ✅ Permite ver todo o conteúdo */
 			}
 
 			.applicator-title {
@@ -678,20 +764,20 @@
 				font-weight: bold;
 				text-transform: uppercase;
 				margin: 0;
-				padding: 5px 10px;
+				padding: 3px 8px;
 				color: white;
 				background: #7c3aed;
 				text-align: center;
 			}
 
 			.applicator-content {
-				padding: 8px 10px;
+				padding: 4px 8px;
 			}
 
 			.applicator-options {
 				display: flex;
 				flex-direction: column;
-				gap: 5px;
+				gap: 3px;
 			}
 
 			.applicator-option {
@@ -710,57 +796,84 @@
 				flex-shrink: 0;
 			}
 
-			/* WRAPPER EXTERNO PARA OS TRIÂNGULOS E O GRID */
-			.answer-grid-wrapper {
-				position: relative;
-				padding: 40px; /* Espaço real para os triângulos ficarem em volta */
-				margin: 10px 0;
-			}
+		/* WRAPPER DO GRID COM TRIÂNGULOS FIDUCIAIS */
+		/* PASSO 3: Corrigir wrapper da grade (cálculo REAL atualizado) */
+		/* Cálculo REAL: 29.7cm - 1.2cm (top) - 6.4cm (header) - 3.8cm (instruções) - 2.6cm (aplicador) - 2.2cm (bottom) = 13.5cm */
+		.answer-grid-wrapper {
+			position: relative; /* 🔴 ESSENCIAL: Para triângulos serem relativos ao grid */
+			padding: 0.3cm 0.6cm 1.5cm 0.6cm; /* ✅ Zona morta: top reduzido para subir triângulos, bottom ajustado para garantir borda dos blocos */
+			margin: 2px 0; /* ✅ Reduzido para subir os blocos */
+			height: 13.5cm; /* ✅ Altura REAL recalculada (aumentada devido ao padding-top menor) */
+			max-height: 13.5cm; /* ✅ Trava máxima */
+			overflow: hidden; /* ✅ PROÍBE crescimento */
+		}
 
 			/* Grade de respostas - adaptável para múltiplos blocos */
+			/* ETAPA 6: Grid fixo (não flex solto) */
 			.answer-grid-container {
-				margin: 6px 0;
-				display: flex;
-				flex-direction: row;
-				flex-wrap: nowrap;
-				gap: 15px;
-				align-items: flex-start; /* Alinha blocos pelo topo */
+				margin: 0; /* ✅ Sem margem negativa - já ajustado pelo padding do wrapper */
+				display: grid; /* ✅ Grid fixo */
+				grid-template-columns: repeat(4, 1fr); /* ✅ 4 colunas fixas */
+				gap: 0.4cm; /* ✅ Gap controlado */
+				height: 100%; /* ✅ Altura completa do wrapper */
 			}
 
-			.answer-block {
-				border: 2px solid #000;
-				padding: 8px 10px;
-				flex: 1 1 auto; /* Permite que os blocos cresçam e encolham igualmente */
-				min-width: 0; /* Permite que encolham abaixo do conteúdo mínimo */
-				position: relative;
-				background: white;
-			}
+		/* Wrapper do bloco com header externo */
+		.block-wrapper {
+			display: flex;
+			flex-direction: column;
+			flex: 1 1 auto;
+			min-width: 0;
+		}
 
-			.block-header {
-				text-align: center;
-				font-weight: bold;
-				font-size: 9pt;
-				margin: 0 0 8px 0;
-				padding: 4px;
-				background: #f5f5f5;
-				line-height: 1.3;
-				border-bottom: 1px solid #ccc;
-			}
+		.block-header {
+			text-align: center;
+			font-weight: bold;
+			font-size: 8pt;
+			margin: 0 0 3px 0; /* ✅ Margem abaixo do header para separar do bloco */
+			padding: 2px;
+			background: transparent; /* ✅ Sem background para ficar fora do quadrado */
+			line-height: 1.2;
+			flex-shrink: 0;
+		}
 
-			.answer-row {
-				display: flex;
-				align-items: center;
-				margin: 0 0 8px 0;
-				padding: 4px 0;
-				min-height: 33px;
-				gap: 0;
-			}
+		/* PASSO 5: Travar bloco para não estourar */
+		.answer-block {
+			border: 2px solid #000;
+			padding: 8px 4px 8px 4px; /* ✅ Padding interno em cima e embaixo para não encostar nas bordas */
+			flex: 1 1 auto; /* Permite que os blocos cresçam e encolham igualmente */
+			min-width: 0; /* Permite que encolham abaixo do conteúdo mínimo */
+			position: relative;
+			background: white;
+			overflow: hidden; /* ✅ PROÍBE crescimento */
+			display: flex;
+			flex-direction: column;
+		}
+
+		/* PASSO 4: Corrigir altura da linha (CRÍTICO para 26 questões) */
+		/* 26 questões × 0.42cm = 10.92cm (cabe com folga no bloco) */
+		.answer-row {
+			display: flex;
+			align-items: center;
+			margin: 0; /* ✅ Sem margem */
+			padding: 0; /* ✅ Sem padding */
+			min-height: 0.44cm; /* ✅ Altura ajustada para 26 questões (aumentada para acomodar bolhas de 15px) */
+			max-height: 0.44cm; /* ✅ Trava máxima */
+			gap: 0;
+			flex-shrink: 0; /* ✅ Não encolhe */
+		}
+		
+		/* Eliminar espaço extra após última questão */
+		.answer-block > .answer-row:last-child {
+			margin-bottom: 0;
+			padding-bottom: 0;
+		}
 
 			.question-num {
-				font-size: 9pt;
+				font-size: 7pt;
 				font-weight: bold;
-				width: 30px;
-				min-width: 30px;
+				width: 25px;
+				min-width: 25px;
 				text-align: left;
 				flex-shrink: 0;
 				display: flex;
@@ -775,22 +888,22 @@
 
 			.bubbles {
 				display: flex;
-				gap: 8px;
+				gap: 4px;
 				justify-content: flex-start;
 				flex: 1;
 				align-items: center;
 			}
 
 			.bubble {
-				width: 25px;
-				height: 25px;
+				width: 15px; /* ✅ Tamanho ajustado para OMR */
+				height: 15px; /* ✅ Tamanho ajustado para OMR */
 				border: 1px solid #7c3aed;
 				border-radius: 50%;
 				background: white;
 				display: inline-flex;
 				align-items: center;
 				justify-content: center;
-				font-size: 9pt;
+				font-size: 7pt;
 				font-weight: bold;
 				color: #ccc;
 				line-height: 1;
@@ -1019,7 +1132,29 @@
 
 		<!-- Formulário de Respostas com Marcadores Geométricos -->
 		<div class="answer-sheet">
-			<!-- Cabeçalho -->
+			<!-- ÂNCORAS DA PÁGINA A4 (dentro do .answer-sheet com position: relative) -->
+			<div class="a4-anchor-square anchor-top-left">
+				<svg width="20" height="20" xmlns="http://www.w3.org/2000/svg">
+					<rect width="20" height="20" fill="#000" />
+				</svg>
+			</div>
+			<div class="a4-anchor-square anchor-top-right">
+				<svg width="20" height="20" xmlns="http://www.w3.org/2000/svg">
+					<rect width="20" height="20" fill="#000" />
+				</svg>
+			</div>
+			<div class="a4-anchor-square anchor-bottom-left">
+				<svg width="20" height="20" xmlns="http://www.w3.org/2000/svg">
+					<rect width="20" height="20" fill="#000" />
+				</svg>
+			</div>
+		<div class="a4-anchor-square anchor-bottom-right">
+			<svg width="20" height="20" xmlns="http://www.w3.org/2000/svg">
+				<rect width="20" height="20" fill="#000" />
+			</svg>
+		</div>
+		
+		<!-- Cabeçalho -->
 			<div class="answer-sheet-header">
 				<div class="header-left">
 					<div>
@@ -1198,57 +1333,30 @@
 				</div>
 			</div>
 
-			<!-- Grade de Respostas com Marcadores Geométricos -->
-			<div class="answer-grid-wrapper">
-				<!-- TRIÂNGULOS DE ALINHAMENTO NOS 4 CANTOS -->
-				<div class="alignment-triangle triangle-top-left">
-					<svg
-						width="30"
-						height="30"
-						xmlns="http://www.w3.org/2000/svg">
-						<polygon points="0,0 0,30 30,0" fill="#000" />
-					</svg>
-				</div>
-				<div class="alignment-triangle triangle-top-right">
-					<svg
-						width="30"
-						height="30"
-						xmlns="http://www.w3.org/2000/svg">
-						<polygon points="30,0 0,0 30,30" fill="#000" />
-					</svg>
-				</div>
-				<div class="alignment-triangle triangle-bottom-left">
-					<svg
-						width="30"
-						height="30"
-						xmlns="http://www.w3.org/2000/svg">
-						<polygon points="0,30 0,0 30,30" fill="#000" />
-					</svg>
-				</div>
-				<div class="alignment-triangle triangle-bottom-right">
-					<svg
-						width="30"
-						height="30"
-						xmlns="http://www.w3.org/2000/svg">
-						<polygon points="30,30 0,30 30,0" fill="#000" />
-					</svg>
-				</div>
-
-				<!-- GRID DE RESPOSTAS -->
+		<!-- Grade de Respostas -->
+		<div class="answer-grid-wrapper">
+			<!-- ✅ TRIÂNGULOS FIDUCIAIS DO BLOCO DE QUESTÕES -->
+			<!-- ✅ Marcadores fiduciais referenciam o GRID, não a página inteira -->
+			<div class="alignment-triangle triangle-top-left"></div>
+			<div class="alignment-triangle triangle-top-right"></div>
+			<div class="alignment-triangle triangle-bottom-left"></div>
+			<div class="alignment-triangle triangle-bottom-right"></div>
+			
+			<!-- GRID DE RESPOSTAS -->
 				<div class="answer-grid-container">
 					{% if blocks_config and blocks_config.use_blocks %} {% set
 					num_blocks = blocks_config.num_blocks | default(1) %} {% set
 					questions_per_block = blocks_config.questions_per_block |
 					default(12) %} {% if questions_by_block %} {% for block in
 					questions_by_block %} {% set questions_in_block =
-					block.questions | length %} {% if questions_in_block > 0 %}
-					<div class="answer-block">
+					block.questions | length %} 					{% if questions_in_block > 0 %}
+					<div class="block-wrapper">
 						<div class="block-header">
 							BLOCO {{ "%02d"|format(block.block_number) }}{% if
 							block.subject_name %} - {{ block.subject_name }}{%
 							endif %}
 						</div>
-
+						<div class="answer-block">
 						<!-- Linhas de resposta -->
 						{% for question in block.questions %}
 						<div class="answer-row">
@@ -1270,15 +1378,17 @@
 							</div>
 						</div>
 						{% endfor %}
+						</div>
 					</div>
 					{% endif %} {% endfor %} {% else %} {% for block_num in
 					range(1, num_blocks + 1) %} {% set start_question =
 					(block_num - 1) * questions_per_block + 1 %} {% set
 					end_question = block_num * questions_per_block %}
-					<div class="answer-block">
+					<div class="block-wrapper">
 						<div class="block-header">
 							BLOCO {{ "%02d"|format(block_num) }}
 						</div>
+						<div class="answer-block">
 
 						{% for q_num in range(start_question, end_question + 1)
 						%}
@@ -1300,6 +1410,7 @@
 							</div>
 						</div>
 						{% endfor %}
+						</div>
 					</div>
 					{% endfor %} {% endif %} {% else %} {% set
 					questions_per_block = 12 %} {% set total_questions =
@@ -1311,10 +1422,11 @@
 					= [block * questions_per_block, total_questions] | min %} {%
 					set questions_in_block = end_question - start_question + 1
 					%} {% if questions_in_block > 0 %}
-					<div class="answer-block">
+					<div class="block-wrapper">
 						<div class="block-header">
 							BLOCO {{ "%02d"|format(block) }}
 						</div>
+						<div class="answer-block">
 
 						{% for q in range(1, questions_in_block + 1) %} {% set
 						question_num = start_question + q - 1 %}
@@ -1338,6 +1450,7 @@
 							</div>
 						</div>
 						{% endfor %}
+						</div>
 					</div>
 					{% endif %} {% endfor %} {% endif %}
 				</div>

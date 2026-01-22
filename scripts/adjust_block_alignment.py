@@ -28,12 +28,13 @@ except ImportError:
 
 
 class AlignmentAdjuster:
-    # Tamanho padrão fixo para normalização (deve corresponder ao STANDARD_BLOCK em correction_n.py)
+    # Tamanho padrão fixo para normalização (DEPRECADO - agora usa tamanho dinâmico)
+    # Mantido apenas para compatibilidade com código legado
     STANDARD_BLOCK_WIDTH = 431   # Largura padrão (px) - tamanho do escaneado
     STANDARD_BLOCK_HEIGHT = 362  # Altura padrão (px) - tamanho do escaneado
     
     def __init__(self, img_ref_path: str, img_real_path: str, block_num: int = None, 
-                 normalize_to_standard: bool = True, line_height: int = None, 
+                 normalize_to_standard: bool = False, line_height: int = None, 
                  gabarito_id: str = None, test_id: str = None):
         self.img_ref_path = img_ref_path
         self.img_real_path = img_real_path
@@ -77,49 +78,46 @@ class AlignmentAdjuster:
         
         print(f"[INFO] Tamanho original - Referência: {w_ref_orig}x{h_ref_orig}px, Real: {w_real_orig}x{h_real_orig}px")
         
-        # Verificar se a imagem de referência foi recriada (já está no tamanho padrão)
-        is_ref_already_normalized = (
-            w_ref_orig == self.STANDARD_BLOCK_WIDTH and 
-            h_ref_orig == self.STANDARD_BLOCK_HEIGHT
-        )
-        
-        # Verificar se a imagem real já está normalizada (é uma real_only)
-        is_real_already_normalized = (
-            w_real_orig == self.STANDARD_BLOCK_WIDTH and 
-            h_real_orig == self.STANDARD_BLOCK_HEIGHT
-        )
-        
-        if is_real_already_normalized:
-            print(f"[INFO] Imagem real ja esta normalizada ({w_real_orig}x{h_real_orig}px), pulando normalizacao")
-        
-        if is_ref_already_normalized:
-            print(f"[INFO] Imagem de referência ja esta normalizada ({w_ref_orig}x{h_ref_orig}px), pulando normalizacao")
-        
-        # Normalizar ambas as imagens para tamanho padrão se solicitado
+        # ✅ MUDANÇA: Usar tamanho dinâmico baseado nas imagens detectadas
+        # Não normalizar para tamanho fixo - usar o tamanho real das imagens
         if normalize_to_standard:
-            # Redimensionar referência para tamanho padrão apenas se não foi recriada
-            if not is_ref_already_normalized:
-                if (w_ref_orig, h_ref_orig) != (self.STANDARD_BLOCK_WIDTH, self.STANDARD_BLOCK_HEIGHT):
-                    self.img_ref = cv2.resize(self.img_ref, 
-                                            (self.STANDARD_BLOCK_WIDTH, self.STANDARD_BLOCK_HEIGHT),
-                                            interpolation=cv2.INTER_AREA)
-                    print(f"[INFO] Referência normalizada para tamanho padrão: {self.STANDARD_BLOCK_WIDTH}x{self.STANDARD_BLOCK_HEIGHT}px")
+            # Modo legado: normalizar para tamanho padrão (mantido para compatibilidade)
+            print(f"[AVISO] Modo normalize_to_standard=True está DEPRECADO")
+            print(f"   Recomendado: usar normalize_to_standard=False para tamanho dinâmico")
             
-            # Redimensionar real para tamanho padrão apenas se ainda não estiver normalizada
-            if not is_real_already_normalized:
+            # Redimensionar referência para tamanho padrão se necessário
+            if (w_ref_orig, h_ref_orig) != (self.STANDARD_BLOCK_WIDTH, self.STANDARD_BLOCK_HEIGHT):
+                self.img_ref = cv2.resize(self.img_ref, 
+                                        (self.STANDARD_BLOCK_WIDTH, self.STANDARD_BLOCK_HEIGHT),
+                                        interpolation=cv2.INTER_AREA)
+                print(f"[INFO] Referência normalizada para tamanho padrão: {self.STANDARD_BLOCK_WIDTH}x{self.STANDARD_BLOCK_HEIGHT}px")
+            
+            # Redimensionar real para tamanho padrão se necessário
+            if (w_real_orig, h_real_orig) != (self.STANDARD_BLOCK_WIDTH, self.STANDARD_BLOCK_HEIGHT):
                 self.img_real = cv2.resize(self.img_real,
                                          (self.STANDARD_BLOCK_WIDTH, self.STANDARD_BLOCK_HEIGHT),
                                          interpolation=cv2.INTER_AREA)
                 print(f"[INFO] Real normalizada para tamanho padrão: {self.STANDARD_BLOCK_WIDTH}x{self.STANDARD_BLOCK_HEIGHT}px")
-            else:
-                print(f"[INFO] Real ja estava normalizada ({w_real_orig}x{h_real_orig}px), mantendo tamanho")
         else:
-            # Redimensionar para mesmo tamanho (usar referência como base) - comportamento antigo
+            # ✅ MODO DINÂMICO: Usar tamanho real das imagens detectadas
+            # Redimensionar para o mesmo tamanho (usar a maior dimensão como referência)
             h_ref, w_ref = self.img_ref.shape[:2]
             h_real, w_real = self.img_real.shape[:2]
             
-            if (w_real, h_real) != (w_ref, h_ref):
-                self.img_real = cv2.resize(self.img_real, (w_ref, h_ref), interpolation=cv2.INTER_AREA)
+            # Usar o tamanho da referência como base (ou o maior entre as duas)
+            target_w = max(w_ref, w_real)
+            target_h = max(h_ref, h_real)
+            
+            # Redimensionar ambas para o mesmo tamanho (mantendo proporção se necessário)
+            if (w_ref, h_ref) != (target_w, target_h):
+                self.img_ref = cv2.resize(self.img_ref, (target_w, target_h), interpolation=cv2.INTER_AREA)
+                print(f"[INFO] Referência redimensionada para: {target_w}x{target_h}px (tamanho dinâmico)")
+            
+            if (w_real, h_real) != (target_w, target_h):
+                self.img_real = cv2.resize(self.img_real, (target_w, target_h), interpolation=cv2.INTER_AREA)
+                print(f"[INFO] Real redimensionada para: {target_w}x{target_h}px (tamanho dinâmico)")
+            
+            print(f"[INFO] Usando tamanho dinâmico: {target_w}x{target_h}px (baseado nas imagens detectadas)")
         
         if self.img_ref is None:
             raise ValueError("Não foi possível carregar a imagem de referência")
@@ -134,6 +132,15 @@ class AlignmentAdjuster:
         # Estado
         self.show_overlay = True
         self.alpha = 0.5  # Transparência do overlay
+        
+        # Estado do mouse para ajuste interativo
+        self.mouse_dragging = False
+        self.mouse_start_x = 0
+        self.mouse_start_y = 0
+        self.mouse_start_offset_x = 0
+        self.mouse_start_offset_y = 0
+        self.mouse_click_x = 0
+        self.mouse_click_y = 0
     
     def _recriar_imagem_referencia_com_line_height(self, line_height: int) -> bool:
         """
@@ -210,11 +217,15 @@ class AlignmentAdjuster:
                 # Criar instância do serviço de correção
                 correction_service = AnswerSheetCorrectionN(debug=False)
                 
-                # Criar imagem de referência com line_height
+                # ✅ MUDANÇA: Usar tamanho dinâmico baseado na imagem real
+                # Calcular tamanho baseado na imagem real (já carregada)
+                h_real, w_real = self.img_real.shape[:2]
+                
+                # Criar imagem de referência com tamanho dinâmico
                 ref_img = correction_service._criar_imagem_referencia_bloco(
                     block_config=block_config,
                     correct_answers=gabarito,
-                    block_size=(self.STANDARD_BLOCK_WIDTH, self.STANDARD_BLOCK_HEIGHT),
+                    block_size=(w_real, h_real),  # ✅ Usar tamanho da imagem real detectada
                     block_num=self.block_num,
                     manual_line_height=line_height
                 )
@@ -226,11 +237,14 @@ class AlignmentAdjuster:
                     ref_inner = ref_img[border_thickness:ref_h-border_thickness,
                                        border_thickness:ref_w-border_thickness]
                     
-                    # Normalizar se necessário
-                    if ref_inner.shape[:2] != (self.STANDARD_BLOCK_HEIGHT, self.STANDARD_BLOCK_WIDTH):
-                        ref_inner = cv2.resize(ref_inner, 
-                                             (self.STANDARD_BLOCK_WIDTH, self.STANDARD_BLOCK_HEIGHT),
-                                             interpolation=cv2.INTER_AREA)
+                    # ✅ Não normalizar - usar tamanho dinâmico
+                    # A imagem de referência já foi criada com o tamanho correto
+                    # Apenas garantir que está no mesmo tamanho da real
+                    if ref_inner.shape[:2] != (h_real, w_real):
+                        ref_inner = cv2.resize(ref_inner, (w_real, h_real), interpolation=cv2.INTER_AREA)
+                        print(f"[INFO] Referência recriada redimensionada para tamanho dinâmico: {w_real}x{h_real}px")
+                    else:
+                        print(f"[INFO] Referência recriada com tamanho dinâmico: {w_real}x{h_real}px")
                     
                     self.img_ref = ref_inner
                     return True
@@ -264,15 +278,33 @@ class AlignmentAdjuster:
             # Combinar com transparência
             result = cv2.addWeighted(overlay, 1.0 - self.alpha, img_real_offset, self.alpha, 0)
             
-            # Desenhar linhas de referência (verde)
-            cv2.line(result, (0, self.h // 2), (self.w, self.h // 2), (0, 255, 0), 1)
-            cv2.line(result, (self.w // 2, 0), (self.w // 2, self.h), (0, 255, 0), 1)
+            # Desenhar linhas de referência (verde) - centro da imagem de referência
+            ref_center_x = self.w // 2
+            ref_center_y = self.h // 2
+            cv2.line(result, (0, ref_center_y), (self.w, ref_center_y), (0, 255, 0), 1)
+            cv2.line(result, (ref_center_x, 0), (ref_center_x, self.h), (0, 255, 0), 1)
             
-            # Desenhar linhas de offset (azul)
-            center_x = self.w // 2 + self.offset_x
-            center_y = self.h // 2 + self.offset_y
-            cv2.line(result, (center_x - 20, center_y), (center_x + 20, center_y), (255, 0, 0), 2)
-            cv2.line(result, (center_x, center_y - 20), (center_x, center_y + 20), (255, 0, 0), 2)
+            # Desenhar ponto de referência (verde) - centro da imagem de referência
+            cv2.circle(result, (ref_center_x, ref_center_y), 5, (0, 255, 0), -1)
+            
+            # Desenhar linhas de offset (azul) - centro da imagem real com offset aplicado
+            real_center_x = ref_center_x + self.offset_x
+            real_center_y = ref_center_y + self.offset_y
+            cv2.line(result, (real_center_x - 20, real_center_y), (real_center_x + 20, real_center_y), (255, 0, 0), 2)
+            cv2.line(result, (real_center_x, real_center_y - 20), (real_center_x, real_center_y + 20), (255, 0, 0), 2)
+            
+            # Desenhar ponto de offset (azul) - centro da imagem real
+            cv2.circle(result, (real_center_x, real_center_y), 5, (255, 0, 0), -1)
+            
+            # Desenhar linha conectando os dois centros (amarelo)
+            cv2.line(result, (ref_center_x, ref_center_y), (real_center_x, real_center_y), (0, 255, 255), 1)
+            
+            # Se estiver arrastando, mostrar feedback visual
+            if self.mouse_dragging:
+                # Desenhar linha do ponto inicial até o atual
+                cv2.line(result, (self.mouse_start_x, self.mouse_start_y), 
+                        (self.mouse_click_x, self.mouse_click_y), (255, 255, 0), 2)
+                cv2.circle(result, (self.mouse_click_x, self.mouse_click_y), 8, (255, 255, 0), 2)
         else:
             # Lado a lado
             result = np.zeros((self.h, self.w * 2 + 50, 3), dtype=np.uint8)
@@ -301,7 +333,7 @@ class AlignmentAdjuster:
             cv2.putText(result, line_height_text, (10, 90),
                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 0, 0), 2)
         
-        help_text = "Setas: offset | I/K: line_height | Espaço: overlay | S: salvar | Q: sair"
+        help_text = "Setas: offset | Mouse: arrastar | I/K: line_height | Espaço: overlay | S: salvar | Q: sair"
         cv2.putText(result, help_text, (10, self.h - 20),
                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (128, 128, 128), 1)
         
@@ -318,6 +350,8 @@ class AlignmentAdjuster:
         Exemplo:
         - Se offset_x = -25: a imagem real precisa ser movida 25px à esquerda para alinhar
         - Na correção: as posições esperadas serão ajustadas +25px (sinal invertido)
+        
+        ✅ NOVO: Agora também salva o tamanho do bloco para cálculo proporcional de offsets
         """
         config = {
             'block_num': self.block_num,
@@ -326,6 +360,11 @@ class AlignmentAdjuster:
             'img_ref_path': self.img_ref_path,
             'img_real_path': self.img_real_path
         }
+        
+        # ✅ NOVO: Salvar tamanho do bloco para cálculo proporcional
+        # Isso permite que offsets sejam ajustados automaticamente quando o bloco muda de tamanho
+        config['block_width_ref'] = self.w
+        config['block_height_ref'] = self.h
         
         # Adicionar line_height se foi ajustado
         if self.line_height is not None:
@@ -337,9 +376,11 @@ class AlignmentAdjuster:
         print(f"[OK] Configuracao salva em: {output_path}")
         print(f"   Offset X: {self.offset_x:+d}px")
         print(f"   Offset Y: {self.offset_y:+d}px")
+        print(f"   Tamanho do bloco (referência): {self.w}x{self.h}px")
         if self.line_height is not None:
             print(f"   Line Height: {self.line_height}px")
         print(f"   [INFO] O sistema de correcao ira inverter o sinal ao aplicar estes offsets")
+        print(f"   [INFO] Offsets serao ajustados proporcionalmente se o bloco mudar de tamanho")
     
     def run(self, interactive: bool = True):
         """Executa o ajuste interativo ou não-interativo"""
@@ -362,15 +403,19 @@ class AlignmentAdjuster:
         print("Ajuste Manual de Alinhamento de Blocos")
         print("=" * 60)
         print("\nControles:")
-        print("  ← → : Ajustar offset X (-1 / +1)")
-        print("  ↑ ↓ : Ajustar offset Y (-1 / +1)")
-        print("  Shift + ← → : Ajustar offset X (-10 / +10)")
-        print("  Shift + ↑ ↓ : Ajustar offset Y (-10 / +10)")
-        print("  Espaço: Alternar entre overlay e lado a lado")
-        print("  +/- : Ajustar transparência do overlay")
-        print("  I/K: Ajustar line_height (+1 / -1)")
-        print("  S: Salvar configuração")
-        print("  Q: Sair sem salvar")
+        print("  MOUSE:")
+        print("    - Arraste com botão esquerdo: mover imagem real")
+        print("    - Clique direito: posicionar centro da imagem real no ponto clicado")
+        print("  TECLADO:")
+        print("    ← → : Ajustar offset X (-1 / +1)")
+        print("    ↑ ↓ : Ajustar offset Y (-1 / +1)")
+        print("    Shift + ← → : Ajustar offset X (-10 / +10)")
+        print("    Shift + ↑ ↓ : Ajustar offset Y (-10 / +10)")
+        print("    Espaço: Alternar entre overlay e lado a lado")
+        print("    +/- : Ajustar transparência do overlay")
+        print("    I/K: Ajustar line_height (+1 / -1)")
+        print("    S: Salvar configuração")
+        print("    Q: Sair sem salvar")
         print(f"\nOffset inicial: X={self.offset_x:+d}, Y={self.offset_y:+d}")
         if self.line_height is not None:
             print(f"Line Height inicial: {self.line_height}px")
@@ -387,7 +432,50 @@ class AlignmentAdjuster:
             print(f"[ERRO] Erro ao criar janela: {e}")
             raise
         
-        print("[INFO] Janela aberta. Use as teclas para ajustar. Pressione Q para sair.\n")
+        # Callback do mouse para ajuste interativo
+        def mouse_callback(event, x, y, flags, param):
+            if event == cv2.EVENT_LBUTTONDOWN:
+                # Iniciar arrasto
+                self.mouse_dragging = True
+                self.mouse_start_x = x
+                self.mouse_start_y = y
+                self.mouse_start_offset_x = self.offset_x
+                self.mouse_start_offset_y = self.offset_y
+                self.mouse_click_x = x
+                self.mouse_click_y = y
+                print(f"   Mouse: Iniciando arrasto em ({x}, {y})")
+            elif event == cv2.EVENT_MOUSEMOVE:
+                if self.mouse_dragging:
+                    # Atualizar posição durante arrasto
+                    self.mouse_click_x = x
+                    self.mouse_click_y = y
+                    # Calcular offset baseado no movimento do mouse
+                    dx = x - self.mouse_start_x
+                    dy = y - self.mouse_start_y
+                    self.offset_x = self.mouse_start_offset_x + dx
+                    self.offset_y = self.mouse_start_offset_y + dy
+            elif event == cv2.EVENT_LBUTTONUP:
+                # Finalizar arrasto
+                if self.mouse_dragging:
+                    dx = x - self.mouse_start_x
+                    dy = y - self.mouse_start_y
+                    self.offset_x = self.mouse_start_offset_x + dx
+                    self.offset_y = self.mouse_start_offset_y + dy
+                    self.mouse_dragging = False
+                    print(f"   Mouse: Arrasto finalizado. Offset: X={self.offset_x:+d}, Y={self.offset_y:+d}")
+            elif event == cv2.EVENT_RBUTTONDOWN:
+                # Clique direito: resetar offset para o ponto clicado
+                # Calcular offset necessário para mover o centro da imagem real para o ponto clicado
+                ref_center_x = self.w // 2
+                ref_center_y = self.h // 2
+                self.offset_x = x - ref_center_x
+                self.offset_y = y - ref_center_y
+                print(f"   Mouse: Clique direito em ({x}, {y}). Offset: X={self.offset_x:+d}, Y={self.offset_y:+d}")
+        
+        cv2.setMouseCallback(window_name, mouse_callback)
+        
+        print("[INFO] Janela aberta. Use as teclas ou mouse para ajustar. Pressione Q para sair.")
+        print("   Mouse: Arraste com botão esquerdo para mover | Clique direito para posicionar\n")
         
         while True:
             img = self.create_comparison_image()
@@ -397,8 +485,10 @@ class AlignmentAdjuster:
                 print(f"[ERRO] Erro ao exibir imagem: {e}")
                 raise
             
-            # Aguardar tecla pressionada (0 = espera indefinida até tecla ser pressionada)
-            key = cv2.waitKey(0) & 0xFF
+            # Se estiver arrastando, atualizar continuamente (waitKey com delay curto)
+            # Se não estiver arrastando, esperar indefinidamente até tecla ser pressionada
+            wait_time = 10 if self.mouse_dragging else 0
+            key = cv2.waitKey(wait_time) & 0xFF
             
             # Verificar se janela ainda está aberta
             try:
@@ -588,6 +678,52 @@ class AlignmentAdjuster:
         return result
 
 
+def find_image_by_filename(debug_dir: str, filename: str):
+    """
+    Encontra uma imagem específica pelo nome do arquivo
+    
+    Args:
+        debug_dir: Diretório de busca
+        filename: Nome do arquivo (pode ser parcial, ex: "20260119_182714_166_04_block_01_real_only")
+        
+    Returns:
+        Caminho completo da imagem encontrada ou None
+    """
+    if not os.path.isabs(debug_dir):
+        script_dir = Path(__file__).parent.parent
+        possible_paths = [
+            Path(debug_dir),
+            script_dir / debug_dir,
+            Path.cwd() / debug_dir,
+        ]
+        
+        for path in possible_paths:
+            if path.exists():
+                debug_dir = str(path.resolve())
+                break
+        else:
+            debug_dir = str(Path(debug_dir).resolve())
+    
+    debug_path = Path(debug_dir)
+    if not debug_path.exists():
+        return None
+    
+    # Buscar por nome exato ou parcial
+    # Se não tem extensão, adicionar .jpg
+    if not filename.endswith(('.jpg', '.jpeg', '.png')):
+        patterns = [f"*{filename}*.jpg", f"*{filename}*.jpeg", f"*{filename}*.png"]
+    else:
+        patterns = [f"*{filename}*"]
+    
+    for pattern in patterns:
+        files = list(debug_path.glob(pattern))
+        if files:
+            # Retornar o mais recente se houver múltiplos
+            return str(max(files, key=os.path.getmtime).resolve())
+    
+    return None
+
+
 def find_latest_debug_images(debug_dir: str = "debug_corrections", block_num: int = None):
     """Encontra automaticamente as imagens mais recentes"""
     # Resolver caminho absoluto para funcionar de qualquer diretório
@@ -761,8 +897,8 @@ def save_all_blocks_individual_images(debug_dir: str = "debug_corrections"):
             continue
         
         try:
-            # Carregar e normalizar imagens
-            adjuster = AlignmentAdjuster(ref_path, real_path, block_num, normalize_to_standard=True)
+            # Carregar imagens com tamanho dinâmico
+            adjuster = AlignmentAdjuster(ref_path, real_path, block_num, normalize_to_standard=False)
             
             # Salvar imagens individuais
             img_ref_bgr = cv2.cvtColor(adjuster.img_ref, cv2.COLOR_GRAY2BGR)
@@ -790,20 +926,20 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Exemplos:
+  # Modo manual: usar imagem específica e ajustar offsets
+  python scripts/adjust_block_alignment.py --real-filename 20260119_182714_166_04_block_01_real_only --block 1 --auto --offset-x -10 --offset-y 5 --save
+  
   # Buscar automaticamente imagens do bloco 1
   python scripts/adjust_block_alignment.py --block 1 --auto
   
   # Usar imagens específicas
   python scripts/adjust_block_alignment.py -r ref.jpg -i real.jpg --block 1
   
-  # Carregar configuração existente
-  python scripts/adjust_block_alignment.py --block 1 --auto --load-config
+  # Ajustar offsets e salvar (modo manual recomendado)
+  python scripts/adjust_block_alignment.py --real-filename 20260119_182714_166_04_block_01_real_only --block 1 --auto --offset-x -40 --offset-y 0 --save
   
-  # Ajustar offsets e line_height via linha de comando
-  python scripts/adjust_block_alignment.py --block 1 --auto --offset-x -40 --offset-y 0 --line-height 50
-  
-  # Salvar imagens individuais de todos os blocos
-  python scripts/adjust_block_alignment.py --save-all-blocks
+  # Apenas visualizar com offsets (sem salvar)
+  python scripts/adjust_block_alignment.py --real-filename 20260119_182714_166_04_block_01_real_only --block 1 --auto --offset-x -40 --offset-y 0
         """
     )
     parser.add_argument('--reference', '-r', type=str, default=None,
@@ -812,6 +948,8 @@ Exemplos:
                        help='Caminho para imagem real')
     parser.add_argument('--auto', '-a', action='store_true',
                        help='Buscar imagens automaticamente')
+    parser.add_argument('--real-filename', type=str, default=None,
+                       help='Nome específico da imagem real (ex: 20260119_182714_166_04_block_01_real_only.jpg)')
     parser.add_argument('--block', '-b', type=int, default=None,
                        help='Número do bloco')
     parser.add_argument('--load-config', action='store_true',
@@ -838,6 +976,29 @@ Exemplos:
         save_all_blocks_individual_images(args.debug_dir)
         return
     
+    # Buscar imagem real por nome específico se fornecido
+    if args.real_filename:
+        print(f"[BUSCA] Buscando imagem real por nome: '{args.real_filename}'...")
+        real_path = find_image_by_filename(args.debug_dir, args.real_filename)
+        if real_path:
+            args.real = real_path
+            print(f"   [OK] Imagem real encontrada: {Path(real_path).name}")
+        else:
+            print(f"   [ERRO] Imagem real nao encontrada: '{args.real_filename}'")
+            print(f"      Procurando em: {args.debug_dir}")
+            return 1
+        
+        # Se temos a imagem real, buscar a referência automaticamente
+        if not args.reference and args.block:
+            print(f"[BUSCA] Buscando imagem de referencia para bloco {args.block}...")
+            ref_path, _ = find_latest_debug_images(args.debug_dir, args.block)
+            if ref_path:
+                args.reference = ref_path
+                print(f"   [OK] Referencia encontrada: {Path(ref_path).name}")
+            else:
+                print(f"   [AVISO] Referencia nao encontrada automaticamente")
+                print(f"      Procurando por: *_block_{args.block:02d}_reference.jpg")
+    
     # Buscar imagens automaticamente
     if args.auto:
         print(f"[BUSCA] Buscando imagens no diretorio '{args.debug_dir}'...")
@@ -849,7 +1010,13 @@ Exemplos:
             args.debug_dir = str(current_dir)
             print(f"   [INFO] Detectado: executando de dentro do diretorio de debug")
         
-        ref_path, real_path = find_latest_debug_images(args.debug_dir, args.block)
+        # Se já temos a imagem real por nome específico, não buscar novamente
+        if not args.real:
+            ref_path, real_path = find_latest_debug_images(args.debug_dir, args.block)
+        else:
+            # Já temos a real, buscar apenas a referência
+            ref_path, _ = find_latest_debug_images(args.debug_dir, args.block)
+            real_path = args.real
         
         if ref_path:
             args.reference = ref_path
@@ -859,25 +1026,31 @@ Exemplos:
             print(f"   [ERRO] Referencia nao encontrada")
             print(f"      Procurando por: *_block_{block_pattern}_reference.jpg")
         
-        if real_path:
+        if not args.real and real_path:
             args.real = real_path
             print(f"   [OK] Real encontrada")
-        else:
+        elif not args.real:
             block_pattern = f"{args.block:02d}" if args.block else "*"
             print(f"   [ERRO] Real nao encontrada")
             print(f"      Procurando por: *_block_{block_pattern}_original.jpg ou *_roi.jpg")
         
-        if not ref_path or not real_path:
+        if not ref_path or not args.real:
             print("\n[ERRO] Nao foi possivel encontrar as imagens")
             print("\n[DICA] Dicas:")
             print("   - Verifique se voce executou uma correcao primeiro (para gerar as imagens)")
             print("   - Ou especifique os caminhos manualmente:")
             print(f"     python scripts/adjust_block_alignment.py -r <ref.jpg> -i <real.jpg> --block {args.block or 1}")
+            print("   - Ou use --real-filename para buscar por nome específico:")
+            print(f"     python scripts/adjust_block_alignment.py --real-filename 20260119_182714_166_04_block_01_real_only --block 1 --auto")
             return 1
     
     # Validar
     if not args.reference or not args.real:
-        print("[ERRO] E necessario fornecer --reference e --real, ou usar --auto")
+        if args.real_filename:
+            print("[ERRO] Imagem de referencia nao encontrada automaticamente")
+            print("   Tente usar --auto ou especifique --reference manualmente")
+        else:
+            print("[ERRO] E necessario fornecer --reference e --real, ou usar --auto, ou usar --real-filename")
         parser.print_help()
         return 1
     
@@ -916,8 +1089,9 @@ Exemplos:
     
     # Criar ajustador
     try:
-        # Normalizar para tamanho padrão (431x362) para corresponder ao correction_n.py
-        normalize_to_standard = True
+        # ✅ MUDANÇA: Usar tamanho dinâmico (normalize_to_standard=False)
+        # O tamanho será baseado nas imagens detectadas, não em valores fixos
+        normalize_to_standard = False  # Usar tamanho dinâmico das imagens detectadas
         # Criar ajustador com line_height (se fornecido)
         adjuster = AlignmentAdjuster(
             args.reference, 
@@ -948,14 +1122,21 @@ Exemplos:
             # Também gerar imagens de visualização
             adjuster._run_non_interactive()
         else:
-            # Executar modo interativo ou não-interativo
-            interactive = not args.no_interactive
-            if interactive:
-                print(f"\n[MODO] Modo interativo ativado")
-                print(f"   Use --no-interactive para desativar o modo interativo")
+            # Sempre usar modo não-interativo (manual) por padrão
+            # O modo interativo pode não funcionar em alguns ambientes
+            interactive = False  # Forçar não-interativo por padrão
+            
+            if args.no_interactive:
+                print(f"\n[MODO] Modo não-interativo (manual)")
             else:
-                print(f"\n[MODO] Modo não-interativo ativado")
-            adjuster.run(interactive=interactive)
+                print(f"\n[MODO] Modo não-interativo (manual) - use --offset-x e --offset-y para ajustar")
+                print(f"   Exemplo: python scripts/adjust_block_alignment.py --real-filename <nome> --block 1 --offset-x -10 --offset-y 5 --save")
+            
+            adjuster._run_non_interactive()
+            
+            # Mostrar instruções
+            print(f"\n[INSTRUCOES] Para ajustar os offsets:")
+            print(f"   python scripts/adjust_block_alignment.py --real-filename {args.real_filename or 'NOME_IMAGEM'} --block {args.block or 1} --offset-x <valor> --offset-y <valor> --save")
             
     except Exception as e:
         print(f"[ERRO] Erro: {e}")

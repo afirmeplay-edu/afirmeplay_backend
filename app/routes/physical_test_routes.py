@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 Rotas para formulários físicos
-Sistema de correção: AnswerSheetCorrectionN (mesmo sistema de cartões resposta)
+Sistema de correção: AnswerSheetCorrectionNewGrid (novo pipeline OMR robusto)
 Suporta correção única (síncrona) e em lote (assíncrona com polling)
 """
 
@@ -20,7 +20,7 @@ from app.models.question import Question
 from app.models.answerSheetGabarito import AnswerSheetGabarito
 from app.services.physical_test_pdf_generator import PhysicalTestPDFGenerator
 from app.services.physical_test_form_service import PhysicalTestFormService
-from app.services.cartao_resposta.correction_n import AnswerSheetCorrectionN  # NOVO SISTEMA DE CORREÇÃO
+from app.services.cartao_resposta.correction_new_grid import AnswerSheetCorrectionNewGrid  # NOVO SISTEMA DE CORREÇÃO
 from app.services.progress_store import (
     create_job, update_item_processing, update_item_done,
     update_item_error, complete_job, get_job
@@ -736,7 +736,7 @@ def generate_individual_physical_form(test_id, student_id):
 
 def process_batch_in_background(job_id: str, test_id: str, images: list):
     """
-    Processa correção em lote em background thread usando AnswerSheetCorrectionN
+    Processa correção em lote em background thread usando AnswerSheetCorrectionNewGrid
     
     Args:
         job_id: ID do job para tracking
@@ -750,7 +750,7 @@ def process_batch_in_background(job_id: str, test_id: str, images: list):
     
     with app.app_context():
         try:
-            correction_service = AnswerSheetCorrectionN(debug=False)
+            correction_service = AnswerSheetCorrectionNewGrid(debug=False)
             
             for i, image_base64 in enumerate(images):
                 try:
@@ -764,34 +764,32 @@ def process_batch_in_background(job_id: str, test_id: str, images: list):
                         image_base64_clean = image_base64
                     image_data = base64.b64decode(image_base64_clean)
                     
-                    # Processar correção com AnswerSheetCorrectionN
+                    # Processar correção com AnswerSheetCorrectionNewGrid
                     # O test_id e student_id são extraídos automaticamente do QR code
                     result = correction_service.corrigir_cartao_resposta(
-                        image_data=image_data
+                        image_data=image_data,
+                        auto_detect_qr=True
                     )
                     
                     if result.get('success'):
                         # Buscar nome do aluno se não veio no resultado
-                        if not result.get('student_name') and result.get('student_id'):
+                        student_name = None
+                        if result.get('student_id'):
                             student = Student.query.get(result['student_id'])
                             if student:
-                                result['student_name'] = student.name
+                                student_name = student.name
                         
-                        # Adaptar formato do resultado para compatibilidade
+                        # Adaptar formato do resultado para compatibilidade com novo pipeline
                         adapted_result = {
                             'student_id': result.get('student_id'),
-                            'student_name': result.get('student_name'),
+                            'student_name': student_name,
                             'test_id': result.get('test_id') or test_id,
-                            'correct': result.get('correction', {}).get('correct', 0),
-                            'total': result.get('correction', {}).get('total_questions', 0),
-                            'percentage': result.get('correction', {}).get('score_percentage', 0),
-                            'grade': result.get('grade', 0),
-                            'proficiency': result.get('proficiency', 0),
-                            'classification': result.get('classification', ''),
-                            'score_percentage': result.get('correction', {}).get('score_percentage', 0),
-                            'answers': result.get('answers', {}),
-                            'correction': result.get('correction', {}),
-                            'saved_answers': result.get('saved_answers', []),
+                            'correct': result.get('correct_answers', 0),
+                            'total': result.get('total_questions', 0),
+                            'percentage': result.get('score', 0),
+                            'score_percentage': result.get('score', 0),
+                            'detailed_answers': result.get('detailed_answers', []),
+                            'student_answers': result.get('student_answers', {}),
                             'evaluation_result_id': result.get('evaluation_result_id')
                         }
                         
@@ -907,36 +905,37 @@ def process_physical_correction(test_id):
                 single_image_clean = single_image
             image_data = base64.b64decode(single_image_clean)
             
-            # Processar com AnswerSheetCorrectionN
+            # Processar com AnswerSheetCorrectionNewGrid
             # O test_id e student_id são extraídos automaticamente do QR code
-            correction_service = AnswerSheetCorrectionN(debug=False)
+            correction_service = AnswerSheetCorrectionNewGrid(debug=False)
             result = correction_service.corrigir_cartao_resposta(
-                image_data=image_data
+                image_data=image_data,
+                auto_detect_qr=True
             )
             
             if result.get('success'):
-                # Adaptar formato do resultado para compatibilidade
+                # Adaptar formato do resultado para compatibilidade com novo pipeline
                 return jsonify({
                     "message": "Correção processada com sucesso",
-                    "system": "correction_n",
+                    "system": "new_grid_pipeline",
                     "student_id": result.get('student_id'),
                     "test_id": result.get('test_id') or test_id,
-                    "correct": result.get('correction', {}).get('correct', 0),
-                    "total": result.get('correction', {}).get('total_questions', 0),
-                    "percentage": result.get('correction', {}).get('score_percentage', 0),
-                    "grade": result.get('grade', 0),
-                    "proficiency": result.get('proficiency', 0),
-                    "classification": result.get('classification', ''),
-                    "score_percentage": result.get('correction', {}).get('score_percentage', 0),
-                    "answers": result.get('answers', {}),
-                    "correction": result.get('correction', {}),
-                    "saved_answers": result.get('saved_answers', []),
+                    "correct": result.get('correct_answers', 0),
+                    "wrong": result.get('wrong_answers', 0),
+                    "blank": result.get('blank_answers', 0),
+                    "invalid": result.get('invalid_answers', 0),
+                    "total": result.get('total_questions', 0),
+                    "score": result.get('score', 0),
+                    "percentage": result.get('score', 0),
+                    "detailed_answers": result.get('detailed_answers', []),
+                    "student_answers": result.get('student_answers', {}),
+                    "answer_key": result.get('answer_key', {}),
                     "evaluation_result_id": result.get('evaluation_result_id')
                 }), 200
             else:
                 return jsonify({
                     "error": result.get('error', 'Erro desconhecido na correção'),
-                    "system": "correction_n"
+                    "system": "new_grid_pipeline"
                 }), 500
         
         # ==================================================================

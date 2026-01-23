@@ -11,7 +11,7 @@ import sqlalchemy as sa
 
 # revision identifiers, used by Alembic.
 revision = 'add_minio_storage'
-down_revision = None  # ← IMPORTANTE: Atualizar com a última migração existente
+down_revision = 'add_template_base_image'  # Mesmo nível que as outras heads
 branch_labels = None
 depends_on = None
 

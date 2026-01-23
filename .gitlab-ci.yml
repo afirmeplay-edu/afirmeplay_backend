@@ -225,6 +225,13 @@ container_run:
         - |
             set -e
 
+            # Remove container antigo se existir
+            if docker container ls -a -f name="^${CONTAINER_NAME}$" -q; then
+                echo "Removendo container antigo '$CONTAINER_NAME'..."
+                docker stop "$CONTAINER_NAME" || true
+                docker rm "$CONTAINER_NAME" || true
+            fi
+
             docker container run --network "$ENVIRONMENT" -p "$HOST_PORT:$CONTAINER_PORT" --name "$CONTAINER_NAME" -d "$IMAGE_TAG"
 
             CONTAINER_ID=$(docker container ls -a -f ancestor="$IMAGE_TAG" -q)

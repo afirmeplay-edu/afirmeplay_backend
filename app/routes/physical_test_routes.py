@@ -1426,14 +1426,17 @@ def download_physical_form(test_id, form_id):
 @role_required("admin", "professor", "coordenador", "diretor")
 def download_all_physical_forms(test_id):
     """
-    Download de todos os formulários físicos de uma prova em um arquivo ZIP
+    Retorna URL pré-assinada para download do ZIP de provas físicas do MinIO
+    
+    Se o ZIP ainda não foi gerado, retorna erro pedindo para gerar primeiro.
+    O ZIP é gerado automaticamente pela task Celery após POST /physical-tests/test/{test_id}/generate-forms.
     
     Returns:
-        - Arquivo ZIP contendo todos os PDFs dos alunos
+        JSON com URL pré-assinada válida por 1 hora
     """
     try:
-        import zipfile
-        from io import BytesIO
+        from app.services.storage.minio_service import MinIOService
+        from datetime import timedelta
         
         user = get_current_user_from_token()
         if not user:
@@ -1448,29 +1451,43 @@ def download_all_physical_forms(test_id):
         if user['role'] == 'professor' and test.created_by != user['id']:
             return jsonify({"error": "Você não tem permissão para baixar formulários desta prova"}), 403
         
-        # Buscar todos os formulários da prova
-        forms = PhysicalTestForm.query.filter_by(test_id=test_id).all()
+        # Buscar gabarito associado à prova
+        gabarito = AnswerSheetGabarito.query.filter_by(test_id=test_id).first()
         
-        if not forms:
-            return jsonify({"error": "Nenhum formulário encontrado para esta prova"}), 404
+        if not gabarito or not gabarito.minio_object_name:
+            return jsonify({
+                "error": "ZIP de provas físicas ainda não foi gerado",
+                "message": "Use a rota POST /physical-tests/test/{test_id}/generate-forms para gerar as provas primeiro. Após a geração (verifique status via polling), o ZIP estará disponível para download.",
+                "test_id": test_id,
+                "status": "not_generated"
+            }), 400
         
-        # Criar ZIP em memória
-        zip_buffer = BytesIO()
+        # Gerar URL pré-assinada (válida por 1 hora)
+        minio = MinIOService()
         
-        with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
-            for form in forms:
-                if form.form_pdf_data:
-                    filename = f"prova_{test_id}_{form.student_id}.pdf"
-                    zip_file.writestr(filename, form.form_pdf_data)
-        
-        zip_buffer.seek(0)
-        
-        return send_file(
-            zip_buffer,
-            as_attachment=True,
-            download_name=f"provas_fisicas_{test_id}.zip",
-            mimetype='application/zip'
-        )
+        try:
+            presigned_url = minio.get_presigned_url(
+                bucket_name=gabarito.minio_bucket or minio.BUCKETS['PHYSICAL_TESTS'],
+                object_name=gabarito.minio_object_name,
+                expires=timedelta(hours=1)
+            )
+            
+            return jsonify({
+                "download_url": presigned_url,
+                "expires_in": "1 hour",
+                "test_id": test_id,
+                "test_title": test.title,
+                "gabarito_id": str(gabarito.id) if gabarito else None,
+                "generated_at": gabarito.zip_generated_at.isoformat() if gabarito and gabarito.zip_generated_at else None,
+                "minio_url": gabarito.minio_url
+            }), 200
+            
+        except Exception as minio_error:
+            logging.error(f"Erro ao gerar URL pré-assinada: {str(minio_error)}")
+            return jsonify({
+                "error": "Erro ao gerar URL de download",
+                "details": str(minio_error)
+            }), 500
         
     except Exception as e:
         print(f"❌ Erro ao baixar formulários físicos: {str(e)}")

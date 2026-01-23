@@ -318,17 +318,31 @@ def get_current_user_from_token():
 @role_required("admin", "professor", "coordenador", "diretor")
 def generate_physical_forms(test_id):
     """
-    Gera PDFs institucionais para uma prova específica (formato das imagens fornecidas)
+    Dispara geração ASSÍNCRONA de formulários físicos usando Celery
+    
+    A geração é feita em background para evitar timeout em turmas grandes.
+    O frontend deve fazer polling na rota /task/<task_id>/status para acompanhar o progresso.
     
     Body:
-        - output_dir (opcional): Diretório para salvar os PDFs
-        - logo_data (opcional): Dados do logo (base64 ou URL)
-        - force_regenerate (opcional): Forçar regeneração de formulários existentes (padrão: false)
+        - force_regenerate (opcional): Forçar regeneração mesmo se já existirem formulários (padrão: false)
     
     Returns:
-        - Lista de PDFs institucionais gerados
-        - URLs dos PDFs
-        - Informações dos alunos
+        202 Accepted com:
+        - status: "processing"
+        - task_id: ID da task Celery para polling
+        - polling_url: URL para verificar status
+        - test_id: ID da prova
+        - test_title: Título da prova
+    
+    Example Response:
+        {
+            "status": "processing",
+            "message": "Formulários sendo gerados em background",
+            "task_id": "abc-123-def-456",
+            "test_id": "test-uuid",
+            "test_title": "Avaliação de Matemática",
+            "polling_url": "/physical-tests/task/abc-123-def-456/status"
+        }
     """
     try:
         user = get_current_user_from_token()
@@ -342,16 +356,41 @@ def generate_physical_forms(test_id):
         
         # Verificar permissões do professor
         if user['role'] == 'professor' and test.created_by != user['id']:
-            return jsonify({"error": "Você só pode gerar PDFs institucionais para suas próprias provas"}), 403
+            return jsonify({"error": "Você só pode gerar formulários para suas próprias provas"}), 403
         
         # Obter dados da requisição
         try:
             data = request.get_json() or {}
         except:
             data = {}
-        logo_data = data.get('logo_data')  # Logo será implementado posteriormente
-        force_regenerate = data.get('force_regenerate', False)  # Forçar regeneração de formulários existentes
+        force_regenerate = data.get('force_regenerate', False)
         
+        # ✅ DISPARAR TASK CELERY (assíncrono)
+        from app.services.celery_tasks.physical_test_tasks import generate_physical_forms_async
+        
+        logging.info(f"🚀 Disparando task Celery para geração de formulários: test_id={test_id}")
+        
+        task = generate_physical_forms_async.delay(
+            test_id=test_id,
+            force_regenerate=force_regenerate
+        )
+        
+        # ✅ RETORNA IMEDIATAMENTE (não espera a geração)
+        logging.info(f"✅ Task disparada com sucesso: task_id={task.id}")
+        
+        return jsonify({
+            "status": "processing",
+            "message": "Formulários sendo gerados em background. Use o task_id para verificar o status.",
+            "task_id": task.id,
+            "test_id": test_id,
+            "test_title": test.title,
+            "polling_url": f"/physical-tests/task/{task.id}/status"
+        }), 202  # 202 Accepted
+        
+        # OBS: Todo código abaixo foi movido para a task Celery e não é mais executado aqui
+        # Mantido comentado para referência
+        
+        """
         # Extrair blocks_config do body
         blocks_config = data.get('blocks_config')
         if not blocks_config:
@@ -603,10 +642,110 @@ def generate_physical_forms(test_id):
             else:
                 print(f"ERRO: {result.get('error')}")
                 return jsonify({"error": result.get('error', 'Erro ao gerar formulários')}), 500
+        """
         
     except Exception as e:
-        print(f"❌ Erro ao gerar formulários: {str(e)}")
-        return jsonify({"error": "Erro interno do servidor"}), 500
+        logging.error(f"❌ Erro ao disparar geração de formulários: {str(e)}")
+        import traceback
+        logging.error(traceback.format_exc())
+        return jsonify({"error": str(e)}), 500
+
+# ============================================================================
+# ROTA DE POLLING - STATUS DA TASK CELERY
+# ============================================================================
+
+@bp.route('/task/<string:task_id>/status', methods=['GET'])
+@jwt_required()
+def get_task_status(task_id):
+    """
+    Verifica o status de uma task Celery de geração de formulários físicos
+    
+    O frontend deve fazer polling nesta rota (a cada 2-3 segundos) para acompanhar o progresso.
+    
+    Args:
+        task_id: ID da task Celery retornado na rota /generate-forms
+    
+    Returns:
+        200 OK com status da task:
+        - status: "pending" | "processing" | "completed" | "failed" | "retrying"
+        - message: Mensagem descritiva
+        - result: Dados retornados pela task (quando completed)
+        - error: Mensagem de erro (quando failed)
+    
+    Example Response (Processing):
+        {
+            "status": "processing",
+            "message": "Gerando formulários..."
+        }
+    
+    Example Response (Completed):
+        {
+            "status": "completed",
+            "message": "Formulários gerados com sucesso",
+            "result": {
+                "success": true,
+                "test_id": "...",
+                "generated_forms": 35,
+                "forms": [...]
+            }
+        }
+    """
+    try:
+        from celery.result import AsyncResult
+        
+        task = AsyncResult(task_id)
+        
+        if task.state == 'PENDING':
+            response = {
+                'status': 'pending',
+                'message': 'Aguardando processamento...',
+                'task_id': task_id
+            }
+        elif task.state == 'STARTED':
+            response = {
+                'status': 'processing',
+                'message': 'Gerando formulários PDF (isso pode levar alguns minutos)...',
+                'task_id': task_id
+            }
+        elif task.state == 'SUCCESS':
+            result_data = task.result
+            response = {
+                'status': 'completed',
+                'message': result_data.get('message', 'Formulários gerados com sucesso'),
+                'task_id': task_id,
+                'result': result_data
+            }
+        elif task.state == 'FAILURE':
+            response = {
+                'status': 'failed',
+                'message': 'Erro ao gerar formulários',
+                'task_id': task_id,
+                'error': str(task.info)  # Exception
+            }
+        elif task.state == 'RETRY':
+            response = {
+                'status': 'retrying',
+                'message': 'Tentando novamente após erro temporário...',
+                'task_id': task_id,
+                'retries': task.info.get('retries', 0) if hasattr(task, 'info') and task.info else 0
+            }
+        else:
+            response = {
+                'status': task.state.lower(),
+                'message': f'Estado: {task.state}',
+                'task_id': task_id
+            }
+        
+        return jsonify(response), 200
+        
+    except Exception as e:
+        logging.error(f"Erro ao verificar status da task {task_id}: {str(e)}")
+        return jsonify({
+            "status": "error",
+            "message": "Erro ao verificar status da task",
+            "error": str(e)
+        }), 500
+
 
 # ============================================================================
 # ROTA DE GERAÇÃO INDIVIDUAL

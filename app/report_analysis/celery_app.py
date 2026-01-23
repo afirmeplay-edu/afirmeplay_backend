@@ -26,7 +26,10 @@ celery_app = Celery(
     'report_analysis',
     broker=CELERY_BROKER_URL,
     backend=CELERY_RESULT_BACKEND,
-    include=['app.report_analysis.tasks']
+    include=[
+        'app.report_analysis.tasks',
+        'app.services.celery_tasks.physical_test_tasks'  # Tasks de geração de formulários
+    ]
 )
 
 # Configurações do Celery

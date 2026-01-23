@@ -19,7 +19,7 @@ from app.services.progress_store import (
     create_job, update_item_processing, update_item_done,
     update_item_error, complete_job, get_job
 )
-from typing import Dict
+from typing import Dict, Optional, List
 import logging
 import base64
 import io
@@ -30,6 +30,65 @@ from io import BytesIO
 from datetime import datetime
 
 bp = Blueprint('answer_sheets', __name__, url_prefix='/answer-sheets')
+
+
+def _validate_blocks_config(blocks: List, total_questions: int) -> Optional[str]:
+    """
+    Valida configuração de blocos personalizados
+    
+    Args:
+        blocks: Lista de blocos definidos pelo frontend
+        total_questions: Total de questões esperado
+    
+    Returns:
+        String com mensagem de erro ou None se válido
+    """
+    # 1. Máximo 4 blocos
+    if len(blocks) > 4:
+        return f"Máximo de 4 blocos permitidos. Você enviou {len(blocks)} blocos."
+    
+    if len(blocks) == 0:
+        return "Nenhum bloco foi definido."
+    
+    # 2. Validar cada bloco
+    total_from_blocks = 0
+    expected_start = 1
+    
+    for i, block in enumerate(sorted(blocks, key=lambda x: x.get('start_question', 0)), start=1):
+        block_id = block.get('block_id', i)
+        subject_name = block.get('subject_name', '')
+        questions_count = block.get('questions_count', 0)
+        start_question = block.get('start_question', 0)
+        end_question = block.get('end_question', 0)
+        
+        # Validar campos obrigatórios
+        if not subject_name:
+            return f"Bloco {block_id}: 'subject_name' é obrigatório."
+        
+        if questions_count < 1:
+            return f"Bloco {block_id} ({subject_name}): deve ter pelo menos 1 questão."
+        
+        if questions_count > 26:
+            return f"Bloco {block_id} ({subject_name}): máximo de 26 questões por bloco. Você definiu {questions_count}."
+        
+        # Validar sequência
+        if start_question != expected_start:
+            return f"Bloco {block_id} ({subject_name}): deveria começar na questão {expected_start}, mas começa em {start_question}."
+        
+        if end_question - start_question + 1 != questions_count:
+            return f"Bloco {block_id} ({subject_name}): contagem inconsistente (start={start_question}, end={end_question}, count={questions_count})."
+        
+        total_from_blocks += questions_count
+        expected_start = end_question + 1
+    
+    # 3. Total de questões
+    if total_from_blocks != total_questions:
+        return f"Soma das questões dos blocos ({total_from_blocks}) difere do total informado ({total_questions})."
+    
+    if total_questions > 104:
+        return f"Total de {total_questions} questões excede o máximo de 104 (4 blocos × 26 questões)."
+    
+    return None
 
 
 def _generate_complete_structure(num_questions: int, use_blocks: bool,
@@ -78,27 +137,52 @@ def _generate_complete_structure(num_questions: int, use_blocks: bool,
     topology = {}
     
     if use_blocks:
-        # Organizar por blocos
-        num_blocks = blocks_config.get('num_blocks', 1)
-        questions_per_block = blocks_config.get('questions_per_block', 12)
+        custom_blocks = blocks_config.get('blocks', [])
         
-        blocks = []
-        for block_num in range(1, num_blocks + 1):
-            start_question = (block_num - 1) * questions_per_block + 1
-            end_question = min(block_num * questions_per_block, num_questions)
-            
-            questions = []
-            for q_num in range(start_question, end_question + 1):
-                alternatives = questions_map.get(q_num, ['A', 'B', 'C', 'D'])
-                questions.append({
-                    "q": q_num,
-                    "alternatives": alternatives
+        if custom_blocks:
+            # ✅ NOVO: Blocos personalizados com disciplinas
+            blocks = []
+            for block_def in custom_blocks:
+                block_id = block_def.get('block_id')
+                subject_name = block_def.get('subject_name')  # ✅ NOVO
+                start_q = block_def.get('start_question')
+                end_q = block_def.get('end_question')
+                
+                questions = []
+                for q_num in range(start_q, end_q + 1):
+                    alternatives = questions_map.get(q_num, ['A', 'B', 'C', 'D'])
+                    questions.append({
+                        "q": q_num,
+                        "alternatives": alternatives
+                    })
+                
+                blocks.append({
+                    "block_id": block_id,
+                    "subject_name": subject_name,  # ✅ NOVO
+                    "questions": questions
                 })
+        else:
+            # ✅ Fallback: distribuir automaticamente (comportamento original)
+            num_blocks = blocks_config.get('num_blocks', 1)
+            questions_per_block = blocks_config.get('questions_per_block', 12)
             
-            blocks.append({
-                "block_id": block_num,
-                "questions": questions
-            })
+            blocks = []
+            for block_num in range(1, num_blocks + 1):
+                start_question = (block_num - 1) * questions_per_block + 1
+                end_question = min(block_num * questions_per_block, num_questions)
+                
+                questions = []
+                for q_num in range(start_question, end_question + 1):
+                    alternatives = questions_map.get(q_num, ['A', 'B', 'C', 'D'])
+                    questions.append({
+                        "q": q_num,
+                        "alternatives": alternatives
+                    })
+                
+                blocks.append({
+                    "block_id": block_num,
+                    "questions": questions
+                })
         
         topology["blocks"] = blocks
     else:
@@ -207,10 +291,25 @@ def generate_answer_sheets():
         blocks_config = data.get('blocks_config', {})
         if use_blocks:
             blocks_config['use_blocks'] = True
-            if 'num_blocks' not in blocks_config:
-                blocks_config['num_blocks'] = 1
-            if 'questions_per_block' not in blocks_config:
-                blocks_config['questions_per_block'] = 12
+            
+            # ✅ NOVO: Validar blocos personalizados se fornecidos
+            custom_blocks = blocks_config.get('blocks', [])
+            
+            if custom_blocks:
+                # Validar blocos personalizados (com disciplinas)
+                validation_error = _validate_blocks_config(custom_blocks, num_questions)
+                if validation_error:
+                    return jsonify({"error": validation_error}), 400
+                
+                logging.info(f"✅ Blocos personalizados validados: {len(custom_blocks)} blocos")
+            else:
+                # Fallback: distribuir automaticamente (comportamento original)
+                if 'num_blocks' not in blocks_config:
+                    blocks_config['num_blocks'] = 1
+                if 'questions_per_block' not in blocks_config:
+                    blocks_config['questions_per_block'] = 12
+                
+                logging.info(f"✅ Usando distribuição automática de blocos")
         
         # Gerar estrutura completa de questões e alternativas por bloco
         # Isso será usado na correção como "contrato" da estrutura
@@ -275,41 +374,7 @@ def generate_answer_sheets():
             logging.info(f"✅ Coordenadas geradas e salvas para gabarito {str(gabarito.id)}")
         except Exception as e:
             logging.error(f"Erro ao gerar coordenadas: {str(e)}", exc_info=True)
-            # Continuar mesmo se falhar (usará método antigo na correção)
-        
-        # =========================================================================
-        # ✅ TEMPLATE REAL DIGITAL: Gerar templates de blocos
-        # =========================================================================
-        # Renderiza o PDF real e passa pelo MESMO pipeline de correção
-        # para garantir alinhamento perfeito entre template e cartão do aluno.
-        # =========================================================================
-        try:
-            logging.info(f"🔧 TEMPLATE REAL DIGITAL: Iniciando geração de templates para gabarito {str(gabarito.id)}")
-            
-            correction_service = AnswerSheetCorrectionN(debug=False)
-            
-            # Gerar templates de blocos (usa o PDF real passando pelo mesmo pipeline)
-            templates = correction_service.gerar_templates_blocos(gabarito_obj=gabarito, dpi=300)
-            
-            if templates:
-                # Salvar templates no banco
-                success = correction_service.salvar_templates_no_gabarito(
-                    gabarito_obj=gabarito,
-                    templates=templates,
-                    dpi=300
-                )
-                
-                if success:
-                    logging.info(f"✅ TEMPLATE REAL DIGITAL: {len(templates)} templates salvos para gabarito {str(gabarito.id)}")
-                else:
-                    logging.warning(f"⚠️ TEMPLATE REAL DIGITAL: Falha ao salvar templates (continuando sem templates)")
-            else:
-                logging.warning(f"⚠️ TEMPLATE REAL DIGITAL: Nenhum template gerado (continuando sem templates)")
-                
-        except Exception as e:
-            logging.error(f"Erro ao gerar templates de blocos: {str(e)}", exc_info=True)
-            # Continuar mesmo se falhar (usará método geométrico na correção)
-            logging.warning("⚠️ TEMPLATE REAL DIGITAL: Correção usará método geométrico (menos preciso)")
+            # Continuar mesmo se falhar
         
         # Preparar test_data completo
         test_data_complete = {
@@ -413,8 +478,8 @@ def process_answer_sheet_batch_in_background(job_id: str, images: list = None):
     
     with app.app_context():
         try:
-            # Usando nova implementação correction_n para teste
-            correction_service = AnswerSheetCorrectionN(debug=True)
+            # Usando novo pipeline OMR robusto
+            correction_service = AnswerSheetCorrectionNewGrid(debug=False)
             
             for i, image_base64 in enumerate(images):
                 try:
@@ -428,9 +493,10 @@ def process_answer_sheet_batch_in_background(job_id: str, images: list = None):
                         image_base64_clean = image_base64
                     image_data = base64.b64decode(image_base64_clean)
                     
-                    # Processar correção (gabarito_id vem do QR code)
+                    # Processar correção com novo pipeline (gabarito_id e student_id vêm do QR code)
                     result = correction_service.corrigir_cartao_resposta(
-                        image_data=image_data
+                        image_data=image_data,
+                        auto_detect_qr=True
                     )
                     
                     if result.get('success'):

@@ -284,23 +284,29 @@ minio_setup:
             # 3. Criar buckets (usando mc - MinIO Client)
             echo "$(date '+[%Y-%m-%d %H:%M:%S]') - Criando buckets..."
             
+            # Usar container alpine com mc instalado para ter acesso a sh
             docker run --rm \
               --network "$ENVIRONMENT" \
-              minio/mc:latest \
+              alpine:latest \
               sh -c "
-                mc alias set myminio http://minio-server:9000 ${MINIO_ROOT_USER} ${MINIO_ROOT_PASSWORD};
-                mc mb myminio/answer-sheets --ignore-existing;
-                mc mb myminio/physical-tests --ignore-existing;
-                mc mb myminio/municipality-logos --ignore-existing;
-                mc mb myminio/school-logos --ignore-existing;
-                mc mb myminio/question-images --ignore-existing;
-                mc mb myminio/user-uploads --ignore-existing;
-                mc policy set download myminio/answer-sheets;
-                mc policy set download myminio/physical-tests;
-                mc policy set public myminio/municipality-logos;
-                mc policy set public myminio/school-logos;
+                apk add --no-cache curl > /dev/null 2>&1;
+                wget -q -O /tmp/mc https://dl.min.io/client/mc/release/linux-amd64/mc;
+                chmod +x /tmp/mc;
+                /tmp/mc alias set myminio http://minio-server:9000 ${MINIO_ROOT_USER} ${MINIO_ROOT_PASSWORD};
+                /tmp/mc mb myminio/answer-sheets --ignore-existing || true;
+                /tmp/mc mb myminio/physical-tests --ignore-existing || true;
+                /tmp/mc mb myminio/municipality-logos --ignore-existing || true;
+                /tmp/mc mb myminio/school-logos --ignore-existing || true;
+                /tmp/mc mb myminio/question-images --ignore-existing || true;
+                /tmp/mc mb myminio/user-uploads --ignore-existing || true;
+                /tmp/mc anonymous set download myminio/answer-sheets || true;
+                /tmp/mc anonymous set download myminio/physical-tests || true;
+                /tmp/mc anonymous set public myminio/municipality-logos || true;
+                /tmp/mc anonymous set public myminio/school-logos || true;
                 echo 'Buckets criados com sucesso!'
               "
+            
+            echo "$(date '+[%Y-%m-%d %H:%M:%S]') - Setup de buckets concluído!"
             
             echo "$(date '+[%Y-%m-%d %H:%M:%S]') - MinIO setup completo!"
 

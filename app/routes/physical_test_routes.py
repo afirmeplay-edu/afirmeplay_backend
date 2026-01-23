@@ -315,7 +315,7 @@ def get_current_user_from_token():
 
 @bp.route('/test/<string:test_id>/generate-forms', methods=['POST'])
 @jwt_required()
-@role_required("admin", "professor", "coordenador", "diretor")
+@role_required("admin", "professor", "coordenador", "diretor", "tecadm")
 def generate_physical_forms(test_id):
     """
     Dispara geração ASSÍNCRONA de formulários físicos usando Celery
@@ -765,7 +765,7 @@ def get_task_status(task_id):
 
 @bp.route('/test/<string:test_id>/student/<string:student_id>/generate', methods=['POST'])
 @jwt_required()
-@role_required("admin", "professor", "coordenador", "diretor")
+@role_required("admin", "professor", "coordenador", "diretor", "tecadm")
 def generate_individual_physical_form(test_id, student_id):
     """
     Gera formulário físico individual para um aluno específico

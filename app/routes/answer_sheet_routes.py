@@ -388,75 +388,114 @@ def generate_answer_sheets():
             'grade_name': test_data.get('grade_name', '')
         }
         
-        # Gerar cartões resposta
-        generator = AnswerSheetGenerator()
-        generated_files = generator.generate_answer_sheets(
+        # ✅ NOVO: Gerar cartões de forma ASSÍNCRONA via Celery
+        from app.services.celery_tasks.answer_sheet_tasks import generate_answer_sheets_async
+        
+        # Disparar task Celery
+        task = generate_answer_sheets_async.delay(
             class_id=class_id,
-            test_data=test_data_complete,
             num_questions=num_questions,
+            correct_answers=correct_answers,
+            test_data=test_data_complete,
             use_blocks=use_blocks,
             blocks_config=blocks_config,
-            correct_answers=correct_answers,
-            gabarito_id=str(gabarito.id),
-            questions_options=questions_options
+            questions_options=questions_options,
+            gabarito_id=str(gabarito.id)
         )
         
-        if not generated_files:
-            return jsonify({"error": "Nenhum cartão resposta foi gerado"}), 400
+        # Retornar resposta imediata com task_id para polling
+        return jsonify({
+            "status": "processing",
+            "message": "Cartões de resposta sendo gerados em background. Use o task_id para verificar o status.",
+            "task_id": task.id,
+            "gabarito_id": str(gabarito.id),
+            "class_id": class_id,
+            "class_name": class_obj.name,
+            "num_questions": num_questions,
+            "polling_url": f"/answer-sheets/task/{task.id}/status"
+        }), 202
         
-        # Criar ZIP em memória
-        zip_buffer = BytesIO()
-        
-        with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
-            # Adicionar cada PDF ao ZIP
-            for file_info in generated_files:
-                pdf_data = file_info.get('pdf_data')
-                if pdf_data:
-                    # Nome do arquivo: cartao_NomeAluno_studentId.pdf
-                    student_name = file_info.get('student_name', 'Aluno')
-                    student_id = file_info.get('student_id', '')
-                    
-                    # Limpar caracteres inválidos do nome do arquivo
-                    safe_name = "".join(c for c in student_name if c.isalnum() or c in (' ', '-', '_')).strip()
-                    safe_name = safe_name.replace(' ', '_')
-                    
-                    filename = f"cartao_{safe_name}_{student_id[:8]}.pdf"
-                    zip_file.writestr(filename, pdf_data)
-            
-            # Adicionar arquivo de metadados com informações do gabarito
-            metadata = {
-                "gabarito_id": str(gabarito.id),
-                "test_id": str(gabarito.test_id) if gabarito.test_id else None,
-                "class_id": str(gabarito.class_id) if gabarito.class_id else None,
-                "title": gabarito.title,
-                "num_questions": gabarito.num_questions,
-                "use_blocks": gabarito.use_blocks,
-                "blocks_config": gabarito.blocks_config,
-                "generated_count": len([f for f in generated_files if f.get('pdf_data')]),
-                "created_at": gabarito.created_at.isoformat() if gabarito.created_at else None
-            }
-            import json as json_module
-            zip_file.writestr("metadata.json", json_module.dumps(metadata, indent=2, ensure_ascii=False))
-        
-        zip_buffer.seek(0)
-        
-        # Nome do arquivo ZIP
-        zip_filename = f"cartoes_resposta_{test_data_complete.get('title', 'CartaoResposta')}_{str(gabarito.id)[:8]}.zip"
-        # Limpar caracteres inválidos
-        zip_filename = "".join(c for c in zip_filename if c.isalnum() or c in (' ', '-', '_', '.')).rstrip()
-        zip_filename = zip_filename.replace(' ', '_')
-        
-        return send_file(
-            zip_buffer,
-            as_attachment=True,
-            download_name=zip_filename,
-            mimetype='application/zip'
-        )
+        # ❌ CÓDIGO ANTIGO COMENTADO (geração síncrona removida)
+        # generator = AnswerSheetGenerator()
+        # generated_files = generator.generate_answer_sheets(...)
+        # if not generated_files:
+        #     return jsonify({"error": "Nenhum cartão resposta foi gerado"}), 400
         
     except Exception as e:
         db.session.rollback()
         logging.error(f"Erro ao gerar cartões resposta: {str(e)}", exc_info=True)
         return jsonify({"error": f"Erro ao gerar cartões resposta: {str(e)}"}), 500
+
+
+@bp.route('/task/<string:task_id>/status', methods=['GET'])
+@jwt_required()
+def get_answer_sheet_task_status(task_id):
+    """
+    Consulta o status de uma task Celery de geração de cartões de resposta
+    
+    Args:
+        task_id: ID da task Celery
+    
+    Returns:
+        JSON com status da task:
+        - PENDING: Aguardando processamento
+        - STARTED: Em execução
+        - SUCCESS: Concluída com sucesso
+        - FAILURE: Falhou
+        - RETRY: Tentando novamente
+    """
+    try:
+        from app.services.celery_tasks.answer_sheet_tasks import generate_answer_sheets_async
+        from celery.result import AsyncResult
+        
+        # Buscar resultado da task
+        task_result = AsyncResult(task_id, app=generate_answer_sheets_async.app)
+        
+        if task_result.state == 'PENDING':
+            response = {
+                'status': 'pending',
+                'message': 'Task aguardando processamento',
+                'task_id': task_id
+            }
+        elif task_result.state == 'STARTED':
+            response = {
+                'status': 'processing',
+                'message': 'Cartões sendo gerados...',
+                'task_id': task_id
+            }
+        elif task_result.state == 'SUCCESS':
+            result = task_result.result
+            response = {
+                'status': 'completed',
+                'message': 'Cartões gerados com sucesso',
+                'task_id': task_id,
+                'result': result
+            }
+        elif task_result.state == 'FAILURE':
+            response = {
+                'status': 'failed',
+                'message': 'Erro ao gerar cartões',
+                'task_id': task_id,
+                'error': str(task_result.info)
+            }
+        elif task_result.state == 'RETRY':
+            response = {
+                'status': 'retrying',
+                'message': 'Tentando novamente após erro...',
+                'task_id': task_id
+            }
+        else:
+            response = {
+                'status': task_result.state.lower(),
+                'message': f'Status: {task_result.state}',
+                'task_id': task_id
+            }
+        
+        return jsonify(response), 200
+        
+    except Exception as e:
+        logging.error(f"Erro ao consultar status da task {task_id}: {str(e)}")
+        return jsonify({"error": f"Erro ao consultar status: {str(e)}"}), 500
 
 
 # ============================================================================
@@ -688,12 +727,18 @@ def list_gabaritos():
 @role_required("admin", "professor", "coordenador", "diretor", "tecadm")
 def download_gabarito(gabarito_id):
     """
-    Regenera e baixa os cartões resposta de um gabarito existente
+    Retorna URL pré-assinada para download do ZIP de cartões do MinIO
+    
+    Se o ZIP ainda não foi gerado, retorna erro pedindo para gerar primeiro.
+    O ZIP é gerado automaticamente pela task Celery após POST /answer-sheets/generate.
     
     Returns:
-        Arquivo ZIP contendo todos os PDFs dos cartões resposta
+        JSON com URL pré-assinada válida por 1 hora
     """
     try:
+        from app.services.storage.minio_service import MinIOService
+        from datetime import timedelta
+        
         user = get_current_user_from_token()
         if not user:
             return jsonify({"error": "Usuário não encontrado"}), 401
@@ -703,109 +748,52 @@ def download_gabarito(gabarito_id):
         if not gabarito:
             return jsonify({"error": "Gabarito não encontrado"}), 404
         
-        # Verificar se o gabarito foi criado pelo usuário atual
-        if gabarito.created_by != str(user['id']):
+        # Verificar permissão (admin pode baixar qualquer gabarito)
+        if user['role'] != 'admin' and gabarito.created_by != str(user['id']):
             return jsonify({"error": "Você não tem permissão para acessar este gabarito"}), 403
         
-        # Validar que temos class_id
-        if not gabarito.class_id:
-            return jsonify({"error": "Gabarito não possui turma associada"}), 400
+        # Verificar se ZIP foi gerado no MinIO
+        if not gabarito.minio_object_name:
+            return jsonify({
+                "error": "ZIP de cartões ainda não foi gerado",
+                "message": "Use a rota POST /answer-sheets/generate para gerar os cartões primeiro. Após a geração (verifique status via polling), o ZIP estará disponível para download.",
+                "gabarito_id": gabarito_id,
+                "status": "not_generated"
+            }), 400
         
-        # Buscar turma
-        class_obj = Class.query.get(gabarito.class_id)
-        if not class_obj:
-            return jsonify({"error": "Turma não encontrada"}), 404
+        # Gerar URL pré-assinada (válida por 1 hora)
+        minio = MinIOService()
         
-        # Preparar test_data a partir do gabarito
-        test_data_complete = {
-            'id': gabarito.test_id,
-            'title': gabarito.title or 'Cartão Resposta',
-            'municipality': gabarito.municipality or '',
-            'state': gabarito.state or '',
-            'department': '',  # Não armazenado no gabarito
-            'municipality_logo': None,  # Não armazenado no gabarito
-            'institution': gabarito.institution or '',
-            'grade_name': gabarito.grade_name or ''
-        }
-        
-        # Extrair questions_options do blocks_config se existir
-        questions_options = None
-        if gabarito.blocks_config and 'topology' in gabarito.blocks_config:
-            topology = gabarito.blocks_config.get('topology', {})
-            blocks = topology.get('blocks', [])
-            questions_options = {}
-            for block in blocks:
-                for question in block.get('questions', []):
-                    q_num = question.get('q')
-                    alternatives = question.get('alternatives', ['A', 'B', 'C', 'D'])
-                    if q_num:
-                        questions_options[str(q_num)] = alternatives
-        
-        # Gerar cartões resposta usando os dados do gabarito
-        generator = AnswerSheetGenerator()
-        generated_files = generator.generate_answer_sheets(
-            class_id=str(gabarito.class_id),
-            test_data=test_data_complete,
-            num_questions=gabarito.num_questions,
-            use_blocks=gabarito.use_blocks,
-            blocks_config=gabarito.blocks_config or {},
-            correct_answers=gabarito.correct_answers,
-            gabarito_id=str(gabarito.id),
-            questions_options=questions_options
-        )
-        
-        if not generated_files:
-            return jsonify({"error": "Nenhum cartão resposta foi gerado"}), 400
-        
-        # Criar ZIP em memória
-        zip_buffer = BytesIO()
-        
-        with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
-            # Adicionar cada PDF ao ZIP
-            for file_info in generated_files:
-                pdf_data = file_info.get('pdf_data')
-                if pdf_data:
-                    # Nome do arquivo: cartao_NomeAluno_studentId.pdf
-                    student_name = file_info.get('student_name', 'Aluno')
-                    student_id = file_info.get('student_id', '')
-                    
-                    # Limpar caracteres inválidos do nome do arquivo
-                    safe_name = "".join(c for c in student_name if c.isalnum() or c in (' ', '-', '_')).strip()
-                    safe_name = safe_name.replace(' ', '_')
-                    
-                    filename = f"cartao_{safe_name}_{student_id[:8]}.pdf"
-                    zip_file.writestr(filename, pdf_data)
+        try:
+            presigned_url = minio.get_presigned_url(
+                bucket_name=gabarito.minio_bucket or minio.BUCKETS['ANSWER_SHEETS'],
+                object_name=gabarito.minio_object_name,
+                expires=timedelta(hours=1)
+            )
             
-            # Adicionar arquivo de metadados com informações do gabarito
-            metadata = {
+            # Buscar turma para informações adicionais
+            class_obj = Class.query.get(gabarito.class_id) if gabarito.class_id else None
+            
+            return jsonify({
+                "download_url": presigned_url,
+                "expires_in": "1 hour",
                 "gabarito_id": str(gabarito.id),
                 "test_id": str(gabarito.test_id) if gabarito.test_id else None,
                 "class_id": str(gabarito.class_id) if gabarito.class_id else None,
+                "class_name": class_obj.name if class_obj else None,
                 "title": gabarito.title,
                 "num_questions": gabarito.num_questions,
-                "use_blocks": gabarito.use_blocks,
-                "blocks_config": gabarito.blocks_config,
-                "generated_count": len([f for f in generated_files if f.get('pdf_data')]),
+                "generated_at": gabarito.zip_generated_at.isoformat() if gabarito.zip_generated_at else None,
                 "created_at": gabarito.created_at.isoformat() if gabarito.created_at else None,
-                "regenerated_at": datetime.now().isoformat()
-            }
-            import json as json_module
-            zip_file.writestr("metadata.json", json_module.dumps(metadata, indent=2, ensure_ascii=False))
-        
-        zip_buffer.seek(0)
-        
-        # Nome do arquivo ZIP
-        zip_filename = f"cartoes_resposta_{gabarito.title or 'CartaoResposta'}_{str(gabarito.id)[:8]}.zip"
-        # Limpar caracteres inválidos
-        zip_filename = "".join(c for c in zip_filename if c.isalnum() or c in (' ', '-', '_', '.')).rstrip()
-        zip_filename = zip_filename.replace(' ', '_')
-        
-        return send_file(
-            zip_buffer,
-            as_attachment=True,
-            download_name=zip_filename,
-            mimetype='application/zip'
-        )
+                "minio_url": gabarito.minio_url
+            }), 200
+            
+        except Exception as minio_error:
+            logging.error(f"Erro ao gerar URL pré-assinada: {str(minio_error)}")
+            return jsonify({
+                "error": "Erro ao gerar URL de download",
+                "details": str(minio_error)
+            }), 500
         
     except Exception as e:
         logging.error(f"Erro ao baixar gabarito: {str(e)}", exc_info=True)

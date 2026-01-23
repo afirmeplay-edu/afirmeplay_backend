@@ -6,6 +6,9 @@ Processa geração de PDFs de forma assíncrona para evitar timeout
 
 import logging
 import tempfile
+import zipfile
+import os
+from datetime import datetime
 from typing import Dict, Any, List, Optional
 from celery import Task
 
@@ -245,6 +248,77 @@ def generate_physical_forms_async(
                     'created_at': form['generated_at']
                 })
             
+            # ========================================================================
+            # UPLOAD PARA MINIO
+            # ========================================================================
+            logger.info(f"[CELERY] 📦 Criando ZIP para upload no MinIO...")
+            
+            from app.models.physicalTestForm import PhysicalTestForm
+            
+            # Buscar todos os formulários com PDFs
+            physical_forms = PhysicalTestForm.query.filter_by(test_id=test_id).all()
+            
+            if physical_forms:
+                # Criar ZIP temporário
+                zip_temp_dir = tempfile.mkdtemp()
+                zip_path = os.path.join(zip_temp_dir, f'provas_fisicas_{test_id}.zip')
+                
+                try:
+                    with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zf:
+                        for form in physical_forms:
+                            if form.form_pdf_data:
+                                # Buscar nome do aluno
+                                student = Student.query.get(form.student_id)
+                                student_name = student.name.replace(' ', '_') if student else 'aluno'
+                                
+                                filename = f"prova_{student_name}_{form.student_id}.pdf"
+                                zf.writestr(filename, form.form_pdf_data)
+                    
+                    logger.info(f"[CELERY] ✅ ZIP criado: {os.path.getsize(zip_path)} bytes")
+                    
+                    # Ler ZIP como bytes
+                    with open(zip_path, 'rb') as f:
+                        zip_data = f.read()
+                    
+                    # Upload para MinIO
+                    logger.info(f"[CELERY] ☁️ Enviando ZIP para MinIO...")
+                    from app.services.storage.minio_service import MinIOService
+                    
+                    minio = MinIOService()
+                    upload_result = minio.upload_physical_test_zip(
+                        test_id=test_id,
+                        zip_data=zip_data
+                    )
+                    
+                    logger.info(f"[CELERY] ✅ Upload concluído: {upload_result['url']}")
+                    
+                    # Atualizar gabarito no banco com URL do MinIO
+                    gabarito.minio_url = upload_result['url']
+                    gabarito.minio_object_name = upload_result['object_name']
+                    gabarito.minio_bucket = upload_result['bucket']
+                    gabarito.zip_generated_at = datetime.utcnow()
+                    db.session.commit()
+                    logger.info(f"[CELERY] ✅ Gabarito atualizado com URL do MinIO")
+                    
+                    minio_url = upload_result['url']
+                    download_size = upload_result['size']
+                    
+                except Exception as minio_error:
+                    logger.error(f"[CELERY] ⚠️ Erro ao fazer upload para MinIO: {str(minio_error)}")
+                    minio_url = None
+                    download_size = 0
+                
+                finally:
+                    # Limpar arquivos temporários
+                    if os.path.exists(zip_path):
+                        os.remove(zip_path)
+                    if os.path.exists(zip_temp_dir):
+                        os.rmdir(zip_temp_dir)
+                    logger.info(f"[CELERY] 🧹 Arquivos temporários limpos")
+            else:
+                minio_url = None
+                download_size = 0
+            
             return {
                 'success': True,
                 'test_id': test_id,
@@ -253,6 +327,8 @@ def generate_physical_forms_async(
                 'total_students': len(students_data),
                 'generated_forms': len(formularios_gerados),
                 'gabarito_id': str(gabarito.id),
+                'minio_url': minio_url,
+                'download_size_bytes': download_size,
                 'forms': formularios_gerados,
                 'message': f'Formulários gerados com sucesso para {len(formularios_gerados)} alunos'
             }

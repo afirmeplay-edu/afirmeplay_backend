@@ -219,15 +219,32 @@ class AnswerSheetCorrectionNewGrid:
             student_id = qr_data.get('student_id')
             test_id = qr_data.get('test_id')
             
-            if not gabarito_id:
-                self.logger.error("❌ gabarito_id não encontrado no QR Code")
+            # ✅ ACEITAR gabarito_id OU test_id
+            if not gabarito_id and not test_id:
+                self.logger.error("❌ Nem gabarito_id nem test_id encontrados no QR Code")
                 self.logger.error(f"Dados do QR Code: {qr_data_str[:100]}...")
                 return None
             
+            # Se tem test_id mas não gabarito_id, buscar gabarito pela prova
+            if test_id and not gabarito_id:
+                self.logger.info(f"🔍 QR Code com test_id (prova física): {test_id[:8]}...")
+                from app.models.answerSheetGabarito import AnswerSheetGabarito
+                gabarito_obj = AnswerSheetGabarito.query.filter_by(test_id=test_id).first()
+                
+                if gabarito_obj:
+                    gabarito_id = str(gabarito_obj.id)
+                    self.logger.info(f"✅ Gabarito encontrado via test_id: {gabarito_id[:8]}...")
+                else:
+                    self.logger.warning(f"⚠️ Gabarito não encontrado para test_id: {test_id[:8]}...")
+                    # Nota: gabarito_id ficará None, será tratado no corrigir_cartao_resposta
+            
             self.logger.info(f"✅ QR Code decodificado com sucesso!")
-            self.logger.info(f"   Gabarito: {gabarito_id[:8]}...")
+            if gabarito_id:
+                self.logger.info(f"   Gabarito: {gabarito_id[:8]}...")
             if student_id:
                 self.logger.info(f"   Aluno: {student_id[:8]}...")
+            if test_id:
+                self.logger.info(f"   Test: {test_id[:8]}...")
             
             return {
                 'gabarito_id': gabarito_id,
@@ -241,6 +258,94 @@ class AnswerSheetCorrectionNewGrid:
             return None
         except Exception as e:
             self.logger.error(f"❌ Erro ao processar QR Code: {str(e)}")
+            return None
+    
+    def _criar_gabarito_de_test(self, test_id: str):
+        """
+        Cria gabarito temporário a partir dos dados da prova (Test).
+        Usado quando prova física foi corrigida sem ter gabarito gerado antes.
+        
+        Args:
+            test_id: ID da prova
+        
+        Returns:
+            Objeto temporário com atributos: id, correct_answers, blocks_config, num_questions, use_blocks
+            ou None se falhar
+        """
+        try:
+            from app.models.test import Test
+            from app.models.testQuestion import TestQuestion
+            from app.models.question import Question
+            
+            # Buscar prova
+            test = Test.query.get(test_id)
+            if not test:
+                self.logger.error(f"❌ Prova {test_id} não encontrada")
+                return None
+            
+            # Buscar questões ordenadas
+            test_questions = TestQuestion.query.filter_by(
+                test_id=test_id
+            ).order_by(TestQuestion.order).all()
+            
+            if not test_questions:
+                self.logger.error(f"❌ Prova {test_id} não tem questões")
+                return None
+            
+            # Montar correct_answers
+            correct_answers = {}
+            for i, tq in enumerate(test_questions, start=1):
+                question = Question.query.get(tq.question_id)
+                if question:
+                    correct_answers[str(i)] = question.correct_answer
+                else:
+                    self.logger.warning(f"⚠️ Questão {tq.question_id} não encontrada")
+                    correct_answers[str(i)] = 'A'  # Fallback
+            
+            num_questions = len(correct_answers)
+            self.logger.info(f"📝 Gabarito montado com {num_questions} questões")
+            
+            # Criar topology padrão (4 blocos de 26 questões)
+            blocks_config = {
+                'use_blocks': True,
+                'num_blocks': 4,
+                'questions_per_block': 26,
+                'topology': {
+                    'blocks': []
+                }
+            }
+            
+            # Montar topology
+            for block_num in range(1, 5):
+                start_q = (block_num - 1) * 26 + 1
+                end_q = min(block_num * 26, num_questions)
+                
+                block_questions = []
+                for q_num in range(start_q, end_q + 1):
+                    block_questions.append({
+                        'q': q_num,
+                        'alternatives': ['A', 'B', 'C', 'D']
+                    })
+                
+                blocks_config['topology']['blocks'].append({
+                    'block_id': block_num,
+                    'questions': block_questions
+                })
+            
+            # Criar objeto temporário (não salva no banco)
+            class GabaritoTemp:
+                def __init__(self):
+                    self.id = f"temp_{test_id}"
+                    self.correct_answers = correct_answers
+                    self.blocks_config = blocks_config
+                    self.num_questions = num_questions
+                    self.use_blocks = True
+            
+            self.logger.info(f"✅ Gabarito temporário criado para test_id {test_id[:8]}...")
+            return GabaritoTemp()
+            
+        except Exception as e:
+            self.logger.error(f"❌ Erro ao criar gabarito de test: {str(e)}")
             return None
     
     # =========================================================================
@@ -1642,13 +1747,40 @@ class AnswerSheetCorrectionNewGrid:
                 
                 gabarito_id = qr_data.get('gabarito_id')
                 student_id = qr_data.get('student_id')
+                test_id = qr_data.get('test_id')
                 
                 # Carregar gabarito do banco
                 from app.models.answerSheetGabarito import AnswerSheetGabarito
-                gabarito_obj = AnswerSheetGabarito.query.get(gabarito_id)
+                from app.models.test import Test
+                from app.models.testQuestion import TestQuestion
+                from app.models.question import Question
+                
+                gabarito_obj = None
+                
+                # ✅ BUSCAR por gabarito_id OU por test_id
+                if gabarito_id:
+                    gabarito_obj = AnswerSheetGabarito.query.get(gabarito_id)
+                    if not gabarito_obj:
+                        return {"success": False, "error": f"Gabarito {gabarito_id[:8]}... não encontrado"}
+                
+                elif test_id:
+                    # Buscar gabarito por test_id (prova física)
+                    gabarito_obj = AnswerSheetGabarito.query.filter_by(test_id=test_id).first()
+                    
+                    if gabarito_obj:
+                        self.logger.info(f"✅ Gabarito encontrado para test_id: {gabarito_obj.id[:8]}...")
+                    else:
+                        # Gabarito não existe - criar temporário a partir do Test
+                        self.logger.warning(f"⚠️ Gabarito não encontrado para test_id {test_id[:8]}..., montando dinamicamente")
+                        gabarito_obj = self._criar_gabarito_de_test(test_id)
+                        
+                        if not gabarito_obj:
+                            return {"success": False, "error": f"Prova {test_id[:8]}... não encontrada ou sem questões"}
+                else:
+                    return {"success": False, "error": "QR Code sem gabarito_id ou test_id"}
                 
                 if not gabarito_obj:
-                    return {"success": False, "error": "Gabarito não encontrado no banco de dados"}
+                    return {"success": False, "error": "Gabarito não encontrado"}
                 
                 # Construir topology_json
                 topology_json = {
@@ -1706,7 +1838,7 @@ class AnswerSheetCorrectionNewGrid:
             
             # Adicionar informações extras se auto_detect_qr
             if auto_detect_qr and qr_data:
-                correction['gabarito_id'] = qr_data.get('gabarito_id')
+                correction['gabarito_id'] = qr_data.get('gabarito_id') or gabarito_obj.id if hasattr(gabarito_obj, 'id') else None
                 correction['student_id'] = qr_data.get('student_id')
                 correction['test_id'] = qr_data.get('test_id')
             
@@ -2178,6 +2310,10 @@ class AnswerSheetCorrectionNewGrid:
             
             if evaluation_result:
                 self.logger.info(f"✅ EvaluationResult criado/atualizado: {evaluation_result.get('id')}")
+                
+                # Marcar formulário físico como corrigido
+                self._marcar_formulario_como_corrigido(test_id, student_id)
+                
                 return {
                     'id': evaluation_result.get('id'),
                     'test_id': test_id,
@@ -2193,6 +2329,10 @@ class AnswerSheetCorrectionNewGrid:
                 }
             else:
                 self.logger.warning("EvaluationResultService não retornou resultado")
+                
+                # Mesmo sem EvaluationResult, marcar formulário como corrigido
+                self._marcar_formulario_como_corrigido(test_id, student_id)
+                
                 return {
                     'id': None,
                     'test_id': test_id,
@@ -2204,6 +2344,49 @@ class AnswerSheetCorrectionNewGrid:
             db.session.rollback()
             self.logger.error(f"Erro ao salvar resultado em evaluation_results: {str(e)}", exc_info=True)
             return None
+    
+    def _marcar_formulario_como_corrigido(self, test_id: str, student_id: str) -> bool:
+        """
+        Marca o PhysicalTestForm como corrigido após processar a correção
+        
+        Args:
+            test_id: ID da prova física
+            student_id: ID do aluno
+            
+        Returns:
+            True se marcado com sucesso, False caso contrário
+        """
+        try:
+            from app.models.physicalTestForm import PhysicalTestForm
+            
+            # Buscar formulário físico do aluno para esta prova
+            form = PhysicalTestForm.query.filter_by(
+                test_id=test_id,
+                student_id=student_id
+            ).first()
+            
+            if not form:
+                self.logger.warning(f"Formulário físico não encontrado para test_id={test_id}, student_id={student_id}")
+                return False
+            
+            # Marcar como enviado (se ainda não foi marcado)
+            if not form.answer_sheet_sent_at:
+                form.answer_sheet_sent_at = datetime.utcnow()
+            
+            # Marcar como corrigido
+            form.is_corrected = True
+            form.corrected_at = datetime.utcnow()
+            form.status = 'corrigido'
+            
+            db.session.commit()
+            
+            self.logger.info(f"✅ Formulário físico marcado como corrigido: {form.id}")
+            return True
+            
+        except Exception as e:
+            db.session.rollback()
+            self.logger.error(f"Erro ao marcar formulário como corrigido: {str(e)}", exc_info=True)
+            return False
     
     def salvar_resultado(self, correction: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """

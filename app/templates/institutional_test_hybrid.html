@@ -7,15 +7,15 @@
 			{{ test_data.title }} - Versão Híbrida (Detecção Geométrica)
 		</title>
 		<style>
-		/* PASSO 1: @page SEM margem (controle tudo no layout interno) */
-		/* ✅ REGRA DE OURO OMR: Controle tudo no layout, sem margem no @page */
+		/* PASSO 1: @page COM margem para páginas de conteúdo */
+		/* ✅ Páginas normais (capa, questões) têm margem confortável */
 		@page {
 			size: A4 portrait;
-			margin: 0; /* ✅ SEM margem - controle tudo no layout interno */
+			margin: 1.5cm 2cm; /* ✅ Margem boa para leitura */
 		}
 
 		@page with-footer {
-			margin: 0; /* ✅ SEM margem - rodapé funciona sem margem */
+			margin: 1.5cm 2cm; /* ✅ Margem boa para leitura */
 			@bottom-left {
 				content: "AfirmePlay Sistema de Ensino e Avaliação";
 				font-family: "Helvetica", Arial, sans-serif;
@@ -36,6 +36,14 @@
 			}
 		}
 
+		/* ✅ NOVO: @page específico para cartão resposta OMR */
+		/* Cartão resposta precisa margem ZERO para precisão OMR */
+		@page answer-sheet-omr {
+			size: A4 portrait;
+			margin: 0; /* ✅ Margem zero SOMENTE para OMR - controle preciso necessário */
+			/* Sem rodapé no cartão resposta */
+		}
+
 			* {
 				margin: 0;
 				padding: 0;
@@ -50,14 +58,14 @@
 				position: relative; /* Para posicionar quadrados A4 em relação ao body */
 			}
 
-			.institutional-cover {
-				page-break-after: always;
-				display: flex;
-				flex-direction: column;
-				min-height: 27cm;
-				background: white;
-				padding: 0.5cm;
-			}
+		.institutional-cover {
+			page-break-after: always;
+			display: flex;
+			flex-direction: column;
+			min-height: 26cm; /* ✅ Ajustado para caber dentro da área com margem */
+			background: white;
+			padding: 0; /* ✅ Sem padding - margem do @page já é suficiente */
+		}
 
 			.cover-header {
 				display: flex;
@@ -198,21 +206,19 @@
 				min-width: 0;
 			}
 
-			.subject-cover {
-				page: with-footer;
-				page-break-after: always;
-				page-break-before: always;
-				display: flex;
-				flex-direction: column;
-				justify-content: center;
-				align-items: center;
-				min-height: 27cm;
-				background: white;
-				padding: 3cm 2cm;
-				border: 2px solid #e5e7eb;
-				border-radius: 15px;
-				margin: 0.5cm;
-			}
+		.subject-cover {
+			page: with-footer;
+			page-break-after: always;
+			page-break-before: always;
+			display: flex;
+			flex-direction: column;
+			justify-content: center;
+			align-items: center;
+			min-height: auto; /* ✅ Auto - deixa o conteúdo definir altura */
+			background: white;
+			padding: 0; /* ✅ Sem padding - margem do @page já é suficiente */
+			/* ✅ Removido border e margin - @page já tem margem */
+		}
 
 			.block-number {
 				font-size: 24pt;
@@ -289,11 +295,11 @@
 				text-align: center;
 			}
 
-			.questions-section {
-				page: with-footer;
-				page-break-before: always;
-				padding: 20px 15px;
-			}
+		.questions-section {
+			page: with-footer;
+			page-break-before: always;
+			padding: 0.5cm 0 0 0; /* ✅ Padding-top para afastar do topo da página (complementa margem do @page) */
+		}
 
 			.question {
 				margin-bottom: 35px;
@@ -467,7 +473,7 @@
 
 			/* PASSO 2: Definir área útil real A4 (sem conflito com @page) */
 		.answer-sheet {
-			page: with-footer;
+			page: answer-sheet-omr; /* ✅ Usa @page com margem zero (OMR preciso) */
 			/* ❌ REMOVIDO: page-break-before: always; (causa quebra de página) */
 			position: relative;
 			

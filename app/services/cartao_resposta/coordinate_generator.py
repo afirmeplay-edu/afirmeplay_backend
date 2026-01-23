@@ -141,25 +141,50 @@ class CoordinateGenerator:
             Lista de blocos: [{block_number, questions: [{question_number, options}]}]
         """
         blocks = []
-        num_blocks = blocks_config.get('num_blocks', 1)
-        questions_per_block = blocks_config.get('questions_per_block', 12)
         
-        for block_num in range(1, num_blocks + 1):
-            start_question = (block_num - 1) * questions_per_block + 1
-            end_question = min(block_num * questions_per_block, num_questions)
+        # ✅ NOVO: Verificar se há blocos personalizados
+        custom_blocks = blocks_config.get('blocks', [])
+        
+        if custom_blocks:
+            # ✅ Blocos personalizados com disciplinas
+            for block_def in custom_blocks:
+                block_id = block_def.get('block_id')
+                start_q = block_def.get('start_question')
+                end_q = block_def.get('end_question')
+                
+                questions = []
+                for q_num in range(start_q, end_q + 1):
+                    questions.append({
+                        'question_number': q_num,
+                        'options': options_map.get(q_num, ['A', 'B', 'C', 'D'])
+                    })
+                
+                if questions:
+                    blocks.append({
+                        'block_number': block_id,
+                        'questions': questions
+                    })
+        else:
+            # ✅ Fallback: distribuição automática
+            num_blocks = blocks_config.get('num_blocks', 1)
+            questions_per_block = blocks_config.get('questions_per_block', 12)
             
-            questions = []
-            for q_num in range(start_question, end_question + 1):
-                questions.append({
-                    'question_number': q_num,
-                    'options': options_map.get(q_num, ['A', 'B', 'C', 'D'])
-                })
-            
-            if questions:
-                blocks.append({
-                    'block_number': block_num,
-                    'questions': questions
-                })
+            for block_num in range(1, num_blocks + 1):
+                start_question = (block_num - 1) * questions_per_block + 1
+                end_question = min(block_num * questions_per_block, num_questions)
+                
+                questions = []
+                for q_num in range(start_question, end_question + 1):
+                    questions.append({
+                        'question_number': q_num,
+                        'options': options_map.get(q_num, ['A', 'B', 'C', 'D'])
+                    })
+                
+                if questions:
+                    blocks.append({
+                        'block_number': block_num,
+                        'questions': questions
+                    })
         
         return blocks
     

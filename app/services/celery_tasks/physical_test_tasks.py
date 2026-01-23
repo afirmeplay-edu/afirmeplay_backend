@@ -29,7 +29,8 @@ logger = logging.getLogger(__name__)
 def generate_physical_forms_async(
     self: Task,
     test_id: str,
-    force_regenerate: bool = False
+    force_regenerate: bool = False,
+    blocks_config: Dict = None
 ) -> Dict[str, Any]:
     """
     Task Celery para geração ASSÍNCRONA de formulários físicos.
@@ -40,6 +41,13 @@ def generate_physical_forms_async(
     Args:
         test_id: ID da prova (UUID)
         force_regenerate: Se True, regenera mesmo se já existirem formulários
+        blocks_config: Configuração de blocos do payload (opcional)
+            {
+                'use_blocks': bool,
+                'num_blocks': int,
+                'questions_per_block': int,
+                'separate_by_subject': bool
+            }
     
     Returns:
         Dict com resultado da geração:
@@ -59,7 +67,10 @@ def generate_physical_forms_async(
     
     Example:
         # Disparar task
-        task = generate_physical_forms_async.delay(test_id='abc-123')
+        task = generate_physical_forms_async.delay(
+            test_id='abc-123',
+            blocks_config={'use_blocks': True, 'num_blocks': 2, 'questions_per_block': 5}
+        )
         
         # Verificar status
         from celery.result import AsyncResult
@@ -155,50 +166,69 @@ def generate_physical_forms_async(
         num_questions = len(questions_data)
         logger.info(f"[CELERY] 📝 Total de questões: {num_questions}")
         
-        # Buscar ou criar gabarito
+        # Preparar respostas corretas
+        correct_answers = {}
+        for i, q in enumerate(questions_data, start=1):
+            correct_answers[str(i)] = q.get('correct_answer', 'A')
+        
+        # Extrair questions_options (alternativas por questão)
+        questions_options = {}
+        for i, q in enumerate(questions_data, start=1):
+            alternatives = q.get('alternatives', [])
+            if isinstance(alternatives, list) and len(alternatives) >= 2:
+                # Converter para formato ['A', 'B', 'C', 'D']
+                letters = ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H']
+                options_list = []
+                for idx, alt in enumerate(alternatives):
+                    if idx < len(letters):
+                        options_list.append(letters[idx])
+                if options_list:
+                    questions_options[str(i)] = options_list
+                else:
+                    questions_options[str(i)] = ['A', 'B', 'C', 'D']
+            else:
+                questions_options[str(i)] = ['A', 'B', 'C', 'D']
+        
+        # ✅ USAR blocks_config recebido do payload (se fornecido)
+        if blocks_config is None:
+            blocks_config = {}
+        
+        # Validar e normalizar blocks_config
+        use_blocks = blocks_config.get('use_blocks', False)
+        if use_blocks:
+            if 'num_blocks' not in blocks_config:
+                blocks_config['num_blocks'] = 1
+            if 'questions_per_block' not in blocks_config:
+                blocks_config['questions_per_block'] = 12
+            if 'separate_by_subject' not in blocks_config:
+                blocks_config['separate_by_subject'] = False
+        
+        # Gerar estrutura completa (topology) se necessário
+        if use_blocks and 'topology' not in blocks_config:
+            logger.info(f"[CELERY] 🔨 Gerando estrutura completa de blocos...")
+            from app.routes.physical_test_routes import _generate_complete_structure
+            
+            complete_structure = _generate_complete_structure(
+                num_questions=num_questions,
+                use_blocks=use_blocks,
+                blocks_config=blocks_config,
+                questions_options=questions_options
+            )
+            blocks_config['topology'] = complete_structure
+            logger.info(f"[CELERY] ✅ Estrutura gerada: {blocks_config.get('num_blocks', 1)} blocos")
+        
+        # Buscar ou criar/atualizar gabarito
         gabarito = AnswerSheetGabarito.query.filter_by(test_id=test_id).first()
         
         if not gabarito:
-            # Criar gabarito
+            # Criar novo gabarito
             logger.info(f"[CELERY] 📋 Criando gabarito para test_id={test_id}")
-            
-            # Preparar respostas corretas
-            correct_answers = {}
-            for i, q in enumerate(questions_data, start=1):
-                correct_answers[str(i)] = q.get('correct_answer', 'A')
-            
-            # Configuração de blocos padrão (4 blocos de 26 questões)
-            blocks_config = {
-                'use_blocks': True,
-                'num_blocks': 4,
-                'questions_per_block': 26,
-                'topology': {
-                    'blocks': []
-                }
-            }
-            
-            # Criar topologia
-            for block_num in range(1, 5):
-                start_q = (block_num - 1) * 26 + 1
-                end_q = min(block_num * 26, num_questions)
-                
-                block_questions = []
-                for q_num in range(start_q, end_q + 1):
-                    block_questions.append({
-                        'q': q_num,
-                        'alternatives': ['A', 'B', 'C', 'D']
-                    })
-                
-                blocks_config['topology']['blocks'].append({
-                    'block_id': block_num,
-                    'questions': block_questions
-                })
             
             gabarito = AnswerSheetGabarito(
                 test_id=test_id,
                 class_id=class_tests[0].class_id,
                 num_questions=num_questions,
-                use_blocks=True,
+                use_blocks=use_blocks,
                 blocks_config=blocks_config,
                 correct_answers=correct_answers,
                 created_by=test.created_by
@@ -208,14 +238,24 @@ def generate_physical_forms_async(
             
             logger.info(f"[CELERY] ✅ Gabarito criado: {gabarito.id}")
         else:
-            logger.info(f"[CELERY] ✅ Gabarito existente: {gabarito.id}")
+            # Atualizar gabarito existente com novo blocks_config (se fornecido)
+            if blocks_config:
+                logger.info(f"[CELERY] 📋 Atualizando gabarito existente com novo blocks_config")
+                gabarito.num_questions = num_questions
+                gabarito.use_blocks = use_blocks
+                gabarito.blocks_config = blocks_config
+                gabarito.correct_answers = correct_answers
+                db.session.commit()
+                logger.info(f"[CELERY] ✅ Gabarito atualizado: {gabarito.id}")
+            else:
+                logger.info(f"[CELERY] ✅ Gabarito existente: {gabarito.id} (mantendo config atual)")
         
-        # Preparar test_data
+        # Preparar test_data com blocks_config atualizado
         test_data = {
             'id': str(test.id),
             'title': test.title,
             'description': test.description or '',
-            'blocks_config': gabarito.blocks_config or {},
+            'blocks_config': gabarito.blocks_config or blocks_config or {},
             'num_questions': num_questions
         }
         

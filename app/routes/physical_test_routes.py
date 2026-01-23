@@ -365,14 +365,26 @@ def generate_physical_forms(test_id):
             data = {}
         force_regenerate = data.get('force_regenerate', False)
         
+        # Extrair blocks_config do payload
+        blocks_config = data.get('blocks_config')
+        if not blocks_config:
+            # Se não vier como objeto, montar a partir dos parâmetros individuais
+            blocks_config = {
+                'use_blocks': data.get('use_blocks', False),
+                'num_blocks': data.get('num_blocks', 1),
+                'questions_per_block': data.get('questions_per_block', 12),
+                'separate_by_subject': data.get('separate_by_subject', False)
+            }
+        
         # ✅ DISPARAR TASK CELERY (assíncrono)
         from app.services.celery_tasks.physical_test_tasks import generate_physical_forms_async
         
-        logging.info(f"🚀 Disparando task Celery para geração de formulários: test_id={test_id}")
+        logging.info(f"🚀 Disparando task Celery para geração de formulários: test_id={test_id}, blocks_config={blocks_config}")
         
         task = generate_physical_forms_async.delay(
             test_id=test_id,
-            force_regenerate=force_regenerate
+            force_regenerate=force_regenerate,
+            blocks_config=blocks_config
         )
         
         # ✅ RETORNA IMEDIATAMENTE (não espera a geração)

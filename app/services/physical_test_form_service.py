@@ -213,7 +213,8 @@ class PhysicalTestFormService:
                 'test_title': test.title,
                 'total_questions': len(questions),
                 'total_students': len(students),
-                'forms': saved_forms
+                'forms': saved_forms,
+                'generated_files': generated_files  # Retornar arquivos gerados para criar ZIP
             }
             
         except Exception as e:

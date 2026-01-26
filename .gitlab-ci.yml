@@ -331,7 +331,8 @@ container_run:
 
             docker container run --network "$ENVIRONMENT" -p "$HOST_PORT:$CONTAINER_PORT" --name "$CONTAINER_NAME" -d "$IMAGE_TAG"
 
-            CONTAINER_ID=$(docker container ls -a -f ancestor="$IMAGE_TAG" -q)
+
+            CONTAINER_ID=$(docker container ls -a -f name="^${CONTAINER_NAME}$" -q) 
 
             if [ -z "$CONTAINER_ID" ]; then
                 echo "$(date '+[%Y-%m-%d %H:%M:%S]') - Falha ao criar o container '$CONTAINER_NAME'."

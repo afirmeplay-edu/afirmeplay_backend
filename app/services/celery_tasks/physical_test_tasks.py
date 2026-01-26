@@ -352,7 +352,10 @@ def generate_physical_forms_async(
             generated_count = result.get('generated_forms', 0)
             logger.info(f"[CELERY] ✅ Formulários gerados com sucesso: {generated_count}/{len(students_data)}")
             
-            # Buscar formulários salvos
+            # Obter arquivos gerados diretamente do resultado (não do banco)
+            generated_files = result.get('generated_files', [])
+            
+            # Buscar formulários salvos para resposta
             forms = form_service.get_physical_forms_by_test(test_id)
             formularios_gerados = []
             
@@ -368,49 +371,26 @@ def generate_physical_forms_async(
             # ========================================================================
             # CRIAR ZIP A PARTIR DE ARQUIVOS EM DISCO (NÃO EM MEMÓRIA)
             # ========================================================================
+            zip_path = os.path.join(temp_dir, f'provas_fisicas_{test_id}.zip')
+            
             logger.info(f"[CELERY] 📦 Criando ZIP a partir de arquivos em disco...")
-            
-            from app.models.physicalTestForm import PhysicalTestForm
-            
-            # Buscar todos os formulários com PDFs
-            physical_forms = PhysicalTestForm.query.filter_by(test_id=test_id).all()
             
             minio_url = None
             minio_object_name = None
             minio_bucket = None
             download_size = 0
             
-            if physical_forms:
-                zip_path = os.path.join(temp_dir, f'provas_fisicas_{test_id}.zip')
-                
+            if generated_files:
                 try:
-                    # Criar ZIP usando arquivos em disco (não bytes em memória)
+                    # Criar ZIP usando arquivos em disco diretamente dos generated_files
                     with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zf:
-                        for form in physical_forms:
-                            # Tentar usar pdf_path se disponível (arquivo em disco)
-                            pdf_path = None
-                            
-                            # Verificar se há arquivo em disco correspondente (output_dir padrão)
-                            if form.student_id:
-                                student = Student.query.get(form.student_id)
-                                student_name = student.name.replace(' ', '_').replace('/', '_') if student else 'aluno'
-                                # Usar output_dir padrão do gerador
-                                default_output_dir = '/tmp/celery_pdfs/physical_tests'
-                                potential_path = os.path.join(default_output_dir, f"prova_{student_name}_{form.student_id}.pdf")
-                                
-                                if os.path.exists(potential_path):
-                                    pdf_path = potential_path
-                            
-                            if pdf_path:
+                        for file_info in generated_files:
+                            pdf_path = file_info.get('pdf_path')
+                            if pdf_path and os.path.exists(pdf_path):
                                 # Usar zipfile.write() com arquivo em disco (eficiente)
-                                filename = f"prova_{student_name}_{form.student_id}.pdf"
+                                student_name = file_info['student_name'].replace(' ', '_').replace('/', '_')
+                                filename = f"prova_{student_name}_{file_info['student_id']}.pdf"
                                 zf.write(pdf_path, filename)
-                            elif form.form_pdf_data:
-                                # Fallback: usar dados em memória (compatibilidade)
-                                student = Student.query.get(form.student_id)
-                                student_name = student.name.replace(' ', '_').replace('/', '_') if student else 'aluno'
-                                filename = f"prova_{student_name}_{form.student_id}.pdf"
-                                zf.writestr(filename, form.form_pdf_data)
                     
                     zip_size = os.path.getsize(zip_path)
                     logger.info(f"[CELERY] ✅ ZIP criado: {zip_size} bytes")

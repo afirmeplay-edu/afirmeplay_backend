@@ -63,6 +63,12 @@ class MinIOService:
         # URL pública (se houver nginx/proxy na frente)
         self.public_endpoint = os.getenv('MINIO_ENDPOINT_PUBLIC', f"http://{self.endpoint}")
         
+        # ========================================================================
+        # CLIENT INTERNO: Para operações diretas (upload, download, delete, list)
+        # ========================================================================
+        # Usa endpoint interno (minio-server:9000) para comunicação entre containers
+        # Isso evita dependência do tunnel Cloudflare para operações internas,
+        # melhora latência e reduz risco se o tunnel cair.
         self.client = Minio(
             self.endpoint,
             access_key=self.access_key,
@@ -70,7 +76,31 @@ class MinIOService:
             secure=self.secure
         )
         
-        logger.info(f"✅ MinIO client inicializado: {self.endpoint} (secure={self.secure})")
+        # ========================================================================
+        # CLIENT PÚBLICO: APENAS para geração de URLs pré-assinadas
+        # ========================================================================
+        # ⚠️ REGRA CRÍTICA: URLs pré-assinadas S3 incluem o hostname na assinatura
+        # e NÃO PODEM ser alteradas após a geração. Qualquer modificação da URL
+        # (incluindo substituição de hostname) invalida a assinatura e resulta em
+        # erro SignatureDoesNotMatch.
+        #
+        # Por isso, este client usa diretamente o domínio público (files.afirmeplay.com.br)
+        # para que a URL gerada já contenha o hostname correto na assinatura.
+        #
+        # Formato da URL gerada (path-style, compatível com Cloudflare Tunnel):
+        # https://files.afirmeplay.com.br/answer-sheets/gabaritos/.../cartoes.zip?X-Amz-Signature=...
+        #
+        # NÃO usar virtual-host-style (bucket.subdominio) - Cloudflare Tunnel requer path-style.
+        public_endpoint = 'files.afirmeplay.com.br'
+        self.public_client = Minio(
+            public_endpoint,
+            access_key=self.access_key,
+            secret_key=self.secret_key,
+            secure=True  # HTTPS obrigatório para domínio público
+        )
+        
+        logger.info(f"✅ MinIO client interno inicializado: {self.endpoint} (secure={self.secure})")
+        logger.info(f"✅ MinIO client público inicializado: {public_endpoint} (secure=True, apenas presigned URLs)")
     
     def _get_content_type(self, file_path: str) -> str:
         """Detecta MIME type baseado na extensão do arquivo"""
@@ -177,51 +207,38 @@ class MinIOService:
         """
         Gera URL pré-assinada para download temporário
         
+        ⚠️ IMPORTANTE: Usa public_client diretamente para garantir que o hostname
+        correto (files.afirmeplay.com.br) esteja presente na assinatura S3.
+        
+        URLs pré-assinadas S3 incluem o hostname no cálculo da assinatura e NÃO PODEM
+        ser modificadas após a geração. Qualquer alteração (incluindo substituição de
+        hostname) invalida a assinatura e resulta em erro SignatureDoesNotMatch.
+        
         Args:
             bucket_name: Nome do bucket
             object_name: Nome do objeto
             expires: Tempo de expiração (padrão: 1 hora)
         
         Returns:
-            URL pré-assinada para download com hostname público (files.afirmeplay.com.br)
+            URL pré-assinada para download no formato path-style:
+            https://files.afirmeplay.com.br/{bucket_name}/{object_name}?X-Amz-Signature=...
+            
+            A URL é gerada diretamente com o hostname público e NÃO é modificada.
+        
+        Raises:
+            S3Error: Se houver erro ao gerar a URL pré-assinada
         """
         try:
-            url = self.client.presigned_get_object(
+            # Usar public_client diretamente - NÃO modificar a URL depois
+            # O hostname (files.afirmeplay.com.br) já está correto na assinatura
+            url = self.public_client.presigned_get_object(
                 bucket_name,
                 object_name,
                 expires=expires
             )
             
-            # Substituir hostname interno por hostname público
-            # Exemplo: http://minio-server:9000/... -> http://files.afirmeplay.com.br/...
-            public_hostname = 'files.afirmeplay.com.br'
-            
-            # Extrair protocolo (http ou https)
-            if url.startswith('https://'):
-                protocol = 'https://'
-                url_without_protocol = url[8:]
-            elif url.startswith('http://'):
-                protocol = 'http://'
-                url_without_protocol = url[7:]
-            else:
-                protocol = 'http://'
-                url_without_protocol = url
-            
-            # Encontrar o primeiro '/' após o hostname para separar hostname do path
-            # O path inclui o bucket, object_name e todos os parâmetros de assinatura
-            path_start = url_without_protocol.find('/')
-            if path_start > 0:
-                path = url_without_protocol[path_start:]
-                public_url = f"{protocol}{public_hostname}{path}"
-            else:
-                # Fallback: substituir qualquer ocorrência do endpoint interno
-                public_url = url.replace(self.endpoint, public_hostname)
-                # Também substituir variações comuns
-                public_url = public_url.replace('minio-server:9000', public_hostname)
-                public_url = public_url.replace('localhost:9000', public_hostname)
-            
-            logger.info(f"✅ URL pré-assinada gerada (válida por {expires}): {public_url[:100]}...")
-            return public_url
+            logger.info(f"✅ URL pré-assinada gerada (válida por {expires}): {url[:100]}...")
+            return url
             
         except S3Error as e:
             logger.error(f"❌ Erro ao gerar URL pré-assinada: {str(e)}")

@@ -377,8 +377,9 @@ container_run_celery:
               --network "$ENVIRONMENT" \
               "$IMAGE_TAG" \
               celery -A app.report_analysis.celery_app worker \
-              --loglevel=info \
-              --concurrency=2
+                --loglevel=info \
+                --concurrency=4 \
+                --prefetch-multiplier=1
 
             sleep 10
 

@@ -11,6 +11,7 @@ import base64
 import logging
 import json
 import qrcode
+import gc
 from datetime import datetime
 from typing import List, Dict, Any, Optional
 from io import BytesIO
@@ -35,9 +36,11 @@ class AnswerSheetGenerator:
     def generate_answer_sheets(self, class_id: str, test_data: Dict, 
                               num_questions: int, use_blocks: bool,
                               blocks_config: Dict, correct_answers: Dict,
-                              gabarito_id: str = None, questions_options: Dict = None) -> List[Dict]:
+                              gabarito_id: str = None, questions_options: Dict = None,
+                              output_dir: str = None) -> List[Dict]:
         """
         Gera PDFs de cartões resposta para todos os alunos de uma turma
+        PROCESSAMENTO INCREMENTAL: gera → salva em disco → libera memória
 
         Args:
             class_id: ID da turma
@@ -49,10 +52,15 @@ class AnswerSheetGenerator:
             gabarito_id: ID do gabarito salvo (opcional)
             questions_options: Dict com alternativas de cada questão {1: ['A', 'B', 'C'], 2: ['A', 'B', 'C', 'D'], ...}
                               Se não fornecido, usa padrão A, B, C, D para todas
+            output_dir: Diretório para salvar PDFs em disco (padrão: /tmp/celery_pdfs/answer_sheets)
 
         Returns:
-            Lista com informações dos PDFs gerados
+            Lista com informações dos PDFs gerados (com pdf_path se output_dir fornecido)
         """
+        # Definir output_dir padrão para containers Linux
+        if output_dir is None:
+            output_dir = '/tmp/celery_pdfs/answer_sheets'
+        
         try:
             from app.models.student import Student
             from app.models.studentClass import Class
@@ -66,6 +74,9 @@ class AnswerSheetGenerator:
             students = Student.query.filter_by(class_id=class_id).all()
             if not students:
                 raise ValueError(f"Nenhum aluno encontrado na turma {class_id}")
+
+            # Criar diretório de saída (sempre criar, mesmo com padrão)
+            os.makedirs(output_dir, exist_ok=True)
 
             generated_files = []
 
@@ -99,7 +110,9 @@ class AnswerSheetGenerator:
                     num_questions, blocks_config, questions_map
                 )
 
-            for student in students:
+            # Processamento incremental: gerar → salvar → liberar
+            total_students = len(students)
+            for idx, student in enumerate(students, 1):
                 try:
                     # Gerar PDF individual para cada aluno
                     pdf_data = self._generate_individual_answer_sheet(
@@ -108,25 +121,45 @@ class AnswerSheetGenerator:
                     )
 
                     if pdf_data:
-                        generated_files.append({
+                        file_info = {
                             'student_id': student.id,
                             'student_name': student.name,
-                            'pdf_data': pdf_data,
                             'has_pdf_data': True
-                        })
+                        }
+                        
+                        if output_dir:
+                            # Salvar em disco e liberar memória imediatamente
+                            student_name_safe = student.name.replace(' ', '_').replace('/', '_')
+                            pdf_path = os.path.join(output_dir, f"cartao_{student_name_safe}_{student.id}.pdf")
+                            
+                            with open(pdf_path, 'wb') as f:
+                                f.write(pdf_data)
+                            
+                            file_info['pdf_path'] = pdf_path
+                            # NÃO incluir pdf_data quando salvo em disco
+                            del pdf_data
+                        else:
+                            # Modo compatibilidade: retornar bytes em memória
+                            file_info['pdf_data'] = pdf_data
+                        
+                        generated_files.append(file_info)
+                        
+                        # Liberar memória explicitamente após cada PDF
+                        gc.collect()
+                    
+                    # Log de progresso apenas a cada 10 alunos ou no final
+                    if idx % 10 == 0 or idx == total_students:
+                        logging.debug(f"Gerados {idx}/{total_students} cartões resposta")
 
                 except Exception as e:
-                    logging.error(f"Erro ao gerar cartão resposta para aluno {student.id}: {str(e)}")
-                    import traceback
-                    logging.error(traceback.format_exc())
+                    # Log apenas em caso de erro (não dentro do loop normal)
+                    logging.error(f"Erro ao gerar cartão resposta para aluno {student.id}: {str(e)}", exc_info=True)
                     continue
 
             return generated_files
 
         except Exception as e:
-            logging.error(f"Erro ao gerar cartões resposta: {str(e)}")
-            import traceback
-            logging.error(traceback.format_exc())
+            logging.error(f"Erro ao gerar cartões resposta: {str(e)}", exc_info=True)
             raise
 
     def _generate_individual_answer_sheet(self, student: Dict, test_data: Dict,

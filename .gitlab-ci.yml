@@ -47,25 +47,23 @@ stages:
 .clean_job:
     script:
         - |
-            CONTAINER_IDS=$(docker container ls -a -f ancestor="$IMAGE_TAG" -q)
+            CONTAINER_IDS=$(docker container ls -a -f name="^${CONTAINER_NAME}$" -q)
 
             if [ -z "$CONTAINER_IDS" ]; then
-                echo "$(date '+[%Y-%m-%d %H:%M:%S]') - Container do app não existe."
+                echo "$(date '+[%Y-%m-%d %H:%M:%S]') - Container '$CONTAINER_NAME' não existe."
             else
                 for ID in $CONTAINER_IDS; do
-                    IS_RUNNING=$(docker inspect -f "{{.State.Running}}" "$ID")
+                    IS_RUNNING=$(docker inspect -f "{{.State.Running}}" "$ID" 2>/dev/null || echo "false")
 
                     if [ "$IS_RUNNING" = "true" ]; then
-                        docker container stop "$ID"
-
-                        echo "$(date '+[%Y-%m-%d %H:%M:%S]') - Container do app com id '$ID' foi parado."
+                        docker container stop "$ID" 2>/dev/null || true
+                        echo "$(date '+[%Y-%m-%d %H:%M:%S]') - Container '$CONTAINER_NAME' parado."
                     else
-                        echo "$(date '+[%Y-%m-%d %H:%M:%S]') - Container do app com id '$ID' já está parado."
+                        echo "$(date '+[%Y-%m-%d %H:%M:%S]') - Container '$CONTAINER_NAME' já estava parado."
                     fi
 
-                    docker container rm "$ID"
-
-                    echo "$(date '+[%Y-%m-%d %H:%M:%S]') - Container do app com id '$ID' foi removido."
+                    docker container rm "$ID" 2>/dev/null || true
+                    echo "$(date '+[%Y-%m-%d %H:%M:%S]') - Container '$CONTAINER_NAME' removido."
                 done
             fi
         - |
@@ -74,10 +72,10 @@ stages:
             if [ -z "$IMAGE_ID" ]; then
                 echo "$(date '+[%Y-%m-%d %H:%M:%S]') - Imagem '$IMAGE_TAG' não existe."
             else
-                docker image rm "$IMAGE_ID"
-
-                echo "$(date '+[%Y-%m-%d %H:%M:%S]') - Imagem '$IMAGE_TAG' com id '$IMAGE_ID' foi removida."
+                docker image rm "$IMAGE_ID" 2>/dev/null || true
+                echo "$(date '+[%Y-%m-%d %H:%M:%S]') - Imagem '$IMAGE_TAG' removida."
             fi
+
 
 invalid_merge_request:
     stage: validate_pipeline

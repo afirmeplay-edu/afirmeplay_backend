@@ -106,9 +106,15 @@ image_build:
         - .set_runner_tag
     environment:
         name: $ENVIRONMENT
+    rules:
+        - changes:
+            - Dockerfile
+            - requirements.txt
     script:
         - |
             set -e
+
+            docker build -t "$IMAGE_TAG" .
 
             echo "DATABASE_URL=$DATABASE_URL" > app/.env
             echo "FRONTEND_URL=$FRONTEND_URL" >> app/.env
@@ -222,6 +228,7 @@ container_run:
         name: $ENVIRONMENT
         on_stop: environment_clean
     script:
+        - docker rm -f "$CONTAINER_NAME" || true
         - |
             set -e
 

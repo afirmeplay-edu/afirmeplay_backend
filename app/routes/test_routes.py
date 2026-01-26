@@ -906,6 +906,36 @@ def atualizar_avaliacao(test_id):
                 else:
                     setattr(test, campo, data[campo])
 
+        # Processar questões se fornecidas
+        if 'questions' in data and isinstance(data['questions'], list):
+            # Remover todas as associações existentes
+            # As questões permanecem no banco para reutilização futura
+            existing_test_questions = TestQuestion.query.filter_by(test_id=test.id).all()
+            for test_question in existing_test_questions:
+                db.session.delete(test_question)
+            logging.info(f"Removidas {len(existing_test_questions)} associações de questões existentes")
+            
+            # Criar novas associações
+            for index, question_data in enumerate(data['questions']):
+                if 'id' in question_data and question_data['id']:
+                    # Verificar se a questão existe
+                    existing_question = Question.query.get(question_data['id'])
+                    if existing_question:
+                        # Usar o campo 'number' como order se fornecido, caso contrário usar índice + 1
+                        order = question_data.get('number', index + 1)
+                        
+                        test_question = TestQuestion(
+                            test_id=test.id,
+                            question_id=existing_question.id,
+                            order=order
+                        )
+                        db.session.add(test_question)
+                        logging.info(f"Questão {existing_question.id} associada à avaliação com ordem {order}")
+                    else:
+                        logging.warning(f"Questão com ID {question_data['id']} não encontrada")
+                else:
+                    logging.warning(f"Questão na posição {index} não possui ID válido")
+
         db.session.commit()
         return jsonify({'message': 'Test updated successfully'}), 200
 

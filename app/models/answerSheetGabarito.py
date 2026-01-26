@@ -70,6 +70,14 @@ class AnswerSheetGabarito(db.Model):
     grade_name = db.Column(db.String(100), nullable=True)  # Série/turma (ex: "5º Ano")
     institution = db.Column(db.String(200), nullable=True)  # Instituição
     
+    # =========================================================================
+    # ✅ Campos MinIO para armazenamento de ZIPs de cartões resposta
+    # =========================================================================
+    minio_url = db.Column(db.String(500), nullable=True)  # URL completa do ZIP no MinIO
+    minio_object_name = db.Column(db.String(200), nullable=True)  # Path do objeto no bucket
+    minio_bucket = db.Column(db.String(100), nullable=True)  # Nome do bucket
+    zip_generated_at = db.Column(db.DateTime, nullable=True)  # Timestamp de geração do ZIP
+    
     # Relacionamentos
     test = db.relationship('Test', foreign_keys=[test_id])
     class_ = db.relationship('Class', foreign_keys=[class_id])

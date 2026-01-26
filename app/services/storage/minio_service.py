@@ -46,10 +46,19 @@ class MinIOService:
     }
     
     def __init__(self):
-        self.endpoint = os.getenv('MINIO_ENDPOINT', 'localhost:9000')
+        self.endpoint = os.getenv('MINIO_ENDPOINT', 'minio-server:9000')
         self.access_key = os.getenv('MINIO_ACCESS_KEY', 'minioadmin')
         self.secret_key = os.getenv('MINIO_SECRET_KEY', 'minioadmin123')
-        self.secure = os.getenv('MINIO_SECURE', 'false').lower() == 'true'
+        
+        # 🔒 FORÇAR HTTP para comunicação interna entre containers
+        # Se endpoint contém 'minio-server' ou 'localhost', sempre usar HTTP
+        is_internal = 'minio-server' in self.endpoint or 'localhost' in self.endpoint
+        if is_internal:
+            self.secure = False
+            logger.info(f"🔒 Endpoint interno detectado ({self.endpoint}), forçando secure=False")
+        else:
+            # Para endpoints externos, respeitar variável de ambiente
+            self.secure = os.getenv('MINIO_SECURE', 'false').lower() == 'true'
         
         # URL pública (se houver nginx/proxy na frente)
         self.public_endpoint = os.getenv('MINIO_ENDPOINT_PUBLIC', f"http://{self.endpoint}")
@@ -61,7 +70,7 @@ class MinIOService:
             secure=self.secure
         )
         
-        logger.info(f"✅ MinIO client inicializado: {self.endpoint}")
+        logger.info(f"✅ MinIO client inicializado: {self.endpoint} (secure={self.secure})")
     
     def _get_content_type(self, file_path: str) -> str:
         """Detecta MIME type baseado na extensão do arquivo"""
@@ -75,7 +84,7 @@ class MinIOService:
         data: bytes,
         content_type: Optional[str] = None,
         metadata: Optional[Dict] = None
-    ) -> Dict[str, str]:
+    ) -> Optional[Dict[str, str]]:
         """
         Upload genérico de arquivo para MinIO
         
@@ -87,7 +96,8 @@ class MinIOService:
             metadata: Metadados opcionais
         
         Returns:
-            Dict com 'url', 'object_name', 'bucket' e 'size'
+            Dict com 'url', 'object_name', 'bucket' e 'size' ou None se falhar
+            NÃO lança exceção - retorna None para permitir tratamento não crítico
         """
         try:
             if content_type is None:
@@ -112,17 +122,24 @@ class MinIOService:
                 'size': len(data)
             }
             
-        except S3Error as e:
-            logger.error(f"❌ Erro ao enviar arquivo para MinIO: {str(e)}")
-            raise
+        except (S3Error, Exception) as e:
+            logger.error(f"❌ Erro ao enviar arquivo para MinIO: {str(e)}", exc_info=True)
+            # NÃO fazer raise - retornar None para permitir tratamento não crítico
+            return None
     
     def upload_from_path(
         self, 
         bucket_name: str, 
         object_name: str, 
         file_path: str
-    ) -> Dict[str, str]:
-        """Upload de arquivo a partir de caminho no filesystem"""
+    ) -> Optional[Dict[str, str]]:
+        """
+        Upload de arquivo a partir de caminho no filesystem
+        
+        Returns:
+            Dict com informações do upload ou None se falhar
+            NÃO lança exceção - retorna None para permitir tratamento não crítico
+        """
         try:
             content_type = self._get_content_type(file_path)
             
@@ -146,9 +163,10 @@ class MinIOService:
                 'size': file_size
             }
             
-        except S3Error as e:
-            logger.error(f"❌ Erro ao enviar arquivo para MinIO: {str(e)}")
-            raise
+        except (S3Error, Exception) as e:
+            logger.error(f"❌ Erro ao enviar arquivo para MinIO: {str(e)}", exc_info=True)
+            # NÃO fazer raise - retornar None para permitir tratamento não crítico
+            return None
     
     def get_presigned_url(
         self, 
@@ -229,7 +247,7 @@ class MinIOService:
     # MÉTODOS ESPECÍFICOS PARA CADA TIPO DE ARQUIVO
     # ========================================================================
     
-    def upload_answer_sheet_zip(self, gabarito_id: str, zip_data: bytes) -> Dict[str, str]:
+    def upload_answer_sheet_zip(self, gabarito_id: str, zip_data: bytes) -> Optional[Dict[str, str]]:
         """
         Upload de ZIP de cartões de resposta
         
@@ -238,7 +256,7 @@ class MinIOService:
             zip_data: Dados binários do ZIP
         
         Returns:
-            Dict com informações do upload
+            Dict com informações do upload ou None se falhar
         """
         object_name = f"gabaritos/{gabarito_id}/cartoes.zip"
         return self.upload_file(
@@ -248,7 +266,7 @@ class MinIOService:
             content_type='application/zip'
         )
     
-    def upload_physical_test_zip(self, test_id: str, zip_data: bytes) -> Dict[str, str]:
+    def upload_physical_test_zip(self, test_id: str, zip_data: bytes) -> Optional[Dict[str, str]]:
         """
         Upload de ZIP de provas físicas
         
@@ -257,7 +275,7 @@ class MinIOService:
             zip_data: Dados binários do ZIP
         
         Returns:
-            Dict com informações do upload
+            Dict com informações do upload ou None se falhar
         """
         object_name = f"{test_id}/all_forms.zip"
         return self.upload_file(

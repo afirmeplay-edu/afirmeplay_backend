@@ -22,22 +22,22 @@ def upgrade():
     - AnswerSheetGabarito
     - PhysicalTestForm
     """
-    # AnswerSheetGabarito - campos MinIO
-    op.add_column('answer_sheet_gabarito', 
+    # AnswerSheetGabarito - campos MinIO (tabela: answer_sheet_gabaritos)
+    op.add_column('answer_sheet_gabaritos', 
         sa.Column('minio_url', sa.String(500), nullable=True))
-    op.add_column('answer_sheet_gabarito', 
+    op.add_column('answer_sheet_gabaritos', 
         sa.Column('minio_object_name', sa.String(200), nullable=True))
-    op.add_column('answer_sheet_gabarito', 
+    op.add_column('answer_sheet_gabaritos', 
         sa.Column('minio_bucket', sa.String(100), nullable=True))
-    op.add_column('answer_sheet_gabarito', 
+    op.add_column('answer_sheet_gabaritos', 
         sa.Column('zip_generated_at', sa.DateTime(), nullable=True))
     
-    # PhysicalTestForm - campos MinIO
-    op.add_column('physical_test_form', 
+    # PhysicalTestForm - campos MinIO (tabela: physical_test_forms)
+    op.add_column('physical_test_forms', 
         sa.Column('minio_url', sa.String(500), nullable=True))
-    op.add_column('physical_test_form', 
+    op.add_column('physical_test_forms', 
         sa.Column('minio_object_name', sa.String(200), nullable=True))
-    op.add_column('physical_test_form', 
+    op.add_column('physical_test_forms', 
         sa.Column('minio_bucket', sa.String(100), nullable=True))
 
 
@@ -45,13 +45,13 @@ def downgrade():
     """
     Remove campos MinIO
     """
-    # AnswerSheetGabarito
-    op.drop_column('answer_sheet_gabarito', 'zip_generated_at')
-    op.drop_column('answer_sheet_gabarito', 'minio_bucket')
-    op.drop_column('answer_sheet_gabarito', 'minio_object_name')
-    op.drop_column('answer_sheet_gabarito', 'minio_url')
+    # AnswerSheetGabarito (tabela: answer_sheet_gabaritos)
+    op.drop_column('answer_sheet_gabaritos', 'zip_generated_at')
+    op.drop_column('answer_sheet_gabaritos', 'minio_bucket')
+    op.drop_column('answer_sheet_gabaritos', 'minio_object_name')
+    op.drop_column('answer_sheet_gabaritos', 'minio_url')
     
-    # PhysicalTestForm
-    op.drop_column('physical_test_form', 'minio_bucket')
-    op.drop_column('physical_test_form', 'minio_object_name')
-    op.drop_column('physical_test_form', 'minio_url')
+    # PhysicalTestForm (tabela: physical_test_forms)
+    op.drop_column('physical_test_forms', 'minio_bucket')
+    op.drop_column('physical_test_forms', 'minio_object_name')
+    op.drop_column('physical_test_forms', 'minio_url')

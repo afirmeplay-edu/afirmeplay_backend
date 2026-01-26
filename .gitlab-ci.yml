@@ -292,6 +292,7 @@ minio_setup:
                 apk add --no-cache curl > /dev/null 2>&1;
                 wget -q -O /tmp/mc https://dl.min.io/client/mc/release/linux-amd64/mc;
                 chmod +x /tmp/mc;
+                /tmp/mc alias remove myminio || true
                 /tmp/mc alias set myminio http://minio-server:9000 ${MINIO_ROOT_USER} ${MINIO_ROOT_PASSWORD};
                 /tmp/mc mb myminio/answer-sheets --ignore-existing || true;
                 /tmp/mc mb myminio/physical-tests --ignore-existing || true;

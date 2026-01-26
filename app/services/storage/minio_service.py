@@ -183,7 +183,7 @@ class MinIOService:
             expires: Tempo de expiração (padrão: 1 hora)
         
         Returns:
-            URL pré-assinada para download
+            URL pré-assinada para download com hostname público (files.afirmeplay.com.br)
         """
         try:
             url = self.client.presigned_get_object(
@@ -192,8 +192,36 @@ class MinIOService:
                 expires=expires
             )
             
-            logger.info(f"✅ URL pré-assinada gerada (válida por {expires})")
-            return url
+            # Substituir hostname interno por hostname público
+            # Exemplo: http://minio-server:9000/... -> http://files.afirmeplay.com.br/...
+            public_hostname = 'files.afirmeplay.com.br'
+            
+            # Extrair protocolo (http ou https)
+            if url.startswith('https://'):
+                protocol = 'https://'
+                url_without_protocol = url[8:]
+            elif url.startswith('http://'):
+                protocol = 'http://'
+                url_without_protocol = url[7:]
+            else:
+                protocol = 'http://'
+                url_without_protocol = url
+            
+            # Encontrar o primeiro '/' após o hostname para separar hostname do path
+            # O path inclui o bucket, object_name e todos os parâmetros de assinatura
+            path_start = url_without_protocol.find('/')
+            if path_start > 0:
+                path = url_without_protocol[path_start:]
+                public_url = f"{protocol}{public_hostname}{path}"
+            else:
+                # Fallback: substituir qualquer ocorrência do endpoint interno
+                public_url = url.replace(self.endpoint, public_hostname)
+                # Também substituir variações comuns
+                public_url = public_url.replace('minio-server:9000', public_hostname)
+                public_url = public_url.replace('localhost:9000', public_hostname)
+            
+            logger.info(f"✅ URL pré-assinada gerada (válida por {expires}): {public_url[:100]}...")
+            return public_url
             
         except S3Error as e:
             logger.error(f"❌ Erro ao gerar URL pré-assinada: {str(e)}")

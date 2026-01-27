@@ -142,17 +142,42 @@ class PhysicalTestFormService:
                                 state_name = city_obj.state
 
             
-            # Buscar blocks_config do AnswerSheetGabarito se existir
+            # ✅ MODIFICADO: Extrair correction_data ANTES de mesclar test_data (para não perder)
+            print(f"[SERVICE] ========== EXTRAINDO CORRECTION_DATA ==========")
+            print(f"[SERVICE] test_data recebido: {test_data}")
+            print(f"[SERVICE] 'correction_data' em test_data: {'correction_data' in test_data if test_data else False}")
+            
             blocks_config = None
-            gabarito = AnswerSheetGabarito.query.filter_by(test_id=test_id).first()
-            if gabarito:
-                if gabarito.blocks_config:
-                    blocks_config = gabarito.blocks_config.copy()
-                    # Garantir que use_blocks está presente
-                    if gabarito.use_blocks:
-                        blocks_config['use_blocks'] = True
-                    else:
-                        blocks_config['use_blocks'] = False
+            correction_data = None
+            
+            # Primeiro, tentar pegar do test_data passado (vem do Celery task)
+            if test_data and 'correction_data' in test_data:
+                correction_data = test_data.pop('correction_data')  # Remover para não ser mesclado
+                blocks_config = correction_data.get('blocks_config')
+                print(f"[SERVICE] ✅ correction_data extraído: {correction_data}")
+                print(f"[SERVICE] blocks_config extraído: {blocks_config}")
+                print(f"[SERVICE] blocks_config tem topology: {'topology' in blocks_config if blocks_config else False}")
+                logging.info(f"✅ Dados de correção obtidos do test_data (correction_data)")
+            else:
+                print(f"[SERVICE] ⚠️ correction_data NÃO encontrado em test_data, usando fallback")
+                # Fallback: buscar do AnswerSheetGabarito (compatibilidade com código antigo)
+                gabarito = AnswerSheetGabarito.query.filter_by(test_id=test_id).first()
+                if gabarito:
+                    if gabarito.blocks_config:
+                        blocks_config = gabarito.blocks_config.copy()
+                        # Garantir que use_blocks está presente
+                        if gabarito.use_blocks:
+                            blocks_config['use_blocks'] = True
+                        else:
+                            blocks_config['use_blocks'] = False
+                    # Criar correction_data a partir do gabarito para compatibilidade
+                    correction_data = {
+                        'num_questions': gabarito.num_questions,
+                        'use_blocks': gabarito.use_blocks,
+                        'blocks_config': blocks_config,
+                        'correct_answers': gabarito.correct_answers
+                    }
+                    logging.info(f"⚠️ Dados de correção obtidos do AnswerSheetGabarito (fallback)")
             
             # Criar test_data base, mesclando com test_data passado como parâmetro
             base_test_data = {
@@ -170,11 +195,11 @@ class PhysicalTestFormService:
             if test_data:
                 base_test_data.update(test_data)
             
-            # Incluir blocks_config do gabarito apenas se não foi passado no test_data
+            # Incluir blocks_config do correction_data apenas se não foi passado no test_data
             if blocks_config and 'blocks_config' not in base_test_data:
                 base_test_data['blocks_config'] = blocks_config
             elif blocks_config and 'blocks_config' in base_test_data:
-                # Se ambos existem, mesclar: usar valores do test_data passado, mas preencher campos faltantes do gabarito
+                # Se ambos existem, mesclar: usar valores do test_data passado, mas preencher campos faltantes do correction_data
                 merged_blocks_config = blocks_config.copy()
                 merged_blocks_config.update(base_test_data['blocks_config'])
                 base_test_data['blocks_config'] = merged_blocks_config
@@ -202,9 +227,17 @@ class PhysicalTestFormService:
             )
             
             # Salvar informações no banco de dados (processamento incremental)
+            print(f"[SERVICE] ========== CHAMANDO _save_physical_forms_to_db ==========")
+            print(f"[SERVICE] correction_data antes de passar: {correction_data}")
+            print(f"[SERVICE] correction_data tem blocks_config: {'blocks_config' in correction_data if correction_data else False}")
+            if correction_data and 'blocks_config' in correction_data:
+                print(f"[SERVICE] blocks_config tem topology: {'topology' in correction_data['blocks_config']}")
+            
             saved_forms = self._save_physical_forms_to_db(
-                test_id, generated_files, questions
+                test_id, generated_files, questions, correction_data=correction_data
             )
+            
+            print(f"[SERVICE] _save_physical_forms_to_db retornou: {len(saved_forms)} formulários salvos")
             
             return {
                 'success': True,
@@ -349,11 +382,26 @@ class PhysicalTestFormService:
             'qr_code': qr_code_base64
         }
 
-    def _save_physical_forms_to_db(self, test_id: str, generated_files: List[Dict], questions: List[Question]) -> List[Dict]:
+    def _save_physical_forms_to_db(self, test_id: str, generated_files: List[Dict], questions: List[Question], correction_data: Dict = None) -> List[Dict]:
         """
         Salva formulários físicos no banco de dados
         PROCESSAMENTO INCREMENTAL: salva aluno por aluno, libera memória após cada commit
+        
+        Args:
+            test_id: ID da prova
+            generated_files: Lista de arquivos gerados
+            questions: Lista de questões
+            correction_data: Dados de correção (num_questions, use_blocks, blocks_config, correct_answers)
         """
+        print(f"[_save_physical_forms_to_db] ========== MÉTODO CHAMADO ==========")
+        print(f"[_save_physical_forms_to_db] test_id: {test_id}")
+        print(f"[_save_physical_forms_to_db] correction_data recebido: {correction_data}")
+        print(f"[_save_physical_forms_to_db] correction_data é None: {correction_data is None}")
+        if correction_data:
+            print(f"[_save_physical_forms_to_db] correction_data tem blocks_config: {'blocks_config' in correction_data}")
+            if 'blocks_config' in correction_data:
+                print(f"[_save_physical_forms_to_db] blocks_config tem topology: {'topology' in correction_data['blocks_config']}")
+        
         saved_forms = []
         try:
             if not generated_files:
@@ -391,33 +439,120 @@ class PhysicalTestFormService:
                         })
                         continue
                     
-                    # Ler PDF do disco se pdf_path fornecido (processamento incremental)
-                    pdf_data = None
+                    # ✅ MODIFICADO: Enviar PDF individual para MinIO e salvar apenas URL
                     pdf_path = file_info.get('pdf_path')
+                    minio_url = None
                     
                     if pdf_path and os.path.exists(pdf_path):
-                        # Ler PDF do disco apenas quando necessário
-                        with open(pdf_path, 'rb') as f:
-                            pdf_data = f.read()
+                        try:
+                            from app.services.storage.minio_service import MinIOService
+                            
+                            minio = MinIOService()
+                            # Upload do PDF individual para MinIO
+                            student_name_safe = file_info['student_name'].replace(' ', '_').replace('/', '_')
+                            object_name = f"{test_id}/forms/{student_id}_{student_name_safe}.pdf"
+                            
+                            upload_result = minio.upload_from_path(
+                                bucket_name=minio.BUCKETS['PHYSICAL_TESTS'],
+                                object_name=object_name,
+                                file_path=pdf_path
+                            )
+                            
+                            if upload_result:
+                                minio_url = upload_result['url']
+                                logging.debug(f"✅ PDF enviado para MinIO: {minio_url}")
+                            else:
+                                logging.warning(f"⚠️ Falha ao enviar PDF para MinIO, usando caminho local: {pdf_path}")
+                                minio_url = pdf_path  # Fallback para caminho local
+                        except Exception as minio_error:
+                            logging.warning(f"⚠️ Erro ao enviar PDF para MinIO (não crítico): {str(minio_error)}, usando caminho local")
+                            minio_url = pdf_path  # Fallback para caminho local
                     elif file_info.get('pdf_data'):
-                        # Modo compatibilidade: usar pdf_data em memória
-                        pdf_data = file_info['pdf_data']
+                        # Modo compatibilidade: upload direto de bytes (não recomendado para produção)
+                        try:
+                            from app.services.storage.minio_service import MinIOService
+                            
+                            minio = MinIOService()
+                            student_name_safe = file_info['student_name'].replace(' ', '_').replace('/', '_')
+                            object_name = f"{test_id}/forms/{student_id}_{student_name_safe}.pdf"
+                            
+                            upload_result = minio.upload_file(
+                                bucket_name=minio.BUCKETS['PHYSICAL_TESTS'],
+                                object_name=object_name,
+                                data=file_info['pdf_data'],
+                                content_type='application/pdf'
+                            )
+                            
+                            if upload_result:
+                                minio_url = upload_result['url']
+                                logging.debug(f"✅ PDF enviado para MinIO (bytes): {minio_url}")
+                            else:
+                                logging.warning(f"⚠️ Falha ao enviar PDF para MinIO")
+                        except Exception as minio_error:
+                            logging.warning(f"⚠️ Erro ao enviar PDF para MinIO: {str(minio_error)}")
                     
-                    if not pdf_data:
+                    if not minio_url and not pdf_path:
                         logging.warning(f"PDF não encontrado para aluno {student_id}")
                         continue
                     
                     # Criar registro do formulário físico
+                    # ✅ MODIFICADO: NÃO salvar form_pdf_data (apenas URL do MinIO)
                     physical_form = PhysicalTestForm(
                         test_id=test_id,
                         student_id=student_id,
                         class_test_id=class_test_id,
-                        form_pdf_data=pdf_data,
-                        form_pdf_url=pdf_path,
+                        form_pdf_data=None,  # ✅ NÃO salvar bytes no banco
+                        form_pdf_url=minio_url or pdf_path,  # ✅ Salvar apenas URL
                         qr_code_data=file_info.get('qr_code_data', file_info['student_id']),
                         status='gerado',
                         form_type='institutional'
                     )
+                    
+                    # ✅ NOVO: Salvar dados de correção no PhysicalTestForm
+                    print(f"[SERVICE] ========== SALVANDO DADOS DE CORREÇÃO ==========")
+                    print(f"[SERVICE] student_id: {student_id}")
+                    print(f"[SERVICE] correction_data existe: {correction_data is not None}")
+                    
+                    if correction_data:
+                        print(f"[SERVICE] correction_data: {correction_data}")
+                        physical_form.num_questions = correction_data.get('num_questions')
+                        physical_form.use_blocks = correction_data.get('use_blocks', False)
+                        print(f"[SERVICE] num_questions: {physical_form.num_questions}")
+                        print(f"[SERVICE] use_blocks: {physical_form.use_blocks}")
+                        
+                        # ✅ CRÍTICO: Garantir que blocks_config tenha a topology completa
+                        blocks_config_to_save = correction_data.get('blocks_config')
+                        print(f"[SERVICE] blocks_config_to_save: {blocks_config_to_save}")
+                        
+                        if blocks_config_to_save:
+                            # Verificar se tem topology
+                            has_topology = 'topology' in blocks_config_to_save and blocks_config_to_save.get('topology')
+                            print(f"[SERVICE] blocks_config tem topology: {has_topology}")
+                            
+                            if not has_topology:
+                                print(f"[SERVICE] ⚠️⚠️⚠️ ATENÇÃO: blocks_config SEM topology para aluno {student_id}")
+                                logging.warning(f"⚠️ blocks_config sem topology para aluno {student_id}")
+                            else:
+                                num_blocks_in_topology = len(blocks_config_to_save['topology'].get('blocks', []))
+                                print(f"[SERVICE] ✅ blocks_config com topology: {num_blocks_in_topology} blocos")
+                                logging.info(f"✅ blocks_config com topology: {num_blocks_in_topology} blocos")
+                            
+                            physical_form.blocks_config = blocks_config_to_save
+                            print(f"[SERVICE] blocks_config salvo no physical_form")
+                        else:
+                            print(f"[SERVICE] ⚠️⚠️⚠️ blocks_config NÃO encontrado em correction_data para aluno {student_id}")
+                            logging.warning(f"⚠️ blocks_config não encontrado em correction_data para aluno {student_id}")
+                        
+                        physical_form.correct_answers = correction_data.get('correct_answers')
+                        print(f"[SERVICE] correct_answers: {physical_form.correct_answers}")
+                        print(f"[SERVICE] ✅ Dados de correção salvos: num_questions={physical_form.num_questions}, use_blocks={physical_form.use_blocks}")
+                        logging.info(f"✅ Dados de correção salvos no PhysicalTestForm para aluno {student_id}: num_questions={physical_form.num_questions}, use_blocks={physical_form.use_blocks}")
+                    else:
+                        print(f"[SERVICE] ⚠️⚠️⚠️⚠️⚠️ correction_data NÃO fornecido para aluno {student_id} - dados NÃO serão salvos!")
+                        logging.warning(f"⚠️ correction_data não fornecido para aluno {student_id} - dados de correção NÃO serão salvos!")
+                    
+                    print(f"[SERVICE] ========== COMMIT NO BANCO ==========")
+                    
                     db.session.add(physical_form)
                     db.session.flush()  # Para obter o ID
                     
@@ -426,6 +561,7 @@ class PhysicalTestFormService:
                         'student_name': file_info['student_name'],
                         'form_id': physical_form.id,
                         'pdf_path': pdf_path,
+                        'minio_url': minio_url,
                         'already_exists': False
                     })
                     
@@ -433,7 +569,6 @@ class PhysicalTestFormService:
                     db.session.commit()
                     
                     # Liberar memória após cada salvamento
-                    del pdf_data
                     import gc
                     gc.collect()
                     
@@ -631,7 +766,7 @@ class PhysicalTestFormService:
             
             # Salvar no banco
             saved_forms = self._save_physical_forms_to_db(
-                test_id, generated_files, questions
+                test_id, generated_files, questions, correction_data=None
             )
             
             return {

@@ -153,6 +153,10 @@ def generate_physical_forms_async(
             data = result.get()
     """
     try:
+        print(f"[CELERY] ========== TASK CELERY INICIADA ==========")
+        print(f"[CELERY] test_id: {test_id}")
+        print(f"[CELERY] force_regenerate: {force_regenerate}")
+        print(f"[CELERY] blocks_config recebido: {blocks_config}")
         logger.info(f"[CELERY] 🚀 Iniciando geração de formulários físicos para test_id={test_id}")
         
         # Imports locais para evitar problemas de circular import
@@ -277,61 +281,65 @@ def generate_physical_forms_async(
             if 'separate_by_subject' not in blocks_config:
                 blocks_config['separate_by_subject'] = False
         
-        # Gerar estrutura completa (topology) se necessário
-        if use_blocks and 'topology' not in blocks_config:
-            logger.info(f"[CELERY] 🔨 Gerando estrutura completa de blocos...")
-            from app.routes.physical_test_routes import _generate_complete_structure
-            
-            complete_structure = _generate_complete_structure(
-                num_questions=num_questions,
-                use_blocks=use_blocks,
-                blocks_config=blocks_config,
-                questions_options=questions_options
-            )
-            blocks_config['topology'] = complete_structure
-            logger.info(f"[CELERY] ✅ Estrutura gerada: {blocks_config.get('num_blocks', 1)} blocos")
-        
-        # Buscar ou criar/atualizar gabarito
-        gabarito = AnswerSheetGabarito.query.filter_by(test_id=test_id).first()
-        
-        if not gabarito:
-            # Criar novo gabarito
-            logger.info(f"[CELERY] 📋 Criando gabarito para test_id={test_id}")
-            
-            gabarito = AnswerSheetGabarito(
-                test_id=test_id,
-                class_id=class_tests[0].class_id,
-                num_questions=num_questions,
-                use_blocks=use_blocks,
-                blocks_config=blocks_config,
-                correct_answers=correct_answers,
-                created_by=test.created_by
-            )
-            db.session.add(gabarito)
-            db.session.commit()
-            
-            logger.info(f"[CELERY] ✅ Gabarito criado: {gabarito.id}")
-        else:
-            # Atualizar gabarito existente com novo blocks_config (se fornecido)
-            if blocks_config:
-                logger.info(f"[CELERY] 📋 Atualizando gabarito existente com novo blocks_config")
-                gabarito.num_questions = num_questions
-                gabarito.use_blocks = use_blocks
-                gabarito.blocks_config = blocks_config
-                gabarito.correct_answers = correct_answers
-                db.session.commit()
-                logger.info(f"[CELERY] ✅ Gabarito atualizado: {gabarito.id}")
+        # ✅ CRÍTICO: Gerar estrutura completa (topology) SEMPRE que use_blocks=True
+        # Isso garante que a topologia completa seja salva no banco
+        if use_blocks:
+            if 'topology' not in blocks_config or not blocks_config.get('topology'):
+                logger.info(f"[CELERY] 🔨 Gerando estrutura completa de blocos...")
+                from app.routes.physical_test_routes import _generate_complete_structure
+                
+                complete_structure = _generate_complete_structure(
+                    num_questions=num_questions,
+                    use_blocks=use_blocks,
+                    blocks_config=blocks_config,
+                    questions_options=questions_options
+                )
+                blocks_config['topology'] = complete_structure
+                logger.info(f"[CELERY] ✅ Estrutura gerada: {blocks_config.get('num_blocks', 1)} blocos, {len(complete_structure.get('blocks', []))} blocos na topology")
             else:
-                logger.info(f"[CELERY] ✅ Gabarito existente: {gabarito.id} (mantendo config atual)")
+                logger.info(f"[CELERY] ✅ Topology já existe no blocks_config")
+        
+        # ✅ MODIFICADO: Não criar AnswerSheetGabarito para provas físicas
+        # Os dados serão salvos diretamente no PhysicalTestForm quando cada formulário for criado
+        logger.info(f"[CELERY] 📋 Dados de correção preparados para salvar em PhysicalTestForm")
+        logger.info(f"[CELERY]    num_questions={num_questions}, use_blocks={use_blocks}, num_blocks={blocks_config.get('num_blocks', 1)}")
+        logger.info(f"[CELERY]    blocks_config tem topology: {'topology' in blocks_config}")
+        if 'topology' in blocks_config:
+            logger.info(f"[CELERY]    topology tem {len(blocks_config['topology'].get('blocks', []))} blocos")
         
         # Preparar test_data com blocks_config atualizado
+        print(f"[CELERY] ========== PREPARANDO CORRECTION_DATA ==========")
+        print(f"[CELERY] num_questions: {num_questions}")
+        print(f"[CELERY] use_blocks: {use_blocks}")
+        print(f"[CELERY] blocks_config ANTES de copiar: {blocks_config}")
+        print(f"[CELERY] blocks_config tem topology: {'topology' in blocks_config if blocks_config else False}")
+        if blocks_config and 'topology' in blocks_config:
+            print(f"[CELERY] topology tem {len(blocks_config['topology'].get('blocks', []))} blocos")
+        print(f"[CELERY] correct_answers: {correct_answers}")
+        
+        correction_data_to_pass = {
+            'num_questions': num_questions,
+            'use_blocks': use_blocks,
+            'blocks_config': blocks_config.copy() if blocks_config else {},  # ✅ Copiar para garantir que não seja modificado
+            'correct_answers': correct_answers.copy() if correct_answers else {}  # ✅ Copiar para garantir que não seja modificado
+        }
+        
+        print(f"[CELERY] correction_data preparado: {correction_data_to_pass}")
+        print(f"[CELERY] correction_data['blocks_config'] tem topology: {'topology' in correction_data_to_pass.get('blocks_config', {})}")
+        
         test_data = {
             'id': str(test.id),
             'title': test.title,
             'description': test.description or '',
-            'blocks_config': gabarito.blocks_config or blocks_config or {},
-            'num_questions': num_questions
+            'blocks_config': blocks_config or {},
+            'num_questions': num_questions,
+            # ✅ NOVO: Passar dados de correção para salvar no PhysicalTestForm
+            # IMPORTANTE: blocks_config aqui já deve ter a topology completa
+            'correction_data': correction_data_to_pass
         }
+        
+        print(f"[CELERY] test_data['correction_data'] existe: {'correction_data' in test_data}")
+        print(f"[CELERY] ========== CHAMANDO FORM_SERVICE ==========")
         
         # Criar diretório temporário para ZIP (PDFs serão salvos no output_dir padrão)
         temp_dir = tempfile.mkdtemp()
@@ -418,13 +426,10 @@ def generate_physical_forms_async(
                             
                             logger.info(f"[CELERY] ✅ Upload concluído: {minio_url}")
                             
-                            # Atualizar gabarito no banco com URL do MinIO
-                            gabarito.minio_url = minio_url
-                            gabarito.minio_object_name = minio_object_name
-                            gabarito.minio_bucket = minio_bucket
-                            gabarito.zip_generated_at = datetime.utcnow()
-                            db.session.commit()
-                            logger.info(f"[CELERY] ✅ Gabarito atualizado com URL do MinIO")
+                            # ✅ MODIFICADO: Provas físicas não usam AnswerSheetGabarito
+                            # O MinIO URL pode ser armazenado em outro lugar se necessário
+                            # Por enquanto, apenas logamos o sucesso
+                            logger.info(f"[CELERY] ✅ Upload para MinIO concluído (prova física não usa AnswerSheetGabarito)")
                         else:
                             logger.warning(f"[CELERY] ⚠️ Upload para MinIO falhou, mas PDFs foram gerados com sucesso")
                             
@@ -451,7 +456,7 @@ def generate_physical_forms_async(
                 'total_questions': num_questions,
                 'total_students': len(students_data),
                 'generated_forms': len(formularios_gerados),
-                'gabarito_id': str(gabarito.id),
+                # ✅ MODIFICADO: Provas físicas não têm gabarito_id (dados estão em PhysicalTestForm)
                 'minio_url': minio_url,
                 'download_size_bytes': download_size,
                 'forms': formularios_gerados,

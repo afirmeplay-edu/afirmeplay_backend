@@ -139,6 +139,7 @@ def create_app():
     from app.socioeconomic_forms.routes import socioeconomic_form_routes
     from app.socioeconomic_forms.routes import filter_routes
     from .play_tv import routes as playtv_routes
+    from .plantao_online import routes as plantao_online_routes
     from .competicoes import routes as competicoes_routes
     from app.certification.routes import certificate_routes
     # Importar rotas de report_analysis (processamento assíncrono)
@@ -182,6 +183,7 @@ def create_app():
     app.register_blueprint(socioeconomic_form_routes.bp)
     app.register_blueprint(filter_routes.bp)
     app.register_blueprint(playtv_routes.bp)
+    app.register_blueprint(plantao_online_routes.bp)
     app.register_blueprint(competicoes_routes.bp)
     app.register_blueprint(certificate_routes.bp)
     # Importar modelos para garantir que as tabelas sejam criadas

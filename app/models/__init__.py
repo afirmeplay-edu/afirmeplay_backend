@@ -36,9 +36,10 @@ from .calendar_event import CalendarEvent, CalendarVisibilityScope
 from .calendar_event_target import CalendarEventTarget, CalendarTargetType
 from .calendar_event_user import CalendarEventUser
 
-# Formulários Socioeconômicos e Play TV
+# Formulários Socioeconômicos, Play TV e Plantão Online
 from app.socioeconomic_forms.models import Form, FormQuestion, FormRecipient, FormResponse
 from app.play_tv.models import PlayTvVideo, PlayTvVideoSchool
+from app.plantao_online.models import PlantaoOnline, PlantaoOnlineSchool
 
 # Certificados
 from app.certification.models import CertificateTemplate, Certificate

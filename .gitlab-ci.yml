@@ -105,6 +105,10 @@ image_build:
         - .set_runner_tag
     environment:
         name: $ENVIRONMENT
+    rules:
+        - changes:
+            - Dockerfile
+            - requirements.txt
     script:
         - |
             set -e

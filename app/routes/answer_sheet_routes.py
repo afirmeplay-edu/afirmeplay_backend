@@ -8,17 +8,18 @@ from flask_jwt_extended import jwt_required, get_jwt_identity
 from app.decorators.role_required import role_required, get_current_user_from_token
 from app import db
 from app.models.answerSheetGabarito import AnswerSheetGabarito
+from app.models.answerSheetResult import AnswerSheetResult
 from app.models.studentClass import Class
 from app.models.student import Student
 from app.models.user import User
 from app.services.cartao_resposta.answer_sheet_generator import AnswerSheetGenerator
 from app.services.cartao_resposta.answer_sheet_correction_service import AnswerSheetCorrectionService
-from app.services.cartao_resposta.correction_n import AnswerSheetCorrectionN
+from app.services.cartao_resposta.correction_new_grid import AnswerSheetCorrectionNewGrid
 from app.services.progress_store import (
     create_job, update_item_processing, update_item_done,
     update_item_error, complete_job, get_job
 )
-from typing import Dict
+from typing import Dict, Optional, List
 import logging
 import base64
 import io
@@ -26,8 +27,68 @@ import zipfile
 import threading
 import uuid
 from io import BytesIO
+from datetime import datetime
 
 bp = Blueprint('answer_sheets', __name__, url_prefix='/answer-sheets')
+
+
+def _validate_blocks_config(blocks: List, total_questions: int) -> Optional[str]:
+    """
+    Valida configuração de blocos personalizados
+    
+    Args:
+        blocks: Lista de blocos definidos pelo frontend
+        total_questions: Total de questões esperado
+    
+    Returns:
+        String com mensagem de erro ou None se válido
+    """
+    # 1. Máximo 4 blocos
+    if len(blocks) > 4:
+        return f"Máximo de 4 blocos permitidos. Você enviou {len(blocks)} blocos."
+    
+    if len(blocks) == 0:
+        return "Nenhum bloco foi definido."
+    
+    # 2. Validar cada bloco
+    total_from_blocks = 0
+    expected_start = 1
+    
+    for i, block in enumerate(sorted(blocks, key=lambda x: x.get('start_question', 0)), start=1):
+        block_id = block.get('block_id', i)
+        subject_name = block.get('subject_name', '')
+        questions_count = block.get('questions_count', 0)
+        start_question = block.get('start_question', 0)
+        end_question = block.get('end_question', 0)
+        
+        # Validar campos obrigatórios
+        if not subject_name:
+            return f"Bloco {block_id}: 'subject_name' é obrigatório."
+        
+        if questions_count < 1:
+            return f"Bloco {block_id} ({subject_name}): deve ter pelo menos 1 questão."
+        
+        if questions_count > 26:
+            return f"Bloco {block_id} ({subject_name}): máximo de 26 questões por bloco. Você definiu {questions_count}."
+        
+        # Validar sequência
+        if start_question != expected_start:
+            return f"Bloco {block_id} ({subject_name}): deveria começar na questão {expected_start}, mas começa em {start_question}."
+        
+        if end_question - start_question + 1 != questions_count:
+            return f"Bloco {block_id} ({subject_name}): contagem inconsistente (start={start_question}, end={end_question}, count={questions_count})."
+        
+        total_from_blocks += questions_count
+        expected_start = end_question + 1
+    
+    # 3. Total de questões
+    if total_from_blocks != total_questions:
+        return f"Soma das questões dos blocos ({total_from_blocks}) difere do total informado ({total_questions})."
+    
+    if total_questions > 104:
+        return f"Total de {total_questions} questões excede o máximo de 104 (4 blocos × 26 questões)."
+    
+    return None
 
 
 def _generate_complete_structure(num_questions: int, use_blocks: bool,
@@ -76,27 +137,52 @@ def _generate_complete_structure(num_questions: int, use_blocks: bool,
     topology = {}
     
     if use_blocks:
-        # Organizar por blocos
-        num_blocks = blocks_config.get('num_blocks', 1)
-        questions_per_block = blocks_config.get('questions_per_block', 12)
+        custom_blocks = blocks_config.get('blocks', [])
         
-        blocks = []
-        for block_num in range(1, num_blocks + 1):
-            start_question = (block_num - 1) * questions_per_block + 1
-            end_question = min(block_num * questions_per_block, num_questions)
-            
-            questions = []
-            for q_num in range(start_question, end_question + 1):
-                alternatives = questions_map.get(q_num, ['A', 'B', 'C', 'D'])
-                questions.append({
-                    "q": q_num,
-                    "alternatives": alternatives
+        if custom_blocks:
+            # ✅ NOVO: Blocos personalizados com disciplinas
+            blocks = []
+            for block_def in custom_blocks:
+                block_id = block_def.get('block_id')
+                subject_name = block_def.get('subject_name')  # ✅ NOVO
+                start_q = block_def.get('start_question')
+                end_q = block_def.get('end_question')
+                
+                questions = []
+                for q_num in range(start_q, end_q + 1):
+                    alternatives = questions_map.get(q_num, ['A', 'B', 'C', 'D'])
+                    questions.append({
+                        "q": q_num,
+                        "alternatives": alternatives
+                    })
+                
+                blocks.append({
+                    "block_id": block_id,
+                    "subject_name": subject_name,  # ✅ NOVO
+                    "questions": questions
                 })
+        else:
+            # ✅ Fallback: distribuir automaticamente (comportamento original)
+            num_blocks = blocks_config.get('num_blocks', 1)
+            questions_per_block = blocks_config.get('questions_per_block', 12)
             
-            blocks.append({
-                "block_id": block_num,
-                "questions": questions
-            })
+            blocks = []
+            for block_num in range(1, num_blocks + 1):
+                start_question = (block_num - 1) * questions_per_block + 1
+                end_question = min(block_num * questions_per_block, num_questions)
+                
+                questions = []
+                for q_num in range(start_question, end_question + 1):
+                    alternatives = questions_map.get(q_num, ['A', 'B', 'C', 'D'])
+                    questions.append({
+                        "q": q_num,
+                        "alternatives": alternatives
+                    })
+                
+                blocks.append({
+                    "block_id": block_num,
+                    "questions": questions
+                })
         
         topology["blocks"] = blocks
     else:
@@ -205,10 +291,25 @@ def generate_answer_sheets():
         blocks_config = data.get('blocks_config', {})
         if use_blocks:
             blocks_config['use_blocks'] = True
-            if 'num_blocks' not in blocks_config:
-                blocks_config['num_blocks'] = 1
-            if 'questions_per_block' not in blocks_config:
-                blocks_config['questions_per_block'] = 12
+            
+            # ✅ NOVO: Validar blocos personalizados se fornecidos
+            custom_blocks = blocks_config.get('blocks', [])
+            
+            if custom_blocks:
+                # Validar blocos personalizados (com disciplinas)
+                validation_error = _validate_blocks_config(custom_blocks, num_questions)
+                if validation_error:
+                    return jsonify({"error": validation_error}), 400
+                
+                logging.info(f"✅ Blocos personalizados validados: {len(custom_blocks)} blocos")
+            else:
+                # Fallback: distribuir automaticamente (comportamento original)
+                if 'num_blocks' not in blocks_config:
+                    blocks_config['num_blocks'] = 1
+                if 'questions_per_block' not in blocks_config:
+                    blocks_config['questions_per_block'] = 12
+                
+                logging.info(f"✅ Usando distribuição automática de blocos")
         
         # Gerar estrutura completa de questões e alternativas por bloco
         # Isso será usado na correção como "contrato" da estrutura
@@ -273,7 +374,7 @@ def generate_answer_sheets():
             logging.info(f"✅ Coordenadas geradas e salvas para gabarito {str(gabarito.id)}")
         except Exception as e:
             logging.error(f"Erro ao gerar coordenadas: {str(e)}", exc_info=True)
-            # Continuar mesmo se falhar (usará método antigo na correção)
+            # Continuar mesmo se falhar
         
         # Preparar test_data completo
         test_data_complete = {
@@ -287,75 +388,114 @@ def generate_answer_sheets():
             'grade_name': test_data.get('grade_name', '')
         }
         
-        # Gerar cartões resposta
-        generator = AnswerSheetGenerator()
-        generated_files = generator.generate_answer_sheets(
+        # ✅ NOVO: Gerar cartões de forma ASSÍNCRONA via Celery
+        from app.services.celery_tasks.answer_sheet_tasks import generate_answer_sheets_async
+        
+        # Disparar task Celery
+        task = generate_answer_sheets_async.delay(
             class_id=class_id,
-            test_data=test_data_complete,
             num_questions=num_questions,
+            correct_answers=correct_answers,
+            test_data=test_data_complete,
             use_blocks=use_blocks,
             blocks_config=blocks_config,
-            correct_answers=correct_answers,
-            gabarito_id=str(gabarito.id),
-            questions_options=questions_options
+            questions_options=questions_options,
+            gabarito_id=str(gabarito.id)
         )
         
-        if not generated_files:
-            return jsonify({"error": "Nenhum cartão resposta foi gerado"}), 400
+        # Retornar resposta imediata com task_id para polling
+        return jsonify({
+            "status": "processing",
+            "message": "Cartões de resposta sendo gerados em background. Use o task_id para verificar o status.",
+            "task_id": task.id,
+            "gabarito_id": str(gabarito.id),
+            "class_id": class_id,
+            "class_name": class_obj.name,
+            "num_questions": num_questions,
+            "polling_url": f"/answer-sheets/task/{task.id}/status"
+        }), 202
         
-        # Criar ZIP em memória
-        zip_buffer = BytesIO()
-        
-        with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
-            # Adicionar cada PDF ao ZIP
-            for file_info in generated_files:
-                pdf_data = file_info.get('pdf_data')
-                if pdf_data:
-                    # Nome do arquivo: cartao_NomeAluno_studentId.pdf
-                    student_name = file_info.get('student_name', 'Aluno')
-                    student_id = file_info.get('student_id', '')
-                    
-                    # Limpar caracteres inválidos do nome do arquivo
-                    safe_name = "".join(c for c in student_name if c.isalnum() or c in (' ', '-', '_')).strip()
-                    safe_name = safe_name.replace(' ', '_')
-                    
-                    filename = f"cartao_{safe_name}_{student_id[:8]}.pdf"
-                    zip_file.writestr(filename, pdf_data)
-            
-            # Adicionar arquivo de metadados com informações do gabarito
-            metadata = {
-                "gabarito_id": str(gabarito.id),
-                "test_id": str(gabarito.test_id) if gabarito.test_id else None,
-                "class_id": str(gabarito.class_id) if gabarito.class_id else None,
-                "title": gabarito.title,
-                "num_questions": gabarito.num_questions,
-                "use_blocks": gabarito.use_blocks,
-                "blocks_config": gabarito.blocks_config,
-                "generated_count": len([f for f in generated_files if f.get('pdf_data')]),
-                "created_at": gabarito.created_at.isoformat() if gabarito.created_at else None
-            }
-            import json as json_module
-            zip_file.writestr("metadata.json", json_module.dumps(metadata, indent=2, ensure_ascii=False))
-        
-        zip_buffer.seek(0)
-        
-        # Nome do arquivo ZIP
-        zip_filename = f"cartoes_resposta_{test_data_complete.get('title', 'CartaoResposta')}_{str(gabarito.id)[:8]}.zip"
-        # Limpar caracteres inválidos
-        zip_filename = "".join(c for c in zip_filename if c.isalnum() or c in (' ', '-', '_', '.')).rstrip()
-        zip_filename = zip_filename.replace(' ', '_')
-        
-        return send_file(
-            zip_buffer,
-            as_attachment=True,
-            download_name=zip_filename,
-            mimetype='application/zip'
-        )
+        # ❌ CÓDIGO ANTIGO COMENTADO (geração síncrona removida)
+        # generator = AnswerSheetGenerator()
+        # generated_files = generator.generate_answer_sheets(...)
+        # if not generated_files:
+        #     return jsonify({"error": "Nenhum cartão resposta foi gerado"}), 400
         
     except Exception as e:
         db.session.rollback()
         logging.error(f"Erro ao gerar cartões resposta: {str(e)}", exc_info=True)
         return jsonify({"error": f"Erro ao gerar cartões resposta: {str(e)}"}), 500
+
+
+@bp.route('/task/<string:task_id>/status', methods=['GET'])
+@jwt_required()
+def get_answer_sheet_task_status(task_id):
+    """
+    Consulta o status de uma task Celery de geração de cartões de resposta
+    
+    Args:
+        task_id: ID da task Celery
+    
+    Returns:
+        JSON com status da task:
+        - PENDING: Aguardando processamento
+        - STARTED: Em execução
+        - SUCCESS: Concluída com sucesso
+        - FAILURE: Falhou
+        - RETRY: Tentando novamente
+    """
+    try:
+        from app.services.celery_tasks.answer_sheet_tasks import generate_answer_sheets_async
+        from celery.result import AsyncResult
+        
+        # Buscar resultado da task
+        task_result = AsyncResult(task_id, app=generate_answer_sheets_async.app)
+        
+        if task_result.state == 'PENDING':
+            response = {
+                'status': 'pending',
+                'message': 'Task aguardando processamento',
+                'task_id': task_id
+            }
+        elif task_result.state == 'STARTED':
+            response = {
+                'status': 'processing',
+                'message': 'Cartões sendo gerados...',
+                'task_id': task_id
+            }
+        elif task_result.state == 'SUCCESS':
+            result = task_result.result
+            response = {
+                'status': 'completed',
+                'message': 'Cartões gerados com sucesso',
+                'task_id': task_id,
+                'result': result
+            }
+        elif task_result.state == 'FAILURE':
+            response = {
+                'status': 'failed',
+                'message': 'Erro ao gerar cartões',
+                'task_id': task_id,
+                'error': str(task_result.info)
+            }
+        elif task_result.state == 'RETRY':
+            response = {
+                'status': 'retrying',
+                'message': 'Tentando novamente após erro...',
+                'task_id': task_id
+            }
+        else:
+            response = {
+                'status': task_result.state.lower(),
+                'message': f'Status: {task_result.state}',
+                'task_id': task_id
+            }
+        
+        return jsonify(response), 200
+        
+    except Exception as e:
+        logging.error(f"Erro ao consultar status da task {task_id}: {str(e)}")
+        return jsonify({"error": f"Erro ao consultar status: {str(e)}"}), 500
 
 
 # ============================================================================
@@ -377,8 +517,8 @@ def process_answer_sheet_batch_in_background(job_id: str, images: list = None):
     
     with app.app_context():
         try:
-            # Usando nova implementação correction_n para teste
-            correction_service = AnswerSheetCorrectionN(debug=True)
+            # Usando novo pipeline OMR robusto
+            correction_service = AnswerSheetCorrectionNewGrid(debug=False)
             
             for i, image_base64 in enumerate(images):
                 try:
@@ -392,9 +532,10 @@ def process_answer_sheet_batch_in_background(job_id: str, images: list = None):
                         image_base64_clean = image_base64
                     image_data = base64.b64decode(image_base64_clean)
                     
-                    # Processar correção (gabarito_id vem do QR code)
+                    # Processar correção com novo pipeline (gabarito_id e student_id vêm do QR code)
                     result = correction_service.corrigir_cartao_resposta(
-                        image_data=image_data
+                        image_data=image_data,
+                        auto_detect_qr=True
                     )
                     
                     if result.get('success'):
@@ -427,161 +568,10 @@ def process_answer_sheet_batch_in_background(job_id: str, images: list = None):
 # ROTAS DE CORREÇÃO
 # ============================================================================
 
-@bp.route('/correct', methods=['POST'])
-@jwt_required()
-@role_required("admin", "professor", "coordenador", "diretor", "tecadm")
-def correct_answer_sheet():
-    """
-    Corrige cartão(ões) resposta usando detecção geométrica
-    
-    O gabarito_id é extraído automaticamente do QR code no cartão resposta.
-    Não é necessário enviar gabarito_id na requisição.
-    
-    Aceita:
-    - Uma única imagem (campo 'image') - processamento SÍNCRONO
-    - Múltiplas imagens (campo 'images') - processamento ASSÍNCRONO com job_id
-    
-    Body (JSON) - Modo Único:
-    {
-        "image": "data:image/jpeg;base64,..."
-    }
-    
-    Body (JSON) - Modo Lote:
-    {
-        "images": [
-            "data:image/jpeg;base64,...",
-            "data:image/jpeg;base64,...",
-            ...
-        ]
-    }
-    
-    Returns (síncrono - 1 imagem):
-        Resultado completo da correção
-        
-    Returns (assíncrono - múltiplas imagens):
-        {"job_id": "uuid", "message": "Processamento iniciado", "total": N}
-        Use GET /answer-sheets/correction-progress/<job_id> para acompanhar o progresso
-    """
-    try:
-        user = get_current_user_from_token()
-        if not user:
-            return jsonify({"error": "Usuário não encontrado"}), 401
-        
-        # Obter dados da requisição
-        data = None
-        images = []
-        single_image = None
-        
-        # Tentar obter de JSON
-        try:
-            data = request.get_json() or {}
-            
-            # Verificar se é lote (campo 'images') ou única (campo 'image')
-            if 'images' in data and isinstance(data['images'], list):
-                images = data['images']
-            elif 'image' in data:
-                single_image = data['image']
-        except:
-            pass
-        
-        # Tentar obter de form-data (arquivo)
-        if not images and not single_image and 'image' in request.files:
-            file = request.files['image']
-            if file and file.filename:
-                image_bytes = file.read()
-                single_image = f"data:image/jpeg;base64,{base64.b64encode(image_bytes).decode('utf-8')}"
-        
-        # Tentar obter de form-data (base64)
-        if not images and not single_image:
-            image_base64 = request.form.get('image')
-            if image_base64:
-                single_image = image_base64
-        
-        # ==================================================================
-        # MODO ÚNICO (1 imagem) - Processamento SÍNCRONO
-        # ==================================================================
-        if single_image and not images:
-            logging.info(f"🔧 Processando correção única de cartão resposta")
-            
-            # Decodificar imagem
-            if single_image.startswith('data:image'):
-                single_image_clean = single_image.split(',')[1]
-            else:
-                single_image_clean = single_image
-            image_data = base64.b64decode(single_image_clean)
-            
-            # Processar correção (gabarito_id vem do QR code)
-            # Usando nova implementação correction_n para teste
-            correction_service = AnswerSheetCorrectionN(debug=True)
-            resultado = correction_service.corrigir_cartao_resposta(
-                image_data=image_data
-            )
-            
-            if resultado.get('success'):
-                return jsonify({
-                    "message": "Correção processada com sucesso",
-                    "system": resultado.get('detection_method', 'geometric_n'),
-                    "student_id": resultado.get('student_id'),
-                    "gabarito_id": resultado.get('gabarito_id'),
-                    "test_id": resultado.get('test_id'),
-                    "correct": resultado.get('correct'),
-                    "total": resultado.get('total'),
-                    "percentage": resultado.get('percentage'),
-                    "grade": resultado.get('grade'),
-                    "proficiency": resultado.get('proficiency'),
-                    "classification": resultado.get('classification'),
-                    "score_percentage": resultado.get('score_percentage'),
-                    "answers": resultado.get('answers'),
-                    "correction": resultado.get('correction'),
-                    "answer_sheet_result_id": resultado.get('answer_sheet_result_id')
-                }), 200
-            else:
-                return jsonify({
-                    "error": resultado.get('error', 'Erro desconhecido na correção'),
-                    "system": "geometric_n"
-                }), 500
-        
-        # ==================================================================
-        # MODO LOTE (múltiplas imagens) - Processamento ASSÍNCRONO
-        # ==================================================================
-        if images:
-            # Validar quantidade
-            if len(images) > 50:
-                return jsonify({"error": "Máximo de 50 imagens por lote"}), 400
-            
-            if len(images) == 0:
-                return jsonify({"error": "Nenhuma imagem fornecida"}), 400
-            
-            logging.info(f"🔧 Iniciando correção em lote: {len(images)} cartões resposta")
-            
-            # Criar job ID
-            job_id = str(uuid.uuid4())
-            
-            # Criar job no store
-            create_job(job_id, len(images))
-            
-            # Iniciar thread de processamento
-            thread = threading.Thread(
-                target=process_answer_sheet_batch_in_background,
-                args=(job_id, images),
-                daemon=True
-            )
-            thread.start()
-            
-            return jsonify({
-                "job_id": job_id,
-                "message": "Processamento em lote iniciado",
-                "total": len(images),
-                "status": "processing"
-            }), 202  # 202 Accepted
-        
-        # Nenhuma imagem fornecida
-        return jsonify({"error": "Imagem não fornecida. Use 'image' para única ou 'images' para lote."}), 400
-        
-    except Exception as e:
-        logging.error(f"Erro ao corrigir cartão resposta: {str(e)}", exc_info=True)
-        return jsonify({"error": f"Erro ao corrigir cartão resposta: {str(e)}"}), 500
-
+# ROTA ANTIGA REMOVIDA - Usar /correct-new
+# @bp.route('/correct', methods=['POST'])
+# def correct_answer_sheet():
+#     ... (removida - frontend usa /correct-new)
 
 @bp.route('/correction-progress/<string:job_id>', methods=['GET'])
 @jwt_required()
@@ -634,6 +624,182 @@ def get_answer_sheet_correction_progress(job_id):
     return jsonify(response), 200
 
 
+@bp.route('/gabaritos', methods=['GET'])
+@jwt_required()
+@role_required("admin", "professor", "coordenador", "diretor", "tecadm")
+def list_gabaritos():
+    """
+    Lista os gabaritos (cartões resposta gerados) criados pelo usuário atual com paginação
+    
+    Query Parameters:
+        page: Número da página (padrão: 1)
+        per_page: Itens por página (padrão: 20)
+        class_id: Filtrar por turma (opcional)
+        test_id: Filtrar por prova (opcional)
+        school_id: Filtrar por escola (opcional)
+        title: Filtrar por título (busca parcial, opcional)
+    
+    Returns:
+        Lista de gabaritos criados pelo usuário com informações resumidas
+    """
+    try:
+        user = get_current_user_from_token()
+        if not user:
+            return jsonify({"error": "Usuário não encontrado"}), 401
+        
+        # Obter parâmetros de paginação e filtros
+        page = int(request.args.get('page', 1))
+        per_page = int(request.args.get('per_page', 20))
+        class_id = request.args.get('class_id')
+        test_id = request.args.get('test_id')
+        school_id = request.args.get('school_id')
+        title = request.args.get('title')
+        
+        # Construir query base - filtrar apenas gabaritos criados pelo usuário atual
+        query = AnswerSheetGabarito.query.filter(AnswerSheetGabarito.created_by == str(user['id']))
+        
+        # Aplicar filtros adicionais
+        if class_id:
+            query = query.filter(AnswerSheetGabarito.class_id == class_id)
+        if test_id:
+            query = query.filter(AnswerSheetGabarito.test_id == test_id)
+        if school_id:
+            query = query.filter(AnswerSheetGabarito.school_id == school_id)
+        if title:
+            query = query.filter(AnswerSheetGabarito.title.ilike(f'%{title}%'))
+        
+        # Ordenar por data de criação (mais recentes primeiro)
+        query = query.order_by(AnswerSheetGabarito.created_at.desc())
+        
+        # Paginação
+        pagination = query.paginate(page=page, per_page=per_page, error_out=False)
+        
+        # Formatar resultados
+        gabaritos = []
+        for gabarito in pagination.items:
+            # Buscar informações da turma
+            class_name = None
+            if gabarito.class_id:
+                class_obj = Class.query.get(gabarito.class_id)
+                if class_obj:
+                    class_name = class_obj.name
+            
+            # Buscar informações do criador
+            creator_name = None
+            if gabarito.created_by:
+                creator = User.query.get(gabarito.created_by)
+                if creator:
+                    creator_name = creator.name
+            
+            gabaritos.append({
+                "id": str(gabarito.id),
+                "test_id": str(gabarito.test_id) if gabarito.test_id else None,
+                "class_id": str(gabarito.class_id) if gabarito.class_id else None,
+                "class_name": class_name,
+                "num_questions": gabarito.num_questions,
+                "use_blocks": gabarito.use_blocks,
+                "title": gabarito.title,
+                "school_name": gabarito.school_name,
+                "municipality": gabarito.municipality,
+                "state": gabarito.state,
+                "grade_name": gabarito.grade_name,
+                "institution": gabarito.institution,
+                "created_at": gabarito.created_at.isoformat() if gabarito.created_at else None,
+                "created_by": str(gabarito.created_by) if gabarito.created_by else None,
+                "creator_name": creator_name
+            })
+        
+        return jsonify({
+            "gabaritos": gabaritos,
+            "total": pagination.total,
+            "page": page,
+            "per_page": per_page,
+            "pages": pagination.pages
+        }), 200
+        
+    except Exception as e:
+        logging.error(f"Erro ao listar gabaritos: {str(e)}", exc_info=True)
+        return jsonify({"error": f"Erro ao listar gabaritos: {str(e)}"}), 500
+
+
+@bp.route('/gabarito/<string:gabarito_id>/download', methods=['GET'])
+@jwt_required()
+@role_required("admin", "professor", "coordenador", "diretor", "tecadm")
+def download_gabarito(gabarito_id):
+    """
+    Retorna URL pré-assinada para download do ZIP de cartões do MinIO
+    
+    Se o ZIP ainda não foi gerado, retorna erro pedindo para gerar primeiro.
+    O ZIP é gerado automaticamente pela task Celery após POST /answer-sheets/generate.
+    
+    Returns:
+        JSON com URL pré-assinada válida por 1 hora
+    """
+    try:
+        from app.services.storage.minio_service import MinIOService
+        from datetime import timedelta
+        
+        user = get_current_user_from_token()
+        if not user:
+            return jsonify({"error": "Usuário não encontrado"}), 401
+        
+        # Buscar gabarito
+        gabarito = AnswerSheetGabarito.query.get(gabarito_id)
+        if not gabarito:
+            return jsonify({"error": "Gabarito não encontrado"}), 404
+        
+        # Verificar permissão (admin pode baixar qualquer gabarito)
+        if user['role'] != 'admin' and gabarito.created_by != str(user['id']):
+            return jsonify({"error": "Você não tem permissão para acessar este gabarito"}), 403
+        
+        # Verificar se ZIP foi gerado no MinIO
+        if not gabarito.minio_object_name:
+            return jsonify({
+                "error": "ZIP de cartões ainda não foi gerado",
+                "message": "Use a rota POST /answer-sheets/generate para gerar os cartões primeiro. Após a geração (verifique status via polling), o ZIP estará disponível para download.",
+                "gabarito_id": gabarito_id,
+                "status": "not_generated"
+            }), 400
+        
+        # Gerar URL pré-assinada (válida por 1 hora)
+        minio = MinIOService()
+        
+        try:
+            presigned_url = minio.get_presigned_url(
+                bucket_name=gabarito.minio_bucket or minio.BUCKETS['ANSWER_SHEETS'],
+                object_name=gabarito.minio_object_name,
+                expires=timedelta(hours=1)
+            )
+            
+            # Buscar turma para informações adicionais
+            class_obj = Class.query.get(gabarito.class_id) if gabarito.class_id else None
+            
+            return jsonify({
+                "download_url": presigned_url,
+                "expires_in": "1 hour",
+                "gabarito_id": str(gabarito.id),
+                "test_id": str(gabarito.test_id) if gabarito.test_id else None,
+                "class_id": str(gabarito.class_id) if gabarito.class_id else None,
+                "class_name": class_obj.name if class_obj else None,
+                "title": gabarito.title,
+                "num_questions": gabarito.num_questions,
+                "generated_at": gabarito.zip_generated_at.isoformat() if gabarito.zip_generated_at else None,
+                "created_at": gabarito.created_at.isoformat() if gabarito.created_at else None,
+                "minio_url": gabarito.minio_url
+            }), 200
+            
+        except Exception as minio_error:
+            logging.error(f"Erro ao gerar URL pré-assinada: {str(minio_error)}")
+            return jsonify({
+                "error": "Erro ao gerar URL de download",
+                "details": str(minio_error)
+            }), 500
+        
+    except Exception as e:
+        logging.error(f"Erro ao baixar gabarito: {str(e)}", exc_info=True)
+        return jsonify({"error": f"Erro ao baixar gabarito: {str(e)}"}), 500
+
+
 @bp.route('/gabarito/<string:gabarito_id>', methods=['GET'])
 @jwt_required()
 @role_required("admin", "professor", "coordenador", "diretor", "tecadm")
@@ -668,3 +834,471 @@ def get_gabarito(gabarito_id):
     except Exception as e:
         logging.error(f"Erro ao buscar gabarito: {str(e)}", exc_info=True)
         return jsonify({"error": f"Erro ao buscar gabarito: {str(e)}"}), 500
+
+
+@bp.route('/gabarito/<string:gabarito_id>', methods=['DELETE'])
+@jwt_required()
+@role_required("admin", "professor", "coordenador", "diretor", "tecadm")
+def delete_gabarito(gabarito_id):
+    """
+    Exclui um gabarito individual
+    
+    Returns:
+        Confirmação de exclusão
+    """
+    try:
+        user = get_current_user_from_token()
+        if not user:
+            return jsonify({"error": "Usuário não encontrado"}), 401
+        
+        # Buscar gabarito
+        gabarito = AnswerSheetGabarito.query.get(gabarito_id)
+        if not gabarito:
+            return jsonify({"error": "Gabarito não encontrado"}), 404
+        
+        # Verificar se o gabarito foi criado pelo usuário atual
+        if gabarito.created_by != str(user['id']):
+            return jsonify({"error": "Você não tem permissão para excluir este gabarito"}), 403
+        
+        # Excluir resultados relacionados primeiro
+        results_deleted = AnswerSheetResult.query.filter_by(gabarito_id=gabarito_id).delete()
+        if results_deleted > 0:
+            logging.info(f"Excluídos {results_deleted} resultados relacionados ao gabarito {gabarito_id}")
+        
+        # Excluir gabarito
+        db.session.delete(gabarito)
+        db.session.commit()
+        
+        logging.info(f"Gabarito {gabarito_id} excluído por usuário {user['id']}")
+        
+        return jsonify({
+            "message": "Gabarito excluído com sucesso",
+            "gabarito_id": gabarito_id
+        }), 200
+        
+    except Exception as e:
+        db.session.rollback()
+        logging.error(f"Erro ao excluir gabarito: {str(e)}", exc_info=True)
+        return jsonify({"error": f"Erro ao excluir gabarito: {str(e)}"}), 500
+
+
+@bp.route('/correct-new', methods=['POST'])
+@jwt_required()
+@role_required("admin", "professor", "coordenador", "diretor", "tecadm")
+def correct_answer_sheet_new_pipeline():
+    """
+    🆕 ROTA DE TESTE - Novo Pipeline OMR Robusto
+    
+    Corrige cartão resposta usando o NOVO pipeline determinístico
+    baseado em JSON de topologia.
+    
+    DIFERENÇAS do pipeline antigo:
+    - ✅ Suporta alternativas variáveis (2, 3, 4, 5 opções)
+    - ✅ Grid matemático baseado no JSON
+    - ✅ Validação rigorosa (rejeita imagens inválidas)
+    - ✅ Determinístico (mesma entrada = mesma saída)
+    
+    Body (JSON):
+    {
+        "image": "data:image/jpeg;base64,..."
+    }
+    
+    OU upload de arquivo (form-data):
+    - Campo: image (arquivo)
+    
+    Returns:
+        Resultado completo da correção com o novo sistema
+    """
+    try:
+        user = get_current_user_from_token()
+        if not user:
+            return jsonify({"error": "Usuário não encontrado"}), 401
+        
+        logging.info("🆕 Usando NOVO pipeline OMR robusto (correction_new_grid)")
+        
+        # Obter imagem
+        image_data = None
+        
+        # Tentar obter de JSON
+        try:
+            data = request.get_json() or {}
+            if 'image' in data:
+                single_image = data['image']
+                if single_image.startswith('data:image'):
+                    single_image_clean = single_image.split(',')[1]
+                else:
+                    single_image_clean = single_image
+                image_data = base64.b64decode(single_image_clean)
+        except:
+            pass
+        
+        # Tentar obter de form-data (arquivo)
+        if not image_data and 'image' in request.files:
+            file = request.files['image']
+            if file and file.filename:
+                image_data = file.read()
+        
+        # Tentar obter de form-data (base64)
+        if not image_data:
+            image_base64 = request.form.get('image')
+            if image_base64:
+                if image_base64.startswith('data:image'):
+                    image_base64_clean = image_base64.split(',')[1]
+                else:
+                    image_base64_clean = image_base64
+                image_data = base64.b64decode(image_base64_clean)
+        
+        if not image_data:
+            return jsonify({"error": "Imagem não fornecida"}), 400
+        
+        # Processar com NOVO pipeline (detecção automática de QR code)
+        corrector = AnswerSheetCorrectionNewGrid(debug=False)
+        
+        result = corrector.corrigir_cartao_resposta(
+            image_data=image_data,
+            auto_detect_qr=True  # Detecta QR code automaticamente
+        )
+        
+        if result.get('success'):
+            # Buscar nome do aluno se tiver student_id
+            student_name = None
+            if result.get('student_id'):
+                student = Student.query.get(result['student_id'])
+                if student:
+                    student_name = student.name
+            
+            logging.info(
+                f"✅ NOVO PIPELINE: Correção processada com sucesso - "
+                f"{result['correct_answers']}/{result['total_questions']} corretas "
+                f"({result['score']:.1f}%)"
+            )
+            
+            return jsonify({
+                "message": "Correção processada com sucesso (NOVO PIPELINE)",
+                "system": "new_grid_pipeline",
+                "student_id": result.get('student_id'),
+                "student_name": student_name,
+                "gabarito_id": result.get('gabarito_id'),
+                "test_id": result.get('test_id'),
+                "correct": result['correct_answers'],
+                "wrong": result['wrong_answers'],
+                "blank": result['blank_answers'],
+                "invalid": result['invalid_answers'],
+                "total": result['total_questions'],
+                "score": result['score'],
+                "percentage": result['score'],  # Alias para compatibilidade
+                # Respostas em múltiplos formatos:
+                "detailed_answers": result['detailed_answers'],  # Lista: [{question, marked, correct, is_correct}]
+                "student_answers": result['student_answers'],    # Dict: {1: "A", 2: "B"}
+                "answer_key": result['answer_key']               # Dict: {1: "C", 2: "D"}
+            }), 200
+        else:
+            return jsonify({
+                "error": result.get('error', 'Erro desconhecido na correção'),
+                "system": "new_grid_pipeline"
+            }), 500
+        
+    except Exception as e:
+        logging.error(f"Erro ao corrigir com novo pipeline: {str(e)}", exc_info=True)
+        return jsonify({"error": f"Erro ao corrigir: {str(e)}"}), 500
+
+
+@bp.route('/gabaritos', methods=['DELETE'])
+@jwt_required()
+@role_required("admin", "professor", "coordenador", "diretor", "tecadm")
+def bulk_delete_gabaritos():
+    """
+    Exclui múltiplos gabaritos em massa
+    
+    Body (JSON):
+        {
+            "ids": ["gabarito_id_1", "gabarito_id_2", ...]
+        }
+    
+    Returns:
+        Confirmação de exclusão com estatísticas
+    """
+    try:
+        user = get_current_user_from_token()
+        if not user:
+            return jsonify({"error": "Usuário não encontrado"}), 401
+        
+        # Obter dados da requisição
+        data = request.get_json()
+        if not data or 'ids' not in data:
+            return jsonify({"error": "Lista de 'ids' é obrigatória no corpo da requisição"}), 400
+        
+        gabarito_ids = data.get('ids', [])
+        if not isinstance(gabarito_ids, list):
+            return jsonify({"error": "O campo 'ids' deve ser uma lista"}), 400
+        
+        if not gabarito_ids:
+            return jsonify({"message": "Nenhum ID de gabarito fornecido para exclusão"}), 200
+        
+        # Buscar gabaritos que pertencem ao usuário
+        gabaritos_to_delete = AnswerSheetGabarito.query.filter(
+            AnswerSheetGabarito.id.in_(gabarito_ids),
+            AnswerSheetGabarito.created_by == str(user['id'])
+        ).all()
+        
+        if not gabaritos_to_delete:
+            return jsonify({
+                "message": "Nenhum gabarito encontrado ou você não tem permissão para excluir os gabaritos fornecidos",
+                "deleted_count": 0,
+                "requested_count": len(gabarito_ids)
+            }), 200
+        
+        # Contar quantos foram encontrados vs solicitados
+        deleted_ids = [str(g.id) for g in gabaritos_to_delete]
+        not_found_ids = [gid for gid in gabarito_ids if gid not in deleted_ids]
+        
+        # Excluir resultados relacionados primeiro
+        total_results_deleted = 0
+        for gabarito in gabaritos_to_delete:
+            results_deleted = AnswerSheetResult.query.filter_by(gabarito_id=str(gabarito.id)).delete()
+            total_results_deleted += results_deleted
+        
+        # Excluir gabaritos
+        for gabarito in gabaritos_to_delete:
+            db.session.delete(gabarito)
+        
+        db.session.commit()
+        
+        if total_results_deleted > 0:
+            logging.info(f"Excluídos {total_results_deleted} resultados relacionados aos gabaritos")
+        
+        logging.info(f"{len(gabaritos_to_delete)} gabaritos excluídos por usuário {user['id']}")
+        
+        response = {
+            "message": f"{len(gabaritos_to_delete)} gabarito(s) excluído(s) com sucesso",
+            "deleted_count": len(gabaritos_to_delete),
+            "requested_count": len(gabarito_ids),
+            "deleted_ids": deleted_ids,
+            "results_deleted": total_results_deleted
+        }
+        
+        if not_found_ids:
+            response["not_found_or_unauthorized_ids"] = not_found_ids
+            response["message"] += f". {len(not_found_ids)} gabarito(s) não encontrado(s) ou sem permissão"
+        
+        return jsonify(response), 200
+        
+    except Exception as e:
+        db.session.rollback()
+        logging.error(f"Erro ao excluir gabaritos em massa: {str(e)}", exc_info=True)
+        return jsonify({"error": f"Erro ao excluir gabaritos: {str(e)}"}), 500
+
+
+@bp.route('/results', methods=['GET'])
+@jwt_required()
+@role_required("admin", "professor", "coordenador", "diretor", "tecadm")
+def list_answer_sheet_results():
+    """
+    Lista resultados de correção de cartões resposta (AnswerSheetResult)
+    
+    Query params:
+        - gabarito_id (opcional): Filtrar por gabarito específico
+        - student_id (opcional): Filtrar por aluno específico
+        - page (opcional): Número da página (padrão: 1)
+        - per_page (opcional): Resultados por página (padrão: 20, máximo: 100)
+    
+    Returns:
+        Lista de resultados com paginação
+    """
+    try:
+        user = get_current_user_from_token()
+        if not user:
+            return jsonify({"error": "Usuário não encontrado"}), 401
+        
+        # Obter parâmetros de query
+        gabarito_id = request.args.get('gabarito_id')
+        student_id = request.args.get('student_id')
+        page = int(request.args.get('page', 1))
+        per_page = min(int(request.args.get('per_page', 20)), 100)
+        
+        # Construir query base
+        query = AnswerSheetResult.query
+        
+        # Aplicar filtros
+        if gabarito_id:
+            query = query.filter_by(gabarito_id=gabarito_id)
+        
+        if student_id:
+            query = query.filter_by(student_id=student_id)
+        
+        # Filtrar por permissões do usuário
+        if user['role'] == 'professor':
+            # Professor vê apenas resultados de seus gabaritos
+            from app.models.answerSheetGabarito import AnswerSheetGabarito
+            gabaritos_ids = [g.id for g in AnswerSheetGabarito.query.filter_by(created_by=user['id']).all()]
+            query = query.filter(AnswerSheetResult.gabarito_id.in_(gabaritos_ids))
+        
+        # Ordenar por data de correção (mais recentes primeiro)
+        query = query.order_by(AnswerSheetResult.corrected_at.desc())
+        
+        # Paginar
+        pagination = query.paginate(page=page, per_page=per_page, error_out=False)
+        
+        # Formatar resultados
+        results = []
+        for result in pagination.items:
+            # Buscar informações do aluno
+            student = Student.query.get(result.student_id)
+            student_name = student.name if student else "Desconhecido"
+            
+            # Buscar informações do gabarito
+            from app.models.answerSheetGabarito import AnswerSheetGabarito
+            gabarito = AnswerSheetGabarito.query.get(result.gabarito_id)
+            gabarito_title = gabarito.title if gabarito else "Gabarito não encontrado"
+            
+            results.append({
+                'id': result.id,
+                'gabarito_id': result.gabarito_id,
+                'gabarito_title': gabarito_title,
+                'student_id': result.student_id,
+                'student_name': student_name,
+                'correct_answers': result.correct_answers,
+                'total_questions': result.total_questions,
+                'incorrect_answers': result.incorrect_answers,
+                'unanswered_questions': result.unanswered_questions,
+                'answered_questions': result.answered_questions,
+                'score_percentage': result.score_percentage,
+                'grade': result.grade,
+                'proficiency': result.proficiency,
+                'classification': result.classification,
+                'corrected_at': result.corrected_at.isoformat() if result.corrected_at else None,
+                'detection_method': result.detection_method
+            })
+        
+        return jsonify({
+            'results': results,
+            'page': page,
+            'per_page': per_page,
+            'total': pagination.total,
+            'pages': pagination.pages,
+            'has_next': pagination.has_next,
+            'has_prev': pagination.has_prev
+        }), 200
+        
+    except Exception as e:
+        logging.error(f"❌ Erro ao listar resultados: {str(e)}", exc_info=True)
+        return jsonify({"error": "Erro interno do servidor"}), 500
+
+
+@bp.route('/result/<string:result_id>', methods=['GET'])
+@jwt_required()
+@role_required("admin", "professor", "coordenador", "diretor", "tecadm")
+def get_answer_sheet_result(result_id):
+    """
+    Busca detalhes de um resultado específico de correção de cartão resposta
+    
+    Returns:
+        Detalhes completos do resultado incluindo respostas detectadas
+    """
+    try:
+        user = get_current_user_from_token()
+        if not user:
+            return jsonify({"error": "Usuário não encontrado"}), 401
+        
+        # Buscar resultado
+        result = AnswerSheetResult.query.get(result_id)
+        if not result:
+            return jsonify({"error": "Resultado não encontrado"}), 404
+        
+        # Verificar permissões
+        if user['role'] == 'professor':
+            from app.models.answerSheetGabarito import AnswerSheetGabarito
+            gabarito = AnswerSheetGabarito.query.get(result.gabarito_id)
+            if not gabarito or gabarito.created_by != user['id']:
+                return jsonify({"error": "Você não tem permissão para ver este resultado"}), 403
+        
+        # Buscar informações do aluno
+        student = Student.query.get(result.student_id)
+        student_name = student.name if student else "Desconhecido"
+        
+        # Buscar informações do gabarito
+        from app.models.answerSheetGabarito import AnswerSheetGabarito
+        gabarito = AnswerSheetGabarito.query.get(result.gabarito_id)
+        gabarito_title = gabarito.title if gabarito else "Gabarito não encontrado"
+        gabarito_correct_answers = gabarito.correct_answers if gabarito else {}
+        
+        # Buscar topologia para saber quantas alternativas cada questão tem
+        blocks_config = gabarito.blocks_config if gabarito else {}
+        topology = blocks_config.get('topology', {}) if isinstance(blocks_config, dict) else {}
+        blocks = topology.get('blocks', [])
+        
+        # Mapear quantas alternativas cada questão tem
+        alternatives_map = {}
+        for block in blocks:
+            for question in block.get('questions', []):
+                q_num = question.get('q')
+                alternatives = question.get('alternatives', [])
+                alternatives_map[q_num] = alternatives
+        
+        # Construir lista detalhada de questões ordenada
+        detailed_questions = []
+        detected_answers_dict = result.detected_answers if isinstance(result.detected_answers, dict) else {}
+        
+        # Obter todas as questões e ordenar numericamente
+        all_questions = set(detected_answers_dict.keys()) | set(gabarito_correct_answers.keys())
+        sorted_questions = sorted([int(q) for q in all_questions if str(q).isdigit()])
+        
+        for q_num in sorted_questions:
+            q_str = str(q_num)
+            student_answer = detected_answers_dict.get(q_str)
+            correct_answer = gabarito_correct_answers.get(q_str) or gabarito_correct_answers.get(q_num)
+            
+            # Determinar número de alternativas
+            alternatives = alternatives_map.get(q_num, ['A', 'B', 'C', 'D'])
+            num_alternatives = len(alternatives)
+            
+            # Determinar se acertou
+            if student_answer is None:
+                status = "blank"
+                is_correct = False
+            elif student_answer == correct_answer:
+                status = "correct"
+                is_correct = True
+            else:
+                status = "incorrect"
+                is_correct = False
+            
+            detailed_questions.append({
+                "question": q_num,
+                "alternatives": alternatives,
+                "num_alternatives": num_alternatives,
+                "student_answer": student_answer,
+                "correct_answer": correct_answer,
+                "is_correct": is_correct,
+                "status": status
+            })
+        
+        return jsonify({
+            'id': result.id,
+            'gabarito_id': result.gabarito_id,
+            'gabarito_title': gabarito_title,
+            'student_id': result.student_id,
+            'student_name': student_name,
+            
+            # Estatísticas
+            'correct_answers': result.correct_answers,
+            'total_questions': result.total_questions,
+            'incorrect_answers': result.incorrect_answers,
+            'unanswered_questions': result.unanswered_questions,
+            'answered_questions': result.answered_questions,
+            'score_percentage': result.score_percentage,
+            'grade': result.grade,
+            'proficiency': result.proficiency,
+            'classification': result.classification,
+            
+            # Metadados
+            'corrected_at': result.corrected_at.isoformat() if result.corrected_at else None,
+            'detection_method': result.detection_method,
+            
+            # Questões detalhadas (NOVO - formato simplificado)
+            'detailed_questions': detailed_questions
+        }), 200
+        
+    except Exception as e:
+        logging.error(f"❌ Erro ao buscar resultado: {str(e)}", exc_info=True)
+        return jsonify({"error": "Erro interno do servidor"}), 500

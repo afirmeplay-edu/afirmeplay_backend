@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 Rotas para formulários físicos
-Sistema de correção: AnswerSheetCorrectionN (mesmo sistema de cartões resposta)
+Sistema de correção: AnswerSheetCorrectionNewGrid (novo pipeline OMR robusto)
 Suporta correção única (síncrona) e em lote (assíncrona com polling)
 """
 
@@ -20,7 +20,7 @@ from app.models.question import Question
 from app.models.answerSheetGabarito import AnswerSheetGabarito
 from app.services.physical_test_pdf_generator import PhysicalTestPDFGenerator
 from app.services.physical_test_form_service import PhysicalTestFormService
-from app.services.cartao_resposta.correction_n import AnswerSheetCorrectionN  # NOVO SISTEMA DE CORREÇÃO
+from app.services.cartao_resposta.correction_new_grid import AnswerSheetCorrectionNewGrid  # NOVO SISTEMA DE CORREÇÃO
 from app.services.progress_store import (
     create_job, update_item_processing, update_item_done,
     update_item_error, complete_job, get_job
@@ -315,20 +315,34 @@ def get_current_user_from_token():
 
 @bp.route('/test/<string:test_id>/generate-forms', methods=['POST'])
 @jwt_required()
-@role_required("admin", "professor", "coordenador", "diretor")
+@role_required("admin", "professor", "coordenador", "diretor", "tecadm")
 def generate_physical_forms(test_id):
     """
-    Gera PDFs institucionais para uma prova específica (formato das imagens fornecidas)
+    Dispara geração ASSÍNCRONA de formulários físicos usando Celery
+    
+    A geração é feita em background para evitar timeout em turmas grandes.
+    O frontend deve fazer polling na rota /task/<task_id>/status para acompanhar o progresso.
     
     Body:
-        - output_dir (opcional): Diretório para salvar os PDFs
-        - logo_data (opcional): Dados do logo (base64 ou URL)
-        - force_regenerate (opcional): Forçar regeneração de formulários existentes (padrão: false)
+        - force_regenerate (opcional): Forçar regeneração mesmo se já existirem formulários (padrão: false)
     
     Returns:
-        - Lista de PDFs institucionais gerados
-        - URLs dos PDFs
-        - Informações dos alunos
+        202 Accepted com:
+        - status: "processing"
+        - task_id: ID da task Celery para polling
+        - polling_url: URL para verificar status
+        - test_id: ID da prova
+        - test_title: Título da prova
+    
+    Example Response:
+        {
+            "status": "processing",
+            "message": "Formulários sendo gerados em background",
+            "task_id": "abc-123-def-456",
+            "test_id": "test-uuid",
+            "test_title": "Avaliação de Matemática",
+            "polling_url": "/physical-tests/task/abc-123-def-456/status"
+        }
     """
     try:
         user = get_current_user_from_token()
@@ -342,16 +356,53 @@ def generate_physical_forms(test_id):
         
         # Verificar permissões do professor
         if user['role'] == 'professor' and test.created_by != user['id']:
-            return jsonify({"error": "Você só pode gerar PDFs institucionais para suas próprias provas"}), 403
+            return jsonify({"error": "Você só pode gerar formulários para suas próprias provas"}), 403
         
         # Obter dados da requisição
         try:
             data = request.get_json() or {}
         except:
             data = {}
-        logo_data = data.get('logo_data')  # Logo será implementado posteriormente
-        force_regenerate = data.get('force_regenerate', False)  # Forçar regeneração de formulários existentes
+        force_regenerate = data.get('force_regenerate', False)
         
+        # Extrair blocks_config do payload
+        blocks_config = data.get('blocks_config')
+        if not blocks_config:
+            # Se não vier como objeto, montar a partir dos parâmetros individuais
+            blocks_config = {
+                'use_blocks': data.get('use_blocks', False),
+                'num_blocks': data.get('num_blocks', 1),
+                'questions_per_block': data.get('questions_per_block', 12),
+                'separate_by_subject': data.get('separate_by_subject', False)
+            }
+        
+        # ✅ DISPARAR TASK CELERY (assíncrono)
+        from app.services.celery_tasks.physical_test_tasks import generate_physical_forms_async
+        
+        logging.info(f"🚀 Disparando task Celery para geração de formulários: test_id={test_id}, blocks_config={blocks_config}")
+        
+        task = generate_physical_forms_async.delay(
+            test_id=test_id,
+            force_regenerate=force_regenerate,
+            blocks_config=blocks_config
+        )
+        
+        # ✅ RETORNA IMEDIATAMENTE (não espera a geração)
+        logging.info(f"✅ Task disparada com sucesso: task_id={task.id}")
+        
+        return jsonify({
+            "status": "processing",
+            "message": "Formulários sendo gerados em background. Use o task_id para verificar o status.",
+            "task_id": task.id,
+            "test_id": test_id,
+            "test_title": test.title,
+            "polling_url": f"/physical-tests/task/{task.id}/status"
+        }), 202  # 202 Accepted
+        
+        # OBS: Todo código abaixo foi movido para a task Celery e não é mais executado aqui
+        # Mantido comentado para referência
+        
+        """
         # Extrair blocks_config do body
         blocks_config = data.get('blocks_config')
         if not blocks_config:
@@ -603,10 +654,110 @@ def generate_physical_forms(test_id):
             else:
                 print(f"ERRO: {result.get('error')}")
                 return jsonify({"error": result.get('error', 'Erro ao gerar formulários')}), 500
+        """
         
     except Exception as e:
-        print(f"❌ Erro ao gerar formulários: {str(e)}")
-        return jsonify({"error": "Erro interno do servidor"}), 500
+        logging.error(f"❌ Erro ao disparar geração de formulários: {str(e)}")
+        import traceback
+        logging.error(traceback.format_exc())
+        return jsonify({"error": str(e)}), 500
+
+# ============================================================================
+# ROTA DE POLLING - STATUS DA TASK CELERY
+# ============================================================================
+
+@bp.route('/task/<string:task_id>/status', methods=['GET'])
+@jwt_required()
+def get_task_status(task_id):
+    """
+    Verifica o status de uma task Celery de geração de formulários físicos
+    
+    O frontend deve fazer polling nesta rota (a cada 2-3 segundos) para acompanhar o progresso.
+    
+    Args:
+        task_id: ID da task Celery retornado na rota /generate-forms
+    
+    Returns:
+        200 OK com status da task:
+        - status: "pending" | "processing" | "completed" | "failed" | "retrying"
+        - message: Mensagem descritiva
+        - result: Dados retornados pela task (quando completed)
+        - error: Mensagem de erro (quando failed)
+    
+    Example Response (Processing):
+        {
+            "status": "processing",
+            "message": "Gerando formulários..."
+        }
+    
+    Example Response (Completed):
+        {
+            "status": "completed",
+            "message": "Formulários gerados com sucesso",
+            "result": {
+                "success": true,
+                "test_id": "...",
+                "generated_forms": 35,
+                "forms": [...]
+            }
+        }
+    """
+    try:
+        from celery.result import AsyncResult
+        
+        task = AsyncResult(task_id)
+        
+        if task.state == 'PENDING':
+            response = {
+                'status': 'pending',
+                'message': 'Aguardando processamento...',
+                'task_id': task_id
+            }
+        elif task.state == 'STARTED':
+            response = {
+                'status': 'processing',
+                'message': 'Gerando formulários PDF (isso pode levar alguns minutos)...',
+                'task_id': task_id
+            }
+        elif task.state == 'SUCCESS':
+            result_data = task.result
+            response = {
+                'status': 'completed',
+                'message': result_data.get('message', 'Formulários gerados com sucesso'),
+                'task_id': task_id,
+                'result': result_data
+            }
+        elif task.state == 'FAILURE':
+            response = {
+                'status': 'failed',
+                'message': 'Erro ao gerar formulários',
+                'task_id': task_id,
+                'error': str(task.info)  # Exception
+            }
+        elif task.state == 'RETRY':
+            response = {
+                'status': 'retrying',
+                'message': 'Tentando novamente após erro temporário...',
+                'task_id': task_id,
+                'retries': task.info.get('retries', 0) if hasattr(task, 'info') and task.info else 0
+            }
+        else:
+            response = {
+                'status': task.state.lower(),
+                'message': f'Estado: {task.state}',
+                'task_id': task_id
+            }
+        
+        return jsonify(response), 200
+        
+    except Exception as e:
+        logging.error(f"Erro ao verificar status da task {task_id}: {str(e)}")
+        return jsonify({
+            "status": "error",
+            "message": "Erro ao verificar status da task",
+            "error": str(e)
+        }), 500
+
 
 # ============================================================================
 # ROTA DE GERAÇÃO INDIVIDUAL
@@ -614,7 +765,7 @@ def generate_physical_forms(test_id):
 
 @bp.route('/test/<string:test_id>/student/<string:student_id>/generate', methods=['POST'])
 @jwt_required()
-@role_required("admin", "professor", "coordenador", "diretor")
+@role_required("admin", "professor", "coordenador", "diretor", "tecadm")
 def generate_individual_physical_form(test_id, student_id):
     """
     Gera formulário físico individual para um aluno específico
@@ -736,7 +887,7 @@ def generate_individual_physical_form(test_id, student_id):
 
 def process_batch_in_background(job_id: str, test_id: str, images: list):
     """
-    Processa correção em lote em background thread usando AnswerSheetCorrectionN
+    Processa correção em lote em background thread usando AnswerSheetCorrectionNewGrid
     
     Args:
         job_id: ID do job para tracking
@@ -750,7 +901,7 @@ def process_batch_in_background(job_id: str, test_id: str, images: list):
     
     with app.app_context():
         try:
-            correction_service = AnswerSheetCorrectionN(debug=False)
+            correction_service = AnswerSheetCorrectionNewGrid(debug=False)
             
             for i, image_base64 in enumerate(images):
                 try:
@@ -764,34 +915,32 @@ def process_batch_in_background(job_id: str, test_id: str, images: list):
                         image_base64_clean = image_base64
                     image_data = base64.b64decode(image_base64_clean)
                     
-                    # Processar correção com AnswerSheetCorrectionN
+                    # Processar correção com AnswerSheetCorrectionNewGrid
                     # O test_id e student_id são extraídos automaticamente do QR code
                     result = correction_service.corrigir_cartao_resposta(
-                        image_data=image_data
+                        image_data=image_data,
+                        auto_detect_qr=True
                     )
                     
                     if result.get('success'):
                         # Buscar nome do aluno se não veio no resultado
-                        if not result.get('student_name') and result.get('student_id'):
+                        student_name = None
+                        if result.get('student_id'):
                             student = Student.query.get(result['student_id'])
                             if student:
-                                result['student_name'] = student.name
+                                student_name = student.name
                         
-                        # Adaptar formato do resultado para compatibilidade
+                        # Adaptar formato do resultado para compatibilidade com novo pipeline
                         adapted_result = {
                             'student_id': result.get('student_id'),
-                            'student_name': result.get('student_name'),
+                            'student_name': student_name,
                             'test_id': result.get('test_id') or test_id,
-                            'correct': result.get('correction', {}).get('correct', 0),
-                            'total': result.get('correction', {}).get('total_questions', 0),
-                            'percentage': result.get('correction', {}).get('score_percentage', 0),
-                            'grade': result.get('grade', 0),
-                            'proficiency': result.get('proficiency', 0),
-                            'classification': result.get('classification', ''),
-                            'score_percentage': result.get('correction', {}).get('score_percentage', 0),
-                            'answers': result.get('answers', {}),
-                            'correction': result.get('correction', {}),
-                            'saved_answers': result.get('saved_answers', []),
+                            'correct': result.get('correct_answers', 0),
+                            'total': result.get('total_questions', 0),
+                            'percentage': result.get('score', 0),
+                            'score_percentage': result.get('score', 0),
+                            'detailed_answers': result.get('detailed_answers', []),
+                            'student_answers': result.get('student_answers', {}),
                             'evaluation_result_id': result.get('evaluation_result_id')
                         }
                         
@@ -907,36 +1056,37 @@ def process_physical_correction(test_id):
                 single_image_clean = single_image
             image_data = base64.b64decode(single_image_clean)
             
-            # Processar com AnswerSheetCorrectionN
+            # Processar com AnswerSheetCorrectionNewGrid
             # O test_id e student_id são extraídos automaticamente do QR code
-            correction_service = AnswerSheetCorrectionN(debug=False)
+            correction_service = AnswerSheetCorrectionNewGrid(debug=False)
             result = correction_service.corrigir_cartao_resposta(
-                image_data=image_data
+                image_data=image_data,
+                auto_detect_qr=True
             )
             
             if result.get('success'):
-                # Adaptar formato do resultado para compatibilidade
+                # Adaptar formato do resultado para compatibilidade com novo pipeline
                 return jsonify({
                     "message": "Correção processada com sucesso",
-                    "system": "correction_n",
+                    "system": "new_grid_pipeline",
                     "student_id": result.get('student_id'),
                     "test_id": result.get('test_id') or test_id,
-                    "correct": result.get('correction', {}).get('correct', 0),
-                    "total": result.get('correction', {}).get('total_questions', 0),
-                    "percentage": result.get('correction', {}).get('score_percentage', 0),
-                    "grade": result.get('grade', 0),
-                    "proficiency": result.get('proficiency', 0),
-                    "classification": result.get('classification', ''),
-                    "score_percentage": result.get('correction', {}).get('score_percentage', 0),
-                    "answers": result.get('answers', {}),
-                    "correction": result.get('correction', {}),
-                    "saved_answers": result.get('saved_answers', []),
+                    "correct": result.get('correct_answers', 0),
+                    "wrong": result.get('wrong_answers', 0),
+                    "blank": result.get('blank_answers', 0),
+                    "invalid": result.get('invalid_answers', 0),
+                    "total": result.get('total_questions', 0),
+                    "score": result.get('score', 0),
+                    "percentage": result.get('score', 0),
+                    "detailed_answers": result.get('detailed_answers', []),
+                    "student_answers": result.get('student_answers', {}),
+                    "answer_key": result.get('answer_key', {}),
                     "evaluation_result_id": result.get('evaluation_result_id')
                 }), 200
             else:
                 return jsonify({
                     "error": result.get('error', 'Erro desconhecido na correção'),
-                    "system": "correction_n"
+                    "system": "new_grid_pipeline"
                 }), 500
         
         # ==================================================================
@@ -1288,14 +1438,17 @@ def download_physical_form(test_id, form_id):
 @role_required("admin", "professor", "coordenador", "diretor")
 def download_all_physical_forms(test_id):
     """
-    Download de todos os formulários físicos de uma prova em um arquivo ZIP
+    Retorna URL pré-assinada para download do ZIP de provas físicas do MinIO
+    
+    Se o ZIP ainda não foi gerado, retorna erro pedindo para gerar primeiro.
+    O ZIP é gerado automaticamente pela task Celery após POST /physical-tests/test/{test_id}/generate-forms.
     
     Returns:
-        - Arquivo ZIP contendo todos os PDFs dos alunos
+        JSON com URL pré-assinada válida por 1 hora
     """
     try:
-        import zipfile
-        from io import BytesIO
+        from app.services.storage.minio_service import MinIOService
+        from datetime import timedelta
         
         user = get_current_user_from_token()
         if not user:
@@ -1310,29 +1463,43 @@ def download_all_physical_forms(test_id):
         if user['role'] == 'professor' and test.created_by != user['id']:
             return jsonify({"error": "Você não tem permissão para baixar formulários desta prova"}), 403
         
-        # Buscar todos os formulários da prova
-        forms = PhysicalTestForm.query.filter_by(test_id=test_id).all()
+        # Buscar gabarito associado à prova
+        gabarito = AnswerSheetGabarito.query.filter_by(test_id=test_id).first()
         
-        if not forms:
-            return jsonify({"error": "Nenhum formulário encontrado para esta prova"}), 404
+        if not gabarito or not gabarito.minio_object_name:
+            return jsonify({
+                "error": "ZIP de provas físicas ainda não foi gerado",
+                "message": "Use a rota POST /physical-tests/test/{test_id}/generate-forms para gerar as provas primeiro. Após a geração (verifique status via polling), o ZIP estará disponível para download.",
+                "test_id": test_id,
+                "status": "not_generated"
+            }), 400
         
-        # Criar ZIP em memória
-        zip_buffer = BytesIO()
+        # Gerar URL pré-assinada (válida por 1 hora)
+        minio = MinIOService()
         
-        with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
-            for form in forms:
-                if form.form_pdf_data:
-                    filename = f"prova_{test_id}_{form.student_id}.pdf"
-                    zip_file.writestr(filename, form.form_pdf_data)
-        
-        zip_buffer.seek(0)
-        
-        return send_file(
-            zip_buffer,
-            as_attachment=True,
-            download_name=f"provas_fisicas_{test_id}.zip",
-            mimetype='application/zip'
-        )
+        try:
+            presigned_url = minio.get_presigned_url(
+                bucket_name=gabarito.minio_bucket or minio.BUCKETS['PHYSICAL_TESTS'],
+                object_name=gabarito.minio_object_name,
+                expires=timedelta(hours=1)
+            )
+            
+            return jsonify({
+                "download_url": presigned_url,
+                "expires_in": "1 hour",
+                "test_id": test_id,
+                "test_title": test.title,
+                "gabarito_id": str(gabarito.id) if gabarito else None,
+                "generated_at": gabarito.zip_generated_at.isoformat() if gabarito and gabarito.zip_generated_at else None,
+                "minio_url": gabarito.minio_url
+            }), 200
+            
+        except Exception as minio_error:
+            logging.error(f"Erro ao gerar URL pré-assinada: {str(minio_error)}")
+            return jsonify({
+                "error": "Erro ao gerar URL de download",
+                "details": str(minio_error)
+            }), 500
         
     except Exception as e:
         print(f"❌ Erro ao baixar formulários físicos: {str(e)}")

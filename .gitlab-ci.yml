@@ -32,6 +32,7 @@ stages:
     - build
     - predeploy
     - mock
+    - mock_storage
     - deploy
     - clean
 
@@ -130,6 +131,11 @@ image_build:
             echo "CELERY_RESULT_BACKEND=$CELERY_RESULT_BACKEND" >> app/.env
             echo "REDIS_URL=$REDIS_URL" >> app/.env
             echo "REDIS_PASSWORD=$REDIS_PASSWORD" >> app/.env
+            
+            echo "MINIO_ENDPOINT=$MINIO_ENDPOINT" >> app/.env
+            echo "MINIO_ACCESS_KEY=$MINIO_ACCESS_KEY" >> app/.env
+            echo "MINIO_SECRET_KEY=$MINIO_SECRET_KEY" >> app/.env
+            echo "MINIO_SECURE=$MINIO_SECURE" >> app/.env
 
             docker build --no-cache -t "$IMAGE_TAG" .
 
@@ -219,6 +225,97 @@ mock_database:
                 fi
             done
 
+minio_setup:
+    stage: mock_storage
+    extends:
+        - .set_runner_tag
+        - .set_none_git_strategy
+    environment:
+        name: $ENVIRONMENT
+    script:
+        - |
+            set -e
+            
+            MINIO_CONTAINER_NAME="minio-server"
+            
+            # 1. Verificar se MinIO já existe e está rodando
+            MINIO_ID=$(docker container ls -a -f name="^${MINIO_CONTAINER_NAME}$" -q)
+            
+            if [ -z "$MINIO_ID" ]; then
+                echo "$(date '+[%Y-%m-%d %H:%M:%S]') - Criando container MinIO..."
+                
+                # Criar container MinIO
+                docker run -d \
+                  --name "$MINIO_CONTAINER_NAME" \
+                  --network "$ENVIRONMENT" \
+                  -p 9000:9000 \
+                  -p 9001:9001 \
+                  -e MINIO_ROOT_USER="${MINIO_ROOT_USER}" \
+                  -e MINIO_ROOT_PASSWORD="${MINIO_ROOT_PASSWORD}" \
+                  -v minio_data:/data \
+                  minio/minio:latest \
+                  server /data --console-address ":9001"
+                
+                echo "$(date '+[%Y-%m-%d %H:%M:%S]') - MinIO container criado."
+            else
+                # Verificar se está rodando
+                IS_RUNNING=$(docker inspect -f "{{.State.Running}}" "$MINIO_ID")
+                
+                if [ "$IS_RUNNING" = "true" ]; then
+                    echo "$(date '+[%Y-%m-%d %H:%M:%S]') - MinIO já está rodando."
+                else
+                    echo "$(date '+[%Y-%m-%d %H:%M:%S]') - Iniciando MinIO..."
+                    docker start "$MINIO_CONTAINER_NAME"
+                fi
+            fi
+            
+            # 2. Aguardar MinIO ficar pronto (health check)
+            echo "$(date '+[%Y-%m-%d %H:%M:%S]') - Aguardando MinIO ficar pronto..."
+            TIMEOUT=60
+            ELAPSED=0
+            
+            until docker exec "$MINIO_CONTAINER_NAME" curl -f http://localhost:9000/minio/health/live 2>/dev/null; do
+                sleep 2
+                ELAPSED=$((ELAPSED + 2))
+                
+                if [ $ELAPSED -ge $TIMEOUT ]; then
+                    echo "$(date '+[%Y-%m-%d %H:%M:%S]') - Timeout esperando MinIO ficar pronto."
+                    docker logs "$MINIO_CONTAINER_NAME"
+                    exit 1
+                fi
+            done
+            
+            echo "$(date '+[%Y-%m-%d %H:%M:%S]') - MinIO está pronto!"
+            
+            # 3. Criar buckets (usando mc - MinIO Client)
+            echo "$(date '+[%Y-%m-%d %H:%M:%S]') - Criando buckets..."
+            
+            # Usar container alpine com mc instalado para ter acesso a sh
+            docker run --rm \
+              --network "$ENVIRONMENT" \
+              alpine:latest \
+              sh -c "
+                apk add --no-cache curl > /dev/null 2>&1;
+                wget -q -O /tmp/mc https://dl.min.io/client/mc/release/linux-amd64/mc;
+                chmod +x /tmp/mc;
+                /tmp/mc alias set myminio http://minio-server:9000 ${MINIO_ROOT_USER} ${MINIO_ROOT_PASSWORD};
+                /tmp/mc mb myminio/answer-sheets --ignore-existing || true;
+                /tmp/mc mb myminio/physical-tests --ignore-existing || true;
+                /tmp/mc mb myminio/municipality-logos --ignore-existing || true;
+                /tmp/mc mb myminio/school-logos --ignore-existing || true;
+                /tmp/mc mb myminio/question-images --ignore-existing || true;
+                /tmp/mc mb myminio/user-uploads --ignore-existing || true;
+                /tmp/mc anonymous set download myminio/answer-sheets || true;
+                /tmp/mc anonymous set download myminio/physical-tests || true;
+                /tmp/mc anonymous set public myminio/municipality-logos || true;
+                /tmp/mc anonymous set public myminio/school-logos || true;
+                echo 'Buckets criados com sucesso!'
+              "
+            
+            echo "$(date '+[%Y-%m-%d %H:%M:%S]') - Setup de buckets concluído!"
+            
+            echo "$(date '+[%Y-%m-%d %H:%M:%S]') - MinIO setup completo!"
+
 container_run:
     stage: deploy
     extends:
@@ -231,6 +328,13 @@ container_run:
         - docker rm -f "$CONTAINER_NAME" || true
         - |
             set -e
+
+            # Remove container antigo se existir
+            if docker container ls -a -f name="^${CONTAINER_NAME}$" -q; then
+                echo "Removendo container antigo '$CONTAINER_NAME'..."
+                docker stop "$CONTAINER_NAME" || true
+                docker rm "$CONTAINER_NAME" || true
+            fi
 
             docker container run --network "$ENVIRONMENT" -p "$HOST_PORT:$CONTAINER_PORT" --name "$CONTAINER_NAME" -d "$IMAGE_TAG"
 

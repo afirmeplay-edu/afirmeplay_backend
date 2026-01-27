@@ -1,0 +1,71 @@
+RESUMO DA INVESTIGACAO E SOLUCAO
+
+PROBLEMA ORIGINAL:
+  - Grid alinhado perfeitamente no inicio (Q1) mas desalinha progressivamente
+  - fill_ratios aumentam de 0.24-0.42 (Q1-Q12) para 0.64-0.84 (Q20-Q26)
+  - Desalinhamento acumula conforme se desce a pagina
+
+DIAGNOSTICO REALIZADO:
+
+  TESTE 1: Quadrados A4 detectados
+    - Resultado: EXCELENTE (proporcao 0.7016 vs 0.7071 = 99.2% correto)
+    - TL/TR/BR/BL coordenadas detectadas com precisao
+
+  TESTE 2: warpPerspective normalizado
+    - Resultado: PERFEITO
+    - Escalas praticamente identicas (px_per_cm_x=27.76, px_per_cm_y=27.98)
+    - Diferenca: 0.79% (aceitavel)
+
+  TESTE 3: Tamanho de normalizacao A4
+    - Resultado: CORRETO (827x1169px)
+    - Mudado de int() para round() por precisao
+
+  TESTE 4: Configuracoes JSON
+    - Resultado: CORRETO (line_height=18px em todos os 4 blocos)
+    - Valores calculados esperados: Q1=15px, Q26=465px
+
+SOLUCOES IMPLEMENTADAS:
+
+1. JSON FILES (COMPLETADO)
+   - Arquivo: app/services/cartao_resposta/block_0{1-4}_coordinates_adjustment.json
+   - Mudanca: line_height 14 -> 18 px
+   - Status: Aplicado
+
+2. correction_n.py (COMPLETADO)
+   - Mudanca 1: round() ao invés de int() em cálculo A4_WIDTH_PX/A4_HEIGHT_PX
+   - Mudanca 2: DEBUG logs adicionados para capturar dados de warpPerspective
+   - Status: Aplicado
+
+PROBLEMA RESTANTE A INVESTIGAR:
+
+Se após aplicar as mudancas acima o desalinhamento PERSISTIR:
+
+O problema esta em uma destas areas:
+  1. Deteccao de bolhas (HoughCircles) - imprecisao ao detectar bolhas
+  2. Agrupamento por linha (LINE_Y_THRESHOLD=8px) - bolhas nao agrupadas corretamente
+  3. Calculo de offset do bloco - desalinhamento entre blocos
+
+COMO INVESTIGAR:
+  1. Executar: python run.py com debug=True
+  2. Verificar logs para "DEBUG - Quadrados detectados" e "DEBUG - Escala"
+  3. Se scales estiverem muito diferentes, problema pode estar em:
+     - Deteccao imprecisa de quadrados em certas imagens
+     - Necessidade de usar cv2.undistort() para corrigir distorcao camera
+
+PROXIMOS PASSOS RECOMENDADOS:
+  1. Testar com uma imagem REAL que tem bolhas marcadas
+  2. Comparar fill_ratios antes vs depois da mudanca 14->18px
+  3. Se ainda houver desalinhamento, ativar logs e analisar output do warpPerspective
+  4. Possivel correcao adicional: usar sub-pixel accuracy na deteccao de quadrados
+
+STATUS FINAL:
+
+CONCLUIDO:
+  - JSON files atualizado (line_height 14->18)
+  - correction_n.py optimizado (round vs int)
+  - DEBUG logs adicionados
+  - Diagnostico completo da pipeline realizado
+
+PROXIMA ACAO:
+  - Testar com imagem REAL e verificar se fill_ratios ainda aumentam
+  - Se persistir: usar dados dos logs DEBUG para investigar deteccao de bolhas

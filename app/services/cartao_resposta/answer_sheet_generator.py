@@ -196,49 +196,78 @@ class AnswerSheetGenerator:
         Returns:
             Lista de blocos, cada um contendo:
             - block_number: número do bloco
+            - subject_name: nome da disciplina (se fornecido)
             - questions: lista de questões com {question_number, options}
             - start_question_num: número da primeira questão
             - end_question_num: número da última questão
         """
         blocks = []
         
-        num_blocks = blocks_config.get('num_blocks', 1)
-        questions_per_block = blocks_config.get('questions_per_block', 12)
-        separate_by_subject = blocks_config.get('separate_by_subject', False)
-        
         # Garantir questions_map
         if questions_map is None:
             questions_map = {}
         
-        if separate_by_subject:
-            # Se separar por disciplina, precisaríamos de dados de disciplinas
-            # Por enquanto, vamos distribuir sequencialmente
-            # TODO: Implementar separação por disciplina se necessário
-            pass
+        # ✅ NOVO: Verificar se há blocos personalizados
+        custom_blocks = blocks_config.get('blocks', [])
         
-        # Distribuir questões sequencialmente pelos blocos
-        for block_num in range(1, num_blocks + 1):
-            start_question = (block_num - 1) * questions_per_block + 1
-            end_question = min(block_num * questions_per_block, num_questions)
-            
-            # Criar lista de questões com alternativas
-            questions = []
-            for q_num in range(start_question, end_question + 1):
-                # Buscar alternativas da questão ou usar padrão
-                options = questions_map.get(q_num, ['A', 'B', 'C', 'D'])
-                questions.append({
-                    'question_number': q_num,
-                    'options': options
-                })
-            
-            if questions:
+        if custom_blocks:
+            # ✅ Blocos personalizados com disciplinas
+            for block_def in custom_blocks:
+                block_id = block_def.get('block_id')
+                subject_name = block_def.get('subject_name')  # ✅ NOVO
+                start_q = block_def.get('start_question')
+                end_q = block_def.get('end_question')
+                
+                questions = []
+                for q_num in range(start_q, end_q + 1):
+                    options = questions_map.get(q_num, ['A', 'B', 'C', 'D'])
+                    questions.append({
+                        'question_number': q_num,
+                        'options': options
+                    })
+                
                 blocks.append({
-                    'block_number': block_num,
-                    'subject_name': None,
+                    'block_number': block_id,
+                    'subject_name': subject_name,  # ✅ NOVO
                     'questions': questions,
-                    'start_question_num': start_question,
-                    'end_question_num': end_question
+                    'start_question_num': start_q,
+                    'end_question_num': end_q
                 })
+        else:
+            # ✅ Fallback: distribuir automaticamente (comportamento original)
+            num_blocks = blocks_config.get('num_blocks', 1)
+            questions_per_block = blocks_config.get('questions_per_block', 12)
+            separate_by_subject = blocks_config.get('separate_by_subject', False)
+            
+            if separate_by_subject:
+                # Se separar por disciplina, precisaríamos de dados de disciplinas
+                # Por enquanto, vamos distribuir sequencialmente
+                # TODO: Implementar separação por disciplina automática se necessário
+                pass
+            
+            # Distribuir questões sequencialmente pelos blocos
+            for block_num in range(1, num_blocks + 1):
+                start_question = (block_num - 1) * questions_per_block + 1
+                end_question = min(block_num * questions_per_block, num_questions)
+                
+                # Criar lista de questões com alternativas
+                questions = []
+                for q_num in range(start_question, end_question + 1):
+                    # Buscar alternativas da questão ou usar padrão
+                    options = questions_map.get(q_num, ['A', 'B', 'C', 'D'])
+                    questions.append({
+                        'question_number': q_num,
+                        'options': options
+                    })
+                
+                if questions:
+                    blocks.append({
+                        'block_number': block_num,
+                        'subject_name': None,
+                        'questions': questions,
+                        'start_question_num': start_question,
+                        'end_question_num': end_question
+                    })
         
         # Validar que temos pelo menos um bloco
         if not blocks:

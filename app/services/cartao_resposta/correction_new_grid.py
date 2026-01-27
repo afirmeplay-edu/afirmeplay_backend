@@ -20,6 +20,7 @@ import numpy as np
 import json
 import logging
 import uuid
+import re
 from typing import Dict, List, Optional, Tuple, Any
 from collections import defaultdict
 from datetime import datetime
@@ -227,16 +228,11 @@ class AnswerSheetCorrectionNewGrid:
             
             # Se tem test_id mas não gabarito_id, buscar gabarito pela prova
             if test_id and not gabarito_id:
+                # ✅ MODIFICADO: Para provas físicas, não buscar gabarito_id
+                # O QR Code de provas físicas usa apenas test_id (não gabarito_id)
+                # Os dados de correção serão buscados em PhysicalTestForm no corrigir_cartao_resposta
                 self.logger.info(f"🔍 QR Code com test_id (prova física): {test_id[:8]}...")
-                from app.models.answerSheetGabarito import AnswerSheetGabarito
-                gabarito_obj = AnswerSheetGabarito.query.filter_by(test_id=test_id).first()
-                
-                if gabarito_obj:
-                    gabarito_id = str(gabarito_obj.id)
-                    self.logger.info(f"✅ Gabarito encontrado via test_id: {gabarito_id[:8]}...")
-                else:
-                    self.logger.warning(f"⚠️ Gabarito não encontrado para test_id: {test_id[:8]}...")
-                    # Nota: gabarito_id ficará None, será tratado no corrigir_cartao_resposta
+                # Nota: gabarito_id ficará None, será tratado no corrigir_cartao_resposta buscando em PhysicalTestForm
             
             self.logger.info(f"✅ QR Code decodificado com sucesso!")
             if gabarito_id:
@@ -1620,6 +1616,84 @@ class AnswerSheetCorrectionNewGrid:
         }
     
     # =========================================================================
+    # FORMATAÇÃO DE ERROS AMIGÁVEIS
+    # =========================================================================
+    
+    def _format_user_friendly_error(self, technical_error: str, context: Dict = None) -> str:
+        """
+        Converte mensagens de erro técnicas em mensagens amigáveis para o usuário final
+        
+        Args:
+            technical_error: Mensagem de erro técnica original
+            context: Dicionário com contexto adicional (ex: num_blocks_expected, num_blocks_found)
+        
+        Returns:
+            Mensagem de erro amigável
+        """
+        if context is None:
+            context = {}
+        
+        # Verificar primeiro se é erro de quantidade de blocos (precisa de contexto)
+        blocks_pattern = r"Esperava\s+(\d+)\s+blocos.*encontrou\s+(\d+)|Esperava\s+(\d+)\s+blocos.*encontrou.*diferente"
+        blocks_match = re.search(blocks_pattern, technical_error, re.IGNORECASE)
+        if blocks_match:
+            # Se não temos contexto, tentar extrair dos números na mensagem
+            if not context or 'num_blocks_expected' not in context:
+                try:
+                    expected = int(blocks_match.group(1)) if blocks_match.group(1) else int(blocks_match.group(3))
+                    found = context.get('num_blocks_found', 0)
+                    context = {
+                        'num_blocks_expected': expected,
+                        'num_blocks_found': found
+                    }
+                except:
+                    pass
+            return self._format_blocks_quantity_error(context)
+        
+        # Mapeamento de padrões técnicos para mensagens amigáveis
+        error_patterns = [
+            # Detecção de elementos
+            (r"âncoras\s+A4|Âncoras\s+A4|quadrados\s+A4", "Não foi possível identificar os marcadores nos cantos da folha. Verifique se a imagem está completa e os cantos estão visíveis."),
+            (r"triângulos", "Não foi possível identificar os marcadores de alinhamento. Certifique-se de que a imagem está nítida e os triângulos estão visíveis."),
+            (r"blocos.*detectado|Nenhum bloco", "Não foi possível identificar as áreas de resposta. Verifique se a imagem está bem iluminada e as bordas dos blocos estão visíveis."),
+            (r"QR\s+Code.*não\s+detectado|QR\s+Code.*inválido|QR\s+Code.*não\s+encontrado", "Não foi possível ler o código QR do cartão. Verifique se o código está visível, não está danificado e a imagem está nítida."),
+            
+            # Processamento
+            (r"decodificar\s+imagem|Falha ao carregar imagem", "Não foi possível processar a imagem. Verifique se o arquivo está em um formato válido (JPG, PNG)."),
+            (r"normalizar.*A4", "Não foi possível ajustar a imagem. Tente escanear novamente com a folha bem posicionada e os cantos visíveis."),
+            (r"crop.*área", "Não foi possível identificar a área de respostas. Verifique se a imagem está completa e bem alinhada."),
+            
+            # Dados
+            (r"Aluno.*não\s+encontrado", "Aluno não encontrado no sistema. Verifique se o código QR está correto."),
+            (r"Gabarito.*não\s+encontrado", "Gabarito não encontrado. Verifique se a prova está cadastrada corretamente."),
+            (r"Prova.*não\s+encontrada", "Prova não encontrada. Verifique se a prova está cadastrada corretamente."),
+            (r"topology_json.*obrigatório|gabarito.*obrigatório", "Configuração da prova incompleta. Entre em contato com o suporte técnico."),
+        ]
+        
+        # Buscar padrão correspondente
+        for pattern, friendly_msg in error_patterns:
+            if re.search(pattern, technical_error, re.IGNORECASE):
+                return friendly_msg
+        
+        # Se não encontrou padrão específico, retornar mensagem genérica
+        return "Não foi possível processar a imagem. Por favor, verifique se a imagem está nítida e completa, e tente novamente."
+    
+    def _format_blocks_quantity_error(self, context: Dict) -> str:
+        """Formata erro específico de quantidade de blocos"""
+        expected = context.get('num_blocks_expected', None)
+        found = context.get('num_blocks_found', 0)
+        
+        if expected is None:
+            return "A quantidade de blocos de resposta não corresponde ao esperado. Verifique se a imagem está completa e todas as áreas de resposta estão visíveis."
+        
+        if found == 0:
+            return "Nenhuma área de resposta foi identificada. Verifique se a imagem está completa e as bordas dos blocos estão visíveis."
+        elif found < expected:
+            return f"Foram identificadas apenas {found} área(s) de resposta, mas esperava-se {expected}. Verifique se a imagem está completa e todas as áreas estão visíveis."
+        else:
+            return f"Foram identificadas {found} áreas de resposta, mas esperava-se {expected}. Verifique se há elementos extras na imagem que possam estar sendo confundidos com áreas de resposta."
+    
+    # =========================================================================
     # PIPELINE PRINCIPAL
     # =========================================================================
     
@@ -1640,7 +1714,8 @@ class AnswerSheetCorrectionNewGrid:
         self.logger.info("🔄 Etapa 2: Detectar âncoras A4")
         anchors = self._detect_a4_anchors(img, edges)
         if anchors is None:
-            return {"success": False, "error": "Âncoras A4 não detectadas"}
+            error_msg = self._format_user_friendly_error("Âncoras A4 não detectadas")
+            return {"success": False, "error": error_msg}
         
         # ETAPA 3: Normalizar para A4 lógico
         self.logger.info("🔄 Etapa 3: Normalizar para A4")
@@ -1652,9 +1727,17 @@ class AnswerSheetCorrectionNewGrid:
         num_blocks_expected = topology_json.get("num_blocks", 4)
         blocks = self._detect_answer_blocks_in_full_a4(img_a4, num_blocks_expected)
         if blocks is None:
+            context = {
+                'num_blocks_expected': num_blocks_expected,
+                'num_blocks_found': 0
+            }
+            error_msg = self._format_user_friendly_error(
+                f"Esperava {num_blocks_expected} blocos, encontrou quantidade diferente",
+                context
+            )
             return {
                 "success": False,
-                "error": f"Esperava {num_blocks_expected} blocos, encontrou quantidade diferente"
+                "error": error_msg
             }
         
         # ETAPAS 6-9: Processar cada bloco
@@ -1730,10 +1813,12 @@ class AnswerSheetCorrectionNewGrid:
                 nparr = np.frombuffer(image_data, np.uint8)
                 img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
             else:
-                return {"success": False, "error": "Nenhuma imagem fornecida"}
+                error_msg = self._format_user_friendly_error("Nenhuma imagem fornecida")
+                return {"success": False, "error": error_msg}
             
             if img is None:
-                return {"success": False, "error": "Falha ao carregar imagem"}
+                error_msg = self._format_user_friendly_error("Falha ao carregar imagem")
+                return {"success": False, "error": error_msg}
             
             # Salvar imagem de entrada para debug
             if self.debug:
@@ -1743,7 +1828,8 @@ class AnswerSheetCorrectionNewGrid:
             if auto_detect_qr:
                 qr_data = self._detectar_qr_code(img)
                 if not qr_data:
-                    return {"success": False, "error": "QR Code não encontrado no cartão"}
+                    error_msg = self._format_user_friendly_error("QR Code não encontrado no cartão")
+                    return {"success": False, "error": error_msg}
                 
                 gabarito_id = qr_data.get('gabarito_id')
                 student_id = qr_data.get('student_id')
@@ -1761,26 +1847,51 @@ class AnswerSheetCorrectionNewGrid:
                 if gabarito_id:
                     gabarito_obj = AnswerSheetGabarito.query.get(gabarito_id)
                     if not gabarito_obj:
-                        return {"success": False, "error": f"Gabarito {gabarito_id[:8]}... não encontrado"}
+                        error_msg = self._format_user_friendly_error(f"Gabarito {gabarito_id[:8]}... não encontrado")
+                        return {"success": False, "error": error_msg}
                 
                 elif test_id:
-                    # Buscar gabarito por test_id (prova física)
-                    gabarito_obj = AnswerSheetGabarito.query.filter_by(test_id=test_id).first()
+                    # ✅ MODIFICADO: Para provas físicas, buscar em PhysicalTestForm ao invés de AnswerSheetGabarito
+                    from app.models.physicalTestForm import PhysicalTestForm
                     
-                    if gabarito_obj:
-                        self.logger.info(f"✅ Gabarito encontrado para test_id: {gabarito_obj.id[:8]}...")
-                    else:
-                        # Gabarito não existe - criar temporário a partir do Test
-                        self.logger.warning(f"⚠️ Gabarito não encontrado para test_id {test_id[:8]}..., montando dinamicamente")
-                        gabarito_obj = self._criar_gabarito_de_test(test_id)
+                    # Buscar PhysicalTestForm por test_id (prova física)
+                    # Pegar o primeiro formulário da prova para obter os dados de correção
+                    physical_form = PhysicalTestForm.query.filter_by(test_id=test_id).first()
+                    
+                    if physical_form and physical_form.blocks_config and physical_form.correct_answers:
+                        # Criar objeto temporário compatível com a interface esperada
+                        class GabaritoTemp:
+                            def __init__(self, form):
+                                self.id = f"physical_{form.test_id}"
+                                self.test_id = form.test_id
+                                self.num_questions = form.num_questions
+                                self.use_blocks = form.use_blocks
+                                self.blocks_config = form.blocks_config
+                                self.correct_answers = form.correct_answers
                         
-                        if not gabarito_obj:
-                            return {"success": False, "error": f"Prova {test_id[:8]}... não encontrada ou sem questões"}
+                        gabarito_obj = GabaritoTemp(physical_form)
+                        self.logger.info(f"✅ Dados de correção encontrados em PhysicalTestForm para test_id: {test_id[:8]}...")
+                    else:
+                        # Fallback: tentar buscar em AnswerSheetGabarito (compatibilidade)
+                        gabarito_obj = AnswerSheetGabarito.query.filter_by(test_id=test_id).first()
+                        
+                        if gabarito_obj:
+                            self.logger.info(f"✅ Gabarito encontrado em AnswerSheetGabarito (fallback) para test_id: {gabarito_obj.id[:8]}...")
+                        else:
+                            # Último recurso: criar temporário a partir do Test
+                            self.logger.warning(f"⚠️ Dados de correção não encontrados para test_id {test_id[:8]}..., montando dinamicamente")
+                            gabarito_obj = self._criar_gabarito_de_test(test_id)
+                            
+                            if not gabarito_obj:
+                                error_msg = self._format_user_friendly_error(f"Prova {test_id[:8]}... não encontrada ou sem questões")
+                                return {"success": False, "error": error_msg}
                 else:
-                    return {"success": False, "error": "QR Code sem gabarito_id ou test_id"}
+                    error_msg = self._format_user_friendly_error("QR Code sem gabarito_id ou test_id")
+                    return {"success": False, "error": error_msg}
                 
                 if not gabarito_obj:
-                    return {"success": False, "error": "Gabarito não encontrado"}
+                    error_msg = self._format_user_friendly_error("Gabarito não encontrado")
+                    return {"success": False, "error": error_msg}
                 
                 # Construir topology_json
                 topology_json = {
@@ -1792,9 +1903,10 @@ class AnswerSheetCorrectionNewGrid:
                 
                 # Validar topology
                 if not topology_json.get('topology') or not topology_json['topology'].get('blocks'):
+                    error_msg = self._format_user_friendly_error("Gabarito não possui estrutura de topologia. Regenere os cartões.")
                     return {
                         "success": False,
-                        "error": "Gabarito não possui estrutura de topologia. Regenere os cartões."
+                        "error": error_msg
                     }
                 
                 # Usar respostas corretas do gabarito
@@ -1817,9 +1929,11 @@ class AnswerSheetCorrectionNewGrid:
             
             # Validar parâmetros
             if not topology_json:
-                return {"success": False, "error": "topology_json é obrigatório"}
+                error_msg = self._format_user_friendly_error("topology_json é obrigatório")
+                return {"success": False, "error": error_msg}
             if not gabarito:
-                return {"success": False, "error": "gabarito é obrigatório ou está vazio"}
+                error_msg = self._format_user_friendly_error("gabarito é obrigatório ou está vazio")
+                return {"success": False, "error": error_msg}
             
             # Executar pipeline
             result = self._execute_omr_pipeline(img, topology_json)
@@ -1860,9 +1974,10 @@ class AnswerSheetCorrectionNewGrid:
             
         except Exception as e:
             self.logger.error(f"❌ Erro ao corrigir cartão: {str(e)}", exc_info=True)
+            error_msg = self._format_user_friendly_error(f"Erro interno: {str(e)}")
             return {
                 "success": False,
-                "error": f"Erro interno: {str(e)}"
+                "error": error_msg
             }
     
     # =========================================================================
@@ -2252,16 +2367,27 @@ class AnswerSheetCorrectionNewGrid:
         Primeiro salva respostas em StudentAnswer, depois calcula EvaluationResult
         """
         try:
-            from app.models.answerSheetGabarito import AnswerSheetGabarito
+            # ✅ MODIFICADO: Buscar dados de correção em PhysicalTestForm para provas físicas
+            from app.models.physicalTestForm import PhysicalTestForm
             
-            # 1. Buscar gabarito para obter respostas corretas
-            gabarito_obj = AnswerSheetGabarito.query.filter_by(test_id=test_id).first()
-            if not gabarito_obj:
-                self.logger.error(f"Gabarito não encontrado para test_id={test_id}")
-                return None
+            # 1. Buscar PhysicalTestForm para obter respostas corretas
+            physical_form = PhysicalTestForm.query.filter_by(test_id=test_id).first()
+            
+            if not physical_form or not physical_form.correct_answers:
+                # Fallback: tentar buscar em AnswerSheetGabarito (compatibilidade)
+                from app.models.answerSheetGabarito import AnswerSheetGabarito
+                gabarito_obj = AnswerSheetGabarito.query.filter_by(test_id=test_id).first()
+                if gabarito_obj:
+                    correct_answers = gabarito_obj.correct_answers
+                    self.logger.info(f"✅ Dados de correção obtidos de AnswerSheetGabarito (fallback)")
+                else:
+                    self.logger.error(f"Gabarito não encontrado para test_id={test_id}")
+                    return None
+            else:
+                correct_answers = physical_form.correct_answers
+                self.logger.info(f"✅ Dados de correção obtidos de PhysicalTestForm")
             
             # Converter correct_answers para dict
-            correct_answers = gabarito_obj.correct_answers
             if isinstance(correct_answers, str):
                 correct_answers = json.loads(correct_answers)
             

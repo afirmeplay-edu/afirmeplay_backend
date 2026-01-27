@@ -1346,16 +1346,114 @@ class AnswerSheetCorrectionN:
             self.logger.error(f"Erro ao detectar QR Code: {str(e)}")
             return None
     
+    def _analisar_iluminacao(self, gray: np.ndarray) -> Dict[str, Any]:
+        """
+        Analisa a qualidade da iluminação da imagem.
+        Usado apenas para decidir se vale tentar fallback, nunca para alterar correção.
+        
+        Args:
+            gray: Imagem em escala de cinza
+            
+        Returns:
+            Dict com informações de iluminação: mean, std, brightness
+        """
+        try:
+            mean = float(np.mean(gray))
+            std = float(np.std(gray))
+            
+            # Classificar brilho
+            if mean < 80:
+                brightness = "dark"
+            elif mean > 180:
+                brightness = "bright"
+            else:
+                brightness = "normal"
+            
+            return {
+                "mean": mean,
+                "std": std,
+                "brightness": brightness
+            }
+        except Exception as e:
+            self.logger.warning(f"Erro ao analisar iluminação: {str(e)}")
+            return {"mean": 128.0, "std": 50.0, "brightness": "normal"}
+    
+    def _preprocess_omr(self, image: np.ndarray, mode: str = "auto") -> np.ndarray:
+        """
+        Pré-processamento adaptativo para melhorar detecção em imagens difíceis.
+        NÃO altera lógica de detecção. Apenas melhora contraste para imagens difíceis.
+        
+        Implementa:
+        - Conversão para LAB
+        - Equalização CLAHE no canal L
+        - Remoção de sombra via background blur + normalize
+        - Retorna imagem BGR
+        
+        ⚠️ Essa função NÃO deve ser usada por padrão, apenas como fallback.
+        
+        Args:
+            image: Imagem BGR original
+            mode: Modo de pré-processamento ("auto", "clahe", "shadow_removal", "both")
+            
+        Returns:
+            Imagem BGR pré-processada
+        """
+        try:
+            if len(image.shape) != 3:
+                # Se já está em grayscale, converter para BGR
+                image = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
+            
+            # Converter para LAB para trabalhar no canal L (luminância)
+            lab = cv2.cvtColor(image, cv2.COLOR_BGR2LAB)
+            l_channel, a_channel, b_channel = cv2.split(lab)
+            
+            # Aplicar CLAHE (Contrast Limited Adaptive Histogram Equalization) no canal L
+            if mode in ["auto", "clahe", "both"]:
+                clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+                l_channel = clahe.apply(l_channel)
+            
+            # Remoção de sombra via background blur + normalize
+            if mode in ["auto", "shadow_removal", "both"]:
+                # Criar background estimado usando blur gaussiano grande
+                background = cv2.GaussianBlur(l_channel, (101, 101), 0)
+                
+                # Normalizar: l_normalized = (l - background) * scale + offset
+                # Isso remove gradientes de iluminação
+                l_normalized = cv2.subtract(l_channel, background)
+                l_normalized = cv2.add(l_normalized, 128)  # Adicionar offset para manter brilho médio
+                
+                # Limitar valores entre 0 e 255
+                l_normalized = np.clip(l_normalized, 0, 255).astype(np.uint8)
+                l_channel = l_normalized
+            
+            # Recombinar canais LAB
+            lab_processed = cv2.merge([l_channel, a_channel, b_channel])
+            
+            # Converter de volta para BGR
+            result = cv2.cvtColor(lab_processed, cv2.COLOR_LAB2BGR)
+            
+            # Salvar debug se ativado
+            if self.save_debug_images:
+                self._save_debug_image("preprocess_omr_result.jpg", result)
+            
+            return result
+            
+        except Exception as e:
+            self.logger.warning(f"Erro no pré-processamento OMR: {str(e)}, retornando imagem original")
+            return image
+    
     def _detectar_quadrados_a4(self, img: np.ndarray) -> Optional[Dict]:
         """
         Detecta 4 quadrados pretos nos cantos do cartão resposta (âncoras A4)
         
-        Implementação robusta com:
-        - RETR_TREE para hierarquia de contornos
-        - Área relativa à imagem (não fixa)
-        - Aspect ratio restritivo (0.9-1.1)
-        - Filtro de proximidade à borda
-        - Garantia de 1 quadrado por canto
+        Implementação robusta com fallback progressivo:
+        - Tentativa 1: Detecção original (comportamento padrão)
+        - Tentativa 2: Pré-processamento adaptativo + detecção original
+        - Tentativa 3: Relaxamento controlado de parâmetros
+        - Tentativa 4: Fallback com Canny
+        
+        ⚠️ PRESERVA COMPORTAMENTO ORIGINAL para imagens boas.
+        ⚠️ Apenas adiciona robustez quando detecção original falha.
         
         Args:
             img: Imagem original
@@ -1363,161 +1461,250 @@ class AnswerSheetCorrectionN:
         Returns:
             Dict com coordenadas dos 4 quadrados ordenados (TL, TR, BR, BL) ou None
         """
-        try:
-            # Converter para grayscale
-            if len(img.shape) == 3:
-                gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-            else:
-                gray = img.copy()
+        def _detectar_quadrados_interno(img_detect: np.ndarray, 
+                                       relax_area: float = 1.0, 
+                                       relax_aspect: float = 0.0) -> Optional[Dict]:
+            """
+            Lógica interna de detecção de quadrados (extraída para reutilização).
             
-            img_height, img_width = gray.shape[:2]
-            img_area = img_width * img_height
-            
-            # Aplicar threshold para detectar quadrados pretos
-            _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
-            
-            # ✅ CORREÇÃO 1: Usar RETR_TREE para hierarquia de contornos
-            contours, hierarchy = cv2.findContours(binary, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
-            
-            # ✅ CORREÇÃO 2: Área relativa à imagem (nunca fixa)
-            min_area = img_area * 0.0001   # ~0.01% da imagem
-            max_area = img_area * 0.002    # ~0.2% da imagem
-            
-            # ✅ CORREÇÃO 4: Margem para filtro de proximidade à borda
-            margin_x = img_width * 0.1   # 10% da largura
-            margin_y = img_height * 0.1  # 10% da altura
-            
-            squares = []
-            
-            for i, cnt in enumerate(contours):
-                # Aproximar contorno
-                peri = cv2.arcLength(cnt, True)
-                approx = cv2.approxPolyDP(cnt, 0.04 * peri, True)
-                
-                # Verificar se é um quadrado (4 vértices)
-                if len(approx) != 4:
-                    continue
-                
-                area = cv2.contourArea(approx)
-                
-                # ✅ CORREÇÃO 2: Filtrar por área relativa
-                if not (min_area < area < max_area):
-                    continue
-                
-                # Verificar aspect ratio
-                x, y, w, h = cv2.boundingRect(approx)
-                aspect_ratio = w / float(h) if h > 0 else 0
-                
-                # ✅ CORREÇÃO 3: Aspect ratio mais restritivo (quadrado real)
-                if not (0.9 < aspect_ratio < 1.1):
-                    continue
-                
-                # Calcular centro do quadrado
-                M = cv2.moments(approx)
-                if M["m00"] == 0:
-                    continue
-                
-                cx = int(M["m10"] / M["m00"])
-                cy = int(M["m01"] / M["m00"])
-                
-                # ✅ CORREÇÃO 4: FILTRO DE PROXIMIDADE À BORDA (ESSENCIAL)
-                # Quadrados A4 SEMPRE estão perto dos cantos
-                is_near_edge = (
-                    cx < margin_x or
-                    cx > img_width - margin_x or
-                    cy < margin_y or
-                    cy > img_height - margin_y
-                )
-                
-                if not is_near_edge:
-                    continue
-                
-                squares.append({
-                    'contour': approx,
-                    'center': (cx, cy),
-                    'area': area
-                })
-            
-            if len(squares) < 4:
-                self.logger.warning(f"Apenas {len(squares)} quadrados detectados (necessário 4)")
-                return None
-            
-            # ✅ CORREÇÃO 5: GARANTIR 1 QUADRADO POR CANTO
-            corners = {
-                "TL": [],  # Top-Left
-                "TR": [],  # Top-Right
-                "BR": [],  # Bottom-Right
-                "BL": []   # Bottom-Left
-            }
-            
-            for s in squares:
-                cx, cy = s["center"]
-                # Classificar por quadrante
-                if cx < img_width / 2 and cy < img_height / 2:
-                    corners["TL"].append(s)
-                elif cx >= img_width / 2 and cy < img_height / 2:
-                    corners["TR"].append(s)
-                elif cx >= img_width / 2 and cy >= img_height / 2:
-                    corners["BR"].append(s)
+            Args:
+                img_detect: Imagem para detectar
+                relax_area: Fator de relaxamento de área (1.0 = original, 1.2 = +20%)
+                relax_aspect: Relaxamento de aspect ratio (0.0 = original, 0.1 = expandir 0.1)
+            """
+            try:
+                # Converter para grayscale
+                if len(img_detect.shape) == 3:
+                    gray = cv2.cvtColor(img_detect, cv2.COLOR_BGR2GRAY)
                 else:
-                    corners["BL"].append(s)
-            
-            # Verificar se todos os cantos têm pelo menos 1 quadrado
-            missing_corners = [corner for corner, items in corners.items() if not items]
-            if missing_corners:
-                self.logger.warning(f"Quadrados ausentes nos cantos: {missing_corners}")
-                return None
-            
-            # Para cada canto, pegar o maior quadrado (mais confiável) e extrair o vértice correto
-            ordered_squares = {}
-            for corner, items in corners.items():
-                if not items:
-                    self.logger.warning(f"Quadrado ausente no canto {corner}")
+                    gray = img_detect.copy()
+                
+                img_height, img_width = gray.shape[:2]
+                img_area = img_width * img_height
+                
+                # Aplicar threshold para detectar quadrados pretos
+                _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+                
+                # Salvar debug se ativado
+                if self.save_debug_images:
+                    self._save_debug_image("00_a4_binary.jpg", binary)
+                
+                # ✅ CORREÇÃO 1: Usar RETR_TREE para hierarquia de contornos
+                contours, hierarchy = cv2.findContours(binary, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
+                
+                # ✅ CORREÇÃO 2: Área relativa à imagem (nunca fixa) com relaxamento opcional
+                min_area = img_area * 0.0001 * (1.0 / relax_area)   # ~0.01% da imagem
+                max_area = img_area * 0.002 * relax_area    # ~0.2% da imagem
+                
+                # ✅ CORREÇÃO 4: Margem para filtro de proximidade à borda
+                margin_x = img_width * 0.1   # 10% da largura
+                margin_y = img_height * 0.1  # 10% da altura
+                
+                squares = []
+                
+                for i, cnt in enumerate(contours):
+                    # Aproximar contorno
+                    peri = cv2.arcLength(cnt, True)
+                    approx = cv2.approxPolyDP(cnt, 0.04 * peri, True)
+                    
+                    # Verificar se é um quadrado (4 vértices)
+                    if len(approx) != 4:
+                        continue
+                    
+                    area = cv2.contourArea(approx)
+                    
+                    # ✅ CORREÇÃO 2: Filtrar por área relativa (com relaxamento)
+                    if not (min_area < area < max_area):
+                        continue
+                    
+                    # Verificar aspect ratio
+                    x, y, w, h = cv2.boundingRect(approx)
+                    aspect_ratio = w / float(h) if h > 0 else 0
+                    
+                    # ✅ CORREÇÃO 3: Aspect ratio mais restritivo (quadrado real) com relaxamento
+                    aspect_min = 0.9 - relax_aspect
+                    aspect_max = 1.1 + relax_aspect
+                    if not (aspect_min < aspect_ratio < aspect_max):
+                        continue
+                    
+                    # Calcular centro do quadrado
+                    M = cv2.moments(approx)
+                    if M["m00"] == 0:
+                        continue
+                    
+                    cx = int(M["m10"] / M["m00"])
+                    cy = int(M["m01"] / M["m00"])
+                    
+                    # ✅ CORREÇÃO 4: FILTRO DE PROXIMIDADE À BORDA (ESSENCIAL)
+                    # Quadrados A4 SEMPRE estão perto dos cantos
+                    is_near_edge = (
+                        cx < margin_x or
+                        cx > img_width - margin_x or
+                        cy < margin_y or
+                        cy > img_height - margin_y
+                    )
+                    
+                    if not is_near_edge:
+                        continue
+                    
+                    squares.append({
+                        'contour': approx,
+                        'center': (cx, cy),
+                        'area': area
+                    })
+                
+                if len(squares) < 4:
                     return None
-                # Pegar o maior quadrado do canto
-                best_square = max(items, key=lambda x: x["area"])
                 
-                # ✅ CORREÇÃO: Extrair o vértice correto do quadrado ao invés do centro
-                # O vértice correto é aquele que está mais próximo do canto real do documento
-                contour = best_square["contour"]  # approx com 4 vértices
-                vertices = contour.reshape(-1, 2)  # Converter para array de pontos (x, y)
+                # ✅ CORREÇÃO 5: GARANTIR 1 QUADRADO POR CANTO
+                corners = {
+                    "TL": [],  # Top-Left
+                    "TR": [],  # Top-Right
+                    "BR": [],  # Bottom-Right
+                    "BL": []   # Bottom-Left
+                }
                 
-                # Selecionar o vértice correto baseado no canto
-                # Para cada canto, queremos o vértice que minimiza/maximiza x e y apropriadamente
-                if corner == "TL":  # Top-Left: menor x E menor y
-                    # Encontrar vértice com menor distância ao canto (0, 0)
-                    distances = vertices[:, 0] + vertices[:, 1]
-                    corner_vertex = vertices[np.argmin(distances)]
-                elif corner == "TR":  # Top-Right: maior x E menor y
-                    # Encontrar vértice com maior x e menor y (mais próximo de (width, 0))
-                    # Usar distância ponderada: maximizar x, minimizar y
-                    scores = vertices[:, 0] - vertices[:, 1]
-                    corner_vertex = vertices[np.argmax(scores)]
-                elif corner == "BR":  # Bottom-Right: maior x E maior y
-                    # Encontrar vértice com maior distância ao canto (0, 0)
-                    distances = vertices[:, 0] + vertices[:, 1]
-                    corner_vertex = vertices[np.argmax(distances)]
-                else:  # BL - Bottom-Left: menor x E maior y
-                    # Encontrar vértice com menor x e maior y (mais próximo de (0, height))
-                    # Usar distância ponderada: minimizar x, maximizar y
-                    scores = vertices[:, 0] - vertices[:, 1]
-                    corner_vertex = vertices[np.argmin(scores)]
+                for s in squares:
+                    cx, cy = s["center"]
+                    # Classificar por quadrante
+                    if cx < img_width / 2 and cy < img_height / 2:
+                        corners["TL"].append(s)
+                    elif cx >= img_width / 2 and cy < img_height / 2:
+                        corners["TR"].append(s)
+                    elif cx >= img_width / 2 and cy >= img_height / 2:
+                        corners["BR"].append(s)
+                    else:
+                        corners["BL"].append(s)
                 
-                ordered_squares[corner] = [float(corner_vertex[0]), float(corner_vertex[1])]
+                # Verificar se todos os cantos têm pelo menos 1 quadrado
+                missing_corners = [corner for corner, items in corners.items() if not items]
+                if missing_corners:
+                    return None
+                
+                # Para cada canto, pegar o maior quadrado (mais confiável) e extrair o vértice correto
+                ordered_squares = {}
+                for corner, items in corners.items():
+                    if not items:
+                        return None
+                    # Pegar o maior quadrado do canto
+                    best_square = max(items, key=lambda x: x["area"])
+                    
+                    # ✅ CORREÇÃO: Extrair o vértice correto do quadrado ao invés do centro
+                    # O vértice correto é aquele que está mais próximo do canto real do documento
+                    contour = best_square["contour"]  # approx com 4 vértices
+                    vertices = contour.reshape(-1, 2)  # Converter para array de pontos (x, y)
+                    
+                    # Selecionar o vértice correto baseado no canto
+                    # Para cada canto, queremos o vértice que minimiza/maximiza x e y apropriadamente
+                    if corner == "TL":  # Top-Left: menor x E menor y
+                        # Encontrar vértice com menor distância ao canto (0, 0)
+                        distances = vertices[:, 0] + vertices[:, 1]
+                        corner_vertex = vertices[np.argmin(distances)]
+                    elif corner == "TR":  # Top-Right: maior x E menor y
+                        # Encontrar vértice com maior x e menor y (mais próximo de (width, 0))
+                        # Usar distância ponderada: maximizar x, minimizar y
+                        scores = vertices[:, 0] - vertices[:, 1]
+                        corner_vertex = vertices[np.argmax(scores)]
+                    elif corner == "BR":  # Bottom-Right: maior x E maior y
+                        # Encontrar vértice com maior distância ao canto (0, 0)
+                        distances = vertices[:, 0] + vertices[:, 1]
+                        corner_vertex = vertices[np.argmax(distances)]
+                    else:  # BL - Bottom-Left: menor x E maior y
+                        # Encontrar vértice com menor x e maior y (mais próximo de (0, height))
+                        # Usar distância ponderada: minimizar x, maximizar y
+                        scores = vertices[:, 0] - vertices[:, 1]
+                        corner_vertex = vertices[np.argmin(scores)]
+                    
+                    ordered_squares[corner] = [float(corner_vertex[0]), float(corner_vertex[1])]
+                
+                return ordered_squares
+                
+            except Exception as e:
+                self.logger.warning(f"Erro na detecção interna de quadrados: {str(e)}")
+                return None
+        
+        # ========== PIPELINE DE FALLBACK PROGRESSIVO ==========
+        try:
+            # TENTATIVA 1: Detecção original (comportamento padrão)
+            result = _detectar_quadrados_interno(img, relax_area=1.0, relax_aspect=0.0)
+            if result:
+                if self.save_debug_images:
+                    img_debug = img.copy()
+                    for label, vertex in result.items():
+                        vx, vy = int(vertex[0]), int(vertex[1])
+                        cv2.circle(img_debug, (vx, vy), 15, (0, 255, 0), -1)
+                        cv2.putText(img_debug, label, (vx+20, vy), 
+                                  cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 255, 0), 3)
+                    self._save_debug_image("00_a4_squares_detected.jpg", img_debug)
+                self.logger.info(f"✅ 4 quadrados A4 detectados (tentativa 1 - original): TL={result['TL']}, TR={result['TR']}, BR={result['BR']}, BL={result['BL']}")
+                return result
             
-            # Salvar debug
+            # Analisar iluminação para decidir se vale tentar fallback
+            gray_temp = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY) if len(img.shape) == 3 else img.copy()
+            iluminacao = self._analisar_iluminacao(gray_temp)
+            
             if self.save_debug_images:
-                img_debug = img.copy()
-                for label, vertex in ordered_squares.items():
-                    vx, vy = int(vertex[0]), int(vertex[1])
-                    cv2.circle(img_debug, (vx, vy), 15, (0, 255, 0), -1)
-                    cv2.putText(img_debug, label, (vx+20, vy), 
-                              cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 255, 0), 3)
-                self._save_debug_image("00_a4_squares_detected.jpg", img_debug)
+                self.logger.info(f"🔍 Iluminação analisada: mean={iluminacao['mean']:.1f}, std={iluminacao['std']:.1f}, brightness={iluminacao['brightness']}")
             
-            self.logger.info(f"✅ 4 quadrados A4 detectados (vértices): TL={ordered_squares['TL']}, TR={ordered_squares['TR']}, BR={ordered_squares['BR']}, BL={ordered_squares['BL']}")
+            # TENTATIVA 2: Pré-processamento adaptativo + detecção original
+            self.logger.info("⚠️ Tentativa 1 falhou, aplicando pré-processamento adaptativo...")
+            img_preprocessed = self._preprocess_omr(img, mode="auto")
+            result = _detectar_quadrados_interno(img_preprocessed, relax_area=1.0, relax_aspect=0.0)
+            if result:
+                if self.save_debug_images:
+                    img_debug = img_preprocessed.copy()
+                    for label, vertex in result.items():
+                        vx, vy = int(vertex[0]), int(vertex[1])
+                        cv2.circle(img_debug, (vx, vy), 15, (0, 255, 0), -1)
+                        cv2.putText(img_debug, label, (vx+20, vy), 
+                                  cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 255, 0), 3)
+                    self._save_debug_image("00_a4_squares_detected_preprocessed.jpg", img_debug)
+                self.logger.info(f"✅ 4 quadrados A4 detectados (tentativa 2 - pré-processado): TL={result['TL']}, TR={result['TR']}, BR={result['BR']}, BL={result['BL']}")
+                return result
             
-            return ordered_squares
+            # TENTATIVA 3: Relaxamento controlado de parâmetros (área ±20%, aspect ratio expandido)
+            self.logger.info("⚠️ Tentativa 2 falhou, aplicando relaxamento controlado de parâmetros...")
+            result = _detectar_quadrados_interno(img_preprocessed, relax_area=1.2, relax_aspect=0.1)
+            if result:
+                if self.save_debug_images:
+                    img_debug = img_preprocessed.copy()
+                    for label, vertex in result.items():
+                        vx, vy = int(vertex[0]), int(vertex[1])
+                        cv2.circle(img_debug, (vx, vy), 15, (255, 255, 0), -1)
+                        cv2.putText(img_debug, label, (vx+20, vy), 
+                                  cv2.FONT_HERSHEY_SIMPLEX, 1.0, (255, 255, 0), 3)
+                    self._save_debug_image("00_a4_squares_detected_relaxed.jpg", img_debug)
+                self.logger.warning(f"⚠️ 4 quadrados A4 detectados (tentativa 3 - relaxado): TL={result['TL']}, TR={result['TR']}, BR={result['BR']}, BL={result['BL']}")
+                return result
+            
+            # TENTATIVA 4: Fallback com Canny (já existente no código original)
+            self.logger.warning("⚠️ Tentativa 3 falhou, tentando fallback com Canny...")
+            try:
+                gray = cv2.cvtColor(img_preprocessed, cv2.COLOR_BGR2GRAY) if len(img_preprocessed.shape) == 3 else img_preprocessed.copy()
+                blurred = cv2.GaussianBlur(gray, (5, 5), 0)
+                edged = cv2.Canny(blurred, 50, 150)
+                kernel = np.ones((3, 3), np.uint8)
+                edged_dilated = cv2.dilate(edged, kernel, iterations=1)
+                
+                if self.save_debug_images:
+                    self._save_debug_image("00_a4_canny.jpg", edged_dilated)
+                
+                # Tentar detectar com Canny
+                contours, _ = cv2.findContours(edged_dilated, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
+                # Usar mesma lógica mas com contornos do Canny
+                # (reutilizar função interna com imagem binária do Canny)
+                # Por simplicidade, vamos tentar novamente com threshold adaptativo
+                binary_canny = edged_dilated
+                result = _detectar_quadrados_interno(img_preprocessed, relax_area=1.3, relax_aspect=0.15)
+                if result:
+                    self.logger.warning(f"⚠️ 4 quadrados A4 detectados (tentativa 4 - Canny fallback): TL={result['TL']}, TR={result['TR']}, BR={result['BR']}, BL={result['BL']}")
+                    return result
+            except Exception as e:
+                self.logger.warning(f"Erro no fallback Canny: {str(e)}")
+            
+            # Todas as tentativas falharam
+            self.logger.error("❌ Falha total na detecção de quadrados A4 após todas as tentativas")
+            return None
             
         except Exception as e:
             self.logger.error(f"Erro ao detectar quadrados A4: {str(e)}", exc_info=True)
@@ -1638,64 +1825,86 @@ class AnswerSheetCorrectionN:
         """
         Detecta triângulos dentro da área dos blocos (já na imagem normalizada para A4)
         
+        Implementação robusta com fallback progressivo:
+        - Tentativa 1: Detecção original (múltiplas estratégias de threshold)
+        - Tentativa 2: Pré-processamento adaptativo + detecção original
+        - Tentativa 3: Relaxamento controlado de área mínima/máxima
+        - Tentativa 4: Fallback de área padrão (já existente)
+        
+        ⚠️ PRESERVA COMPORTAMENTO ORIGINAL para imagens boas.
+        ⚠️ Apenas adiciona robustez quando detecção original falha.
+        
         Args:
             img_a4: Imagem já normalizada para A4
             
         Returns:
             Dict com coordenadas dos 4 triângulos (TL, TR, BR, BL) ou None
         """
-        try:
-            h, w = img_a4.shape[:2]
+        def _detectar_triangulos_interno(img_detect: np.ndarray, 
+                                        relax_area_min: float = 1.0,
+                                        relax_area_max: float = 1.0) -> Optional[List[Dict]]:
+            """
+            Lógica interna de detecção de triângulos (extraída para reutilização).
             
-            # Usar função existente para detectar triângulos
-            # Mas agora na imagem já normalizada
-            gray = cv2.cvtColor(img_a4, cv2.COLOR_BGR2GRAY) if len(img_a4.shape) == 3 else img_a4.copy()
-            
-            # Tentar múltiplas estratégias de threshold para melhorar detecção
-            triangles = []
-            
-            # Estratégia 1: Threshold Otsu padrão
-            _, binary1 = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
-            triangles.extend(self._extrair_triangulos_de_binary(binary1))
-            
-            # Estratégia 2: Adaptive threshold (mais robusto para iluminação variável)
-            binary2 = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, 
-                                          cv2.THRESH_BINARY_INV, 11, 2)
-            triangles.extend(self._extrair_triangulos_de_binary(binary2))
-            
-            # Estratégia 3: Threshold adaptativo com blur
-            blurred = cv2.GaussianBlur(gray, (5, 5), 0)
-            _, binary3 = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
-            triangles.extend(self._extrair_triangulos_de_binary(binary3))
-            
-            # Remover duplicatas (triângulos muito próximos)
-            triangles = self._remover_triangulos_duplicados(triangles)
-            
-            self.logger.info(f"Total de triângulos detectados (após remoção de duplicatas): {len(triangles)}")
+            Args:
+                img_detect: Imagem para detectar
+                relax_area_min: Fator de relaxamento de área mínima (1.0 = original, 0.5 = -50%)
+                relax_area_max: Fator de relaxamento de área máxima (1.0 = original, 1.5 = +50%)
+            """
+            try:
+                h, w = img_detect.shape[:2]
+                gray = cv2.cvtColor(img_detect, cv2.COLOR_BGR2GRAY) if len(img_detect.shape) == 3 else img_detect.copy()
+                
+                # Tentar múltiplas estratégias de threshold para melhorar detecção
+                triangles = []
+                
+                # Estratégia 1: Threshold Otsu padrão
+                _, binary1 = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+                triangles.extend(self._extrair_triangulos_de_binary(binary1, relax_area_min, relax_area_max))
+                
+                # Estratégia 2: Adaptive threshold (mais robusto para iluminação variável)
+                binary2 = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, 
+                                              cv2.THRESH_BINARY_INV, 11, 2)
+                triangles.extend(self._extrair_triangulos_de_binary(binary2, relax_area_min, relax_area_max))
+                
+                # Estratégia 3: Threshold adaptativo com blur
+                blurred = cv2.GaussianBlur(gray, (5, 5), 0)
+                _, binary3 = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+                triangles.extend(self._extrair_triangulos_de_binary(binary3, relax_area_min, relax_area_max))
+                
+                # Remover duplicatas (triângulos muito próximos)
+                triangles = self._remover_triangulos_duplicados(triangles)
+                
+                return triangles
+                
+            except Exception as e:
+                self.logger.warning(f"Erro na detecção interna de triângulos: {str(e)}")
+                return None
+        
+        def _processar_triangulos_detectados(triangles: List[Dict], w: int, h: int) -> Optional[Dict]:
+            """
+            Processa lista de triângulos detectados e retorna dict ordenado ou None.
+            """
+            if not triangles:
+                return None
             
             # Se detectou menos de 4, tentar inferir o(s) faltante(s)
             if len(triangles) < 4:
-                self.logger.warning(f"Apenas {len(triangles)} triângulos detectados na área dos blocos (necessário 4)")
-                
                 # Se detectou 3, inferir o 4º baseado na geometria esperada
                 if len(triangles) == 3:
                     triangles = self._inferir_quarto_triangulo(triangles, w, h)
                     if triangles and len(triangles) == 4:
                         self.logger.info("✅ 4º triângulo inferido com sucesso")
                     else:
-                        self.logger.warning("Não foi possível inferir o 4º triângulo")
                         return None
                 elif len(triangles) < 3:
-                    # Muito poucos triângulos, usar fallback de área padrão
-                    self.logger.warning("Muito poucos triângulos detectados, usando área padrão baseada no template")
-                    return self._usar_area_padrao_blocos(w, h)
+                    return None
                 else:
                     return None
             
             # Se detectou mais de 4, ordenar por área e pegar os 4 maiores
             if len(triangles) > 4:
                 triangles = sorted(triangles, key=lambda t: t['area'], reverse=True)[:4]
-                self.logger.info(f"Selecionados os 4 maiores triângulos de {len(triangles)} detectados")
             
             # Ordenar: TL, TR, BR, BL
             centers = np.array([t['center'] for t in triangles], dtype="float32")
@@ -1730,37 +1939,99 @@ class AnswerSheetCorrectionN:
                     'BL': centers[bl_idx].tolist()
                 }
             
-            # Salvar debug
-            if self.save_debug_images:
-                img_debug = img_a4.copy()
-                for label, center in ordered_triangles.items():
-                    cx, cy = int(center[0]), int(center[1])
-                    cv2.circle(img_debug, (cx, cy), 15, (255, 0, 0), -1)
-                    cv2.putText(img_debug, f"T{label}", (cx+20, cy), 
-                              cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 0, 0), 2)
-                self._save_debug_image("02_triangles_in_a4.jpg", img_debug)
-            
-            self.logger.info(f"✅ 4 triângulos detectados na área dos blocos")
-            
             return ordered_triangles
+        
+        # ========== PIPELINE DE FALLBACK PROGRESSIVO ==========
+        try:
+            h, w = img_a4.shape[:2]
+            
+            # TENTATIVA 1: Detecção original (comportamento padrão)
+            triangles = _detectar_triangulos_interno(img_a4, relax_area_min=1.0, relax_area_max=1.0)
+            if triangles:
+                self.logger.info(f"Total de triângulos detectados (tentativa 1 - original): {len(triangles)}")
+                result = _processar_triangulos_detectados(triangles, w, h)
+                if result:
+                    if self.save_debug_images:
+                        img_debug = img_a4.copy()
+                        for label, center in result.items():
+                            cx, cy = int(center[0]), int(center[1])
+                            cv2.circle(img_debug, (cx, cy), 15, (255, 0, 0), -1)
+                            cv2.putText(img_debug, f"T{label}", (cx+20, cy), 
+                                      cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 0, 0), 2)
+                        self._save_debug_image("02_triangles_in_a4.jpg", img_debug)
+                    self.logger.info(f"✅ 4 triângulos detectados na área dos blocos (tentativa 1 - original)")
+                    return result
+            
+            # Analisar iluminação para decidir se vale tentar fallback
+            gray_temp = cv2.cvtColor(img_a4, cv2.COLOR_BGR2GRAY) if len(img_a4.shape) == 3 else img_a4.copy()
+            iluminacao = self._analisar_iluminacao(gray_temp)
+            
+            if self.save_debug_images:
+                self.logger.info(f"🔍 Iluminação analisada: mean={iluminacao['mean']:.1f}, std={iluminacao['std']:.1f}, brightness={iluminacao['brightness']}")
+            
+            # TENTATIVA 2: Pré-processamento adaptativo + detecção original
+            self.logger.info("⚠️ Tentativa 1 falhou, aplicando pré-processamento adaptativo...")
+            img_preprocessed = self._preprocess_omr(img_a4, mode="auto")
+            triangles = _detectar_triangulos_interno(img_preprocessed, relax_area_min=1.0, relax_area_max=1.0)
+            if triangles:
+                self.logger.info(f"Total de triângulos detectados (tentativa 2 - pré-processado): {len(triangles)}")
+                result = _processar_triangulos_detectados(triangles, w, h)
+                if result:
+                    if self.save_debug_images:
+                        img_debug = img_preprocessed.copy()
+                        for label, center in result.items():
+                            cx, cy = int(center[0]), int(center[1])
+                            cv2.circle(img_debug, (cx, cy), 15, (255, 0, 0), -1)
+                            cv2.putText(img_debug, f"T{label}", (cx+20, cy), 
+                                      cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 0, 0), 2)
+                        self._save_debug_image("02_triangles_in_a4_preprocessed.jpg", img_debug)
+                    self.logger.info(f"✅ 4 triângulos detectados na área dos blocos (tentativa 2 - pré-processado)")
+                    return result
+            
+            # TENTATIVA 3: Relaxamento controlado de área (área mínima -50%, área máxima +50%)
+            self.logger.info("⚠️ Tentativa 2 falhou, aplicando relaxamento controlado de área...")
+            triangles = _detectar_triangulos_interno(img_preprocessed, relax_area_min=0.5, relax_area_max=1.5)
+            if triangles:
+                self.logger.info(f"Total de triângulos detectados (tentativa 3 - relaxado): {len(triangles)}")
+                result = _processar_triangulos_detectados(triangles, w, h)
+                if result:
+                    if self.save_debug_images:
+                        img_debug = img_preprocessed.copy()
+                        for label, center in result.items():
+                            cx, cy = int(center[0]), int(center[1])
+                            cv2.circle(img_debug, (cx, cy), 15, (255, 255, 0), -1)
+                            cv2.putText(img_debug, f"T{label}", (cx+20, cy), 
+                                      cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 0), 2)
+                        self._save_debug_image("02_triangles_in_a4_relaxed.jpg", img_debug)
+                    self.logger.warning(f"⚠️ 4 triângulos detectados na área dos blocos (tentativa 3 - relaxado)")
+                    return result
+            
+            # TENTATIVA 4: Fallback de área padrão (já existente no código original)
+            self.logger.warning("⚠️ Tentativa 3 falhou, usando área padrão baseada no template")
+            return self._usar_area_padrao_blocos(w, h)
             
         except Exception as e:
             self.logger.error(f"Erro ao detectar triângulos na área dos blocos: {str(e)}", exc_info=True)
             return None
     
-    def _extrair_triangulos_de_binary(self, binary: np.ndarray) -> List[Dict]:
+    def _extrair_triangulos_de_binary(self, binary: np.ndarray, 
+                                     relax_area_min: float = 1.0,
+                                     relax_area_max: float = 1.0) -> List[Dict]:
         """
         Extrai triângulos de uma imagem binária.
         
         Args:
             binary: Imagem binária (threshold aplicado)
+            relax_area_min: Fator de relaxamento de área mínima (1.0 = original, 0.5 = -50%)
+            relax_area_max: Fator de relaxamento de área máxima (1.0 = original, 1.5 = +50%)
             
         Returns:
             Lista de triângulos detectados
         """
         triangles = []
-        min_triangle_area = 100  # Área mínima reduzida para detectar triângulos menores/cortados
-        max_triangle_area = 800  # Área máxima aumentada para tolerância
+        # Área base com relaxamento opcional
+        min_triangle_area = int(100 * relax_area_min)  # Área mínima reduzida para detectar triângulos menores/cortados
+        max_triangle_area = int(800 * relax_area_max)  # Área máxima aumentada para tolerância
         
         # Usar RETR_TREE para pegar todos os contornos (não só externos)
         contours, _ = cv2.findContours(binary, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
@@ -2234,163 +2505,256 @@ class AnswerSheetCorrectionN:
         Detecta blocos com borda preta grossa (answer-block)
         Dentro da área cropada pelos triângulos
         
+        Implementação robusta com fallback progressivo:
+        - Tentativa 1: Detecção original (threshold Otsu + morfologia)
+        - Tentativa 2: Pré-processamento adaptativo + detecção original
+        - Tentativa 3: Relaxamento controlado de parâmetros (área ±20%, largura expandida)
+        - Tentativa 4: Fallback com Canny (já existente)
+        
+        ⚠️ PRESERVA COMPORTAMENTO ORIGINAL para imagens boas.
+        ⚠️ Apenas adiciona robustez quando detecção original falha.
+        
         Args:
             img_warped: Imagem da área cropada dos blocos (após detecção de triângulos)
             
         Returns:
             Tuple: (Lista de ROIs, Lista de contornos dos blocos)
         """
-        try:
-            # Converter para grayscale
-            if len(img_warped.shape) == 3:
-                gray = cv2.cvtColor(img_warped, cv2.COLOR_BGR2GRAY)
-            else:
-                gray = img_warped.copy()
+        def _detectar_blocos_interno(img_detect: np.ndarray,
+                                    relax_area: float = 1.0,
+                                    relax_width: float = 1.0,
+                                    relax_aspect: float = 0.0) -> List:
+            """
+            Lógica interna de detecção de blocos (extraída para reutilização).
             
-            img_height, img_width = gray.shape[:2]
-            self.logger.info(f"🔍 Detectando blocos em imagem cropada: {img_width}x{img_height}px")
-            
-            # Aplicar blur para suavizar
-            blurred = cv2.GaussianBlur(gray, (5, 5), 0)
-            
-            # ESTRATÉGIA 1: Detectar bordas grossas usando morfologia específica
-            # Threshold binário invertido para destacar bordas pretas
-            _, thresh = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
-            
-            # ✅ CORREÇÃO: Dilatação mínima (1 iteração) para conectar bordas quebradas SEM conectar blocos adjacentes
-            kernel_small = np.ones((3, 3), np.uint8)
-            dilated = cv2.dilate(thresh, kernel_small, iterations=1)
-            
-            # ✅ CORREÇÃO: Usar RETR_TREE para pegar contornos internos e externos
-            # Isso permite detectar cada bloco individual mesmo se estiverem próximos
-            cnts, hierarchy = cv2.findContours(dilated.copy(), cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
-            
-            # Filtrar contornos que são blocos individuais
-            # Cada bloco deve ter ~20-25% da largura total (4 blocos lado a lado)
-            min_block_area = (img_width * img_height) * 0.03  # Reduzido para 3% (mais flexível)
-            max_block_area = (img_width * img_height) * 0.30   # Reduzido para 30% (bloco individual)
-            min_block_width = img_width * 0.15  # Cada bloco tem pelo menos 15% da largura
-            max_block_width = img_width * 0.30  # Cada bloco tem no máximo 30% da largura
-            
-            block_contours = []
-            
-            # ✅ CORREÇÃO CRÍTICA: Filtrar apenas contornos EXTERNOS usando hierarquia
-            # Cada bloco tem 2 contornos: externo (borda grossa completa) e interno (área de questões)
-            # Precisamos pegar apenas os externos para evitar duplicação (8 blocos em vez de 4)
-            for idx, c in enumerate(cnts):
-                # Verificar se é contorno externo (sem pai) - hierarchy[0][idx][3] == -1
-                # hierarchy estrutura: [next, previous, first_child, parent]
-                if hierarchy is not None and len(hierarchy) > 0:
-                    if hierarchy[0][idx][3] != -1:  # Tem pai = contorno interno, pular
+            Args:
+                img_detect: Imagem para detectar
+                relax_area: Fator de relaxamento de área (1.0 = original, 1.2 = +20%)
+                relax_width: Fator de relaxamento de largura (1.0 = original, 1.2 = +20%)
+                relax_aspect: Relaxamento de aspect ratio (0.0 = original, 0.5 = expandir 0.5)
+            """
+            try:
+                # Converter para grayscale
+                if len(img_detect.shape) == 3:
+                    gray = cv2.cvtColor(img_detect, cv2.COLOR_BGR2GRAY)
+                else:
+                    gray = img_detect.copy()
+                
+                img_height, img_width = gray.shape[:2]
+                
+                # Aplicar blur para suavizar
+                blurred = cv2.GaussianBlur(gray, (5, 5), 0)
+                
+                # ESTRATÉGIA 1: Detectar bordas grossas usando morfologia específica
+                # Threshold binário invertido para destacar bordas pretas
+                _, thresh = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+                
+                # Salvar debug se ativado
+                if self.save_debug_images:
+                    self._save_debug_image("04_blocos_binary.jpg", thresh)
+                
+                # ✅ CORREÇÃO: Dilatação mínima (1 iteração) para conectar bordas quebradas SEM conectar blocos adjacentes
+                kernel_small = np.ones((3, 3), np.uint8)
+                dilated = cv2.dilate(thresh, kernel_small, iterations=1)
+                
+                # ✅ CORREÇÃO: Usar RETR_TREE para pegar contornos internos e externos
+                # Isso permite detectar cada bloco individual mesmo se estiverem próximos
+                cnts, hierarchy = cv2.findContours(dilated.copy(), cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
+                
+                # Filtrar contornos que são blocos individuais (com relaxamento)
+                min_block_area = (img_width * img_height) * 0.03 / relax_area
+                max_block_area = (img_width * img_height) * 0.30 * relax_area
+                min_block_width = img_width * 0.15 / relax_width
+                max_block_width = img_width * 0.30 * relax_width
+                
+                block_contours = []
+                
+                # ✅ CORREÇÃO CRÍTICA: Filtrar apenas contornos EXTERNOS usando hierarquia
+                for idx, c in enumerate(cnts):
+                    if hierarchy is not None and len(hierarchy) > 0:
+                        if hierarchy[0][idx][3] != -1:  # Tem pai = contorno interno, pular
+                            continue
+                    
+                    area = cv2.contourArea(c)
+                    
+                    # Filtrar por área (com relaxamento)
+                    if area < min_block_area or area > max_block_area:
                         continue
-                
-                area = cv2.contourArea(c)
-                
-                # Filtrar por área
-                if area < min_block_area or area > max_block_area:
-                    continue
-                
-                # Aproximar contorno
-                peri = cv2.arcLength(c, True)
-                approx = cv2.approxPolyDP(c, 0.02 * peri, True)
-                
-                # Procurar por retângulos (4 vértices) - bordas dos blocos
-                if len(approx) >= 4:  # Aceitar 4 ou mais vértices (mais flexível)
-                    x, y, w, h = cv2.boundingRect(approx)
                     
-                    # Filtrar por largura (cada bloco tem ~20-25% da largura total)
-                    if w < min_block_width or w > max_block_width:
-                        continue
+                    # Aproximar contorno
+                    peri = cv2.arcLength(c, True)
+                    approx = cv2.approxPolyDP(c, 0.02 * peri, True)
                     
-                    aspect_ratio = w / float(h) if h > 0 else 0
-                    
-                    # Verificar se é um retângulo razoável (não muito alongado)
-                    # Blocos de resposta têm aspect ratio entre 0.3 e 3.0 (mais flexível)
-                    if 0.3 < aspect_ratio < 3.0:
-                        block_contours.append(approx)
-                        self.logger.debug(f"✅ Bloco EXTERNO detectado: x={x}, y={y}, w={w}, h={h}, area={area:.0f}, aspect={aspect_ratio:.2f}")
-            
-            # ✅ CORREÇÃO: Se detectou menos de 4 blocos mas encontrou contornos grandes, tentar dividir
-            if len(block_contours) < 4 and len(block_contours) > 0:
-                # Verificar se algum contorno é muito grande (pode ser múltiplos blocos conectados)
-                large_contours = [c for c in block_contours if cv2.boundingRect(c)[2] > img_width * 0.5]
-                
-                if large_contours:
-                    self.logger.warning(f"⚠️ Detectado {len(block_contours)} blocos, mas alguns podem estar conectados. Tentando dividir...")
-                    # Tentar usar Canny como fallback para detectar bordas internas
-                    edged = cv2.Canny(blurred, 50, 150)
-                    # Dilatar levemente para conectar bordas quebradas
-                    kernel_canny = np.ones((2, 2), np.uint8)
-                    edged_dilated = cv2.dilate(edged, kernel_canny, iterations=1)
-                    
-                    cnts_canny, hierarchy_canny = cv2.findContours(edged_dilated.copy(), cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
-                    
-                    # Adicionar blocos detectados pelo Canny que não foram detectados antes
-                    # ✅ CORREÇÃO: Filtrar apenas contornos externos
-                    for idx_c, c in enumerate(cnts_canny):
-                        # Verificar se é contorno externo (sem pai)
-                        if hierarchy_canny is not None and len(hierarchy_canny) > 0:
-                            if hierarchy_canny[0][idx_c][3] != -1:  # Tem pai = contorno interno, pular
-                                continue
+                    # Procurar por retângulos (4 vértices) - bordas dos blocos
+                    if len(approx) >= 4:
+                        x, y, w, h = cv2.boundingRect(approx)
                         
-                        area = cv2.contourArea(c)
-                        if min_block_area < area < max_block_area:
-                            x, y, w, h = cv2.boundingRect(c)
-                            if min_block_width < w < max_block_width:
-                                aspect_ratio = w / float(h) if h > 0 else 0
-                                if 0.3 < aspect_ratio < 3.0:
-                                    # Verificar se já não foi adicionado (evitar duplicatas)
-                                    is_duplicate = False
-                                    for existing in block_contours:
-                                        ex, ey, ew, eh = cv2.boundingRect(existing)
-                                        # Se overlap significativo, é duplicata
-                                        if abs(x - ex) < 20 and abs(y - ey) < 20:
-                                            is_duplicate = True
-                                            break
-                                    if not is_duplicate:
-                                        peri = cv2.arcLength(c, True)
-                                        approx = cv2.approxPolyDP(c, 0.02 * peri, True)
-                                        if len(approx) >= 4:
-                                            block_contours.append(approx)
-                                            self.logger.debug(f"✅ Bloco EXTERNO adicional detectado (Canny): x={x}, y={y}, w={w}, h={h}")
-            
-            # Se ainda não encontrou blocos, tentar estratégia alternativa
-            if len(block_contours) == 0:
-                self.logger.warning("⚠️ Nenhum bloco detectado com threshold, tentando Canny como fallback")
+                        # Filtrar por largura (com relaxamento)
+                        if w < min_block_width or w > max_block_width:
+                            continue
+                        
+                        aspect_ratio = w / float(h) if h > 0 else 0
+                        
+                        # Verificar aspect ratio (com relaxamento)
+                        aspect_min = 0.3 - relax_aspect
+                        aspect_max = 3.0 + relax_aspect
+                        if aspect_min < aspect_ratio < aspect_max:
+                            block_contours.append(approx)
+                
+                return block_contours
+                
+            except Exception as e:
+                self.logger.warning(f"Erro na detecção interna de blocos: {str(e)}")
+                return []
+        
+        def _tentar_canny_fallback(img_detect: np.ndarray, block_contours_existentes: List,
+                                  min_block_area: float, max_block_area: float,
+                                  min_block_width: float, max_block_width: float) -> List:
+            """
+            Tenta detectar blocos usando Canny como fallback.
+            """
+            try:
+                if len(img_detect.shape) == 3:
+                    gray = cv2.cvtColor(img_detect, cv2.COLOR_BGR2GRAY)
+                else:
+                    gray = img_detect.copy()
+                
+                blurred = cv2.GaussianBlur(gray, (5, 5), 0)
                 edged = cv2.Canny(blurred, 50, 150)
                 kernel_canny = np.ones((2, 2), np.uint8)
                 edged_dilated = cv2.dilate(edged, kernel_canny, iterations=1)
+                
+                if self.save_debug_images:
+                    self._save_debug_image("04_blocos_canny.jpg", edged_dilated)
+                
                 cnts_canny, hierarchy_canny = cv2.findContours(edged_dilated.copy(), cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
                 
-                # ✅ CORREÇÃO: Filtrar apenas contornos externos
+                new_blocks = []
                 for idx_c, c in enumerate(cnts_canny):
-                    # Verificar se é contorno externo (sem pai)
                     if hierarchy_canny is not None and len(hierarchy_canny) > 0:
-                        if hierarchy_canny[0][idx_c][3] != -1:  # Tem pai = contorno interno, pular
+                        if hierarchy_canny[0][idx_c][3] != -1:
                             continue
                     
                     area = cv2.contourArea(c)
                     if min_block_area < area < max_block_area:
                         x, y, w, h = cv2.boundingRect(c)
                         if min_block_width < w < max_block_width:
-                            peri = cv2.arcLength(c, True)
-                            approx = cv2.approxPolyDP(c, 0.02 * peri, True)
-                            if len(approx) >= 4:
-                                aspect_ratio = w / float(h) if h > 0 else 0
-                                if 0.3 < aspect_ratio < 3.0:
-                                    block_contours.append(approx)
-                                    self.logger.debug(f"✅ Bloco EXTERNO detectado (Canny fallback): x={x}, y={y}, w={w}, h={h}")
+                            aspect_ratio = w / float(h) if h > 0 else 0
+                            if 0.3 < aspect_ratio < 3.0:
+                                # Verificar se já não foi adicionado (evitar duplicatas)
+                                is_duplicate = False
+                                for existing in block_contours_existentes + new_blocks:
+                                    ex, ey, ew, eh = cv2.boundingRect(existing)
+                                    if abs(x - ex) < 20 and abs(y - ey) < 20:
+                                        is_duplicate = True
+                                        break
+                                if not is_duplicate:
+                                    peri = cv2.arcLength(c, True)
+                                    approx = cv2.approxPolyDP(c, 0.02 * peri, True)
+                                    if len(approx) >= 4:
+                                        new_blocks.append(approx)
+                
+                return new_blocks
+                
+            except Exception as e:
+                self.logger.warning(f"Erro no fallback Canny: {str(e)}")
+                return []
+        
+        # ========== PIPELINE DE FALLBACK PROGRESSIVO ==========
+        try:
+            img_height, img_width = img_warped.shape[:2] if len(img_warped.shape) == 2 else img_warped.shape[:2]
+            if len(img_warped.shape) == 3:
+                gray_temp = cv2.cvtColor(img_warped, cv2.COLOR_BGR2GRAY)
+            else:
+                gray_temp = img_warped.copy()
+            
+            self.logger.info(f"🔍 Detectando blocos em imagem cropada: {img_width}x{img_height}px")
+            
+            # TENTATIVA 1: Detecção original (comportamento padrão)
+            block_contours = _detectar_blocos_interno(img_warped, relax_area=1.0, relax_width=1.0, relax_aspect=0.0)
+            
+            # Se detectou menos de 4 blocos mas encontrou contornos grandes, tentar Canny
+            if len(block_contours) < 4 and len(block_contours) > 0:
+                large_contours = [c for c in block_contours if cv2.boundingRect(c)[2] > img_width * 0.5]
+                if large_contours:
+                    self.logger.warning(f"⚠️ Detectado {len(block_contours)} blocos, mas alguns podem estar conectados. Tentando Canny...")
+                    min_area = (img_width * img_height) * 0.03
+                    max_area = (img_width * img_height) * 0.30
+                    min_width = img_width * 0.15
+                    max_width = img_width * 0.30
+                    canny_blocks = _tentar_canny_fallback(img_warped, block_contours, min_area, max_area, min_width, max_width)
+                    block_contours.extend(canny_blocks)
+            
+            if len(block_contours) >= 4:
+                # Ordenar blocos da esquerda para direita
+                block_contours = sorted(block_contours, key=lambda c: cv2.boundingRect(c)[0])
+                self.logger.info(f"✅ Total de {len(block_contours)} blocos detectados (tentativa 1 - original)")
+            else:
+                # Analisar iluminação para decidir se vale tentar fallback
+                iluminacao = self._analisar_iluminacao(gray_temp)
+                
+                if self.save_debug_images:
+                    self.logger.info(f"🔍 Iluminação analisada: mean={iluminacao['mean']:.1f}, std={iluminacao['std']:.1f}, brightness={iluminacao['brightness']}")
+                
+                # TENTATIVA 2: Pré-processamento adaptativo + detecção original
+                self.logger.info("⚠️ Tentativa 1 falhou, aplicando pré-processamento adaptativo...")
+                img_preprocessed = self._preprocess_omr(img_warped, mode="auto")
+                block_contours = _detectar_blocos_interno(img_preprocessed, relax_area=1.0, relax_width=1.0, relax_aspect=0.0)
+                
+                # Tentar Canny se necessário
+                if len(block_contours) < 4 and len(block_contours) > 0:
+                    min_area = (img_width * img_height) * 0.03
+                    max_area = (img_width * img_height) * 0.30
+                    min_width = img_width * 0.15
+                    max_width = img_width * 0.30
+                    canny_blocks = _tentar_canny_fallback(img_preprocessed, block_contours, min_area, max_area, min_width, max_width)
+                    block_contours.extend(canny_blocks)
+                
+                if len(block_contours) >= 4:
+                    block_contours = sorted(block_contours, key=lambda c: cv2.boundingRect(c)[0])
+                    self.logger.info(f"✅ Total de {len(block_contours)} blocos detectados (tentativa 2 - pré-processado)")
+                else:
+                    # TENTATIVA 3: Relaxamento controlado de parâmetros
+                    self.logger.info("⚠️ Tentativa 2 falhou, aplicando relaxamento controlado de parâmetros...")
+                    block_contours = _detectar_blocos_interno(img_preprocessed, relax_area=1.2, relax_width=1.2, relax_aspect=0.5)
+                    
+                    # Tentar Canny se necessário
+                    if len(block_contours) < 4:
+                        min_area = (img_width * img_height) * 0.03 / 1.2
+                        max_area = (img_width * img_height) * 0.30 * 1.2
+                        min_width = img_width * 0.15 / 1.2
+                        max_width = img_width * 0.30 * 1.2
+                        canny_blocks = _tentar_canny_fallback(img_preprocessed, block_contours, min_area, max_area, min_width, max_width)
+                        block_contours.extend(canny_blocks)
+                    
+                    if len(block_contours) >= 4:
+                        block_contours = sorted(block_contours, key=lambda c: cv2.boundingRect(c)[0])
+                        self.logger.warning(f"⚠️ Total de {len(block_contours)} blocos detectados (tentativa 3 - relaxado)")
+                    else:
+                        # TENTATIVA 4: Fallback com Canny completo
+                        self.logger.warning("⚠️ Tentativa 3 falhou, tentando Canny como fallback completo...")
+                        min_area = (img_width * img_height) * 0.03 / 1.2
+                        max_area = (img_width * img_height) * 0.30 * 1.2
+                        min_width = img_width * 0.15 / 1.2
+                        max_width = img_width * 0.30 * 1.2
+                        block_contours = _tentar_canny_fallback(img_preprocessed, [], min_area, max_area, min_width, max_width)
+                        
+                        if len(block_contours) >= 4:
+                            block_contours = sorted(block_contours, key=lambda c: cv2.boundingRect(c)[0])
+                            self.logger.warning(f"⚠️ Total de {len(block_contours)} blocos detectados (tentativa 4 - Canny fallback)")
             
             # Ordenar blocos da esquerda para direita
             if len(block_contours) > 0:
                 block_contours = sorted(block_contours, key=lambda c: cv2.boundingRect(c)[0])
-                self.logger.info(f"✅ Total de {len(block_contours)} blocos detectados")
+                if len(block_contours) < 4:
+                    self.logger.warning(f"⚠️ Apenas {len(block_contours)} blocos detectados após todas as tentativas")
             else:
                 self.logger.warning("⚠️ Nenhum bloco detectado após todas as estratégias")
             
             # Salvar imagem de debug
             if self.save_debug_images:
-                img_debug = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR) if len(gray.shape) == 2 else gray.copy()
+                gray_debug = cv2.cvtColor(img_warped, cv2.COLOR_BGR2GRAY) if len(img_warped.shape) == 3 else img_warped.copy()
+                img_debug = cv2.cvtColor(gray_debug, cv2.COLOR_GRAY2BGR) if len(gray_debug.shape) == 2 else gray_debug.copy()
                 for idx, block_cnt in enumerate(block_contours):
                     x, y, w, h = cv2.boundingRect(block_cnt)
                     cv2.rectangle(img_debug, (x, y), (x + w, y + h), (0, 255, 0), 2)

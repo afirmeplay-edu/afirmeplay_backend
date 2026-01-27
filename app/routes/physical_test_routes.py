@@ -367,6 +367,11 @@ def generate_physical_forms(test_id):
         
         # Extrair blocks_config do payload
         blocks_config = data.get('blocks_config')
+        print(f"[ROTA] ========== INÍCIO GERAÇÃO FORMULÁRIOS ==========")
+        print(f"[ROTA] test_id: {test_id}")
+        print(f"[ROTA] Payload recebido: {data}")
+        print(f"[ROTA] blocks_config recebido: {blocks_config}")
+        
         if not blocks_config:
             # Se não vier como objeto, montar a partir dos parâmetros individuais
             blocks_config = {
@@ -375,10 +380,12 @@ def generate_physical_forms(test_id):
                 'questions_per_block': data.get('questions_per_block', 12),
                 'separate_by_subject': data.get('separate_by_subject', False)
             }
+            print(f"[ROTA] blocks_config montado a partir de parâmetros: {blocks_config}")
         
         # ✅ DISPARAR TASK CELERY (assíncrono)
         from app.services.celery_tasks.physical_test_tasks import generate_physical_forms_async
         
+        print(f"[ROTA] 🚀 Disparando task Celery com blocks_config: {blocks_config}")
         logging.info(f"🚀 Disparando task Celery para geração de formulários: test_id={test_id}, blocks_config={blocks_config}")
         
         task = generate_physical_forms_async.delay(
@@ -386,6 +393,8 @@ def generate_physical_forms(test_id):
             force_regenerate=force_regenerate,
             blocks_config=blocks_config
         )
+        
+        print(f"[ROTA] ✅ Task disparada: task_id={task.id}")
         
         # ✅ RETORNA IMEDIATAMENTE (não espera a geração)
         logging.info(f"✅ Task disparada com sucesso: task_id={task.id}")

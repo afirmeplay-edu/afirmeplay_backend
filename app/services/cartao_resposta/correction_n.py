@@ -13,6 +13,7 @@ import numpy as np
 import json
 import logging
 import os
+import re
 from collections import defaultdict
 from typing import Dict, List, Optional, Tuple, Any
 from app import db
@@ -69,6 +70,78 @@ class AnswerSheetCorrectionN:
         if not os.path.exists(self.debug_dir):
             os.makedirs(self.debug_dir)
             self.logger.info(f"📁 Diretório de debug criado: {self.debug_dir}")
+    
+    def _format_user_friendly_error(self, technical_error: str, context: Dict = None) -> str:
+        """
+        Converte mensagens de erro técnicas em mensagens amigáveis para o usuário final
+        
+        Args:
+            technical_error: Mensagem de erro técnica original
+            context: Dicionário com contexto adicional (ex: num_blocks_expected, num_blocks_found)
+        
+        Returns:
+            Mensagem de erro amigável
+        """
+        if context is None:
+            context = {}
+        
+        # Verificar primeiro se é erro de quantidade de blocos (precisa de contexto)
+        blocks_pattern = r"Esperava\s+(\d+)\s+blocos.*encontrou\s+(\d+)"
+        blocks_match = re.search(blocks_pattern, technical_error, re.IGNORECASE)
+        if blocks_match:
+            # Se não temos contexto, tentar extrair dos números na mensagem
+            if not context or 'num_blocks_expected' not in context:
+                try:
+                    expected = int(blocks_match.group(1))
+                    found = int(blocks_match.group(2))
+                    context = {
+                        'num_blocks_expected': expected,
+                        'num_blocks_found': found
+                    }
+                except:
+                    pass
+            return self._format_blocks_quantity_error(context)
+        
+        # Mapeamento de padrões técnicos para mensagens amigáveis
+        error_patterns = [
+            # Detecção de elementos
+            (r"quadrados\s+A4", "Não foi possível identificar os marcadores nos cantos da folha. Verifique se a imagem está completa e os cantos estão visíveis."),
+            (r"triângulos", "Não foi possível identificar os marcadores de alinhamento. Certifique-se de que a imagem está nítida e os triângulos estão visíveis."),
+            (r"blocos.*detectado|Nenhum bloco", "Não foi possível identificar as áreas de resposta. Verifique se a imagem está bem iluminada e as bordas dos blocos estão visíveis."),
+            (r"QR\s+Code.*não\s+detectado|QR\s+Code.*inválido", "Não foi possível ler o código QR do cartão. Verifique se o código está visível, não está danificado e a imagem está nítida."),
+            
+            # Processamento
+            (r"decodificar\s+imagem", "Não foi possível processar a imagem. Verifique se o arquivo está em um formato válido (JPG, PNG)."),
+            (r"normalizar.*A4", "Não foi possível ajustar a imagem. Tente escanear novamente com a folha bem posicionada e os cantos visíveis."),
+            (r"crop.*área", "Não foi possível identificar a área de respostas. Verifique se a imagem está completa e bem alinhada."),
+            
+            # Dados
+            (r"Aluno.*não\s+encontrado", "Aluno não encontrado no sistema. Verifique se o código QR está correto."),
+            (r"Gabarito.*não\s+encontrado", "Gabarito não encontrado. Verifique se a prova está cadastrada corretamente."),
+        ]
+        
+        # Buscar padrão correspondente
+        for pattern, friendly_msg in error_patterns:
+            if re.search(pattern, technical_error, re.IGNORECASE):
+                return friendly_msg
+        
+        # Se não encontrou padrão específico, retornar mensagem genérica
+        return "Não foi possível processar a imagem. Por favor, verifique se a imagem está nítida e completa, e tente novamente."
+    
+    def _format_blocks_quantity_error(self, context: Dict) -> str:
+        """Formata erro específico de quantidade de blocos"""
+        expected = context.get('num_blocks_expected', None)
+        found = context.get('num_blocks_found', 0)
+        
+        if expected is None:
+            return "A quantidade de blocos de resposta não corresponde ao esperado. Verifique se a imagem está completa e todas as áreas de resposta estão visíveis."
+        
+        if found == 0:
+            return "Nenhuma área de resposta foi identificada. Verifique se a imagem está completa e as bordas dos blocos estão visíveis."
+        elif found < expected:
+            return f"Foram identificadas apenas {found} área(s) de resposta, mas esperava-se {expected}. Verifique se a imagem está completa e todas as áreas estão visíveis."
+        else:
+            return f"Foram identificadas {found} áreas de resposta, mas esperava-se {expected}. Verifique se há elementos extras na imagem que possam estar sendo confundidos com áreas de resposta."
     
     def _calcular_offsets_proporcionais(self, offset_x_abs: int, offset_y_abs: int, 
                                        block_width_ref: int, block_height_ref: int,
@@ -721,7 +794,8 @@ class AnswerSheetCorrectionN:
             # 1. Decodificar imagem
             img = self._decode_image(image_data)
             if img is None:
-                return {"success": False, "error": "Erro ao decodificar imagem"}
+                error_msg = self._format_user_friendly_error("Erro ao decodificar imagem")
+                return {"success": False, "error": error_msg}
             
             self.logger.info(f"Imagem decodificada: {img.shape}")
             
@@ -731,7 +805,8 @@ class AnswerSheetCorrectionN:
             # 2. Detectar QR Code
             qr_result = self._detectar_qr_code(img)
             if not qr_result or 'student_id' not in qr_result:
-                return {"success": False, "error": "QR Code não detectado ou inválido"}
+                error_msg = self._format_user_friendly_error("QR Code não detectado ou inválido")
+                return {"success": False, "error": error_msg}
             
             student_id = qr_result['student_id']
             gabarito_id_original = qr_result.get('gabarito_id')  # ID original do QR code
@@ -742,7 +817,8 @@ class AnswerSheetCorrectionN:
             # 3. Validar aluno
             student = Student.query.get(student_id)
             if not student:
-                return {"success": False, "error": f"Aluno com ID {student_id} não encontrado no sistema"}
+                error_msg = self._format_user_friendly_error(f"Aluno com ID {student_id} não encontrado no sistema")
+                return {"success": False, "error": error_msg}
             
             # 4. Buscar gabarito
             # Prioridade: gabarito_id > test_id
@@ -763,11 +839,12 @@ class AnswerSheetCorrectionN:
                     self.logger.info(f"Buscando gabarito por test_id: {test_id} (não encontrado)")
             
             if not gabarito_obj:
-                error_msg = f"Gabarito não encontrado"
+                error_msg_tech = f"Gabarito não encontrado"
                 if gabarito_id_original:
-                    error_msg += f" (gabarito_id: {gabarito_id_original})"
+                    error_msg_tech += f" (gabarito_id: {gabarito_id_original})"
                 if test_id:
-                    error_msg += f" (test_id: {test_id})"
+                    error_msg_tech += f" (test_id: {test_id})"
+                error_msg = self._format_user_friendly_error(error_msg_tech)
                 return {"success": False, "error": error_msg}
             
             # 5. Detectar tipo de correção baseado no QR code original
@@ -795,24 +872,28 @@ class AnswerSheetCorrectionN:
             # 6. Detectar quadrados A4 nos cantos
             squares = self._detectar_quadrados_a4(img)
             if squares is None:
-                return {"success": False, "error": "Não foi possível detectar quadrados A4 nos cantos do documento"}
+                error_msg = self._format_user_friendly_error("Não foi possível detectar quadrados A4 nos cantos do documento")
+                return {"success": False, "error": error_msg}
             else:
                 # 7. Normalizar imagem para A4 padrão
                 result = self._normalizar_para_a4(img, squares)
                 if result is None:
-                    return {"success": False, "error": "Erro ao normalizar imagem para A4"}
+                    error_msg = self._format_user_friendly_error("Erro ao normalizar imagem para A4")
+                    return {"success": False, "error": error_msg}
                 
                 img_a4_normalized, scale_info = result
                 
                 # 8. Detectar triângulos na área dos blocos (dentro do A4 normalizado)
                 triangles = self._detectar_triangulos_na_area_blocos(img_a4_normalized)
                 if triangles is None:
-                    return {"success": False, "error": "Não foi possível detectar triângulos na área dos blocos"}
+                    error_msg = self._format_user_friendly_error("Não foi possível detectar triângulos na área dos blocos")
+                    return {"success": False, "error": error_msg}
                 
                 # 9. Fazer crop da área dos blocos usando triângulos
                 block_area_cropped = self._crop_area_blocos_com_triangulos(img_a4_normalized, triangles)
                 if block_area_cropped is None:
-                    return {"success": False, "error": "Erro ao fazer crop da área dos blocos"}
+                    error_msg = self._format_user_friendly_error("Erro ao fazer crop da área dos blocos")
+                    return {"success": False, "error": error_msg}
                 
                 # Usar área cropada como img_warped
                 img_warped = block_area_cropped
@@ -867,7 +948,14 @@ class AnswerSheetCorrectionN:
             use_proportional_mapping = False
             
             if not answer_blocks:
-                return {"success": False, "error": "Nenhum bloco de resposta detectado"}
+                # Verificar se temos informação sobre quantidade esperada de blocos
+                num_blocks_expected = len(blocks_structure.get('blocks', [])) if blocks_structure else None
+                context = {
+                    'num_blocks_expected': num_blocks_expected,
+                    'num_blocks_found': 0
+                }
+                error_msg = self._format_user_friendly_error("Nenhum bloco de resposta detectado", context)
+                return {"success": False, "error": error_msg}
             
             self.logger.info(f"✅ Detectados {len(answer_blocks)} blocos de resposta (método: {'proporcional' if use_proportional_mapping else 'detecção por bordas'})")
             
@@ -896,6 +984,20 @@ class AnswerSheetCorrectionN:
             
             self.logger.info(f"Topology tem {len(topology_blocks_map)} blocos: {list(topology_blocks_map.keys())}")
             self.logger.info(f"Imagem detectou {len(answer_blocks)} blocos físicos")
+            
+            # Validar quantidade de blocos detectados vs esperados
+            num_blocks_expected = len(topology_blocks_map)
+            num_blocks_found = len(answer_blocks)
+            if num_blocks_found != num_blocks_expected:
+                context = {
+                    'num_blocks_expected': num_blocks_expected,
+                    'num_blocks_found': num_blocks_found
+                }
+                error_msg = self._format_user_friendly_error(
+                    f"Esperava {num_blocks_expected} blocos, encontrou {num_blocks_found}",
+                    context
+                )
+                return {"success": False, "error": error_msg}
             
             # Processar cada bloco detectado SEPARADAMENTE
             # Salvar offsets dos blocos para ajustar coordenadas na imagem final
@@ -1217,7 +1319,8 @@ class AnswerSheetCorrectionN:
             
         except Exception as e:
             self.logger.error(f"Erro na correção: {str(e)}", exc_info=True)
-            return {"success": False, "error": f"Erro interno: {str(e)}"}
+            error_msg = self._format_user_friendly_error(f"Erro interno: {str(e)}")
+            return {"success": False, "error": error_msg}
     
     # ========================================================================
     # FUNÇÕES DE DETECÇÃO
@@ -4003,7 +4106,8 @@ class AnswerSheetCorrectionN:
             # Detectar blocos
             answer_blocks, block_contours = self._detectar_blocos_resposta(img_warped)
             if not answer_blocks:
-                return {"success": False, "error": "Nenhum bloco de resposta detectado"}
+                error_msg = self._format_user_friendly_error("Nenhum bloco de resposta detectado")
+                return {"success": False, "error": error_msg}
             
             # Processar cada bloco usando método antigo
             all_answers = {}
@@ -4083,7 +4187,8 @@ class AnswerSheetCorrectionN:
             return response
         except Exception as e:
             self.logger.error(f"Erro no método antigo: {str(e)}", exc_info=True)
-            return {"success": False, "error": f"Erro no método antigo: {str(e)}"}
+            error_msg = self._format_user_friendly_error(f"Erro no método antigo: {str(e)}")
+            return {"success": False, "error": error_msg}
     
     def _processar_bloco(self, block_roi: np.ndarray, start_question: int, 
                          block_num: int = None) -> Tuple[Dict[int, Optional[str]], List[Dict]]:

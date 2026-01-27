@@ -109,6 +109,8 @@ image_build:
         - |
             set -e
 
+            docker build -t "$IMAGE_TAG" .
+
             echo "DATABASE_URL=$DATABASE_URL" > app/.env
             echo "FRONTEND_URL=$FRONTEND_URL" >> app/.env
             echo "JWT_SECRET_KEY=$JWT_SECRET_KEY" >> app/.env
@@ -319,6 +321,7 @@ container_run:
         name: $ENVIRONMENT
         on_stop: environment_clean
     script:
+        - docker rm -f "$CONTAINER_NAME" || true
         - |
             set -e
 

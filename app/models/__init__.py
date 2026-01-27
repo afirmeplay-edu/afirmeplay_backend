@@ -8,6 +8,7 @@ from .subject import Subject
 from .studentClass import Class
 from .classSubject import ClassSubject
 from .classTest import ClassTest
+from .studentTestOlimpics import StudentTestOlimpics
 from .test import Test
 from .testQuestion import TestQuestion
 from .educationStage import EducationStage

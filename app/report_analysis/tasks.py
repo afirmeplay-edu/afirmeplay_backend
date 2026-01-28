@@ -65,89 +65,107 @@ def rebuild_report_for_scope(
         print(f"[REBUILD] 🔄 Normalizando escopo: scope_type={scope_type}, scope_id={scope_id}")
         scope_type, scope_id = ReportAggregateService._normalize_scope(scope_type, scope_id)
         print(f"[REBUILD] ✅ Escopo normalizado: scope_type={scope_type}, scope_id={scope_id}")
-        
-        # Buscar turmas conforme o escopo
-        print(f"[REBUILD] 🔍 Buscando turmas para scope_type={scope_type}, scope_id={scope_id}")
-        if scope_type == 'teacher':
-            # Para professor, buscar turmas específicas
-            print(f"[REBUILD] 👨‍🏫 Buscando turmas do professor: scope_id={scope_id}")
-            teacher_classes = TeacherClass.query.filter_by(teacher_id=scope_id).all()
-            teacher_class_ids = [tc.class_id for tc in teacher_classes]
-            print(f"[REBUILD] 📊 Turmas do professor encontradas: {len(teacher_class_ids)}")
-            class_tests = ClassTest.query.filter(
-                ClassTest.test_id == test_id,
-                ClassTest.class_id.in_(teacher_class_ids)
-            ).all()
-        else:
-            # Para outros escopos, usar função existente
-            # CORRIGIDO: Para 'overall', scope_id é None. Para 'city' e 'school', usar scope_id diretamente
-            print(f"[REBUILD] 🌐 Buscando turmas por escopo: scope_type={scope_type}, scope_id={scope_id}")
-            class_tests = _buscar_turmas_por_escopo(test_id, scope_type, scope_id)
-        
-        print(f"[REBUILD] 📊 Total de turmas encontradas: {len(class_tests) if class_tests else 0}")
-        if not class_tests:
-            print(f"[REBUILD] ⚠️ Nenhuma turma encontrada para test_id={test_id}, scope_type={scope_type}, scope_id={scope_id}")
-            logger.warning(f"Nenhuma turma encontrada para test_id={test_id}, scope_type={scope_type}, scope_id={scope_id}")
-            return {
-                'success': False,
-                'error': 'Nenhuma turma encontrada',
-                'test_id': test_id,
-                'scope_type': scope_type,
-                'scope_id': scope_id
-            }
-        
-        # 1. Calcular payload (dados agregados)
-        print(f"[REBUILD] 📊 ETAPA 1: Calculando payload para {scope_type}:{scope_id}")
-        logger.info(f"Calculando payload para {scope_type}:{scope_id}")
-        
-        if scope_type == 'teacher':
-            # Para professor, usar função específica
-            print(f"[REBUILD] 👨‍🏫 Usando _montar_resposta_relatorio_por_turmas para professor")
-            from app.routes.report_routes import _montar_resposta_relatorio_por_turmas
-            payload = _montar_resposta_relatorio_por_turmas(
-                test_id,
-                class_tests,
-                include_ai=False  # IA será gerada separadamente
-            )
-        else:
-            # Para outros escopos
-            school_id = scope_id if scope_type == 'school' else None
-            city_id = scope_id if scope_type == 'city' else None
-            print(f"[REBUILD] 🌐 Usando _montar_resposta_relatorio: school_id={school_id}, city_id={city_id}")
-            payload = _montar_resposta_relatorio(
-                test_id,
-                school_id=school_id,
-                city_id=city_id,
-                include_ai=False  # IA será gerada separadamente
-            )
-        
-        print(f"[REBUILD] ✅ Payload calculado com sucesso")
-        
-        # Extrair student_count
-        student_count = (
-            payload.get('total_alunos', {})
-            .get('total_geral', {})
-            .get('avaliados', 0)
+
+        # Verificar se já existe payload válido em cache (caso apenas a IA esteja dirty)
+        aggregate_cached = ReportAggregateService.get(test_id, scope_type, scope_id)
+        use_cached_payload = bool(
+            aggregate_cached
+            and not aggregate_cached.is_dirty
+            and aggregate_cached.payload
         )
-        print(f"[REBUILD] 📊 Total de alunos: {student_count}")
-        
-        # 2. Salvar payload no cache
-        print(f"[REBUILD] 💾 ETAPA 2: Salvando payload no cache para {scope_type}:{scope_id}")
-        logger.info(f"Salvando payload no cache para {scope_type}:{scope_id}")
-        ReportAggregateService.save_payload(
-            test_id=test_id,
-            scope_type=scope_type,
-            scope_id=scope_id,
-            payload=payload,
-            student_count=student_count,
-            commit=True
-        )
-        print(f"[REBUILD] ✅ Payload salvo no cache")
-        
-        # Verificar se foi realmente salvo (forçar refresh)
-        db.session.expire_all()
-        aggregate_check = ReportAggregateService.get(test_id, scope_type, scope_id)
-        print(f"[REBUILD] 🔍 Verificação payload: is_dirty={aggregate_check.is_dirty if aggregate_check else 'None'}, has_payload={bool(aggregate_check.payload) if aggregate_check else False}")
+
+        if use_cached_payload:
+            print(f"[REBUILD] 💾 Usando payload já salvo no cache para {scope_type}:{scope_id} (is_dirty=False)")
+            payload = aggregate_cached.payload or {}
+            student_count = (
+                payload.get('total_alunos', {})
+                .get('total_geral', {})
+                .get('avaliados', 0)
+            )
+            print(f"[REBUILD] 📊 Total de alunos (cache): {student_count}")
+        else:
+            # Buscar turmas conforme o escopo
+            print(f"[REBUILD] 🔍 Buscando turmas para scope_type={scope_type}, scope_id={scope_id}")
+            if scope_type == 'teacher':
+                # Para professor, buscar turmas específicas
+                print(f"[REBUILD] 👨‍🏫 Buscando turmas do professor: scope_id={scope_id}")
+                teacher_classes = TeacherClass.query.filter_by(teacher_id=scope_id).all()
+                teacher_class_ids = [tc.class_id for tc in teacher_classes]
+                print(f"[REBUILD] 📊 Turmas do professor encontradas: {len(teacher_class_ids)}")
+                class_tests = ClassTest.query.filter(
+                    ClassTest.test_id == test_id,
+                    ClassTest.class_id.in_(teacher_class_ids)
+                ).all()
+            else:
+                # Para outros escopos, usar função existente
+                # CORRIGIDO: Para 'overall', scope_id é None. Para 'city' e 'school', usar scope_id diretamente
+                print(f"[REBUILD] 🌐 Buscando turmas por escopo: scope_type={scope_type}, scope_id={scope_id}")
+                class_tests = _buscar_turmas_por_escopo(test_id, scope_type, scope_id)
+            
+            print(f"[REBUILD] 📊 Total de turmas encontradas: {len(class_tests) if class_tests else 0}")
+            if not class_tests:
+                print(f"[REBUILD] ⚠️ Nenhuma turma encontrada para test_id={test_id}, scope_type={scope_type}, scope_id={scope_id}")
+                logger.warning(f"Nenhuma turma encontrada para test_id={test_id}, scope_type={scope_type}, scope_id={scope_id}")
+                return {
+                    'success': False,
+                    'error': 'Nenhuma turma encontrada',
+                    'test_id': test_id,
+                    'scope_type': scope_type,
+                    'scope_id': scope_id
+                }
+            
+            # 1. Calcular payload (dados agregados)
+            print(f"[REBUILD] 📊 ETAPA 1: Calculando payload para {scope_type}:{scope_id}")
+            logger.info(f"Calculando payload para {scope_type}:{scope_id}")
+            
+            if scope_type == 'teacher':
+                # Para professor, usar função específica
+                print(f"[REBUILD] 👨‍🏫 Usando _montar_resposta_relatorio_por_turmas para professor")
+                from app.routes.report_routes import _montar_resposta_relatorio_por_turmas
+                payload = _montar_resposta_relatorio_por_turmas(
+                    test_id,
+                    class_tests,
+                    include_ai=False  # IA será gerada separadamente
+                )
+            else:
+                # Para outros escopos
+                school_id = scope_id if scope_type == 'school' else None
+                city_id = scope_id if scope_type == 'city' else None
+                print(f"[REBUILD] 🌐 Usando _montar_resposta_relatorio: school_id={school_id}, city_id={city_id}")
+                payload = _montar_resposta_relatorio(
+                    test_id,
+                    school_id=school_id,
+                    city_id=city_id,
+                    include_ai=False  # IA será gerada separadamente
+                )
+            
+            print(f"[REBUILD] ✅ Payload calculado com sucesso")
+            
+            # Extrair student_count
+            student_count = (
+                payload.get('total_alunos', {})
+                .get('total_geral', {})
+                .get('avaliados', 0)
+            )
+            print(f"[REBUILD] 📊 Total de alunos: {student_count}")
+            
+            # 2. Salvar payload no cache
+            print(f"[REBUILD] 💾 ETAPA 2: Salvando payload no cache para {scope_type}:{scope_id}")
+            logger.info(f"Salvando payload no cache para {scope_type}:{scope_id}")
+            ReportAggregateService.save_payload(
+                test_id=test_id,
+                scope_type=scope_type,
+                scope_id=scope_id,
+                payload=payload,
+                student_count=student_count,
+                commit=True
+            )
+            print(f"[REBUILD] ✅ Payload salvo no cache")
+            
+            # Verificar se foi realmente salvo (forçar refresh)
+            db.session.expire_all()
+            aggregate_check = ReportAggregateService.get(test_id, scope_type, scope_id)
+            print(f"[REBUILD] 🔍 Verificação payload: is_dirty={aggregate_check.is_dirty if aggregate_check else 'None'}, has_payload={bool(aggregate_check.payload) if aggregate_check else False}")
         
         # 3. Gerar análise de IA
         print(f"[REBUILD] 🤖 ETAPA 3: Gerando análise de IA para {scope_type}:{scope_id}")
@@ -167,11 +185,17 @@ def rebuild_report_for_scope(
                 "scope_id": scope_id
             })
             print(f"[REBUILD] ✅ Análise de IA gerada com sucesso")
-            print(f"[REBUILD] 📊 Resultado da análise:")
-            print(f"  - Participação: {len(ai_analysis.get('participacao', ''))} caracteres")
-            print(f"  - Proficiência: {len(ai_analysis.get('proficiencia', {}))} disciplinas")
-            print(f"  - Notas: {len(ai_analysis.get('notas', ''))} caracteres")
-            print(f"  - Níveis: {len(ai_analysis.get('niveis_aprendizagem', {}))} disciplinas")
+            print(f"[REBUILD] 📊 Resumo da análise de IA:")
+            participacao_text = ai_analysis.get('participacao', '') or ''
+            notas_text = ai_analysis.get('notas', '') or ''
+            niveis_dict = ai_analysis.get('niveis_aprendizagem', {}) or {}
+            prof_dict = ai_analysis.get('proficiencia', {}) or {}
+            print(f"  - Participação: {len(participacao_text)} caracteres")
+            print(f"    Início: {participacao_text[:300].replace('\\n', ' ')}")
+            print(f"  - Notas: {len(notas_text)} caracteres")
+            print(f"    Início: {notas_text[:300].replace('\\n', ' ')}")
+            print(f"  - Proficiência: {len(prof_dict)} disciplinas -> {list(prof_dict.keys())}")
+            print(f"  - Níveis: {len(niveis_dict)} disciplinas -> {list(niveis_dict.keys())}")
             
             # 4. Salvar análise de IA no cache
             print(f"[REBUILD] 💾 ETAPA 4: Salvando análise de IA no cache para {scope_type}:{scope_id}")

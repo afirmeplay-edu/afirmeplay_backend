@@ -4,8 +4,10 @@ Serviço para análise de relatórios usando OpenRouter AI
 """
 
 import logging
+import os
 import re
 from typing import Dict, Any, Optional
+import google.generativeai as genai
 from app.openai_config.openai_config import (
     OPENROUTER_MODEL,
     OPENROUTER_MAX_TOKENS,
@@ -28,8 +30,17 @@ class AIAnalysisService:
     
     def __init__(self):
         self.logger = logging.getLogger(__name__)
+        # Mantido por compatibilidade (não usado no fluxo Gemini),
+        # mas deixamos visível em runtime qual provedor/vars estão ativos.
         self.client = get_openrouter_client()
-        self.logger.info("Usando OpenRouter AI para análise de relatórios")
+
+        google_key_set = bool(os.getenv("GOOGLE_AI_STUDIO_API_KEY"))
+        google_model = os.getenv("GOOGLE_AI_STUDIO_MODEL", "gemini-1.5-pro")
+        print(
+            f"[AIAnalysisService] init | GOOGLE_AI_STUDIO_API_KEY set? {google_key_set} | "
+            f"GOOGLE_AI_STUDIO_MODEL={google_model}"
+        )
+        print("[AIAnalysisService] init | Provedor esperado para análise: Google AI Studio (Gemini)")
     
     def analyze_report_data(self, report_data: Dict[str, Any]) -> Dict[str, Any]:
         """
@@ -966,46 +977,70 @@ e recomendações práticas para a escola.
     
     def _call_openai(self, prompt: str) -> str:
         """
-        Chama a API do OpenRouter para gerar análise.
-        Adiciona logs detalhados para debug.
+        Chama a API do Google AI Studio (Gemini) para gerar análise.
+        Mantém a mesma assinatura usada anteriormente com OpenRouter.
         """
-        """Chama API OpenRouter via cliente OpenAI"""
         try:
-            system_prompt = "Você é um especialista em educação e análise de dados educacionais. Sempre gere texto humanizado e profissional, SEM usar formatação markdown (sem #, ##, *, **, etc). Use apenas parágrafos normais e títulos em maiúsculas seguidos de dois pontos."
-            
-            # Obter headers extras do OpenRouter (opcionais)
-            extra_headers = get_openrouter_extra_headers()
-            
-            # Fazer chamada usando cliente OpenAI
-            completion = self.client.chat.completions.create(
-                model=OPENROUTER_MODEL,
-                messages=[
-                    {
-                        "role": "system",
-                        "content": system_prompt
-                    },
-                    {
-                        "role": "user",
-                        "content": prompt
-                    }
-                ],
-                temperature=OPENROUTER_TEMPERATURE,
-                max_tokens=OPENROUTER_MAX_TOKENS,
-                extra_headers=extra_headers if extra_headers else {}
+            # Chave da API do Google AI Studio deve vir de variável de ambiente
+            api_key = os.getenv("GOOGLE_AI_STUDIO_API_KEY")
+            if not api_key:
+                self.logger.error("GOOGLE_AI_STUDIO_API_KEY não configurada no ambiente")
+                raise RuntimeError("Chave da API do Google AI Studio não configurada")
+
+            # Configurar cliente global do Gemini
+            genai.configure(api_key=api_key)
+
+            # Modelo padrão pode ser sobrescrito por variável de ambiente
+            model_name = os.getenv("GOOGLE_AI_STUDIO_MODEL", "gemini-1.5-pro")
+            print(f"[AIAnalysisService] call | Usando Google AI Studio (Gemini) | model={model_name}")
+            print("[AIAnalysisService] call | GOOGLE_AI_STUDIO_API_KEY set? True")
+
+            system_prompt = (
+                "Você é um especialista em educação e análise de dados educacionais. "
+                "Sempre gere texto humanizado e profissional, SEM usar formatação markdown "
+                "(sem #, ##, *, **, etc). Use apenas parágrafos normais e títulos em "
+                "maiúsculas seguidos de dois pontos."
             )
-            
-            # Extrair conteúdo da resposta
-            if completion.choices and len(completion.choices) > 0:
-                content = completion.choices[0].message.content
-                if content:
-                    return content
-            
-            # Se não houver conteúdo, lançar exceção
-            self.logger.error(f"Resposta do OpenRouter em formato inesperado: {completion}")
-            raise Exception("Resposta do OpenRouter em formato inesperado")
-                
+
+            # Configuração de geração reaproveitando temperatura e max_tokens atuais
+            generation_config = {
+                "temperature": OPENROUTER_TEMPERATURE,
+                "max_output_tokens": OPENROUTER_MAX_TOKENS,
+            }
+
+            model = genai.GenerativeModel(
+                model_name,
+                system_instruction=system_prompt,
+                generation_config=generation_config,
+            )
+
+            response = model.generate_content(prompt)
+
+            # Extrair texto da resposta
+            if hasattr(response, "text") and response.text:
+                return response.text
+
+            # Fallback: tentar extrair dos candidates/parts
+            try:
+                candidates = getattr(response, "candidates", None) or []
+                for cand in candidates:
+                    content = getattr(cand, "content", None)
+                    if not content:
+                        continue
+                    parts = getattr(content, "parts", None) or []
+                    texts = [getattr(p, "text", "") for p in parts if getattr(p, "text", "")]
+                    joined = "\n".join(texts).strip()
+                    if joined:
+                        return joined
+            except Exception:
+                # Se der erro ao extrair, continua para log abaixo
+                pass
+
+            self.logger.error(f"Resposta do Google AI em formato inesperado: {response}")
+            raise RuntimeError("Resposta do Google AI em formato inesperado")
+
         except Exception as e:
-            self.logger.error(f"Erro ao chamar OpenRouter AI: {str(e)}", exc_info=True)
+            self.logger.error(f"Erro ao chamar Google AI Studio: {str(e)}", exc_info=True)
             raise
     
     def _process_ai_response(self, ai_response: str) -> Dict[str, str]:

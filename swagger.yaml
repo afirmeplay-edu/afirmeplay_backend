@@ -1885,6 +1885,45 @@ paths:
         '500':
           $ref: '#/responses/InternalServerError'
 
+  /test/{test_id}/applied-students:
+    get:
+      summary: List students with individual olympics application
+      description: |
+        Retorna os IDs dos alunos que tiveram a olimpíada aplicada individualmente
+        (via POST /test/{test_id}/apply-olympics) para o test_id informado.
+      parameters:
+        - name: test_id
+          in: path
+          required: true
+          schema:
+            type: string
+          description: ID da olimpíada (test)
+      responses:
+        '200':
+          description: Lista de student_id aplicados individualmente
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  students:
+                    type: array
+                    items:
+                      type: string
+                      format: uuid
+                example:
+                  students:
+                    - "uuid-aluno-1"
+                    - "uuid-aluno-2"
+        '401':
+          $ref: '#/responses/UnauthorizedError'
+        '403':
+          $ref: '#/responses/ForbiddenError'
+        '404':
+          $ref: '#/responses/NotFoundError'
+        '500':
+          $ref: '#/responses/InternalServerError'
+
   /test/{test_id}/classes:
     get:
       summary: Get classes where test is applied

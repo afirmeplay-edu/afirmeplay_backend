@@ -1512,6 +1512,32 @@ def remover_aplicacao_olympics(test_id, student_id):
         return jsonify({"error": "Error removing olympics application", "details": str(e)}), 500
 
 
+@bp.route('/<string:test_id>/applied-students', methods=['GET'])
+@jwt_required()
+@role_required("admin", "professor", "coordenador", "diretor", "tecadm")
+def listar_alunos_aplicados_individualmente(test_id):
+    """
+    Retorna os IDs dos alunos que tiveram a olimpíada aplicada individualmente
+    (via apply-olympics / student_test_olimpics) para o test_id informado.
+
+    Resposta aceita pelo front:
+    - Objeto com array students: { "students": ["uuid-1", "uuid-2"] }
+    """
+    try:
+        test = Test.query.get(test_id)
+        if not test:
+            return jsonify({"error": "Avaliação não encontrada"}), 404
+
+        records = StudentTestOlimpics.query.filter_by(test_id=str(test_id)).all()
+        student_ids = [r.student_id for r in records]
+
+        return jsonify({"students": student_ids}), 200
+
+    except Exception as e:
+        logging.error(f"Error listing applied students: {str(e)}", exc_info=True)
+        return jsonify({"error": "Erro ao listar alunos aplicados", "details": str(e)}), 500
+
+
 @bp.route('/<string:test_id>/classes', methods=['GET'])
 @jwt_required()
 @role_required("admin", "professor", "coordenador", "diretor",'tecadm')

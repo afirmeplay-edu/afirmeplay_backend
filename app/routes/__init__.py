@@ -29,7 +29,8 @@ def register_routes(app: Flask):
         manager_routes,
         physical_test_routes
     )
-    from .play_tv import routes as playtv_routes
+    from app.play_tv import routes as playtv_routes
+    from app.plantao_online import routes as plantao_online_routes
     
     # Register blueprints
     app.register_blueprint(admin_route.bp)
@@ -58,3 +59,4 @@ def register_routes(app: Flask):
     app.register_blueprint(manager_routes.bp)
     app.register_blueprint(physical_test_routes.bp)
     app.register_blueprint(playtv_routes.bp)
+    app.register_blueprint(plantao_online_routes.bp)

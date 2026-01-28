@@ -47,25 +47,23 @@ stages:
 .clean_job:
     script:
         - |
-            CONTAINER_IDS=$(docker container ls -a -f ancestor="$IMAGE_TAG" -q)
+            CONTAINER_IDS=$(docker container ls -a -f name="^${CONTAINER_NAME}$" -q)
 
             if [ -z "$CONTAINER_IDS" ]; then
-                echo "$(date '+[%Y-%m-%d %H:%M:%S]') - Container do app não existe."
+                echo "$(date '+[%Y-%m-%d %H:%M:%S]') - Container '$CONTAINER_NAME' não existe."
             else
                 for ID in $CONTAINER_IDS; do
-                    IS_RUNNING=$(docker inspect -f "{{.State.Running}}" "$ID")
+                    IS_RUNNING=$(docker inspect -f "{{.State.Running}}" "$ID" 2>/dev/null || echo "false")
 
                     if [ "$IS_RUNNING" = "true" ]; then
-                        docker container stop "$ID"
-
-                        echo "$(date '+[%Y-%m-%d %H:%M:%S]') - Container do app com id '$ID' foi parado."
+                        docker container stop "$ID" 2>/dev/null || true
+                        echo "$(date '+[%Y-%m-%d %H:%M:%S]') - Container '$CONTAINER_NAME' parado."
                     else
-                        echo "$(date '+[%Y-%m-%d %H:%M:%S]') - Container do app com id '$ID' já está parado."
+                        echo "$(date '+[%Y-%m-%d %H:%M:%S]') - Container '$CONTAINER_NAME' já estava parado."
                     fi
 
-                    docker container rm "$ID"
-
-                    echo "$(date '+[%Y-%m-%d %H:%M:%S]') - Container do app com id '$ID' foi removido."
+                    docker container rm "$ID" 2>/dev/null || true
+                    echo "$(date '+[%Y-%m-%d %H:%M:%S]') - Container '$CONTAINER_NAME' removido."
                 done
             fi
         - |
@@ -74,10 +72,10 @@ stages:
             if [ -z "$IMAGE_ID" ]; then
                 echo "$(date '+[%Y-%m-%d %H:%M:%S]') - Imagem '$IMAGE_TAG' não existe."
             else
-                docker image rm "$IMAGE_ID"
-
-                echo "$(date '+[%Y-%m-%d %H:%M:%S]') - Imagem '$IMAGE_TAG' com id '$IMAGE_ID' foi removida."
+                docker image rm "$IMAGE_ID" 2>/dev/null || true
+                echo "$(date '+[%Y-%m-%d %H:%M:%S]') - Imagem '$IMAGE_TAG' removida."
             fi
+
 
 invalid_merge_request:
     stage: validate_pipeline
@@ -110,6 +108,8 @@ image_build:
     script:
         - |
             set -e
+
+            docker build -t "$IMAGE_TAG" .
 
             echo "DATABASE_URL=$DATABASE_URL" > app/.env
             echo "FRONTEND_URL=$FRONTEND_URL" >> app/.env
@@ -246,6 +246,7 @@ minio_setup:
                   -p 9001:9001 \
                   -e MINIO_ROOT_USER="${MINIO_ROOT_USER}" \
                   -e MINIO_ROOT_PASSWORD="${MINIO_ROOT_PASSWORD}" \
+                  -e MINIO_SERVER_URL="https://demo.afirmeplay.com.br" \
                   -v minio_data:/data \
                   minio/minio:latest \
                   server /data --console-address ":9001"
@@ -292,6 +293,7 @@ minio_setup:
                 apk add --no-cache curl > /dev/null 2>&1;
                 wget -q -O /tmp/mc https://dl.min.io/client/mc/release/linux-amd64/mc;
                 chmod +x /tmp/mc;
+                /tmp/mc alias remove myminio || true
                 /tmp/mc alias set myminio http://minio-server:9000 ${MINIO_ROOT_USER} ${MINIO_ROOT_PASSWORD};
                 /tmp/mc mb myminio/answer-sheets --ignore-existing || true;
                 /tmp/mc mb myminio/physical-tests --ignore-existing || true;
@@ -319,6 +321,7 @@ container_run:
         name: $ENVIRONMENT
         on_stop: environment_clean
     script:
+        - docker rm -f "$CONTAINER_NAME" || true
         - |
             set -e
 
@@ -331,7 +334,8 @@ container_run:
 
             docker container run --network "$ENVIRONMENT" -p "$HOST_PORT:$CONTAINER_PORT" --name "$CONTAINER_NAME" -d "$IMAGE_TAG"
 
-            CONTAINER_ID=$(docker container ls -a -f ancestor="$IMAGE_TAG" -q)
+
+            CONTAINER_ID=$(docker container ls -a -f name="^${CONTAINER_NAME}$" -q) 
 
             if [ -z "$CONTAINER_ID" ]; then
                 echo "$(date '+[%Y-%m-%d %H:%M:%S]') - Falha ao criar o container '$CONTAINER_NAME'."
@@ -377,8 +381,9 @@ container_run_celery:
               --network "$ENVIRONMENT" \
               "$IMAGE_TAG" \
               celery -A app.report_analysis.celery_app worker \
-              --loglevel=info \
-              --concurrency=2
+                --loglevel=info \
+                --concurrency=4 \
+                --prefetch-multiplier=1
 
             sleep 10
 

@@ -42,7 +42,7 @@ class PhysicalTestFormService:
         self.evaluation_calculator = EvaluationCalculator()
         self.evaluation_result_service = EvaluationResultService()
 
-    def generate_physical_forms(self, test_id: str, output_dir: str = "physical_forms", test_data: Dict = None) -> Dict[str, Any]:
+    def generate_physical_forms(self, test_id: str, output_dir: str = None, test_data: Dict = None) -> Dict[str, Any]:
         """
         Gera formulários físicos para uma prova específica
         
@@ -194,12 +194,14 @@ class PhysicalTestFormService:
             from app.services.institutional_test_weasyprint_generator import InstitutionalTestWeasyPrintGenerator
             institutional_generator = InstitutionalTestWeasyPrintGenerator()
 
-            # Gerar PDFs institucionais e salvar no banco
+            # Gerar PDFs institucionais com processamento incremental (salva em disco)
+            # output_dir padrão será usado se não fornecido (/tmp/celery_pdfs/physical_tests)
             generated_files = institutional_generator.generate_institutional_test_pdf(
-                test_data, students_data, questions_data, class_test_id
+                test_data, students_data, questions_data, class_test_id,
+                output_dir=output_dir  # Se None, usa padrão /tmp/celery_pdfs/physical_tests
             )
             
-            # Salvar informações no banco de dados
+            # Salvar informações no banco de dados (processamento incremental)
             saved_forms = self._save_physical_forms_to_db(
                 test_id, generated_files, questions
             )
@@ -211,7 +213,8 @@ class PhysicalTestFormService:
                 'test_title': test.title,
                 'total_questions': len(questions),
                 'total_students': len(students),
-                'forms': saved_forms
+                'forms': saved_forms,
+                'generated_files': generated_files  # Retornar arquivos gerados para criar ZIP
             }
             
         except Exception as e:
@@ -347,7 +350,10 @@ class PhysicalTestFormService:
         }
 
     def _save_physical_forms_to_db(self, test_id: str, generated_files: List[Dict], questions: List[Question]) -> List[Dict]:
-        """Salva formulários físicos no banco de dados"""
+        """
+        Salva formulários físicos no banco de dados
+        PROCESSAMENTO INCREMENTAL: salva aluno por aluno, libera memória após cada commit
+        """
         saved_forms = []
         try:
             if not generated_files:
@@ -357,65 +363,94 @@ class PhysicalTestFormService:
             class_test = ClassTest.query.filter_by(test_id=test_id).first()
             
             if not class_test:
-                # Se não existe ClassTest, criar um temporário ou usar um padrão
-                # Por enquanto, vamos usar um ID temporário
                 class_test_id = "temp-class-test-id"
             else:
                 class_test_id = class_test.id
             
-            for file_info in generated_files:
+            # Processamento incremental: salvar aluno por aluno
+            total_files = len(generated_files)
+            for idx, file_info in enumerate(generated_files, 1):
                 student_id = file_info['student_id']
                 
-                # Verificar se já existe formulário para este aluno e esta prova
-                existing_form = PhysicalTestForm.query.filter_by(
-                    test_id=test_id,
-                    student_id=student_id,
-                    form_type='institutional'
-                ).first()
-                
-                if existing_form:
-                    logging.warning(f"Formulário já existe para aluno {student_id} e prova {test_id}. Pulando...")
-                    # Adicionar à lista de formulários existentes
+                try:
+                    # Verificar se já existe formulário para este aluno e esta prova
+                    existing_form = PhysicalTestForm.query.filter_by(
+                        test_id=test_id,
+                        student_id=student_id,
+                        form_type='institutional'
+                    ).first()
+                    
+                    if existing_form:
+                        logging.debug(f"Formulário já existe para aluno {student_id} e prova {test_id}. Pulando...")
+                        saved_forms.append({
+                            'student_id': student_id,
+                            'student_name': file_info['student_name'],
+                            'form_id': existing_form.id,
+                            'pdf_path': file_info.get('pdf_path', None),
+                            'already_exists': True
+                        })
+                        continue
+                    
+                    # Ler PDF do disco se pdf_path fornecido (processamento incremental)
+                    pdf_data = None
+                    pdf_path = file_info.get('pdf_path')
+                    
+                    if pdf_path and os.path.exists(pdf_path):
+                        # Ler PDF do disco apenas quando necessário
+                        with open(pdf_path, 'rb') as f:
+                            pdf_data = f.read()
+                    elif file_info.get('pdf_data'):
+                        # Modo compatibilidade: usar pdf_data em memória
+                        pdf_data = file_info['pdf_data']
+                    
+                    if not pdf_data:
+                        logging.warning(f"PDF não encontrado para aluno {student_id}")
+                        continue
+                    
+                    # Criar registro do formulário físico
+                    physical_form = PhysicalTestForm(
+                        test_id=test_id,
+                        student_id=student_id,
+                        class_test_id=class_test_id,
+                        form_pdf_data=pdf_data,
+                        form_pdf_url=pdf_path,
+                        qr_code_data=file_info.get('qr_code_data', file_info['student_id']),
+                        status='gerado',
+                        form_type='institutional'
+                    )
+                    db.session.add(physical_form)
+                    db.session.flush()  # Para obter o ID
+                    
                     saved_forms.append({
                         'student_id': student_id,
                         'student_name': file_info['student_name'],
-                        'form_id': existing_form.id,
-                        'pdf_path': file_info.get('pdf_path', None),
-                        'already_exists': True
+                        'form_id': physical_form.id,
+                        'pdf_path': pdf_path,
+                        'already_exists': False
                     })
-                    continue
+                    
+                    # Commit incremental: salvar aluno por aluno
+                    db.session.commit()
+                    
+                    # Liberar memória após cada salvamento
+                    del pdf_data
+                    import gc
+                    gc.collect()
+                    
+                    # Log de progresso apenas a cada 10 alunos ou no final
+                    if idx % 10 == 0 or idx == total_files:
+                        logging.debug(f"Salvos {idx}/{total_files} formulários no banco")
                 
-                # Criar registro do formulário físico
-                pdf_data = file_info.get('pdf_data')
-                if not pdf_data:
+                except Exception as e:
+                    db.session.rollback()
+                    logging.error(f"Erro ao salvar formulário para aluno {student_id}: {str(e)}", exc_info=True)
                     continue
-                
-                physical_form = PhysicalTestForm(
-                    test_id=test_id,
-                    student_id=student_id,
-                    class_test_id=class_test_id,
-                    form_pdf_data=pdf_data,
-                    form_pdf_url=file_info.get('pdf_path', None),
-                    qr_code_data=file_info['student_id'],
-                    status='gerado',
-                    form_type='institutional'
-                )
-                db.session.add(physical_form)
-                db.session.flush()  # Para obter o ID
-                saved_forms.append({
-                    'student_id': student_id,
-                    'student_name': file_info['student_name'],
-                    'form_id': physical_form.id,
-                    'pdf_path': file_info.get('pdf_path', None),
-                    'already_exists': False
-                })
             
-            db.session.commit()
             return saved_forms
             
         except Exception as e:
             db.session.rollback()
-            logging.error(f"Erro ao salvar formulários no banco: {str(e)}")
+            logging.error(f"Erro ao salvar formulários no banco: {str(e)}", exc_info=True)
             return []
 
     def get_physical_forms_by_test(self, test_id: str) -> List[Dict]:

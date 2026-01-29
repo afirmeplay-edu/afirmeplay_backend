@@ -76,7 +76,6 @@ stages:
                 echo "$(date '+[%Y-%m-%d %H:%M:%S]') - Imagem '$IMAGE_TAG' removida."
             fi
 
-
 invalid_merge_request:
     stage: validate_pipeline
     extends:
@@ -125,11 +124,14 @@ image_build:
             echo "CELERY_RESULT_BACKEND=$CELERY_RESULT_BACKEND" >> app/.env
             echo "REDIS_URL=$REDIS_URL" >> app/.env
             echo "REDIS_PASSWORD=$REDIS_PASSWORD" >> app/.env
-            
+
             echo "MINIO_ENDPOINT=$MINIO_ENDPOINT" >> app/.env
             echo "MINIO_ACCESS_KEY=$MINIO_ACCESS_KEY" >> app/.env
             echo "MINIO_SECRET_KEY=$MINIO_SECRET_KEY" >> app/.env
             echo "MINIO_SECURE=$MINIO_SECURE" >> app/.env
+
+            echo "GOOGLE_AI_STUDIO_API_KEY=$GOOGLE_AI_STUDIO_API_KEY" >> app/.env
+            echo "GOOGLE_AI_STUDIO_MODEL=$GOOGLE_AI_STUDIO_MODEL" >> app/.env
 
             docker build --no-cache -t "$IMAGE_TAG" .
 
@@ -229,12 +231,12 @@ minio_setup:
     script:
         - |
             set -e
-            
+
             MINIO_CONTAINER_NAME="minio-server"
-            
+
             # 1. Verificar se MinIO já existe e está rodando
             MINIO_ID=$(docker container ls -a -f name="^${MINIO_CONTAINER_NAME}$" -q)
-            
+
             if [ -z "$MINIO_ID" ]; then
                 echo "$(date '+[%Y-%m-%d %H:%M:%S]') - Criando container MinIO..."
                 
@@ -263,12 +265,12 @@ minio_setup:
                     docker start "$MINIO_CONTAINER_NAME"
                 fi
             fi
-            
+
             # 2. Aguardar MinIO ficar pronto (health check)
             echo "$(date '+[%Y-%m-%d %H:%M:%S]') - Aguardando MinIO ficar pronto..."
             TIMEOUT=60
             ELAPSED=0
-            
+
             until docker exec "$MINIO_CONTAINER_NAME" curl -f http://localhost:9000/minio/health/live 2>/dev/null; do
                 sleep 2
                 ELAPSED=$((ELAPSED + 2))
@@ -279,12 +281,12 @@ minio_setup:
                     exit 1
                 fi
             done
-            
+
             echo "$(date '+[%Y-%m-%d %H:%M:%S]') - MinIO está pronto!"
-            
+
             # 3. Criar buckets (usando mc - MinIO Client)
             echo "$(date '+[%Y-%m-%d %H:%M:%S]') - Criando buckets..."
-            
+
             # Usar container alpine com mc instalado para ter acesso a sh
             docker run --rm \
               --network "$ENVIRONMENT" \
@@ -307,9 +309,9 @@ minio_setup:
                 /tmp/mc anonymous set public myminio/school-logos || true;
                 echo 'Buckets criados com sucesso!'
               "
-            
+
             echo "$(date '+[%Y-%m-%d %H:%M:%S]') - Setup de buckets concluído!"
-            
+
             echo "$(date '+[%Y-%m-%d %H:%M:%S]') - MinIO setup completo!"
 
 container_run:

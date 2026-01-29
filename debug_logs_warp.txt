@@ -1,9 +1,0 @@
-LOGS COMPLETOS DE RUN.PY
-======================================================================
-
-Traceback (most recent call last):
-  File "C:\Users\Artur Calderon\Documents\Programming\innovaplay_backend\run.py", line 1, in <module>
-    from app import create_app
-  File "C:\Users\Artur Calderon\Documents\Programming\innovaplay_backend\app\__init__.py", line 1, in <module>
-    from flask import Flask, send_from_directory, request, jsonify
-ModuleNotFoundError: No module named 'flask'

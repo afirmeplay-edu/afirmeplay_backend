@@ -990,10 +990,11 @@ e recomendações práticas para a escola.
             # Configurar cliente global do Gemini
             genai.configure(api_key=api_key)
 
-            # Modelo padrão pode ser sobrescrito por variável de ambiente
-            model_name = os.getenv("GOOGLE_AI_STUDIO_MODEL", "gemini-1.5-pro")
-            print(f"[AIAnalysisService] call | Usando Google AI Studio (Gemini) | model={model_name}")
-            print("[AIAnalysisService] call | GOOGLE_AI_STUDIO_API_KEY set? True")
+            # Modelo: sempre usar GOOGLE_AI_STUDIO_MODEL do ambiente (ex: gemini-3-pro-preview)
+            model_name = (os.getenv("GOOGLE_AI_STUDIO_MODEL") or "gemini-1.5-pro").strip()
+            if not model_name:
+                model_name = "gemini-1.5-pro"
+            print(f"[AIAnalysisService] call | Google AI Studio (Gemini) | model={model_name}")
 
             system_prompt = (
                 "Você é um especialista em educação e análise de dados educacionais. "
@@ -1002,10 +1003,15 @@ e recomendações práticas para a escola.
                 "maiúsculas seguidos de dois pontos."
             )
 
-            # Configuração de geração reaproveitando temperatura e max_tokens atuais
+            # Gemini 3 usa "thinking" interno: com prompt longo pode consumir todos os tokens
+            # e devolver finish_reason=MAX_TOKENS sem Part. Reservar mais tokens para a saída.
+            max_tokens = OPENROUTER_MAX_TOKENS
+            if "gemini-3" in (model_name or "").lower():
+                max_tokens = int(os.getenv("GOOGLE_AI_STUDIO_MAX_OUTPUT_TOKENS", "32768"))
+                self.logger.info("Gemini 3 detectado: max_output_tokens=%s (evita resposta vazia com prompts longos)", max_tokens)
             generation_config = {
                 "temperature": OPENROUTER_TEMPERATURE,
-                "max_output_tokens": OPENROUTER_MAX_TOKENS,
+                "max_output_tokens": max_tokens,
             }
 
             model = genai.GenerativeModel(
@@ -1016,28 +1022,30 @@ e recomendações práticas para a escola.
 
             response = model.generate_content(prompt)
 
-            # Extrair texto da resposta
-            if hasattr(response, "text") and response.text:
-                return response.text
+            # Extrair texto dos candidates/parts (evita ValueError quando response.text
+            # não existe por finish_reason=MAX_TOKENS/SAFETY/etc. ou Part vazia)
+            candidates = getattr(response, "candidates", None) or []
+            for cand in candidates:
+                content = getattr(cand, "content", None)
+                if not content:
+                    continue
+                parts = getattr(content, "parts", None) or []
+                texts = [getattr(p, "text", "") for p in parts if getattr(p, "text", "")]
+                joined = "\n".join(texts).strip()
+                if joined:
+                    return joined
 
-            # Fallback: tentar extrair dos candidates/parts
-            try:
-                candidates = getattr(response, "candidates", None) or []
-                for cand in candidates:
-                    content = getattr(cand, "content", None)
-                    if not content:
-                        continue
-                    parts = getattr(content, "parts", None) or []
-                    texts = [getattr(p, "text", "") for p in parts if getattr(p, "text", "")]
-                    joined = "\n".join(texts).strip()
-                    if joined:
-                        return joined
-            except Exception:
-                # Se der erro ao extrair, continua para log abaixo
-                pass
-
-            self.logger.error(f"Resposta do Google AI em formato inesperado: {response}")
-            raise RuntimeError("Resposta do Google AI em formato inesperado")
+            # Sem texto: logar finish_reason para diagnóstico (2=MAX_TOKENS, 3=SAFETY, etc.)
+            finish_reasons = [getattr(c, "finish_reason", None) for c in candidates]
+            self.logger.error(
+                "Resposta do Google AI sem Part válida. finish_reason(s)=%s. "
+                "Se 2 (MAX_TOKENS), aumente OPENROUTER_MAX_TOKENS ou use modelo com mais saída.",
+                finish_reasons,
+            )
+            raise RuntimeError(
+                "Resposta do Google AI sem conteúdo (finish_reason pode ser MAX_TOKENS ou SAFETY). "
+                "Tente aumentar max_output_tokens ou outro modelo."
+            )
 
         except Exception as e:
             self.logger.error(f"Erro ao chamar Google AI Studio: {str(e)}", exc_info=True)

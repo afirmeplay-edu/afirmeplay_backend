@@ -32,6 +32,7 @@ from app.utils.uuid_helpers import ensure_uuid, ensure_uuid_list
 from sqlalchemy import cast
 from sqlalchemy.dialects.postgresql import UUID as PostgresUUID
 from app.models.classTest import ClassTest
+from app.models.studentTestOlimpics import StudentTestOlimpics
 from app.models.schoolTeacher import SchoolTeacher
 from app.models.skill import Skill
 from app import db
@@ -2924,22 +2925,29 @@ def relatorio_detalhado(evaluation_id: str):
         # Dados dos alunos (buscar diretamente)
         from app.models.evaluationResult import EvaluationResult
         
-        # Buscar TODOS os alunos das turmas onde a avaliação foi aplicada
+        # Buscar TODOS os alunos das turmas onde a avaliação foi aplicada (ou individuais via StudentTestOlimpics)
         # ✅ CORRIGIDO: ClassTest.test_id é VARCHAR, converter evaluation_id para string
         class_tests = ClassTest.query.filter_by(test_id=str(evaluation_id)).all()
         class_ids = [ct.class_id for ct in class_tests]
         
         if not class_ids:
-            return jsonify({
-                "avaliacao": avaliacao_data,
-                "questoes": questoes_data,
-                "alunos": []
-            }), 200
-        
-        # Buscar todos os alunos dessas turmas
-        all_students = Student.query.options(
-            joinedload(Student.class_).joinedload(Class.grade)
-        ).filter(Student.class_id.in_(class_ids)).all()
+            # Olimpíada só individual: buscar alunos via StudentTestOlimpics
+            records = StudentTestOlimpics.query.filter_by(test_id=str(evaluation_id)).all()
+            if not records:
+                return jsonify({
+                    "avaliacao": avaliacao_data,
+                    "questoes": questoes_data,
+                    "alunos": []
+                }), 200
+            student_ids = [r.student_id for r in records]
+            all_students = Student.query.options(
+                joinedload(Student.class_)
+            ).filter(Student.id.in_(student_ids)).all()
+        else:
+            # Buscar todos os alunos das turmas onde a avaliação foi aplicada
+            all_students = Student.query.options(
+                joinedload(Student.class_).joinedload(Class.grade)
+            ).filter(Student.class_id.in_(class_ids)).all()
         
         # Buscar resultados pré-calculados
         evaluation_results = EvaluationResult.query.filter_by(test_id=evaluation_id).all()
@@ -4175,6 +4183,7 @@ def get_student_test_results(test_id, student_id):
             "test_id": test_id,
             "student_id": student_id,  # user_id
             "student_db_id": student.id,  # id real da tabela Student
+            "student_name": student.name,
             "total_questions": total_questions,
             "answered_questions": correct_answers,  # Simplificado - usar acertos como questões respondidas
             "correct_answers": correct_answers,

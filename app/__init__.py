@@ -142,6 +142,7 @@ def create_app():
     from .plantao_online import routes as plantao_online_routes
     from app.certification.routes import certificate_routes
     from app.balance.routes import bp as balance_bp
+    from app.competitions.routes import bp as competitions_bp
     # Importar rotas de report_analysis (processamento assíncrono)
     from app.report_analysis import routes as report_analysis_routes
     
@@ -186,6 +187,7 @@ def create_app():
     app.register_blueprint(plantao_online_routes.bp)
     app.register_blueprint(certificate_routes.bp)
     app.register_blueprint(balance_bp)
+    app.register_blueprint(competitions_bp)
     # Importar modelos para garantir que as tabelas sejam criadas
     from .models import City, School, SchoolTeacher, Teacher, Student, Subject, Class, ClassSubject, ClassTest, Test, EducationStage, Grade, Skill, Question, StudentAnswer, UserQuickLinks, TeacherClass, User, Manager
     from app.certification.models import CertificateTemplate, Certificate

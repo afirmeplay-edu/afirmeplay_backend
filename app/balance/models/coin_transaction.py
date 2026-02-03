@@ -15,7 +15,11 @@ class CoinTransaction(db.Model):
     balance_before = db.Column(db.Integer, nullable=False)
     balance_after = db.Column(db.Integer, nullable=False)
     reason = db.Column(db.String, nullable=False)
-    competition_id = db.Column(db.String, nullable=True)
+    competition_id = db.Column(
+        db.String,
+        db.ForeignKey('competitions.id', ondelete='SET NULL'),
+        nullable=True,
+    )
     test_session_id = db.Column(
         db.String,
         db.ForeignKey('test_sessions.id', ondelete='SET NULL'),
@@ -25,6 +29,7 @@ class CoinTransaction(db.Model):
     created_at = db.Column(db.TIMESTAMP, server_default=db.text('CURRENT_TIMESTAMP'))
 
     student = db.relationship('Student', backref='coin_transactions')
+    competition = db.relationship('Competition', backref='coin_transactions')
     test_session = db.relationship('TestSession', backref='coin_transactions')
 
     def to_dict(self):

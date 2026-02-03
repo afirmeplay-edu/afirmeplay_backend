@@ -114,10 +114,10 @@ def get_transaction(transaction_id):
 
 @bp.route('/admin/credit', methods=['POST'])
 @jwt_required()
-@role_required('admin', 'coordenador')
+@role_required('admin', 'coordenador', 'diretor', 'tecadm')
 def admin_credit_coins():
     """
-    Credita moedas manualmente (admin/coordenador).
+    Credita moedas manualmente (admin, coordenador, diretor, tecadm).
     Body: { "student_id", "amount", "reason", "description" (opcional) }
     """
     data = request.get_json()
@@ -146,3 +146,48 @@ def admin_credit_coins():
     except Exception as e:
         logging.error(f"Erro ao creditar moedas: {str(e)}", exc_info=True)
         return jsonify({"erro": "Erro ao creditar moedas", "detalhes": str(e)}), 500
+
+
+@bp.route('/admin/debit', methods=['POST'])
+@jwt_required()
+@role_required('admin', 'coordenador', 'diretor', 'tecadm')
+def admin_debit_coins():
+    """
+    Debita (remove) moedas manualmente (admin, coordenador, diretor, tecadm).
+    Body: { "student_id", "amount", "reason", "description" (opcional) }
+    Falha com 400 se o saldo do aluno for insuficiente.
+    """
+    data = request.get_json()
+    if not data:
+        return jsonify({"erro": "Dados não fornecidos"}), 400
+    student_id = data.get('student_id')
+    amount = data.get('amount')
+    if not student_id:
+        return jsonify({"erro": "student_id é obrigatório"}), 400
+    if amount is None:
+        return jsonify({"erro": "amount é obrigatório"}), 400
+    try:
+        amount_int = int(amount)
+        if amount_int <= 0:
+            return jsonify({"erro": "amount deve ser positivo"}), 400
+    except (TypeError, ValueError):
+        return jsonify({"erro": "amount deve ser um número inteiro"}), 400
+    try:
+        transaction = CoinService.debit_coins(
+            student_id=student_id,
+            amount=amount_int,
+            reason=data.get('reason', 'admin_debit'),
+            description=data.get('description'),
+        )
+        return jsonify({
+            'message': 'Moedas debitadas com sucesso',
+            'transaction_id': transaction.id,
+            'new_balance': transaction.balance_after,
+        }), 201
+    except InsufficientBalanceError as e:
+        return jsonify({"erro": "Saldo insuficiente", "detalhes": str(e)}), 400
+    except ValueError as e:
+        return jsonify({"erro": str(e)}), 400
+    except Exception as e:
+        logging.error(f"Erro ao debitar moedas: {str(e)}", exc_info=True)
+        return jsonify({"erro": "Erro ao debitar moedas", "detalhes": str(e)}), 500

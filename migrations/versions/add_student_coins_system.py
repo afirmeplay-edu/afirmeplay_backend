@@ -44,7 +44,6 @@ def upgrade():
         sa.Column('created_at', sa.TIMESTAMP(), server_default=sa.text('CURRENT_TIMESTAMP')),
         sa.PrimaryKeyConstraint('id'),
         sa.ForeignKeyConstraint(['student_id'], ['student.id'], ondelete='CASCADE'),
-        sa.ForeignKeyConstraint(['competition_id'], ['competitions.id'], ondelete='SET NULL'),
         sa.ForeignKeyConstraint(['test_session_id'], ['test_sessions.id'], ondelete='SET NULL'),
     )
 

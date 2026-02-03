@@ -37,10 +37,10 @@ class AnswerSheetGenerator:
                               num_questions: int, use_blocks: bool,
                               blocks_config: Dict, correct_answers: Dict,
                               gabarito_id: str = None, questions_options: Dict = None,
-                              output_dir: str = None) -> List[Dict]:
+                              output_dir: str = None) -> Dict:
         """
-        Gera PDFs de cartões resposta para todos os alunos de uma turma
-        PROCESSAMENTO INCREMENTAL: gera → salva em disco → libera memória
+        Gera UM PDF com MÚLTIPLAS PÁGINAS para uma turma
+        Cada página = 1 cartão resposta de 1 aluno
 
         Args:
             class_id: ID da turma
@@ -49,15 +49,20 @@ class AnswerSheetGenerator:
             use_blocks: Se usa blocos ou não
             blocks_config: Configuração de blocos {num_blocks, questions_per_block, separate_by_subject}
             correct_answers: Dict com respostas corretas {1: "A", 2: "B", ...}
-            gabarito_id: ID do gabarito salvo (opcional)
+            gabarito_id: ID do gabarito salvo (obrigatório para QR code)
             questions_options: Dict com alternativas de cada questão {1: ['A', 'B', 'C'], 2: ['A', 'B', 'C', 'D'], ...}
-                              Se não fornecido, usa padrão A, B, C, D para todas
-            output_dir: Diretório para salvar PDFs em disco (padrão: /tmp/celery_pdfs/answer_sheets)
+            output_dir: Diretório para salvar PDF em disco (padrão: /tmp/celery_pdfs/answer_sheets)
 
         Returns:
-            Lista com informações dos PDFs gerados (com pdf_path se output_dir fornecido)
+            Dict com:
+            {
+                'class_id': uuid,
+                'class_name': 'A',
+                'pdf_path': '/tmp/.../cartoes_turma_A.pdf',
+                'student_count': 25,
+                'file_size': 1024000
+            }
         """
-        # Definir output_dir padrão para containers Linux
         if output_dir is None:
             output_dir = '/tmp/celery_pdfs/answer_sheets'
         
@@ -72,20 +77,25 @@ class AnswerSheetGenerator:
 
             # Buscar alunos da turma
             students = Student.query.filter_by(class_id=class_id).all()
+            print(f"\n=== DEBUG GENERATOR ===")
+            print(f"Turma: {class_obj.name} (ID: {class_id})")
+            print(f"Estudantes encontrados no generator: {len(students)}")
+            for student in students:
+                print(f"  - {student.name} (ID: {student.id})")
+            print(f"======================\n")
+            
             if not students:
                 raise ValueError(f"Nenhum aluno encontrado na turma {class_id}")
 
-            # Criar diretório de saída (sempre criar, mesmo com padrão)
+            # Criar diretório de saída
             os.makedirs(output_dir, exist_ok=True)
-
-            generated_files = []
 
             # Processar questions_options: converter chaves string para int
             questions_map = {}
             if questions_options:
                 for key, value in questions_options.items():
                     try:
-                        q_num = int(key)  # Converter "1" -> 1
+                        q_num = int(key)
                         if isinstance(value, list) and len(value) >= 2:
                             questions_map[q_num] = value
                         else:
@@ -103,63 +113,113 @@ class AnswerSheetGenerator:
                     if q not in questions_map:
                         questions_map[q] = ['A', 'B', 'C', 'D']
 
-            # Organizar questões por blocos se necessário
-            questions_by_block = None
-            if use_blocks:
-                questions_by_block = self._organize_questions_by_blocks(
-                    num_questions, blocks_config, questions_map
-                )
-
-            # Processamento incremental: gerar → salvar → liberar
-            total_students = len(students)
-            for idx, student in enumerate(students, 1):
+            # ✅ SEMPRE organizar questões por blocos (independente de use_blocks)
+            # use_blocks controla apenas se mostra "BLOCO XX" no template
+            logging.warning(f"\n=== DEBUG ORGANIZE BLOCKS ===")
+            logging.warning(f"use_blocks: {use_blocks}")
+            logging.warning(f"blocks_config: {blocks_config}")
+            logging.warning(f"============================\n")
+            
+            questions_by_block = self._organize_questions_by_blocks(
+                num_questions, blocks_config, questions_map
+            )            
+            logging.warning(f"\n=== RESULTADO ORGANIZE_BLOCKS ===")
+            logging.warning(f"questions_by_block: {questions_by_block}")
+            logging.warning(f"================================\n")
+            # ✅ GERAR 1 PDF COM MÚLTIPLAS PÁGINAS (1 página por aluno)
+            logging.info(f"[GENERATOR] Gerando PDF multi-página para {len(students)} alunos da turma {class_obj.name}")
+            
+            # Coletar HTMLs de todos os alunos
+            html_pages = []
+            for student in students:
                 try:
-                    # Gerar PDF individual para cada aluno
-                    pdf_data = self._generate_individual_answer_sheet(
-                        student, test_data, num_questions, use_blocks,
-                        blocks_config, questions_by_block, gabarito_id, questions_map
+                    student_data = self._get_complete_student_data(student)
+                    
+                    # Gerar QR code
+                    qr_code_base64 = self._generate_qr_code(
+                        student_id=student_data['id'],
+                        test_id=test_data.get('id'),
+                        gabarito_id=gabarito_id
                     )
 
-                    if pdf_data:
-                        file_info = {
-                            'student_id': student.id,
-                            'student_name': student.name,
-                            'has_pdf_data': True
-                        }
-                        
-                        if output_dir:
-                            # Salvar em disco e liberar memória imediatamente
-                            student_name_safe = student.name.replace(' ', '_').replace('/', '_')
-                            pdf_path = os.path.join(output_dir, f"cartao_{student_name_safe}_{student.id}.pdf")
-                            
-                            with open(pdf_path, 'wb') as f:
-                                f.write(pdf_data)
-                            
-                            file_info['pdf_path'] = pdf_path
-                            # NÃO incluir pdf_data quando salvo em disco
-                            del pdf_data
-                        else:
-                            # Modo compatibilidade: retornar bytes em memória
-                            file_info['pdf_data'] = pdf_data
-                        
-                        generated_files.append(file_info)
-                        
-                        # Liberar memória explicitamente após cada PDF
-                        gc.collect()
-                    
-                    # Log de progresso apenas a cada 10 alunos ou no final
-                    if idx % 10 == 0 or idx == total_students:
-                        logging.debug(f"Gerados {idx}/{total_students} cartões resposta")
+                    student_with_qr = student_data.copy()
+                    student_with_qr['qr_code'] = qr_code_base64
+
+                    # Preparar dados para template
+                    template_data = {
+                        'test_data': test_data,
+                        'student': student_with_qr,
+                        'questions_by_block': questions_by_block,
+                        'questions_map': questions_map,
+                        'blocks_config': blocks_config,  # ✅ SEMPRE passar blocks_config (nunca None)
+                        'total_questions': num_questions,
+                        'datetime': datetime,
+                        'generated_date': datetime.now().strftime('%d/%m/%Y %H:%M')
+                    }
+
+                    # Renderizar template HTML
+                    template = self.env.get_template('answer_sheet.html')
+                    html_content = template.render(**template_data)
+                    html_pages.append(html_content)
 
                 except Exception as e:
-                    # Log apenas em caso de erro (não dentro do loop normal)
-                    logging.error(f"Erro ao gerar cartão resposta para aluno {student.id}: {str(e)}", exc_info=True)
+                    logging.error(f"Erro ao gerar página para aluno {student.id}: {str(e)}", exc_info=True)
                     continue
 
-            return generated_files
+            if not html_pages:
+                raise ValueError("Nenhuma página foi gerada com sucesso")
+
+            # ✅ JUNTAR TODOS OS HTMLS EM 1 DOCUMENTO
+            # Cada página: <div style="page-break-after: always;">...HTML...</div>
+            combined_html = """<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <style>
+        @page { margin: 0; }
+        body { margin: 0; padding: 0; }
+        .page { page-break-after: always; }
+    </style>
+</head>
+<body>
+"""
+            for html_page in html_pages:
+                combined_html += f'<div class="page">{html_page}</div>\n'
+            
+            combined_html += """</body>
+</html>"""
+
+            # ✅ GERAR PDF ÚNICO COM TODAS AS PÁGINAS
+            pdf_buffer = io.BytesIO()
+            HTML(string=combined_html).write_pdf(pdf_buffer)
+            pdf_buffer.seek(0)
+            pdf_bytes = pdf_buffer.read()
+
+            # ✅ SALVAR EM DISCO
+            class_name_safe = class_obj.name.replace(' ', '_').replace('/', '_')
+            pdf_filename = f"cartoes_turma_{class_name_safe}_{class_id}.pdf"
+            pdf_path = os.path.join(output_dir, pdf_filename)
+
+            with open(pdf_path, 'wb') as f:
+                f.write(pdf_bytes)
+
+            file_size = os.path.getsize(pdf_path)
+            logging.info(f"[GENERATOR] ✅ PDF gerado: {pdf_filename} ({file_size} bytes)")
+
+            # Liberar memória
+            del pdf_bytes, pdf_buffer, combined_html, html_pages
+            gc.collect()
+
+            return {
+                'class_id': str(class_id),
+                'class_name': class_obj.name,
+                'pdf_path': pdf_path,
+                'student_count': len(students),
+                'file_size': file_size
+            }
 
         except Exception as e:
-            logging.error(f"Erro ao gerar cartões resposta: {str(e)}", exc_info=True)
+            logging.error(f"[GENERATOR] ❌ Erro ao gerar cartões resposta: {str(e)}", exc_info=True)
             raise
 
     def _generate_individual_answer_sheet(self, student: Dict, test_data: Dict,
@@ -425,4 +485,3 @@ class AnswerSheetGenerator:
             import traceback
             logging.error(traceback.format_exc())
             return ""
-

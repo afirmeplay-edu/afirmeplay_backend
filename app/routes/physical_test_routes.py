@@ -1394,7 +1394,7 @@ def get_physical_forms(test_id):
 
 @bp.route('/test/<string:test_id>/download/<string:form_id>', methods=['GET'])
 @jwt_required()
-@role_required("admin", "professor", "coordenador", "diretor")
+@role_required("admin", "professor", "coordenador", "diretor", "tecadm")
 def download_physical_form(test_id, form_id):
     """
     Download de formulário físico específico (URL pré-assinada do MinIO)
@@ -1489,7 +1489,7 @@ def download_physical_form(test_id, form_id):
 
 @bp.route('/test/<string:test_id>/download-all', methods=['GET'])
 @jwt_required()
-@role_required("admin", "professor", "coordenador", "diretor")
+@role_required("admin", "professor", "coordenador", "diretor", "tecadm")
 def download_all_physical_forms(test_id):
     """
     Retorna URL pré-assinada para download do ZIP de provas físicas do MinIO

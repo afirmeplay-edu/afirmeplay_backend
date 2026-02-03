@@ -26,11 +26,15 @@ class AnswerSheetGabarito(db.Model):
     # Vinculação opcional com prova ou turma
     test_id = db.Column(db.String, db.ForeignKey('test.id'), nullable=True)
     class_id = db.Column(UUID(as_uuid=True), db.ForeignKey('class.id'), nullable=True)
+    grade_id = db.Column(UUID(as_uuid=True), db.ForeignKey('grade.id'), nullable=True)
     
     # Configuração do cartão
     num_questions = db.Column(db.Integer, nullable=False)
     use_blocks = db.Column(db.Boolean, default=False)
     blocks_config = db.Column(JSON, nullable=True)  # {num_blocks, questions_per_block, separate_by_subject}
+    
+    # Escopo de geração: 'class' (1 turma), 'grade' (série inteira), 'school' (escola inteira)
+    scope_type = db.Column(db.String(50), default='class')  # class | grade | school | city
     
     # Gabarito: {1: "A", 2: "B", ...}
     correct_answers = db.Column(JSON, nullable=False)

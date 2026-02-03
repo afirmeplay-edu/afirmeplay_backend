@@ -1397,10 +1397,10 @@ def get_physical_forms(test_id):
 @role_required("admin", "professor", "coordenador", "diretor")
 def download_physical_form(test_id, form_id):
     """
-    Download de formulário físico específico
-    
+    Download de formulário físico específico (URL pré-assinada do MinIO)
+
     Returns:
-        - Arquivo PDF do formulário
+        - JSON com URL pré-assinada válida por 1 hora
     """
     try:
         user = get_current_user_from_token()
@@ -1420,23 +1420,68 @@ def download_physical_form(test_id, form_id):
         test = Test.query.get(test_id)
         if user['role'] == 'professor' and test.created_by != user['id']:
             return jsonify({"error": "Você não tem permissão para baixar este formulário"}), 403
-        
-        # Verificar se PDF existe no banco
-        if not form.form_pdf_data:
-            return jsonify({"error": "Arquivo PDF não encontrado no banco de dados"}), 404
-        
-        # Criar arquivo temporário em memória
-        from io import BytesIO
-        pdf_buffer = BytesIO(form.form_pdf_data)
-        pdf_buffer.seek(0)
-        
-        # Enviar arquivo do banco
-        return send_file(
-            pdf_buffer,
-            as_attachment=True,
-            download_name=f"prova_{test_id}_{form.student_id}.pdf",
-            mimetype='application/pdf'
-        )
+
+        # ============================================================
+        # NOVO FLUXO: usar MinIO como fonte única (sem legado Postgres)
+        # ============================================================
+        # Verificar se temos URL do PDF salva no formulário
+        if not form.form_pdf_url:
+            return jsonify({"error": "URL do PDF não encontrada para este formulário"}), 404
+
+        # Gerar URL pré-assinada a partir da URL salva (MinIO)
+        from app.services.storage.minio_service import MinIOService
+        from datetime import timedelta
+
+        minio = MinIOService()
+        bucket_name = minio.BUCKETS['PHYSICAL_TESTS']
+        file_url = form.form_pdf_url
+
+        # Extrair object_name da URL:
+        # Exemplo: http://minio-server:9000/physical-tests/<object_name>
+        #          https://files.afirmeplay.com.br/physical-tests/<object_name>
+        marker = f"/{bucket_name}/"
+        idx = file_url.find(marker)
+        if idx == -1:
+            # URL em formato inesperado - não conseguimos derivar o object_name
+            return jsonify({
+                "error": "Formato de URL do arquivo inválido para download",
+                "details": "URL não contém o caminho do bucket esperado",
+                "form_id": form_id,
+                "test_id": test_id
+            }), 400
+
+        object_name = file_url[idx + len(marker):]
+        if not object_name:
+            return jsonify({
+                "error": "Nome do objeto MinIO não encontrado na URL",
+                "form_id": form_id,
+                "test_id": test_id
+            }), 400
+
+        # Gerar URL pré-assinada (válida por 1 hora)
+        try:
+            presigned_url = minio.get_presigned_url(
+                bucket_name=bucket_name,
+                object_name=object_name,
+                expires=timedelta(hours=1)
+            )
+
+            return jsonify({
+                "download_url": presigned_url,
+                "expires_in": "1 hour",
+                "test_id": test_id,
+                "form_id": form_id,
+                "student_id": form.student_id,
+                "student_name": getattr(form, "student", None).name if getattr(form, "student", None) else None,
+                "created_at": form.generated_at.isoformat() if form.generated_at else None
+            }), 200
+
+        except Exception as minio_error:
+            logging.error(f"Erro ao gerar URL pré-assinada para formulário físico: {str(minio_error)}")
+            return jsonify({
+                "error": "Erro ao gerar URL de download",
+                "details": str(minio_error)
+            }), 500
         
     except Exception as e:
         print(f"❌ Erro ao baixar formulário físico: {str(e)}")

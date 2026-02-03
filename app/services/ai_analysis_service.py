@@ -4,8 +4,10 @@ Serviço para análise de relatórios usando OpenRouter AI
 """
 
 import logging
+import os
 import re
 from typing import Dict, Any, Optional
+import google.generativeai as genai
 from app.openai_config.openai_config import (
     OPENROUTER_MODEL,
     OPENROUTER_MAX_TOKENS,
@@ -28,8 +30,17 @@ class AIAnalysisService:
     
     def __init__(self):
         self.logger = logging.getLogger(__name__)
+        # Mantido por compatibilidade (não usado no fluxo Gemini),
+        # mas deixamos visível em runtime qual provedor/vars estão ativos.
         self.client = get_openrouter_client()
-        self.logger.info("Usando OpenRouter AI para análise de relatórios")
+
+        google_key_set = bool(os.getenv("GOOGLE_AI_STUDIO_API_KEY"))
+        google_model = os.getenv("GOOGLE_AI_STUDIO_MODEL", "gemini-1.5-pro")
+        print(
+            f"[AIAnalysisService] init | GOOGLE_AI_STUDIO_API_KEY set? {google_key_set} | "
+            f"GOOGLE_AI_STUDIO_MODEL={google_model}"
+        )
+        print("[AIAnalysisService] init | Provedor esperado para análise: Google AI Studio (Gemini)")
     
     def analyze_report_data(self, report_data: Dict[str, Any]) -> Dict[str, Any]:
         """
@@ -966,46 +977,78 @@ e recomendações práticas para a escola.
     
     def _call_openai(self, prompt: str) -> str:
         """
-        Chama a API do OpenRouter para gerar análise.
-        Adiciona logs detalhados para debug.
+        Chama a API do Google AI Studio (Gemini) para gerar análise.
+        Mantém a mesma assinatura usada anteriormente com OpenRouter.
         """
-        """Chama API OpenRouter via cliente OpenAI"""
         try:
-            system_prompt = "Você é um especialista em educação e análise de dados educacionais. Sempre gere texto humanizado e profissional, SEM usar formatação markdown (sem #, ##, *, **, etc). Use apenas parágrafos normais e títulos em maiúsculas seguidos de dois pontos."
-            
-            # Obter headers extras do OpenRouter (opcionais)
-            extra_headers = get_openrouter_extra_headers()
-            
-            # Fazer chamada usando cliente OpenAI
-            completion = self.client.chat.completions.create(
-                model=OPENROUTER_MODEL,
-                messages=[
-                    {
-                        "role": "system",
-                        "content": system_prompt
-                    },
-                    {
-                        "role": "user",
-                        "content": prompt
-                    }
-                ],
-                temperature=OPENROUTER_TEMPERATURE,
-                max_tokens=OPENROUTER_MAX_TOKENS,
-                extra_headers=extra_headers if extra_headers else {}
+            # Chave da API do Google AI Studio deve vir de variável de ambiente
+            api_key = os.getenv("GOOGLE_AI_STUDIO_API_KEY")
+            if not api_key:
+                self.logger.error("GOOGLE_AI_STUDIO_API_KEY não configurada no ambiente")
+                raise RuntimeError("Chave da API do Google AI Studio não configurada")
+
+            # Configurar cliente global do Gemini
+            genai.configure(api_key=api_key)
+
+            # Modelo: sempre usar GOOGLE_AI_STUDIO_MODEL do ambiente (ex: gemini-3-pro-preview)
+            model_name = (os.getenv("GOOGLE_AI_STUDIO_MODEL") or "gemini-1.5-pro").strip()
+            if not model_name:
+                model_name = "gemini-1.5-pro"
+            print(f"[AIAnalysisService] call | Google AI Studio (Gemini) | model={model_name}")
+
+            system_prompt = (
+                "Você é um especialista em educação e análise de dados educacionais. "
+                "Sempre gere texto humanizado e profissional, SEM usar formatação markdown "
+                "(sem #, ##, *, **, etc). Use apenas parágrafos normais e títulos em "
+                "maiúsculas seguidos de dois pontos."
             )
-            
-            # Extrair conteúdo da resposta
-            if completion.choices and len(completion.choices) > 0:
-                content = completion.choices[0].message.content
-                if content:
-                    return content
-            
-            # Se não houver conteúdo, lançar exceção
-            self.logger.error(f"Resposta do OpenRouter em formato inesperado: {completion}")
-            raise Exception("Resposta do OpenRouter em formato inesperado")
-                
+
+            # Gemini 3 usa "thinking" interno: com prompt longo pode consumir todos os tokens
+            # e devolver finish_reason=MAX_TOKENS sem Part. Reservar mais tokens para a saída.
+            max_tokens = OPENROUTER_MAX_TOKENS
+            if "gemini-3" in (model_name or "").lower():
+                max_tokens = int(os.getenv("GOOGLE_AI_STUDIO_MAX_OUTPUT_TOKENS", "32768"))
+                self.logger.info("Gemini 3 detectado: max_output_tokens=%s (evita resposta vazia com prompts longos)", max_tokens)
+            generation_config = {
+                "temperature": OPENROUTER_TEMPERATURE,
+                "max_output_tokens": max_tokens,
+            }
+
+            model = genai.GenerativeModel(
+                model_name,
+                system_instruction=system_prompt,
+                generation_config=generation_config,
+            )
+
+            response = model.generate_content(prompt)
+
+            # Extrair texto dos candidates/parts (evita ValueError quando response.text
+            # não existe por finish_reason=MAX_TOKENS/SAFETY/etc. ou Part vazia)
+            candidates = getattr(response, "candidates", None) or []
+            for cand in candidates:
+                content = getattr(cand, "content", None)
+                if not content:
+                    continue
+                parts = getattr(content, "parts", None) or []
+                texts = [getattr(p, "text", "") for p in parts if getattr(p, "text", "")]
+                joined = "\n".join(texts).strip()
+                if joined:
+                    return joined
+
+            # Sem texto: logar finish_reason para diagnóstico (2=MAX_TOKENS, 3=SAFETY, etc.)
+            finish_reasons = [getattr(c, "finish_reason", None) for c in candidates]
+            self.logger.error(
+                "Resposta do Google AI sem Part válida. finish_reason(s)=%s. "
+                "Se 2 (MAX_TOKENS), aumente OPENROUTER_MAX_TOKENS ou use modelo com mais saída.",
+                finish_reasons,
+            )
+            raise RuntimeError(
+                "Resposta do Google AI sem conteúdo (finish_reason pode ser MAX_TOKENS ou SAFETY). "
+                "Tente aumentar max_output_tokens ou outro modelo."
+            )
+
         except Exception as e:
-            self.logger.error(f"Erro ao chamar OpenRouter AI: {str(e)}", exc_info=True)
+            self.logger.error(f"Erro ao chamar Google AI Studio: {str(e)}", exc_info=True)
             raise
     
     def _process_ai_response(self, ai_response: str) -> Dict[str, str]:

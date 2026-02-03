@@ -1,38 +1,38 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="pt-BR">
 	<head>
 		<meta charset="UTF-8" />
 		<meta name="viewport" content="width=device-width, initial-scale=1.0" />
 		<title>Cartão Resposta - {{ test_data.title }}</title>
 		<style>
-		/* PASSO 1: @page SEM margem (controle tudo no layout interno) */
-		/* ✅ REGRA DE OURO OMR: Controle tudo no layout, sem margem no @page */
-		@page {
-			size: A4 portrait;
-			margin: 0; /* ✅ SEM margem - controle tudo no layout interno */
-		}
+			/* PASSO 1: @page SEM margem (controle tudo no layout interno) */
+			/* ✅ REGRA DE OURO OMR: Controle tudo no layout, sem margem no @page */
+			@page {
+				size: A4 portrait;
+				margin: 0; /* ✅ SEM margem - controle tudo no layout interno */
+			}
 
-		@page with-footer {
-			margin: 0; /* ✅ SEM margem - rodapé funciona sem margem */
-			@bottom-left {
-				content: "AfirmePlay Sistema de Ensino e Avaliação";
-				font-family: "Helvetica", Arial, sans-serif;
-				font-size: 7pt;
-				color: #999;
+			@page with-footer {
+				margin: 0; /* ✅ SEM margem - rodapé funciona sem margem */
+				@bottom-left {
+					content: "AfirmePlay Sistema de Ensino e Avaliação";
+					font-family: "Helvetica", Arial, sans-serif;
+					font-size: 7pt;
+					color: #999;
+				}
+				@bottom-center {
+					content: "Página " counter(page);
+					font-family: "Helvetica", Arial, sans-serif;
+					font-size: 7pt;
+					color: #999;
+				}
+				@bottom-right {
+					content: "Gerado em {{ generated_date }}";
+					font-family: "Helvetica", Arial, sans-serif;
+					font-size: 7pt;
+					color: #999;
+				}
 			}
-			@bottom-center {
-				content: "Página " counter(page);
-				font-family: "Helvetica", Arial, sans-serif;
-				font-size: 7pt;
-				color: #999;
-			}
-			@bottom-right {
-				content: "Gerado em {{ generated_date }}";
-				font-family: "Helvetica", Arial, sans-serif;
-				font-size: 7pt;
-				color: #999;
-			}
-		}
 
 			* {
 				margin: 0;
@@ -84,103 +84,103 @@
 				right: 0.2cm;
 			}
 
-		/* Formulário de Respostas */
-		/* PASSO 2: Definir área útil real A4 (sem conflito com @page) */
-		.answer-sheet {
-			page: with-footer;
-			/* ❌ REMOVIDO: page-break-before: always; (causa quebra de página) */
-			position: relative;
-			
-			/* Área útil real A4 completa */
-			width: 21cm;   /* ✅ Largura A4 */
-			height: 29.7cm; /* ✅ Altura A4 completa */
-			
-		/* ÁREA ÚTIL - Padding intocável para conteúdo OMR */
-		/* Cria zona morta (clear zone) ao redor do conteúdo */
-		/* ✅ Padding-top reduzido para aproximar conteúdo dos quadrados de cima */
-		padding: 1.2cm 2cm 2.2cm 2cm; /* top right bottom left - reduzido top para subir tudo */
-		box-sizing: border-box;
-			
-			overflow: hidden; /* ✅ PROÍBE quebrar página - OBRIGATÓRIO em OMR */
-		}
+			/* Formulário de Respostas */
+			/* PASSO 2: Definir área útil real A4 (sem conflito com @page) */
+			.answer-sheet {
+				page: with-footer;
+				/* ❌ REMOVIDO: page-break-before: always; (causa quebra de página) */
+				position: relative;
 
-	/* TRIÂNGULOS DE ALINHAMENTO (FIDUCIAIS DO BLOCO DE QUESTÕES) */
-	/* ✅ REGRA DE OURO OMR: Marcadores fiduciais referenciam o GRID, não a página */
-	/* ✅ Zona morta criada pelo padding do .answer-grid-wrapper (0.6cm) */
-	.alignment-triangle {
-		position: absolute; /* Relativo ao .answer-grid-wrapper (position: relative) */
-		width: 0;
-		height: 0;
-		z-index: 10;
-		pointer-events: none;
-	}
+				/* Área útil real A4 completa */
+				width: 21cm; /* ✅ Largura A4 */
+				height: 29.7cm; /* ✅ Altura A4 completa */
 
-	/* Triângulo superior esquerdo - Relativo ao grid */
-	.triangle-top-left {
-		top: 0; /* ✅ Colado na zona morta do wrapper (padding: 0.3cm) */
-		left: 0; /* ✅ Colado na zona morta do wrapper */
-		border-top: 0.6cm solid #000; /* ✅ Tamanho do triângulo */
-		border-right: 0.6cm solid transparent;
-	}
+				/* ÁREA ÚTIL - Padding intocável para conteúdo OMR */
+				/* Cria zona morta (clear zone) ao redor do conteúdo */
+				/* ✅ Padding-top reduzido para aproximar conteúdo dos quadrados de cima */
+				padding: 1.2cm 2cm 2.2cm 2cm; /* top right bottom left - reduzido top para subir tudo */
+				box-sizing: border-box;
 
-	/* Triângulo superior direito - Relativo ao grid */
-	.triangle-top-right {
-		top: 0; /* ✅ Colado na zona morta do wrapper */
-		right: 0; /* ✅ Colado na zona morta do wrapper */
-		border-top: 0.6cm solid #000; /* ✅ Tamanho do triângulo */
-		border-left: 0.6cm solid transparent;
-	}
+				overflow: hidden; /* ✅ PROÍBE quebrar página - OBRIGATÓRIO em OMR */
+			}
 
-	/* Triângulo inferior esquerdo - Relativo ao grid */
-	.triangle-bottom-left {
-		bottom: 0; /* ✅ Colado na zona morta do wrapper (fiducial dentro do grid) */
-		left: 0; /* ✅ Colado na zona morta do wrapper */
-		border-bottom: 0.6cm solid #000; /* ✅ Tamanho do triângulo */
-		border-right: 0.6cm solid transparent;
-	}
+			/* TRIÂNGULOS DE ALINHAMENTO (FIDUCIAIS DO BLOCO DE QUESTÕES) */
+			/* ✅ REGRA DE OURO OMR: Marcadores fiduciais referenciam o GRID, não a página */
+			/* ✅ Zona morta criada pelo padding do .answer-grid-wrapper (0.6cm) */
+			.alignment-triangle {
+				position: absolute; /* Relativo ao .answer-grid-wrapper (position: relative) */
+				width: 0;
+				height: 0;
+				z-index: 10;
+				pointer-events: none;
+			}
 
-	/* Triângulo inferior direito - Relativo ao grid */
-	.triangle-bottom-right {
-		bottom: 0; /* ✅ Colado na zona morta do wrapper (fiducial dentro do grid) */
-		right: 0; /* ✅ Colado na zona morta do wrapper */
-		border-bottom: 0.6cm solid #000; /* ✅ Tamanho do triângulo */
-		border-left: 0.6cm solid transparent;
-	}
+			/* Triângulo superior esquerdo - Relativo ao grid */
+			.triangle-top-left {
+				top: 0; /* ✅ Colado na zona morta do wrapper (padding: 0.3cm) */
+				left: 0; /* ✅ Colado na zona morta do wrapper */
+				border-top: 0.6cm solid #000; /* ✅ Tamanho do triângulo */
+				border-right: 0.6cm solid transparent;
+			}
+
+			/* Triângulo superior direito - Relativo ao grid */
+			.triangle-top-right {
+				top: 0; /* ✅ Colado na zona morta do wrapper */
+				right: 0; /* ✅ Colado na zona morta do wrapper */
+				border-top: 0.6cm solid #000; /* ✅ Tamanho do triângulo */
+				border-left: 0.6cm solid transparent;
+			}
+
+			/* Triângulo inferior esquerdo - Relativo ao grid */
+			.triangle-bottom-left {
+				bottom: 0; /* ✅ Colado na zona morta do wrapper (fiducial dentro do grid) */
+				left: 0; /* ✅ Colado na zona morta do wrapper */
+				border-bottom: 0.6cm solid #000; /* ✅ Tamanho do triângulo */
+				border-right: 0.6cm solid transparent;
+			}
+
+			/* Triângulo inferior direito - Relativo ao grid */
+			.triangle-bottom-right {
+				bottom: 0; /* ✅ Colado na zona morta do wrapper (fiducial dentro do grid) */
+				right: 0; /* ✅ Colado na zona morta do wrapper */
+				border-bottom: 0.6cm solid #000; /* ✅ Tamanho do triângulo */
+				border-left: 0.6cm solid transparent;
+			}
 
 			/* Cabeçalho da folha de resposta */
 			/* ETAPA 2: Travar altura do cabeçalho */
-		.answer-sheet-header {
-			border: 1px solid #000;
-			padding: 4px;
-			margin: 0;
-			margin-bottom: 2px; /* ✅ Reduzido para subir elementos abaixo */
-			display: flex;
-			justify-content: space-between;
-			align-items: stretch;
-			height: 6.4cm; /* ✅ Altura fixa */
-			max-height: 6.4cm; /* ✅ Trava máxima */
-			overflow: hidden; /* ✅ PROÍBE crescimento */
-			width: 100%; /* ✅ Ocupa toda largura disponível */
-			box-sizing: border-box; /* ✅ Inclui padding e border no cálculo */
-		}
+			.answer-sheet-header {
+				border: 1px solid #000;
+				padding: 4px;
+				margin: 0;
+				margin-bottom: 2px; /* ✅ Reduzido para subir elementos abaixo */
+				display: flex;
+				justify-content: space-between;
+				align-items: stretch;
+				height: 6.4cm; /* ✅ Altura fixa */
+				max-height: 6.4cm; /* ✅ Trava máxima */
+				overflow: hidden; /* ✅ PROÍBE crescimento */
+				width: 100%; /* ✅ Ocupa toda largura disponível */
+				box-sizing: border-box; /* ✅ Inclui padding e border no cálculo */
+			}
 
-		.header-left {
-			flex: 1;
-			display: flex;
-			flex-direction: column;
-			justify-content: space-between;
-			min-width: 0; /* ✅ Permite que encolha se necessário */
-			overflow: hidden; /* ✅ Evita que conteúdo ultrapasse */
-		}
+			.header-left {
+				flex: 1;
+				display: flex;
+				flex-direction: column;
+				justify-content: space-between;
+				min-width: 0; /* ✅ Permite que encolha se necessário */
+				overflow: hidden; /* ✅ Evita que conteúdo ultrapasse */
+			}
 
-		.header-info-line {
-			font-size: 7pt;
-			margin: 0.5px 0;
-			text-transform: uppercase;
-			overflow: hidden; /* ✅ Evita que texto ultrapasse */
-			text-overflow: ellipsis; /* ✅ Mostra "..." se texto for muito longo */
-			white-space: nowrap; /* ✅ Mantém texto em uma linha */
-		}
+			.header-info-line {
+				font-size: 7pt;
+				margin: 0.5px 0;
+				text-transform: uppercase;
+				overflow: hidden; /* ✅ Evita que texto ultrapasse */
+				text-overflow: ellipsis; /* ✅ Mostra "..." se texto for muito longo */
+				white-space: nowrap; /* ✅ Mantém texto em uma linha */
+			}
 
 			.header-info-line .label {
 				font-weight: bold;
@@ -190,15 +190,15 @@
 				font-weight: normal;
 			}
 
-		.student-name-grid {
-			margin-top: 4px;
-			margin-bottom: 10px;
-			border-top: 1px solid #000;
-			padding-top: 3px;
-			width: 100%; /* ✅ Ocupa toda largura do .header-left */
-			box-sizing: border-box; /* ✅ Inclui border no cálculo */
-			overflow: hidden; /* ✅ Evita que ultrapasse */
-		}
+			.student-name-grid {
+				margin-top: 4px;
+				margin-bottom: 10px;
+				border-top: 1px solid #000;
+				padding-top: 3px;
+				width: 100%; /* ✅ Ocupa toda largura do .header-left */
+				box-sizing: border-box; /* ✅ Inclui border no cálculo */
+				overflow: hidden; /* ✅ Evita que ultrapasse */
+			}
 
 			.student-name-label {
 				font-size: 7pt;
@@ -226,19 +226,19 @@
 				background: white;
 			}
 
-		.header-right {
-			width: 140px;
-			min-width: 140px; /* ✅ Largura mínima fixa */
-			max-width: 140px; /* ✅ Largura máxima fixa */
-			display: flex;
-			flex-direction: column;
-			align-items: center;
-			justify-content: center;
-			border-left: 1px solid #000;
-			padding-left: 10px;
-			margin-left: 10px;
-			flex-shrink: 0;
-		}
+			.header-right {
+				width: 140px;
+				min-width: 140px; /* ✅ Largura mínima fixa */
+				max-width: 140px; /* ✅ Largura máxima fixa */
+				display: flex;
+				flex-direction: column;
+				align-items: center;
+				justify-content: center;
+				border-left: 1px solid #000;
+				padding-left: 10px;
+				margin-left: 10px;
+				flex-shrink: 0;
+			}
 
 			.qr-code-box {
 				width: 120px;
@@ -269,17 +269,17 @@
 				margin-bottom: 2px;
 			}
 
-		.signature-section {
-			border-top: 1px dashed #000;
-			margin-top: 15px;
-			padding-bottom: 0;
-			text-align: center;
-			font-size: 7pt;
-			font-weight: bold;
-			width: 100%; /* ✅ Ocupa toda largura do .header-left */
-			box-sizing: border-box; /* ✅ Inclui border no cálculo */
-			overflow: hidden; /* ✅ Evita que ultrapasse */
-		}
+			.signature-section {
+				border-top: 1px dashed #000;
+				margin-top: 15px;
+				padding-bottom: 0;
+				text-align: center;
+				font-size: 7pt;
+				font-weight: bold;
+				width: 100%; /* ✅ Ocupa toda largura do .header-left */
+				box-sizing: border-box; /* ✅ Inclui border no cálculo */
+				overflow: hidden; /* ✅ Evita que ultrapasse */
+			}
 
 			/* Instruções */
 			/* ETAPA 3: Travar altura das instruções (ajustado para não cortar texto) */
@@ -419,17 +419,17 @@
 				flex-shrink: 0;
 			}
 
-		/* WRAPPER DO GRID COM TRIÂNGULOS FIDUCIAIS */
-		/* PASSO 3: Corrigir wrapper da grade (cálculo REAL atualizado) */
-		/* Cálculo REAL: 29.7cm - 1.2cm (top) - 6.4cm (header) - 3.8cm (instruções) - 2.6cm (aplicador) - 2.2cm (bottom) = 13.5cm */
-		.answer-grid-wrapper {
-			position: relative; /* 🔴 ESSENCIAL: Para triângulos serem relativos ao grid */
-			padding: 0.3cm 0.6cm 1.5cm 0.6cm; /* ✅ Zona morta: top reduzido para subir triângulos, bottom ajustado para garantir borda dos blocos */
-			margin: 2px 0; /* ✅ Reduzido para subir os blocos */
-			height: 13.5cm; /* ✅ Altura REAL recalculada (aumentada devido ao padding-top menor) */
-			max-height: 13.5cm; /* ✅ Trava máxima */
-			overflow: hidden; /* ✅ PROÍBE crescimento */
-		}
+			/* WRAPPER DO GRID COM TRIÂNGULOS FIDUCIAIS */
+			/* PASSO 3: Corrigir wrapper da grade (cálculo REAL atualizado) */
+			/* Cálculo REAL: 29.7cm - 1.2cm (top) - 6.4cm (header) - 3.8cm (instruções) - 2.6cm (aplicador) - 2.2cm (bottom) = 13.5cm */
+			.answer-grid-wrapper {
+				position: relative; /* 🔴 ESSENCIAL: Para triângulos serem relativos ao grid */
+				padding: 0.3cm 0.6cm 1.5cm 0.6cm; /* ✅ Zona morta: top reduzido para subir triângulos, bottom ajustado para garantir borda dos blocos */
+				margin: 2px 0; /* ✅ Reduzido para subir os blocos */
+				height: 13.5cm; /* ✅ Altura REAL recalculada (aumentada devido ao padding-top menor) */
+				max-height: 13.5cm; /* ✅ Trava máxima */
+				overflow: hidden; /* ✅ PROÍBE crescimento */
+			}
 
 			/* Grade de respostas - adaptável para múltiplos blocos */
 			/* ETAPA 6: Grid fixo (não flex solto) */
@@ -441,56 +441,56 @@
 				height: 100%; /* ✅ Altura completa do wrapper */
 			}
 
-		/* Wrapper do bloco com header externo */
-		.block-wrapper {
-			display: flex;
-			flex-direction: column;
-			flex: 1 1 auto;
-			min-width: 0;
-		}
+			/* Wrapper do bloco com header externo */
+			.block-wrapper {
+				display: flex;
+				flex-direction: column;
+				flex: 1 1 auto;
+				min-width: 0;
+			}
 
-		.block-header {
-			text-align: center;
-			font-weight: bold;
-			font-size: 8pt;
-			margin: 0 0 3px 0; /* ✅ Margem abaixo do header para separar do bloco */
-			padding: 2px;
-			background: transparent; /* ✅ Sem background para ficar fora do quadrado */
-			line-height: 1.2;
-			flex-shrink: 0;
-		}
+			.block-header {
+				text-align: center;
+				font-weight: bold;
+				font-size: 8pt;
+				margin: 0 0 3px 0; /* ✅ Margem abaixo do header para separar do bloco */
+				padding: 2px;
+				background: transparent; /* ✅ Sem background para ficar fora do quadrado */
+				line-height: 1.2;
+				flex-shrink: 0;
+			}
 
-		/* PASSO 5: Travar bloco para não estourar */
-		.answer-block {
-			border: 2px solid #000;
-			padding: 8px 4px 8px 4px; /* ✅ Padding interno em cima e embaixo para não encostar nas bordas */
-			flex: 1 1 auto;
-			min-width: 0;
-			position: relative;
-			background: white;
-			overflow: hidden; /* ✅ PROÍBE crescimento */
-			display: flex;
-			flex-direction: column;
-		}
+			/* PASSO 5: Travar bloco para não estourar */
+			.answer-block {
+				border: 2px solid #000;
+				padding: 8px 4px 8px 4px; /* ✅ Padding interno em cima e embaixo para não encostar nas bordas */
+				flex: 1 1 auto;
+				min-width: 0;
+				position: relative;
+				background: white;
+				overflow: hidden; /* ✅ PROÍBE crescimento */
+				display: flex;
+				flex-direction: column;
+			}
 
-		/* PASSO 4: Corrigir altura da linha (CRÍTICO para 26 questões) */
-		/* 26 questões × 0.42cm = 10.92cm (cabe com folga no bloco) */
-		.answer-row {
-			display: flex;
-			align-items: center;
-			margin: 0; /* ✅ Sem margem */
-			padding: 0; /* ✅ Sem padding */
-			min-height: 0.44cm; /* ✅ Altura ajustada para 26 questões (aumentada para acomodar bolhas de 15px) */
-			max-height: 0.44cm; /* ✅ Trava máxima */
-			gap: 0;
-			flex-shrink: 0; /* ✅ Não encolhe */
-		}
-		
-		/* Eliminar espaço extra após última questão */
-		.answer-block > .answer-row:last-child {
-			margin-bottom: 0;
-			padding-bottom: 0;
-		}
+			/* PASSO 4: Corrigir altura da linha (CRÍTICO para 26 questões) */
+			/* 26 questões × 0.42cm = 10.92cm (cabe com folga no bloco) */
+			.answer-row {
+				display: flex;
+				align-items: center;
+				margin: 0; /* ✅ Sem margem */
+				padding: 0; /* ✅ Sem padding */
+				min-height: 0.44cm; /* ✅ Altura ajustada para 26 questões (aumentada para acomodar bolhas de 15px) */
+				max-height: 0.44cm; /* ✅ Trava máxima */
+				gap: 0;
+				flex-shrink: 0; /* ✅ Não encolhe */
+			}
+
+			/* Eliminar espaço extra após última questão */
+			.answer-block > .answer-row:last-child {
+				margin-bottom: 0;
+				padding-bottom: 0;
+			}
 
 			.question-num {
 				font-size: 7pt;
@@ -568,13 +568,13 @@
 					<rect width="20" height="20" fill="#000" />
 				</svg>
 			</div>
-		<div class="a4-anchor-square anchor-bottom-right">
-			<svg width="20" height="20" xmlns="http://www.w3.org/2000/svg">
-				<rect width="20" height="20" fill="#000" />
-			</svg>
-		</div>
-		
-		<!-- Cabeçalho -->
+			<div class="a4-anchor-square anchor-bottom-right">
+				<svg width="20" height="20" xmlns="http://www.w3.org/2000/svg">
+					<rect width="20" height="20" fill="#000" />
+				</svg>
+			</div>
+
+			<!-- Cabeçalho -->
 			<div class="answer-sheet-header">
 				<div class="header-left">
 					<div>
@@ -613,8 +613,8 @@
 						<div class="header-info-line">
 							<span class="label">TURMA:</span>
 							<span class="value"
-								>{{ student.class_name or 'Não informado'
-								}}</span
+								>{{ test_data.grade_name or 'Sem turma' }} - {{
+								student.class_name or 'A' }}</span
 							>
 						</div>
 					</div>
@@ -726,23 +726,23 @@
 				</div>
 			</div>
 
-		<!-- Grade de Respostas -->
-		<div class="answer-grid-wrapper">
-			<!-- ✅ TRIÂNGULOS FIDUCIAIS DO BLOCO DE QUESTÕES -->
-			<!-- ✅ Marcadores fiduciais referenciam o GRID, não a página inteira -->
-			<div class="alignment-triangle triangle-top-left"></div>
-			<div class="alignment-triangle triangle-top-right"></div>
-			<div class="alignment-triangle triangle-bottom-left"></div>
-			<div class="alignment-triangle triangle-bottom-right"></div>
-			
-			<!-- GRID DE RESPOSTAS -->
+			<!-- Grade de Respostas -->
+			<div class="answer-grid-wrapper">
+				<!-- ✅ TRIÂNGULOS FIDUCIAIS DO BLOCO DE QUESTÕES -->
+				<!-- ✅ Marcadores fiduciais referenciam o GRID, não a página inteira -->
+				<div class="alignment-triangle triangle-top-left"></div>
+				<div class="alignment-triangle triangle-top-right"></div>
+				<div class="alignment-triangle triangle-bottom-left"></div>
+				<div class="alignment-triangle triangle-bottom-right"></div>
+
+				<!-- GRID DE RESPOSTAS -->
 				<div class="answer-grid-container">
 					{% if blocks_config and blocks_config.use_blocks %} {% set
 					num_blocks = blocks_config.num_blocks | default(1) %} {% set
 					questions_per_block = blocks_config.questions_per_block |
 					default(12) %} {% if questions_by_block %} {% for block in
 					questions_by_block %} {% set questions_in_block =
-					block.questions | length %} 					{% if questions_in_block > 0 %}
+					block.questions | length %} {% if questions_in_block > 0 %}
 					<div class="block-wrapper">
 						<div class="block-header">
 							BLOCO {{ "%02d"|format(block.block_number) }}{% if
@@ -750,28 +750,28 @@
 							endif %}
 						</div>
 						<div class="answer-block">
-						<!-- Linhas de resposta -->
-						{% for question in block.questions %}
-						<div class="answer-row">
-							<span class="question-num">
-								<span class="question-num-text"
-									>{{ question.question_number }}.</span
-								>
-							</span>
+							<!-- Linhas de resposta -->
+							{% for question in block.questions %}
+							<div class="answer-row">
+								<span class="question-num">
+									<span class="question-num-text"
+										>{{ question.question_number }}.</span
+									>
+								</span>
 
-							<div class="bubbles">
-								{% if question.options %} {% for opt in
-								question.options %}
-								<div class="bubble">{{ opt }}</div>
-								{% endfor %} {% else %}
-								<div class="bubble">A</div>
-								<div class="bubble">B</div>
-								<div class="bubble">C</div>
-								<div class="bubble">D</div>
-								{% endif %}
+								<div class="bubbles">
+									{% if question.options %} {% for opt in
+									question.options %}
+									<div class="bubble">{{ opt }}</div>
+									{% endfor %} {% else %}
+									<div class="bubble">A</div>
+									<div class="bubble">B</div>
+									<div class="bubble">C</div>
+									<div class="bubble">D</div>
+									{% endif %}
+								</div>
 							</div>
-						</div>
-						{% endfor %}
+							{% endfor %}
 						</div>
 					</div>
 					{% endif %} {% endfor %} {% else %} {% for block_num in
@@ -784,28 +784,27 @@
 							BLOCO {{ "%02d"|format(block_num) }}
 						</div>
 						<div class="answer-block">
-
-						{% for q_num in range(start_question, end_question + 1)
-						%}
-						<div class="answer-row">
-							<span class="question-num">
-								<span class="question-num-text"
-									>{{ q_num }}.</span
-								>
-							</span>
-							<div class="bubbles">
-								{% if questions_map and questions_map[q_num] %}
-								{% for opt in questions_map[q_num] %}
-								<div class="bubble">{{ opt }}</div>
-								{% endfor %} {% else %}
-								<div class="bubble">A</div>
-								<div class="bubble">B</div>
-								<div class="bubble">C</div>
-								<div class="bubble">D</div>
-								{% endif %}
+							{% for q_num in range(start_question, end_question +
+							1) %}
+							<div class="answer-row">
+								<span class="question-num">
+									<span class="question-num-text"
+										>{{ q_num }}.</span
+									>
+								</span>
+								<div class="bubbles">
+									{% if questions_map and questions_map[q_num]
+									%} {% for opt in questions_map[q_num] %}
+									<div class="bubble">{{ opt }}</div>
+									{% endfor %} {% else %}
+									<div class="bubble">A</div>
+									<div class="bubble">B</div>
+									<div class="bubble">C</div>
+									<div class="bubble">D</div>
+									{% endif %}
+								</div>
 							</div>
-						</div>
-						{% endfor %}
+							{% endfor %}
 						</div>
 					</div>
 					{% endfor %} {% endif %} {% else %} {% set
@@ -823,29 +822,28 @@
 							BLOCO {{ "%02d"|format(block) }}
 						</div>
 						<div class="answer-block">
-
-						{% for q in range(1, questions_in_block + 1) %} {% set
-						question_num = start_question + q - 1 %}
-						<div class="answer-row">
-							<span class="question-num">
-								<span class="question-num-text"
-									>{{ question_num }}.</span
-								>
-							</span>
-							<div class="bubbles">
-								{% if questions_map and
-								questions_map[question_num] %} {% for opt in
-								questions_map[question_num] %}
-								<div class="bubble">{{ opt }}</div>
-								{% endfor %} {% else %}
-								<div class="bubble">A</div>
-								<div class="bubble">B</div>
-								<div class="bubble">C</div>
-								<div class="bubble">D</div>
-								{% endif %}
+							{% for q in range(1, questions_in_block + 1) %} {%
+							set question_num = start_question + q - 1 %}
+							<div class="answer-row">
+								<span class="question-num">
+									<span class="question-num-text"
+										>{{ question_num }}.</span
+									>
+								</span>
+								<div class="bubbles">
+									{% if questions_map and
+									questions_map[question_num] %} {% for opt in
+									questions_map[question_num] %}
+									<div class="bubble">{{ opt }}</div>
+									{% endfor %} {% else %}
+									<div class="bubble">A</div>
+									<div class="bubble">B</div>
+									<div class="bubble">C</div>
+									<div class="bubble">D</div>
+									{% endif %}
+								</div>
 							</div>
-						</div>
-						{% endfor %}
+							{% endfor %}
 						</div>
 					</div>
 					{% endif %} {% endfor %} {% endif %}

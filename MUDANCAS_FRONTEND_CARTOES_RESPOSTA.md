@@ -4,6 +4,8 @@
 
 ### **O que foi mudado:**
 
+### Comentário para subir de novo o backend pois deu erro!
+
 1. **Geração de PDFs**: Agora gera **1 PDF por turma** com múltiplas páginas (1 página por aluno)
 2. **Múltiplos escopos**: Suporta geração para 1 turma, múltiplas turmas de uma série ou escola inteira
 3. **Estrutura de blocos e alternativas**: **MANTIDA** (não mudou nada)

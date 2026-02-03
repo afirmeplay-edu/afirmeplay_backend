@@ -48,7 +48,7 @@ class AnswerSheetGenerator:
             use_blocks: Se usa blocos ou não
             blocks_config: Configuração de blocos {num_blocks, questions_per_block, separate_by_subject}
             correct_answers: Dict com respostas corretas {1: "A", 2: "B", ...}
-            gabarito_id: ID do gabarito salvo (opcional)
+            gabarito_id: ID do gabarito salvo (obrigatório para QR code)
             questions_options: Dict com alternativas de cada questão {1: ['A', 'B', 'C'], 2: ['A', 'B', 'C', 'D'], ...}
                               Se não fornecido, usa padrão A, B, C, D para todas
             output_dir: Diretório para salvar PDF em disco (padrão: /tmp/celery_pdfs/answer_sheets)
@@ -73,9 +73,17 @@ class AnswerSheetGenerator:
 
             # Buscar alunos da turma
             students = Student.query.filter_by(class_id=class_id).all()
+            print(f"\n=== DEBUG GENERATOR ===")
+            print(f"Turma: {class_obj.name} (ID: {class_id})")
+            print(f"Estudantes encontrados no generator: {len(students)}")
+            for student in students:
+                print(f"  - {student.name} (ID: {student.id})")
+            print(f"======================\n")
+            
             if not students:
                 raise ValueError(f"Nenhum aluno encontrado na turma {class_id}")
 
+            # Criar diretório de saída
             # Criar diretório de saída
             os.makedirs(output_dir, exist_ok=True)
 
@@ -84,7 +92,7 @@ class AnswerSheetGenerator:
             if questions_options:
                 for key, value in questions_options.items():
                     try:
-                        q_num = int(key)  # Converter "1" -> 1
+                        q_num = int(key)
                         if isinstance(value, list) and len(value) >= 2:
                             questions_map[q_num] = value
                         else:
@@ -461,4 +469,3 @@ class AnswerSheetGenerator:
             import traceback
             logging.error(traceback.format_exc())
             return ""
-

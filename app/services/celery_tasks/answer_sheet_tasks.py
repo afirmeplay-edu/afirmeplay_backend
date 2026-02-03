@@ -13,6 +13,7 @@ from typing import Dict, Any
 from celery import Task
 
 from app.report_analysis.celery_app import celery_app
+from app.services.progress_store import update_job, get_job
 from app import db
 
 logger = logging.getLogger(__name__)
@@ -89,6 +90,62 @@ def upload_answer_sheets_zip_async(
         logger.error(f"[CELERY-UPLOAD] ⚠️ Erro ao fazer upload para MinIO: {str(e)}", exc_info=True)
         # NÃO fazer retry - upload não é crítico
         return {'success': False, 'error': str(e)}
+
+
+# ============================================================================
+# FUNÇÕES AUXILIARES PARA CONSOLIDAÇÃO
+# ============================================================================
+
+def get_job_for_class(class_id: str) -> Dict:
+    """
+    Busca job que contém uma classe específica
+    """
+    try:
+        from app.services.progress_store import get_all_active_jobs
+        
+        jobs = get_all_active_jobs()
+        for job in jobs:
+            tasks = job.get('tasks', [])
+            for task in tasks:
+                if task.get('class_id') == str(class_id):
+                    return job
+        return None
+    except Exception as e:
+        logger.error(f"Erro ao buscar job para classe {class_id}: {str(e)}")
+        return None
+
+
+def should_consolidate_job(job_id: str) -> bool:
+    """
+    Verifica se todas as tasks de um job estão completas e se deve consolidar
+    """
+    try:
+        job = get_job(job_id)
+        if not job:
+            return False
+        
+        tasks = job.get('tasks', [])
+        if not tasks:
+            return False
+        
+        # Verificar se todas as tasks estão completas
+        completed_count = sum(1 for task in tasks if task.get('status') == 'completed')
+        total_count = len(tasks)
+        
+        logger.info(f"[CONSOLIDATE-CHECK] Job {job_id}: {completed_count}/{total_count} tasks completas")
+        
+        # Só consolida se todas estão completas E temos mais de 1 task
+        return completed_count == total_count and total_count > 1
+        
+    except Exception as e:
+        logger.error(f"Erro ao verificar consolidação para job {job_id}: {str(e)}")
+        return False
+
+
+# ============================================================================
+# Função consolidate_answer_sheets_to_zip (versão antiga) REMOVIDA
+# A versão correta está mais abaixo no arquivo (linha ~566)
+# ============================================================================
 
 
 @celery_app.task(
@@ -253,7 +310,6 @@ def generate_answer_sheets_batch_async(
         minio_url = None
         minio_object_name = None
         minio_bucket = None
-        download_size = 0
         
         # Upload usando arquivo em disco (streaming, não carrega tudo em memória)
         logger.info(f"[CELERY-BATCH] ☁️ Enviando ZIP para MinIO...")
@@ -279,7 +335,6 @@ def generate_answer_sheets_batch_async(
                 minio_url = upload_result['url']
                 minio_object_name = upload_result['object_name']
                 minio_bucket = upload_result['bucket']
-                download_size = upload_result['size']
                 
                 logger.info(f"[CELERY-BATCH] ✅ Upload concluído: {minio_url}")
                 
@@ -344,7 +399,7 @@ def generate_answer_sheets_batch_async(
         
         # 🔒 NÃO fazer retry por erro de MinIO - apenas por erros críticos de geração
         # Se PDFs foram gerados mas upload falhou, não retryar
-        is_minio_error = 'minio' in str(e).lower() or 's3' in str(e).lower() or 'ssl' in str(e).lower()
+        is_minio_error = 'minio' in error_str or 's3' in error_str or 'ssl' in error_str
         
         if is_minio_error:
             logger.warning(f"[CELERY-BATCH] ⚠️ Erro de MinIO detectado - não retryando task (PDFs podem ter sido gerados)")
@@ -356,7 +411,7 @@ def generate_answer_sheets_batch_async(
                 'is_minio_error': True
             }
         
-        # Retry apenas para erros críticos (não relacionados a MinIO)
+        # Retry apenas para erros críticos (não relacionados a MinIO ou permissões)
         if self.request.retries < self.max_retries:
             logger.info(f"[CELERY-BATCH] 🔄 Tentando novamente (retry {self.request.retries + 1}/{self.max_retries})...")
             raise self.retry(exc=e)

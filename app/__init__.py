@@ -140,8 +140,8 @@ def create_app():
     from app.socioeconomic_forms.routes import filter_routes
     from .play_tv import routes as playtv_routes
     from .plantao_online import routes as plantao_online_routes
-    from .competicoes import routes as competicoes_routes
     from app.certification.routes import certificate_routes
+    from app.balance.routes import bp as balance_bp
     # Importar rotas de report_analysis (processamento assíncrono)
     from app.report_analysis import routes as report_analysis_routes
     
@@ -184,11 +184,10 @@ def create_app():
     app.register_blueprint(filter_routes.bp)
     app.register_blueprint(playtv_routes.bp)
     app.register_blueprint(plantao_online_routes.bp)
-    app.register_blueprint(competicoes_routes.bp)
     app.register_blueprint(certificate_routes.bp)
+    app.register_blueprint(balance_bp)
     # Importar modelos para garantir que as tabelas sejam criadas
     from .models import City, School, SchoolTeacher, Teacher, Student, Subject, Class, ClassSubject, ClassTest, Test, EducationStage, Grade, Skill, Question, StudentAnswer, UserQuickLinks, TeacherClass, User, Manager
-    from .competicoes.models import Competition, CompetitionEnrollment, CompetitionResult
     from app.certification.models import CertificateTemplate, Certificate
 
     # Rota para servir o arquivo swagger.yaml a partir do diretório raiz do projeto

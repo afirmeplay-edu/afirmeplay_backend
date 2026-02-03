@@ -1,2 +1,0 @@
-# Competições Module
-

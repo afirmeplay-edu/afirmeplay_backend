@@ -44,4 +44,8 @@ from app.plantao_online.models import PlantaoOnline, PlantaoOnlineSchool
 # Certificados
 from app.certification.models import CertificateTemplate, Certificate
 
+# Saldo e moedas do aluno
+from app.balance.models import StudentCoins, CoinTransaction
 
+# Competições
+from app.competitions.models import CompetitionTemplate, Competition

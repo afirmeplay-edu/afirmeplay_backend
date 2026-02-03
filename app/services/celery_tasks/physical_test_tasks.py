@@ -426,10 +426,32 @@ def generate_physical_forms_async(
                             
                             logger.info(f"[CELERY] ✅ Upload concluído: {minio_url}")
                             
-                            # ✅ MODIFICADO: Provas físicas não usam AnswerSheetGabarito
-                            # O MinIO URL pode ser armazenado em outro lugar se necessário
-                            # Por enquanto, apenas logamos o sucesso
-                            logger.info(f"[CELERY] ✅ Upload para MinIO concluído (prova física não usa AnswerSheetGabarito)")
+                            # Criar ou atualizar AnswerSheetGabarito para o download-all funcionar
+                            gabarito = AnswerSheetGabarito.query.filter_by(test_id=test_id).first()
+                            if gabarito:
+                                gabarito.minio_url = minio_url
+                                gabarito.minio_object_name = minio_object_name
+                                gabarito.minio_bucket = minio_bucket
+                                gabarito.zip_generated_at = datetime.utcnow()
+                                logger.info(f"[CELERY] ✅ Gabarito atualizado com URL do MinIO (prova física)")
+                            else:
+                                gabarito = AnswerSheetGabarito(
+                                    test_id=test_id,
+                                    class_id=class_ids[0] if class_ids else None,
+                                    num_questions=num_questions,
+                                    use_blocks=use_blocks,
+                                    blocks_config=blocks_config,
+                                    correct_answers=correct_answers,
+                                    title=test.title,
+                                    grade_name=test.grade.name if test.grade else None,
+                                    minio_url=minio_url,
+                                    minio_object_name=minio_object_name,
+                                    minio_bucket=minio_bucket,
+                                    zip_generated_at=datetime.utcnow()
+                                )
+                                db.session.add(gabarito)
+                                logger.info(f"[CELERY] ✅ Gabarito criado com URL do MinIO (prova física)")
+                            db.session.commit()
                         else:
                             logger.warning(f"[CELERY] ⚠️ Upload para MinIO falhou, mas PDFs foram gerados com sucesso")
                             

@@ -551,6 +551,8 @@
 	</head>
 	<body>
 		<!-- Formulário de Respostas -->
+		<!-- ✅ Loop para gerar múltiplas páginas (1 por aluno) -->
+		{% if students %} {% for student in students %}
 		<div class="answer-sheet">
 			<!-- ÂNCORAS DA PÁGINA A4 (dentro do .answer-sheet com position: relative) -->
 			<div class="a4-anchor-square anchor-top-left">
@@ -850,5 +852,311 @@
 				</div>
 			</div>
 		</div>
+
+		<!-- ✅ Quebra de página entre alunos (exceto após o último) -->
+		{% if not loop.last %}
+		<div style="page-break-after: always"></div>
+		{% endif %} {% endfor %} {% else %}
+		<!-- ✅ Fallback: Modo compatibilidade com aluno único -->
+		<div class="answer-sheet">
+			<!-- ÂNCORAS DA PÁGINA A4 (dentro do .answer-sheet com position: relative) -->
+			<div class="a4-anchor-square anchor-top-left">
+				<svg width="20" height="20" xmlns="http://www.w3.org/2000/svg">
+					<rect width="20" height="20" fill="#000" />
+				</svg>
+			</div>
+			<div class="a4-anchor-square anchor-top-right">
+				<svg width="20" height="20" xmlns="http://www.w3.org/2000/svg">
+					<rect width="20" height="20" fill="#000" />
+				</svg>
+			</div>
+			<div class="a4-anchor-square anchor-bottom-left">
+				<svg width="20" height="20" xmlns="http://www.w3.org/2000/svg">
+					<rect width="20" height="20" fill="#000" />
+				</svg>
+			</div>
+			<div class="a4-anchor-square anchor-bottom-right">
+				<svg width="20" height="20" xmlns="http://www.w3.org/2000/svg">
+					<rect width="20" height="20" fill="#000" />
+				</svg>
+			</div>
+
+			<!-- Cabeçalho -->
+			<div class="answer-sheet-header">
+				<div class="header-left">
+					<div>
+						<div class="test-name-section">
+							<div class="header-info-line">
+								<span class="label">NOME DA PROVA:</span>
+								<span class="value">{{ test_data.title }}</span>
+							</div>
+						</div>
+						<div class="header-info-line">
+							<span class="label">NOME COMPLETO:</span>
+							<span class="value"
+								>{{ student.name or student.nome }}</span
+							>
+						</div>
+						<div class="header-info-line">
+							<span class="label">ESTADO:</span>
+							<span class="value"
+								>{{ test_data.state or 'ALAGOAS' }}</span
+							>
+						</div>
+						<div class="header-info-line">
+							<span class="label">MUNICÍPIO:</span>
+							<span class="value"
+								>{{ test_data.municipality or 'SÃO MIGUEL DOS
+								CAMPOS' }}</span
+							>
+						</div>
+						<div class="header-info-line">
+							<span class="label">ESCOLA:</span>
+							<span class="value"
+								>{{ student.school_name or 'Não informado'
+								}}</span
+							>
+						</div>
+						<div class="header-info-line">
+							<span class="label">TURMA:</span>
+							<span class="value"
+								>{{ test_data.grade_name or 'Sem turma' }} - {{
+								student.class_name or 'A' }}</span
+							>
+						</div>
+					</div>
+					<div class="student-name-grid">
+						<div class="student-name-label">NOME DO ALUNO:</div>
+						<div class="name-boxes">
+							<div class="name-boxes-row">
+								{% for i in range(23) %}
+								<span class="name-box"></span>
+								{% endfor %}
+							</div>
+							<div class="name-boxes-row">
+								{% for i in range(23) %}
+								<span class="name-box"></span>
+								{% endfor %}
+							</div>
+						</div>
+					</div>
+					<div class="signature-section">
+						Assinatura do participante:
+					</div>
+				</div>
+				<div class="header-right">
+					<div class="qr-code-box">
+						<img
+							src="data:image/png;base64,{{ student.qr_code }}"
+							alt="QR Code" />
+					</div>
+					<div class="qr-label">QR Code:</div>
+				</div>
+			</div>
+
+			<!-- Instruções -->
+			<div class="instructions-box">
+				<div class="instructions-title">Instruções para o aluno</div>
+				<div class="instructions-content">
+					<ul>
+						<li>Preencha seu nome e data de nascimento.</li>
+						<li>
+							Este cartão-resposta não será substituído. Tenha
+							muita atenção ao marcar as alternativas.
+						</li>
+						<li>
+							Em cada questão é apresentada uma única resposta
+							correta portando o seu cartão-resposta.
+						</li>
+						<li>
+							Use apenas caneta esferográfica de tinta preta. Não
+							amasse, dobre ou rasure o cartão, pois ele é o único
+							documento para correção.
+						</li>
+						<li>
+							Para todas as marcações neste CARTÃO-RESPOSTA,
+							<strong>preencha os círculos completamente</strong>,
+							utilizando caneta esferográfica de tinta preta
+							fabricada em material transparente, conforme na
+							ilustração.
+						</li>
+					</ul>
+					<div class="instructions-examples">
+						<div class="example-item">
+							<span class="example-bubble filled"></span>
+							<span>CORRETO</span>
+						</div>
+						<div class="example-item">
+							<span class="example-bubble"></span>
+							<span>INCORRETO</span>
+						</div>
+						<div class="example-item">
+							<span class="example-bubble half"></span>
+							<span>INCORRETO</span>
+						</div>
+						<div class="example-item">
+							<span
+								class="example-bubble crossed"
+								style="position: relative"></span>
+							<span>INCORRETO</span>
+						</div>
+					</div>
+				</div>
+			</div>
+
+			<!-- Bloco Exclusivo para Aplicador -->
+			<div class="applicator-box">
+				<div class="applicator-title">
+					Atenção: Bloco Exclusivo para Uso do Aplicador
+				</div>
+				<div class="applicator-content">
+					<div class="applicator-options">
+						<div class="applicator-option">
+							<span class="applicator-checkbox"></span>
+							<span>1. Aluno ausente</span>
+						</div>
+						<div class="applicator-option">
+							<span class="applicator-checkbox"></span>
+							<span
+								>2. Aluno com deficiência indicada no
+								Censo</span
+							>
+						</div>
+						<div class="applicator-option">
+							<span class="applicator-checkbox"></span>
+							<span
+								>3. Aluno com atendimento especializado que
+								utilizou tempo adicional.</span
+							>
+						</div>
+					</div>
+				</div>
+			</div>
+
+			<!-- Grade de Respostas -->
+			<div class="answer-grid-wrapper">
+				<!-- ✅ TRIÂNGULOS FIDUCIAIS DO BLOCO DE QUESTÕES -->
+				<!-- ✅ Marcadores fiduciais referenciam o GRID, não a página inteira -->
+				<div class="alignment-triangle triangle-top-left"></div>
+				<div class="alignment-triangle triangle-top-right"></div>
+				<div class="alignment-triangle triangle-bottom-left"></div>
+				<div class="alignment-triangle triangle-bottom-right"></div>
+
+				<!-- GRID DE RESPOSTAS -->
+				<div class="answer-grid-container">
+					{% if blocks_config and blocks_config.use_blocks %} {% set
+					num_blocks = blocks_config.num_blocks | default(1) %} {% set
+					questions_per_block = blocks_config.questions_per_block |
+					default(12) %} {% if questions_by_block %} {% for block in
+					questions_by_block %} {% set questions_in_block =
+					block.questions | length %} {% if questions_in_block > 0 %}
+					<div class="block-wrapper">
+						<div class="block-header">
+							BLOCO {{ "%02d"|format(block.block_number) }}{% if
+							block.subject_name %} - {{ block.subject_name }}{%
+							endif %}
+						</div>
+						<div class="answer-block">
+							<!-- Linhas de resposta -->
+							{% for question in block.questions %}
+							<div class="answer-row">
+								<span class="question-num">
+									<span class="question-num-text"
+										>{{ question.question_number }}.</span
+									>
+								</span>
+
+								<div class="bubbles">
+									{% if question.options %} {% for opt in
+									question.options %}
+									<div class="bubble">{{ opt }}</div>
+									{% endfor %} {% else %}
+									<div class="bubble">A</div>
+									<div class="bubble">B</div>
+									<div class="bubble">C</div>
+									<div class="bubble">D</div>
+									{% endif %}
+								</div>
+							</div>
+							{% endfor %}
+						</div>
+					</div>
+					{% endif %} {% endfor %} {% else %} {% for block_num in
+					range(1, num_blocks + 1) %} {% set start_question =
+					(block_num - 1) * questions_per_block + 1 %} {% set
+					end_question = [block_num * questions_per_block,
+					total_questions] | min %}
+					<div class="block-wrapper">
+						<div class="block-header">
+							BLOCO {{ "%02d"|format(block_num) }}
+						</div>
+						<div class="answer-block">
+							{% for q_num in range(start_question, end_question +
+							1) %}
+							<div class="answer-row">
+								<span class="question-num">
+									<span class="question-num-text"
+										>{{ q_num }}.</span
+									>
+								</span>
+								<div class="bubbles">
+									{% if questions_map and questions_map[q_num]
+									%} {% for opt in questions_map[q_num] %}
+									<div class="bubble">{{ opt }}</div>
+									{% endfor %} {% else %}
+									<div class="bubble">A</div>
+									<div class="bubble">B</div>
+									<div class="bubble">C</div>
+									<div class="bubble">D</div>
+									{% endif %}
+								</div>
+							</div>
+							{% endfor %}
+						</div>
+					</div>
+					{% endfor %} {% endif %} {% else %} {% set
+					questions_per_block = 12 %} {% set total_questions =
+					total_questions | default(48) %} {% set num_blocks =
+					((total_questions - 1) // questions_per_block) + 1 %} {% if
+					num_blocks == 0 %}{% set num_blocks = 1 %}{% endif %} {% for
+					block in range(1, num_blocks + 1) %} {% set start_question =
+					(block - 1) * questions_per_block + 1 %} {% set end_question
+					= [block * questions_per_block, total_questions] | min %} {%
+					set questions_in_block = end_question - start_question + 1
+					%} {% if questions_in_block > 0 %}
+					<div class="block-wrapper">
+						<div class="block-header">
+							BLOCO {{ "%02d"|format(block) }}
+						</div>
+						<div class="answer-block">
+							{% for q in range(1, questions_in_block + 1) %} {%
+							set question_num = start_question + q - 1 %}
+							<div class="answer-row">
+								<span class="question-num">
+									<span class="question-num-text"
+										>{{ question_num }}.</span
+									>
+								</span>
+								<div class="bubbles">
+									{% if questions_map and
+									questions_map[question_num] %} {% for opt in
+									questions_map[question_num] %}
+									<div class="bubble">{{ opt }}</div>
+									{% endfor %} {% else %}
+									<div class="bubble">A</div>
+									<div class="bubble">B</div>
+									<div class="bubble">C</div>
+									<div class="bubble">D</div>
+									{% endif %}
+								</div>
+							</div>
+							{% endfor %}
+						</div>
+					</div>
+					{% endif %} {% endfor %} {% endif %}
+				</div>
+			</div>
+		</div>
+		{% endif %}
 	</body>
 </html>

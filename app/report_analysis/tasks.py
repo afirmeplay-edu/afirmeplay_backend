@@ -191,9 +191,11 @@ def rebuild_report_for_scope(
             niveis_dict = ai_analysis.get('niveis_aprendizagem', {}) or {}
             prof_dict = ai_analysis.get('proficiencia', {}) or {}
             print(f"  - Participação: {len(participacao_text)} caracteres")
-            print(f"    Início: {participacao_text[:300].replace('\\n', ' ')}")
+            participacao_preview = participacao_text[:300].replace('\n', ' ')
+            print(f"    Início: {participacao_preview}")
             print(f"  - Notas: {len(notas_text)} caracteres")
-            print(f"    Início: {notas_text[:300].replace('\\n', ' ')}")
+            notas_preview = notas_text[:300].replace('\n', ' ')
+            print(f"    Início: {notas_preview}")
             print(f"  - Proficiência: {len(prof_dict)} disciplinas -> {list(prof_dict.keys())}")
             print(f"  - Níveis: {len(niveis_dict)} disciplinas -> {list(niveis_dict.keys())}")
             

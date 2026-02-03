@@ -1,7 +1,7 @@
 """Fix expected_tasks to be nullable and add batch_id
 
 Revision ID: 20260203_fix_expected_tasks
-Revises: c5eac53e27b6
+Revises: f1e2d3c4b5a6
 Create Date: 2026-02-03 18:30:00.000000
 
 """
@@ -11,7 +11,7 @@ import sqlalchemy as sa
 
 # revision identifiers, used by Alembic.
 revision = '20260203_fix_expected_tasks'
-down_revision = 'c5eac53e27b6'
+down_revision = 'f1e2d3c4b5a6'  # merge_heads_coins_and_grade_scope
 branch_labels = None
 depends_on = None
 
@@ -30,7 +30,16 @@ def upgrade():
         except:
             pass  # Se coluna não existir, ignora
     
-    # 2. Adicionar campo batch_id para agrupar gabaritos gerados juntos
+    # 2. Tornar completed_tasks NULLABLE se existir
+    with op.batch_alter_table('answer_sheet_gabaritos', schema=None) as batch_op:
+        try:
+            batch_op.alter_column('completed_tasks',
+                                existing_type=sa.Integer(),
+                                nullable=True)
+        except:
+            pass  # Se coluna não existir, ignora
+    
+    # 3. Adicionar campo batch_id para agrupar gabaritos gerados juntos
     with op.batch_alter_table('answer_sheet_gabaritos', schema=None) as batch_op:
         batch_op.add_column(sa.Column('batch_id', sa.String(36), nullable=True))
     

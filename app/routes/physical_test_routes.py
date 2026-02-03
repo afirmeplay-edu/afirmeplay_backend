@@ -713,8 +713,9 @@ def get_task_status(task_id):
     """
     try:
         from celery.result import AsyncResult
-        
-        task = AsyncResult(task_id)
+        from app.services.celery_tasks.physical_test_tasks import generate_physical_forms_async
+
+        task = AsyncResult(task_id, app=generate_physical_forms_async.app)
         
         if task.state == 'PENDING':
             response = {

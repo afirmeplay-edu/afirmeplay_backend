@@ -9,7 +9,7 @@ import zipfile
 import os
 import gc
 from datetime import datetime
-from typing import Dict, Any
+from typing import Dict, Any, List
 from celery import Task
 
 from app.report_analysis.celery_app import celery_app
@@ -246,6 +246,11 @@ def generate_answer_sheets_batch_async(
                     output_dir=output_dir
                 )
                 
+                # Turma sem alunos: generator retorna None — pular sem erro
+                if pdf_result is None:
+                    logger.warning(f"[CELERY-BATCH] ⚠️ Turma {class_obj.name} sem alunos — pulando")
+                    continue
+                
                 if pdf_result and pdf_result.get('pdf_path'):
                     generated_pdfs.append({
                         'gabarito_id': str(gabarito.id),
@@ -302,6 +307,7 @@ def generate_answer_sheets_batch_async(
                         zf.write(pdf_info['pdf_path'], pdf_info['filename'])
         
         zip_size = os.path.getsize(zip_path)
+        download_size = zip_size  # Para retorno na resposta
         logger.info(f"[CELERY-BATCH] ✅ ZIP criado: {zip_size} bytes")
         
         # ========================================================================
@@ -397,6 +403,7 @@ def generate_answer_sheets_batch_async(
     except Exception as e:
         logger.error(f"[CELERY-BATCH] ❌ Erro ao gerar cartões de resposta: {str(e)}", exc_info=True)
         
+        error_str = str(e).lower()
         # 🔒 NÃO fazer retry por erro de MinIO - apenas por erros críticos de geração
         # Se PDFs foram gerados mas upload falhou, não retryar
         is_minio_error = 'minio' in error_str or 's3' in error_str or 'ssl' in error_str

@@ -55,7 +55,8 @@ class AnswerSheetGenerator:
             class_name_suffix: Sufixo para nome do arquivo (ex: "Turma A")
 
         Returns:
-            Dict com informações do PDF gerado: {'pdf_path': str, 'total_students': int, 'class_name': str}
+            Dict com informações do PDF gerado: {'pdf_path': str, 'total_students': int, 'class_name': str},
+            ou None se a turma não tiver alunos (a task deve pular essa turma).
         """
         # Definir output_dir padrão para containers Linux
         if output_dir is None:
@@ -81,7 +82,8 @@ class AnswerSheetGenerator:
             print(f"======================\n")
             
             if not students:
-                raise ValueError(f"Nenhum aluno encontrado na turma {class_id}")
+                logging.warning(f"[GENERATOR] Turma {class_obj.name} ({class_id}) sem alunos — será pulada")
+                return None
 
             # Criar diretório de saída
             # Criar diretório de saída

@@ -493,17 +493,19 @@ def generate_answer_sheets():
         except Exception as e:
             logging.error(f"[ROTA] ⚠️ Erro ao gerar coordenadas (não crítico): {str(e)}")
         
+        # grade_name para test_data: primeiro gabarito ou test_data
+        grade_name_for_gabarito = (gabaritos[0].grade_name if gabaritos else '') or test_data.get('grade_name', '')
+        
         # ✅ 7. PREPARAR test_data
         test_data_complete = {
             'id': data.get('test_id'),
             'title': title,
             'municipality': test_data.get('municipality', ''),
             'state': test_data.get('state', ''),
-            'grade_name': grade_name_for_gabarito,  # ✅ Adicionar grade_name
+            'grade_name': grade_name_for_gabarito,
             'department': test_data.get('department', ''),
             'municipality_logo': test_data.get('municipality_logo'),
-            'institution': test_data.get('institution', ''),
-            'grade_name': test_data.get('grade_name', '')
+            'institution': test_data.get('institution', '')
         }
         
         # ✅ NOVO: Gerar cartões de forma ASSÍNCRONA via Celery (batch)
@@ -571,11 +573,11 @@ def get_answer_sheet_task_status(task_id):
         - RETRY: Tentando novamente
     """
     try:
-        from app.services.celery_tasks.answer_sheet_tasks import generate_answer_sheets_async
+        from app.services.celery_tasks.answer_sheet_tasks import generate_answer_sheets_batch_async
         from celery.result import AsyncResult
         
         # Buscar resultado da task
-        task_result = AsyncResult(task_id, app=generate_answer_sheets_async.app)
+        task_result = AsyncResult(task_id, app=generate_answer_sheets_batch_async.app)
         
         if task_result.state == 'PENDING':
             response = {
@@ -1659,7 +1661,7 @@ def get_job_status(job_id):
     """
     try:
         from celery.result import AsyncResult
-        from app.services.celery_tasks.answer_sheet_tasks import generate_answer_sheets_async
+        from app.services.celery_tasks.answer_sheet_tasks import generate_answer_sheets_batch_async
         from app.services.progress_store import update_job
         
         current_user_id = get_jwt_identity()
@@ -1712,7 +1714,7 @@ def get_job_status(job_id):
         if task_ids:
             for task_id in task_ids:
                 try:
-                    task_result = AsyncResult(task_id, app=generate_answer_sheets_async.app)
+                    task_result = AsyncResult(task_id, app=generate_answer_sheets_batch_async.app)
                     
                     if task_result.state == 'SUCCESS':
                         completed += 1

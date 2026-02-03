@@ -19,11 +19,16 @@ from app.services.progress_store import (
     create_job, update_item_processing, update_item_done,
     update_item_error, complete_job, get_job
 )
-from typing import Dict, Optional, List
+from app.models.school import School
+from app.models.grades import Grade
+from app.models.city import City
+from typing import Dict, Optional, List, Any
 import logging
 import base64
 import io
+import os
 import zipfile
+import tempfile
 import threading
 import uuid
 from io import BytesIO
@@ -133,60 +138,62 @@ def _generate_complete_structure(num_questions: int, use_blocks: bool,
             if q not in questions_map:
                 questions_map[q] = ['A', 'B', 'C', 'D']
     
-    # Estrutura topology (sem use_blocks, apenas blocks)
+    # Estrutura topology (apenas blocks)
     topology = {}
     
-    if use_blocks:
-        custom_blocks = blocks_config.get('blocks', [])
-        
-        if custom_blocks:
-            # ✅ NOVO: Blocos personalizados com disciplinas
-            blocks = []
-            for block_def in custom_blocks:
-                block_id = block_def.get('block_id')
-                subject_name = block_def.get('subject_name')  # ✅ NOVO
-                start_q = block_def.get('start_question')
-                end_q = block_def.get('end_question')
-                
-                questions = []
-                for q_num in range(start_q, end_q + 1):
-                    alternatives = questions_map.get(q_num, ['A', 'B', 'C', 'D'])
-                    questions.append({
-                        "q": q_num,
-                        "alternatives": alternatives
-                    })
-                
-                blocks.append({
-                    "block_id": block_id,
-                    "subject_name": subject_name,  # ✅ NOVO
-                    "questions": questions
-                })
-        else:
-            # ✅ Fallback: distribuir automaticamente (comportamento original)
-            num_blocks = blocks_config.get('num_blocks', 1)
-            questions_per_block = blocks_config.get('questions_per_block', 12)
+    # ✅ SEMPRE verificar blocos personalizados primeiro (independente de use_blocks)
+    custom_blocks = blocks_config.get('blocks', [])
+    
+    if custom_blocks:
+        # ✅ Blocos personalizados (com disciplinas ou não)
+        blocks = []
+        for block_def in custom_blocks:
+            block_id = block_def.get('block_id')
+            subject_name = block_def.get('subject_name')
+            start_q = block_def.get('start_question')
+            end_q = block_def.get('end_question')
             
-            blocks = []
-            for block_num in range(1, num_blocks + 1):
-                start_question = (block_num - 1) * questions_per_block + 1
-                end_question = min(block_num * questions_per_block, num_questions)
-                
-                questions = []
-                for q_num in range(start_question, end_question + 1):
-                    alternatives = questions_map.get(q_num, ['A', 'B', 'C', 'D'])
-                    questions.append({
-                        "q": q_num,
-                        "alternatives": alternatives
-                    })
-                
-                blocks.append({
-                    "block_id": block_num,
-                    "questions": questions
+            questions = []
+            for q_num in range(start_q, end_q + 1):
+                alternatives = questions_map.get(q_num, ['A', 'B', 'C', 'D'])
+                questions.append({
+                    "q": q_num,
+                    "alternatives": alternatives
                 })
+            
+            blocks.append({
+                "block_id": block_id,
+                "subject_name": subject_name,
+                "questions": questions
+            })
+        
+        topology["blocks"] = blocks
+    elif use_blocks:
+        # ✅ Distribuição automática por blocos numerados
+        num_blocks = blocks_config.get('num_blocks', 1)
+        questions_per_block = blocks_config.get('questions_per_block', 12)
+        
+        blocks = []
+        for block_num in range(1, num_blocks + 1):
+            start_question = (block_num - 1) * questions_per_block + 1
+            end_question = min(block_num * questions_per_block, num_questions)
+            
+            questions = []
+            for q_num in range(start_question, end_question + 1):
+                alternatives = questions_map.get(q_num, ['A', 'B', 'C', 'D'])
+                questions.append({
+                    "q": q_num,
+                    "alternatives": alternatives
+                })
+            
+            blocks.append({
+                "block_id": block_num,
+                "questions": questions
+            })
         
         topology["blocks"] = blocks
     else:
-        # Sem blocos: um único bloco com todas questões
+        # ✅ Sem blocos: um único bloco com todas questões
         questions = []
         for q_num in range(1, num_questions + 1):
             alternatives = questions_map.get(q_num, ['A', 'B', 'C', 'D'])
@@ -208,40 +215,44 @@ def _generate_complete_structure(num_questions: int, use_blocks: bool,
 @role_required("admin", "professor", "coordenador", "diretor", "tecadm")
 def generate_answer_sheets():
     """
-    Gera cartões resposta para uma turma e retorna como arquivo ZIP
+    Gera cartões resposta de forma INTELIGENTE e HIERÁRQUICA
+    
+    A rota detecta automaticamente o escopo baseado nos parâmetros fornecidos:
+    - Se fornecido APENAS class_id → gera para 1 turma
+    - Se fornecido grade_id (sem class_id) → gera para TODAS as turmas da série
+    - Se fornecido school_id (sem grade_id) → gera para TODAS as turmas da escola
     
     Body:
         {
-            "class_id": "uuid",
+            "title": "Avaliação de Português",
             "num_questions": 48,
             "use_blocks": true,
-            "blocks_config": {
-                "num_blocks": 4,
-                "questions_per_block": 12,
-                "separate_by_subject": false
-            },
-            "correct_answers": {
-                "1": "A",
-                "2": "B",
-                ...
-            },
-            "questions_options": {
-                "1": ["A", "B", "C"],
-                "2": ["A", "B", "C", "D"],
-                ...
-            } (opcional - se omitido, usa A, B, C, D para todas),
-            "test_data": {
-                "title": "Nome da Prova",
-                "municipality": "...",
-                "state": "...",
-                ...
-            },
-            "test_id": "uuid" (opcional)
+            "blocks_config": {...},
+            "correct_answers": {...},
+            "questions_options": {...},
+            "test_data": {...},
+            "test_id": "uuid" (opcional),
+            
+            // ESCOPO (preencher APENAS o que for necessário):
+            "class_id": "uuid-turma",      // ← Turma específica
+            "grade_id": "uuid-série",      // ← Série inteira (sem class_id)
+            "school_id": "uuid-escola"     // ← Escola inteira (sem grade_id)
         }
     
-    Returns:
-        Arquivo ZIP contendo todos os PDFs dos cartões resposta
-        O ZIP também contém um arquivo metadata.json com informações do gabarito
+    Returns (202 Accepted):
+        {
+            "status": "processing",
+            "job_id": "uuid",
+            "gabarito_id": "uuid",
+            "scope_type": "class|grade|school",
+            "total_classes": N,
+            "total_students": M,
+            "tasks": [
+                {"class_id": "...", "class_name": "A", "task_id": "..."},
+                ...
+            ],
+            "polling_url": "/answer-sheets/jobs/{job_id}/status"
+        }
     """
     try:
         user = get_current_user_from_token()
@@ -252,67 +263,115 @@ def generate_answer_sheets():
         if not data:
             return jsonify({"error": "Dados não fornecidos"}), 400
         
-        # Validar campos obrigatórios
-        class_id = data.get('class_id')
+        # ✅ 1. VALIDAR CAMPOS OBRIGATÓRIOS
         num_questions = data.get('num_questions')
         correct_answers = data.get('correct_answers')
-        questions_options = data.get('questions_options')  # Opcional
         test_data = data.get('test_data', {})
+        title = data.get('title', test_data.get('title', 'Cartão Resposta'))
         
-        if not class_id:
-            return jsonify({"error": "class_id é obrigatório"}), 400
         if not num_questions or num_questions <= 0:
             return jsonify({"error": "num_questions deve ser maior que 0"}), 400
         if not correct_answers:
             return jsonify({"error": "correct_answers é obrigatório"}), 400
         
-        # Validar turma
-        class_obj = Class.query.get(class_id)
-        if not class_obj:
-            return jsonify({"error": "Turma não encontrada"}), 404
+        # ✅ 2. DETERMINAR ESCOPO (inteligente!)
+        class_id = data.get('class_id', '').strip() or None
+        grade_id = data.get('grade_id', '').strip() or None
+        school_id = data.get('school_id', '').strip() or None
         
-        # Validar permissões
-        if user['role'] == 'professor':
-            # Verificar se professor tem acesso à turma
-            from app.models.teacher import Teacher
-            from app.models.teacherClass import TeacherClass
+        # Lógica de precedência
+        scope_type = 'class'  # padrão
+        classes_to_generate = []
+        
+        if class_id:
+            # Apenas 1 turma
+            scope_type = 'class'
+            class_obj = Class.query.get(class_id)
+            if not class_obj:
+                return jsonify({"error": "Turma não encontrada"}), 404
+            classes_to_generate = [class_obj]
             
-            teacher = Teacher.query.filter_by(user_id=user['id']).first()
-            if teacher:
-                teacher_class = TeacherClass.query.filter_by(
-                    teacher_id=teacher.id,
-                    class_id=class_id
-                ).first()
-                if not teacher_class:
-                    return jsonify({"error": "Você não tem acesso a esta turma"}), 403
+            # Validar permissões do professor
+            if user['role'] == 'professor':
+                from app.models.teacher import Teacher
+                from app.models.teacherClass import TeacherClass
+                
+                teacher = Teacher.query.filter_by(user_id=user['id']).first()
+                if teacher:
+                    teacher_class = TeacherClass.query.filter_by(
+                        teacher_id=teacher.id,
+                        class_id=class_id
+                    ).first()
+                    if not teacher_class:
+                        return jsonify({"error": "Você não tem acesso a esta turma"}), 403
         
-        # Configuração de blocos
+        elif grade_id:
+            # Série inteira
+            scope_type = 'grade'
+            grade_obj = Grade.query.get(grade_id)
+            if not grade_obj:
+                return jsonify({"error": "Série não encontrada"}), 404
+            
+            # Buscar todas as turmas da série
+            classes_to_generate = Class.query.filter_by(grade_id=grade_id).all()
+            if not classes_to_generate:
+                return jsonify({"error": "Nenhuma turma encontrada para esta série"}), 400
+        
+        elif school_id:
+            # Escola inteira
+            scope_type = 'school'
+            school_obj = School.query.get(school_id)
+            if not school_obj:
+                return jsonify({"error": "Escola não encontrada"}), 404
+            
+            # Buscar todas as turmas da escola
+            classes_to_generate = Class.query.filter_by(school_id=school_id).all()
+            if not classes_to_generate:
+                return jsonify({"error": "Nenhuma turma encontrada para esta escola"}), 400
+        
+        else:
+            return jsonify({"error": "Forneça class_id, grade_id ou school_id"}), 400
+        
+        logging.info(f"[ROTA] ✅ Escopo determinado: {scope_type}, {len(classes_to_generate)} turma(s)")
+        
+        # ✅ 3. PREPARAR CONFIGURAÇÃO DE BLOCOS
         use_blocks = data.get('use_blocks', False)
         blocks_config = data.get('blocks_config', {})
-        if use_blocks:
-            blocks_config['use_blocks'] = True
-            
-            # ✅ NOVO: Validar blocos personalizados se fornecidos
-            custom_blocks = blocks_config.get('blocks', [])
-            
-            if custom_blocks:
-                # Validar blocos personalizados (com disciplinas)
-                validation_error = _validate_blocks_config(custom_blocks, num_questions)
-                if validation_error:
-                    return jsonify({"error": validation_error}), 400
-                
-                logging.info(f"✅ Blocos personalizados validados: {len(custom_blocks)} blocos")
-            else:
-                # Fallback: distribuir automaticamente (comportamento original)
-                if 'num_blocks' not in blocks_config:
-                    blocks_config['num_blocks'] = 1
-                if 'questions_per_block' not in blocks_config:
-                    blocks_config['questions_per_block'] = 12
-                
-                logging.info(f"✅ Usando distribuição automática de blocos")
         
-        # Gerar estrutura completa de questões e alternativas por bloco
-        # Isso será usado na correção como "contrato" da estrutura
+        # ✅ SEMPRE verificar se há blocos personalizados (independente de use_blocks)
+        custom_blocks = blocks_config.get('blocks', [])
+        
+        if custom_blocks:
+            # Validar blocos personalizados (disciplinas)
+            validation_error = _validate_blocks_config(custom_blocks, num_questions)
+            if validation_error:
+                return jsonify({"error": validation_error}), 400
+            
+            # Adicionar campos necessários no nível raiz
+            blocks_config['num_blocks'] = len(custom_blocks)
+            blocks_config['questions_per_block'] = custom_blocks[0].get('questions_count', 12) if custom_blocks else 12
+            blocks_config['use_blocks'] = use_blocks
+            blocks_config['separate_by_subject'] = not use_blocks  # true quando usa disciplinas
+            
+            logging.info(f"[ROTA] ✅ Blocos personalizados: {len(custom_blocks)} blocos, use_blocks={use_blocks}")
+        elif use_blocks:
+            # Distribuição automática por blocos numerados
+            if 'num_blocks' not in blocks_config:
+                blocks_config['num_blocks'] = 1
+            if 'questions_per_block' not in blocks_config:
+                blocks_config['questions_per_block'] = 12
+            blocks_config['use_blocks'] = True
+            blocks_config['separate_by_subject'] = False
+            
+            logging.info(f"[ROTA] ✅ Distribuição automática: {blocks_config['num_blocks']} blocos")
+        else:
+            # Sem blocos - um único bloco com todas as questões
+            blocks_config['use_blocks'] = False
+            blocks_config['num_blocks'] = 1
+            blocks_config['questions_per_block'] = num_questions
+            blocks_config['separate_by_subject'] = False
+        
+        # ✅ 4. GERAR ESTRUTURA COMPLETA (topology)
         questions_options = data.get('questions_options', {})
         complete_structure = _generate_complete_structure(
             num_questions=num_questions,
@@ -320,42 +379,54 @@ def generate_answer_sheets():
             blocks_config=blocks_config,
             questions_options=questions_options
         )
-        
-        # Adicionar estrutura completa ao blocks_config como 'topology'
         blocks_config['topology'] = complete_structure
         
-        # Buscar informações da turma e escola para salvar no gabarito
-        school_id = None
-        school_name = ''
-        if class_obj.school_id:
-            from app.models.school import School
-            school = School.query.get(class_obj.school_id)
-            if school:
-                school_id = school.id
-                school_name = school.name or ''
+        logging.info(f"[ROTA] ✅ Estrutura de blocos preparada")
         
-        # Salvar gabarito no banco (garantir que UUIDs sejam strings)
+        # ✅ 5. CRIAR 1 ÚNICO GABARITO PARA TODAS AS TURMAS
+        school_id_for_gabarito = None
+        school_name = ''
+        grade_id_for_gabarito = None
+        grade_name_for_gabarito = test_data.get('grade_name', '')  # ✅ Pegar do payload primeiro
+        
+        if classes_to_generate:
+            first_class = classes_to_generate[0]
+            if first_class.school_id:
+                school_id_for_gabarito = first_class.school_id
+                if first_class.school:
+                    school_name = first_class.school.name or ''
+            if first_class.grade_id:
+                grade_id_for_gabarito = first_class.grade_id
+                # ✅ Se não veio no payload, buscar do banco
+                if not grade_name_for_gabarito and first_class.grade:
+                    grade_name_for_gabarito = first_class.grade.name
+        
         gabarito = AnswerSheetGabarito(
             test_id=str(data.get('test_id')) if data.get('test_id') else None,
-            class_id=class_id,  # Já é UUID pelo modelo
+            # class_id será None para geração hierárquica
+            class_id=class_id if scope_type == 'class' else None,
+            grade_id=grade_id_for_gabarito,
             num_questions=num_questions,
             use_blocks=use_blocks,
             blocks_config=blocks_config,
             correct_answers=correct_answers,
-            title=test_data.get('title', 'Cartão Resposta'),
+            title=title,
             created_by=str(user['id']) if user.get('id') else None,
-            # Campos adicionais
-            school_id=str(school_id) if school_id else None,
+            scope_type=scope_type,  # ✅ NOVO CAMPO
+            school_id=str(school_id_for_gabarito) if school_id_for_gabarito else None,
             school_name=school_name,
             municipality=test_data.get('municipality', ''),
             state=test_data.get('state', ''),
-            grade_name=test_data.get('grade_name', ''),
+            grade_name=grade_name_for_gabarito,  # ✅ Usar variável que busca do banco se necessário
             institution=test_data.get('institution', '')
         )
         db.session.add(gabarito)
         db.session.commit()
+        gabarito_id = str(gabarito.id)
         
-        # Gerar coordenadas automaticamente
+        logging.info(f"[ROTA] ✅ Gabarito criado: {gabarito_id} (scope: {scope_type})")
+        
+        # ✅ 6. GERAR COORDENADAS
         try:
             from app.services.cartao_resposta.coordinate_generator import CoordinateGenerator
             
@@ -367,63 +438,124 @@ def generate_answer_sheets():
                 questions_options=questions_options
             )
             
-            # Salvar coordenadas no gabarito
             gabarito.coordinates = coordinates
             db.session.commit()
-            
-            logging.info(f"✅ Coordenadas geradas e salvas para gabarito {str(gabarito.id)}")
+            logging.info(f"[ROTA] ✅ Coordenadas geradas para gabarito {gabarito_id}")
         except Exception as e:
-            logging.error(f"Erro ao gerar coordenadas: {str(e)}", exc_info=True)
-            # Continuar mesmo se falhar
+            logging.error(f"[ROTA] ⚠️ Erro ao gerar coordenadas (não crítico): {str(e)}")
         
-        # Preparar test_data completo
+        # ✅ 7. PREPARAR test_data
         test_data_complete = {
             'id': data.get('test_id'),
-            'title': test_data.get('title', 'Cartão Resposta'),
+            'title': title,
             'municipality': test_data.get('municipality', ''),
             'state': test_data.get('state', ''),
+            'grade_name': grade_name_for_gabarito,  # ✅ Adicionar grade_name
             'department': test_data.get('department', ''),
             'municipality_logo': test_data.get('municipality_logo'),
             'institution': test_data.get('institution', ''),
             'grade_name': test_data.get('grade_name', '')
         }
         
-        # ✅ NOVO: Gerar cartões de forma ASSÍNCRONA via Celery
+        # ✅ 8. DISPARAR 1 TASK CELERY POR TURMA (todas compartilham 1 gabarito)
         from app.services.celery_tasks.answer_sheet_tasks import generate_answer_sheets_async
+        from app.services.progress_store import create_job
         
-        # Disparar task Celery
-        task = generate_answer_sheets_async.delay(
-            class_id=class_id,
-            num_questions=num_questions,
-            correct_answers=correct_answers,
-            test_data=test_data_complete,
-            use_blocks=use_blocks,
-            blocks_config=blocks_config,
-            questions_options=questions_options,
-            gabarito_id=str(gabarito.id)
+        celery_tasks = []
+        task_ids = []
+        response_tasks = []
+        
+        print(f"\n=== CRIANDO JOBS CELERY ===")
+        for i, class_obj in enumerate(classes_to_generate):
+            print(f"Criando job {i+1} para classe: {class_obj.name} (ID: {class_obj.id})")
+            celery_task = generate_answer_sheets_async.delay(
+                class_id=str(class_obj.id),
+                num_questions=num_questions,
+                correct_answers=correct_answers,
+                test_data=test_data_complete,
+                use_blocks=use_blocks,
+                blocks_config=blocks_config,
+                questions_options=questions_options,
+                gabarito_id=gabarito_id  # ✅ MESMO GABARITO PARA TODAS!
+            )
+            
+            celery_tasks.append(celery_task)
+            task_ids.append(celery_task.id)
+            print(f"  - Job criado com ID: {celery_task.id}")
+            
+            response_tasks.append({
+                'class_id': str(class_obj.id),
+                'class_name': class_obj.name,
+                'status': 'pending',
+                'task_id': celery_task.id
+            })
+        
+        print(f"Total de jobs criados: {len(celery_tasks)}")
+        print(f"============================\n")
+        
+        logging.info(f"[ROTA] ✅ {len(celery_tasks)} task(s) disparada(s) para gabarito {gabarito_id}")
+        
+        # ✅ 9. CRIAR JOB PARA RASTREAMENTO
+        job_id = str(uuid.uuid4())
+        job = create_job(
+            job_id=job_id,
+            total=len(classes_to_generate),
+            gabarito_id=gabarito_id,
+            user_id=str(user['id']),
+            task_ids=task_ids
         )
         
-        # Retornar resposta imediata com task_id para polling
-        return jsonify({
-            "status": "processing",
-            "message": "Cartões de resposta sendo gerados em background. Use o task_id para verificar o status.",
-            "task_id": task.id,
-            "gabarito_id": str(gabarito.id),
-            "class_id": class_id,
-            "class_name": class_obj.name,
-            "num_questions": num_questions,
-            "polling_url": f"/answer-sheets/task/{task.id}/status"
-        }), 202
+        # ✅ Atualizar job com scope_type
+        from app.services.progress_store import update_job
+        update_job(job_id, {'scope_type': scope_type})
         
-        # ❌ CÓDIGO ANTIGO COMENTADO (geração síncrona removida)
-        # generator = AnswerSheetGenerator()
-        # generated_files = generator.generate_answer_sheets(...)
-        # if not generated_files:
-        #     return jsonify({"error": "Nenhum cartão resposta foi gerado"}), 400
+        # ⚠️ Contar total de alunos (pode mudar até task executar)
+        print(f"\n=== DEBUG CONTAGEM INICIAL ===")
+        print(f"Total de classes encontradas: {len(classes_to_generate)}")
+        print(f"Sessão atual SQLAlchemy: {db.session}")
         
+        total_students = 0
+        for i, cls in enumerate(classes_to_generate):
+            # Forçar reload da relação students
+            db.session.refresh(cls)
+            students_via_relationship = len(cls.students) if cls.students else 0
+            # Comparar com query direta
+            from app.models.student import Student
+            students_via_query = Student.query.filter_by(class_id=cls.id).count()
+            
+            print(f"Classe {i+1} (ID: {cls.id}, Nome: {cls.name}):")
+            print(f"  - Via relacionamento (após refresh): {students_via_relationship} estudantes")
+            print(f"  - Via query direta: {students_via_query} estudantes")
+            print(f"  - Relação cls.students carregada: {'Sim' if hasattr(cls, '_sa_instance_state') and 'students' in cls._sa_instance_state.committed_state else 'Não'}")
+            
+            total_students += students_via_relationship
+        
+        print(f"\nRESUMO CONTAGEM INICIAL:")
+        print(f"Total classes: {len(classes_to_generate)}")
+        print(f"Total estudantes (relacionamento): {total_students}")
+        print(f"================================\n")
+        
+        response_data = {
+            'status': 'processing',
+            'job_id': job_id,
+            'gabarito_id': gabarito_id,
+            'scope_type': scope_type,
+            'total_classes': len(classes_to_generate),
+            'total_students': total_students,
+            'note': 'Números de alunos e turmas são estimativas. Valores reais estão no status do job.',
+            'tasks': response_tasks,
+            'polling_url': f"/answer-sheets/jobs/{job_id}/status"
+        }
+        
+        print(f"\n=== RESPOSTA FINAL ENDPOINT ===")
+        print(f"Response enviado: {response_data}")
+        print(f"============================\n")
+        
+        return jsonify(response_data), 202
+    
     except Exception as e:
         db.session.rollback()
-        logging.error(f"Erro ao gerar cartões resposta: {str(e)}", exc_info=True)
+        logging.error(f"[ROTA] ❌ Erro ao gerar cartões resposta: {str(e)}", exc_info=True)
         return jsonify({"error": f"Erro ao gerar cartões resposta: {str(e)}"}), 500
 
 
@@ -465,10 +597,19 @@ def get_answer_sheet_task_status(task_id):
             }
         elif task_result.state == 'SUCCESS':
             result = task_result.result
+            
+            # Mostrar avisos se houver
+            warnings = []
+            if result.get('warning'):
+                warnings.append(result['warning'])
+            elif result.get('students_count') == 0:
+                warnings.append("Nenhum aluno registrado na turma - cartões não foram gerados")
+            
             response = {
                 'status': 'completed',
                 'message': 'Cartões gerados com sucesso',
                 'task_id': task_id,
+                'warnings': warnings if warnings else None,
                 'result': result
             }
         elif task_result.state == 'FAILURE':
@@ -679,10 +820,56 @@ def list_gabaritos():
         for gabarito in pagination.items:
             # Buscar informações da turma
             class_name = None
+            class_students_count = 0
             if gabarito.class_id:
                 class_obj = Class.query.get(gabarito.class_id)
                 if class_obj:
                     class_name = class_obj.name
+                    class_students_count = len(class_obj.students) if class_obj.students else 0
+            
+            # Buscar informações da série (grade)
+            grade_name = None
+            total_classes_in_grade = 0
+            total_students_in_grade = 0
+            if gabarito.grade_id:
+                grade_obj = Grade.query.get(gabarito.grade_id)
+                if grade_obj:
+                    grade_name = grade_obj.name
+                    classes_in_grade = Class.query.filter_by(grade_id=gabarito.grade_id).all()
+                    total_classes_in_grade = len(classes_in_grade)
+                    total_students_in_grade = sum(
+                        len(cls.students) if cls.students else 0 
+                        for cls in classes_in_grade
+                    )
+            
+            # Buscar informações da escola (school) se necessário
+            total_classes_in_school = 0
+            total_students_in_school = 0
+            if gabarito.scope_type == "school" and gabarito.school_id:
+                classes_in_school = Class.query.filter_by(school_id=gabarito.school_id).all()
+                total_classes_in_school = len(classes_in_school)
+                total_students_in_school = sum(
+                    len(cls.students) if cls.students else 0 
+                    for cls in classes_in_school
+                )
+            
+            # Determinar contagem baseada no scope_type correto
+            final_students_count = 0
+            final_classes_count = 0
+            
+            if gabarito.scope_type == "class":
+                final_students_count = class_students_count
+                final_classes_count = 1
+            elif gabarito.scope_type == "grade":
+                final_students_count = total_students_in_grade
+                final_classes_count = total_classes_in_grade
+            elif gabarito.scope_type == "school":
+                final_students_count = total_students_in_school
+                final_classes_count = total_classes_in_school
+            else:
+                # Fallback para scope desconhecido
+                final_students_count = total_students_in_grade if total_students_in_grade > 0 else class_students_count
+                final_classes_count = total_classes_in_grade if total_classes_in_grade > 0 else 1
             
             # Buscar informações do criador
             creator_name = None
@@ -691,19 +878,32 @@ def list_gabaritos():
                 if creator:
                     creator_name = creator.name
             
+            # Determinar status (se foi gerado ou não)
+            generation_status = "pending"
+            if gabarito.minio_url or gabarito.minio_object_name:
+                generation_status = "completed"
+            
             gabaritos.append({
                 "id": str(gabarito.id),
                 "test_id": str(gabarito.test_id) if gabarito.test_id else None,
                 "class_id": str(gabarito.class_id) if gabarito.class_id else None,
                 "class_name": class_name,
+                "grade_id": str(gabarito.grade_id) if gabarito.grade_id else None,
+                "grade_name": grade_name or gabarito.grade_name,
                 "num_questions": gabarito.num_questions,
                 "use_blocks": gabarito.use_blocks,
                 "title": gabarito.title,
                 "school_name": gabarito.school_name,
                 "municipality": gabarito.municipality,
                 "state": gabarito.state,
-                "grade_name": gabarito.grade_name,
                 "institution": gabarito.institution,
+                # ✅ CONTAGEM CORRIGIDA PARA TODOS OS SCOPE TYPES
+                "scope_type": gabarito.scope_type or "class",  # class | grade | school | city
+                "generation_status": generation_status,  # pending | completed
+                "students_count": final_students_count,
+                "classes_count": final_classes_count,
+                "minio_url": gabarito.minio_url,
+                "can_download": bool(gabarito.minio_url or gabarito.minio_object_name),
                 "created_at": gabarito.created_at.isoformat() if gabarito.created_at else None,
                 "created_by": str(gabarito.created_by) if gabarito.created_by else None,
                 "creator_name": creator_name
@@ -836,7 +1036,7 @@ def get_gabarito(gabarito_id):
         return jsonify({"error": f"Erro ao buscar gabarito: {str(e)}"}), 500
 
 
-@bp.route('/gabarito/<string:gabarito_id>', methods=['DELETE'])
+@bp.route('/<string:gabarito_id>', methods=['DELETE'])  # Rota alternativa para compatibilidade
 @jwt_required()
 @role_required("admin", "professor", "coordenador", "diretor", "tecadm")
 def delete_gabarito(gabarito_id):
@@ -1302,3 +1502,742 @@ def get_answer_sheet_result(result_id):
     except Exception as e:
         logging.error(f"❌ Erro ao buscar resultado: {str(e)}", exc_info=True)
         return jsonify({"error": "Erro interno do servidor"}), 500
+
+
+# ============================================================================
+# NOVOS ENDPOINTS HIERÁRQUICOS (Escolas → Séries → Turmas)
+# ============================================================================
+
+@bp.route('/generate-hierarchical', methods=['POST'])
+@jwt_required()
+@role_required("admin", "professor", "coordenador", "diretor", "tecadm")
+def generate_hierarchical_answer_sheets():
+    """
+    ✅ ENDPOINT DESCONTINUADO
+    
+    Use POST /answer-sheets/generate com os parâmetros inteligentes:
+    - class_id: para gerar para 1 turma
+    - grade_id: para gerar para uma série inteira
+    - school_id: para gerar para uma escola inteira
+    
+    A rota /generate agora detecta automaticamente o escopo!
+    """
+    return jsonify({
+        "error": "Endpoint descontinuado",
+        "message": "Use POST /answer-sheets/generate com class_id, grade_id ou school_id",
+        "example": {
+            "school_id": "uuid-escola",
+            "num_questions": 48,
+            "correct_answers": {"1": "A", "2": "B"},
+            "test_data": {"title": "Avaliação"}
+        }
+    }), 410
+
+
+@bp.route('/jobs/<job_id>/status', methods=['GET'])
+@jwt_required()
+def get_job_status(job_id):
+    """
+    Retorna status REAL da geração com contagem de alunos/turmas REALMENTE gerados
+    
+    GET /answer-sheets/jobs/uuid/status
+    
+    ✅ VALIDA NÚMEROS REAIS:
+    - Consulta cada AsyncResult para status e resultado
+    - Calcula alunos/turmas GERADOS com sucesso (não promessas iniciais)
+    - Lista erros específicos de cada turma
+    - Marca job "completed" quando todos os tasks finalizarem
+    
+    Response:
+    {
+        "job_id": "uuid",
+        "gabarito_id": "uuid",
+        "status": "processing|completed|failed",
+        "progress": {
+            "current": 5,
+            "total": 10,
+            "percentage": 50
+        },
+        "result": {
+            "classes_generated": 4,
+            "total_students": 95,
+            "successful_classes": 4,
+            "failed_classes": 1,
+            "scope_type": "grade",
+            "minio_url": "https://..."
+        },
+        "errors": [
+            {"class_name": "A", "error": "Turma não tem alunos registrados"}
+        ]
+    }
+    """
+    try:
+        from celery.result import AsyncResult
+        from app.services.celery_tasks.answer_sheet_tasks import generate_answer_sheets_async
+        from app.services.progress_store import update_job
+        
+        current_user_id = get_jwt_identity()
+        job = get_job(job_id)
+        
+        # ✅ Se job não existe na memória, buscar pelo gabarito no banco
+        if not job:
+            gabarito_from_db = AnswerSheetGabarito.query.filter_by(job_id=job_id).first()
+            
+            if not gabarito_from_db:
+                return jsonify({"error": "Job não encontrado"}), 404
+            
+            # Validar que o gabarito pertence ao usuário
+            if gabarito_from_db.user_id != str(current_user_id):
+                return jsonify({"error": "Acesso negado"}), 403
+            
+            # ✅ Job completado, retornar resultado direto do banco
+            return jsonify({
+                'job_id': job_id,
+                'gabarito_id': str(gabarito_from_db.id),
+                'status': 'completed',
+                'progress': {
+                    'current': 1,
+                    'total': 1,
+                    'percentage': 100
+                },
+                'result': {
+                    'scope_type': gabarito_from_db.scope_type,
+                    'minio_url': gabarito_from_db.minio_url,
+                    'download_url': gabarito_from_db.minio_url,
+                    'can_download': bool(gabarito_from_db.minio_url),
+                    'zip_generated_at': gabarito_from_db.zip_generated_at.isoformat() if gabarito_from_db.zip_generated_at else None
+                }
+            }), 200
+
+        # Validar que o job pertence ao usuário
+        if job.get('user_id') != str(current_user_id):
+            return jsonify({"error": "Acesso negado"}), 403
+
+        # ✅ CONSULTAR STATUS REAL DE CADA TASK
+        task_ids = job.get('task_ids', [])
+        gabarito_id = job.get('gabarito_id')
+        completed = 0
+        successful = 0
+        failed = 0
+        classes_generated = 0
+        total_students_generated = 0
+        errors = []
+        
+        if task_ids:
+            for task_id in task_ids:
+                try:
+                    task_result = AsyncResult(task_id, app=generate_answer_sheets_async.app)
+                    
+                    if task_result.state == 'SUCCESS':
+                        completed += 1
+                        result = task_result.result
+                        
+                        if result and result.get('success'):
+                            successful += 1
+                            classes_generated += 1
+                            students_count = result.get('students_count', 0)
+                            total_students_generated += students_count
+                            logging.info(f"✅ Task {task_id}: {result.get('class_name', 'Unknown')} "
+                                        f"com {students_count} alunos")
+                        else:
+                            # Task retornou sucesso na execução, mas sem PDF gerado
+                            failed += 1
+                            error_msg = result.get('error') if result else 'Erro desconhecido'
+                            class_name = result.get('class_name', 'Unknown') if result else 'Unknown'
+                            errors.append({
+                                'class_name': class_name,
+                                'error': error_msg
+                            })
+                            logging.warning(f"❌ Task {task_id}: {class_name} - {error_msg}")
+                                
+                    elif task_result.state == 'FAILURE':
+                        completed += 1
+                        failed += 1
+                        error_msg = str(task_result.info) if task_result.info else 'Erro desconhecido'
+                        errors.append({
+                            'class_name': 'Unknown',
+                            'error': error_msg
+                        })
+                        logging.error(f"❌ Task {task_id} FAILURE: {error_msg}")
+                        
+                    elif task_result.state in ['PENDING', 'RETRY']:
+                        # Task ainda processando
+                        pass
+                        
+                except Exception as e:
+                    logging.debug(f"Erro ao consultar task {task_id}: {str(e)}")
+
+        # ✅ DETERMINAR STATUS DO JOB
+        job_status = "processing"
+        if completed == len(task_ids) and task_ids:
+            job_status = "completed"
+        
+        # ✅ BUSCAR INFORMAÇÕES DO GABARITO
+        gabarito = None
+        if gabarito_id:
+            gabarito = AnswerSheetGabarito.query.get(gabarito_id)
+        
+        # ✅ PREPARAR RESPOSTA COM NÚMEROS REAIS
+        progress = {
+            'current': completed,
+            'total': len(task_ids),
+            'percentage': int((completed / len(task_ids) * 100) if task_ids else 0)
+        }
+        
+        result_data = {
+            'classes_generated': classes_generated,
+            'total_students': total_students_generated,
+            'successful_classes': successful,
+            'failed_classes': failed,
+            'scope_type': job.get('scope_type', 'unknown'),
+            'minio_url': gabarito.minio_url if gabarito else None,
+            'download_url': gabarito.minio_url if gabarito else None,
+            'can_download': bool(gabarito and gabarito.minio_url),
+            'zip_generated_at': gabarito.zip_generated_at.isoformat() if (gabarito and gabarito.zip_generated_at) else None
+        }
+        
+        response = {
+            'job_id': job_id,
+            'gabarito_id': gabarito_id,
+            'status': job_status,
+            'progress': progress,
+            'result': result_data,
+            'errors': errors if errors else None
+        }
+        
+        # ✅ ATUALIZAR JOB NO STORE
+        updates = {
+            'completed': completed,
+            'successful': successful,
+            'failed': failed,
+            'status': job_status,
+            'total_students_generated': total_students_generated,
+            'classes_generated': classes_generated
+        }
+        
+        if job_status == "completed" and "completed_at" not in job:
+            from datetime import datetime
+            updates['completed_at'] = datetime.utcnow().isoformat()
+        
+        update_job(job_id, updates)
+        
+        logging.info(f"📊 Job {job_id}: {completed}/{len(task_ids)} tasks, "
+                    f"{classes_generated} turmas, {total_students_generated} alunos")
+        
+        return jsonify(response), 200
+
+    except Exception as e:
+        logging.error(f"Erro ao buscar status: {str(e)}", exc_info=True)
+        return jsonify({"error": "Erro ao buscar status"}), 500
+
+
+@bp.route('/jobs/<job_id>/download', methods=['GET'])
+@jwt_required()
+def download_job_zip(job_id):
+    """
+    Faz download de todos os PDFs gerados em um job como ZIP
+    
+    GET /answer-sheets/jobs/uuid/download
+    
+    Response:
+    - application/zip com todos os PDFs do job
+    """
+    try:
+        current_user_id = get_jwt_identity()
+        job = get_job(job_id)
+        
+        if not job:
+            return jsonify({"error": "Job não encontrado"}), 404
+
+        # Validar que o job pertence ao usuário
+        if job.get('user_id') != str(current_user_id):
+            return jsonify({"error": "Acesso negado"}), 403
+
+        # Status deve ser "completed"
+        if job.get('status') != 'completed':
+            return jsonify({
+                "error": "Job ainda não foi concluído",
+                "status": job.get('status')
+            }), 400
+
+        from app.services.storage.minio_service import MinIOService
+        import shutil
+        
+        minio = MinIOService()
+        
+        # Criar diretório temporário para os PDFs
+        temp_dir = tempfile.mkdtemp(prefix='job_download_')
+        
+        try:
+            # Buscar todas as tasks do job
+            tasks = job.get('tasks', [])
+            
+            if not tasks:
+                return jsonify({"error": "Nenhuma tarefa encontrada para este job"}), 400
+            
+            # Baixar cada PDF do MinIO
+            pdf_count = 0
+            for i, task in enumerate(tasks):
+                if task.get('status') != 'completed':
+                    continue
+                
+                result = task.get('result', {})
+                minio_url = result.get('minio_url')
+                
+                if not minio_url:
+                    logging.warning(f"[DOWNLOAD] Task {i} não tem URL do MinIO")
+                    continue
+                
+                # Extrair object_name da URL
+                # Formato: https://files.afirmeplay.com.br/answer-sheets/job_id/filename.pdf
+                # object_name esperado: answer-sheets/job_id/filename.pdf
+                try:
+                    from urllib.parse import urlparse
+                    from app.services.storage.minio_service import MinIOService
+                    
+                    parsed = urlparse(minio_url)
+                    
+                    # path = /answer-sheets/job_id/filename.pdf
+                    # object_name = answer-sheets/job_id/filename.pdf
+                    object_name = parsed.path.lstrip('/')
+                    
+                    # Extrair nome do arquivo para usar como nome local
+                    filename = object_name.split('/')[-1]
+                    file_path = os.path.join(temp_dir, filename)
+                    
+                    logging.info(f"[DOWNLOAD] Baixando {filename} do MinIO ({object_name})...")
+                    
+                    # Baixar arquivo do MinIO
+                    pdf_data = minio.download_file(
+                        bucket_name=MinIOService.BUCKETS['ANSWER_SHEETS'],
+                        object_name=object_name
+                    )
+                    
+                    with open(file_path, 'wb') as f:
+                        f.write(pdf_data)
+                    
+                    pdf_count += 1
+                    logging.info(f"[DOWNLOAD] ✅ Baixado: {filename}")
+                    
+                except Exception as e:
+                    logging.error(f"[DOWNLOAD] Erro ao baixar {object_name}: {str(e)}")
+                    continue
+            
+            if pdf_count == 0:
+                shutil.rmtree(temp_dir)
+                return jsonify({
+                    "error": "Nenhum PDF foi encontrado para download"
+                }), 400
+            
+            # Criar ZIP com os PDFs
+            zip_filename = f"cartoes-resposta-{job_id}.zip"
+            zip_path = os.path.join(tempfile.gettempdir(), zip_filename)
+            
+            logging.info(f"[DOWNLOAD] Criando ZIP com {pdf_count} PDFs...")
+            
+            with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
+                for filename in os.listdir(temp_dir):
+                    file_path = os.path.join(temp_dir, filename)
+                    if os.path.isfile(file_path):
+                        zipf.write(file_path, arcname=filename)
+            
+            logging.info(f"[DOWNLOAD] ✅ ZIP criado: {zip_path}")
+            
+            # Enviar arquivo para download
+            return send_file(
+                zip_path,
+                as_attachment=True,
+                download_name=zip_filename,
+                mimetype='application/zip'
+            )
+            
+        finally:
+            # Limpar diretório temporário
+            try:
+                shutil.rmtree(temp_dir)
+                if os.path.exists(zip_path):
+                    os.remove(zip_path)
+            except Exception as e:
+                logging.warning(f"[DOWNLOAD] Erro ao limpar arquivos temporários: {str(e)}")
+
+    except Exception as e:
+        logging.error(f"Erro ao fazer download do job: {str(e)}", exc_info=True)
+        return jsonify({"error": f"Erro ao fazer download: {str(e)}"}), 500
+
+
+# ==================== FUNÇÕES AUXILIARES PARA FILTROS CASCATA ====================
+
+def _obter_estados_disponiveis(user: dict, permissao: dict) -> List[Dict[str, Any]]:
+    """
+    Retorna estados disponíveis baseado nas permissões do usuário.
+    Para CARTÃO RESPOSTA (sem dependência de avaliação).
+    """
+    if permissao['scope'] == 'all':
+        # Admin vê todos os estados
+        estados = db.session.query(City.state).distinct().filter(City.state.isnot(None)).all()
+    else:
+        # Outros usuários veem apenas estados das suas cidades
+        estados = db.session.query(City.state).distinct().filter(
+            City.state.isnot(None),
+            City.id == user.get('city_id')
+        ).all()
+    
+    return [{"id": estado[0], "nome": estado[0]} for estado in estados]
+
+
+def _obter_municipios_por_estado(estado: str, user: dict, permissao: dict) -> List[Dict[str, Any]]:
+    """
+    Retorna municípios de um estado específico baseado nas permissões do usuário.
+    Para CARTÃO RESPOSTA (sem dependência de avaliação).
+    """
+    if permissao['scope'] == 'all':
+        # Admin vê todos os municípios do estado
+        municipios = City.query.filter(City.state.ilike(f"%{estado}%")).all()
+    else:
+        # Outros usuários veem apenas seu município
+        municipios = City.query.filter(
+            City.state.ilike(f"%{estado}%"),
+            City.id == user.get('city_id')
+        ).all()
+    
+    return [{"id": str(m.id), "nome": m.name} for m in municipios]
+
+
+def _obter_escolas_por_municipio(municipio_id: str, user: dict, permissao: dict) -> List[Dict[str, Any]]:
+    """
+    Retorna escolas de um município específico baseado nas permissões do usuário.
+    Para CARTÃO RESPOSTA (sem dependência de avaliação).
+    """
+    city = City.query.get(municipio_id)
+    if not city:
+        return []
+    
+    # Verificar se o usuário tem acesso ao município
+    if permissao['scope'] != 'all' and user.get('city_id') != city.id:
+        return []
+    
+    # Aplicar filtros baseados no papel do usuário
+    query_escolas = School.query.with_entities(School.id, School.name)\
+                           .filter(School.city_id == city.id)
+    
+    if permissao['scope'] == 'escola':
+        if user.get('role') in ['diretor', 'coordenador']:
+            # Diretor e Coordenador veem apenas sua escola
+            from app.models.manager import Manager
+            manager = Manager.query.filter_by(user_id=user['id']).first()
+            if manager and manager.school_id:
+                query_escolas = query_escolas.filter(School.id == manager.school_id)
+            else:
+                return []
+        elif user.get('role') == 'professor':
+            # Professor vê apenas escolas onde está vinculado
+            from app.models.teacher import Teacher
+            from app.models.schoolTeacher import SchoolTeacher
+            
+            teacher = Teacher.query.filter_by(user_id=user['id']).first()
+            if teacher:
+                teacher_schools = SchoolTeacher.query.filter_by(teacher_id=teacher.id).all()
+                teacher_school_ids = [ts.school_id for ts in teacher_schools]
+                
+                if teacher_school_ids:
+                    query_escolas = query_escolas.filter(School.id.in_(teacher_school_ids))
+                else:
+                    return []
+            else:
+                return []
+    
+    escolas = query_escolas.distinct().all()
+    return [{"id": str(e[0]), "nome": e[1]} for e in escolas]
+
+
+def _obter_series_por_escola(escola_id: str, municipio_id: str, user: dict, permissao: dict) -> List[Dict[str, Any]]:
+    """
+    Retorna séries (grades) de uma escola específica.
+    Para CARTÃO RESPOSTA (sem dependência de avaliação).
+    """
+    city = City.query.get(municipio_id)
+    school = School.query.get(escola_id)
+    
+    if not city or not school:
+        return []
+    
+    # Verificar se o usuário tem acesso
+    if permissao['scope'] != 'all' and user.get('city_id') != city.id:
+        return []
+    
+    if permissao['scope'] == 'escola':
+        if user.get('role') in ['diretor', 'coordenador']:
+            from app.models.manager import Manager
+            manager = Manager.query.filter_by(user_id=user['id']).first()
+            if not manager or manager.school_id != school.id:
+                return []
+        elif user.get('role') == 'professor':
+            # Verificar se professor está vinculado à escola
+            from app.models.teacher import Teacher
+            from app.models.schoolTeacher import SchoolTeacher
+            
+            teacher = Teacher.query.filter_by(user_id=user['id']).first()
+            if not teacher:
+                return []
+            
+            teacher_school = SchoolTeacher.query.filter_by(
+                teacher_id=teacher.id,
+                school_id=school.id
+            ).first()
+            
+            if not teacher_school:
+                return []
+    
+    # Buscar séries da escola
+    query_series = db.session.query(Grade.id, Grade.name)\
+                             .join(Class, Grade.id == Class.grade_id)\
+                             .filter(Class.school_id == school.id)\
+                             .distinct()\
+                             .order_by(Grade.name)
+    
+    series = query_series.all()
+    return [{"id": str(s[0]), "nome": s[1]} for s in series]
+
+
+def _obter_turmas_por_serie(escola_id: str, serie_id: str, municipio_id: str, user: dict, permissao: dict) -> List[Dict[str, Any]]:
+    """
+    Retorna turmas de uma série específica em uma escola.
+    Para CARTÃO RESPOSTA (sem dependência de avaliação).
+    """
+    city = City.query.get(municipio_id)
+    school = School.query.get(escola_id)
+    grade = Grade.query.get(serie_id)
+    
+    if not city or not school or not grade:
+        return []
+    
+    # Verificar permissões
+    if permissao['scope'] != 'all' and user.get('city_id') != city.id:
+        return []
+    
+    if permissao['scope'] == 'escola':
+        if user.get('role') in ['diretor', 'coordenador']:
+            from app.models.manager import Manager
+            manager = Manager.query.filter_by(user_id=user['id']).first()
+            if not manager or manager.school_id != school.id:
+                return []
+        elif user.get('role') == 'professor':
+            from app.models.teacher import Teacher
+            from app.models.teacherClass import TeacherClass
+            
+            teacher = Teacher.query.filter_by(user_id=user['id']).first()
+            if not teacher:
+                return []
+    
+    # Buscar turmas
+    query_turmas = Class.query.with_entities(Class.id, Class.name)\
+                              .filter(
+                                  Class.school_id == school.id,
+                                  Class.grade_id == grade.id
+                              )
+    
+    # Se professor, filtrar apenas turmas onde está vinculado
+    if permissao['scope'] == 'escola' and user.get('role') == 'professor':
+        from app.models.teacher import Teacher
+        from app.models.teacherClass import TeacherClass
+        
+        teacher = Teacher.query.filter_by(user_id=user['id']).first()
+        teacher_classes = TeacherClass.query.filter_by(teacher_id=teacher.id).all()
+        teacher_class_ids = [tc.class_id for tc in teacher_classes]
+        
+        if teacher_class_ids:
+            query_turmas = query_turmas.filter(Class.id.in_(teacher_class_ids))
+        else:
+            return []
+    
+    turmas = query_turmas.order_by(Class.name).all()
+    return [{"id": str(t[0]), "nome": t[1]} for t in turmas]
+
+
+# ==================== ENDPOINT: GET /opcoes-filtros ====================
+
+@bp.route('/opcoes-filtros', methods=['GET'])
+@jwt_required()
+@role_required("admin", "professor", "coordenador", "diretor", "tecadm")
+def obter_opcoes_filtros():
+    """
+    Retorna opções hierárquicas de filtros para CARTÃO RESPOSTA.
+    Retorna apenas os níveis necessários baseado nos parâmetros fornecidos.
+    
+    Hierarquia: Estado → Município → Escola → Série → Turma
+    
+    Query Parameters (todos opcionais, seguindo a hierarquia):
+    - estado: Estado selecionado
+    - municipio: Município selecionado (requer estado)
+    - escola: Escola selecionada (requer municipio)
+    - serie: Série selecionada (requer escola)
+    
+    Exemplos:
+    - GET /opcoes-filtros → Retorna apenas estados
+    - GET /opcoes-filtros?estado=SP → Retorna estados + municípios de SP
+    - GET /opcoes-filtros?estado=SP&municipio=uuid → Retorna estados + municípios + escolas
+    - GET /opcoes-filtros?estado=SP&municipio=uuid&escola=uuid → Retorna estados + municípios + escolas + séries
+    - GET /opcoes-filtros?estado=SP&municipio=uuid&escola=uuid&serie=uuid → Retorna estados + municípios + escolas + séries + turmas
+    """
+    try:
+        current_user_id = get_jwt_identity()
+        current_user = User.query.get(current_user_id)
+        
+        if not current_user:
+            return jsonify({"error": "Usuário não encontrado"}), 401
+
+        # Verificar permissões
+        from app.permissions import get_user_permission_scope
+        permissao = get_user_permission_scope({
+            'id': current_user.id,
+            'role': current_user.role,
+            'city_id': getattr(current_user, 'city_id', None),
+            'tenant_id': getattr(current_user, 'tenant_id', None)
+        })
+        
+        if not permissao['permitted']:
+            return jsonify({"error": permissao.get('error', 'Acesso negado')}), 403
+
+        user_dict = {
+            'id': current_user.id,
+            'role': current_user.role,
+            'city_id': getattr(current_user, 'city_id', None)
+        }
+
+        # Extrair parâmetros (todos opcionais)
+        estado = request.args.get('estado')
+        municipio = request.args.get('municipio')
+        escola = request.args.get('escola')
+        serie = request.args.get('serie')
+        
+        response = {}
+        
+        # 1. SEMPRE retornar estados (nível 0)
+        response["estados"] = _obter_estados_disponiveis(user_dict, permissao)
+        
+        # 2. Se estado fornecido, retornar municípios (nível 1)
+        if estado:
+            response["municipios"] = _obter_municipios_por_estado(estado, user_dict, permissao)
+            
+            # 3. Se município fornecido, retornar escolas (nível 2)
+            if municipio:
+                response["escolas"] = _obter_escolas_por_municipio(municipio, user_dict, permissao)
+                
+                # 4. Se escola fornecido, retornar séries (nível 3)
+                if escola:
+                    response["series"] = _obter_series_por_escola(escola, municipio, user_dict, permissao)
+                    
+                    # 5. Se série fornecido, retornar turmas (nível 4)
+                    if serie:
+                        response["turmas"] = _obter_turmas_por_serie(escola, serie, municipio, user_dict, permissao)
+        
+        return jsonify(response), 200
+
+    except Exception as e:
+        logging.error(f"Erro ao obter opções de filtros: {str(e)}", exc_info=True)
+        return jsonify({"error": "Erro ao obter opções de filtros", "details": str(e)}), 500
+
+
+@bp.route('/next-filter-options', methods=['POST'])
+@jwt_required()
+def get_next_filter_options():
+    """
+    Retorna próximas opções de filtro (cascata) ✅ Suporta chamadas PARCIAIS
+    
+    POST /answer-sheets/next-filter-options
+    {
+        "state": "SP",
+        "city": "São Paulo" (obrigatório APENAS para buscar schools/grades/classes),
+        "school_id": "uuid-escola" (opcional),
+        "grade_id": "uuid-série" (opcional)
+    }
+    
+    Exemplos:
+    
+    1. Buscar cidades de um estado (PARCIAL):
+       {"state": "SP"}
+       → Retorna lista de cidades em SP
+    
+    2. Buscar escolas de uma cidade (PARCIAL):
+       {"state": "SP", "city": "São Paulo"}
+       → Retorna lista de escolas em São Paulo/SP
+    
+    3. Buscar séries de uma escola:
+       {"state": "SP", "city": "São Paulo", "school_id": "uuid"}
+       → Retorna lista de séries da escola
+    
+    4. Buscar turmas de uma série:
+       {"state": "SP", "city": "São Paulo", "school_id": "uuid", "grade_id": "uuid"}
+       → Retorna lista de turmas da série
+    
+    Response (sucesso):
+    {
+        "current_level": "state|city|school|grade",
+        "next_level": "city|school|grade|class|none",
+        "options": [
+            {
+                "id": "uuid",
+                "name": "São Paulo",
+                "count": 45
+            },
+            ...
+        ]
+    }
+    
+    Response (sem resultados):
+    {
+        "current_level": "state",
+        "next_level": "city",
+        "options": [],
+        "error": "Nenhuma cidade encontrada para este estado"
+    }
+    """
+    try:
+        current_user_id = get_jwt_identity()
+        current_user = User.query.get(current_user_id)
+        
+        if not current_user:
+            return jsonify({"error": "Usuário não encontrado"}), 401
+
+        data = request.get_json()
+        state = (data.get('state') or '').strip() if data else ''
+        city = (data.get('city') or '').strip() if data else ''
+        school_id = (data.get('school_id') or '').strip() or None if data else None
+        grade_id = (data.get('grade_id') or '').strip() or None if data else None
+
+        from app.services.cartao_resposta.hierarchical_generator import HierarchicalAnswerSheetGenerator
+        
+        hier_gen = HierarchicalAnswerSheetGenerator()
+        user_dict = {
+            'id': current_user.id,
+            'email': current_user.email,
+            'role': current_user.role,
+            'city_id': getattr(current_user, 'city_id', None)
+        }
+
+        # Chamar função de validação (agora existe apenas uma)
+        result = hier_gen.determine_generation_scope(
+            state=state,
+            city=city,
+            school_id=school_id,
+            grade_id=grade_id,
+            user=user_dict
+        )
+
+        # Se houver validação_errors, retornar erro
+        if result.get('validation_errors'):
+            return jsonify({
+                'error': 'Validação falhou',
+                'errors': result['validation_errors']
+            }), 400
+
+        return jsonify({
+            'scope_type': result['scope_type'],
+            'parent_grouping': result['parent_grouping'],
+            'city_id': str(result['city_id']),
+            'scope': result
+        }), 200
+
+    except Exception as e:
+        logging.error(f"Erro ao buscar opções de filtro: {str(e)}", exc_info=True)
+        return jsonify({"error": "Erro ao buscar opções"}), 500

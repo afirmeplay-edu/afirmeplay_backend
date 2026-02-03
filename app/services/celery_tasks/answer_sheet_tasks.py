@@ -93,112 +93,162 @@ def upload_answer_sheets_zip_async(
 
 @celery_app.task(
     bind=True,
-    name='answer_sheet_tasks.generate_answer_sheets_async',
+    name='answer_sheet_tasks.generate_answer_sheets_batch_async',
     max_retries=2,
     default_retry_delay=60,
-    time_limit=1800,  # 30 minutos máximo
-    soft_time_limit=1680  # 28 minutos soft limit
+    time_limit=3600,  # 60 minutos máximo (aumentado para suportar múltiplas turmas)
+    soft_time_limit=3480  # 58 minutos soft limit
 )
-def generate_answer_sheets_async(
+def generate_answer_sheets_batch_async(
     self: Task,
-    class_id: str,
+    gabarito_ids: List[str],
     num_questions: int,
     correct_answers: Dict,
     test_data: Dict,
     use_blocks: bool,
     blocks_config: Dict,
     questions_options: Dict = None,
-    gabarito_id: str = None
+    batch_id: str = None,
+    scope: str = 'class'
 ) -> Dict[str, Any]:
     """
-    Task Celery para geração ASSÍNCRONA de cartões de resposta.
+    Task Celery para geração ASSÍNCRONA de cartões de resposta em batch.
     
-    Gera PDFs de cartões resposta para todos os alunos de uma turma de forma assíncrona,
-    evitando timeout do Gunicorn e permitindo processar turmas grandes.
+    Gera 1 PDF por turma (cada PDF com múltiplas páginas, 1 por aluno).
+    Suporta geração para 1 turma, múltiplas turmas de uma série ou escola inteira.
     
     Args:
-        class_id: ID da turma
+        gabarito_ids: Lista de IDs dos gabaritos (1 por turma)
         num_questions: Quantidade de questões
         correct_answers: Dict com respostas corretas
         test_data: Dados da prova (title, municipality, etc.)
         use_blocks: Se usa blocos
         blocks_config: Configuração de blocos
         questions_options: Alternativas por questão (opcional)
-        gabarito_id: ID do gabarito (opcional)
+        batch_id: ID do batch (opcional, para agrupar múltiplas turmas)
+        scope: Escopo da geração ('class', 'grade' ou 'school')
     
     Returns:
         Dict com status e informações dos cartões gerados
     """
     try:
-        logger.info(f"[CELERY] 🚀 Iniciando geração de cartões de resposta para class_id={class_id}")
+        logger.info(f"[CELERY-BATCH] 🚀 Iniciando geração de cartões - Escopo: {scope}, Gabaritos: {len(gabarito_ids)}")
         
-        from app.models.student import Student
         from app.models.studentClass import Class
+        from app.models.answerSheetGabarito import AnswerSheetGabarito
+        from app.models.grades import Grade
         from app.services.cartao_resposta.answer_sheet_generator import AnswerSheetGenerator
         
-        # Buscar turma
-        class_obj = Class.query.get(class_id)
-        if not class_obj:
-            raise ValueError(f"Turma {class_id} não encontrada")
+        # Buscar todos os gabaritos
+        gabaritos = []
+        for gab_id in gabarito_ids:
+            gab = AnswerSheetGabarito.query.get(gab_id)
+            if gab:
+                gabaritos.append(gab)
+            else:
+                logger.warning(f"[CELERY-BATCH] ⚠️ Gabarito {gab_id} não encontrado")
         
-        logger.info(f"[CELERY] ✅ Turma encontrada: {class_obj.name}")
+        if not gabaritos:
+            raise ValueError("Nenhum gabarito encontrado")
         
-        # Buscar alunos da turma
-        students = Student.query.filter_by(class_id=class_id).all()
-        if not students:
-            raise ValueError(f"Nenhum aluno encontrado na turma {class_id}")
+        logger.info(f"[CELERY-BATCH] ✅ {len(gabaritos)} gabarito(s) encontrado(s)")
+        logger.info(f"[CELERY-BATCH] 📝 Total de questões: {num_questions}")
         
-        logger.info(f"[CELERY] 📊 Total de alunos: {len(students)}")
-        logger.info(f"[CELERY] 📝 Total de questões: {num_questions}")
-        
-        # Criar diretório temporário para ZIP (PDFs serão salvos no output_dir padrão)
+        # Criar diretório temporário para ZIP
         temp_dir = tempfile.mkdtemp()
-        
-        # Gerar cartões usando processamento incremental (salva em disco no output_dir padrão)
-        logger.info(f"[CELERY] 🔨 Iniciando geração de PDFs para {len(students)} alunos...")
+        output_dir = os.path.join(temp_dir, 'pdfs')
+        os.makedirs(output_dir, exist_ok=True)
         
         generator = AnswerSheetGenerator()
-        
-        # output_dir padrão será usado (/tmp/celery_pdfs/answer_sheets)
-        generated_files = generator.generate_answer_sheets(
-            class_id=class_id,
-            test_data=test_data,
-            num_questions=num_questions,
-            use_blocks=use_blocks,
-            blocks_config=blocks_config,
-            correct_answers=correct_answers,
-            gabarito_id=gabarito_id,
-            questions_options=questions_options
-            # output_dir padrão será usado automaticamente
-        )
-        
-        if not generated_files:
-            raise ValueError("Nenhum cartão resposta foi gerado")
-        
-        logger.info(f"[CELERY] ✅ Cartões gerados com sucesso: {len(generated_files)}/{len(students)}")
+        generated_pdfs = []
+        total_students = 0
         
         # ========================================================================
-        # CRIAR ZIP A PARTIR DE ARQUIVOS EM DISCO (NÃO EM MEMÓRIA)
+        # ✅ NOVO: Gerar 1 PDF POR TURMA (cada PDF com múltiplas páginas)
         # ========================================================================
-        zip_path = os.path.join(temp_dir, f'cartoes_{gabarito_id}.zip')
+        for idx, gabarito in enumerate(gabaritos, 1):
+            try:
+                logger.info(f"[CELERY-BATCH] 🔨 Gerando PDF {idx}/{len(gabaritos)} para turma {gabarito.class_id}...")
+                
+                # Buscar turma
+                class_obj = Class.query.get(gabarito.class_id)
+                if not class_obj:
+                    logger.error(f"[CELERY-BATCH] ❌ Turma {gabarito.class_id} não encontrada")
+                    continue
+                
+                # Gerar 1 PDF único para a turma (múltiplas páginas)
+                pdf_result = generator.generate_answer_sheet_for_class(
+                    class_id=str(gabarito.class_id),
+                    test_data=test_data,
+                    num_questions=num_questions,
+                    use_blocks=use_blocks,
+                    blocks_config=blocks_config,
+                    correct_answers=correct_answers,
+                    gabarito_id=str(gabarito.id),
+                    questions_options=questions_options,
+                    output_dir=output_dir
+                )
+                
+                if pdf_result and pdf_result.get('pdf_path'):
+                    generated_pdfs.append({
+                        'gabarito_id': str(gabarito.id),
+                        'class_id': str(gabarito.class_id),
+                        'pdf_path': pdf_result['pdf_path'],
+                        'filename': pdf_result['filename'],
+                        'grade_name': pdf_result.get('grade_name', gabarito.grade_name),
+                        'class_name': pdf_result.get('class_name', class_obj.name),
+                        'total_students': pdf_result['total_students'],
+                        'total_pages': pdf_result['total_pages']
+                    })
+                    total_students += pdf_result['total_students']
+                    logger.info(f"[CELERY-BATCH] ✅ PDF gerado: {pdf_result['filename']} ({pdf_result['total_students']} páginas)")
+                else:
+                    logger.warning(f"[CELERY-BATCH] ⚠️ Falha ao gerar PDF para gabarito {gabarito.id}")
+                
+            except Exception as e:
+                logger.error(f"[CELERY-BATCH] ❌ Erro ao gerar PDF para gabarito {gabarito.id}: {str(e)}", exc_info=True)
+                continue
         
-        logger.info(f"[CELERY] 📦 Criando ZIP a partir de arquivos em disco...")
+        if not generated_pdfs:
+            raise ValueError("Nenhum PDF foi gerado")
         
-        # Criar ZIP usando arquivos em disco (não bytes em memória)
+        logger.info(f"[CELERY-BATCH] ✅ PDFs gerados: {len(generated_pdfs)}, Total de alunos: {total_students}")
+        
+        # ========================================================================
+        # ✅ NOVO: CRIAR ZIP COM ESTRUTURA HIERÁRQUICA
+        # ========================================================================
+        zip_filename = f'cartoes_{batch_id or gabarito_ids[0]}.zip'
+        zip_path = os.path.join(temp_dir, zip_filename)
+        
+        logger.info(f"[CELERY-BATCH] 📦 Criando ZIP com estrutura hierárquica...")
+        
         with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zf:
-            for file_info in generated_files:
-                pdf_path = file_info.get('pdf_path')
-                if pdf_path and os.path.exists(pdf_path):
-                    # Usar zipfile.write() com arquivo em disco (eficiente)
-                    student_name = file_info['student_name'].replace(' ', '_').replace('/', '_')
-                    filename = f"cartao_{student_name}_{file_info['student_id']}.pdf"
-                    zf.write(pdf_path, filename)
+            if scope == 'school':
+                # ✅ ESCOPO ESCOLA: Organizar por série (pastas por série)
+                by_grade = {}
+                for pdf_info in generated_pdfs:
+                    grade = pdf_info.get('grade_name', 'Sem Serie')
+                    if grade not in by_grade:
+                        by_grade[grade] = []
+                    by_grade[grade].append(pdf_info)
+                
+                for grade_name, pdfs in by_grade.items():
+                    for pdf_info in pdfs:
+                        if os.path.exists(pdf_info['pdf_path']):
+                            # Path: "Serie/Arquivo.pdf"
+                            zip_internal_path = f"{grade_name}/{pdf_info['filename']}"
+                            zf.write(pdf_info['pdf_path'], zip_internal_path)
+            else:
+                # ✅ ESCOPO TURMA/SÉRIE: ZIP plano (sem pastas)
+                for pdf_info in generated_pdfs:
+                    if os.path.exists(pdf_info['pdf_path']):
+                        zf.write(pdf_info['pdf_path'], pdf_info['filename'])
         
         zip_size = os.path.getsize(zip_path)
-        logger.info(f"[CELERY] ✅ ZIP criado: {zip_size} bytes")
+        logger.info(f"[CELERY-BATCH] ✅ ZIP criado: {zip_size} bytes")
         
         # ========================================================================
-        # UPLOAD PARA MINIO (NÃO CRÍTICO - não deve derrubar a task)
+        # ✅ UPLOAD PARA MINIO (NÃO CRÍTICO - não deve derrubar a task)
         # ========================================================================
         minio_url = None
         minio_object_name = None
@@ -206,15 +256,22 @@ def generate_answer_sheets_async(
         download_size = 0
         
         # Upload usando arquivo em disco (streaming, não carrega tudo em memória)
-        logger.info(f"[CELERY] ☁️ Enviando ZIP para MinIO...")
+        logger.info(f"[CELERY-BATCH] ☁️ Enviando ZIP para MinIO...")
         try:
             from app.services.storage.minio_service import MinIOService
             
             minio = MinIOService()
+            
+            # Path do objeto no MinIO
+            if batch_id:
+                object_name = f"gabaritos/batch/{batch_id}/cartoes.zip"
+            else:
+                object_name = f"gabaritos/{gabarito_ids[0]}/cartoes.zip"
+            
             # Usar upload_from_path para não carregar ZIP inteiro em memória
             upload_result = minio.upload_from_path(
                 bucket_name=minio.BUCKETS['ANSWER_SHEETS'],
-                object_name=f"gabaritos/{gabarito_id}/cartoes.zip",
+                object_name=object_name,
                 file_path=zip_path
             )
             
@@ -224,82 +281,89 @@ def generate_answer_sheets_async(
                 minio_bucket = upload_result['bucket']
                 download_size = upload_result['size']
                 
-                logger.info(f"[CELERY] ✅ Upload concluído: {minio_url}")
+                logger.info(f"[CELERY-BATCH] ✅ Upload concluído: {minio_url}")
                 
-                # Atualizar gabarito no banco com URL do MinIO
-                from app.models.answerSheetGabarito import AnswerSheetGabarito
+                # ✅ ATUALIZAR TODOS os gabaritos com a mesma URL do ZIP
+                for gabarito_id in gabarito_ids:
+                    gabarito = AnswerSheetGabarito.query.get(gabarito_id)
+                    if gabarito:
+                        gabarito.minio_url = minio_url
+                        gabarito.minio_object_name = minio_object_name
+                        gabarito.minio_bucket = minio_bucket
+                        gabarito.zip_generated_at = datetime.utcnow()
                 
-                gabarito = AnswerSheetGabarito.query.get(gabarito_id)
-                if gabarito:
-                    gabarito.minio_url = minio_url
-                    gabarito.minio_object_name = minio_object_name
-                    gabarito.minio_bucket = minio_bucket
-                    gabarito.zip_generated_at = datetime.utcnow()
-                    db.session.commit()
-                    logger.info(f"[CELERY] ✅ Gabarito atualizado com URL do MinIO")
+                db.session.commit()
+                logger.info(f"[CELERY-BATCH] ✅ {len(gabarito_ids)} gabarito(s) atualizado(s) com URL do MinIO")
             else:
-                logger.warning(f"[CELERY] ⚠️ Upload para MinIO falhou, mas PDFs foram gerados com sucesso")
+                logger.warning(f"[CELERY-BATCH] ⚠️ Upload para MinIO falhou, mas PDFs foram gerados com sucesso")
                 
         except Exception as minio_error:
             # 🔒 Erro de MinIO NÃO deve derrubar a task - PDFs já foram gerados
-            logger.error(f"[CELERY] ⚠️ Erro ao fazer upload para MinIO (não crítico): {str(minio_error)}", exc_info=True)
+            logger.error(f"[CELERY-BATCH] ⚠️ Erro ao fazer upload para MinIO (não crítico): {str(minio_error)}", exc_info=True)
         
         # Limpar arquivos temporários
         try:
             import shutil
             shutil.rmtree(temp_dir)
-            logger.info(f"[CELERY] 🧹 Arquivos temporários limpos")
+            logger.info(f"[CELERY-BATCH] 🧹 Arquivos temporários limpos")
         except Exception as e:
-            logger.warning(f"[CELERY] ⚠️ Erro ao limpar arquivos temporários: {str(e)}")
+            logger.warning(f"[CELERY-BATCH] ⚠️ Erro ao limpar arquivos temporários: {str(e)}")
         
         # Liberar memória explicitamente
         gc.collect()
         
-        # Preparar resposta (sem incluir pdf_data - PDFs foram salvos em disco e enviados ao MinIO)
-        cartoes_gerados = []
-        for file_info in generated_files:
-            cartoes_gerados.append({
-                'student_id': str(file_info['student_id']),
-                'student_name': file_info['student_name'],
-                'has_pdf': True  # PDF foi gerado (salvo em disco e enviado ao MinIO)
+        # Preparar resposta
+        classes_generated = []
+        for pdf_info in generated_pdfs:
+            classes_generated.append({
+                'gabarito_id': pdf_info['gabarito_id'],
+                'class_id': pdf_info['class_id'],
+                'class_name': pdf_info['class_name'],
+                'grade_name': pdf_info['grade_name'],
+                'filename': pdf_info['filename'],
+                'total_students': pdf_info['total_students'],
+                'total_pages': pdf_info['total_pages']
             })
         
         return {
             'success': True,
-            'class_id': class_id,
-            'class_name': class_obj.name,
+            'scope': scope,
+            'batch_id': batch_id,
+            'gabarito_ids': gabarito_ids,
             'num_questions': num_questions,
-            'total_students': len(students),
-            'generated_sheets': len(generated_files),
-            'gabarito_id': gabarito_id,
+            'total_classes': len(generated_pdfs),
+            'total_students': total_students,
+            'total_pdfs': len(generated_pdfs),
             'minio_url': minio_url,  # Pode ser None se upload falhar
             'download_size_bytes': download_size,
-            'sheets': cartoes_gerados
+            'classes': classes_generated
         }
     
     except Exception as e:
-        logger.error(f"[CELERY] ❌ Erro ao gerar cartões de resposta: {str(e)}", exc_info=True)
+        logger.error(f"[CELERY-BATCH] ❌ Erro ao gerar cartões de resposta: {str(e)}", exc_info=True)
         
         # 🔒 NÃO fazer retry por erro de MinIO - apenas por erros críticos de geração
         # Se PDFs foram gerados mas upload falhou, não retryar
         is_minio_error = 'minio' in str(e).lower() or 's3' in str(e).lower() or 'ssl' in str(e).lower()
         
         if is_minio_error:
-            logger.warning(f"[CELERY] ⚠️ Erro de MinIO detectado - não retryando task (PDFs podem ter sido gerados)")
+            logger.warning(f"[CELERY-BATCH] ⚠️ Erro de MinIO detectado - não retryando task (PDFs podem ter sido gerados)")
             return {
                 'success': False,
                 'error': str(e),
-                'class_id': class_id,
+                'scope': scope,
+                'gabarito_ids': gabarito_ids,
                 'is_minio_error': True
             }
         
         # Retry apenas para erros críticos (não relacionados a MinIO)
         if self.request.retries < self.max_retries:
-            logger.info(f"[CELERY] 🔄 Tentando novamente (retry {self.request.retries + 1}/{self.max_retries})...")
+            logger.info(f"[CELERY-BATCH] 🔄 Tentando novamente (retry {self.request.retries + 1}/{self.max_retries})...")
             raise self.retry(exc=e)
         
         return {
             'success': False,
             'error': str(e),
-            'class_id': class_id
+            'scope': scope,
+            'gabarito_ids': gabarito_ids
         }

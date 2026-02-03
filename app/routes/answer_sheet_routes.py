@@ -208,40 +208,39 @@ def _generate_complete_structure(num_questions: int, use_blocks: bool,
 @role_required("admin", "professor", "coordenador", "diretor", "tecadm")
 def generate_answer_sheets():
     """
-    Gera cartões resposta para uma turma e retorna como arquivo ZIP
+    Gera cartões resposta com diferentes escopos (turma, série ou escola)
     
-    Body:
+    Body (ESCOPO 1 - Uma turma):
         {
             "class_id": "uuid",
             "num_questions": 48,
             "use_blocks": true,
-            "blocks_config": {
-                "num_blocks": 4,
-                "questions_per_block": 12,
-                "separate_by_subject": false
-            },
-            "correct_answers": {
-                "1": "A",
-                "2": "B",
-                ...
-            },
-            "questions_options": {
-                "1": ["A", "B", "C"],
-                "2": ["A", "B", "C", "D"],
-                ...
-            } (opcional - se omitido, usa A, B, C, D para todas),
-            "test_data": {
-                "title": "Nome da Prova",
-                "municipality": "...",
-                "state": "...",
-                ...
-            },
+            "blocks_config": {...},
+            "correct_answers": {"1": "A", "2": "B", ...},
+            "questions_options": {...} (opcional),
+            "test_data": {...},
             "test_id": "uuid" (opcional)
         }
     
+    Body (ESCOPO 2 - Todas turmas de uma série):
+        {
+            "grade_id": "uuid",
+            "school_id": "uuid",
+            "num_questions": 48,
+            ... demais campos
+        }
+    
+    Body (ESCOPO 3 - Todas turmas de uma escola):
+        {
+            "school_id": "uuid",
+            "num_questions": 48,
+            ... demais campos
+        }
+    
     Returns:
-        Arquivo ZIP contendo todos os PDFs dos cartões resposta
-        O ZIP também contém um arquivo metadata.json com informações do gabarito
+        Status 202 com task_id para polling
+        - ESCOPO 1: Gera 1 PDF com N páginas (1 por aluno)
+        - ESCOPO 2/3: Gera N PDFs (1 por turma), cada um com M páginas
     """
     try:
         user = get_current_user_from_token()
@@ -253,38 +252,92 @@ def generate_answer_sheets():
             return jsonify({"error": "Dados não fornecidos"}), 400
         
         # Validar campos obrigatórios
-        class_id = data.get('class_id')
         num_questions = data.get('num_questions')
         correct_answers = data.get('correct_answers')
         questions_options = data.get('questions_options')  # Opcional
         test_data = data.get('test_data', {})
         
-        if not class_id:
-            return jsonify({"error": "class_id é obrigatório"}), 400
         if not num_questions or num_questions <= 0:
             return jsonify({"error": "num_questions deve ser maior que 0"}), 400
         if not correct_answers:
             return jsonify({"error": "correct_answers é obrigatório"}), 400
         
-        # Validar turma
-        class_obj = Class.query.get(class_id)
-        if not class_obj:
-            return jsonify({"error": "Turma não encontrada"}), 404
+        # ========================================================================
+        # ✅ DETERMINAR ESCOPO E BUSCAR TURMAS
+        # ========================================================================
+        class_id = data.get('class_id')
+        grade_id = data.get('grade_id')
+        school_id = data.get('school_id')
         
-        # Validar permissões
+        classes = []
+        scope = None
+        scope_name = None
+        
+        if class_id:
+            # ESCOPO 1: Uma turma específica
+            scope = 'class'
+            class_obj = Class.query.get(class_id)
+            if not class_obj:
+                return jsonify({"error": "Turma não encontrada"}), 404
+            classes = [class_obj]
+            scope_name = f"Turma {class_obj.name}"
+            
+        elif grade_id and school_id:
+            # ESCOPO 2: Todas turmas de uma série em uma escola
+            scope = 'grade'
+            from app.models.grades import Grade
+            
+            grade_obj = Grade.query.get(grade_id)
+            if not grade_obj:
+                return jsonify({"error": "Série não encontrada"}), 404
+            
+            classes = Class.query.filter_by(
+                grade_id=grade_id,
+                school_id=school_id
+            ).all()
+            
+            if not classes:
+                return jsonify({"error": "Nenhuma turma encontrada para esta série nesta escola"}), 404
+            
+            scope_name = f"Série {grade_obj.name}"
+            
+        elif school_id:
+            # ESCOPO 3: Todas turmas de todas séries de uma escola
+            scope = 'school'
+            from app.models.school import School
+            
+            school_obj = School.query.get(school_id)
+            if not school_obj:
+                return jsonify({"error": "Escola não encontrada"}), 404
+            
+            classes = Class.query.filter_by(school_id=school_id).all()
+            
+            if not classes:
+                return jsonify({"error": "Nenhuma turma encontrada nesta escola"}), 404
+            
+            scope_name = f"Escola {school_obj.name}"
+            
+        else:
+            return jsonify({"error": "Deve fornecer class_id, grade_id+school_id ou school_id"}), 400
+        
+        logging.info(f"✅ Escopo determinado: {scope} - {scope_name} ({len(classes)} turma(s))")
+        
+        # ========================================================================
+        # ✅ VALIDAR PERMISSÕES (usuário tem acesso às turmas?)
+        # ========================================================================
         if user['role'] == 'professor':
-            # Verificar se professor tem acesso à turma
+            # Verificar se professor tem acesso às turmas
             from app.models.teacher import Teacher
             from app.models.teacherClass import TeacherClass
             
             teacher = Teacher.query.filter_by(user_id=user['id']).first()
             if teacher:
-                teacher_class = TeacherClass.query.filter_by(
-                    teacher_id=teacher.id,
-                    class_id=class_id
-                ).first()
-                if not teacher_class:
-                    return jsonify({"error": "Você não tem acesso a esta turma"}), 403
+                teacher_class_ids = [tc.class_id for tc in TeacherClass.query.filter_by(teacher_id=teacher.id).all()]
+                
+                # Verificar se todas as turmas estão acessíveis
+                for cls in classes:
+                    if cls.id not in teacher_class_ids:
+                        return jsonify({"error": f"Você não tem acesso à turma {cls.name}"}), 403
         
         # Configuração de blocos
         use_blocks = data.get('use_blocks', False)
@@ -324,38 +377,57 @@ def generate_answer_sheets():
         # Adicionar estrutura completa ao blocks_config como 'topology'
         blocks_config['topology'] = complete_structure
         
-        # Buscar informações da turma e escola para salvar no gabarito
-        school_id = None
-        school_name = ''
-        if class_obj.school_id:
-            from app.models.school import School
-            school = School.query.get(class_obj.school_id)
-            if school:
-                school_id = school.id
-                school_name = school.name or ''
+        # ========================================================================
+        # ✅ CRIAR 1 GABARITO POR TURMA
+        # ========================================================================
+        batch_id = str(uuid.uuid4()) if len(classes) > 1 else None
+        gabaritos = []
         
-        # Salvar gabarito no banco (garantir que UUIDs sejam strings)
-        gabarito = AnswerSheetGabarito(
-            test_id=str(data.get('test_id')) if data.get('test_id') else None,
-            class_id=class_id,  # Já é UUID pelo modelo
-            num_questions=num_questions,
-            use_blocks=use_blocks,
-            blocks_config=blocks_config,
-            correct_answers=correct_answers,
-            title=test_data.get('title', 'Cartão Resposta'),
-            created_by=str(user['id']) if user.get('id') else None,
-            # Campos adicionais
-            school_id=str(school_id) if school_id else None,
-            school_name=school_name,
-            municipality=test_data.get('municipality', ''),
-            state=test_data.get('state', ''),
-            grade_name=test_data.get('grade_name', ''),
-            institution=test_data.get('institution', '')
-        )
-        db.session.add(gabarito)
+        for class_obj in classes:
+            # Buscar informações da turma e escola
+            cls_school_id = None
+            cls_school_name = ''
+            cls_grade_name = test_data.get('grade_name', '')
+            
+            if class_obj.school_id:
+                from app.models.school import School
+                school = School.query.get(class_obj.school_id)
+                if school:
+                    cls_school_id = school.id
+                    cls_school_name = school.name or ''
+            
+            # Buscar nome da série se não fornecido
+            if not cls_grade_name and class_obj.grade_id:
+                from app.models.grades import Grade
+                grade_obj = Grade.query.get(class_obj.grade_id)
+                if grade_obj:
+                    cls_grade_name = grade_obj.name
+            
+            # Criar gabarito
+            gabarito = AnswerSheetGabarito(
+                test_id=str(data.get('test_id')) if data.get('test_id') else None,
+                class_id=class_obj.id,
+                num_questions=num_questions,
+                use_blocks=use_blocks,
+                blocks_config=blocks_config,
+                correct_answers=correct_answers,
+                title=test_data.get('title', 'Cartão Resposta'),
+                created_by=str(user['id']) if user.get('id') else None,
+                school_id=str(cls_school_id) if cls_school_id else None,
+                school_name=cls_school_name,
+                municipality=test_data.get('municipality', ''),
+                state=test_data.get('state', ''),
+                grade_name=cls_grade_name,
+                institution=test_data.get('institution', ''),
+                batch_id=batch_id  # ✅ NOVO: ID do batch (se múltiplas turmas)
+            )
+            db.session.add(gabarito)
+            gabaritos.append(gabarito)
+        
         db.session.commit()
+        logging.info(f"✅ {len(gabaritos)} gabarito(s) criado(s)")
         
-        # Gerar coordenadas automaticamente
+        # Gerar coordenadas para todos os gabaritos
         try:
             from app.services.cartao_resposta.coordinate_generator import CoordinateGenerator
             
@@ -367,11 +439,12 @@ def generate_answer_sheets():
                 questions_options=questions_options
             )
             
-            # Salvar coordenadas no gabarito
-            gabarito.coordinates = coordinates
-            db.session.commit()
+            # Salvar mesmas coordenadas em todos os gabaritos (mesma estrutura)
+            for gabarito in gabaritos:
+                gabarito.coordinates = coordinates
             
-            logging.info(f"✅ Coordenadas geradas e salvas para gabarito {str(gabarito.id)}")
+            db.session.commit()
+            logging.info(f"✅ Coordenadas geradas e salvas para {len(gabaritos)} gabarito(s)")
         except Exception as e:
             logging.error(f"Erro ao gerar coordenadas: {str(e)}", exc_info=True)
             # Continuar mesmo se falhar
@@ -388,38 +461,46 @@ def generate_answer_sheets():
             'grade_name': test_data.get('grade_name', '')
         }
         
-        # ✅ NOVO: Gerar cartões de forma ASSÍNCRONA via Celery
-        from app.services.celery_tasks.answer_sheet_tasks import generate_answer_sheets_async
+        # ✅ NOVO: Gerar cartões de forma ASSÍNCRONA via Celery (batch)
+        from app.services.celery_tasks.answer_sheet_tasks import generate_answer_sheets_batch_async
         
-        # Disparar task Celery
-        task = generate_answer_sheets_async.delay(
-            class_id=class_id,
+        # Disparar task Celery com lista de gabaritos
+        task = generate_answer_sheets_batch_async.delay(
+            gabarito_ids=[str(g.id) for g in gabaritos],
             num_questions=num_questions,
             correct_answers=correct_answers,
             test_data=test_data_complete,
             use_blocks=use_blocks,
             blocks_config=blocks_config,
             questions_options=questions_options,
-            gabarito_id=str(gabarito.id)
+            batch_id=batch_id,
+            scope=scope
         )
+        
+        # Preparar informações das turmas
+        classes_info = []
+        for cls, gab in zip(classes, gabaritos):
+            classes_info.append({
+                'class_id': str(cls.id),
+                'class_name': cls.name,
+                'gabarito_id': str(gab.id),
+                'grade_name': gab.grade_name
+            })
         
         # Retornar resposta imediata com task_id para polling
         return jsonify({
             "status": "processing",
-            "message": "Cartões de resposta sendo gerados em background. Use o task_id para verificar o status.",
+            "message": f"Cartões de resposta sendo gerados em background ({scope}: {scope_name}). Use o task_id para verificar o status.",
             "task_id": task.id,
-            "gabarito_id": str(gabarito.id),
-            "class_id": class_id,
-            "class_name": class_obj.name,
+            "scope": scope,
+            "scope_name": scope_name,
+            "batch_id": batch_id,
+            "gabarito_ids": [str(g.id) for g in gabaritos],
+            "classes_count": len(classes),
+            "classes": classes_info,
             "num_questions": num_questions,
             "polling_url": f"/answer-sheets/task/{task.id}/status"
         }), 202
-        
-        # ❌ CÓDIGO ANTIGO COMENTADO (geração síncrona removida)
-        # generator = AnswerSheetGenerator()
-        # generated_files = generator.generate_answer_sheets(...)
-        # if not generated_files:
-        #     return jsonify({"error": "Nenhum cartão resposta foi gerado"}), 400
         
     except Exception as e:
         db.session.rollback()
@@ -785,7 +866,9 @@ def download_gabarito(gabarito_id):
                 "num_questions": gabarito.num_questions,
                 "generated_at": gabarito.zip_generated_at.isoformat() if gabarito.zip_generated_at else None,
                 "created_at": gabarito.created_at.isoformat() if gabarito.created_at else None,
-                "minio_url": gabarito.minio_url
+                "minio_url": gabarito.minio_url,
+                "is_batch": gabarito.batch_id is not None,  # ✅ NOVO
+                "batch_id": gabarito.batch_id  # ✅ NOVO
             }), 200
             
         except Exception as minio_error:
@@ -798,6 +881,96 @@ def download_gabarito(gabarito_id):
     except Exception as e:
         logging.error(f"Erro ao baixar gabarito: {str(e)}", exc_info=True)
         return jsonify({"error": f"Erro ao baixar gabarito: {str(e)}"}), 500
+
+
+@bp.route('/batch/<string:batch_id>/download', methods=['GET'])
+@jwt_required()
+@role_required("admin", "professor", "coordenador", "diretor", "tecadm")
+def download_batch(batch_id):
+    """
+    Retorna URL pré-assinada para download do ZIP de um batch de cartões
+    
+    Um batch agrupa múltiplas turmas geradas juntas (ex: todas turmas de uma escola).
+    O ZIP contém 1 PDF por turma, cada PDF com múltiplas páginas (1 por aluno).
+    
+    Returns:
+        JSON com URL pré-assinada e informações do batch
+    """
+    try:
+        from app.services.storage.minio_service import MinIOService
+        from datetime import timedelta
+        
+        user = get_current_user_from_token()
+        if not user:
+            return jsonify({"error": "Usuário não encontrado"}), 401
+        
+        # Buscar qualquer gabarito do batch para obter URL do MinIO
+        gabarito = AnswerSheetGabarito.query.filter_by(batch_id=batch_id).first()
+        
+        if not gabarito:
+            return jsonify({"error": "Batch não encontrado"}), 404
+        
+        # Verificar permissão (admin pode baixar qualquer batch)
+        if user['role'] != 'admin' and gabarito.created_by != str(user['id']):
+            return jsonify({"error": "Você não tem permissão para acessar este batch"}), 403
+        
+        # Verificar se ZIP foi gerado
+        if not gabarito.minio_object_name:
+            return jsonify({
+                "error": "ZIP ainda não foi gerado",
+                "message": "Aguarde a conclusão da geração dos cartões",
+                "batch_id": batch_id,
+                "status": "not_generated"
+            }), 400
+        
+        # Buscar todos gabaritos do batch
+        gabaritos = AnswerSheetGabarito.query.filter_by(batch_id=batch_id).all()
+        
+        # Gerar URL pré-assinada (válida por 1 hora)
+        minio = MinIOService()
+        
+        try:
+            presigned_url = minio.get_presigned_url(
+                bucket_name=gabarito.minio_bucket or minio.BUCKETS['ANSWER_SHEETS'],
+                object_name=gabarito.minio_object_name,
+                expires=timedelta(hours=1)
+            )
+            
+            # Preparar informações das turmas
+            classes_info = []
+            for gab in gabaritos:
+                class_obj = Class.query.get(gab.class_id) if gab.class_id else None
+                classes_info.append({
+                    'gabarito_id': str(gab.id),
+                    'class_id': str(gab.class_id) if gab.class_id else None,
+                    'class_name': class_obj.name if class_obj else None,
+                    'grade_name': gab.grade_name,
+                    'school_name': gab.school_name
+                })
+            
+            return jsonify({
+                "download_url": presigned_url,
+                "expires_in": "1 hour",
+                "batch_id": batch_id,
+                "classes_count": len(gabaritos),
+                "classes": classes_info,
+                "title": gabarito.title,
+                "num_questions": gabarito.num_questions,
+                "generated_at": gabarito.zip_generated_at.isoformat() if gabarito.zip_generated_at else None,
+                "created_at": gabarito.created_at.isoformat() if gabarito.created_at else None,
+                "minio_url": gabarito.minio_url
+            }), 200
+            
+        except Exception as minio_error:
+            logging.error(f"Erro ao gerar URL pré-assinada: {str(minio_error)}")
+            return jsonify({
+                "error": "Erro ao gerar URL de download",
+                "details": str(minio_error)
+            }), 500
+        
+    except Exception as e:
+        logging.error(f"Erro ao baixar batch: {str(e)}", exc_info=True)
+        return jsonify({"error": f"Erro ao baixar batch: {str(e)}"}), 500
 
 
 @bp.route('/gabarito/<string:gabarito_id>', methods=['GET'])

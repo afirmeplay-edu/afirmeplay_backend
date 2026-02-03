@@ -78,6 +78,11 @@ class AnswerSheetGabarito(db.Model):
     minio_bucket = db.Column(db.String(100), nullable=True)  # Nome do bucket
     zip_generated_at = db.Column(db.DateTime, nullable=True)  # Timestamp de geração do ZIP
     
+    # =========================================================================
+    # ✅ Campo para agrupar gabaritos gerados em batch (múltiplas turmas)
+    # =========================================================================
+    batch_id = db.Column(db.String(36), nullable=True)  # UUID comum para gabaritos do mesmo batch
+    
     # Relacionamentos
     test = db.relationship('Test', foreign_keys=[test_id])
     class_ = db.relationship('Class', foreign_keys=[class_id])

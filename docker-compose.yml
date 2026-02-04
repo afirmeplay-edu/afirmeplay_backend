@@ -130,8 +130,9 @@ services:
       REDIS_URL: redis://:${REDIS_PASSWORD:-redis_password}@redis_container:6379/0
       REDIS_PASSWORD: ${REDIS_PASSWORD:-redis_password}
       
-      # MinIO
+      # MinIO (MINIO_SERVER_URL = URL usada nas presigned URLs, acessível pelo browser)
       MINIO_ENDPOINT: http://minio-server:9000
+      MINIO_SERVER_URL: ${MINIO_SERVER_URL:-http://localhost:9000}
       MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:-${MINIO_ROOT_USER:-minioadmin}}
       MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:-${MINIO_ROOT_PASSWORD:-minioadmin123}}
       MINIO_SECURE: ${MINIO_SECURE:-false}
@@ -182,8 +183,9 @@ services:
       REDIS_URL: redis://:${REDIS_PASSWORD:-redis_password}@redis_container:6379/0
       REDIS_PASSWORD: ${REDIS_PASSWORD:-redis_password}
       
-      # MinIO
+      # MinIO (MINIO_SERVER_URL = URL usada nas presigned URLs)
       MINIO_ENDPOINT: http://minio-server:9000
+      MINIO_SERVER_URL: ${MINIO_SERVER_URL:-http://localhost:9000}
       MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:-${MINIO_ROOT_USER:-minioadmin}}
       MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:-${MINIO_ROOT_PASSWORD:-minioadmin123}}
       MINIO_SECURE: ${MINIO_SECURE:-false}

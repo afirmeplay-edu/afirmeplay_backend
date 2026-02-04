@@ -166,7 +166,8 @@ def generate_answer_sheets_batch_async(
     blocks_config: Dict,
     questions_options: Dict = None,
     batch_id: str = None,
-    scope: str = 'class'
+    scope: str = 'class',
+    class_ids: List[str] = None
 ) -> Dict[str, Any]:
     """
     Task Celery para geração ASSÍNCRONA de cartões de resposta em batch.
@@ -191,10 +192,9 @@ def generate_answer_sheets_batch_async(
     try:
         logger.info(f"[CELERY-BATCH] 🚀 Iniciando geração de cartões - Escopo: {scope}, Gabaritos: {len(gabarito_ids)}")
         
-        from app.models.studentClass import Class
         from app.models.answerSheetGabarito import AnswerSheetGabarito
-        from app.models.grades import Grade
         from app.services.cartao_resposta.answer_sheet_generator import AnswerSheetGenerator
+        from app.models.studentClass import Class
         
         # Buscar todos os gabaritos
         gabaritos = []
@@ -218,58 +218,137 @@ def generate_answer_sheets_batch_async(
         
         generator = AnswerSheetGenerator()
         generated_pdfs = []
+        skipped_classes = []  # ✅ NOVO: rastrear turmas puladas
         total_students = 0
-        
+
         # ========================================================================
-        # ✅ NOVO: Gerar 1 PDF POR TURMA (cada PDF com múltiplas páginas)
+        # ✅ NOVO: Gerar PDFs a partir de UM gabarito (escopo) e lista de turmas
         # ========================================================================
-        for idx, gabarito in enumerate(gabaritos, 1):
-            try:
-                logger.info(f"[CELERY-BATCH] 🔨 Gerando PDF {idx}/{len(gabaritos)} para turma {gabarito.class_id}...")
-                
-                # Buscar turma
-                class_obj = Class.query.get(gabarito.class_id)
-                if not class_obj:
-                    logger.error(f"[CELERY-BATCH] ❌ Turma {gabarito.class_id} não encontrada")
+        if class_ids:
+            # Novo fluxo: 1 gabarito representando o escopo inteiro
+            if len(gabaritos) != 1:
+                raise ValueError("Fluxo com class_ids requer exatamente 1 gabarito (escopo)")
+
+            gabarito_master = gabaritos[0]
+
+            # Buscar todas as turmas do escopo (lista explícita)
+            classes = Class.query.filter(Class.id.in_(class_ids)).all()
+            if not classes:
+                raise ValueError("Nenhuma turma encontrada para os IDs informados")
+
+            logger.info(f"[CELERY-BATCH] ✅ Gerando PDFs para {len(classes)} turma(s) usando gabarito único {gabarito_master.id}")
+
+            for idx, class_obj in enumerate(classes, 1):
+                try:
+                    logger.info(f"[CELERY-BATCH] 🔨 Gerando PDF {idx}/{len(classes)} para turma {class_obj.id}...")
+
+                    pdf_result = generator.generate_answer_sheet_for_class(
+                        class_id=str(class_obj.id),
+                        test_data=test_data,
+                        num_questions=num_questions,
+                        use_blocks=use_blocks,
+                        blocks_config=blocks_config,
+                        correct_answers=correct_answers,
+                        gabarito_id=str(gabarito_master.id),
+                        questions_options=questions_options,
+                        output_dir=output_dir
+                    )
+
+                    # Turma sem alunos: generator retorna None — pular sem erro
+                    if pdf_result is None:
+                        logger.warning(f"[CELERY-BATCH] ⚠️ Turma {class_obj.name} sem alunos — pulando")
+                        # ✅ NOVO: adicionar à lista de puladas
+                        from app.models.grades import Grade
+                        grade_name = ''
+                        if class_obj.grade_id:
+                            grade_obj = Grade.query.get(class_obj.grade_id)
+                            if grade_obj:
+                                grade_name = grade_obj.name
+                        skipped_classes.append({
+                            'class_name': class_obj.name,
+                            'grade_name': grade_name
+                        })
+                        continue
+
+                    if pdf_result and pdf_result.get('pdf_path'):
+                        generated_pdfs.append({
+                            'gabarito_id': str(gabarito_master.id),
+                            'class_id': str(class_obj.id),
+                            'pdf_path': pdf_result['pdf_path'],
+                            'filename': pdf_result['filename'],
+                            'grade_name': pdf_result.get('grade_name', gabarito_master.grade_name),
+                            'class_name': pdf_result.get('class_name', class_obj.name),
+                            'total_students': pdf_result['total_students'],
+                            'total_pages': pdf_result['total_pages']
+                        })
+                        total_students += pdf_result['total_students']
+                        logger.info(f"[CELERY-BATCH] ✅ PDF gerado: {pdf_result['filename']} ({pdf_result['total_students']} páginas)")
+                    else:
+                        logger.warning(f"[CELERY-BATCH] ⚠️ Falha ao gerar PDF para turma {class_obj.id}")
+
+                except Exception as e:
+                    logger.error(f"[CELERY-BATCH] ❌ Erro ao gerar PDF para turma {class_obj.id}: {str(e)}", exc_info=True)
                     continue
-                
-                # Gerar 1 PDF único para a turma (múltiplas páginas)
-                pdf_result = generator.generate_answer_sheet_for_class(
-                    class_id=str(gabarito.class_id),
-                    test_data=test_data,
-                    num_questions=num_questions,
-                    use_blocks=use_blocks,
-                    blocks_config=blocks_config,
-                    correct_answers=correct_answers,
-                    gabarito_id=str(gabarito.id),
-                    questions_options=questions_options,
-                    output_dir=output_dir
-                )
-                
-                # Turma sem alunos: generator retorna None — pular sem erro
-                if pdf_result is None:
-                    logger.warning(f"[CELERY-BATCH] ⚠️ Turma {class_obj.name} sem alunos — pulando")
+        else:
+            # Fluxo antigo: 1 gabarito por turma
+            for idx, gabarito in enumerate(gabaritos, 1):
+                try:
+                    logger.info(f"[CELERY-BATCH] 🔨 Gerando PDF {idx}/{len(gabaritos)} para turma {gabarito.class_id}...")
+                    
+                    # Buscar turma
+                    class_obj = Class.query.get(gabarito.class_id)
+                    if not class_obj:
+                        logger.error(f"[CELERY-BATCH] ❌ Turma {gabarito.class_id} não encontrada")
+                        continue
+                    
+                    # Gerar 1 PDF único para a turma (múltiplas páginas)
+                    pdf_result = generator.generate_answer_sheet_for_class(
+                        class_id=str(gabarito.class_id),
+                        test_data=test_data,
+                        num_questions=num_questions,
+                        use_blocks=use_blocks,
+                        blocks_config=blocks_config,
+                        correct_answers=correct_answers,
+                        gabarito_id=str(gabarito.id),
+                        questions_options=questions_options,
+                        output_dir=output_dir
+                    )
+                    
+                    # Turma sem alunos: generator retorna None — pular sem erro
+                    if pdf_result is None:
+                        logger.warning(f"[CELERY-BATCH] ⚠️ Turma {class_obj.name} sem alunos — pulando")
+                        # ✅ NOVO: adicionar à lista de puladas
+                        from app.models.grades import Grade
+                        grade_name = ''
+                        if class_obj.grade_id:
+                            grade_obj = Grade.query.get(class_obj.grade_id)
+                            if grade_obj:
+                                grade_name = grade_obj.name
+                        skipped_classes.append({
+                            'class_name': class_obj.name,
+                            'grade_name': grade_name
+                        })
+                        continue
+                    
+                    if pdf_result and pdf_result.get('pdf_path'):
+                        generated_pdfs.append({
+                            'gabarito_id': str(gabarito.id),
+                            'class_id': str(gabarito.class_id),
+                            'pdf_path': pdf_result['pdf_path'],
+                            'filename': pdf_result['filename'],
+                            'grade_name': pdf_result.get('grade_name', gabarito.grade_name),
+                            'class_name': pdf_result.get('class_name', class_obj.name),
+                            'total_students': pdf_result['total_students'],
+                            'total_pages': pdf_result['total_pages']
+                        })
+                        total_students += pdf_result['total_students']
+                        logger.info(f"[CELERY-BATCH] ✅ PDF gerado: {pdf_result['filename']} ({pdf_result['total_students']} páginas)")
+                    else:
+                        logger.warning(f"[CELERY-BATCH] ⚠️ Falha ao gerar PDF para gabarito {gabarito.id}")
+                    
+                except Exception as e:
+                    logger.error(f"[CELERY-BATCH] ❌ Erro ao gerar PDF para gabarito {gabarito.id}: {str(e)}", exc_info=True)
                     continue
-                
-                if pdf_result and pdf_result.get('pdf_path'):
-                    generated_pdfs.append({
-                        'gabarito_id': str(gabarito.id),
-                        'class_id': str(gabarito.class_id),
-                        'pdf_path': pdf_result['pdf_path'],
-                        'filename': pdf_result['filename'],
-                        'grade_name': pdf_result.get('grade_name', gabarito.grade_name),
-                        'class_name': pdf_result.get('class_name', class_obj.name),
-                        'total_students': pdf_result['total_students'],
-                        'total_pages': pdf_result['total_pages']
-                    })
-                    total_students += pdf_result['total_students']
-                    logger.info(f"[CELERY-BATCH] ✅ PDF gerado: {pdf_result['filename']} ({pdf_result['total_students']} páginas)")
-                else:
-                    logger.warning(f"[CELERY-BATCH] ⚠️ Falha ao gerar PDF para gabarito {gabarito.id}")
-                
-            except Exception as e:
-                logger.error(f"[CELERY-BATCH] ❌ Erro ao gerar PDF para gabarito {gabarito.id}: {str(e)}", exc_info=True)
-                continue
         
         if not generated_pdfs:
             raise ValueError("Nenhum PDF foi gerado")
@@ -397,7 +476,8 @@ def generate_answer_sheets_batch_async(
             'total_pdfs': len(generated_pdfs),
             'minio_url': minio_url,  # Pode ser None se upload falhar
             'download_size_bytes': download_size,
-            'classes': classes_generated
+            'classes': classes_generated,
+            'skipped_classes': skipped_classes  # ✅ NOVO: turmas puladas (sem alunos)
         }
     
     except Exception as e:

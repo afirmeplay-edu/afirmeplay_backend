@@ -65,11 +65,18 @@ class Competition(db.Model):
 
     @property
     def enrolled_count(self) -> int:
-        """Conta quantos alunos inscritos (via test_id em StudentTestOlimpics)."""
+        """Conta quantos alunos inscritos (via competition_enrollments; fallback em StudentTestOlimpics)."""
+        try:
+            return self.enrollments.filter_by(status='inscrito').count()
+        except Exception:
+            pass
         if not self.test_id:
             return 0
-        from app.models.studentTestOlimpics import StudentTestOlimpics
-        return StudentTestOlimpics.query.filter_by(test_id=self.test_id).count()
+        try:
+            from app.models.studentTestOlimpics import StudentTestOlimpics
+            return StudentTestOlimpics.query.filter_by(test_id=self.test_id).count()
+        except Exception:
+            return 0
 
     @property
     def available_slots(self):

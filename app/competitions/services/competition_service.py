@@ -1,24 +1,24 @@
 # -*- coding: utf-8 -*-
-"""Serviço de Competições (Etapa 2)."""
+"""Serviço de Competições (Etapa 2 e 3)."""
+from datetime import datetime
+
 from sqlalchemy import func
+
 from app import db
-from app.competitions.models import Competition
-from app.competitions.constants import is_valid_level, STAGE_NAMES_BY_LEVEL
+from app.competitions.models import Competition, CompetitionEnrollment
+from app.competitions.constants import is_valid_level, student_grade_matches_level
+from app.competitions.exceptions import ValidationError
 from app.models.test import Test
 from app.models.testQuestion import TestQuestion
 from app.models.question import Question
-from app.models.educationStage import EducationStage
-from datetime import datetime
-import random
+from app.models.student import Student
+from app.models.studentTestOlimpics import StudentTestOlimpics
+
+from .question_selection_service import QuestionSelectionService
 
 # Formato esperado de reward_config: {"participation_coins": int, "ranking_rewards": [{"position": int, "coins": int}, ...]}
 REWARD_CONFIG_PARTICIPATION_KEY = "participation_coins"
 REWARD_CONFIG_RANKING_KEY = "ranking_rewards"
-
-
-class ValidationError(Exception):
-    """Erro de validação."""
-    pass
 
 
 class CompetitionService:
@@ -80,39 +80,15 @@ class CompetitionService:
     @staticmethod
     def _create_test_with_random_questions(competition: Competition) -> None:
         """
-        Sorteia questões aleatórias baseado em question_rules e no nível da competição.
-        Filtra questões por: disciplina (subject_id), etapa de ensino (nível 1 ou 2),
-        e opcionalmente grade_ids, difficulty_level.
+        Sorteia questões aleatórias baseado em question_rules,
+        delegando a lógica de filtros e aleatorização para QuestionSelectionService.
         """
         rules = competition.question_rules or {}
-        num_questions = rules.get('num_questions', 10)
-
-        query = Question.query.filter_by(subject_id=competition.subject_id)
-
-        # Filtrar por nível da competição: questões da etapa de ensino correspondente
-        stage_names = STAGE_NAMES_BY_LEVEL.get(competition.level)
-        if stage_names:
-            stage_ids = (
-                db.session.query(EducationStage.id)
-                .filter(EducationStage.name.in_(stage_names))
-                .all()
-            )
-            stage_ids = [s[0] for s in stage_ids]
-            if stage_ids:
-                query = query.filter(Question.education_stage_id.in_(stage_ids))
-
-        if rules.get('grade_ids'):
-            query = query.filter(Question.grade_level.in_(rules['grade_ids']))
-        if rules.get('difficulty_level'):
-            query = query.filter_by(difficulty_level=rules['difficulty_level'])
-
-        available_questions = query.all()
-        if len(available_questions) < num_questions:
-            raise ValidationError(
-                f"Questões insuficientes para o nível e disciplina. Disponíveis: {len(available_questions)}, Necessárias: {num_questions}"
-            )
-
-        selected_questions = random.sample(available_questions, num_questions)
+        selected_questions = QuestionSelectionService.select_questions(
+            subject_id=competition.subject_id,
+            level=competition.level,
+            rules=rules,
+        )
         test = Test(
             title=f"Prova - {competition.name}",
             description=competition.description,
@@ -181,6 +157,157 @@ class CompetitionService:
         competition.status = 'cancelada'
         db.session.commit()
         return competition
+
+    # ---------- Etapa 3: Inscrição e listagem para aluno ----------
+
+    @staticmethod
+    def is_student_enrolled(competition_id: str, student_id: str) -> bool:
+        """Retorna True se o aluno está inscrito (status='inscrito') na competição."""
+        return CompetitionEnrollment.query.filter_by(
+            competition_id=competition_id,
+            student_id=student_id,
+            status='inscrito',
+        ).first() is not None
+
+    @staticmethod
+    def get_available_competitions_for_student(student_id: str, subject_id: str = None):
+        """
+        Lista competições disponíveis para o aluno: status aberta, no período de inscrição,
+        nível e escopo compatíveis, com vagas (se houver limite).
+        """
+        student = Student.query.get(student_id)
+        if not student:
+            return []
+
+        now = datetime.utcnow()
+        query = (
+            Competition.query.filter(
+                Competition.status == 'aberta',
+                Competition.test_id.isnot(None),
+                Competition.enrollment_start <= now,
+                Competition.enrollment_end >= now,
+            )
+        )
+        if subject_id:
+            query = query.filter(Competition.subject_id == subject_id)
+        candidates = query.all()
+
+        result = []
+        for c in candidates:
+            if not _student_level_matches(student, c.level):
+                continue
+            if not _student_in_scope(student, c):
+                continue
+            if c.max_participants is not None:
+                try:
+                    if c.enrolled_count >= c.max_participants:
+                        continue
+                except Exception:
+                    continue
+            result.append(c)
+        return result
+
+    @staticmethod
+    def enroll_student(competition_id: str, student_id: str):
+        """
+        Inscreve o aluno na competição: cria CompetitionEnrollment e StudentTestOlimpics.
+        Levanta ValidationError se não elegível ou já inscrito.
+        """
+        competition = Competition.query.get(competition_id)
+        if not competition:
+            raise ValidationError("Competição não encontrada")
+
+        if competition.status != 'aberta':
+            raise ValidationError("Competição não está aberta para inscrição")
+
+        now = datetime.utcnow()
+        if now < competition.enrollment_start or now > competition.enrollment_end:
+            raise ValidationError("Fora do período de inscrição")
+
+        if not competition.test_id:
+            raise ValidationError("Competição sem prova vinculada")
+
+        student = Student.query.get(student_id)
+        if not student:
+            raise ValidationError("Aluno não encontrado")
+
+        available = CompetitionService.get_available_competitions_for_student(student_id)
+        if not any(c.id == competition_id for c in available):
+            raise ValidationError("Aluno não é elegível para esta competição (nível ou escopo)")
+
+        if competition.max_participants is not None:
+            try:
+                if competition.enrolled_count >= competition.max_participants:
+                    raise ValidationError("Vagas esgotadas")
+            except Exception:
+                pass
+
+        existing = CompetitionEnrollment.query.filter_by(
+            competition_id=competition_id,
+            student_id=student_id,
+            status='inscrito',
+        ).first()
+        if existing:
+            raise ValidationError("Aluno já está inscrito nesta competição")
+
+        if StudentTestOlimpics.query.filter_by(
+            student_id=student_id,
+            test_id=competition.test_id,
+        ).first():
+            raise ValidationError("Aluno já possui inscrição para a prova desta competição")
+
+        enrollment = CompetitionEnrollment(
+            competition_id=competition_id,
+            student_id=student_id,
+            status='inscrito',
+        )
+        db.session.add(enrollment)
+        db.session.flush()
+
+        app_str = competition.application.isoformat() if competition.application else ''
+        exp_str = competition.expiration.isoformat() if competition.expiration else ''
+        st_o = StudentTestOlimpics(
+            student_id=student_id,
+            test_id=competition.test_id,
+            application=app_str,
+            expiration=exp_str,
+            timezone=competition.timezone or 'America/Sao_Paulo',
+            status='agendada',
+        )
+        db.session.add(st_o)
+        db.session.commit()
+        return enrollment
+
+    @staticmethod
+    def unenroll_student(competition_id: str, student_id: str):
+        """
+        Cancela inscrição do aluno: marca enrollment como cancelado e remove StudentTestOlimpics.
+        Só permitido antes do período de aplicação.
+        """
+        competition = Competition.query.get(competition_id)
+        if not competition:
+            raise ValidationError("Competição não encontrada")
+
+        now = datetime.utcnow()
+        if competition.application and now >= competition.application:
+            raise ValidationError("Não é possível cancelar inscrição após o início do período de aplicação")
+
+        enrollment = CompetitionEnrollment.query.filter_by(
+            competition_id=competition_id,
+            student_id=student_id,
+            status='inscrito',
+        ).first()
+        if not enrollment:
+            raise ValidationError("Aluno não está inscrito nesta competição")
+
+        enrollment.status = 'cancelado'
+        st_o = StudentTestOlimpics.query.filter_by(
+            student_id=student_id,
+            test_id=competition.test_id,
+        ).first()
+        if st_o:
+            db.session.delete(st_o)
+        db.session.commit()
 
     @staticmethod
     def credit_participation_coins(competition_id: str, student_id: str, test_session_id: str = None) -> int:
@@ -267,3 +394,69 @@ def _parse_dt(v):
     if isinstance(v, str):
         return datetime.fromisoformat(v.replace('Z', '+00:00'))
     return v
+
+
+def _student_level_matches(student, competition_level):
+    """True se a etapa de ensino do aluno corresponde ao nível da competição (1 ou 2)."""
+    if student.grade_id is None or student.grade is None:
+        return False
+    stage = getattr(student.grade, 'education_stage', None)
+    if stage is None:
+        return False
+    name = getattr(stage, 'name', None)
+    return student_grade_matches_level(name, competition_level)
+
+
+def _student_in_scope(student, competition):
+    """True se o aluno está no escopo da competição (scope + scope_filter)."""
+    scope = (competition.scope or 'individual').strip().lower()
+    scope_filter = competition.scope_filter or {}
+
+    if scope == 'individual':
+        return True
+
+    def _norm_ids(ids):
+        if not ids:
+            return set()
+        return {str(x).lower() for x in ids}
+
+    class_ids = _norm_ids(scope_filter.get('class_ids'))
+    school_ids = _norm_ids(scope_filter.get('school_ids'))
+    city_ids = _norm_ids(
+        scope_filter.get('city_ids') or scope_filter.get('municipality_ids')
+    )
+    state_names = scope_filter.get('state_names') or scope_filter.get('state')
+    if state_names is not None and not isinstance(state_names, (list, tuple)):
+        state_names = [state_names] if state_names else []
+    state_set = {str(s).strip().lower() for s in (state_names or [])}
+
+    if scope in ('turma', 'class') and class_ids:
+        if student.class_id is None:
+            return False
+        return str(student.class_id).lower() in class_ids
+
+    if scope in ('escola', 'school') and school_ids:
+        if student.school_id is None:
+            return False
+        return str(student.school_id).lower() in school_ids
+
+    if scope in ('municipio', 'city', 'município') and city_ids:
+        if student.school_id is None or student.school is None:
+            return False
+        city_id = getattr(student.school, 'city_id', None)
+        if city_id is None:
+            return False
+        return str(city_id).lower() in city_ids
+
+    if scope in ('estado', 'state') and state_set:
+        if student.school_id is None or student.school is None:
+            return False
+        city = getattr(student.school, 'city', None)
+        if city is None:
+            return False
+        state = getattr(city, 'state', None)
+        if state is None:
+            return False
+        return str(state).strip().lower() in state_set
+
+    return False

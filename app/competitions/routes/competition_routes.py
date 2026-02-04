@@ -7,15 +7,55 @@ from flask import Blueprint, request, jsonify
 from flask_jwt_extended import jwt_required
 from app import db
 from app.permissions import role_required, get_current_user_from_token
-from app.competitions.models import Competition
+from app.competitions.models import (
+    Competition,
+    CompetitionEnrollment,
+    CompetitionRankingPayout,
+    CompetitionResult,
+    CompetitionReward,
+)
 from app.competitions.services import CompetitionService, ValidationError, validate_reward_config
+from app.models.student import Student
+from app.models.testQuestion import TestQuestion
 from app.competitions.constants import is_valid_level, LEVEL_OPTIONS
 from sqlalchemy.exc import SQLAlchemyError, IntegrityError
 import logging
 
 bp = Blueprint('competitions', __name__, url_prefix='/competitions')
 
-ROLES_EDIT = ("admin", "professor", "coordenador", "diretor", "tecadm")
+# Página de gerenciamento de competições: admin, coordenador, diretor, tecadm, professor
+ROLES_EDIT = ("admin", "coordenador", "diretor", "tecadm", "professor")
+# Rotas de listagem disponível / inscrição: roles acima + aluno
+ROLES_STUDENT_OR_EDIT = ("admin", "coordenador", "diretor", "tecadm", "professor", "aluno")
+
+
+def _resolve_student_id():
+    """
+    Resolve student_id para rotas de aluno/competição.
+    - Se usuário é aluno: usa o student_id vinculado ao user.
+    - Se outro role: usa student_id da query ou do body (opcional).
+    Retorna (student_id, error_response) onde error_response é (response, status) ou None.
+    """
+    user = get_current_user_from_token()
+    if not user:
+        return None, (jsonify({"error": "Usuário não autenticado"}), 401)
+    role = (user.get("role") or "").strip().lower()
+    if role == "aluno":
+        student = Student.query.filter_by(user_id=user["id"]).first()
+        if not student:
+            return None, (jsonify({"error": "Estudante não vinculado ao usuário"}), 403)
+        return student.id, None
+    sid = request.args.get("student_id") or (request.get_json() or {}).get("student_id")
+    if not sid:
+        return None, (jsonify({"error": "student_id é obrigatório (query ou body)"}), 400)
+    return sid, None
+
+
+def _competition_to_dict_with_enrolled(c, student_id):
+    """Como _competition_to_dict mas adiciona is_enrolled."""
+    d = _competition_to_dict(c)
+    d["is_enrolled"] = CompetitionService.is_student_enrolled(c.id, student_id) if student_id else False
+    return d
 
 
 def _safe_enrolled_count(c):
@@ -34,6 +74,23 @@ def _safe_available_slots(c):
     except Exception as e:
         logging.warning("available_slots falhou para competition %s: %s", c.id, e)
         return None
+
+
+def _get_selected_question_ids(test_id):
+    """Retorna lista de question_id na ordem do teste (para competição com auto_random)."""
+    if not test_id:
+        return []
+    try:
+        rows = (
+            TestQuestion.query.filter_by(test_id=test_id)
+            .order_by(TestQuestion.order)
+            .with_entities(TestQuestion.question_id)
+            .all()
+        )
+        return [r[0] for r in rows]
+    except Exception as e:
+        logging.warning("selected_question_ids falhou para test_id %s: %s", test_id, e)
+        return []
 
 
 def _competition_to_dict(c):
@@ -70,6 +127,7 @@ def _competition_to_dict(c):
         'is_finished': c.is_finished,
         'enrolled_count': _safe_enrolled_count(c),
         'available_slots': _safe_available_slots(c),
+        'selected_question_ids': _get_selected_question_ids(c.test_id),
     }
     if c.subject:
         d['subject_name'] = c.subject.name
@@ -137,8 +195,76 @@ def list_competitions():
             pass
     if request.args.get('subject_id'):
         query = query.filter(Competition.subject_id == request.args.get('subject_id'))
+    if request.args.get('scope'):
+        query = query.filter(Competition.scope == request.args.get('scope'))
     items = query.order_by(Competition.created_at.desc()).all()
     return jsonify([_competition_to_dict(c) for c in items]), 200
+
+
+# ---------- Etapa 3: rotas para aluno (disponíveis, detalhes, inscrição, cancelar) ----------
+
+@bp.route('/available', methods=['GET'])
+@jwt_required()
+@role_required(*ROLES_STUDENT_OR_EDIT)
+def list_available_competitions():
+    """Lista competições disponíveis para o aluno (nível, escopo, período, vagas)."""
+    student_id, err = _resolve_student_id()
+    if err:
+        return err[0], err[1]
+    subject_id = request.args.get('subject_id')
+    competitions = CompetitionService.get_available_competitions_for_student(student_id, subject_id=subject_id)
+    return jsonify([_competition_to_dict_with_enrolled(c, student_id) for c in competitions]), 200
+
+
+@bp.route('/<competition_id>/details', methods=['GET'])
+@jwt_required()
+@role_required(*ROLES_STUDENT_OR_EDIT)
+def get_competition_details_for_student(competition_id):
+    """Detalhes da competição para o aluno (inclui is_enrolled, available_slots)."""
+    student_id, err = _resolve_student_id()
+    if err:
+        return err[0], err[1]
+    c = Competition.query.get_or_404(competition_id)
+    out = _competition_to_dict_with_enrolled(c, student_id)
+    return jsonify(out), 200
+
+
+@bp.route('/<competition_id>/enroll', methods=['POST'])
+@jwt_required()
+@role_required(*ROLES_STUDENT_OR_EDIT)
+def enroll_in_competition(competition_id):
+    """Inscreve o aluno na competição."""
+    student_id, err = _resolve_student_id()
+    if err:
+        return err[0], err[1]
+    try:
+        enrollment = CompetitionService.enroll_student(competition_id, student_id)
+    except ValidationError as e:
+        return jsonify({"error": str(e)}), 400
+    return jsonify({
+        "message": "Inscrição realizada com sucesso",
+        "enrollment": {
+            "id": enrollment.id,
+            "competition_id": enrollment.competition_id,
+            "student_id": enrollment.student_id,
+            "enrolled_at": enrollment.enrolled_at.isoformat() if enrollment.enrolled_at else None,
+        },
+    }), 201
+
+
+@bp.route('/<competition_id>/unenroll', methods=['DELETE'])
+@jwt_required()
+@role_required(*ROLES_STUDENT_OR_EDIT)
+def unenroll_from_competition(competition_id):
+    """Cancela inscrição do aluno na competição (antes do período de aplicação)."""
+    student_id, err = _resolve_student_id()
+    if err:
+        return err[0], err[1]
+    try:
+        CompetitionService.unenroll_student(competition_id, student_id)
+    except ValidationError as e:
+        return jsonify({"error": str(e)}), 400
+    return jsonify({"message": "Inscrição cancelada com sucesso"}), 200
 
 
 @bp.route('/<competition_id>', methods=['GET'])
@@ -181,8 +307,9 @@ def update_competition(competition_id):
     if not data:
         return jsonify({"error": "Body JSON obrigatório"}), 400
     editable = ('name', 'description', 'level', 'scope', 'scope_filter', 'enrollment_start', 'enrollment_end',
-                'application', 'expiration', 'timezone', 'question_rules', 'reward_config', 'ranking_criteria',
-                'ranking_tiebreaker', 'ranking_visibility', 'max_participants', 'recurrence', 'template_id')
+                'application', 'expiration', 'timezone', 'question_mode', 'question_rules', 'reward_config',
+                'ranking_criteria', 'ranking_tiebreaker', 'ranking_visibility', 'max_participants', 'recurrence',
+                'template_id')
     for key in editable:
         if key in data:
             val = data[key]
@@ -198,6 +325,14 @@ def update_competition(competition_id):
                 except ValidationError as e:
                     return jsonify({"error": str(e)}), 400
             setattr(c, key, val)
+
+    # Se passou para auto_random com question_rules e ainda não tem prova, sorteia questões e cria o Test
+    if c.question_mode == 'auto_random' and c.question_rules and not c.test_id:
+        try:
+            CompetitionService._create_test_with_random_questions(c)
+        except ValidationError as e:
+            return jsonify({"error": str(e)}), 400
+
     db.session.commit()
     return jsonify(_competition_to_dict(c)), 200
 
@@ -206,10 +341,20 @@ def update_competition(competition_id):
 @jwt_required()
 @role_required(*ROLES_EDIT)
 def delete_competition(competition_id):
-    """Remove competição (apenas rascunho)."""
+    """Remove competição (apenas rascunho ou cancelada). Remove inscrições e dados relacionados."""
     c = Competition.query.get_or_404(competition_id)
-    if c.status != 'rascunho':
-        return jsonify({"error": "Só é possível excluir competição em rascunho"}), 400
+    if c.status not in ('rascunho', 'cancelada'):
+        return jsonify({
+            "error": "Só é possível excluir competição em rascunho ou cancelada. Cancele a competição antes de excluir."
+        }), 400
+
+    # Tabelas com FK sem ON DELETE CASCADE precisam ser apagadas antes
+    CompetitionRankingPayout.query.filter_by(competition_id=c.id).delete()
+    # Inscrições, recompensas e resultados têm CASCADE no banco; removemos em código para controle
+    CompetitionResult.query.filter_by(competition_id=c.id).delete()
+    CompetitionReward.query.filter_by(competition_id=c.id).delete()
+    CompetitionEnrollment.query.filter_by(competition_id=c.id).delete()
+
     db.session.delete(c)
     db.session.commit()
     return jsonify({"message": "Competição excluída"}), 200

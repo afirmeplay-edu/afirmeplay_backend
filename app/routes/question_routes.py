@@ -277,6 +277,18 @@ def update_question(question_id):
         if not data:
             return jsonify({"error": "No data provided"}), 400
 
+        # 🔥 DETECÇÃO DE MUDANÇA DE GABARITO
+        # Armazenar resposta correta antiga antes de atualizar
+        old_correct_answer = question.correct_answer
+        new_correct_answer = data.get('solution')  # 'solution' mapeia para 'correct_answer'
+        
+        # Verificar se houve mudança no gabarito
+        gabarito_changed = (
+            new_correct_answer is not None and 
+            old_correct_answer != new_correct_answer and
+            old_correct_answer is not None  # Só recalcular se já existia gabarito
+        )
+
         # Mapeia chaves do JSON (camelCase) para atributos do modelo (snake_case)
         field_map = {
             'number': 'number',
@@ -319,7 +331,117 @@ def update_question(question_id):
         question.version += 1
 
         db.session.commit()
-        return jsonify({'message': 'Question updated successfully'}), 200
+        
+        # 🔥 RECÁLCULO AUTOMÁTICO DE RESULTADOS SE GABARITO MUDOU
+        recalculation_info = None
+        if gabarito_changed:
+            logging.info(
+                f"🔄 Gabarito alterado para questão {question_id}: "
+                f"{old_correct_answer} → {new_correct_answer}"
+            )
+            
+            try:
+                from app.services.celery_tasks.evaluation_recalculation_tasks import (
+                    recalculate_results_after_answer_correction,
+                    trigger_recalculation_sync
+                )
+                
+                # Buscar provas que usam essa questão
+                test_questions = TestQuestion.query.filter_by(question_id=question_id).all()
+                test_ids = [tq.test_id for tq in test_questions]
+                
+                if test_ids:
+                    # Contar quantos alunos únicos responderam essa questão
+                    student_answers = StudentAnswer.query.filter(
+                        StudentAnswer.question_id == question_id,
+                        StudentAnswer.test_id.in_(test_ids)
+                    ).all()
+                    
+                    student_ids = list(set([sa.student_id for sa in student_answers]))
+                    total_students = len(student_ids)
+                    
+                    logging.info(
+                        f"📊 Impacto da mudança de gabarito:\n"
+                        f"  - Provas afetadas: {len(test_ids)}\n"
+                        f"  - Alunos afetados: {total_students}"
+                    )
+                    
+                    # Decidir entre síncrono ou assíncrono baseado no threshold
+                    ASYNC_THRESHOLD = 20  # A partir de 20 alunos, usar assíncrono
+                    
+                    if total_students < ASYNC_THRESHOLD:
+                        # RECÁLCULO SÍNCRONO (poucos alunos)
+                        logging.info(f"⚡ Recálculo SÍNCRONO ({total_students} alunos)")
+                        
+                        modified_by = data.get('lastModifiedBy', 'unknown')
+                        result = trigger_recalculation_sync(
+                            question_id=question_id,
+                            old_answer=str(old_correct_answer),
+                            new_answer=str(new_correct_answer),
+                            modified_by=modified_by,
+                            student_ids=student_ids
+                        )
+                        
+                        recalculation_info = {
+                            'status': 'completed',
+                            'mode': 'sync',
+                            'tests_affected': result.get('tests_affected', 0),
+                            'students_recalculated': result.get('students_recalculated', 0),
+                            'errors': len(result.get('errors', []))
+                        }
+                        
+                    else:
+                        # RECÁLCULO ASSÍNCRONO (muitos alunos)
+                        logging.info(f"🚀 Recálculo ASSÍNCRONO ({total_students} alunos)")
+                        
+                        modified_by = data.get('lastModifiedBy', 'unknown')
+                        task = recalculate_results_after_answer_correction.delay(
+                            question_id=question_id,
+                            old_answer=str(old_correct_answer),
+                            new_answer=str(new_correct_answer),
+                            modified_by=modified_by
+                        )
+                        
+                        recalculation_info = {
+                            'status': 'processing',
+                            'mode': 'async',
+                            'task_id': task.id,
+                            'tests_affected': len(test_ids),
+                            'students_to_recalculate': total_students,
+                            'message': 'Recálculo em andamento em background'
+                        }
+                        
+                else:
+                    recalculation_info = {
+                        'status': 'skipped',
+                        'reason': 'Questão não está em nenhuma prova'
+                    }
+                    
+            except Exception as e:
+                logging.error(
+                    f"❌ Erro ao disparar recálculo para questão {question_id}: {str(e)}",
+                    exc_info=True
+                )
+                recalculation_info = {
+                    'status': 'error',
+                    'error': str(e)
+                }
+        
+        # Preparar resposta
+        response = {
+            'message': 'Question updated successfully',
+            'question_id': question_id,
+            'version': question.version
+        }
+        
+        # Incluir informações de recálculo se houve mudança de gabarito
+        if recalculation_info:
+            response['gabarito_changed'] = True
+            response['old_answer'] = old_correct_answer
+            response['new_answer'] = new_correct_answer
+            response['recalculation'] = recalculation_info
+        
+        return jsonify(response), 200
 
     except Exception as e:
         db.session.rollback()

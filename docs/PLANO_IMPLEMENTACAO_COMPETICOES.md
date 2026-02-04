@@ -27,130 +27,46 @@ Este documento consolida a visão geral do projeto. Para detalhes de implementa�
 
 ---
 
-## Metodologia: Test-Driven Development (TDD)
+## Modelo de Dados e Decisões de Desenho
 
-### Processo TDD
+Este bloco consolida as decisões de tabelas, reuso de cálculos e comportamento do ranking.
 
-Para cada funcionalidade implementada, seguir o ciclo **Red-Green-Refactor**:
+### Tabelas do sistema de competições
 
-1. **🔴 Red (Teste Falhando)**
-   - Escrever teste primeiro (antes do código)
-   - Rodar teste e verificar que falha (comportamento esperado)
-   - Confirmar que o teste está testando o que deveria
+**Todas as tabelas de competições são criadas o quanto antes (Etapa 2)** numa única migration (ou em sequência na mesma etapa), para não precisar criar tabelas ou adicionar campos em etapas futuras. Nas etapas seguintes apenas se implementa a lógica que usa essas tabelas.
 
-2. **🟢 Green (Fazer Passar)**
-   - Implementar o código mínimo necessário para fazer o teste passar
-   - Não se preocupar com otimização nesta fase
-   - Rodar teste novamente e verificar que passa
+| Tabela | Criar em | Descrição |
+|--------|----------|-----------|
+| **competitions** | Etapa 2 | Metadados da competição, datas, reward_config, test_id (prova vinculada), etc. |
+| **competition_templates** | Etapa 2 (ou já existente) | Templates para criar competições recorrentes (Etapa 6 usa; tabela já existe). |
+| **competition_enrollments** | Etapa 2 | Inscrições: competition_id, student_id, enrolled_at, status. Etapa 3 só implementa a lógica de inscrição. |
+| **competition_results** | Etapa 2 | Snapshot dos resultados (preenchido só ao finalizar a competição). Campos: posição, nota, proficiência, média, acertos, tempo, moedas_ganhas, etc. Etapa 5 só implementa a lógica de gravação e leitura. |
+| **competition_ranking_payouts** | Etapa 2 (opcional) | Auditoria de pagamentos de ranking (competition_id, student_id, position, amount, paid_at). Etapa 5 usa. |
+| **competition_rewards** | Etapa 2 | Controle de pagamento de moedas de participação (competition_id, student_id, participation_paid_at). Etapa 4 só implementa a lógica ao finalizar prova. |
 
-3. **🔵 Refactor (Refatorar)**
-   - Melhorar o código mantendo os testes passando
-   - Eliminar duplicação
-   - Melhorar legibilidade e estrutura
-   - Rodar todos os testes para garantir que nada quebrou
+**O que não temos**
 
-### Tipos de Testes
+- **competition_questions**: as questões da prova ficam em `test` + `test_questions` (prova é um `Test` normal). Não existe tabela própria de “questões da competição”.
 
-#### Backend
+### Reuso dos resultados da avaliação
 
-**Testes Unitários** (`tests/unit/`)
-- Testam funções/métodos isolados
-- Mockam dependências externas (DB, APIs)
-- Rápidos e específicos
-- Framework: `pytest`
-- Exemplo: testar `CoinService.credit_coins()` mockando DB
+- **Cálculos de nota, proficiência, média, etc.** continuam sendo feitos **somente** nas tabelas e serviços já existentes de resultado da avaliação (ex.: sessões de prova, tabelas de resultado por questão/habilidade).
+- A tabela **competition_results** não recalcula nada: ela armazena uma **cópia** dos valores já calculados (proficiência, média, nota, acertos, tempo, etc.) no momento do fechamento da competição.
+- Assim, proficiência e média na competição são **as mesmas** da avaliação; apenas são gravadas em `competition_results` para histórico e ranking oficial.
 
-**Testes de Integração** (`tests/integration/`)
-- Testam interação entre componentes
-- Usam banco de dados de teste
-- Testam endpoints completos (request → response)
-- Framework: `pytest` + `Flask test client`
-- Exemplo: testar `POST /coins/admin/credit` salvando no DB
+### Ranking: posição só ao finalizar (Opção 1)
 
-**Testes E2E** (`tests/e2e/`)
-- Testam fluxo completo do usuário
-- Usam banco de dados de teste ou mocks
-- Simulam cenários reais
-- Framework: `pytest` + `Selenium` (opcional)
-- Exemplo: criar competição → inscrever aluno → entregar prova → verificar moedas
+- **Durante a competição** (status aberta / em andamento):
+  - **Ranking “ao vivo”**: calculado **em tempo real** a partir dos resultados da avaliação (ex.: sessões finalizadas do `test_id` da competição). **Nenhuma** posição é gravada em `competition_results` nessa fase.
+  - O endpoint de ranking (ex.: `GET /competitions/:id/ranking`) usa as mesmas fontes de dados da avaliação e aplica o critério de ordenação (nota, tempo, etc.).
+- **Quando a competição é finalizada** (status → encerrada):
+  - Um job (ou ação de “encerrar competição”) executa **uma vez**:
+    1. Calcula o ranking a partir dos resultados da avaliação.
+    2. Grava em **competition_results** um registro por participante com: posição, nota, proficiência, média, acertos, tempo, moedas_ganhas, etc. (todos copiados das tabelas de resultado da avaliação).
+    3. Distribui moedas de ranking (CoinService) conforme reward_config.
+  - A partir daí, o ranking “oficial” pode ser lido de `competition_results` (opcional; também pode continuar sendo calculado a partir dos mesmos dados, com o mesmo resultado).
 
-#### Frontend
-
-**Testes Unitários** (`src/__tests__/unit/`)
-- Testam componentes isolados
-- Mockam props e contextos
-- Framework: `Jest` + `React Testing Library`
-- Exemplo: testar `CoinBalance` component
-
-**Testes de Integração** (`src/__tests__/integration/`)
-- Testam fluxos entre componentes
-- Mockam chamadas de API
-- Framework: `Jest` + `React Testing Library` + `MSW` (Mock Service Worker)
-- Exemplo: testar fluxo de inscrição (lista → modal → confirmação)
-
-**Testes E2E** (`e2e/`)
-- Testam aplicação completa
-- Usam navegador real
-- Framework: `Cypress` ou `Playwright`
-- Exemplo: aluno se inscreve, faz prova e vê moedas ganhas
-
-### Setup de Testes
-
-#### Backend
-
-```python
-# tests/conftest.py
-import pytest
-from app import create_app, db
-
-@pytest.fixture
-def app():
-    app = create_app('testing')
-    with app.app_context():
-        db.create_all()
-        yield app
-        db.session.remove()
-        db.drop_all()
-
-@pytest.fixture
-def client(app):
-    return app.test_client()
-
-@pytest.fixture
-def student_fixture(app):
-    # Cria aluno de teste
-    student = Student(nome="Test Student", ...)
-    db.session.add(student)
-    db.session.commit()
-    return student
-```
-
-#### Frontend
-
-```javascript
-// src/setupTests.js
-import '@testing-library/jest-dom';
-import { server } from './mocks/server';
-
-beforeAll(() => server.listen());
-afterEach(() => server.resetHandlers());
-afterAll(() => server.close());
-```
-
-### Cobertura de Testes
-
-**Mínimo aceitável**:
-- Backend: 80% de cobertura (models, services, routes)
-- Frontend: 70% de cobertura (componentes, páginas)
-
-**Comando**:
-```bash
-# Backend
-pytest --cov=app --cov-report=html
-
-# Frontend
-npm test -- --coverage
-```
+Resumo: **posição e demais campos em `competition_results` são atualizados no banco apenas após o status da competição ser finalizado**; durante a prova, o ranking é apenas calculado e exibido em tempo real, sem escrever posição em tabela.
 
 ---
 
@@ -293,335 +209,6 @@ class CoinService:
   - Últimas 3 transações (resumo)
   - Link "Ver histórico completo" → vai para `/coins/history`
 
-### Testes (TDD)
-
-#### Backend - Testes Unitários
-
-**Arquivo**: `tests/unit/services/test_coin_service.py`
-
-```python
-# 🔴 RED: Escrever teste primeiro
-def test_get_balance_returns_zero_for_new_student(student_fixture):
-    """Saldo inicial deve ser 0 para aluno novo"""
-    balance = CoinService.get_balance(student_fixture.id)
-    assert balance == 0
-
-def test_credit_coins_increases_balance(student_fixture):
-    """Creditar moedas deve aumentar saldo"""
-    CoinService.credit_coins(student_fixture.id, 50, 'test')
-    balance = CoinService.get_balance(student_fixture.id)
-    assert balance == 50
-
-def test_credit_coins_creates_transaction(student_fixture):
-    """Creditar moedas deve criar transação"""
-    CoinService.credit_coins(student_fixture.id, 50, 'test', description='Test credit')
-    
-    transaction = CoinTransaction.query.filter_by(student_id=student_fixture.id).first()
-    assert transaction is not None
-    assert transaction.amount == 50
-    assert transaction.reason == 'test'
-    assert transaction.balance_after == 50
-
-def test_debit_coins_decreases_balance(student_fixture):
-    """Debitar moedas deve diminuir saldo"""
-    CoinService.credit_coins(student_fixture.id, 100, 'test')
-    CoinService.debit_coins(student_fixture.id, 30, 'purchase')
-    
-    balance = CoinService.get_balance(student_fixture.id)
-    assert balance == 70
-
-def test_debit_coins_fails_with_insufficient_balance(student_fixture):
-    """Debitar mais que o saldo deve falhar"""
-    CoinService.credit_coins(student_fixture.id, 10, 'test')
-    
-    with pytest.raises(InsufficientBalanceError):
-        CoinService.debit_coins(student_fixture.id, 50, 'purchase')
-
-def test_multiple_credits_accumulate(student_fixture):
-    """Múltiplos créditos devem acumular"""
-    CoinService.credit_coins(student_fixture.id, 50, 'test1')
-    CoinService.credit_coins(student_fixture.id, 30, 'test2')
-    CoinService.credit_coins(student_fixture.id, 20, 'test3')
-    
-    balance = CoinService.get_balance(student_fixture.id)
-    assert balance == 100
-
-# 🟢 GREEN: Implementar CoinService para passar nos testes
-# 🔵 REFACTOR: Melhorar código mantendo testes passando
-```
-
-**Arquivo**: `tests/unit/models/test_student_coins.py`
-
-```python
-def test_student_coins_creation(student_fixture):
-    """StudentCoins deve ser criado com saldo 0"""
-    coins = StudentCoins(student_id=student_fixture.id)
-    db.session.add(coins)
-    db.session.commit()
-    
-    assert coins.balance == 0
-    assert coins.student_id == student_fixture.id
-
-def test_student_coins_unique_per_student(student_fixture):
-    """Deve haver apenas um StudentCoins por aluno"""
-    coins1 = StudentCoins(student_id=student_fixture.id)
-    db.session.add(coins1)
-    db.session.commit()
-    
-    coins2 = StudentCoins(student_id=student_fixture.id)
-    db.session.add(coins2)
-    
-    with pytest.raises(IntegrityError):
-        db.session.commit()
-```
-
-#### Backend - Testes de Integração
-
-**Arquivo**: `tests/integration/routes/test_coin_routes.py`
-
-```python
-def test_get_balance_endpoint(client, student_fixture, auth_headers):
-    """GET /coins/balance deve retornar saldo"""
-    # Setup: creditar moedas
-    CoinService.credit_coins(student_fixture.id, 150, 'test')
-    
-    # Act
-    response = client.get('/coins/balance', headers=auth_headers)
-    
-    # Assert
-    assert response.status_code == 200
-    assert response.json['balance'] == 150
-
-def test_get_transactions_endpoint(client, student_fixture, auth_headers):
-    """GET /coins/transactions deve listar transações"""
-    # Setup
-    CoinService.credit_coins(student_fixture.id, 50, 'test1')
-    CoinService.credit_coins(student_fixture.id, 30, 'test2')
-    
-    # Act
-    response = client.get('/coins/transactions', headers=auth_headers)
-    
-    # Assert
-    assert response.status_code == 200
-    assert len(response.json['transactions']) == 2
-    assert response.json['transactions'][0]['amount'] == 30  # mais recente primeiro
-
-def test_admin_credit_coins_endpoint(client, admin_headers, student_fixture):
-    """POST /coins/admin/credit deve creditar moedas (admin)"""
-    # Act
-    response = client.post('/coins/admin/credit', 
-        json={
-            'student_id': student_fixture.id,
-            'amount': 100,
-            'reason': 'bonus',
-            'description': 'Admin bonus'
-        },
-        headers=admin_headers
-    )
-    
-    # Assert
-    assert response.status_code == 201
-    balance = CoinService.get_balance(student_fixture.id)
-    assert balance == 100
-
-def test_student_cannot_access_admin_credit(client, student_fixture, auth_headers):
-    """Aluno não pode acessar endpoint de admin"""
-    response = client.post('/coins/admin/credit',
-        json={'student_id': student_fixture.id, 'amount': 100, 'reason': 'hack'},
-        headers=auth_headers
-    )
-    
-    assert response.status_code == 403
-```
-
-#### Backend - Testes E2E
-
-**Arquivo**: `tests/e2e/test_coin_flow.py`
-
-```python
-def test_complete_coin_flow(client, student_fixture, auth_headers):
-    """Fluxo completo: creditar → listar → verificar histórico"""
-    # 1. Verificar saldo inicial (0)
-    response = client.get('/coins/balance', headers=auth_headers)
-    assert response.json['balance'] == 0
-    
-    # 2. Creditar moedas (simulando participação em competição)
-    CoinService.credit_coins(student_fixture.id, 50, 'competition_participation', 
-                            competition_id='comp-123', description='Competição Matemática')
-    
-    # 3. Verificar saldo atualizado
-    response = client.get('/coins/balance', headers=auth_headers)
-    assert response.json['balance'] == 50
-    
-    # 4. Verificar histórico
-    response = client.get('/coins/transactions', headers=auth_headers)
-    transactions = response.json['transactions']
-    assert len(transactions) == 1
-    assert transactions[0]['amount'] == 50
-    assert transactions[0]['reason'] == 'competition_participation'
-    assert 'Competição Matemática' in transactions[0]['description']
-```
-
-#### Frontend - Testes Unitários
-
-**Arquivo**: `src/components/Coins/__tests__/CoinBalance.test.tsx`
-
-```typescript
-// 🔴 RED: Escrever teste primeiro
-import { render, screen, waitFor } from '@testing-library/react';
-import { CoinBalance } from '../CoinBalance';
-import { server } from '../../../mocks/server';
-import { rest } from 'msw';
-
-describe('CoinBalance Component', () => {
-  it('should display balance correctly', async () => {
-    // Mock API response
-    server.use(
-      rest.get('/coins/balance', (req, res, ctx) => {
-        return res(ctx.json({ balance: 150 }));
-      })
-    );
-    
-    render(<CoinBalance />);
-    
-    // Deve mostrar loading primeiro
-    expect(screen.getByText(/carregando/i)).toBeInTheDocument();
-    
-    // Depois deve mostrar saldo
-    await waitFor(() => {
-      expect(screen.getByText('150')).toBeInTheDocument();
-    });
-  });
-  
-  it('should display 0 for new student', async () => {
-    server.use(
-      rest.get('/coins/balance', (req, res, ctx) => {
-        return res(ctx.json({ balance: 0 }));
-      })
-    );
-    
-    render(<CoinBalance />);
-    
-    await waitFor(() => {
-      expect(screen.getByText('0')).toBeInTheDocument();
-    });
-  });
-  
-  it('should respect size prop', () => {
-    render(<CoinBalance size="large" />);
-    const container = screen.getByTestId('coin-balance');
-    expect(container).toHaveClass('coin-balance--large');
-  });
-  
-  // 🟢 GREEN: Implementar CoinBalance para passar nos testes
-  // 🔵 REFACTOR: Melhorar código mantendo testes passando
-});
-```
-
-**Arquivo**: `src/pages/Student/__tests__/CoinHistory.test.tsx`
-
-```typescript
-describe('CoinHistory Page', () => {
-  it('should display transaction list', async () => {
-    server.use(
-      rest.get('/coins/transactions', (req, res, ctx) => {
-        return res(ctx.json({
-          transactions: [
-            { id: '1', amount: 50, reason: 'competition_participation', created_at: '2024-01-15' },
-            { id: '2', amount: 100, reason: 'competition_rank_1', created_at: '2024-01-14' },
-          ]
-        }));
-      })
-    );
-    
-    render(<CoinHistory />);
-    
-    await waitFor(() => {
-      expect(screen.getByText('+50')).toBeInTheDocument();
-      expect(screen.getByText('+100')).toBeInTheDocument();
-    });
-  });
-  
-  it('should filter transactions by type', async () => {
-    render(<CoinHistory />);
-    
-    const filterSelect = screen.getByLabelText(/tipo/i);
-    fireEvent.change(filterSelect, { target: { value: 'ranking' } });
-    
-    await waitFor(() => {
-      expect(screen.queryByText('Participação')).not.toBeInTheDocument();
-      expect(screen.getByText('1º Lugar')).toBeInTheDocument();
-    });
-  });
-});
-```
-
-#### Frontend - Testes E2E
-
-**Arquivo**: `e2e/coins/coin-flow.spec.ts` (Cypress)
-
-```typescript
-describe('Coin System Flow', () => {
-  beforeEach(() => {
-    cy.login('student@test.com', 'password');
-  });
-  
-  it('should display coin balance in header', () => {
-    cy.visit('/student/dashboard');
-    cy.get('[data-testid="coin-balance"]').should('be.visible');
-    cy.get('[data-testid="coin-balance"]').should('contain', '0'); // aluno novo
-  });
-  
-  it('should navigate to coin history page', () => {
-    cy.visit('/student/dashboard');
-    cy.get('[data-testid="coin-balance"]').click();
-    cy.contains('Ver histórico completo').click();
-    
-    cy.url().should('include', '/coins/history');
-    cy.contains('Histórico de Moedas').should('be.visible');
-  });
-  
-  it('should display updated balance after earning coins', () => {
-    // Simular ganho de moedas (via backend ou mock)
-    cy.request('POST', '/api/coins/admin/credit', {
-      student_id: Cypress.env('studentId'),
-      amount: 50,
-      reason: 'test'
-    });
-    
-    cy.visit('/student/dashboard');
-    cy.get('[data-testid="coin-balance"]').should('contain', '50');
-  });
-});
-```
-
-### Checklist TDD - Etapa 1
-
-#### Backend
-- [ ] 🔴 Escrever testes unitários de `CoinService`
-- [ ] 🟢 Implementar `CoinService` (todos os testes passando)
-- [ ] 🔵 Refatorar `CoinService`
-- [ ] 🔴 Escrever testes de models (`StudentCoins`, `CoinTransaction`)
-- [ ] 🟢 Implementar models
-- [ ] 🔵 Refatorar models
-- [ ] 🔴 Escrever testes de integração das routes
-- [ ] 🟢 Implementar routes
-- [ ] 🔵 Refatorar routes
-- [ ] 🔴 Escrever testes E2E do fluxo completo
-- [ ] 🟢 Garantir fluxo E2E funcionando
-- [ ] ✅ Cobertura: mínimo 80%
-
-#### Frontend
-- [ ] 🔴 Escrever testes de `CoinBalance` component
-- [ ] 🟢 Implementar `CoinBalance`
-- [ ] 🔵 Refatorar `CoinBalance`
-- [ ] 🔴 Escrever testes de `CoinHistory` page
-- [ ] 🟢 Implementar `CoinHistory`
-- [ ] 🔵 Refatorar `CoinHistory`
-- [ ] 🔴 Escrever testes E2E (Cypress)
-- [ ] 🟢 Garantir fluxo E2E funcionando
-- [ ] ✅ Cobertura: mínimo 70%
-
 ---
 
 ## Etapa 2: Competições CRUD (estrutura básica)
@@ -632,71 +219,146 @@ Criar a estrutura de competições: tabelas, modelos, endpoints CRUD e página d
 ### Backend
 
 #### 2.1 Migrations
-**Arquivo**: `migrations/versions/add_competitions_table.py`
+**Arquivo**: `migrations/versions/add_competitions_tables.py` (ou único arquivo com todas as tabelas de competições)
+
+Criar **todas** as tabelas de competições nesta etapa para não precisar de novas migrations nas etapas 3, 4 e 5. Ordem de criação (respeitando FKs): `competition_templates` (se ainda não existir) → `competitions` → `competition_enrollments` → `competition_rewards` → `competition_results` → `competition_ranking_payouts`.
 
 ```python
-# Tabela: competitions
+# ---- Tabela: competition_templates (se ainda não existir) ----
+# (campos conforme já definido no projeto)
+
+# ---- Tabela: competitions ----
 - id (String/UUID, PK)
 - name (String, required)
 - description (Text)
-- test_id (String, FK → test.id, nullable inicialmente)
+- test_id (String, FK → test.id, nullable)
 - subject_id (String, FK → subject.id)
-- level (Integer) # 1, 2, 3...
-- scope (String, default='individual') # individual, turma, escola, municipio
-- scope_filter (JSON, nullable) # {"class_ids": [...], "school_ids": [...]}
+- level (Integer)
+- scope (String, default='individual')
+- scope_filter (JSON, nullable)
 - enrollment_start (TIMESTAMP)
 - enrollment_end (TIMESTAMP)
 - application (TIMESTAMP)
 - expiration (TIMESTAMP)
 - timezone (String, default='America/Sao_Paulo')
-- question_mode (String, default='auto_random') # auto_random, manual
-- question_rules (JSON, nullable) # regras para sorteio
-- reward_config (JSON, required) # {"participation_coins": 50, "ranking_rewards": [...]}
-- ranking_criteria (String, default='nota') # nota, tempo, acertos
+- question_mode (String, default='auto_random')
+- question_rules (JSON, nullable)
+- reward_config (JSON, required)
+- ranking_criteria (String, default='nota')
 - ranking_tiebreaker (String, default='tempo_entrega')
-- ranking_visibility (String, default='final') # realtime, final
+- ranking_visibility (String, default='final')
 - max_participants (Integer, nullable)
-- recurrence (String, default='manual') # manual, weekly, biweekly, monthly
+- recurrence (String, default='manual')
 - template_id (String, FK → competition_templates.id, nullable)
-- status (String, default='rascunho') # rascunho, aberta, em_andamento, aguardando_resultado, encerrada, cancelada
+- status (String, default='rascunho')
 - created_by (String, FK → users.id)
 - created_at (TIMESTAMP)
 - updated_at (TIMESTAMP)
+
+# ---- Tabela: competition_enrollments (criar já na Etapa 2) ----
+- id (String/UUID, PK)
+- competition_id (String, FK → competitions.id, ondelete=CASCADE)
+- student_id (String, FK → student.id, ondelete=CASCADE)
+- enrolled_at (TIMESTAMP, server_default=CURRENT_TIMESTAMP)
+- status (String, default='inscrito')  # inscrito, cancelado
+# Constraint: unique(competition_id, student_id)
+# Índices: competition_id, student_id, status
+
+# ---- Tabela: competition_rewards (criar já na Etapa 2) ----
+# Controle de pagamento de moedas de participação (usado na Etapa 4)
+- id (String/UUID, PK)
+- competition_id (String, FK → competitions.id, ondelete=CASCADE)
+- student_id (String, FK → student.id, ondelete=CASCADE)
+- participation_paid_at (TIMESTAMP, nullable)
+- created_at (TIMESTAMP)
+- updated_at (TIMESTAMP)
+# Constraint: unique(competition_id, student_id)
+# Índices: competition_id, student_id
+
+# ---- Tabela: competition_results (criar já na Etapa 2) ----
+# Preenchida apenas quando a competição é finalizada (snapshot dos resultados da avaliação)
+- id (String/UUID, PK)
+- competition_id (String, FK → competitions.id, ondelete=CASCADE)
+- student_id (String, FK → student.id, ondelete=CASCADE)
+- session_id (String, FK → test_sessions.id, ondelete=CASCADE)
+- correct_answers (Integer)
+- total_questions (Integer)
+- score_percentage (Float)
+- grade (Float)
+- proficiency (Float, nullable)
+- classification (String, nullable)
+- posicao (Integer)
+- moedas_ganhas (Integer, default=0)
+- tempo_gasto (Integer, nullable)
+- acertos (Integer)
+- erros (Integer)
+- em_branco (Integer)
+- calculated_at (TIMESTAMP)
+# Constraint: unique(competition_id, student_id) ou (competition_id, session_id)
+# Índices: competition_id, student_id, posicao
+
+# ---- Tabela: competition_ranking_payouts (opcional, auditoria; criar já na Etapa 2) ----
+- id (String/UUID, PK)
+- competition_id (String, FK → competitions.id)
+- student_id (String, FK → student.id)
+- position (Integer)
+- amount (Integer)
+- paid_at (TIMESTAMP)
+- created_at (TIMESTAMP)
+# Constraint: unique(competition_id, student_id)
 ```
 
 #### 2.2 Models
-**Arquivo**: `app/models/competition.py`
+Criar os models de **todas** as tabelas de competições nesta etapa, para que as etapas 3 e 5 só implementem lógica e rotas.
+
+**Arquivo**: `app/models/competition.py` (ou `app/competitions/models/competition.py`)
 
 ```python
 class Competition(db.Model):
-    # Campos conforme migration
-    # Relacionamentos:
-    - test (relationship com Test)
-    - subject (relationship com Subject)
-    - creator (relationship com User)
-    - template (relationship com CompetitionTemplate, nullable)
-    
-    # Propriedades:
-    @property
-    def is_enrollment_open(self):
-        # Verifica se está no período de inscrição
-    
-    @property
-    def is_application_open(self):
-        # Verifica se está no período de aplicação
-    
-    @property
-    def is_finished(self):
-        # Verifica se expirou
-    
-    @property
-    def enrolled_count(self):
-        # Conta quantos alunos inscritos (via student_test_olimpics)
-    
-    @property
-    def available_slots(self):
-        # Vagas disponíveis (max_participants - enrolled_count)
+    # Campos conforme migration (competitions)
+    # Relacionamentos: test, subject, creator, template
+    # Propriedades: is_enrollment_open, is_application_open, is_finished, enrolled_count, available_slots
 ```
+
+**Arquivo**: `app/competitions/models/competition_enrollment.py` (ou equivalente)
+
+```python
+class CompetitionEnrollment(db.Model):
+    __tablename__ = 'competition_enrollments'
+    # id, competition_id, student_id, enrolled_at, status
+    # Relacionamentos: competition, student
+```
+
+**Arquivo**: `app/competitions/models/competition_result.py` (ou equivalente)
+
+```python
+class CompetitionResult(db.Model):
+    __tablename__ = 'competition_results'
+    # id, competition_id, student_id, session_id, correct_answers, total_questions,
+    # score_percentage, grade, proficiency, classification, posicao, moedas_ganhas,
+    # tempo_gasto, acertos, erros, em_branco, calculated_at
+    # Relacionamentos: competition, student, test_session
+```
+
+**Arquivo**: `app/competitions/models/competition_reward.py` (ou equivalente)
+
+```python
+class CompetitionReward(db.Model):
+    __tablename__ = 'competition_rewards'
+    # id, competition_id, student_id, participation_paid_at, created_at, updated_at
+    # Relacionamentos: competition, student
+```
+
+**Arquivo** (opcional): `app/competitions/models/competition_ranking_payout.py`
+
+```python
+class CompetitionRankingPayout(db.Model):
+    __tablename__ = 'competition_ranking_payouts'
+    # id, competition_id, student_id, position, amount, paid_at, created_at
+    # Relacionamentos: competition, student
+```
+
+Assim, **enrolled_count** em Competition pode ser implementado contando `CompetitionEnrollment.query.filter_by(competition_id=self.id, status='inscrito').count()` (se usar competition_enrollments) ou mantendo a contagem via student_test_olimpics, conforme decisão do projeto.
 
 #### 2.3 Routes
 **Arquivo**: `app/routes/competition_routes.py`
@@ -883,253 +545,14 @@ class CompetitionService:
 - Se status != 'rascunho': desabilita campos críticos (questões, datas passadas)
 - Só permite editar descrição, recompensas (se não houver inscritos) e status
 
-### Testes (TDD) - Etapa 2
-
-#### Backend - Testes Unitários
-
-**Arquivo**: `tests/unit/services/test_competition_service.py`
-
-```python
-def test_create_competition_with_auto_random_questions(subject_fixture, admin_user):
-    """Criar competição com sorteio automático deve criar test e questões"""
-    # 🔴 RED
-    data = {
-        'name': 'Competição Teste',
-        'subject_id': subject_fixture.id,
-        'level': 1,
-        'question_mode': 'auto_random',
-        'question_rules': {'num_questions': 10, 'difficulty_level': 'media'},
-        'reward_config': {'participation_coins': 50, 'ranking_rewards': []},
-        # ... outras configurações
-    }
-    
-    competition = CompetitionService.create_competition(data, admin_user.id)
-    
-    assert competition.test_id is not None
-    assert len(competition.test.questions) == 10
-    # 🟢 GREEN: implementar
-    # 🔵 REFACTOR: melhorar
-
-def test_create_competition_manual_questions_leaves_test_null(admin_user):
-    """Competição manual não cria test automaticamente"""
-    data = {
-        'name': 'Competição Manual',
-        'question_mode': 'manual',
-        # ... outras configurações
-    }
-    
-    competition = CompetitionService.create_competition(data, admin_user.id)
-    assert competition.test_id is None
-
-def test_publish_competition_validates_test_exists():
-    """Publicar competição deve validar que test existe"""
-    competition = Competition(name='Test', question_mode='manual', test_id=None)
-    db.session.add(competition)
-    db.session.commit()
-    
-    with pytest.raises(ValidationError, match='Test não criado'):
-        CompetitionService.publish_competition(competition.id)
-
-def test_publish_competition_validates_dates():
-    """Publicar competição deve validar datas"""
-    competition = Competition(
-        enrollment_start=datetime(2024, 1, 10),
-        enrollment_end=datetime(2024, 1, 5),  # antes do início
-        # ...
-    )
-    
-    with pytest.raises(ValidationError, match='datas inválidas'):
-        CompetitionService.publish_competition(competition.id)
-```
-
-**Arquivo**: `tests/unit/models/test_competition.py`
-
-```python
-def test_competition_is_enrollment_open_property():
-    """Propriedade is_enrollment_open deve retornar corretamente"""
-    now = datetime.utcnow()
-    competition = Competition(
-        enrollment_start=now - timedelta(hours=1),
-        enrollment_end=now + timedelta(hours=1)
-    )
-    
-    assert competition.is_enrollment_open is True
-
-def test_competition_enrolled_count_property(student_fixture, competition_fixture):
-    """Propriedade enrolled_count deve contar inscritos"""
-    # Inscrever 3 alunos
-    for i in range(3):
-        StudentTestOlimpics(
-            student_id=f'student-{i}',
-            test_id=competition_fixture.test_id
-        ).save()
-    
-    assert competition_fixture.enrolled_count == 3
-
-def test_competition_available_slots_with_limit():
-    """available_slots deve calcular vagas disponíveis"""
-    competition = Competition(max_participants=10)
-    # Simular 7 inscritos
-    competition.enrolled_count = 7  # mock
-    
-    assert competition.available_slots == 3
-```
-
-#### Backend - Testes de Integração
-
-**Arquivo**: `tests/integration/routes/test_competition_routes.py`
-
-```python
-def test_create_competition_endpoint(client, admin_headers, subject_fixture):
-    """POST /competitions/ deve criar competição"""
-    response = client.post('/competitions/',
-        json={
-            'name': 'Competição Teste API',
-            'subject_id': subject_fixture.id,
-            'level': 1,
-            'enrollment_start': '2024-06-01T00:00:00',
-            'enrollment_end': '2024-06-03T23:59:59',
-            'application': '2024-06-04T00:00:00',
-            'expiration': '2024-06-07T23:59:59',
-            'question_mode': 'auto_random',
-            'question_rules': {'num_questions': 5},
-            'reward_config': {'participation_coins': 50, 'ranking_rewards': []}
-        },
-        headers=admin_headers
-    )
-    
-    assert response.status_code == 201
-    assert 'id' in response.json
-    
-    # Verificar no banco
-    competition = Competition.query.get(response.json['id'])
-    assert competition.name == 'Competição Teste API'
-
-def test_list_competitions_endpoint(client, admin_headers):
-    """GET /competitions/ deve listar competições"""
-    # Criar 3 competições
-    for i in range(3):
-        Competition(name=f'Comp {i}', status='aberta').save()
-    
-    response = client.get('/competitions/', headers=admin_headers)
-    
-    assert response.status_code == 200
-    assert len(response.json['competitions']) >= 3
-
-def test_publish_competition_endpoint(client, admin_headers, competition_fixture):
-    """POST /competitions/:id/publish deve publicar"""
-    response = client.post(f'/competitions/{competition_fixture.id}/publish',
-        headers=admin_headers
-    )
-    
-    assert response.status_code == 200
-    
-    competition = Competition.query.get(competition_fixture.id)
-    assert competition.status == 'aberta'
-
-def test_student_cannot_create_competition(client, student_headers):
-    """Aluno não pode criar competição"""
-    response = client.post('/competitions/',
-        json={'name': 'Tentativa Hack'},
-        headers=student_headers
-    )
-    
-    assert response.status_code == 403
-```
-
-#### Frontend - Testes Unitários
-
-**Arquivo**: `src/pages/Admin/Competitions/__tests__/CreateCompetitionModal.test.tsx`
-
-```typescript
-describe('CreateCompetitionModal', () => {
-  it('should render all form steps', () => {
-    render(<CreateCompetitionModal open={true} onClose={jest.fn()} />);
-    
-    expect(screen.getByText('Informações básicas')).toBeInTheDocument();
-    expect(screen.getByText('Datas')).toBeInTheDocument();
-    expect(screen.getByText('Questões')).toBeInTheDocument();
-  });
-  
-  it('should validate required fields', async () => {
-    render(<CreateCompetitionModal open={true} onClose={jest.fn()} />);
-    
-    const submitButton = screen.getByText('Criar competição');
-    fireEvent.click(submitButton);
-    
-    await waitFor(() => {
-      expect(screen.getByText('Nome é obrigatório')).toBeInTheDocument();
-      expect(screen.getByText('Disciplina é obrigatória')).toBeInTheDocument();
-    });
-  });
-  
-  it('should validate dates (application >= enrollment_end)', async () => {
-    render(<CreateCompetitionModal open={true} onClose={jest.fn()} />);
-    
-    // Preencher datas inválidas
-    fireEvent.change(screen.getByLabelText('Fim da inscrição'), {
-      target: { value: '2024-06-10' }
-    });
-    fireEvent.change(screen.getByLabelText('Início da aplicação'), {
-      target: { value: '2024-06-05' }  // antes do fim da inscrição
-    });
-    
-    fireEvent.click(screen.getByText('Próximo'));
-    
-    await waitFor(() => {
-      expect(screen.getByText(/data de aplicação deve ser após/i)).toBeInTheDocument();
-    });
-  });
-  
-  it('should submit form with correct data', async () => {
-    const onSuccess = jest.fn();
-    render(<CreateCompetitionModal open={true} onClose={jest.fn()} onSuccess={onSuccess} />);
-    
-    // Preencher todos os campos...
-    // ... (formulário completo)
-    
-    fireEvent.click(screen.getByText('Criar competição'));
-    
-    await waitFor(() => {
-      expect(onSuccess).toHaveBeenCalled();
-    });
-  });
-});
-```
-
-### Checklist TDD - Etapa 2
-
-#### Backend
-- [ ] 🔴 Escrever testes unitários de `CompetitionService`
-- [ ] 🟢 Implementar `CompetitionService`
-- [ ] 🔵 Refatorar `CompetitionService`
-- [ ] 🔴 Escrever testes de model `Competition`
-- [ ] 🟢 Implementar `Competition` model
-- [ ] 🔵 Refatorar model
-- [ ] 🔴 Escrever testes de integração das routes
-- [ ] 🟢 Implementar routes CRUD
-- [ ] 🔵 Refatorar routes
-- [ ] ✅ Cobertura: mínimo 80%
-
-#### Frontend
-- [ ] 🔴 Escrever testes de `CreateCompetitionModal`
-- [ ] 🟢 Implementar modal com validações
-- [ ] 🔵 Refatorar modal
-- [ ] 🔴 Escrever testes de `CompetitionList`
-- [ ] 🟢 Implementar lista
-- [ ] 🔵 Refatorar lista
-- [ ] 🔴 Escrever testes E2E (Cypress)
-- [ ] 🟢 Garantir fluxo E2E funcionando
-- [ ] ✅ Cobertura: mínimo 70%
-
----
-
 ## Etapa 3: Inscrição e Listagem (Aluno)
 
 ### Objetivo
-Permitir que alunos vejam competições disponíveis e se inscrevam. Integrar com `student_test_olimpics` para liberar a prova.
+Permitir que alunos vejam competições disponíveis e se inscrevam. Integrar com o fluxo de prova (ex.: `student_test_olimpics`) para liberar a prova.
 
 ### Backend
+
+**Tabelas**: A tabela `competition_enrollments` já foi criada na Etapa 2. Nesta etapa implementar apenas os models (se ainda não tiverem sido criados), serviços e rotas que usam essa tabela.
 
 #### 3.1 Routes (adicionar em `competition_routes.py`)
 
@@ -1154,7 +577,7 @@ Permitir que alunos vejam competições disponíveis e se inscrevam. Integrar co
 #   - Aluno pertence ao nível/escopo
 #   - Vagas disponíveis (se houver limite)
 #   - Aluno não inscrito ainda
-# Ação: cria registro em student_test_olimpics (student_id, test_id, application, expiration)
+# Ação: cria registro em competition_enrollments (se a tabela existir) e em student_test_olimpics (test_id da competição, application, expiration)
 # Retorna: sucesso ou erro
 
 # DELETE /competitions/:id/unenroll
@@ -1184,18 +607,17 @@ def get_available_competitions_for_student(student_id):
 @staticmethod
 def enroll_student(competition_id, student_id):
     # Valida tudo (acima)
-    # Cria StudentTestOlimpics:
-    #   - student_id
-    #   - test_id = competition.test_id
-    #   - application = competition.application
-    #   - expiration = competition.expiration
-    #   - timezone = competition.timezone
+    # Se existir tabela competition_enrollments: criar registro (competition_id, student_id, status='inscrito')
+    # Criar (ou garantir) StudentTestOlimpics para liberar a prova:
+    #   - student_id, test_id = competition.test_id
+    #   - application, expiration, timezone da competição
     # Retorna: sucesso ou erro
 
 @staticmethod
 def unenroll_student(competition_id, student_id):
     # Valida: antes do período de aplicação
-    # Remove StudentTestOlimpics
+    # Se existir competition_enrollments: atualizar status para 'cancelado' ou remover registro
+    # Remover StudentTestOlimpics (student_id, test_id da competição)
     # Retorna: sucesso
 ```
 
@@ -1284,137 +706,6 @@ def unenroll_student(competition_id, student_id):
 
 **Descrição**: Adicionar item no menu "Competições" com badge mostrando quantas competições abertas há (número vermelho).
 
-### Testes (TDD) - Etapa 3
-
-#### Backend - Testes Principais
-
-**Arquivo**: `tests/unit/services/test_competition_service.py` (adicionar)
-
-```python
-def test_get_available_competitions_filters_by_level(student_fixture, competition_fixture):
-    """Deve filtrar competições por nível do aluno"""
-    # Aluno série 5 (nível 1)
-    student_fixture.grade_level = 5
-    
-    # Competição nível 1
-    comp1 = Competition(name='Comp Nível 1', level=1, status='aberta')
-    # Competição nível 2
-    comp2 = Competition(name='Comp Nível 2', level=2, status='aberta')
-    
-    available = CompetitionService.get_available_competitions_for_student(student_fixture.id)
-    
-    assert comp1 in available
-    assert comp2 not in available
-
-def test_enroll_student_creates_student_test_olimpics(student_fixture, competition_fixture):
-    """Inscrever aluno deve criar registro em student_test_olimpics"""
-    CompetitionService.enroll_student(competition_fixture.id, student_fixture.id)
-    
-    record = StudentTestOlimpics.query.filter_by(
-        student_id=student_fixture.id,
-        test_id=competition_fixture.test_id
-    ).first()
-    
-    assert record is not None
-    assert record.application == competition_fixture.application
-
-def test_enroll_student_fails_if_no_slots_available(student_fixture, competition_fixture):
-    """Não deve inscrever se vagas esgotadas"""
-    competition_fixture.max_participants = 1
-    # Inscrever outro aluno
-    CompetitionService.enroll_student(competition_fixture.id, 'other-student-id')
-    
-    with pytest.raises(NoSlotsAvailableError):
-        CompetitionService.enroll_student(competition_fixture.id, student_fixture.id)
-
-def test_unenroll_student_removes_record(student_fixture, competition_fixture):
-    """Cancelar inscrição deve remover registro"""
-    CompetitionService.enroll_student(competition_fixture.id, student_fixture.id)
-    CompetitionService.unenroll_student(competition_fixture.id, student_fixture.id)
-    
-    record = StudentTestOlimpics.query.filter_by(
-        student_id=student_fixture.id,
-        test_id=competition_fixture.test_id
-    ).first()
-    
-    assert record is None
-```
-
-**Arquivo**: `tests/integration/routes/test_competition_routes.py` (adicionar)
-
-```python
-def test_enroll_endpoint(client, student_fixture, student_headers, competition_fixture):
-    """POST /competitions/:id/enroll deve inscrever aluno"""
-    response = client.post(f'/competitions/{competition_fixture.id}/enroll',
-        headers=student_headers
-    )
-    
-    assert response.status_code == 201
-    assert response.json['message'] == 'Inscrição realizada com sucesso'
-
-def test_available_competitions_endpoint(client, student_headers):
-    """GET /competitions/available deve retornar competições filtradas"""
-    response = client.get('/competitions/available', headers=student_headers)
-    
-    assert response.status_code == 200
-    assert 'competitions' in response.json
-```
-
-#### Frontend - Testes Principais
-
-**Arquivo**: `src/pages/Student/Competitions/__tests__/CompetitionListStudent.test.tsx`
-
-```typescript
-describe('CompetitionListStudent', () => {
-  it('should display available competitions', async () => {
-    server.use(
-      rest.get('/competitions/available', (req, res, ctx) => {
-        return res(ctx.json({
-          competitions: [
-            { id: '1', name: 'Comp Matemática', available_slots: 50 }
-          ]
-        }));
-      })
-    );
-    
-    render(<CompetitionListStudent />);
-    
-    await waitFor(() => {
-      expect(screen.getByText('Comp Matemática')).toBeInTheDocument();
-    });
-  });
-  
-  it('should enroll student on button click', async () => {
-    render(<CompetitionListStudent />);
-    
-    const enrollButton = screen.getByText('Inscrever-se');
-    fireEvent.click(enrollButton);
-    
-    // Confirmar modal
-    const confirmButton = screen.getByText('Confirmar inscrição');
-    fireEvent.click(confirmButton);
-    
-    await waitFor(() => {
-      expect(screen.getByText('Inscrição realizada!')).toBeInTheDocument();
-    });
-  });
-});
-```
-
-### Checklist TDD - Etapa 3
-
-- [ ] 🔴 Testes de filtro de competições disponíveis
-- [ ] 🟢 Implementar filtros (nível, escopo, vagas)
-- [ ] 🔴 Testes de inscrição
-- [ ] 🟢 Implementar inscrição
-- [ ] 🔴 Testes de cancelamento
-- [ ] 🟢 Implementar cancelamento
-- [ ] 🔴 Testes frontend (lista, modal)
-- [ ] 🟢 Implementar UI
-- [ ] ✅ Cobertura: backend 80%, frontend 70%
-
----
-
 ## Etapa 4: Aplicação e Entrega (integração com prova)
 
 ### Objetivo
@@ -1422,21 +713,9 @@ Integrar competições com o fluxo de prova existente: aluno acessa prova pela c
 
 ### Backend
 
-#### 4.1 Migrations
-**Arquivo**: `migrations/versions/add_competition_rewards.py`
+**Tabelas**: A tabela `competition_rewards` já foi criada na Etapa 2. Nesta etapa implementar apenas a lógica que verifica/marca participação paga e credita moedas (CoinService).
 
-```python
-# Tabela: competition_rewards
-- id (String/UUID, PK)
-- competition_id (String, FK → competitions.id)
-- student_id (String, FK → student.id)
-- participation_paid_at (TIMESTAMP, nullable)
-- created_at (TIMESTAMP)
-- updated_at (TIMESTAMP)
-# Constraint: unique(competition_id, student_id)
-```
-
-#### 4.2 Services (modificar existente)
+#### 4.1 Services (modificar existente)
 **Arquivo**: `app/routes/student_answer_routes.py` (ou onde finaliza prova)
 
 **Adicionar no fluxo de finalização de prova**:
@@ -1483,7 +762,7 @@ if competition:
             return {"coins_earned": participation_coins}
 ```
 
-#### 4.3 Routes (adicionar em `competition_routes.py`)
+#### 4.2 Routes (adicionar em `competition_routes.py`)
 
 ```python
 # GET /competitions/:id/my-session
@@ -1548,250 +827,136 @@ if competition:
   - "Ver ranking" (se ranking_visibility = 'realtime')
   - "Voltar para competições"
 
-### Testes (TDD) - Etapa 4
-
-#### Backend - Testes Principais
-
-**Arquivo**: `tests/integration/test_competition_participation_flow.py`
-
-```python
-def test_finalize_test_session_credits_participation_coins(client, student_fixture, competition_fixture):
-    """Entregar prova de competição deve creditar moedas de participação"""
-    # Setup: inscrever aluno
-    CompetitionService.enroll_student(competition_fixture.id, student_fixture.id)
-    
-    # Criar sessão de prova
-    session = TestSession(student_id=student_fixture.id, test_id=competition_fixture.test_id)
-    db.session.add(session)
-    db.session.commit()
-    
-    # Act: finalizar prova
-    response = client.post(f'/test-sessions/{session.id}/finalize', headers=student_headers)
-    
-    # Assert: moedas creditadas
-    assert response.status_code == 200
-    assert response.json['coins_earned'] == 50  # participation_coins do reward_config
-    
-    balance = CoinService.get_balance(student_fixture.id)
-    assert balance == 50
-
-def test_participation_coins_credited_only_once(student_fixture, competition_fixture):
-    """Moedas de participação só devem ser creditadas uma vez"""
-    CompetitionService.enroll_student(competition_fixture.id, student_fixture.id)
-    
-    # Primeira entrega
-    session1 = TestSession(student_id=student_fixture.id, test_id=competition_fixture.test_id)
-    session1.finalize()  # credita 50 moedas
-    
-    # Segunda tentativa (re-fazer prova)
-    session2 = TestSession(student_id=student_fixture.id, test_id=competition_fixture.test_id)
-    session2.finalize()  # NÃO deve creditar novamente
-    
-    balance = CoinService.get_balance(student_fixture.id)
-    assert balance == 50  # não 100
-
-def test_competition_reward_records_participation_paid_at():
-    """CompetitionReward deve registrar quando participação foi paga"""
-    # ... após entregar prova
-    
-    reward = CompetitionReward.query.filter_by(
-        competition_id=competition_fixture.id,
-        student_id=student_fixture.id
-    ).first()
-    
-    assert reward is not None
-    assert reward.participation_paid_at is not None
-```
-
-#### Frontend - Testes Principais
-
-**Arquivo**: `src/pages/Student/Competitions/__tests__/CompetitionSubmitSuccessModal.test.tsx`
-
-```typescript
-describe('CompetitionSubmitSuccessModal', () => {
-  it('should display coins earned', () => {
-    render(<CompetitionSubmitSuccessModal open={true} coinsEarned={50} />);
-    
-    expect(screen.getByText('+50 moedas!')).toBeInTheDocument();
-    expect(screen.getByText(/ganhou.*moedas por participar/i)).toBeInTheDocument();
-  });
-  
-  it('should show animation for coins', () => {
-    render(<CompetitionSubmitSuccessModal open={true} coinsEarned={50} />);
-    
-    const coinElement = screen.getByTestId('coin-animation');
-    expect(coinElement).toHaveClass('animate-pulse');
-  });
-});
-```
-
-**Arquivo**: `e2e/competitions/participation-flow.spec.ts` (Cypress)
-
-```typescript
-describe('Competition Participation Flow', () => {
-  it('should complete full participation flow with coins', () => {
-    cy.login('student@test.com', 'password');
-    
-    // 1. Ver competições disponíveis
-    cy.visit('/student/competitions');
-    cy.contains('Competição Matemática').should('be.visible');
-    
-    // 2. Inscrever-se
-    cy.contains('Inscrever-se').click();
-    cy.contains('Confirmar inscrição').click();
-    cy.contains('Inscrição realizada!').should('be.visible');
-    
-    // 3. Fazer prova
-    cy.contains('Fazer prova').click();
-    // ... responder questões
-    cy.contains('Finalizar prova').click();
-    
-    // 4. Verificar modal de sucesso com moedas
-    cy.contains('+50 moedas!').should('be.visible');
-    
-    // 5. Verificar saldo atualizado
-    cy.get('[data-testid="coin-balance"]').should('contain', '50');
-  });
-});
-```
-
-### Checklist TDD - Etapa 4
-
-- [ ] 🔴 Teste de crédito de moedas ao entregar
-- [ ] 🟢 Implementar lógica de pagamento
-- [ ] 🔴 Teste de pagamento único
-- [ ] 🟢 Implementar controle (CompetitionReward)
-- [ ] 🔴 Teste de modal de sucesso
-- [ ] 🟢 Implementar modal com animação
-- [ ] 🔴 Teste E2E do fluxo completo
-- [ ] 🟢 Garantir integração funcionando
-- [ ] ✅ Cobertura: backend 80%, frontend 70%
-
----
-
 ## Etapa 5: Ranking e Pagamento de Recompensas
 
 ### Objetivo
-Calcular ranking ao fim da competição e pagar moedas para as posições premiadas. Exibir ranking para alunos.
+Calcular ranking ao fim da competição, gravar snapshot em `competition_results` (proficiência, média, posição, etc. copiados dos resultados da avaliação), pagar moedas para as posições premiadas e exibir ranking para alunos. Durante a competição, o ranking é calculado em tempo real a partir dos resultados da avaliação, sem escrever em `competition_results`.
 
 ### Backend
 
-#### 5.1 Migrations
-**Arquivo**: `migrations/versions/add_competition_ranking_payouts.py`
+**Tabelas**: As tabelas `competition_results` e `competition_ranking_payouts` já foram criadas na Etapa 2. Nesta etapa implementar apenas os models (CompetitionResult, CompetitionRankingPayout, se ainda não tiverem sido criados), o serviço de ranking e o job de finalização que preenche e lê essas tabelas.
 
-```python
-# Tabela: competition_ranking_payouts
-- id (String/UUID, PK)
-- competition_id (String, FK → competitions.id)
-- student_id (String, FK → student.id)
-- position (Integer) # 1, 2, 3...
-- amount (Integer) # moedas creditadas
-- paid_at (TIMESTAMP)
-- created_at (TIMESTAMP)
-# Constraint: unique(competition_id, student_id)
-```
+#### 5.1 Models (se ainda não criados na Etapa 2)
+- **CompetitionResult**: model correspondente à tabela `competition_results` (relacionamentos com Competition, Student, TestSession).
+- **CompetitionRankingPayout**: model correspondente à tabela `competition_ranking_payouts` (opcional, para auditoria).
 
 #### 5.2 Services
 **Arquivo**: `app/services/competition_ranking_service.py`
+
+**Durante a competição** (status aberta / em andamento): ranking é calculado **em tempo real** a partir dos resultados da avaliação (test_sessions e tabelas de resultado existentes). Nada é escrito em `competition_results`.
+
+**Ao finalizar a competição** (status → encerrada): um job ou ação única (1) calcula o ranking a partir dos mesmos dados da avaliação, (2) grava snapshot em `competition_results` (copiando proficiência, média, nota, acertos, tempo, etc. das tabelas de resultado), (3) paga moedas de ranking e opcionalmente registra em `competition_ranking_payouts`.
 
 ```python
 class CompetitionRankingService:
     @staticmethod
     def calculate_ranking(competition_id):
         """
-        Calcula ranking da competição conforme critério
-        Retorna: lista ordenada de {student_id, value, position}
+        Calcula ranking a partir dos resultados da avaliação (test_sessions / tabelas de resultado).
+        Usado tanto para exibir ranking ao vivo quanto no passo de finalização.
+        Retorna: lista ordenada de {student_id, session_id, value, position, grade, proficiency, ...}
         """
         competition = Competition.query.get(competition_id)
+        # Buscar sessões finalizadas e dados já calculados (nota, proficiência, etc.)
+        # da mesma forma que os resultados da avaliação são obtidos
         test_sessions = TestSession.query.filter_by(
             test_id=competition.test_id,
             status='finalizada'
         ).all()
         
-        # Ordenar conforme ranking_criteria:
+        # Enriquecer com proficiência, média, etc. das tabelas de resultado da avaliação
+        # (reutilizar serviços/queries já existentes)
+        
+        # Ordenar conforme ranking_criteria e ranking_tiebreaker
         if competition.ranking_criteria == 'nota':
             sorted_sessions = sorted(test_sessions, key=lambda s: s.grade or 0, reverse=True)
         elif competition.ranking_criteria == 'tempo':
             sorted_sessions = sorted(test_sessions, key=lambda s: s.duration_minutes or 999999)
-        elif competition.ranking_criteria == 'acertos':
-            sorted_sessions = sorted(test_sessions, key=lambda s: s.correct_answers or 0, reverse=True)
-        # ... outros critérios
+        # ... outros critérios e tiebreaker
         
-        # Aplicar tiebreaker se necessário
-        # ...
-        
-        # Montar ranking com posições
         ranking = []
         for idx, session in enumerate(sorted_sessions, start=1):
             ranking.append({
                 'position': idx,
                 'student_id': session.student_id,
-                'value': session.grade  # ou tempo, ou acertos
+                'session_id': session.id,
+                'value': session.grade,  # ou tempo, acertos
+                'grade': session.grade,
+                'proficiency': ...,   # copiado das tabelas de resultado
+                'correct_answers': ...,
+                # ... demais campos para o snapshot
             })
-        
         return ranking
     
     @staticmethod
-    def pay_ranking_rewards(competition_id):
+    def finalize_competition_and_save_results(competition_id):
         """
-        Paga moedas para posições premiadas
+        Chamado uma vez quando a competição é encerrada.
+        1) Calcula ranking a partir dos resultados da avaliação.
+        2) Grava snapshot em competition_results (copia proficiência, média, nota, etc.).
+        3) Paga moedas de ranking (CoinService) e opcionalmente registra em competition_ranking_payouts.
         """
-        competition = Competition.query.get(competition_id)
+        competition = Competition.query.get_or_404(competition_id)
         ranking = CompetitionRankingService.calculate_ranking(competition_id)
         
-        # Ler reward_config
-        ranking_rewards = competition.reward_config.get('ranking_rewards', [])
+        for item in ranking:
+            # Criar registro em competition_results (snapshot)
+            result = CompetitionResult(
+                competition_id=competition_id,
+                student_id=item['student_id'],
+                session_id=item['session_id'],
+                posicao=item['position'],
+                correct_answers=item['correct_answers'],
+                grade=item['grade'],
+                proficiency=item.get('proficiency'),
+                # ... copiar todos os campos das tabelas de resultado
+                moedas_ganhas=0,  # preenchido abaixo se premiado
+                calculated_at=datetime.utcnow(),
+            )
+            db.session.add(result)
         
+        # Pagar moedas para posições premiadas
+        CompetitionRankingService.pay_ranking_rewards(competition_id, ranking)
+        
+        # Atualizar moedas_ganhas em competition_results para cada premiado
+        # ...
+        db.session.commit()
+    
+    @staticmethod
+    def pay_ranking_rewards(competition_id, ranking=None):
+        """
+        Credita moedas para posições premiadas (CoinService).
+        Se existir competition_ranking_payouts, registra o pagamento.
+        """
+        competition = Competition.query.get(competition_id)
+        if ranking is None:
+            ranking = CompetitionRankingService.calculate_ranking(competition_id)
+        
+        ranking_rewards = competition.reward_config.get('ranking_rewards', [])
         for reward_config in ranking_rewards:
             position = reward_config['position']
             coins = reward_config['coins']
-            
-            # Buscar aluno naquela posição
             if position <= len(ranking):
                 student_id = ranking[position - 1]['student_id']
-                
-                # Verificar se já pagou
-                payout = CompetitionRankingPayout.query.filter_by(
-                    competition_id=competition_id,
-                    student_id=student_id
-                ).first()
-                
-                if not payout:
-                    # Creditar moedas
-                    CoinService.credit_coins(
-                        student_id=student_id,
-                        amount=coins,
-                        reason=f'competition_rank_{position}',
-                        competition_id=competition_id,
-                        description=f"{position}º lugar na competição: {competition.name}"
-                    )
-                    
-                    # Registrar payout
-                    payout = CompetitionRankingPayout(
-                        competition_id=competition_id,
-                        student_id=student_id,
-                        position=position,
-                        amount=coins,
-                        paid_at=datetime.utcnow()
-                    )
-                    db.session.add(payout)
-        
-        db.session.commit()
+                # Creditar e opcionalmente registrar em competition_ranking_payouts
+                CoinService.credit_coins(...)
     
     @staticmethod
     def get_ranking(competition_id, limit=100):
         """
-        Retorna ranking com dados dos alunos
+        Se competição encerrada: pode ler de competition_results (ranking oficial).
+        Se competição em andamento: calcula em tempo real (calculate_ranking) a partir dos resultados da avaliação.
+        Retorna lista enriquecida com student_name, student_class, etc.
         """
-        ranking = CompetitionRankingService.calculate_ranking(competition_id)
-        
-        # Enriquecer com dados do aluno (nome, turma, etc.)
-        for item in ranking[:limit]:
-            student = Student.query.get(item['student_id'])
-            item['student_name'] = student.nome if student else 'Desconhecido'
-            item['student_class'] = student.class.name if student and student.class else ''
-        
-        return ranking
+        competition = Competition.query.get(competition_id)
+        if competition.status == 'encerrada':
+            # Ler de competition_results
+            results = CompetitionResult.query.filter_by(competition_id=competition_id)\
+                .order_by(CompetitionResult.posicao).limit(limit).all()
+            return [enriquecer(item) for item in results]
+        else:
+            # Ranking ao vivo: calcular a partir da avaliação
+            return CompetitionRankingService.calculate_ranking(competition_id)[:limit]
 ```
 
 #### 5.3 Celery Task (Job)
@@ -1801,8 +966,10 @@ class CompetitionRankingService:
 @celery.task
 def process_finished_competitions():
     """
-    Job que roda periodicamente (ex: a cada hora)
-    Processa competições que expiraram e ainda não tiveram ranking pago
+    Job que roda periodicamente (ex: a cada hora).
+    Processa competições que expiraram e ainda não foram finalizadas.
+    Ao finalizar: grava snapshot em competition_results (proficiência, média, posição, etc.)
+    e paga moedas de ranking. Posição e competition_results só são atualizados neste momento.
     """
     now = datetime.utcnow()
     
@@ -1812,20 +979,17 @@ def process_finished_competitions():
     ).all()
     
     for competition in competitions:
-        # Verificar se já pagou ranking
-        payouts_count = CompetitionRankingPayout.query.filter_by(
-            competition_id=competition.id
-        ).count()
-        
-        if payouts_count == 0:
-            # Pagar ranking
-            CompetitionRankingService.pay_ranking_rewards(competition.id)
+        # Verificar se já foi finalizada (já tem registros em competition_results)
+        has_results = CompetitionResult.query.filter_by(competition_id=competition.id).count() > 0
+        if not has_results:
+            # 1) Gravar snapshot em competition_results (copiar dados da avaliação)
+            # 2) Pagar moedas de ranking
+            CompetitionRankingService.finalize_competition_and_save_results(competition.id)
             
-            # Atualizar status
             competition.status = 'encerrada'
             db.session.commit()
             
-            logger.info(f"Competição {competition.id} encerrada e ranking pago")
+            logger.info(f"Competição {competition.id} encerrada; results e ranking pagos")
 ```
 
 **Configurar no Celery Beat** (arquivo de configuração):
@@ -1845,11 +1009,13 @@ CELERY_BEAT_SCHEDULE = {
 ```python
 # GET /competitions/:id/ranking
 # Retorna ranking da competição
+# Durante a competição: ranking calculado em tempo real a partir dos resultados da avaliação (não lê competition_results)
+# Após encerrar: ranking pode ser lido de competition_results (snapshot com posição, proficiência, média, etc.)
 # Validações:
 #   - Se ranking_visibility = 'realtime': retorna sempre (se houver sessões finalizadas)
 #   - Se ranking_visibility = 'final': só retorna se competition.status = 'encerrada'
 # Permissões: alunos inscritos, professor/admin
-# Retorna: lista de {position, student_name, student_class, value}
+# Retorna: lista de {position, student_name, student_class, value, proficiency, ...}
 
 # GET /competitions/:id/my-ranking
 # Retorna posição do aluno logado no ranking
@@ -1907,240 +1073,6 @@ CELERY_BEAT_SCHEDULE = {
 - Backend pode criar "notificação" ao pagar ranking (tabela de notificações ou websocket)
 - Frontend exibe toast/modal: "Parabéns! Você ficou em [X]º lugar na competição [Nome] e ganhou [Y] moedas!"
 - Link para ver ranking completo
-
-### Testes (TDD) - Etapa 5
-
-#### Backend - Testes Unitários
-
-**Arquivo**: `tests/unit/services/test_competition_ranking_service.py`
-
-```python
-def test_calculate_ranking_by_grade(competition_fixture):
-    """Ranking por nota deve ordenar corretamente"""
-    # Setup: 3 sessões com notas diferentes
-    sessions = [
-        TestSession(student_id='s1', test_id=competition_fixture.test_id, grade=8.5),
-        TestSession(student_id='s2', test_id=competition_fixture.test_id, grade=9.0),
-        TestSession(student_id='s3', test_id=competition_fixture.test_id, grade=7.5),
-    ]
-    for s in sessions:
-        s.status = 'finalizada'
-        db.session.add(s)
-    db.session.commit()
-    
-    competition_fixture.ranking_criteria = 'nota'
-    
-    # Act
-    ranking = CompetitionRankingService.calculate_ranking(competition_fixture.id)
-    
-    # Assert
-    assert ranking[0]['student_id'] == 's2'  # 9.0 - 1º
-    assert ranking[1]['student_id'] == 's1'  # 8.5 - 2º
-    assert ranking[2]['student_id'] == 's3'  # 7.5 - 3º
-
-def test_calculate_ranking_by_time():
-    """Ranking por tempo deve ordenar do mais rápido ao mais lento"""
-    # 🔴 RED: escrever teste
-    # 🟢 GREEN: implementar
-    # 🔵 REFACTOR
-    pass
-
-def test_pay_ranking_rewards_credits_correct_amounts(competition_fixture):
-    """Pagamento de ranking deve creditar valores corretos"""
-    # Setup: ranking com 3 alunos
-    ranking = [
-        {'position': 1, 'student_id': 's1', 'value': 10.0},
-        {'position': 2, 'student_id': 's2', 'value': 9.0},
-        {'position': 3, 'student_id': 's3', 'value': 8.0},
-    ]
-    
-    competition_fixture.reward_config = {
-        'participation_coins': 50,
-        'ranking_rewards': [
-            {'position': 1, 'coins': 100},
-            {'position': 2, 'coins': 50},
-            {'position': 3, 'coins': 25}
-        ]
-    }
-    
-    # Mock calculate_ranking
-    with patch.object(CompetitionRankingService, 'calculate_ranking', return_value=ranking):
-        CompetitionRankingService.pay_ranking_rewards(competition_fixture.id)
-    
-    # Assert: saldos corretos
-    assert CoinService.get_balance('s1') == 100
-    assert CoinService.get_balance('s2') == 50
-    assert CoinService.get_balance('s3') == 25
-
-def test_pay_ranking_rewards_only_once(competition_fixture):
-    """Ranking só deve ser pago uma vez"""
-    # Pagar primeira vez
-    CompetitionRankingService.pay_ranking_rewards(competition_fixture.id)
-    
-    # Tentar pagar novamente
-    CompetitionRankingService.pay_ranking_rewards(competition_fixture.id)
-    
-    # Verificar que não pagou duas vezes
-    payouts = CompetitionRankingPayout.query.filter_by(
-        competition_id=competition_fixture.id
-    ).all()
-    
-    assert len(payouts) == 3  # não 6
-
-def test_pay_ranking_rewards_creates_payouts_records():
-    """Pagamento deve criar registros em competition_ranking_payouts"""
-    # ...
-    
-    payout = CompetitionRankingPayout.query.filter_by(
-        competition_id=competition_fixture.id,
-        student_id='s1',
-        position=1
-    ).first()
-    
-    assert payout is not None
-    assert payout.amount == 100
-    assert payout.paid_at is not None
-```
-
-#### Backend - Testes de Integração
-
-**Arquivo**: `tests/integration/celery/test_competition_tasks.py`
-
-```python
-def test_process_finished_competitions_task(competition_fixture):
-    """Job deve processar competições expiradas"""
-    # Setup: competição expirada
-    competition_fixture.expiration = datetime.utcnow() - timedelta(hours=1)
-    competition_fixture.status = 'aberta'
-    db.session.commit()
-    
-    # Act: rodar job
-    process_finished_competitions.apply()
-    
-    # Assert: status atualizado
-    competition_fixture = Competition.query.get(competition_fixture.id)
-    assert competition_fixture.status == 'encerrada'
-    
-    # Assert: ranking pago
-    payouts = CompetitionRankingPayout.query.filter_by(
-        competition_id=competition_fixture.id
-    ).count()
-    assert payouts > 0
-
-def test_job_does_not_process_same_competition_twice():
-    """Job não deve processar competição já encerrada"""
-    # Já processada
-    competition = Competition(status='encerrada', expiration=datetime.utcnow() - timedelta(days=1))
-    
-    process_finished_competitions.apply()
-    
-    # Verificar que não tentou processar novamente
-    # (mockar pay_ranking_rewards e verificar que não foi chamado)
-```
-
-**Arquivo**: `tests/integration/routes/test_competition_ranking_routes.py`
-
-```python
-def test_get_ranking_endpoint_realtime(client, student_headers, competition_fixture):
-    """GET /competitions/:id/ranking deve retornar ranking (realtime)"""
-    competition_fixture.ranking_visibility = 'realtime'
-    
-    response = client.get(f'/competitions/{competition_fixture.id}/ranking',
-        headers=student_headers
-    )
-    
-    assert response.status_code == 200
-    assert 'ranking' in response.json
-
-def test_get_ranking_endpoint_final_only_after_expiration(client, student_headers, competition_fixture):
-    """Ranking 'final' só deve ser visível após expiração"""
-    competition_fixture.ranking_visibility = 'final'
-    competition_fixture.expiration = datetime.utcnow() + timedelta(days=1)  # ainda não expirou
-    
-    response = client.get(f'/competitions/{competition_fixture.id}/ranking',
-        headers=student_headers
-    )
-    
-    assert response.status_code == 403
-    assert 'ainda não disponível' in response.json['message'].lower()
-```
-
-#### Frontend - Testes Principais
-
-**Arquivo**: `src/pages/Student/Competitions/__tests__/CompetitionRanking.test.tsx`
-
-```typescript
-describe('CompetitionRanking', () => {
-  it('should display top 3 podium', async () => {
-    server.use(
-      rest.get('/competitions/:id/ranking', (req, res, ctx) => {
-        return res(ctx.json({
-          ranking: [
-            { position: 1, student_name: 'Alice', value: 10.0 },
-            { position: 2, student_name: 'Bob', value: 9.5 },
-            { position: 3, student_name: 'Carol', value: 9.0 },
-          ]
-        }));
-      })
-    );
-    
-    render(<CompetitionRanking competitionId="comp-123" />);
-    
-    await waitFor(() => {
-      expect(screen.getByText('Alice')).toBeInTheDocument();
-      expect(screen.getByText('Bob')).toBeInTheDocument();
-      expect(screen.getByText('Carol')).toBeInTheDocument();
-    });
-    
-    // Verificar medalhas
-    expect(screen.getByTestId('medal-gold')).toBeInTheDocument();
-    expect(screen.getByTestId('medal-silver')).toBeInTheDocument();
-    expect(screen.getByTestId('medal-bronze')).toBeInTheDocument();
-  });
-  
-  it('should display student position', async () => {
-    render(<CompetitionRanking competitionId="comp-123" />);
-    
-    await waitFor(() => {
-      expect(screen.getByText(/você está em.*5º lugar/i)).toBeInTheDocument();
-    });
-  });
-  
-  it('should auto-refresh if realtime visibility', async () => {
-    jest.useFakeTimers();
-    
-    render(<CompetitionRanking competitionId="comp-123" rankingVisibility="realtime" />);
-    
-    // Avançar 10 segundos
-    jest.advanceTimersByTime(10000);
-    
-    // Verificar que fez nova requisição
-    await waitFor(() => {
-      expect(screen.getByText('Atualizado agora')).toBeInTheDocument();
-    });
-    
-    jest.useRealTimers();
-  });
-});
-```
-
-### Checklist TDD - Etapa 5
-
-- [ ] 🔴 Testes de cálculo de ranking (nota, tempo, acertos)
-- [ ] 🟢 Implementar cálculo com critérios
-- [ ] 🔴 Testes de pagamento de ranking
-- [ ] 🟢 Implementar pagamento com reward_config
-- [ ] 🔴 Testes de job de processamento
-- [ ] 🟢 Implementar Celery task
-- [ ] 🔴 Testes de endpoints de ranking
-- [ ] 🟢 Implementar routes com validações
-- [ ] 🔴 Testes frontend (ranking, podium)
-- [ ] 🟢 Implementar UI de ranking
-- [ ] 🔴 Testes de auto-refresh (realtime)
-- [ ] 🟢 Implementar polling/websocket
-- [ ] ✅ Cobertura: backend 80%, frontend 70%
-
----
 
 ## Etapa 6: Templates e Criação Automática
 
@@ -2346,56 +1278,6 @@ CELERY_BEAT_SCHEDULE = {
   - Ativar/Desativar
   - Excluir template (confirmar em modal)
 
-### Testes (TDD) - Etapa 6
-
-#### Testes Principais (resumido)
-
-```python
-# Backend
-def test_template_generates_competition_weekly():
-    """Template semanal deve gerar competição toda semana"""
-    template = CompetitionTemplate(recurrence='weekly', active=True)
-    
-    # Rodar job
-    create_competitions_from_templates.apply()
-    
-    # Verificar competição criada
-    competitions = Competition.query.filter_by(template_id=template.id).all()
-    assert len(competitions) == 1
-
-def test_template_does_not_create_duplicate_competitions():
-    """Não deve criar duas competições para mesma semana"""
-    # Já existe competição desta semana
-    # Rodar job novamente
-    # Verificar que não criou duplicata
-
-def test_deactivated_template_does_not_create_competitions():
-    """Template desativado não cria novas competições"""
-    template = CompetitionTemplate(recurrence='weekly', active=False)
-    # ...
-
-# Frontend
-describe('CompetitionTemplateList', () => {
-  it('should display template list', () => { /* ... */ });
-  it('should create new template', () => { /* ... */ });
-  it('should toggle template active status', () => { /* ... */ });
-});
-```
-
-### Checklist TDD - Etapa 6
-
-- [ ] 🔴 Testes de criação de template
-- [ ] 🟢 Implementar templates CRUD
-- [ ] 🔴 Testes de job de criação automática
-- [ ] 🟢 Implementar job com periodicidade
-- [ ] 🔴 Testes de não-duplicação
-- [ ] 🟢 Implementar verificação de existência
-- [ ] 🔴 Testes frontend
-- [ ] 🟢 Implementar UI de templates
-- [ ] ✅ Cobertura: backend 80%, frontend 70%
-
----
-
 ## Etapa 7: Funcionalidades Avançadas
 
 ### Objetivo
@@ -2536,541 +1418,93 @@ def notify_ranking_updated(competition_id):
 - "Prova abre em: 1d 12h"
 - "Prova fecha em: 3h 45m"
 
-### Testes (TDD) - Etapa 7
-
-#### Testes Principais (resumido)
-
-```python
-# Backend - WebSocket
-def test_websocket_ranking_updates():
-    """WebSocket deve emitir atualizações de ranking"""
-    # Conectar cliente websocket
-    # Finalizar prova de aluno
-    # Verificar que evento 'ranking_updated' foi emitido
-
-# Backend - Notificações
-def test_notification_sent_when_competition_opens():
-    """Notificação deve ser enviada quando competição abre"""
-    # ...
-
-# Backend - Performance
-def test_ranking_pagination_with_1000_participants():
-    """Ranking deve paginar corretamente com muitos participantes"""
-    # Criar 1000 sessões
-    # Buscar ranking com limit=100
-    # Verificar performance < 1s
-
-# Frontend - Realtime
-describe('RealtimeRanking', () => {
-  it('should update automatically with websocket', () => {
-    // Mock websocket
-    // Simular evento de atualização
-    // Verificar que ranking foi atualizado
-  });
-});
-
-# Frontend - Analytics
-describe('CompetitionAnalytics', () => {
-  it('should display charts correctly', () => { /* ... */ });
-  it('should calculate metrics accurately', () => { /* ... */ });
-});
-
-# E2E - Performance
-describe('Performance Tests', () => {
-  it('should load ranking with 500 participants in < 2s', () => {
-    cy.visit('/competitions/comp-123/ranking');
-    cy.get('[data-testid="ranking-list"]').should('be.visible');
-    // Verificar tempo de carregamento
-  });
-});
-```
-
-### Checklist TDD - Etapa 7
-
-- [ ] 🔴 Testes de websocket/polling
-- [ ] 🟢 Implementar realtime ranking
-- [ ] 🔴 Testes de notificações
-- [ ] 🟢 Implementar sistema de notificações
-- [ ] 🔴 Testes de performance
-- [ ] 🟢 Otimizar queries e paginação
-- [ ] 🔴 Testes de analytics
-- [ ] 🟢 Implementar gráficos e métricas
-- [ ] ✅ Cobertura: backend 80%, frontend 70%
-
----
-
-## Boas Práticas de TDD
-
-### Princípios Fundamentais
-
-#### 1. Escrever o teste primeiro (sempre!)
-- ❌ **Errado**: Implementar código e depois testar
-- ✅ **Certo**: Escrever teste, ver falhar, implementar, ver passar
-
-#### 2. Um teste por vez
-- Escrever um teste
-- Fazer passar
-- Refatorar
-- Repetir
-
-#### 3. Testes pequenos e específicos
-- Cada teste deve testar **uma** coisa
-- Nome do teste deve descrever **o quê** e **por quê**
-- Formato: `test_<ação>_<contexto>_<resultado_esperado>`
-
-```python
-# ✅ BOM
-def test_enroll_student_fails_when_no_slots_available():
-    """Deve falhar ao inscrever quando vagas esgotadas"""
-    # ...
-
-# ❌ RUIM
-def test_enrollment():
-    """Testa inscrição"""
-    # testa múltiplas coisas...
-```
-
-#### 4. Testes independentes
-- Cada teste deve rodar isoladamente
-- Não depender de ordem de execução
-- Setup e teardown corretos (fixtures)
-
-#### 5. Arrange-Act-Assert (AAA)
-```python
-def test_credit_coins_increases_balance():
-    # Arrange (preparar)
-    student = Student(nome='Test')
-    initial_balance = 0
-    
-    # Act (executar)
-    CoinService.credit_coins(student.id, 50, 'test')
-    
-    # Assert (verificar)
-    assert CoinService.get_balance(student.id) == 50
-```
-
-### Erros Comuns e Como Evitar
-
-#### ❌ Testar implementação em vez de comportamento
-```python
-# RUIM: teste frágil, quebra se mudar implementação
-def test_credit_coins_calls_session_add():
-    with patch('db.session.add') as mock_add:
-        CoinService.credit_coins(student_id, 50, 'test')
-        mock_add.assert_called_once()
-
-# BOM: testa comportamento final
-def test_credit_coins_increases_balance():
-    balance_before = CoinService.get_balance(student_id)
-    CoinService.credit_coins(student_id, 50, 'test')
-    balance_after = CoinService.get_balance(student_id)
-    assert balance_after == balance_before + 50
-```
-
-#### ❌ Testes muito grandes
-```python
-# RUIM: testa muita coisa
-def test_competition_flow():
-    # cria competição
-    # inscreve aluno
-    # faz prova
-    # verifica ranking
-    # verifica moedas
-    # ... 100 linhas
-
-# BOM: dividir em testes menores
-def test_create_competition(): ...
-def test_enroll_student(): ...
-def test_submit_test(): ...
-```
-
-#### ❌ Pular o Red (não ver teste falhar)
-- Sempre rodar teste antes de implementar
-- Confirmar que falha pelo motivo certo
-- Se não falhar, o teste pode estar errado
-
-#### ❌ Setup/Teardown inadequado
-```python
-# RUIM: dados compartilhados entre testes
-student = Student(nome='Test')  # global
-
-def test_a():
-    student.balance = 100  # muda estado
-
-def test_b():
-    assert student.balance == 0  # falha se test_a rodar antes!
-
-# BOM: fixture isolada
-@pytest.fixture
-def student_fixture():
-    student = Student(nome='Test')
-    db.session.add(student)
-    db.session.commit()
-    yield student
-    db.session.delete(student)
-    db.session.commit()
-```
-
-### Quando Usar Mocks
-
-#### ✅ Usar mocks para:
-- APIs externas (não chamar serviços reais)
-- Banco de dados em testes unitários
-- Funções custosas (processamento pesado)
-- Testar casos de erro (simular falhas)
-
-```python
-def test_external_api_failure():
-    with patch('requests.get') as mock_get:
-        mock_get.side_effect = ConnectionError('API down')
-        
-        with pytest.raises(ServiceUnavailableError):
-            CompetitionService.fetch_questions_from_api()
-```
-
-#### ❌ NÃO usar mocks para:
-- Testar lógica interna (testar comportamento real)
-- Testes de integração (deixar usar DB de teste)
-- Testes E2E (fluxo completo real)
-
-### Cobertura de Código
-
-#### Comandos
-```bash
-# Backend (pytest)
-pytest --cov=app --cov-report=html --cov-report=term
-
-# Frontend (Jest)
-npm test -- --coverage --watchAll=false
-```
-
-#### Interpretando cobertura
-- **80%+**: bom (MVP deve ter isso)
-- **90%+**: excelente (código crítico: pagamentos, ranking)
-- **100%**: raramente necessário (pode indicar over-testing)
-
-#### O que NÃO está coberto (e tudo bem):
-- Código gerado automaticamente
-- Configurações e constantes
-- Logs e prints
-- Código de terceiros
-
-### Pirâmide de Testes
-
-```
-        /\
-       /  \  E2E (poucos, críticos)
-      /____\
-     /      \  Integração (moderado)
-    /________\
-   /          \ Unitários (muitos, rápidos)
-  /__________/
-```
-
-**Distribuição ideal**:
-- 70% unitários (rápidos, isolados)
-- 20% integração (componentes juntos)
-- 10% E2E (fluxo completo)
-
-### Ferramentas de Qualidade
-
-#### Backend
-```bash
-# Linter (PEP8)
-flake8 app/ tests/
-
-# Type checking
-mypy app/
-
-# Security
-bandit -r app/
-
-# Complexity
-radon cc app/ -a
-```
-
-#### Frontend
-```bash
-# Linter
-npm run lint
-
-# Type checking (TypeScript)
-npm run type-check
-
-# Test quality
-npm run test -- --coverage --verbose
-```
-
-### Checklist de Qualidade do Teste
-
-Antes de commitar, verificar:
-
-- [ ] Teste tem nome descritivo
-- [ ] Segue padrão AAA (Arrange-Act-Assert)
-- [ ] Testa apenas uma coisa
-- [ ] Não depende de outros testes
-- [ ] Usa fixtures/mocks apropriadamente
-- [ ] Passa consistentemente (não flaky)
-- [ ] É rápido (< 1s para unitário)
-- [ ] Documenta edge cases
-- [ ] Cobre casos de sucesso E falha
-
-### Revisão de Código (Code Review) com TDD
-
-Ao revisar PR, verificar:
-
-1. **Testes novos foram adicionados?**
-   - Cada feature nova deve ter testes
-
-2. **Testes passam no CI?**
-   - GitHub Actions / GitLab CI deve estar verde
-
-3. **Cobertura não diminuiu?**
-   - PR não deve reduzir % de cobertura
-
-4. **Testes são de qualidade?**
-   - Não apenas "passar por passar"
-   - Testam casos reais e edge cases
-
-5. **Red-Green-Refactor foi seguido?**
-   - Commits mostram TDD? (teste → impl → refactor)
-
 ---
 
 ## Resumo de Prioridades
 
 ### MVP (Mínimo Viável)
-- ✅ Etapa 1: Sistema de Moedas
-- ✅ Etapa 2: Competições CRUD
-- ✅ Etapa 3: Inscrição e Listagem
-- ✅ Etapa 4: Aplicação e Entrega
-- ✅ Etapa 5: Ranking e Pagamento
+- Etapa 1: Sistema de Moedas
+- Etapa 2: Competições CRUD
+- Etapa 3: Inscrição e Listagem
+- Etapa 4: Aplicação e Entrega
+- Etapa 5: Ranking e Pagamento
 
 **Com essas 5 etapas, o sistema já funciona end-to-end**: criar competição, aluno se inscrever, fazer prova, ganhar moedas, ver ranking.
 
-### Incrementos (Após MVP)
-- ⏭️ Etapa 6: Templates e Criação Automática (competições recorrentes)
-- ⏭️ Etapa 7: Funcionalidades Avançadas (ranking em tempo real, notificações, analytics)
+- Etapa 6: Templates e Criação Automática
+- Etapa 7: Funcionalidades Avançadas (ranking em tempo real, notificações, analytics)
 
 ---
 
-## Tecnologias e Dependências
-
-### Backend
-- **Flask** (já existe)
-- **SQLAlchemy** (já existe)
-- **Celery** (já existe, para jobs)
-- **Flask-SocketIO** (opcional, para ranking em tempo real via websocket)
-
-### Frontend
-- **React** (assumindo, ajustar se for Vue/Angular)
-- **React Router** (navegação)
-- **Axios** (API calls)
-- **React Query** ou **SWR** (cache e refetch automático)
-- **Socket.io-client** (se usar websocket)
-- **Chart.js** ou **Recharts** (gráficos de analytics)
-- **date-fns** ou **moment.js** (manipulação de datas, countdown)
-- **React Toastify** ou similar (notificações/toasts)
-
----
-
-## Checklist Final de Implementação (com TDD)
+## Checklist Final de Implementação
 
 ### Etapa 1: Sistema de Moedas
 #### Backend
-- [ ] 🔴 Escrever testes unitários (CoinService)
-- [ ] 🟢 Criar migrations (student_coins, coin_transactions)
-- [ ] 🟢 Implementar models (StudentCoins, CoinTransaction)
-- [ ] 🟢 Implementar CoinService
-- [ ] 🔵 Refatorar services
-- [ ] 🔴 Escrever testes de integração (routes)
-- [ ] 🟢 Implementar routes (/coins/*)
-- [ ] 🔵 Refatorar routes
-- [ ] ✅ Cobertura: ≥ 80%
+- [ ] Criar migrations (student_coins, coin_transactions)
+- [ ] Implementar models (StudentCoins, CoinTransaction)
+- [ ] Implementar CoinService
+- [ ] Implementar routes (/coins/*)
 
 #### Frontend
-- [ ] 🔴 Escrever testes (CoinBalance, CoinHistory)
-- [ ] 🟢 Implementar CoinBalance component
-- [ ] 🟢 Implementar CoinHistory page
-- [ ] 🟢 Integrar no header/navbar
-- [ ] 🔵 Refatorar componentes
-- [ ] 🔴 Escrever testes E2E (Cypress)
-- [ ] 🟢 Garantir fluxo E2E funcionando
-- [ ] ✅ Cobertura: ≥ 70%
+- [ ] Implementar CoinBalance component
+- [ ] Implementar CoinHistory page
+- [ ] Integrar no header/navbar
 
 ### Etapa 2: Competições CRUD
 #### Backend
-- [ ] 🔴 Escrever testes unitários (CompetitionService)
-- [ ] 🟢 Criar migration (competitions)
-- [ ] 🟢 Implementar Competition model
-- [ ] 🟢 Implementar CompetitionService
-- [ ] 🔵 Refatorar service
-- [ ] 🔴 Escrever testes de integração
-- [ ] 🟢 Implementar routes CRUD
-- [ ] 🔵 Refatorar routes
-- [ ] ✅ Cobertura: ≥ 80%
+- [ ] Criar migration com todas as tabelas de competições (competitions, competition_enrollments, competition_rewards, competition_results, competition_ranking_payouts)
+- [ ] Implementar models (Competition, CompetitionEnrollment, CompetitionReward, CompetitionResult, CompetitionRankingPayout)
+- [ ] Implementar CompetitionService
+- [ ] Implementar routes CRUD
 
 #### Frontend
-- [ ] 🔴 Escrever testes (modals, lista)
-- [ ] 🟢 Implementar CompetitionList (admin)
-- [ ] 🟢 Implementar CreateCompetitionModal
-- [ ] 🟢 Implementar CompetitionDetails
-- [ ] 🔵 Refatorar componentes
-- [ ] ✅ Cobertura: ≥ 70%
+- [ ] Implementar CompetitionList (admin)
+- [ ] Implementar CreateCompetitionModal
+- [ ] Implementar CompetitionDetails
 
 ### Etapa 3: Inscrição e Listagem
 #### Backend
-- [ ] 🔴 Escrever testes (filtros, inscrição)
-- [ ] 🟢 Implementar filtros de competições disponíveis
-- [ ] 🟢 Implementar enroll/unenroll endpoints
-- [ ] 🔵 Refatorar
-- [ ] ✅ Cobertura: ≥ 80%
+- [ ] Implementar filtros de competições disponíveis
+- [ ] Implementar enroll/unenroll endpoints
 
 #### Frontend
-- [ ] 🔴 Escrever testes (lista aluno, modal inscrição)
-- [ ] 🟢 Implementar CompetitionListStudent
-- [ ] 🟢 Implementar EnrollConfirmationModal
-- [ ] 🔵 Refatorar
-- [ ] ✅ Cobertura: ≥ 70%
+- [ ] Implementar CompetitionListStudent
+- [ ] Implementar EnrollConfirmationModal
 
 ### Etapa 4: Aplicação e Entrega
 #### Backend
-- [ ] 🔴 Escrever testes (pagamento participação)
-- [ ] 🟢 Criar migration (competition_rewards)
-- [ ] 🟢 Implementar lógica de pagamento na finalização
-- [ ] 🔵 Refatorar
-- [ ] ✅ Cobertura: ≥ 80%
+- [ ] Implementar lógica de pagamento na finalização (usar tabela competition_rewards já criada na Etapa 2)
 
 #### Frontend
-- [ ] 🔴 Escrever testes (modal sucesso, botões)
-- [ ] 🟢 Implementar botão "Fazer prova"
-- [ ] 🟢 Implementar CompetitionSubmitSuccessModal
-- [ ] 🔵 Refatorar
-- [ ] 🔴 Escrever teste E2E (fluxo completo)
-- [ ] 🟢 Garantir fluxo E2E funcionando
-- [ ] ✅ Cobertura: ≥ 70%
+- [ ] Implementar botão "Fazer prova"
+- [ ] Implementar CompetitionSubmitSuccessModal
 
 ### Etapa 5: Ranking e Pagamento
 #### Backend
-- [ ] 🔴 Escrever testes (cálculo ranking)
-- [ ] 🟢 Criar migration (competition_ranking_payouts)
-- [ ] 🟢 Implementar CompetitionRankingService
-- [ ] 🔵 Refatorar service
-- [ ] 🔴 Escrever testes (job Celery)
-- [ ] 🟢 Implementar Celery task
-- [ ] 🔴 Escrever testes (routes ranking)
-- [ ] 🟢 Implementar routes
-- [ ] ✅ Cobertura: ≥ 80%
+- [ ] Implementar CompetitionRankingService (usar tabelas já criadas na Etapa 2)
+- [ ] Implementar Celery task
+- [ ] Implementar routes de ranking
 
 #### Frontend
-- [ ] 🔴 Escrever testes (ranking, podium)
-- [ ] 🟢 Implementar CompetitionRanking
-- [ ] 🔵 Refatorar
-- [ ] 🔴 Teste de auto-refresh (realtime)
-- [ ] 🟢 Implementar polling/websocket
-- [ ] ✅ Cobertura: ≥ 70%
+- [ ] Implementar CompetitionRanking
+- [ ] Implementar polling/websocket (realtime)
 
 ### Etapa 6: Templates
 #### Backend
-- [ ] 🔴 Escrever testes (template, job)
-- [ ] 🟢 Criar migration (competition_templates)
-- [ ] 🟢 Implementar template CRUD
-- [ ] 🟢 Implementar Celery task (criação automática)
-- [ ] 🔵 Refatorar
-- [ ] ✅ Cobertura: ≥ 80%
+- [ ] Criar migration (competition_templates) se ainda não existir
+- [ ] Implementar template CRUD
+- [ ] Implementar Celery task (criação automática)
 
 #### Frontend
-- [ ] 🔴 Escrever testes (CRUD templates)
-- [ ] 🟢 Implementar TemplateList
-- [ ] 🟢 Implementar CreateTemplateModal
-- [ ] 🔵 Refatorar
-- [ ] ✅ Cobertura: ≥ 70%
+- [ ] Implementar TemplateList
+- [ ] Implementar CreateTemplateModal
 
 ### Etapa 7: Avançadas
 #### Backend
-- [ ] 🔴 Testes (websocket, notificações, performance)
-- [ ] 🟢 Implementar funcionalidades avançadas
-- [ ] 🔵 Refatorar e otimizar
-- [ ] ✅ Cobertura: ≥ 80%
+- [ ] Implementar funcionalidades avançadas (websocket, notificações, performance)
 
 #### Frontend
-- [ ] 🔴 Testes (realtime, analytics)
-- [ ] 🟢 Implementar features avançadas
-- [ ] 🔵 Refatorar
-- [ ] ✅ Cobertura: ≥ 70%
-
-### Validação de Qualidade (em cada etapa)
-- [ ] CI/CD passando (GitHub Actions / GitLab CI)
-- [ ] Cobertura de testes atingida (80% backend, 70% frontend)
-- [ ] Linters sem erros (flake8, eslint)
-- [ ] Code review aprovado
-- [ ] Documentação atualizada
-- [ ] Testes E2E dos fluxos principais passando
-
----
-
-**Observação**: Este plano segue rigorosamente **TDD** (Test-Driven Development). Cada funcionalidade deve ter seus testes escritos ANTES da implementação, seguindo o ciclo 🔴 Red → 🟢 Green → 🔵 Refactor. Cada etapa é incremental e depende das anteriores. Validar completamente cada etapa (incluindo cobertura de testes) antes de prosseguir para a próxima.
-
----
-
-## Benefícios do TDD neste Projeto
-
-### 1. **Confiança nas mudanças**
-- Ao adicionar novas features (Etapas 6 e 7), os testes das etapas 1-5 garantem que nada quebrou
-- Refatorações são seguras (se testes passam, comportamento está preservado)
-
-### 2. **Documentação viva**
-- Testes servem como documentação de como usar os componentes
-- Exemplo: `test_enroll_student_fails_if_no_slots_available()` documenta que inscrição respeita limite de vagas
-
-### 3. **Design melhor**
-- TDD força a pensar na interface antes da implementação
-- Código testável tende a ser mais modular e desacoplado
-
-### 4. **Menos bugs em produção**
-- Bugs encontrados em desenvolvimento, não por usuários
-- Edge cases cobertos desde o início
-
-### 5. **Facilita onboarding**
-- Novos desenvolvedores podem rodar testes para entender o sistema
-- Alterações têm rede de segurança
-
-### 6. **CI/CD confiável**
-- Pipeline automatizado valida cada commit
-- Deploy só acontece se todos os testes passarem
-
-### Comandos Úteis
-
-```bash
-# Backend - rodar testes
-pytest                                    # todos os testes
-pytest tests/unit/                        # só unitários
-pytest tests/integration/                 # só integração
-pytest -k "test_coin"                     # só testes de moedas
-pytest --cov=app --cov-report=html        # com cobertura
-pytest -v                                 # verbose
-pytest --lf                               # last failed (re-run falhas)
-
-# Frontend - rodar testes
-npm test                                  # modo watch
-npm test -- --coverage                    # com cobertura
-npm test -- --watch=false                 # run once
-npm test -- CoinBalance                   # só CoinBalance
-
-# E2E - Cypress
-npm run cypress:open                      # modo interativo
-npm run cypress:run                       # headless (CI)
-```
-
-### Próximos Passos
-
-1. **Setup inicial**: configurar ambiente de testes (conftest.py, setupTests.js)
-2. **Etapa 1 completa**: seguir TDD rigorosamente, estabelecer padrões
-3. **Etapas 2-5**: manter disciplina TDD, aumentar cobertura
-4. **Etapas 6-7**: adicionar testes de performance e stress
-5. **Manutenção**: manter testes atualizados, refatorar quando necessário
-
-**Lembre-se**: TDD é um investimento. Leva mais tempo no início, mas economiza muito tempo em bugs e refatorações futuras. 🚀
+- [ ] Implementar features avançadas (realtime, analytics)
 
 ---
 
@@ -3078,59 +1512,38 @@ npm run cypress:run                       # headless (CI)
 
 Para implementação detalhada, consulte os planos específicos:
 
-### 📘 Backend - [PLANO_IMPLEMENTACAO_BACKEND.md](./PLANO_IMPLEMENTACAO_BACKEND.md)
+### Backend - [PLANO_IMPLEMENTACAO_BACKEND.md](./PLANO_IMPLEMENTACAO_BACKEND.md)
+- Migrations, models, services, routes, Celery tasks
+- Checklist por etapa
 
-Contém:
-- ✅ Migrations completas (todas as tabelas)
-- ✅ Models (StudentCoins, CoinTransaction, Competition, etc.)
-- ✅ Services (CoinService, CompetitionService, CompetitionRankingService)
-- ✅ Routes (endpoints REST completos)
-- ✅ Celery Tasks (jobs automáticos)
-- ✅ Testes unitários, integração e E2E (pytest)
-- ✅ Checklist TDD por etapa
-
-**Tecnologias**: Flask, SQLAlchemy, Celery, pytest, Flask-SocketIO
-
-### 📗 Frontend - [PLANO_IMPLEMENTACAO_FRONTEND.md](./PLANO_IMPLEMENTACAO_FRONTEND.md)
-
-Contém:
-- ✅ Componentes (CoinBalance, CompetitionCard, etc.)
-- ✅ Páginas (CoinHistory, CompetitionList, CompetitionRanking)
-- ✅ Modais (CreateCompetitionModal, EnrollConfirmationModal, etc.)
-- ✅ Rotas e navegação
-- ✅ Testes unitários, integração e E2E (Jest, RTL, Cypress)
-- ✅ Checklist TDD por etapa
-
-**Tecnologias**: React, React Router, Axios, Jest, React Testing Library, Cypress, MSW
+### Frontend - [PLANO_IMPLEMENTACAO_FRONTEND.md](./PLANO_IMPLEMENTACAO_FRONTEND.md)
+- Componentes, páginas, modais, rotas
+- Checklist por etapa
 
 ---
 
 ## Roadmap de Implementação
 
 ### Fase 1: MVP (Etapas 1-5) - 4-6 semanas
-- ✅ Sistema completo de competições funcional
-- ✅ Alunos podem se inscrever e participar
-- ✅ Moedas e ranking funcionando
-- ✅ Testes com 80%/70% cobertura
+- Sistema completo de competições funcional
+- Alunos podem se inscrever e participar
+- Moedas e ranking funcionando
 
 ### Fase 2: Automação (Etapa 6) - 2-3 semanas
-- ✅ Templates e criação automática
-- ✅ Competições recorrentes semanais/mensais
-- ✅ Testes de jobs automáticos
+- Templates e criação automática
+- Competições recorrentes semanais/mensais
 
 ### Fase 3: Avançadas (Etapa 7) - 3-4 semanas
-- ✅ Ranking em tempo real
-- ✅ Notificações
-- ✅ Analytics e relatórios
-- ✅ Otimizações de performance
+- Ranking em tempo real
+- Notificações
+- Analytics e relatórios
+- Otimizações de performance
 
-**Total estimado**: 9-13 semanas (com TDD completo)
+**Total estimado**: 9-13 semanas
 
 ---
 
 ## Links Rápidos
 
-- 📘 [Plano Backend](./PLANO_IMPLEMENTACAO_BACKEND.md)
-- 📗 [Plano Frontend](./PLANO_IMPLEMENTACAO_FRONTEND.md)
-- 📄 [Especificação do Sistema](./SISTEMA_COMPETICOES.md)
-- 🗂️ [Tabelas e Estrutura](./SISTEMA_COMPETICOES.md#5-estrutura-das-tabelas-campos-principais)
+- [Plano Backend](./PLANO_IMPLEMENTACAO_BACKEND.md)
+- [Plano Frontend](./PLANO_IMPLEMENTACAO_FRONTEND.md)

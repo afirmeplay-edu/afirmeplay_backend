@@ -16,8 +16,10 @@ from app.competitions.models import (
 )
 from app.competitions.services import CompetitionService, ValidationError, validate_reward_config
 from app.models.student import Student
+from app.models.studentTestOlimpics import StudentTestOlimpics
 from app.models.testQuestion import TestQuestion
 from app.competitions.constants import is_valid_level, LEVEL_OPTIONS
+from app.utils.timezone_utils import get_local_time
 from sqlalchemy.exc import SQLAlchemyError, IntegrityError
 import logging
 
@@ -265,6 +267,90 @@ def unenroll_from_competition(competition_id):
     except ValidationError as e:
         return jsonify({"error": str(e)}), 400
     return jsonify({"message": "Inscrição cancelada com sucesso"}), 200
+
+
+@bp.route('/<competition_id>/eligible-students', methods=['GET'])
+@jwt_required()
+@role_required(*ROLES_EDIT)
+def list_eligible_students(competition_id):
+    """
+    Lista alunos que PODEM se inscrever agora na competição especificada.
+
+    Regras de elegibilidade:
+    - Competição status='aberta'
+    - Agora (horário local do servidor) entre enrollment_start e enrollment_end
+    - test_id não nulo
+    - Nível e escopo compatíveis (mesma lógica de get_available_competitions_for_student)
+    - Ainda não inscritos nem com StudentTestOlimpics criado para esse test_id
+
+    Filtros opcionais:
+    - ?class_id=...  → restringe a uma turma
+    - ?school_id=... → restringe a uma escola (se class_id não for informado)
+    - ?limit=...     → máximo de registros (default: 100)
+    - ?offset=...    → deslocamento para paginação (default: 0)
+    """
+    competition = Competition.query.get_or_404(competition_id)
+
+    # Verificações globais da competição
+    now = get_local_time()
+    # Normalizar para naive datetime para comparação com campos TIMESTAMP do banco
+    now_naive = now.replace(tzinfo=None) if now.tzinfo else now
+    if competition.status != 'aberta' or not competition.test_id:
+        return jsonify([]), 200
+    if competition.enrollment_start and now_naive < competition.enrollment_start:
+        return jsonify([]), 200
+    if competition.enrollment_end and now_naive > competition.enrollment_end:
+        # Fora do período de inscrição: ninguém novo pode se inscrever
+        return jsonify([]), 200
+
+    class_id = request.args.get('class_id')
+    school_id = request.args.get('school_id')
+    try:
+        limit = int(request.args.get('limit', 100))
+        offset = int(request.args.get('offset', 0))
+    except (TypeError, ValueError):
+        limit = 100
+        offset = 0
+
+    query = Student.query
+    if class_id:
+        query = query.filter(Student.class_id == class_id)
+    elif school_id:
+        query = query.filter(Student.school_id == school_id)
+
+    students = query.order_by(Student.name).offset(offset).limit(limit).all()
+
+    eligible = []
+    for student in students:
+        # Já inscrito?
+        if CompetitionService.is_student_enrolled(competition.id, student.id):
+            continue
+
+        # Já tem StudentTestOlimpics para essa prova?
+        if StudentTestOlimpics.query.filter_by(
+            student_id=student.id,
+            test_id=competition.test_id,
+        ).first():
+            continue
+
+        # Reutiliza a mesma lógica de disponibilidade por competição:
+        # se esta competição aparecer em get_available_competitions_for_student,
+        # então o aluno é elegível em termos de nível/escopo/vagas.
+        available = CompetitionService.get_available_competitions_for_student(
+            student.id,
+            subject_id=competition.subject_id,
+        )
+        if not any(c.id == competition.id for c in available):
+            continue
+
+        eligible.append({
+            "id": student.id,
+            "name": student.name,
+            "class_id": student.class_id,
+            "school_id": student.school_id,
+        })
+
+    return jsonify(eligible), 200
 
 
 @bp.route('/<competition_id>', methods=['GET'])

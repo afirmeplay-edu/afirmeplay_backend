@@ -5,7 +5,7 @@ from datetime import datetime
 from sqlalchemy import func
 
 from app import db
-from app.competitions.models import Competition, CompetitionEnrollment
+from app.competitions.models import Competition, CompetitionEnrollment, CompetitionReward
 from app.competitions.constants import is_valid_level, student_grade_matches_level
 from app.competitions.exceptions import ValidationError
 from app.models.test import Test
@@ -456,6 +456,38 @@ class CompetitionService:
             test_session_id=test_session_id,
             description=f"Participação na competição: {competition.name}",
         )
+        return amount
+
+    @staticmethod
+    def process_participation_reward(test_id: str, student_id: str, test_session_id: str = None) -> int:
+        """
+        Verifica se a prova é de uma competição, se a participação ainda não foi paga,
+        credita moedas e marca CompetitionReward.participation_paid_at.
+        Deve ser chamado ao finalizar a prova (submit ou end session).
+        Retorna a quantidade de moedas creditada (0 se não for competição ou já pago).
+        """
+        competition = Competition.query.filter_by(test_id=test_id).first()
+        if not competition:
+            return 0
+        reward = CompetitionReward.query.filter_by(
+            competition_id=competition.id,
+            student_id=student_id,
+        ).first()
+        if reward and reward.participation_paid_at is not None:
+            return 0
+        amount = CompetitionService.credit_participation_coins(
+            competition.id, student_id, test_session_id=test_session_id
+        )
+        if amount > 0:
+            now = datetime.utcnow()
+            if not reward:
+                reward = CompetitionReward(
+                    competition_id=competition.id,
+                    student_id=student_id,
+                )
+                db.session.add(reward)
+            reward.participation_paid_at = now
+            db.session.commit()
         return amount
 
 

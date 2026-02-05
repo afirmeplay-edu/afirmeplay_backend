@@ -15,9 +15,11 @@ from app.competitions.models import (
     CompetitionReward,
 )
 from app.competitions.services import CompetitionService, ValidationError, validate_reward_config
+from app.services.competition_ranking_service import CompetitionRankingService
 from app.models.student import Student
 from app.models.studentTestOlimpics import StudentTestOlimpics
 from app.models.testQuestion import TestQuestion
+from app.models.testSession import TestSession
 from app.competitions.constants import is_valid_level, LEVEL_OPTIONS
 from app.utils.timezone_utils import get_local_time
 from sqlalchemy.exc import SQLAlchemyError, IntegrityError
@@ -54,9 +56,17 @@ def _resolve_student_id():
 
 
 def _competition_to_dict_with_enrolled(c, student_id):
-    """Como _competition_to_dict mas adiciona is_enrolled."""
+    """Como _competition_to_dict mas adiciona is_enrolled e can_start_test (fluxo de aplicação implementado)."""
     d = _competition_to_dict(c)
-    d["is_enrolled"] = CompetitionService.is_student_enrolled(c.id, student_id) if student_id else False
+    is_enrolled = CompetitionService.is_student_enrolled(c.id, student_id) if student_id else False
+    d["is_enrolled"] = is_enrolled
+    # Frontend: true = pode chamar POST /competitions/:id/start para abrir a prova
+    d["can_start_test"] = bool(
+        c.test_id
+        and is_enrolled
+        and c.is_application_open
+        and not c.is_finished
+    )
     return d
 
 
@@ -269,6 +279,270 @@ def unenroll_from_competition(competition_id):
     return jsonify({"message": "Inscrição cancelada com sucesso"}), 200
 
 
+@bp.route('/<competition_id>/enrolled-students', methods=['GET'])
+@jwt_required()
+@role_required(*ROLES_EDIT)
+def list_enrolled_students(competition_id):
+    """
+    Lista alunos inscritos na competição (status=inscrito).
+    Filtros: ?limit=... (default 500), ?offset=... (default 0).
+    """
+    competition = Competition.query.get_or_404(competition_id)
+    try:
+        limit = int(request.args.get('limit', 500))
+        offset = int(request.args.get('offset', 0))
+        limit = min(max(1, limit), 1000)
+    except (TypeError, ValueError):
+        limit = 500
+        offset = 0
+
+    enrollments = (
+        CompetitionEnrollment.query.filter_by(
+            competition_id=competition_id,
+            status='inscrito',
+        )
+        .order_by(CompetitionEnrollment.enrolled_at.desc())
+        .offset(offset)
+        .limit(limit)
+        .all()
+    )
+    out = []
+    for enr in enrollments:
+        student = enr.student
+        out.append({
+            'id': student.id,
+            'name': student.name,
+            'class_id': student.class_id,
+            'school_id': student.school_id,
+            'enrolled_at': enr.enrolled_at.isoformat() if enr.enrolled_at else None,
+            'enrollment_id': enr.id,
+        })
+    return jsonify(out), 200
+
+
+# ---------- Etapa 4: aplicação e entrega (sessão de prova pela competição) ----------
+
+def _session_to_dict(session):
+    """Serializa TestSession para resposta da API."""
+    if not session:
+        return None
+    return {
+        'id': session.id,
+        'student_id': session.student_id,
+        'test_id': session.test_id,
+        'status': session.status,
+        'started_at': session.started_at.isoformat() if session.started_at else None,
+        'submitted_at': session.submitted_at.isoformat() if session.submitted_at else None,
+        'time_limit_minutes': session.time_limit_minutes,
+        'total_questions': session.total_questions,
+        'correct_answers': session.correct_answers,
+        'score': session.score,
+        'grade': session.grade,
+    }
+
+
+@bp.route('/<competition_id>/my-session', methods=['GET'])
+@jwt_required()
+@role_required(*ROLES_STUDENT_OR_EDIT)
+def get_my_competition_session(competition_id):
+    """
+    Retorna a sessão de prova do aluno nesta competição (se existir).
+    Usado para saber se o aluno já iniciou/finalizou a prova.
+    """
+    student_id, err = _resolve_student_id()
+    if err:
+        return err[0], err[1]
+    c = Competition.query.get_or_404(competition_id)
+    if not c.test_id:
+        return jsonify({"test_session": None}), 200
+    session = (
+        TestSession.query.filter_by(student_id=student_id, test_id=c.test_id)
+        .order_by(TestSession.created_at.desc())
+        .first()
+    )
+    return jsonify({"test_session": _session_to_dict(session)}), 200
+
+
+@bp.route('/<competition_id>/start', methods=['POST'])
+@jwt_required()
+@role_required(*ROLES_STUDENT_OR_EDIT)
+def start_competition_test(competition_id):
+    """
+    Inicia a prova da competição (cria test_session).
+    Valida: aluno inscrito, período de aplicação, não possui sessão finalizada.
+    Retorna a sessão criada ou a existente em andamento.
+    """
+    student_id, err = _resolve_student_id()
+    if err:
+        return err[0], err[1]
+    c = Competition.query.get_or_404(competition_id)
+    if not c.test_id:
+        return jsonify({"error": "Competição sem prova vinculada"}), 400
+
+    # Aluno deve estar inscrito
+    enrollment = CompetitionEnrollment.query.filter_by(
+        competition_id=c.id,
+        student_id=student_id,
+        status='inscrito',
+    ).first()
+    if not enrollment:
+        return jsonify({"error": "Aluno não inscrito nesta competição"}), 403
+
+    # Período de aplicação (application / expiration)
+    now = get_local_time()
+    now_naive = now.replace(tzinfo=None) if now.tzinfo else now
+    if c.application and now_naive < c.application:
+        return jsonify({"error": "Fora do período de aplicação da competição"}), 410
+    if c.expiration and now_naive > c.expiration:
+        return jsonify({"error": "Período de aplicação da competição encerrado"}), 410
+
+    # Sessão existente: em_andamento → retornar (mesmo formato de sucesso para o front abrir a prova); finalizada/expirada → não permitir nova
+    existing = (
+        TestSession.query.filter_by(student_id=student_id, test_id=c.test_id)
+        .order_by(TestSession.created_at.desc())
+        .first()
+    )
+    if existing:
+        if existing.status in ('finalizada', 'expirada', 'corrigida', 'revisada'):
+            return jsonify({
+                "error": "Prova já foi realizada",
+                "test_session": _session_to_dict(existing),
+            }), 400
+        # em_andamento: retornar mesmo formato de sucesso para o front poder abrir a prova
+        payload = {
+            "message": "Sessão já iniciada",
+            "session_id": existing.id,
+            "test_session": _session_to_dict(existing),
+            "already_started": True,
+        }
+        return jsonify(payload), 200
+
+    # Criar nova sessão
+    session = TestSession(
+        student_id=student_id,
+        test_id=c.test_id,
+        time_limit_minutes=None,
+        ip_address=request.remote_addr,
+        user_agent=request.headers.get('User-Agent'),
+    )
+    session.start_session()
+    db.session.add(session)
+    db.session.commit()
+    payload = {
+        "message": "Sessão iniciada com sucesso",
+        "session_id": session.id,
+        "test_session": _session_to_dict(session),
+        "already_started": False,
+    }
+    return jsonify(payload), 201
+
+
+# ---------- Etapa 5: ranking e recompensas ----------
+
+def _serialize_ranking_item(item):
+    """Serializa item do ranking para JSON (datas em isoformat, numéricos como float)."""
+    out = dict(item)
+    if out.get('submitted_at') and hasattr(out['submitted_at'], 'isoformat'):
+        out['submitted_at'] = out['submitted_at'].isoformat()
+    for key in ('grade', 'proficiency', 'score_percentage', 'value'):
+        if key in out and out[key] is not None and not isinstance(out[key], (int, float)):
+            try:
+                out[key] = float(out[key])
+            except (TypeError, ValueError):
+                pass
+    return out
+
+
+@bp.route('/<competition_id>/ranking', methods=['GET'])
+@jwt_required()
+@role_required(*ROLES_STUDENT_OR_EDIT)
+def get_competition_ranking(competition_id):
+    """
+    Retorna o ranking da competição.
+    Durante a competição: ranking em tempo real (não lê competition_results).
+    Após encerrar: lê de competition_results (snapshot).
+    ranking_visibility = 'realtime' → retorna sempre (se houver sessões finalizadas).
+    ranking_visibility = 'final' → só retorna se competition.status = 'encerrada'.
+    """
+    c = Competition.query.get_or_404(competition_id)
+    visibility = (c.ranking_visibility or 'final').strip().lower()
+    if visibility == 'final' and c.status != 'encerrada':
+        return jsonify({"error": "Ranking só é exibido após o encerramento da competição"}), 403
+    try:
+        limit = request.args.get('limit', type=int) or 100
+        limit = min(max(1, limit), 500)
+    except (TypeError, ValueError):
+        limit = 100
+    ranking = CompetitionRankingService.get_ranking(competition_id, limit=limit, enriquecer=True)
+    return jsonify({"ranking": [_serialize_ranking_item(r) for r in ranking]}), 200
+
+
+@bp.route('/<competition_id>/my-ranking', methods=['GET'])
+@jwt_required()
+@role_required(*ROLES_STUDENT_OR_EDIT)
+def get_my_competition_ranking(competition_id):
+    """
+    Retorna a posição do aluno logado no ranking.
+    Retorna: position, total_participants, value, grade, coins_earned (se premiado), etc.
+    """
+    student_id, err = _resolve_student_id()
+    if err:
+        return err[0], err[1]
+    c = Competition.query.get_or_404(competition_id)
+    visibility = (c.ranking_visibility or 'final').strip().lower()
+    if visibility == 'final' and c.status != 'encerrada':
+        return jsonify({"error": "Ranking só é exibido após o encerramento da competição"}), 403
+    result = CompetitionRankingService.get_my_ranking(competition_id, student_id)
+    if result is None:
+        return jsonify({
+            "message": "Você ainda não possui resultado nesta competição",
+            "position": None,
+            "total_participants": 0,
+        }), 200
+    return jsonify(result), 200
+
+
+@bp.route('/<competition_id>/finalize', methods=['POST'])
+@jwt_required()
+@role_required(*ROLES_EDIT)
+def finalize_competition(competition_id):
+    """
+    Finaliza a competição manualmente: grava ranking em competition_results,
+    paga moedas de ranking e define status='encerrada'.
+    Só permite se expiration já passou e status é aberta/em_andamento.
+    """
+    from datetime import datetime
+    c = Competition.query.get_or_404(competition_id)
+    now_utc = datetime.utcnow()
+    if c.status not in ('aberta', 'em_andamento'):
+        return jsonify({
+            "error": "Competição já encerrada ou não está aberta.",
+            "status": c.status,
+        }), 400
+    if c.expiration and c.expiration > now_utc:
+        return jsonify({
+            "error": "Competição ainda não expirou. Aguarde a data de expiração.",
+            "expiration": c.expiration.isoformat() if c.expiration else None,
+        }), 400
+    if CompetitionResult.query.filter_by(competition_id=c.id).count() > 0:
+        return jsonify({
+            "message": "Competição já foi finalizada (ranking já gerado).",
+            "status": c.status,
+        }), 200
+    try:
+        CompetitionRankingService.finalize_competition_and_save_results(c.id)
+        c.status = 'encerrada'
+        db.session.commit()
+        return jsonify({
+            "message": "Competição finalizada com sucesso. Ranking gerado e recompensas pagas.",
+            "status": "encerrada",
+        }), 200
+    except Exception as e:
+        logging.exception("Erro ao finalizar competição %s: %s", competition_id, str(e))
+        db.session.rollback()
+        return jsonify({"error": "Erro ao finalizar competição", "details": str(e)}), 500
+
+
 @bp.route('/<competition_id>/eligible-students', methods=['GET'])
 @jwt_required()
 @role_required(*ROLES_EDIT)
@@ -288,19 +562,38 @@ def list_eligible_students(competition_id):
     - ?school_id=... → restringe a uma escola (se class_id não for informado)
     - ?limit=...     → máximo de registros (default: 100)
     - ?offset=...    → deslocamento para paginação (default: 0)
+    - ?include_meta=1 → inclui meta com diagnóstico (students_checked, excluded_*)
     """
     competition = Competition.query.get_or_404(competition_id)
+    include_meta = request.args.get('include_meta', '').lower() in ('1', 'true', 'yes')
 
     # Verificações globais da competição
     now = get_local_time()
-    # Normalizar para naive datetime para comparação com campos TIMESTAMP do banco
     now_naive = now.replace(tzinfo=None) if now.tzinfo else now
     if competition.status != 'aberta' or not competition.test_id:
+        if include_meta:
+            return jsonify({
+                "eligible": [],
+                "meta": {
+                    "reason": "competition_not_open_or_no_test",
+                    "status": competition.status,
+                    "has_test_id": bool(competition.test_id),
+                },
+            }), 200
         return jsonify([]), 200
     if competition.enrollment_start and now_naive < competition.enrollment_start:
+        if include_meta:
+            return jsonify({
+                "eligible": [],
+                "meta": {"reason": "before_enrollment_period", "enrollment_start": competition.enrollment_start.isoformat() if competition.enrollment_start else None},
+            }), 200
         return jsonify([]), 200
     if competition.enrollment_end and now_naive > competition.enrollment_end:
-        # Fora do período de inscrição: ninguém novo pode se inscrever
+        if include_meta:
+            return jsonify({
+                "eligible": [],
+                "meta": {"reason": "after_enrollment_period", "enrollment_end": competition.enrollment_end.isoformat() if competition.enrollment_end else None},
+            }), 200
         return jsonify([]), 200
 
     class_id = request.args.get('class_id')
@@ -319,30 +612,28 @@ def list_eligible_students(competition_id):
         query = query.filter(Student.school_id == school_id)
 
     students = query.order_by(Student.name).offset(offset).limit(limit).all()
-
     eligible = []
-    for student in students:
-        # Já inscrito?
-        if CompetitionService.is_student_enrolled(competition.id, student.id):
-            continue
+    excluded_enrolled = 0
+    excluded_olympics = 0
+    excluded_level_scope = 0
 
-        # Já tem StudentTestOlimpics para essa prova?
+    for student in students:
+        if CompetitionService.is_student_enrolled(competition.id, student.id):
+            excluded_enrolled += 1
+            continue
         if StudentTestOlimpics.query.filter_by(
             student_id=student.id,
             test_id=competition.test_id,
         ).first():
+            excluded_olympics += 1
             continue
-
-        # Reutiliza a mesma lógica de disponibilidade por competição:
-        # se esta competição aparecer em get_available_competitions_for_student,
-        # então o aluno é elegível em termos de nível/escopo/vagas.
         available = CompetitionService.get_available_competitions_for_student(
             student.id,
             subject_id=competition.subject_id,
         )
         if not any(c.id == competition.id for c in available):
+            excluded_level_scope += 1
             continue
-
         eligible.append({
             "id": student.id,
             "name": student.name,
@@ -350,6 +641,16 @@ def list_eligible_students(competition_id):
             "school_id": student.school_id,
         })
 
+    if include_meta:
+        return jsonify({
+            "eligible": eligible,
+            "meta": {
+                "students_checked": len(students),
+                "excluded_enrolled": excluded_enrolled,
+                "excluded_has_olympics": excluded_olympics,
+                "excluded_level_or_scope": excluded_level_scope,
+            },
+        }), 200
     return jsonify(eligible), 200
 
 

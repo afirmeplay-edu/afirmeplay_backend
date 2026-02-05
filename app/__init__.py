@@ -188,6 +188,73 @@ def create_app():
     app.register_blueprint(certificate_routes.bp)
     app.register_blueprint(balance_bp)
     app.register_blueprint(competitions_bp)
+
+    # Thread em background: finaliza competições expiradas a cada 15 min (sem depender de Celery Beat)
+    def _run_finalize_competitions_loop(app_ref):
+        import time
+        from sqlalchemy.exc import OperationalError
+        interval_seconds = 15 * 60  # 15 minutos
+        while True:
+            time.sleep(interval_seconds)
+            try:
+                with app_ref.app_context():
+                    from app.services.competition_ranking_service import CompetitionRankingService
+                    result = CompetitionRankingService.finalize_all_expired_competitions()
+                    if result.get("processed"):
+                        app_ref.logger.info(
+                            "Competições finalizadas em background: %s",
+                            result,
+                        )
+            except OperationalError as e:
+                # Conexão fechada pelo servidor/pool (idle timeout etc.): descartar sessão para próxima rodada usar conexão nova
+                if app_ref:
+                    with app_ref.app_context():
+                        try:
+                            db.session.rollback()
+                        except Exception:
+                            pass
+                        db.session.remove()
+                    if app_ref:
+                        app_ref.logger.warning(
+                            "Conexão com o banco fechada no loop de competições (será retentado em 15 min): %s",
+                            str(e),
+                        )
+            except Exception as e:
+                if app_ref:
+                    with app_ref.app_context():
+                        try:
+                            db.session.rollback()
+                        except Exception:
+                            pass
+                        db.session.remove()
+                    if app_ref:
+                        app_ref.logger.exception(
+                            "Erro no loop de finalização de competições: %s",
+                            str(e),
+                        )
+
+    try:
+        import threading
+        # Uma vez na subida: finalizar competições já expiradas
+        with app.app_context():
+            try:
+                from app.services.competition_ranking_service import CompetitionRankingService
+                r = CompetitionRankingService.finalize_all_expired_competitions()
+                if r.get("processed"):
+                    app.logger.info("Competições expiradas finalizadas na subida: %s", r)
+            except Exception as e:
+                app.logger.warning("Finalização na subida falhou: %s", str(e))
+        _competition_finalize_thread = threading.Thread(
+            target=_run_finalize_competitions_loop,
+            args=(app,),
+            daemon=True,
+            name="competition_finalize",
+        )
+        _competition_finalize_thread.start()
+        app.logger.info("Thread de finalização de competições iniciada (intervalo 15 min)")
+    except Exception as e:
+        app.logger.warning("Não foi possível iniciar thread de finalização de competições: %s", str(e))
+
     # Importar modelos para garantir que as tabelas sejam criadas
     from .models import City, School, SchoolTeacher, Teacher, Student, Subject, Class, ClassSubject, ClassTest, Test, EducationStage, Grade, Skill, Question, StudentAnswer, UserQuickLinks, TeacherClass, User, Manager
     from app.certification.models import CertificateTemplate, Certificate

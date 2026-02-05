@@ -5,7 +5,7 @@ from datetime import datetime
 from sqlalchemy import func
 
 from app import db
-from app.competitions.models import Competition, CompetitionEnrollment
+from app.competitions.models import Competition, CompetitionEnrollment, CompetitionReward
 from app.competitions.constants import is_valid_level, student_grade_matches_level
 from app.competitions.exceptions import ValidationError
 from app.models.test import Test
@@ -13,6 +13,7 @@ from app.models.testQuestion import TestQuestion
 from app.models.question import Question
 from app.models.student import Student
 from app.models.studentTestOlimpics import StudentTestOlimpics
+from app.utils.timezone_utils import get_local_time
 
 from .question_selection_service import QuestionSelectionService
 
@@ -82,6 +83,7 @@ class CompetitionService:
         """
         Sorteia questões aleatórias baseado em question_rules,
         delegando a lógica de filtros e aleatorização para QuestionSelectionService.
+        Preenche todos os campos do Test necessários para reutilizar componente de avaliações.
         """
         rules = competition.question_rules or {}
         selected_questions = QuestionSelectionService.select_questions(
@@ -89,18 +91,60 @@ class CompetitionService:
             level=competition.level,
             rules=rules,
         )
+        
+        # Calcular duration em minutos
+        duration_minutes = None
+        if competition.application and competition.expiration:
+            duration_minutes = int((competition.expiration - competition.application).total_seconds() / 60)
+        
+        # Extrair scope arrays
+        scope_arrays = _extract_scope_arrays(competition)
+        
+        # Buscar informações da disciplina
+        from app.models.subject import Subject
+        subject = Subject.query.get(competition.subject_id)
+        subject_name = subject.name if subject else None
+        
+        # Criar subjects_info
+        subjects_info = [{
+            "subject_id": competition.subject_id,
+            "name": subject_name,
+            "question_count": len(selected_questions)
+        }]
+        
+        # Buscar course (EducationStage) a partir do level
+        course_id = _get_course_from_level(competition.level)
+        
         test = Test(
             title=f"Prova - {competition.name}",
             description=competition.description,
+            type='COMPETICAO',
             subject=competition.subject_id,
+            grade_id=None,  # Competições podem abranger múltiplas séries
             evaluation_mode='virtual',
             created_by=competition.created_by,
+            time_limit=competition.application,
+            end_time=competition.expiration,
+            duration=duration_minutes,
+            municipalities=scope_arrays['municipalities'],
+            schools=scope_arrays['schools'],
+            classes=scope_arrays['classes'],
+            course=course_id,
+            model='COMPETICAO',
+            subjects_info=subjects_info,
+            status='pendente',  # Será mudado para 'agendada' ao publicar
         )
         db.session.add(test)
         db.session.flush()
 
+        # Adicionar questões ao teste
         for idx, question in enumerate(selected_questions, start=1):
             db.session.add(TestQuestion(test_id=test.id, question_id=question.id, order=idx))
+        
+        # Calcular e atualizar max_score após adicionar as questões
+        max_score = _calculate_test_max_score(test.id)
+        test.max_score = max_score
+        
         competition.test_id = test.id
 
     @staticmethod
@@ -121,24 +165,78 @@ class CompetitionService:
             ) + 1
             for idx, qid in enumerate(question_ids, start=next_order):
                 db.session.add(TestQuestion(test_id=test.id, question_id=qid, order=idx))
+            
+            # Recalcular max_score após adicionar novas questões
+            test.max_score = _calculate_test_max_score(test.id)
+            
+            # Atualizar subjects_info com nova contagem de questões
+            from app.models.subject import Subject
+            subject = Subject.query.get(competition.subject_id)
+            subject_name = subject.name if subject else None
+            total_questions = TestQuestion.query.filter_by(test_id=test.id).count()
+            test.subjects_info = [{
+                "subject_id": competition.subject_id,
+                "name": subject_name,
+                "question_count": total_questions
+            }]
         else:
+            # Calcular duration em minutos
+            duration_minutes = None
+            if competition.application and competition.expiration:
+                duration_minutes = int((competition.expiration - competition.application).total_seconds() / 60)
+            
+            # Extrair scope arrays
+            scope_arrays = _extract_scope_arrays(competition)
+            
+            # Buscar informações da disciplina
+            from app.models.subject import Subject
+            subject = Subject.query.get(competition.subject_id)
+            subject_name = subject.name if subject else None
+            
+            # Criar subjects_info
+            subjects_info = [{
+                "subject_id": competition.subject_id,
+                "name": subject_name,
+                "question_count": len(question_ids)
+            }]
+            
+            # Buscar course (EducationStage) a partir do level
+            course_id = _get_course_from_level(competition.level)
+            
             test = Test(
                 title=f"Prova - {competition.name}",
                 description=competition.description,
+                type='COMPETICAO',
                 subject=competition.subject_id,
+                grade_id=None,  # Competições podem abranger múltiplas séries
                 evaluation_mode='virtual',
                 created_by=competition.created_by,
+                time_limit=competition.application,
+                end_time=competition.expiration,
+                duration=duration_minutes,
+                municipalities=scope_arrays['municipalities'],
+                schools=scope_arrays['schools'],
+                classes=scope_arrays['classes'],
+                course=course_id,
+                model='COMPETICAO',
+                subjects_info=subjects_info,
+                status='pendente',  # Será mudado para 'agendada' ao publicar
             )
             db.session.add(test)
             db.session.flush()
             for idx, qid in enumerate(question_ids, start=1):
                 db.session.add(TestQuestion(test_id=test.id, question_id=qid, order=idx))
+            
+            # Calcular e atualizar max_score após adicionar as questões
+            max_score = _calculate_test_max_score(test.id)
+            test.max_score = max_score
+            
             competition.test_id = test.id
         db.session.commit()
 
     @staticmethod
     def publish_competition(competition_id: str) -> Competition:
-        """Publica competição (rascunho → aberta)."""
+        """Publica competição (rascunho → aberta) e atualiza status do Test para 'agendada'."""
         competition = Competition.query.get_or_404(competition_id)
         if not competition.test_id:
             raise ValidationError("Test não foi criado ainda")
@@ -146,7 +244,15 @@ class CompetitionService:
             raise ValidationError("Datas inválidas: fim da inscrição deve ser antes da aplicação")
         if not competition.reward_config:
             raise ValidationError("Configuração de recompensas ausente")
+        
+        # Atualizar status da competição
         competition.status = 'aberta'
+        
+        # Atualizar status do Test para 'agendada' (similar ao que é feito em test_routes.py)
+        test = Test.query.get(competition.test_id)
+        if test:
+            test.status = 'agendada'
+        
         db.session.commit()
         return competition
 
@@ -172,20 +278,27 @@ class CompetitionService:
     @staticmethod
     def get_available_competitions_for_student(student_id: str, subject_id: str = None):
         """
-        Lista competições disponíveis para o aluno: status aberta, no período de inscrição,
+        Lista competições disponíveis para o aluno: status aberta, dentro do período
+        geral da competição (da abertura das inscrições até o fim da prova),
         nível e escopo compatíveis, com vagas (se houver limite).
         """
         student = Student.query.get(student_id)
         if not student:
             return []
 
-        now = datetime.utcnow()
+        # Usar o mesmo conceito de "agora" da parte de avaliações:
+        # horário local do servidor (respeitando TZ configurado), não UTC puro.
+        now = get_local_time()
+        # Normalizar para naive datetime para comparação com campos TIMESTAMP do banco
+        now_naive = now.replace(tzinfo=None) if now.tzinfo else now
         query = (
             Competition.query.filter(
                 Competition.status == 'aberta',
                 Competition.test_id.isnot(None),
-                Competition.enrollment_start <= now,
-                Competition.enrollment_end >= now,
+                # A competição é considerada "disponível" para listagem enquanto estiver
+                # ativa no ciclo dela: inscrições abertas ou prova em andamento.
+                Competition.enrollment_start <= now_naive,
+                Competition.expiration >= now_naive,
             )
         )
         if subject_id:
@@ -220,8 +333,13 @@ class CompetitionService:
         if competition.status != 'aberta':
             raise ValidationError("Competição não está aberta para inscrição")
 
-        now = datetime.utcnow()
-        if now < competition.enrollment_start or now > competition.enrollment_end:
+        # Usar horário local do servidor (mesma lógica de get_available_competitions_for_student)
+        now = get_local_time()
+        # Normalizar para naive datetime para comparação com campos TIMESTAMP do banco
+        now_naive = now.replace(tzinfo=None) if now.tzinfo else now
+        if competition.enrollment_start and now_naive < competition.enrollment_start:
+            raise ValidationError("Fora do período de inscrição")
+        if competition.enrollment_end and now_naive > competition.enrollment_end:
             raise ValidationError("Fora do período de inscrição")
 
         if not competition.test_id:
@@ -340,6 +458,38 @@ class CompetitionService:
         )
         return amount
 
+    @staticmethod
+    def process_participation_reward(test_id: str, student_id: str, test_session_id: str = None) -> int:
+        """
+        Verifica se a prova é de uma competição, se a participação ainda não foi paga,
+        credita moedas e marca CompetitionReward.participation_paid_at.
+        Deve ser chamado ao finalizar a prova (submit ou end session).
+        Retorna a quantidade de moedas creditada (0 se não for competição ou já pago).
+        """
+        competition = Competition.query.filter_by(test_id=test_id).first()
+        if not competition:
+            return 0
+        reward = CompetitionReward.query.filter_by(
+            competition_id=competition.id,
+            student_id=student_id,
+        ).first()
+        if reward and reward.participation_paid_at is not None:
+            return 0
+        amount = CompetitionService.credit_participation_coins(
+            competition.id, student_id, test_session_id=test_session_id
+        )
+        if amount > 0:
+            now = datetime.utcnow()
+            if not reward:
+                reward = CompetitionReward(
+                    competition_id=competition.id,
+                    student_id=student_id,
+                )
+                db.session.add(reward)
+            reward.participation_paid_at = now
+            db.session.commit()
+        return amount
+
 
 def validate_reward_config(reward_config):
     """
@@ -394,6 +544,49 @@ def _parse_dt(v):
     if isinstance(v, str):
         return datetime.fromisoformat(v.replace('Z', '+00:00'))
     return v
+
+
+def _calculate_test_max_score(test_id: str) -> float:
+    """Calcula max_score somando os valores das questões do teste."""
+    test_questions = TestQuestion.query.filter_by(test_id=test_id).all()
+    total = 0.0
+    for tq in test_questions:
+        question = tq.question
+        total += (question.value if question.value else 1.0)
+    return total
+
+
+def _get_course_from_level(level: int) -> str:
+    """Retorna o ID do EducationStage correspondente ao level da competição."""
+    from app.competitions.constants import STAGE_NAMES_BY_LEVEL
+    from app.models.educationStage import EducationStage
+    
+    stage_names = STAGE_NAMES_BY_LEVEL.get(level, [])
+    if not stage_names:
+        return None
+    
+    # Retornar o primeiro EducationStage encontrado (ou null se não houver)
+    stage = EducationStage.query.filter(EducationStage.name.in_(stage_names)).first()
+    return str(stage.id) if stage else None
+
+
+def _extract_scope_arrays(competition: Competition) -> dict:
+    """Extrai arrays de IDs de municipalities, schools, classes do scope_filter."""
+    scope_filter = competition.scope_filter or {}
+    result = {
+        'municipalities': None,
+        'schools': None,
+        'classes': None,
+    }
+    
+    if competition.scope == 'municipio':
+        result['municipalities'] = scope_filter.get('municipality_ids') or scope_filter.get('city_ids')
+    elif competition.scope == 'escola':
+        result['schools'] = scope_filter.get('school_ids')
+    elif competition.scope == 'turma':
+        result['classes'] = scope_filter.get('class_ids')
+    
+    return result
 
 
 def _student_level_matches(student, competition_level):

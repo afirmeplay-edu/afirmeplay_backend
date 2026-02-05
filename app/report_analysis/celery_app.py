@@ -29,10 +29,11 @@ celery_app = Celery(
     include=[
         'app.report_analysis.tasks',
         'app.services.celery_tasks.physical_test_tasks',  # Tasks de geração de formulários físicos
-        'app.services.celery_tasks.answer_sheet_tasks',     # Tasks de geração de cartões de resposta
+        'app.services.celery_tasks.answer_sheet_tasks',  # Tasks de geração de cartões de resposta
         'app.services.celery_tasks.evaluation_recalculation_tasks',  # Tasks de recálculo de resultados
         'app.socioeconomic_forms.services.results_tasks',  # Tasks de resultados socioeconômicos
-        'app.socioeconomic_forms.services.results_migration_tasks'  # Tasks de migração/população inicial
+        'app.socioeconomic_forms.services.results_migration_tasks',  # Tasks de migração/população inicial
+        'app.services.celery_tasks.competition_tasks',  # Tasks de finalização de competições
     ]
 )
 
@@ -68,6 +69,15 @@ else:
 # Configuração de retry
 celery_app.conf.task_default_retry_delay = 60  # 1 minuto
 celery_app.conf.task_max_retries = 3
+
+# Celery Beat: processar competições expiradas a cada hora
+from celery.schedules import crontab
+celery_app.conf.beat_schedule = {
+    'process-finished-competitions': {
+        'task': 'competition_tasks.process_finished_competitions',
+        'schedule': crontab(minute=0, hour='*'),  # a cada hora
+    },
+}
 
 # 🔥 CRÍTICO: Criar app Flask automaticamente quando o módulo é importado pelo worker
 # Isso garante que o contexto Flask esteja disponível mesmo quando iniciado via CLI

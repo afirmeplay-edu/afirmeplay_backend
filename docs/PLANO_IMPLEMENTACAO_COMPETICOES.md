@@ -15,15 +15,15 @@ Este documento consolida a visão geral do projeto. Para detalhes de implementa�
 
 ## Visão geral das etapas
 
-| Etapa | Descrição | Dependências |
-|-------|-----------|--------------|
-| 1 | Sistema de Moedas (base) | Nenhuma |
-| 2 | Competições CRUD (estrutura básica) | Etapa 1 |
-| 3 | Inscrição e Listagem | Etapa 2 |
-| 4 | Aplicação e Entrega (integração com prova) | Etapa 3 |
-| 5 | Ranking e Pagamento de Recompensas | Etapa 4 |
-| 6 | Templates e Criação Automática | Etapa 5 |
-| 7 | Funcionalidades Avançadas | Etapa 6 |
+| Etapa | Descrição                                    | Dependências |
+| ----- | ---------------------------------------------- | ------------- |
+| 1     | Sistema de Moedas (base)                       | Nenhuma       |
+| 2     | Competições CRUD (estrutura básica)         | Etapa 1       |
+| 3     | Inscrição e Listagem                         | Etapa 2       |
+| 4     | Aplicação e Entrega (integração com prova) | Etapa 3       |
+| 5     | Ranking e Pagamento de Recompensas             | Etapa 4       |
+| 6     | Templates e Criação Automática              | Etapa 5       |
+| 7     | Funcionalidades Avançadas                     | Etapa 6       |
 
 ---
 
@@ -35,14 +35,14 @@ Este bloco consolida as decisões de tabelas, reuso de cálculos e comportamento
 
 **Todas as tabelas de competições são criadas o quanto antes (Etapa 2)** numa única migration (ou em sequência na mesma etapa), para não precisar criar tabelas ou adicionar campos em etapas futuras. Nas etapas seguintes apenas se implementa a lógica que usa essas tabelas.
 
-| Tabela | Criar em | Descrição |
-|--------|----------|-----------|
-| **competitions** | Etapa 2 | Metadados da competição, datas, reward_config, test_id (prova vinculada), etc. |
-| **competition_templates** | Etapa 2 (ou já existente) | Templates para criar competições recorrentes (Etapa 6 usa; tabela já existe). |
-| **competition_enrollments** | Etapa 2 | Inscrições: competition_id, student_id, enrolled_at, status. Etapa 3 só implementa a lógica de inscrição. |
-| **competition_results** | Etapa 2 | Snapshot dos resultados (preenchido só ao finalizar a competição). Campos: posição, nota, proficiência, média, acertos, tempo, moedas_ganhas, etc. Etapa 5 só implementa a lógica de gravação e leitura. |
-| **competition_ranking_payouts** | Etapa 2 (opcional) | Auditoria de pagamentos de ranking (competition_id, student_id, position, amount, paid_at). Etapa 5 usa. |
-| **competition_rewards** | Etapa 2 | Controle de pagamento de moedas de participação (competition_id, student_id, participation_paid_at). Etapa 4 só implementa a lógica ao finalizar prova. |
+| Tabela                                | Criar em                   | Descrição                                                                                                                                                                                                         |
+| ------------------------------------- | -------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **competitions**                | Etapa 2                    | Metadados da competição, datas, reward_config, test_id (prova vinculada), etc.                                                                                                                                    |
+| **competition_templates**       | Etapa 2 (ou já existente) | Templates para criar competições recorrentes (Etapa 6 usa; tabela já existe).                                                                                                                                    |
+| **competition_enrollments**     | Etapa 2                    | Inscrições: competition_id, student_id, enrolled_at, status. Etapa 3 só implementa a lógica de inscrição.                                                                                                     |
+| **competition_results**         | Etapa 2                    | Snapshot dos resultados (preenchido só ao finalizar a competição). Campos: posição, nota, proficiência, média, acertos, tempo, moedas_ganhas, etc. Etapa 5 só implementa a lógica de gravação e leitura. |
+| **competition_ranking_payouts** | Etapa 2 (opcional)         | Auditoria de pagamentos de ranking (competition_id, student_id, position, amount, paid_at). Etapa 5 usa.                                                                                                            |
+| **competition_rewards**         | Etapa 2                    | Controle de pagamento de moedas de participação (competition_id, student_id, participation_paid_at). Etapa 4 só implementa a lógica ao finalizar prova.                                                         |
 
 **O que não temos**
 
@@ -73,11 +73,13 @@ Resumo: **posição e demais campos em `competition_results` são atualizados no
 ## Etapa 1: Sistema de Moedas (base)
 
 ### Objetivo
+
 Criar a infraestrutura básica de moedas: saldo, transações e histórico. Esta é a fundação para todo o sistema de recompensas.
 
 ### Backend
 
 #### 1.1 Migrations
+
 **Arquivo**: `migrations/versions/add_student_coins_system.py`
 
 ```python
@@ -102,7 +104,9 @@ Criar a infraestrutura básica de moedas: saldo, transações e histórico. Esta
 ```
 
 #### 1.2 Models
+
 **Arquivos**:
+
 - `app/models/studentCoins.py`
 - `app/models/coinTransaction.py`
 
@@ -119,6 +123,7 @@ Criar a infraestrutura básica de moedas: saldo, transações e histórico. Esta
 ```
 
 #### 1.3 Routes
+
 **Arquivo**: `app/routes/coin_routes.py`
 
 ```python
@@ -141,6 +146,7 @@ Criar a infraestrutura básica de moedas: saldo, transações e histórico. Esta
 ```
 
 #### 1.4 Services
+
 **Arquivo**: `app/services/coin_service.py`
 
 ```python
@@ -148,17 +154,17 @@ class CoinService:
     @staticmethod
     def get_balance(student_id):
         # Retorna saldo do aluno (ou 0 se não existir registro)
-    
+  
     @staticmethod
     def credit_coins(student_id, amount, reason, **kwargs):
         # Credita moedas, cria/atualiza student_coins, registra em coin_transactions
         # Retorna: transaction criada
-    
+  
     @staticmethod
     def debit_coins(student_id, amount, reason, **kwargs):
         # Debita moedas (verifica saldo suficiente)
         # Retorna: transaction criada ou erro
-    
+  
     @staticmethod
     def get_transaction_history(student_id, limit=50, offset=0):
         # Lista transações do aluno (paginado)
@@ -167,21 +173,25 @@ class CoinService:
 ### Frontend
 
 #### 1.1 Componente: CoinBalance (reutilizável)
+
 **Arquivo**: `src/components/Coins/CoinBalance.tsx`
 
 **Descrição**: Exibe o saldo de moedas do aluno (ícone + valor).
 
 **Props**:
+
 - `studentId` (opcional, padrão: aluno logado)
 - `size` (small, medium, large)
 - `showLabel` (boolean, mostra "Moedas" ou só o valor)
 
 **Funcionalidades**:
+
 - Busca saldo via API (`GET /coins/balance`)
 - Atualiza em tempo real (opcional: websocket ou polling)
 - Tooltip com "Ver histórico" (link para página de transações)
 
 #### 1.2 Página: CoinHistory
+
 **Arquivo**: `src/pages/Student/CoinHistory.tsx`
 
 **Rota**: `/student/coins/history` ou `/coins/history`
@@ -189,6 +199,7 @@ class CoinService:
 **Descrição**: Página completa de histórico de moedas do aluno.
 
 **Componentes**:
+
 - **Header**: saldo atual (CoinBalance grande) + filtros
 - **Filtros**: por período (última semana, mês, tudo), por tipo (participação, ranking, bônus)
 - **Lista de transações**: card/tabela com:
@@ -199,11 +210,13 @@ class CoinService:
 - **Paginação**: carregar mais transações
 
 #### 1.3 Integração no Header/Navbar
+
 **Arquivo**: `src/components/Layout/StudentNavbar.tsx` (ou similar)
 
 **Descrição**: Adicionar componente `<CoinBalance size="small" />` no canto superior direito do header do aluno, sempre visível.
 
 **Funcionalidades**:
+
 - Clique abre dropdown com:
   - Saldo atual
   - Últimas 3 transações (resumo)
@@ -214,11 +227,13 @@ class CoinService:
 ## Etapa 2: Competições CRUD (estrutura básica)
 
 ### Objetivo
+
 Criar a estrutura de competições: tabelas, modelos, endpoints CRUD e página de gerenciamento (admin/coordenador). Ainda sem inscrição de aluno ou aplicação de prova.
 
 ### Backend
 
 #### 2.1 Migrations
+
 **Arquivo**: `migrations/versions/add_competitions_tables.py` (ou único arquivo com todas as tabelas de competições)
 
 Criar **todas** as tabelas de competições nesta etapa para não precisar de novas migrations nas etapas 3, 4 e 5. Ordem de criação (respeitando FKs): `competition_templates` (se ainda não existir) → `competitions` → `competition_enrollments` → `competition_rewards` → `competition_results` → `competition_ranking_payouts`.
@@ -309,6 +324,7 @@ Criar **todas** as tabelas de competições nesta etapa para não precisar de no
 ```
 
 #### 2.2 Models
+
 Criar os models de **todas** as tabelas de competições nesta etapa, para que as etapas 3 e 5 só implementem lógica e rotas.
 
 **Arquivo**: `app/models/competition.py` (ou `app/competitions/models/competition.py`)
@@ -361,6 +377,7 @@ class CompetitionRankingPayout(db.Model):
 Assim, **enrolled_count** em Competition pode ser implementado contando `CompetitionEnrollment.query.filter_by(competition_id=self.id, status='inscrito').count()` (se usar competition_enrollments) ou mantendo a contagem via student_test_olimpics, conforme decisão do projeto.
 
 #### 2.3 Routes
+
 **Arquivo**: `app/routes/competition_routes.py`
 
 ```python
@@ -404,6 +421,7 @@ Assim, **enrolled_count** em Competition pode ser implementado contando `Competi
 ```
 
 #### 2.4 Services
+
 **Arquivo**: `app/services/competition_service.py`
 
 ```python
@@ -414,26 +432,26 @@ class CompetitionService:
         # Se question_mode = 'auto_random': chama _create_test_with_random_questions()
         # Se question_mode = 'manual': deixa test_id = None (adicionar depois)
         # Retorna: competition criada
-    
+  
     @staticmethod
     def _create_test_with_random_questions(competition):
         # Sorteia questões baseado em question_rules
         # Cria Test e test_questions
         # Atualiza competition.test_id
-    
+  
     @staticmethod
     def add_questions_manually(competition_id, question_ids):
         # Cria Test e test_questions com as questões fornecidas
         # Atualiza competition.test_id
-    
+  
     @staticmethod
     def publish_competition(competition_id):
         # Valida e muda status para 'aberta'
-    
+  
     @staticmethod
     def cancel_competition(competition_id, reason=None):
         # Cancela competição, notifica inscritos (se houver)
-    
+  
     @staticmethod
     def get_available_competitions_for_student(student_id):
         # Filtra competições disponíveis para o aluno
@@ -444,6 +462,7 @@ class CompetitionService:
 ### Frontend
 
 #### 2.1 Página: CompetitionList (Admin)
+
 **Arquivo**: `src/pages/Admin/Competitions/CompetitionList.tsx`
 
 **Rota**: `/admin/competitions` ou `/coordenador/competitions`
@@ -451,6 +470,7 @@ class CompetitionService:
 **Descrição**: Lista todas as competições criadas (admin/coordenador).
 
 **Componentes**:
+
 - **Header**: "Competições" + botão "Nova Competição" → modal/página de criação
 - **Filtros**: por status (todas, rascunho, abertas, encerradas), por disciplina, por nível
 - **Tabela/Cards**: cada competição mostra:
@@ -463,6 +483,7 @@ class CompetitionService:
 - **Paginação**
 
 #### 2.2 Modal/Página: CreateCompetitionModal
+
 **Arquivo**: `src/pages/Admin/Competitions/CreateCompetitionModal.tsx`
 
 **Descrição**: Modal/página de criação de competição (pode ser multi-etapas).
@@ -470,6 +491,7 @@ class CompetitionService:
 **Etapas do formulário**:
 
 **Etapa 1: Informações básicas**
+
 - Nome (input text)
 - Descrição (textarea, opcional)
 - Disciplina (select)
@@ -480,12 +502,14 @@ class CompetitionService:
   - Se Município: multi-select de municípios
 
 **Etapa 2: Datas**
+
 - Período de inscrição (date range: início + fim)
 - Período de aplicação (date range: início + fim)
 - Timezone (select, padrão: America/Sao_Paulo)
 - Validação: application >= enrollment_end
 
 **Etapa 3: Questões**
+
 - Modo de questões (radio):
   - [ ] Sorteio automático
     - Quantidade de questões (number input)
@@ -495,6 +519,7 @@ class CompetitionService:
     - Botão "Selecionar questões" → abre modal de seleção (lista questões do banco filtradas por disciplina/nível)
 
 **Etapa 4: Recompensas**
+
 - Moedas por participação (number input, ex: 50)
 - Ranking:
   - Botão "Adicionar posição premiada"
@@ -502,16 +527,19 @@ class CompetitionService:
   - Exemplo visual: 1º → 100 moedas, 2º → 50 moedas, 3º → 25 moedas
 
 **Etapa 5: Configurações avançadas**
+
 - Critério de ranking (select: Nota, Tempo, Acertos, Pontuação ponderada)
 - Visibilidade do ranking (select: Tempo real, Só no final)
 - Limite de participantes (number input, deixar vazio = ilimitado)
 - Recorrência (select: Manual, Semanal, Quinzenal, Mensal) - apenas informativo nesta etapa (templates na Etapa 6)
 
 **Botões finais**:
+
 - "Salvar como rascunho" (cria com status='rascunho')
 - "Criar e publicar" (cria com status='aberta')
 
 #### 2.3 Página: CompetitionDetails (Admin)
+
 **Arquivo**: `src/pages/Admin/Competitions/CompetitionDetails.tsx`
 
 **Rota**: `/admin/competitions/:id`
@@ -519,6 +547,7 @@ class CompetitionService:
 **Descrição**: Detalhes completos da competição (admin/coordenador).
 
 **Componentes**:
+
 - **Header**: Nome da competição + status (badge) + botões (Editar, Cancelar, Excluir)
 - **Seção: Informações**:
   - Disciplina, Nível, Escopo
@@ -537,17 +566,20 @@ class CompetitionService:
   - "Cancelar competição" (confirmar em modal)
 
 #### 2.4 Modal: EditCompetitionModal
+
 **Arquivo**: `src/pages/Admin/Competitions/EditCompetitionModal.tsx`
 
 **Descrição**: Similar a CreateCompetitionModal, mas com campos preenchidos.
 
 **Regras**:
+
 - Se status != 'rascunho': desabilita campos críticos (questões, datas passadas)
 - Só permite editar descrição, recompensas (se não houver inscritos) e status
 
 ## Etapa 3: Inscrição e Listagem (Aluno)
 
 ### Objetivo
+
 Permitir que alunos vejam competições disponíveis e se inscrevam. Integrar com o fluxo de prova (ex.: `student_test_olimpics`) para liberar a prova.
 
 ### Backend
@@ -624,6 +656,7 @@ def unenroll_student(competition_id, student_id):
 ### Frontend
 
 #### 3.1 Página: CompetitionListStudent
+
 **Arquivo**: `src/pages/Student/Competitions/CompetitionListStudent.tsx`
 
 **Rota**: `/student/competitions` ou `/competitions` (para aluno)
@@ -631,6 +664,7 @@ def unenroll_student(competition_id, student_id):
 **Descrição**: Lista de competições disponíveis para o aluno se inscrever.
 
 **Componentes**:
+
 - **Header**: "Competições Disponíveis" + filtro por disciplina
 - **Abas (tabs)**:
   - "Abertas" (pode se inscrever agora)
@@ -651,6 +685,7 @@ def unenroll_student(competition_id, student_id):
   - Botão "Ver detalhes" → vai para CompetitionDetailsStudent
 
 #### 3.2 Página: CompetitionDetailsStudent
+
 **Arquivo**: `src/pages/Student/Competitions/CompetitionDetailsStudent.tsx`
 
 **Rota**: `/student/competitions/:id` ou `/competitions/:id`
@@ -658,6 +693,7 @@ def unenroll_student(competition_id, student_id):
 **Descrição**: Detalhes completos de uma competição para o aluno.
 
 **Componentes**:
+
 - **Header**: Nome da competição + badge de status de inscrição
 - **Seção: Sobre a competição**:
   - Descrição
@@ -688,20 +724,24 @@ def unenroll_student(competition_id, student_id):
   - Botão "Fazer prova" (se inscrito e no período de aplicação) → vai para a prova
 
 #### 3.3 Modal: EnrollConfirmationModal
+
 **Arquivo**: `src/pages/Student/Competitions/EnrollConfirmationModal.tsx`
 
 **Descrição**: Modal de confirmação de inscrição.
 
 **Conteúdo**:
+
 - "Deseja se inscrever na competição [Nome]?"
 - Resumo: disciplina, datas, recompensas
 - Botões: "Confirmar inscrição" (chama API) e "Cancelar"
 
 **Após confirmação**:
+
 - Toast de sucesso: "Inscrição realizada! Boa sorte!"
 - Atualiza lista (competição vai para aba "Minhas Inscrições")
 
 #### 3.4 Integração no Header/Menu
+
 **Arquivo**: `src/components/Layout/StudentNavbar.tsx`
 
 **Descrição**: Adicionar item no menu "Competições" com badge mostrando quantas competições abertas há (número vermelho).
@@ -709,6 +749,7 @@ def unenroll_student(competition_id, student_id):
 ## Etapa 4: Aplicação e Entrega (integração com prova)
 
 ### Objetivo
+
 Integrar competições com o fluxo de prova existente: aluno acessa prova pela competição, faz e entrega. Ao entregar, concede moedas de participação.
 
 ### Backend
@@ -716,6 +757,7 @@ Integrar competições com o fluxo de prova existente: aluno acessa prova pela c
 **Tabelas**: A tabela `competition_rewards` já foi criada na Etapa 2. Nesta etapa implementar apenas a lógica que verifica/marca participação paga e credita moedas (CoinService).
 
 #### 4.1 Services (modificar existente)
+
 **Arquivo**: `app/routes/student_answer_routes.py` (ou onde finaliza prova)
 
 **Adicionar no fluxo de finalização de prova**:
@@ -732,11 +774,11 @@ if competition:
         competition_id=competition.id,
         student_id=student_id
     ).first()
-    
+  
     if not reward or reward.participation_paid_at is None:
         # 3. Ler configuração de recompensa
         participation_coins = competition.reward_config.get('participation_coins', 0)
-        
+      
         if participation_coins > 0:
             # 4. Creditar moedas
             CoinService.credit_coins(
@@ -747,7 +789,7 @@ if competition:
                 test_session_id=session.id,
                 description=f"Participação na competição: {competition.name}"
             )
-            
+          
             # 5. Marcar como pago
             if not reward:
                 reward = CompetitionReward(
@@ -757,7 +799,7 @@ if competition:
                 db.session.add(reward)
             reward.participation_paid_at = datetime.utcnow()
             db.session.commit()
-            
+          
             # 6. Retornar info para frontend (toast de moedas ganhas)
             return {"coins_earned": participation_coins}
 ```
@@ -782,6 +824,7 @@ if competition:
 ### Frontend
 
 #### 4.1 Modificar: CompetitionDetailsStudent
+
 **Arquivo**: `src/pages/Student/Competitions/CompetitionDetailsStudent.tsx`
 
 **Adicionar lógica de "Fazer prova"**:
@@ -798,6 +841,7 @@ if competition:
 ```
 
 #### 4.2 Página: CompetitionTest (opcional, pode reutilizar página de prova existente)
+
 **Arquivo**: `src/pages/Student/Competitions/CompetitionTest.tsx`
 
 **Rota**: `/competitions/:id/test` (ou redirecionar para `/test/:test_id`)
@@ -805,6 +849,7 @@ if competition:
 **Descrição**: Tela de prova (reutilizar componente existente de prova).
 
 **Diferenças**:
+
 - Header mostra nome da competição (em vez de só "Avaliação")
 - Ao finalizar: exibe modal especial de "Prova entregue na competição" com:
   - Mensagem de sucesso
@@ -813,11 +858,13 @@ if competition:
   - Botão "Ver ranking" ou "Voltar para competições"
 
 #### 4.3 Modal: CompetitionSubmitSuccessModal
+
 **Arquivo**: `src/pages/Student/Competitions/CompetitionSubmitSuccessModal.tsx`
 
 **Descrição**: Modal exibido após entregar prova de competição.
 
 **Conteúdo**:
+
 - Ícone de sucesso (check verde)
 - "Prova entregue com sucesso!"
 - **Destaque visual**: "+50 moedas!" (ícone de moeda animado, número pulsando)
@@ -830,6 +877,7 @@ if competition:
 ## Etapa 5: Ranking e Pagamento de Recompensas
 
 ### Objetivo
+
 Calcular ranking ao fim da competição, gravar snapshot em `competition_results` (proficiência, média, posição, etc. copiados dos resultados da avaliação), pagar moedas para as posições premiadas e exibir ranking para alunos. Durante a competição, o ranking é calculado em tempo real a partir dos resultados da avaliação, sem escrever em `competition_results`.
 
 ### Backend
@@ -837,10 +885,12 @@ Calcular ranking ao fim da competição, gravar snapshot em `competition_results
 **Tabelas**: As tabelas `competition_results` e `competition_ranking_payouts` já foram criadas na Etapa 2. Nesta etapa implementar apenas os models (CompetitionResult, CompetitionRankingPayout, se ainda não tiverem sido criados), o serviço de ranking e o job de finalização que preenche e lê essas tabelas.
 
 #### 5.1 Models (se ainda não criados na Etapa 2)
+
 - **CompetitionResult**: model correspondente à tabela `competition_results` (relacionamentos com Competition, Student, TestSession).
 - **CompetitionRankingPayout**: model correspondente à tabela `competition_ranking_payouts` (opcional, para auditoria).
 
 #### 5.2 Services
+
 **Arquivo**: `app/services/competition_ranking_service.py`
 
 **Durante a competição** (status aberta / em andamento): ranking é calculado **em tempo real** a partir dos resultados da avaliação (test_sessions e tabelas de resultado existentes). Nada é escrito em `competition_results`.
@@ -863,17 +913,17 @@ class CompetitionRankingService:
             test_id=competition.test_id,
             status='finalizada'
         ).all()
-        
+      
         # Enriquecer com proficiência, média, etc. das tabelas de resultado da avaliação
         # (reutilizar serviços/queries já existentes)
-        
+      
         # Ordenar conforme ranking_criteria e ranking_tiebreaker
         if competition.ranking_criteria == 'nota':
             sorted_sessions = sorted(test_sessions, key=lambda s: s.grade or 0, reverse=True)
         elif competition.ranking_criteria == 'tempo':
             sorted_sessions = sorted(test_sessions, key=lambda s: s.duration_minutes or 999999)
         # ... outros critérios e tiebreaker
-        
+      
         ranking = []
         for idx, session in enumerate(sorted_sessions, start=1):
             ranking.append({
@@ -887,7 +937,7 @@ class CompetitionRankingService:
                 # ... demais campos para o snapshot
             })
         return ranking
-    
+  
     @staticmethod
     def finalize_competition_and_save_results(competition_id):
         """
@@ -898,7 +948,7 @@ class CompetitionRankingService:
         """
         competition = Competition.query.get_or_404(competition_id)
         ranking = CompetitionRankingService.calculate_ranking(competition_id)
-        
+      
         for item in ranking:
             # Criar registro em competition_results (snapshot)
             result = CompetitionResult(
@@ -914,14 +964,14 @@ class CompetitionRankingService:
                 calculated_at=datetime.utcnow(),
             )
             db.session.add(result)
-        
+      
         # Pagar moedas para posições premiadas
         CompetitionRankingService.pay_ranking_rewards(competition_id, ranking)
-        
+      
         # Atualizar moedas_ganhas em competition_results para cada premiado
         # ...
         db.session.commit()
-    
+  
     @staticmethod
     def pay_ranking_rewards(competition_id, ranking=None):
         """
@@ -931,7 +981,7 @@ class CompetitionRankingService:
         competition = Competition.query.get(competition_id)
         if ranking is None:
             ranking = CompetitionRankingService.calculate_ranking(competition_id)
-        
+      
         ranking_rewards = competition.reward_config.get('ranking_rewards', [])
         for reward_config in ranking_rewards:
             position = reward_config['position']
@@ -940,7 +990,7 @@ class CompetitionRankingService:
                 student_id = ranking[position - 1]['student_id']
                 # Creditar e opcionalmente registrar em competition_ranking_payouts
                 CoinService.credit_coins(...)
-    
+  
     @staticmethod
     def get_ranking(competition_id, limit=100):
         """
@@ -960,6 +1010,7 @@ class CompetitionRankingService:
 ```
 
 #### 5.3 Celery Task (Job)
+
 **Arquivo**: `app/services/celery_tasks/competition_tasks.py`
 
 ```python
@@ -972,12 +1023,12 @@ def process_finished_competitions():
     e paga moedas de ranking. Posição e competition_results só são atualizados neste momento.
     """
     now = datetime.utcnow()
-    
+  
     competitions = Competition.query.filter(
         Competition.expiration < now,
         Competition.status.in_(['aberta', 'em_andamento'])
     ).all()
-    
+  
     for competition in competitions:
         # Verificar se já foi finalizada (já tem registros em competition_results)
         has_results = CompetitionResult.query.filter_by(competition_id=competition.id).count() > 0
@@ -985,10 +1036,10 @@ def process_finished_competitions():
             # 1) Gravar snapshot em competition_results (copiar dados da avaliação)
             # 2) Pagar moedas de ranking
             CompetitionRankingService.finalize_competition_and_save_results(competition.id)
-            
+          
             competition.status = 'encerrada'
             db.session.commit()
-            
+          
             logger.info(f"Competição {competition.id} encerrada; results e ranking pagos")
 ```
 
@@ -1025,11 +1076,13 @@ CELERY_BEAT_SCHEDULE = {
 ### Frontend
 
 #### 5.1 Componente: CompetitionRanking
+
 **Arquivo**: `src/pages/Student/Competitions/CompetitionRanking.tsx`
 
 **Descrição**: Exibe ranking da competição (pode ser componente ou página separada).
 
 **Componentes**:
+
 - **Header**: "Ranking - [Nome da Competição]"
 - **Minha posição** (destaque no topo):
   - Card grande: "Você está em [X]º lugar de [Y] participantes"
@@ -1047,6 +1100,7 @@ CELERY_BEAT_SCHEDULE = {
   - Por turma, por escola (se escopo for amplo)
 
 #### 5.2 Adicionar em CompetitionDetailsStudent
+
 **Arquivo**: `src/pages/Student/Competitions/CompetitionDetailsStudent.tsx`
 
 **Seção: Ranking** (atualizar):
@@ -1065,11 +1119,13 @@ CELERY_BEAT_SCHEDULE = {
 ```
 
 #### 5.3 Notificação de prêmio
+
 **Arquivo**: `src/components/Notifications/CompetitionRewardNotification.tsx`
 
 **Descrição**: Quando aluno ganhou moedas de ranking, exibir notificação/toast especial.
 
 **Implementação**:
+
 - Backend pode criar "notificação" ao pagar ranking (tabela de notificações ou websocket)
 - Frontend exibe toast/modal: "Parabéns! Você ficou em [X]º lugar na competição [Nome] e ganhou [Y] moedas!"
 - Link para ver ranking completo
@@ -1077,11 +1133,13 @@ CELERY_BEAT_SCHEDULE = {
 ## Etapa 6: Templates e Criação Automática
 
 ### Objetivo
+
 Criar sistema de templates para competições recorrentes. Job automático lê templates e cria competições conforme periodicidade (semanal, quinzenal, mensal).
 
 ### Backend
 
 #### 6.1 Migrations
+
 **Arquivo**: `migrations/versions/add_competition_templates.py`
 
 ```python
@@ -1107,6 +1165,7 @@ Criar sistema de templates para competições recorrentes. Job automático lê t
 ```
 
 #### 6.2 Models
+
 **Arquivo**: `app/models/competitionTemplate.py`
 
 ```python
@@ -1116,7 +1175,7 @@ class CompetitionTemplate(db.Model):
     - subject
     - creator
     - competitions (lista de competições criadas deste template)
-    
+  
     # Métodos:
     def generate_competition_for_period(self, start_date):
         """
@@ -1130,6 +1189,7 @@ class CompetitionTemplate(db.Model):
 ```
 
 #### 6.3 Routes
+
 **Arquivo**: `app/routes/competition_template_routes.py`
 
 ```python
@@ -1166,6 +1226,7 @@ class CompetitionTemplate(db.Model):
 ```
 
 #### 6.4 Celery Task (Job)
+
 **Arquivo**: `app/services/celery_tasks/competition_tasks.py`
 
 ```python
@@ -1176,9 +1237,9 @@ def create_competitions_from_templates():
     Cria competições para a semana/quinzena/mês se ainda não existir
     """
     now = datetime.utcnow()
-    
+  
     templates = CompetitionTemplate.query.filter_by(active=True).all()
-    
+  
     for template in templates:
         # Verificar periodicidade
         if template.recurrence == 'weekly':
@@ -1189,21 +1250,21 @@ def create_competitions_from_templates():
                 Competition.enrollment_start >= start_of_week,
                 Competition.enrollment_start < start_of_week + timedelta(days=7)
             ).first()
-            
+          
             if not existing:
                 # Criar competição para esta semana
                 competition = template.generate_competition_for_period(start_of_week)
                 db.session.add(competition)
                 logger.info(f"Competição criada do template {template.id}: {competition.name}")
-        
+      
         elif template.recurrence == 'biweekly':
             # Lógica similar para quinzenal
             pass
-        
+      
         elif template.recurrence == 'monthly':
             # Lógica similar para mensal
             pass
-    
+  
     db.session.commit()
 ```
 
@@ -1222,6 +1283,7 @@ CELERY_BEAT_SCHEDULE = {
 ### Frontend
 
 #### 6.1 Página: CompetitionTemplateList
+
 **Arquivo**: `src/pages/Admin/Competitions/CompetitionTemplateList.tsx`
 
 **Rota**: `/admin/competition-templates`
@@ -1229,6 +1291,7 @@ CELERY_BEAT_SCHEDULE = {
 **Descrição**: Lista de templates de competições recorrentes.
 
 **Componentes**:
+
 - **Header**: "Templates de Competições" + botão "Novo Template"
 - **Filtros**: por disciplina, por periodicidade, por status (ativo/inativo)
 - **Tabela/Cards**:
@@ -1241,11 +1304,13 @@ CELERY_BEAT_SCHEDULE = {
   - Ações: Ver, Editar, Ativar/Desativar, Excluir
 
 #### 6.2 Modal/Página: CreateTemplateModal
+
 **Arquivo**: `src/pages/Admin/Competitions/CreateTemplateModal.tsx`
 
 **Descrição**: Formulário de criação de template (similar a CreateCompetitionModal, mas sem datas específicas).
 
 **Campos**:
+
 - Nome do template (ex: "Competição Semanal Matemática Nível 1")
 - Disciplina
 - Nível
@@ -1262,6 +1327,7 @@ CELERY_BEAT_SCHEDULE = {
   - (ou interface mais flexível com offsets)
 
 #### 6.3 Página: TemplateDetails
+
 **Arquivo**: `src/pages/Admin/Competitions/TemplateDetails.tsx`
 
 **Rota**: `/admin/competition-templates/:id`
@@ -1269,6 +1335,7 @@ CELERY_BEAT_SCHEDULE = {
 **Descrição**: Detalhes do template + lista de competições criadas.
 
 **Componentes**:
+
 - **Seção: Configuração do template** (igual a competição)
 - **Seção: Competições criadas** (lista de todas as competições geradas deste template):
   - Nome, datas, status, inscritos, etc.
@@ -1281,6 +1348,7 @@ CELERY_BEAT_SCHEDULE = {
 ## Etapa 7: Funcionalidades Avançadas
 
 ### Objetivo
+
 Implementar funcionalidades avançadas: ranking em tempo real (websocket/polling), escopo detalhado (turma/escola/município), notificações, loja de moedas (futuro), etc.
 
 ### Backend
@@ -1288,11 +1356,13 @@ Implementar funcionalidades avançadas: ranking em tempo real (websocket/polling
 #### 7.1 Ranking em tempo real (WebSocket ou Polling)
 
 **Opção A: Polling** (mais simples)
+
 - Frontend chama `GET /competitions/:id/ranking` a cada X segundos
 - Backend retorna ranking atualizado
 - Já funciona com endpoint existente (Etapa 5)
 
 **Opção B: WebSocket** (mais elegante)
+
 - Usar Flask-SocketIO ou similar
 - Evento: `join_competition_ranking` (aluno entra na "sala" da competição)
 - Evento: `ranking_updated` (servidor envia novo ranking quando alguém entrega prova)
@@ -1321,6 +1391,7 @@ def notify_ranking_updated(competition_id):
 #### 7.2 Notificações
 
 **Adicionar notificações para**:
+
 - Competição aberta para inscrição (no nível/escopo do aluno)
 - Inscrição confirmada
 - Lembrete: prova abre em 24h
@@ -1330,12 +1401,14 @@ def notify_ranking_updated(competition_id):
 - Prêmio de ranking (se ganhou moedas)
 
 **Implementação**:
+
 - Criar sistema de notificações in-app (tabela `notifications`) ou usar existente
 - Push notifications (opcional, via Firebase ou similar)
 
 #### 7.3 Escopo detalhado (validações)
 
 **Já implementado nas etapas anteriores**, mas revisar:
+
 - Filtro correto ao listar competições disponíveis
 - Validação ao inscrever (verificar turma/escola/município do aluno)
 - Ranking filtrado por escopo (se escopo = escola, só alunos daquela escola)
@@ -1343,12 +1416,14 @@ def notify_ranking_updated(competition_id):
 #### 7.4 Loja de moedas (futuro)
 
 **Planejamento** (não implementar agora, mas preparar):
+
 - Tabela `shop_items` (itens da loja: avatares, badges, benefícios)
 - Tabela `shop_purchases` (compras do aluno)
 - Endpoint `POST /shop/purchase` (debita moedas, registra compra)
 - Frontend: página de loja
 
 **Preparação**:
+
 - `coin_transactions` já suporta `amount` negativo (débito)
 - `CoinService.debit_coins()` já existe (Etapa 1)
 
@@ -1357,6 +1432,7 @@ def notify_ranking_updated(competition_id):
 **Endpoint**: `GET /competitions/:id/analytics`
 
 **Retorna**:
+
 - Taxa de inscrição (inscritos / alunos elegíveis)
 - Taxa de participação (entregaram prova / inscritos)
 - Média de nota/tempo/acertos
@@ -1369,28 +1445,34 @@ def notify_ranking_updated(competition_id):
 ### Frontend
 
 #### 7.1 Ranking em tempo real
+
 **Arquivo**: `src/pages/Student/Competitions/CompetitionRanking.tsx`
 
 **Adicionar**:
+
 - Hook `useWebSocket` ou `usePolling` conforme implementação backend
 - Auto-atualização do ranking a cada X segundos (se ranking_visibility = 'realtime')
 - Indicador visual "Atualizando..." ou "Última atualização: há 5s"
 
 #### 7.2 Notificações
+
 **Arquivo**: `src/components/Notifications/NotificationBell.tsx`
 
 **Adicionar**:
+
 - Badge no ícone de sino (quantidade de notificações não lidas)
 - Dropdown com lista de notificações
 - Tipo específico: "Competição" (ícone de troféu)
 - Click na notificação: redireciona para competição
 
 #### 7.3 Página: CompetitionAnalytics (Admin)
+
 **Arquivo**: `src/pages/Admin/Competitions/CompetitionAnalytics.tsx`
 
 **Rota**: `/admin/competitions/:id/analytics`
 
 **Componentes**:
+
 - **Gráficos**:
   - Pizza: taxa de inscrição, taxa de participação
   - Barra: distribuição de notas
@@ -1400,20 +1482,24 @@ def notify_ranking_updated(competition_id):
 - **Tabela**: top 10 alunos
 
 #### 7.4 Filtros avançados
+
 **Arquivo**: `src/pages/Student/Competitions/CompetitionListStudent.tsx`
 
 **Adicionar filtros**:
+
 - Por disciplina (já existe)
 - Por recompensas (mínimo de moedas)
 - Por vagas (só com vagas disponíveis)
 - Por data (próximas semanas)
 
 #### 7.5 Countdown timers
+
 **Componente**: `src/components/Competitions/CompetitionCountdown.tsx`
 
 **Descrição**: Exibe countdown para eventos da competição.
 
 **Uso**:
+
 - "Inscrição fecha em: 2d 5h 30m"
 - "Prova abre em: 1d 12h"
 - "Prova fecha em: 3h 45m"
@@ -1423,6 +1509,7 @@ def notify_ranking_updated(competition_id):
 ## Resumo de Prioridades
 
 ### MVP (Mínimo Viável)
+
 - Etapa 1: Sistema de Moedas
 - Etapa 2: Competições CRUD
 - Etapa 3: Inscrição e Listagem
@@ -1439,71 +1526,92 @@ def notify_ranking_updated(competition_id):
 ## Checklist Final de Implementação
 
 ### Etapa 1: Sistema de Moedas
+
 #### Backend
+
 - [ ] Criar migrations (student_coins, coin_transactions)
 - [ ] Implementar models (StudentCoins, CoinTransaction)
 - [ ] Implementar CoinService
 - [ ] Implementar routes (/coins/*)
 
 #### Frontend
+
 - [ ] Implementar CoinBalance component
 - [ ] Implementar CoinHistory page
 - [ ] Integrar no header/navbar
 
 ### Etapa 2: Competições CRUD
+
 #### Backend
+
 - [ ] Criar migration com todas as tabelas de competições (competitions, competition_enrollments, competition_rewards, competition_results, competition_ranking_payouts)
 - [ ] Implementar models (Competition, CompetitionEnrollment, CompetitionReward, CompetitionResult, CompetitionRankingPayout)
 - [ ] Implementar CompetitionService
 - [ ] Implementar routes CRUD
 
 #### Frontend
+
 - [ ] Implementar CompetitionList (admin)
 - [ ] Implementar CreateCompetitionModal
 - [ ] Implementar CompetitionDetails
 
 ### Etapa 3: Inscrição e Listagem
+
 #### Backend
+
 - [ ] Implementar filtros de competições disponíveis
 - [ ] Implementar enroll/unenroll endpoints
 
 #### Frontend
+
 - [ ] Implementar CompetitionListStudent
 - [ ] Implementar EnrollConfirmationModal
 
 ### Etapa 4: Aplicação e Entrega
+
 #### Backend
+
 - [ ] Implementar lógica de pagamento na finalização (usar tabela competition_rewards já criada na Etapa 2)
 
 #### Frontend
+
 - [ ] Implementar botão "Fazer prova"
 - [ ] Implementar CompetitionSubmitSuccessModal
 
 ### Etapa 5: Ranking e Pagamento
+
 #### Backend
+
 - [ ] Implementar CompetitionRankingService (usar tabelas já criadas na Etapa 2)
 - [ ] Implementar Celery task
 - [ ] Implementar routes de ranking
 
 #### Frontend
+
 - [ ] Implementar CompetitionRanking
 - [ ] Implementar polling/websocket (realtime)
 
 ### Etapa 6: Templates
+
 #### Backend
+
 - [ ] Criar migration (competition_templates) se ainda não existir
 - [ ] Implementar template CRUD
 - [ ] Implementar Celery task (criação automática)
 
 #### Frontend
+
 - [ ] Implementar TemplateList
 - [ ] Implementar CreateTemplateModal
 
 ### Etapa 7: Avançadas
+
 #### Backend
+
 - [ ] Implementar funcionalidades avançadas (websocket, notificações, performance)
 
 #### Frontend
+
 - [ ] Implementar features avançadas (realtime, analytics)
 
 ---
@@ -1513,10 +1621,12 @@ def notify_ranking_updated(competition_id):
 Para implementação detalhada, consulte os planos específicos:
 
 ### Backend - [PLANO_IMPLEMENTACAO_BACKEND.md](./PLANO_IMPLEMENTACAO_BACKEND.md)
+
 - Migrations, models, services, routes, Celery tasks
 - Checklist por etapa
 
 ### Frontend - [PLANO_IMPLEMENTACAO_FRONTEND.md](./PLANO_IMPLEMENTACAO_FRONTEND.md)
+
 - Componentes, páginas, modais, rotas
 - Checklist por etapa
 
@@ -1525,15 +1635,18 @@ Para implementação detalhada, consulte os planos específicos:
 ## Roadmap de Implementação
 
 ### Fase 1: MVP (Etapas 1-5) - 4-6 semanas
+
 - Sistema completo de competições funcional
 - Alunos podem se inscrever e participar
 - Moedas e ranking funcionando
 
 ### Fase 2: Automação (Etapa 6) - 2-3 semanas
+
 - Templates e criação automática
 - Competições recorrentes semanais/mensais
 
 ### Fase 3: Avançadas (Etapa 7) - 3-4 semanas
+
 - Ranking em tempo real
 - Notificações
 - Analytics e relatórios

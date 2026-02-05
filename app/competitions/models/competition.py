@@ -3,6 +3,22 @@
 from app import db
 import uuid
 from datetime import datetime
+from app.utils.timezone_utils import get_local_time
+
+
+def _normalize_datetime_for_comparison(dt):
+    """
+    Normaliza datetime para comparação: se for naive, mantém naive;
+    se for timezone-aware, converte para naive (assumindo que ambos estão no mesmo TZ).
+    """
+    if dt is None:
+        return None
+    if isinstance(dt, datetime):
+        # Se for timezone-aware, remove o timezone para comparação com campos do banco (naive)
+        if dt.tzinfo is not None:
+            return dt.replace(tzinfo=None)
+        return dt
+    return dt
 
 
 class Competition(db.Model):
@@ -48,20 +64,36 @@ class Competition(db.Model):
     @property
     def is_enrollment_open(self) -> bool:
         """Verifica se está no período de inscrição."""
-        now = datetime.utcnow()
-        return self.enrollment_start <= now <= self.enrollment_end
+        # Alinha com lógica de avaliações: usar horário local do servidor
+        # (get_local_time) em vez de UTC puro para comparações.
+        now = get_local_time()
+        now_naive = _normalize_datetime_for_comparison(now)
+        start = _normalize_datetime_for_comparison(self.enrollment_start)
+        end = _normalize_datetime_for_comparison(self.enrollment_end)
+        if start is None or end is None:
+            return False
+        return start <= now_naive <= end
 
     @property
     def is_application_open(self) -> bool:
         """Verifica se está no período de aplicação."""
-        now = datetime.utcnow()
-        return self.application <= now <= self.expiration
+        now = get_local_time()
+        now_naive = _normalize_datetime_for_comparison(now)
+        app_start = _normalize_datetime_for_comparison(self.application)
+        exp = _normalize_datetime_for_comparison(self.expiration)
+        if app_start is None or exp is None:
+            return False
+        return app_start <= now_naive <= exp
 
     @property
     def is_finished(self) -> bool:
         """Verifica se já expirou."""
-        now = datetime.utcnow()
-        return now > self.expiration
+        now = get_local_time()
+        now_naive = _normalize_datetime_for_comparison(now)
+        exp = _normalize_datetime_for_comparison(self.expiration)
+        if exp is None:
+            return False
+        return now_naive > exp
 
     @property
     def enrolled_count(self) -> int:

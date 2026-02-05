@@ -137,8 +137,20 @@ def end_test_session(session_id):
             session.score = 0.0
         
         db.session.commit()
+
+        # Etapa 4: recompensa de participação em competição (moedas)
+        coins_earned = 0
+        try:
+            from app.competitions.services import CompetitionService
+            coins_earned = CompetitionService.process_participation_reward(
+                test_id=session.test_id,
+                student_id=session.student_id,
+                test_session_id=session.id,
+            )
+        except Exception as coins_err:
+            logging.error(f"Erro ao processar recompensa de competição: {str(coins_err)}", exc_info=True)
         
-        return jsonify({
+        response_payload = {
             'message': 'Sessão encerrada com sucesso',
             'session_id': session.id,
             'status': session.status,
@@ -148,7 +160,10 @@ def end_test_session(session_id):
             'correct_answers': session.correct_answers,
             'score': session.score,
             'grade': session.grade
-        }), 200
+        }
+        if coins_earned > 0:
+            response_payload['coins_earned'] = coins_earned
+        return jsonify(response_payload), 200
         
     except Exception as e:
         logging.error(f"Erro ao encerrar sessão: {str(e)}", exc_info=True)
@@ -271,7 +286,10 @@ def submit_answers():
         # Ambos funcionam simultaneamente - não há exclusão mútua
         app_record = olympics if olympics else class_test
 
-        if app_record and app_record.expiration:
+        # Para competição (StudentTestOlimpics): se a sessão já está em_andamento, permitir submissão
+        # mesmo após o horário de expiração da competição (o aluno já começou e deve poder entregar).
+        is_competition_session = app_record is olympics
+        if app_record and app_record.expiration and not is_competition_session:
             current_time = datetime.utcnow()
             import dateutil.parser
             from datetime import timezone as tz
@@ -406,7 +424,19 @@ def submit_answers():
         except Exception as commit_error:
             logging.error(f"Erro no commit: {str(commit_error)}", exc_info=True)
             raise
-        
+
+        # Etapa 4: recompensa de participação em competição (moedas)
+        coins_earned = 0
+        try:
+            from app.competitions.services import CompetitionService
+            coins_earned = CompetitionService.process_participation_reward(
+                test_id=session.test_id,
+                student_id=session.student_id,
+                test_session_id=session.id,
+            )
+        except Exception as coins_err:
+            logging.error(f"Erro ao processar recompensa de competição: {str(coins_err)}", exc_info=True)
+
         # ✅ NOVO: Retornar resultados completos calculados
         if evaluation_result:
             results = {
@@ -435,7 +465,8 @@ def submit_answers():
                 'duration_minutes': session.duration_minutes,
                 'message': 'Avaliação enviada com sucesso! (Cálculo básico)'
             }
-        
+        if coins_earned > 0:
+            results['coins_earned'] = coins_earned
         return jsonify(results), 201
         
     except Exception as e:
@@ -506,10 +537,10 @@ def save_partial_answers():
                     logging.warning(f"Erro ao buscar StudentTestOlimpics, continuando apenas com ClassTest: {str(e)}")
                     olympics = None
         # Priorizar StudentTestOlimpics se ambos existirem (mais específico para o aluno)
-        # Ambos funcionam simultaneamente - não há exclusão mútua
         app_record = olympics if olympics else class_test
+        is_competition_session = app_record is olympics
 
-        if app_record and app_record.expiration:
+        if app_record and app_record.expiration and not is_competition_session:
             current_time = datetime.utcnow()
             import dateutil.parser
             from datetime import timezone as tz

@@ -2536,6 +2536,22 @@ def start_test_session(test_id):
         if not app_record:
             return jsonify({"error": "Avaliação não está aplicada na sua classe"}), 404
 
+        # Se for prova de competição (StudentTestOlimpics) e já existir sessão em andamento,
+        # retornar essa sessão sem validar application/expiration (evita 410 quando o front chama /test/start-session)
+        if app_record is olympics:
+            existing_for_test = TestSession.query.filter_by(
+                student_id=student.id,
+                test_id=test_id,
+                status='em_andamento',
+            ).first()
+            if existing_for_test:
+                return jsonify({
+                    "message": "Sessão já iniciada",
+                    "session_id": existing_for_test.id,
+                    "started_at": existing_for_test.started_at.isoformat() if existing_for_test.started_at else None,
+                    "time_limit_minutes": existing_for_test.time_limit_minutes,
+                }), 200
+
         # ✅ REGRA 4: Verificar se a avaliação está disponível (data de aplicação) e não expirou (data de expiração)
         current_time = None
         if app_record.timezone:

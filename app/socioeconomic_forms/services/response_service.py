@@ -209,7 +209,28 @@ class ResponseService:
                     time_spent = (datetime.utcnow() - response.started_at).total_seconds()
                     response.time_spent = int(time_spent)
             
+            # ✅ CRÍTICO: Marcar caches de resultados como dirty (automático)
+            # Similar ao evaluation_result_service.py
+            try:
+                from app.socioeconomic_forms.services.results_cache_service import ResultsCacheService
+                ResultsCacheService.mark_dirty_for_response(response, commit=False)
+                logging.info(f"Caches marcados como dirty para form_id={form_id}, user_id={user_id}")
+            except Exception as e:
+                logging.warning(f"Erro ao marcar caches como dirty: {str(e)}")
+                # Continuar mesmo se falhar
+            
             db.session.commit()
+            
+            # OPCIONAL: Disparar task Celery para rebuild (apenas quando completo)
+            if is_complete:
+                try:
+                    from app.socioeconomic_forms.services.results_tasks import rebuild_results_for_form
+                    rebuild_results_for_form.delay(form_id)
+                    logging.info(f"Task de rebuild agendada para form_id={form_id}")
+                except Exception as e:
+                    logging.warning(f"Erro ao agendar task de rebuild: {str(e)}")
+                    # Não falhar se Celery não estiver disponível
+            
             return response
             
         except SQLAlchemyError as e:

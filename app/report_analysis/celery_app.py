@@ -30,7 +30,9 @@ celery_app = Celery(
         'app.report_analysis.tasks',
         'app.services.celery_tasks.physical_test_tasks',  # Tasks de geração de formulários físicos
         'app.services.celery_tasks.answer_sheet_tasks',     # Tasks de geração de cartões de resposta
-        'app.services.celery_tasks.evaluation_recalculation_tasks'  # Tasks de recálculo de resultados
+        'app.services.celery_tasks.evaluation_recalculation_tasks',  # Tasks de recálculo de resultados
+        'app.socioeconomic_forms.services.results_tasks',  # Tasks de resultados socioeconômicos
+        'app.socioeconomic_forms.services.results_migration_tasks'  # Tasks de migração/população inicial
     ]
 )
 

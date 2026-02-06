@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """Serviço de Competições (Etapa 2 e 3)."""
-from datetime import datetime
+from datetime import datetime, timezone
 
 from sqlalchemy import func
 
@@ -30,13 +30,28 @@ class CompetitionService:
         Se question_mode = 'auto_random': sorteia questões e cria Test.
         Se question_mode = 'manual': deixa test_id = None (adicionar depois).
         """
-        enrollment_end = data.get('enrollment_end')
-        application = data.get('application')
+        # Parse e validar todas as datas
+        enrollment_start = _parse_dt(data.get('enrollment_start'))
+        enrollment_end = _parse_dt(data.get('enrollment_end'))
+        application = _parse_dt(data.get('application'))
+        expiration = _parse_dt(data.get('expiration'))
+        
+        # Validações de ordem das datas
+        if enrollment_start and enrollment_end:
+            if enrollment_end <= enrollment_start:
+                raise ValidationError("Data de fim da inscrição deve ser após início da inscrição")
+        
         if enrollment_end and application:
-            enrollment_end = _parse_dt(enrollment_end)
-            application = _parse_dt(application)
-            if enrollment_end > application:
-                raise ValidationError("Data de aplicação deve ser após fim da inscrição")
+            if application < enrollment_end:
+                raise ValidationError("Data de aplicação deve ser após ou igual ao fim da inscrição")
+        
+        if application and expiration:
+            if expiration <= application:
+                raise ValidationError("Data de expiração deve ser após início da aplicação")
+        
+        if enrollment_start and expiration:
+            if expiration <= enrollment_start:
+                raise ValidationError("Data de expiração deve ser após início das inscrições")
 
         level = data.get('level')
         if level is not None and not is_valid_level(level):
@@ -52,10 +67,10 @@ class CompetitionService:
             level=data['level'],
             scope=data.get('scope', 'individual'),
             scope_filter=data.get('scope_filter'),
-            enrollment_start=_parse_dt(data['enrollment_start']),
-            enrollment_end=_parse_dt(data['enrollment_end']),
-            application=_parse_dt(data['application']),
-            expiration=_parse_dt(data['expiration']),
+            enrollment_start=enrollment_start,
+            enrollment_end=enrollment_end,
+            application=application,
+            expiration=expiration,
             timezone=data.get('timezone', 'America/Sao_Paulo'),
             question_mode=data.get('question_mode', 'auto_random'),
             question_rules=data.get('question_rules'),
@@ -536,13 +551,25 @@ def _validate_reward_config(reward_config):
 
 
 def _parse_dt(v):
-    """Converte valor para datetime."""
+    """
+    Converte valor para datetime naive (sem timezone) para salvar no banco.
+    Se receber datetime com timezone, converte para UTC e remove timezone.
+    """
     if v is None:
         return None
     if isinstance(v, datetime):
+        # Se já é datetime, garantir que seja naive
+        if v.tzinfo is not None:
+            # Converter para UTC primeiro, depois remover timezone
+            v = v.astimezone(timezone.utc).replace(tzinfo=None)
         return v
     if isinstance(v, str):
-        return datetime.fromisoformat(v.replace('Z', '+00:00'))
+        # Parse ISO string
+        dt = datetime.fromisoformat(v.replace('Z', '+00:00'))
+        # Se tem timezone, converter para UTC e remover
+        if dt.tzinfo is not None:
+            dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
+        return dt
     return v
 
 

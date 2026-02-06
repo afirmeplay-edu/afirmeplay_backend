@@ -66,6 +66,7 @@ class CompetitionRankingService:
         Calcula ranking a partir dos resultados da avaliação (test_sessions + evaluation_results).
         Usado para exibir ranking ao vivo e no passo de finalização.
         Retorna lista ordenada de {student_id, session_id, position, grade, proficiency, ...}.
+        Filtra por escopo da competição (turma/escola/município).
         """
         competition = Competition.query.get(competition_id)
         if not competition or not competition.test_id:
@@ -76,7 +77,15 @@ class CompetitionRankingService:
             TestSession.status.in_(['finalizada', 'expirada', 'corrigida', 'revisada']),
         ).all()
 
-        rows = [CompetitionRankingService._enrich_session_with_evaluation(s) for s in sessions]
+        # Filtrar sessões por escopo da competição
+        from app.competitions.services.competition_service import _student_in_scope
+        filtered_sessions = []
+        for session in sessions:
+            student = Student.query.get(session.student_id)
+            if student and _student_in_scope(student, competition):
+                filtered_sessions.append(session)
+
+        rows = [CompetitionRankingService._enrich_session_with_evaluation(s) for s in filtered_sessions]
         if not rows:
             return []
 
@@ -255,6 +264,8 @@ class CompetitionRankingService:
             return []
 
         if competition.status == 'encerrada':
+            # Para competições encerradas, os resultados já foram filtrados por escopo
+            # durante a finalização, então podemos ler diretamente de competition_results
             results = (
                 CompetitionResult.query.filter_by(competition_id=competition_id)
                 .order_by(CompetitionResult.posicao)

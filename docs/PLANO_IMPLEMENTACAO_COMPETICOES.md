@@ -778,7 +778,7 @@ if competition:
     if not reward or reward.participation_paid_at is None:
         # 3. Ler configuração de recompensa
         participation_coins = competition.reward_config.get('participation_coins', 0)
-      
+    
         if participation_coins > 0:
             # 4. Creditar moedas
             CoinService.credit_coins(
@@ -789,7 +789,7 @@ if competition:
                 test_session_id=session.id,
                 description=f"Participação na competição: {competition.name}"
             )
-          
+        
             # 5. Marcar como pago
             if not reward:
                 reward = CompetitionReward(
@@ -799,7 +799,7 @@ if competition:
                 db.session.add(reward)
             reward.participation_paid_at = datetime.utcnow()
             db.session.commit()
-          
+        
             # 6. Retornar info para frontend (toast de moedas ganhas)
             return {"coins_earned": participation_coins}
 ```
@@ -913,17 +913,17 @@ class CompetitionRankingService:
             test_id=competition.test_id,
             status='finalizada'
         ).all()
-      
+    
         # Enriquecer com proficiência, média, etc. das tabelas de resultado da avaliação
         # (reutilizar serviços/queries já existentes)
-      
+    
         # Ordenar conforme ranking_criteria e ranking_tiebreaker
         if competition.ranking_criteria == 'nota':
             sorted_sessions = sorted(test_sessions, key=lambda s: s.grade or 0, reverse=True)
         elif competition.ranking_criteria == 'tempo':
             sorted_sessions = sorted(test_sessions, key=lambda s: s.duration_minutes or 999999)
         # ... outros critérios e tiebreaker
-      
+    
         ranking = []
         for idx, session in enumerate(sorted_sessions, start=1):
             ranking.append({
@@ -948,7 +948,7 @@ class CompetitionRankingService:
         """
         competition = Competition.query.get_or_404(competition_id)
         ranking = CompetitionRankingService.calculate_ranking(competition_id)
-      
+    
         for item in ranking:
             # Criar registro em competition_results (snapshot)
             result = CompetitionResult(
@@ -964,10 +964,10 @@ class CompetitionRankingService:
                 calculated_at=datetime.utcnow(),
             )
             db.session.add(result)
-      
+    
         # Pagar moedas para posições premiadas
         CompetitionRankingService.pay_ranking_rewards(competition_id, ranking)
-      
+    
         # Atualizar moedas_ganhas em competition_results para cada premiado
         # ...
         db.session.commit()
@@ -981,7 +981,7 @@ class CompetitionRankingService:
         competition = Competition.query.get(competition_id)
         if ranking is None:
             ranking = CompetitionRankingService.calculate_ranking(competition_id)
-      
+    
         ranking_rewards = competition.reward_config.get('ranking_rewards', [])
         for reward_config in ranking_rewards:
             position = reward_config['position']
@@ -1036,10 +1036,10 @@ def process_finished_competitions():
             # 1) Gravar snapshot em competition_results (copiar dados da avaliação)
             # 2) Pagar moedas de ranking
             CompetitionRankingService.finalize_competition_and_save_results(competition.id)
-          
+        
             competition.status = 'encerrada'
             db.session.commit()
-          
+        
             logger.info(f"Competição {competition.id} encerrada; results e ranking pagos")
 ```
 
@@ -1250,17 +1250,17 @@ def create_competitions_from_templates():
                 Competition.enrollment_start >= start_of_week,
                 Competition.enrollment_start < start_of_week + timedelta(days=7)
             ).first()
-          
+        
             if not existing:
                 # Criar competição para esta semana
                 competition = template.generate_competition_for_period(start_of_week)
                 db.session.add(competition)
                 logger.info(f"Competição criada do template {template.id}: {competition.name}")
-      
+    
         elif template.recurrence == 'biweekly':
             # Lógica similar para quinzenal
             pass
-      
+    
         elif template.recurrence == 'monthly':
             # Lógica similar para mensal
             pass

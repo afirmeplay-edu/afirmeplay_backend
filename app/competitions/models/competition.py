@@ -2,21 +2,25 @@
 """Modelo de Competição (Etapa 2)."""
 from app import db
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from app.utils.timezone_utils import get_local_time
 
 
 def _normalize_datetime_for_comparison(dt):
     """
     Normaliza datetime para comparação: se for naive, mantém naive;
-    se for timezone-aware, converte para naive (assumindo que ambos estão no mesmo TZ).
+    se for timezone-aware, converte para UTC e depois remove timezone.
+    Garante que todas as comparações sejam feitas com datetimes naive.
     """
     if dt is None:
         return None
     if isinstance(dt, datetime):
-        # Se for timezone-aware, remove o timezone para comparação com campos do banco (naive)
+        # Se for timezone-aware, converter para UTC primeiro, depois remover timezone
         if dt.tzinfo is not None:
-            return dt.replace(tzinfo=None)
+            # Converter para UTC e depois remover timezone
+            dt_utc = dt.astimezone(timezone.utc)
+            return dt_utc.replace(tzinfo=None)
+        # Se já é naive, retornar como está (assumindo que está em UTC ou timezone local)
         return dt
     return dt
 

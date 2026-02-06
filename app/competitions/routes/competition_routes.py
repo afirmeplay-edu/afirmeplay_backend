@@ -2,7 +2,7 @@
 """
 Rotas CRUD e ações de competições.
 """
-from datetime import datetime
+from datetime import datetime, timezone
 from flask import Blueprint, request, jsonify
 from flask_jwt_extended import jwt_required
 from app import db
@@ -147,10 +147,25 @@ def _competition_to_dict(c):
 
 
 def _parse_dt(val):
-    if val is None or isinstance(val, datetime):
+    """
+    Converte valor para datetime naive (sem timezone) para salvar no banco.
+    Se receber datetime com timezone, converte para UTC e remove timezone.
+    """
+    if val is None:
+        return None
+    if isinstance(val, datetime):
+        # Se já é datetime, garantir que seja naive
+        if val.tzinfo is not None:
+            # Converter para UTC primeiro, depois remover timezone
+            val = val.astimezone(timezone.utc).replace(tzinfo=None)
         return val
     if isinstance(val, str):
-        return datetime.fromisoformat(val.replace('Z', '+00:00'))
+        # Parse ISO string
+        dt = datetime.fromisoformat(val.replace('Z', '+00:00'))
+        # Se tem timezone, converter para UTC e remover
+        if dt.tzinfo is not None:
+            dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
+        return dt
     return val
 
 
@@ -477,6 +492,25 @@ def get_competition_ranking(competition_id):
     return jsonify({"ranking": [_serialize_ranking_item(r) for r in ranking]}), 200
 
 
+@bp.route('/<competition_id>/analytics', methods=['GET'])
+@jwt_required()
+@role_required(*ROLES_EDIT)
+def get_competition_analytics(competition_id):
+    """
+    Retorna analytics completos da competição (apenas admin/coordenador).
+    Inclui: taxa de inscrição, taxa de participação, médias, distribuição de notas, top 10, comparação com anteriores.
+    """
+    try:
+        from app.services.competition_analytics_service import CompetitionAnalyticsService
+        analytics = CompetitionAnalyticsService.get_analytics(competition_id)
+        return jsonify(analytics), 200
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 404
+    except Exception as e:
+        logging.exception("Erro ao calcular analytics da competição %s: %s", competition_id, str(e))
+        return jsonify({"error": "Erro ao calcular analytics", "details": str(e)}), 500
+
+
 @bp.route('/<competition_id>/my-ranking', methods=['GET'])
 @jwt_required()
 @role_required(*ROLES_STUDENT_OR_EDIT)
@@ -697,11 +731,41 @@ def update_competition(competition_id):
                 'application', 'expiration', 'timezone', 'question_mode', 'question_rules', 'reward_config',
                 'ranking_criteria', 'ranking_tiebreaker', 'ranking_visibility', 'max_participants', 'recurrence',
                 'template_id')
+    
+    # Parse todas as datas primeiro
+    parsed_dates = {}
+    for key in ('enrollment_start', 'enrollment_end', 'application', 'expiration'):
+        if key in data:
+            parsed_dates[key] = _parse_dt(data[key])
+    
+    # Validar ordem das datas se todas foram fornecidas
+    enrollment_start = parsed_dates.get('enrollment_start') or c.enrollment_start
+    enrollment_end = parsed_dates.get('enrollment_end') or c.enrollment_end
+    application = parsed_dates.get('application') or c.application
+    expiration = parsed_dates.get('expiration') or c.expiration
+    
+    if enrollment_start and enrollment_end:
+        if enrollment_end <= enrollment_start:
+            return jsonify({"error": "Data de fim da inscrição deve ser após início da inscrição"}), 400
+    
+    if enrollment_end and application:
+        if application < enrollment_end:
+            return jsonify({"error": "Data de aplicação deve ser após ou igual ao fim da inscrição"}), 400
+    
+    if application and expiration:
+        if expiration <= application:
+            return jsonify({"error": "Data de expiração deve ser após início da aplicação"}), 400
+    
+    if enrollment_start and expiration:
+        if expiration <= enrollment_start:
+            return jsonify({"error": "Data de expiração deve ser após início das inscrições"}), 400
+    
+    # Aplicar mudanças
     for key in editable:
         if key in data:
             val = data[key]
             if key in ('enrollment_start', 'enrollment_end', 'application', 'expiration'):
-                val = _parse_dt(val)
+                val = parsed_dates.get(key)  # Usar valor já parseado
             if key == 'level' and val is not None and not is_valid_level(val):
                 return jsonify({
                     "error": "Nível deve ser 1 (Educação Infantil, Anos Iniciais, Educação Especial, EJA) ou 2 (Anos Finais e Ensino Médio)"

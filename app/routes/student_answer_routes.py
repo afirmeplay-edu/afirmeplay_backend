@@ -140,15 +140,34 @@ def end_test_session(session_id):
 
         # Etapa 4: recompensa de participação em competição (moedas)
         coins_earned = 0
+        competition_id = None
         try:
             from app.competitions.services import CompetitionService
+            from app.competitions.models import Competition
             coins_earned = CompetitionService.process_participation_reward(
                 test_id=session.test_id,
                 student_id=session.student_id,
                 test_session_id=session.id,
             )
+            # Verificar se é competição para notificar ranking atualizado
+            competition = Competition.query.filter_by(test_id=session.test_id).first()
+            if competition:
+                competition_id = competition.id
         except Exception as coins_err:
             logging.error(f"Erro ao processar recompensa de competição: {str(coins_err)}", exc_info=True)
+        
+        # Etapa 5: notificar ranking atualizado via WebSocket (se for competição com ranking em tempo real)
+        if competition_id:
+            try:
+                from app.socketio.socketio_config import notify_ranking_updated
+                from app.competitions.models import Competition
+                competition = Competition.query.get(competition_id)
+                if competition:
+                    visibility = (competition.ranking_visibility or 'final').strip().lower()
+                    if visibility == 'realtime':
+                        notify_ranking_updated(competition_id)
+            except Exception as ws_err:
+                logging.warning(f"Erro ao notificar ranking atualizado via WebSocket: {str(ws_err)}", exc_info=True)
         
         response_payload = {
             'message': 'Sessão encerrada com sucesso',

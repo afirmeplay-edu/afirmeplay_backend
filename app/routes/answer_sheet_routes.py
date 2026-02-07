@@ -346,35 +346,6 @@ def generate_answer_sheets():
                     if cls.id not in teacher_class_ids:
                         return jsonify({"error": f"Você não tem acesso à turma {cls.name}"}), 403
         
-        elif grade_id:
-            # Série inteira
-            scope_type = 'grade'
-            grade_obj = Grade.query.get(grade_id)
-            if not grade_obj:
-                return jsonify({"error": "Série não encontrada"}), 404
-            
-            # Buscar todas as turmas da série
-            classes_to_generate = Class.query.filter_by(grade_id=grade_id).all()
-            if not classes_to_generate:
-                return jsonify({"error": "Nenhuma turma encontrada para esta série"}), 400
-        
-        elif school_id:
-            # Escola inteira
-            scope_type = 'school'
-            school_obj = School.query.get(school_id)
-            if not school_obj:
-                return jsonify({"error": "Escola não encontrada"}), 404
-            
-            # Buscar todas as turmas da escola
-            classes_to_generate = Class.query.filter_by(school_id=school_id).all()
-            if not classes_to_generate:
-                return jsonify({"error": "Nenhuma turma encontrada para esta escola"}), 400
-        
-        else:
-            return jsonify({"error": "Forneça class_id, grade_id ou school_id"}), 400
-        
-        logging.info(f"[ROTA] ✅ Escopo determinado: {scope_type}, {len(classes_to_generate)} turma(s)")
-        
         # ✅ 3. PREPARAR CONFIGURAÇÃO DE BLOCOS
         use_blocks = data.get('use_blocks', False)
         blocks_config = data.get('blocks_config', {})
@@ -423,56 +394,148 @@ def generate_answer_sheets():
         blocks_config['topology'] = complete_structure
         
         # ========================================================================
-        # ✅ CRIAR 1 GABARITO POR TURMA
+        # ✅ CRIAR GABARITO(S) CONFORME O ESCOPO
+        # - Turma: 1 gabarito vinculado à turma (scope_type = "class")
+        # - Série: 1 gabarito para TODAS as turmas da série (scope_type = "grade")
+        # - Escola: 1 gabarito para TODAS as turmas da escola (scope_type = "school")
         # ========================================================================
+        logging.info(f"[ROTA-GABARITO] 🔍 Criando gabarito(s) com scope='{scope}', {len(classes)} turma(s)")
+        
         batch_id = str(uuid.uuid4()) if len(classes) > 1 else None
         gabaritos = []
-        
-        for class_obj in classes:
-            # Buscar informações da turma e escola
+
+        # Campos comuns
+        common_kwargs = {
+            "test_id": str(data.get('test_id')) if data.get('test_id') else None,
+            "num_questions": num_questions,
+            "use_blocks": use_blocks,
+            "blocks_config": blocks_config,
+            "correct_answers": correct_answers,
+            "title": test_data.get('title', 'Cartão Resposta'),
+            "created_by": str(user['id']) if user.get('id') else None,
+            "municipality": test_data.get('municipality', ''),
+            "state": test_data.get('state', ''),
+            "institution": test_data.get('institution', ''),
+            "batch_id": batch_id
+        }
+
+        if scope == 'class':
+            # ✅ ESCOPO TURMA: 1 gabarito vinculado à turma
+            class_obj = classes[0]
+
             cls_school_id = None
             cls_school_name = ''
             cls_grade_name = test_data.get('grade_name', '')
-            
+
             if class_obj.school_id:
                 from app.models.school import School
                 school = School.query.get(class_obj.school_id)
                 if school:
                     cls_school_id = school.id
                     cls_school_name = school.name or ''
-            
+
             # Buscar nome da série se não fornecido
             if not cls_grade_name and class_obj.grade_id:
                 from app.models.grades import Grade
                 grade_obj = Grade.query.get(class_obj.grade_id)
                 if grade_obj:
                     cls_grade_name = grade_obj.name
-            
-            # Criar gabarito
+
             gabarito = AnswerSheetGabarito(
-                test_id=str(data.get('test_id')) if data.get('test_id') else None,
                 class_id=class_obj.id,
-                num_questions=num_questions,
-                use_blocks=use_blocks,
-                blocks_config=blocks_config,
-                correct_answers=correct_answers,
-                title=test_data.get('title', 'Cartão Resposta'),
-                created_by=str(user['id']) if user.get('id') else None,
                 school_id=str(cls_school_id) if cls_school_id else None,
                 school_name=cls_school_name,
-                municipality=test_data.get('municipality', ''),
-                state=test_data.get('state', ''),
+                grade_id=class_obj.grade_id,
                 grade_name=cls_grade_name,
-                institution=test_data.get('institution', ''),
-                batch_id=batch_id  # ✅ NOVO: ID do batch (se múltiplas turmas)
+                scope_type='class',
+                **common_kwargs
             )
             db.session.add(gabarito)
             gabaritos.append(gabarito)
-        
+
+        elif scope == 'grade':
+            # ✅ ESCOPO SÉRIE: 1 gabarito para TODAS as turmas da série na escola
+            from app.models.grades import Grade
+            from app.models.school import School
+
+            grade_obj = Grade.query.get(grade_id)
+            school_obj = School.query.get(school_id) if school_id else None
+
+            cls_school_id = school_obj.id if school_obj else None
+            cls_school_name = school_obj.name if school_obj and school_obj.name else ''
+            cls_grade_name = grade_obj.name if grade_obj and grade_obj.name else test_data.get('grade_name', '')
+
+            gabarito = AnswerSheetGabarito(
+                class_id=None,
+                school_id=str(cls_school_id) if cls_school_id else None,
+                school_name=cls_school_name,
+                grade_id=grade_obj.id if grade_obj else None,
+                grade_name=cls_grade_name,
+                scope_type='grade',
+                **common_kwargs
+            )
+            db.session.add(gabarito)
+            gabaritos.append(gabarito)
+
+        elif scope == 'school':
+            # ✅ ESCOPO ESCOLA: 1 gabarito para TODAS as turmas da escola
+            from app.models.school import School
+
+            school_obj = School.query.get(school_id) if school_id else None
+
+            cls_school_id = school_obj.id if school_obj else None
+            cls_school_name = school_obj.name if school_obj and school_obj.name else ''
+
+            # grade_name em escopo escola pode não ser único; usar do payload se existir
+            cls_grade_name = test_data.get('grade_name', '')
+
+            gabarito = AnswerSheetGabarito(
+                class_id=None,
+                school_id=str(cls_school_id) if cls_school_id else None,
+                school_name=cls_school_name,
+                grade_id=None,
+                grade_name=cls_grade_name,
+                scope_type='school',
+                **common_kwargs
+            )
+            db.session.add(gabarito)
+            gabaritos.append(gabarito)
+        else:
+            # Por segurança, manter comportamento anterior se scope desconhecido
+            for class_obj in classes:
+                cls_school_id = None
+                cls_school_name = ''
+                cls_grade_name = test_data.get('grade_name', '')
+
+                if class_obj.school_id:
+                    from app.models.school import School
+                    school = School.query.get(class_obj.school_id)
+                    if school:
+                        cls_school_id = school.id
+                        cls_school_name = school.name or ''
+
+                if not cls_grade_name and class_obj.grade_id:
+                    from app.models.grades import Grade
+                    grade_obj = Grade.query.get(class_obj.grade_id)
+                    if grade_obj:
+                        cls_grade_name = grade_obj.name
+
+                gabarito = AnswerSheetGabarito(
+                    class_id=class_obj.id,
+                    school_id=str(cls_school_id) if cls_school_id else None,
+                    school_name=cls_school_name,
+                    grade_id=class_obj.grade_id,
+                    grade_name=cls_grade_name,
+                    scope_type=scope or 'class',
+                    **common_kwargs
+                )
+                db.session.add(gabarito)
+                gabaritos.append(gabarito)
+
         db.session.commit()
         logging.info(f"✅ {len(gabaritos)} gabarito(s) criado(s)")
         
-        # Gerar coordenadas para todos os gabaritos
+        # Gerar coordenadas para todos os gabaritos (mesma estrutura para todo o escopo)
         try:
             from app.services.cartao_resposta.coordinate_generator import CoordinateGenerator
             
@@ -511,7 +574,7 @@ def generate_answer_sheets():
         # ✅ NOVO: Gerar cartões de forma ASSÍNCRONA via Celery (batch)
         from app.services.celery_tasks.answer_sheet_tasks import generate_answer_sheets_batch_async
         
-        # Disparar task Celery com lista de gabaritos
+        # Disparar task Celery com gabarito único e lista de turmas do escopo
         task = generate_answer_sheets_batch_async.delay(
             gabarito_ids=[str(g.id) for g in gabaritos],
             num_questions=num_questions,
@@ -521,17 +584,20 @@ def generate_answer_sheets():
             blocks_config=blocks_config,
             questions_options=questions_options,
             batch_id=batch_id,
-            scope=scope
+            scope=scope,
+            class_ids=[str(cls.id) for cls in classes]
         )
         
         # Preparar informações das turmas
+        # ✅ NOVO: usar gabarito único para todos os escopos
+        gabarito_master = gabaritos[0] if gabaritos else None
         classes_info = []
-        for cls, gab in zip(classes, gabaritos):
+        for cls in classes:
             classes_info.append({
                 'class_id': str(cls.id),
                 'class_name': cls.name,
-                'gabarito_id': str(gab.id),
-                'grade_name': gab.grade_name
+                'gabarito_id': str(gabarito_master.id) if gabarito_master else None,
+                'grade_name': gabarito_master.grade_name if gabarito_master else ''
             })
         
         # Retornar resposta imediata com task_id para polling
@@ -600,6 +666,17 @@ def get_answer_sheet_task_status(task_id):
                 warnings.append(result['warning'])
             elif result.get('students_count') == 0:
                 warnings.append("Nenhum aluno registrado na turma - cartões não foram gerados")
+            
+            # ✅ NOVO: Incluir turmas puladas nos warnings
+            skipped_classes = result.get('skipped_classes', [])
+            if skipped_classes:
+                for skipped in skipped_classes:
+                    class_name = skipped.get('class_name', 'Turma desconhecida')
+                    grade_name = skipped.get('grade_name', '')
+                    if grade_name:
+                        warnings.append(f"Turma {class_name} ({grade_name}) foi pulada - sem alunos cadastrados")
+                    else:
+                        warnings.append(f"Turma {class_name} foi pulada - sem alunos cadastrados")
             
             response = {
                 'status': 'completed',
@@ -841,12 +918,25 @@ def list_gabaritos():
             # Buscar informações da escola (school) se necessário
             total_classes_in_school = 0
             total_students_in_school = 0
+            classes_with_students_in_school = 0
             if gabarito.scope_type == "school" and gabarito.school_id:
                 classes_in_school = Class.query.filter_by(school_id=gabarito.school_id).all()
                 total_classes_in_school = len(classes_in_school)
                 total_students_in_school = sum(
                     len(cls.students) if cls.students else 0 
                     for cls in classes_in_school
+                )
+                # Contar apenas turmas com alunos
+                classes_with_students_in_school = sum(
+                    1 for cls in classes_in_school if cls.students and len(cls.students) > 0
+                )
+            
+            # Para série: contar turmas com alunos
+            classes_with_students_in_grade = 0
+            if gabarito.grade_id:
+                classes_in_grade = Class.query.filter_by(grade_id=gabarito.grade_id).all()
+                classes_with_students_in_grade = sum(
+                    1 for cls in classes_in_grade if cls.students and len(cls.students) > 0
                 )
             
             # Determinar contagem baseada no scope_type correto
@@ -857,15 +947,17 @@ def list_gabaritos():
                 final_students_count = class_students_count
                 final_classes_count = 1
             elif gabarito.scope_type == "grade":
+                # ✅ Contar apenas turmas com alunos
                 final_students_count = total_students_in_grade
-                final_classes_count = total_classes_in_grade
+                final_classes_count = classes_with_students_in_grade
             elif gabarito.scope_type == "school":
+                # ✅ Contar apenas turmas com alunos
                 final_students_count = total_students_in_school
-                final_classes_count = total_classes_in_school
+                final_classes_count = classes_with_students_in_school
             else:
                 # Fallback para scope desconhecido
                 final_students_count = total_students_in_grade if total_students_in_grade > 0 else class_students_count
-                final_classes_count = total_classes_in_grade if total_classes_in_grade > 0 else 1
+                final_classes_count = classes_with_students_in_grade if classes_with_students_in_grade > 0 else 1
             
             # Buscar informações do criador
             creator_name = None

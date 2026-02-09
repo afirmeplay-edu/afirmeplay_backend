@@ -10,6 +10,7 @@ from app.socioeconomic_forms.services.form_service import FormService
 from app.socioeconomic_forms.services.distribution_service import DistributionService
 from app.socioeconomic_forms.services.response_service import ResponseService
 from app.socioeconomic_forms.services.report_service import ReportService
+from app.socioeconomic_forms.services.template_service import TemplateService
 from app.socioeconomic_forms.models import Form, FormRecipient, FormResponse
 from app import db
 from sqlalchemy.exc import SQLAlchemyError
@@ -37,7 +38,15 @@ def handle_value_error(error):
 @jwt_required()
 @role_required("admin", "tecadm")
 def create_form():
-    """Cria um novo questionário"""
+    """
+    Cria formulário(s) socioeconômico(s)
+    
+    Cria automaticamente múltiplos formulários se as séries selecionadas
+    pertencem a diferentes education stages (ex: Educação Infantil + Anos Finais).
+    
+    Títulos são gerados automaticamente no formato:
+    "{N}° Questionário Socioeconômico - {Education Stage} - {Escola}"
+    """
     try:
         user = get_current_user_from_token()
         if not user:
@@ -48,63 +57,76 @@ def create_form():
             return jsonify({"error": "Dados não fornecidos"}), 400
         
         # Validações básicas
-        if not data.get('title'):
-            return jsonify({"error": "Título é obrigatório"}), 400
+        # formType é opcional - será detectado automaticamente pelas séries
+        # title não é mais necessário - gerado automaticamente
         
-        if not data.get('formType'):
-            return jsonify({"error": "Tipo de formulário é obrigatório"}), 400
+        # Criar formulário(s)
+        result = FormService.create_form(data, user['id'])
         
-        # Criar formulário
-        form = FormService.create_form(data, user['id'])
+        # Determinar se foi criado único ou múltiplos
+        is_multiple = isinstance(result, list)
+        forms = result if is_multiple else [result]
         
-        # Se filtros ou seleções estiverem presentes, enviar automaticamente
+        # Distribuir para recipients (se aplicável)
         filters = data.get('filters')
         selected_schools = data.get('selectedSchools', [])
         selected_grades = data.get('selectedGrades', [])
         selected_classes = data.get('selectedClasses', [])
         
-        recipients_count = 0
-        sent_at = None
+        forms_response = []
         
-        if filters or selected_schools or selected_grades or selected_classes:
-            # Determinar destinatários e enviar
-            recipients_data = DistributionService.determine_recipients_by_filters(
-                form.form_type,
-                filters=filters,
-                selected_schools=selected_schools if selected_schools else None,
-                selected_grades=selected_grades if selected_grades else None,
-                selected_classes=selected_classes if selected_classes else None
-            )
+        for form in forms:
+            recipients_count = 0
+            sent_at = None
             
-            # Criar registros de FormRecipient
-            sent_at = datetime.utcnow()
-            for recipient_data in recipients_data:
-                # Verificar se já existe (evitar duplicatas)
-                existing = FormRecipient.query.filter_by(
-                    form_id=form.id,
-                    user_id=recipient_data['user_id']
-                ).first()
+            if filters or selected_schools or selected_grades or selected_classes:
+                # Determinar destinatários para este formulário específico
+                recipients_data = DistributionService.determine_recipients_by_filters(
+                    form.form_type,
+                    filters=filters,
+                    selected_schools=form.selected_schools,
+                    selected_grades=form.selected_grades,
+                    selected_classes=selected_classes if selected_classes else None
+                )
                 
-                if not existing:
-                    recipient = FormRecipient(
+                # Criar registros de FormRecipient
+                sent_at = datetime.utcnow()
+                for recipient_data in recipients_data:
+                    # Verificar se já existe (evitar duplicatas)
+                    existing = FormRecipient.query.filter_by(
                         form_id=form.id,
-                        user_id=recipient_data['user_id'],
-                        school_id=recipient_data.get('school_id'),
-                        status='pending',
-                        sent_at=sent_at
-                    )
-                    db.session.add(recipient)
-                    recipients_count += 1
+                        user_id=recipient_data['user_id']
+                    ).first()
+                    
+                    if not existing:
+                        recipient = FormRecipient(
+                            form_id=form.id,
+                            user_id=recipient_data['user_id'],
+                            school_id=recipient_data.get('school_id'),
+                            status='pending',
+                            sent_at=sent_at
+                        )
+                        db.session.add(recipient)
+                        recipients_count += 1
+                
+                db.session.commit()
             
-            db.session.commit()
+            # Preparar resposta para este formulário
+            form_data = form.to_dict(include_questions=True)
+            if recipients_count > 0:
+                form_data['recipientsCount'] = recipients_count
+                form_data['sentAt'] = sent_at.isoformat() if sent_at else None
+            
+            forms_response.append(form_data)
         
-        # Preparar resposta
-        response_data = form.to_dict(include_questions=True)
-        if recipients_count > 0:
-            response_data['recipientsCount'] = recipients_count
-            response_data['sentAt'] = sent_at.isoformat() if sent_at else None
-        
-        return jsonify(response_data), 201
+        # Retornar resposta
+        if is_multiple:
+            return jsonify({
+                "message": f"{len(forms)} formulário(s) criado(s) com sucesso",
+                "forms": forms_response
+            }), 201
+        else:
+            return jsonify(forms_response[0]), 201
         
     except ValueError as e:
         db.session.rollback()
@@ -119,8 +141,20 @@ def create_form():
 @jwt_required()
 @role_required("admin", "tecadm", "diretor", "coordenador", "professor", "aluno")
 def list_forms():
-    """Lista questionários"""
+    """
+    Lista questionários com filtros de escopo
+    
+    Query Parameters:
+    - formType: Filtrar por tipo de formulário
+    - isActive: Filtrar por status ativo (true/false)
+    - selectedSchools: IDs de escolas separadas por vírgula
+    - selectedGrades: IDs de séries separadas por vírgula
+    - selectedClasses: IDs de turmas separadas por vírgula
+    - page: Número da página (default: 1)
+    - limit: Itens por página (default: 20)
+    """
     try:
+        # Filtros básicos
         form_type = request.args.get('formType')
         is_active = request.args.get('isActive')
         if is_active is not None:
@@ -128,12 +162,35 @@ def list_forms():
         else:
             is_active = None
         
+        # Filtros de escopo (separados por vírgula)
+        selected_schools = request.args.get('selectedSchools')
+        if selected_schools:
+            selected_schools = [s.strip() for s in selected_schools.split(',') if s.strip()]
+        else:
+            selected_schools = None
+        
+        selected_grades = request.args.get('selectedGrades')
+        if selected_grades:
+            selected_grades = [g.strip() for g in selected_grades.split(',') if g.strip()]
+        else:
+            selected_grades = None
+        
+        selected_classes = request.args.get('selectedClasses')
+        if selected_classes:
+            selected_classes = [c.strip() for c in selected_classes.split(',') if c.strip()]
+        else:
+            selected_classes = None
+        
+        # Paginação
         page = int(request.args.get('page', 1))
         limit = int(request.args.get('limit', 20))
         
         result = FormService.list_forms(
             form_type=form_type,
             is_active=is_active,
+            selected_schools=selected_schools,
+            selected_grades=selected_grades,
+            selected_classes=selected_classes,
             page=page,
             limit=limit
         )
@@ -593,4 +650,63 @@ def get_general_statistics():
     except Exception as e:
         logging.error(f"Erro ao calcular estatísticas: {str(e)}", exc_info=True)
         return jsonify({"error": "Erro ao calcular estatísticas", "details": str(e)}), 500
+
+
+# ==================== TEMPLATES DE FORMULÁRIOS ====================
+
+@bp.route('/templates', methods=['GET'])
+@jwt_required()
+@role_required("admin", "tecadm")
+def get_available_templates():
+    """Lista todos os templates de questionários disponíveis"""
+    try:
+        templates = TemplateService.get_available_templates()
+        return jsonify({
+            "templates": templates,
+            "total": len(templates)
+        }), 200
+        
+    except Exception as e:
+        logging.error(f"Erro ao listar templates: {str(e)}", exc_info=True)
+        return jsonify({"error": "Erro ao listar templates", "details": str(e)}), 500
+
+
+@bp.route('/templates/<form_type>', methods=['GET'])
+@jwt_required()
+@role_required("admin", "tecadm")
+def get_template(form_type):
+    """Obtém o template de perguntas para um tipo de formulário"""
+    try:
+        template = TemplateService.load_template(form_type)
+        
+        if not template:
+            return jsonify({"error": f"Template para '{form_type}' não encontrado"}), 404
+        
+        return jsonify(template), 200
+        
+    except Exception as e:
+        logging.error(f"Erro ao carregar template: {str(e)}", exc_info=True)
+        return jsonify({"error": "Erro ao carregar template", "details": str(e)}), 500
+
+
+@bp.route('/templates/<form_type>/questions', methods=['GET'])
+@jwt_required()
+@role_required("admin", "tecadm")
+def get_template_questions(form_type):
+    """Obtém apenas as perguntas do template"""
+    try:
+        questions = TemplateService.get_questions(form_type)
+        
+        if questions is None:
+            return jsonify({"error": f"Template para '{form_type}' não encontrado"}), 404
+        
+        return jsonify({
+            "formType": form_type,
+            "questions": questions,
+            "totalQuestions": len(questions)
+        }), 200
+        
+    except Exception as e:
+        logging.error(f"Erro ao carregar perguntas do template: {str(e)}", exc_info=True)
+        return jsonify({"error": "Erro ao carregar perguntas do template", "details": str(e)}), 500
 

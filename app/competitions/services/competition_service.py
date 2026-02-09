@@ -12,7 +12,7 @@ from app.competitions.models import (
     CompetitionResult,
     CompetitionReward,
 )
-from app.competitions.constants import is_valid_level, student_grade_matches_level
+from app.competitions.constants import is_valid_level, student_grade_matches_level, validate_scope_and_filter
 from app.competitions.exceptions import ValidationError
 from app.models.test import Test
 from app.models.testQuestion import TestQuestion
@@ -65,6 +65,11 @@ class CompetitionService:
 
         reward_config = data.get('reward_config')
         _validate_reward_config(reward_config)
+
+        try:
+            validate_scope_and_filter(data.get('scope', 'individual'), data.get('scope_filter'))
+        except ValueError as e:
+            raise ValidationError(str(e))
 
         competition = Competition(
             name=data['name'],
@@ -632,11 +637,12 @@ def _extract_scope_arrays(competition: Competition) -> dict:
         'classes': None,
     }
     
-    if competition.scope == 'municipio':
+    scope = (competition.scope or '').strip().lower()
+    if scope == 'municipio':
         result['municipalities'] = scope_filter.get('municipality_ids') or scope_filter.get('city_ids')
-    elif competition.scope == 'escola':
+    elif scope == 'escola':
         result['schools'] = scope_filter.get('school_ids')
-    elif competition.scope == 'turma':
+    elif scope == 'turma':
         result['classes'] = scope_filter.get('class_ids')
     
     return result

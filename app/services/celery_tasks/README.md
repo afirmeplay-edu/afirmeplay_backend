@@ -11,6 +11,7 @@ Gera formulários físicos (PDFs) de forma assíncrona para evitar timeout.
 **Arquivo:** `physical_test_tasks.py`
 
 **Uso:**
+
 ```python
 from app.services.celery_tasks.physical_test_tasks import generate_physical_forms_async
 
@@ -25,10 +26,12 @@ task_id = task.id
 ```
 
 **Parâmetros:**
+
 - `test_id` (str): ID da prova (UUID)
 - `force_regenerate` (bool, opcional): Forçar regeneração mesmo se já existirem formulários
 
 **Retorno:**
+
 ```python
 {
     'success': bool,
@@ -48,6 +51,79 @@ task_id = task.id
 **Timeout:** 15 minutos máximo
 
 **Retries:** 2 tentativas automáticas em caso de falha
+
+---
+
+### **2. recalculate_results_after_answer_correction**
+
+Recalcula resultados de avaliações após correção de gabarito.
+
+**Arquivo:** `evaluation_recalculation_tasks.py`
+
+**Uso:**
+
+```python
+from app.services.celery_tasks.evaluation_recalculation_tasks import (
+    recalculate_results_after_answer_correction,
+    trigger_recalculation_sync
+)
+
+# Recálculo ASSÍNCRONO (≥ 20 alunos)
+task = recalculate_results_after_answer_correction.delay(
+    question_id='question-uuid',
+    old_answer='C',
+    new_answer='A',
+    modified_by='user-uuid'
+)
+
+# Recálculo SÍNCRONO (< 20 alunos)
+result = trigger_recalculation_sync(
+    question_id='question-uuid',
+    old_answer='C',
+    new_answer='A',
+    modified_by='user-uuid',
+    student_ids=['student-1', 'student-2']
+)
+```
+
+**Parâmetros:**
+
+- `question_id` (str): ID da questão que teve gabarito corrigido
+- `old_answer` (str): Resposta correta antiga (ex: "C")
+- `new_answer` (str): Resposta correta nova (ex: "A")
+- `modified_by` (str): ID do usuário que fez a alteração
+
+**Retorno:**
+
+```python
+{
+    'success': bool,
+    'task_id': str,
+    'question_id': str,
+    'old_answer': str,
+    'new_answer': str,
+    'tests_affected': int,
+    'students_recalculated': int,
+    'errors': List[Dict],
+    'duration_seconds': float
+}
+```
+
+**Tempo estimado:** 5 segundos a 10 minutos (dependendo do número de alunos)
+
+**Timeout:** 10 minutos máximo
+
+**Retries:** 3 tentativas automáticas em caso de falha
+
+**Threshold:** 20 alunos (< 20 = síncrono, ≥ 20 = assíncrono)
+
+**Quando é disparada:**
+
+- Automaticamente ao atualizar campo `correct_answer` de uma questão
+- Via `PUT /questions/{question_id}`
+- Sistema detecta mudança e dispara recálculo
+
+**Documentação completa:** `docs/RECALCULO_GABARITO.md`
 
 ---
 
@@ -72,23 +148,23 @@ from celery import Task
 def my_async_task(self: Task, param1: str, param2: int) -> dict:
     """
     Descrição da task
-    
+
     Args:
         param1: Descrição do parâmetro 1
         param2: Descrição do parâmetro 2
-    
+
     Returns:
         Dict com resultado
     """
     try:
         # Sua lógica aqui
         result = do_something(param1, param2)
-        
+
         return {
             'success': True,
             'data': result
         }
-    
+
     except Exception as e:
         # Retry automático
         if self.request.retries < self.max_retries:
@@ -139,9 +215,9 @@ celery_app = Celery(
 @jwt_required()
 def get_my_task_status(task_id):
     from celery.result import AsyncResult
-    
+
     task = AsyncResult(task_id)
-    
+
     return jsonify({
         'status': task.state.lower(),
         'result': task.result if task.ready() else None
@@ -162,15 +238,18 @@ def get_my_task_status(task_id):
 ## ⚙️ **Configurações Importantes**
 
 ### **Timeouts**
+
 - `task_time_limit`: Tempo máximo total (hard limit) - worker é terminado
 - `task_soft_time_limit`: Soft limit - exceção SoftTimeLimitExceeded é lançada
 
 ### **Retries**
+
 - `max_retries`: Número máximo de tentativas
 - `default_retry_delay`: Tempo entre retries (segundos)
 - `task_acks_late`: Acknowledge apenas após conclusão (não ao iniciar)
 
 ### **Serialização**
+
 - `task_serializer='json'`: Tasks são serializadas em JSON
 - `accept_content=['json']`: Aceita apenas JSON
 - `result_serializer='json'`: Resultados em JSON
@@ -192,18 +271,21 @@ def get_my_task_status(task_id):
 ## 🔍 **Debugging**
 
 ### **Ver logs do worker:**
+
 ```bash
 # No servidor
 docker logs celery_worker_production -f
 ```
 
 ### **Verificar tasks na fila:**
+
 ```bash
 # No container do worker
 celery -A app.report_analysis.celery_app inspect active
 ```
 
 ### **Monitorar com Flower (opcional):**
+
 ```bash
 celery -A app.report_analysis.celery_app flower
 # Acesse: http://localhost:5555

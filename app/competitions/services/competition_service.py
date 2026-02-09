@@ -5,7 +5,13 @@ from datetime import datetime, timezone
 from sqlalchemy import func
 
 from app import db
-from app.competitions.models import Competition, CompetitionEnrollment, CompetitionReward
+from app.competitions.models import (
+    Competition,
+    CompetitionEnrollment,
+    CompetitionRankingPayout,
+    CompetitionResult,
+    CompetitionReward,
+)
 from app.competitions.constants import is_valid_level, student_grade_matches_level
 from app.competitions.exceptions import ValidationError
 from app.models.test import Test
@@ -278,6 +284,26 @@ class CompetitionService:
         competition.status = 'cancelada'
         db.session.commit()
         return competition
+
+    @staticmethod
+    def delete_competition(competition_id: str) -> None:
+        """
+        Remove competição (apenas status rascunho ou cancelada).
+        Remove inscrições, recompensas, resultados e payouts de ranking antes de excluir.
+        """
+        c = Competition.query.get_or_404(competition_id)
+        if c.status not in ('rascunho', 'cancelada'):
+            raise ValidationError(
+                "Só é possível excluir competição em rascunho ou cancelada. Cancele a competição antes de excluir."
+            )
+
+        CompetitionRankingPayout.query.filter_by(competition_id=c.id).delete()
+        CompetitionResult.query.filter_by(competition_id=c.id).delete()
+        CompetitionReward.query.filter_by(competition_id=c.id).delete()
+        CompetitionEnrollment.query.filter_by(competition_id=c.id).delete()
+
+        db.session.delete(c)
+        db.session.commit()
 
     # ---------- Etapa 3: Inscrição e listagem para aluno ----------
 

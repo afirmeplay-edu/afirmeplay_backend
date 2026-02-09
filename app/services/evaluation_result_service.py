@@ -362,9 +362,9 @@ class EvaluationResultService:
             try:
                 from app.report_analysis.tasks import rebuild_reports_for_test
                 rebuild_reports_for_test.delay(test_id)
-                logger.info(f"Task de rebuild agendada para test_id={test_id}")
+                logging.info(f"Task de rebuild agendada para test_id={test_id}")
             except Exception as e:
-                logger.warning(f"Erro ao agendar task de rebuild: {str(e)}. Continuando sem rebuild automático.")
+                logging.warning(f"Erro ao agendar task de rebuild: {str(e)}. Continuando sem rebuild automático.")
                 # Não falhar se Celery não estiver disponível
             
             # Preparar resposta com informações adicionais se houver múltiplas disciplinas

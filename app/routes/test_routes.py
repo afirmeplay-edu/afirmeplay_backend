@@ -1002,6 +1002,7 @@ def bulk_delete_tests():
         
         # EXCLUIR REGISTROS RELACIONADOS PARA CADA TESTE
         from app.models.studentAnswer import StudentAnswer
+        from app.models.studentTestOlimpics import StudentTestOlimpics
         from app.models.testSession import TestSession
         from app.models.question import Question
         
@@ -1013,6 +1014,12 @@ def bulk_delete_tests():
             for answer in student_answers:
                 db.session.delete(answer)
             logging.info(f"🗑️ Excluídas {len(student_answers)} respostas de alunos para teste {test.id}")
+            
+            # 1.1 Excluir aplicações olímpicas vinculadas a este teste
+            olympic_applications = StudentTestOlimpics.query.filter_by(test_id=test.id).all()
+            for olympic in olympic_applications:
+                db.session.delete(olympic)
+            logging.info(f"🗑️ Excluídas {len(olympic_applications)} aplicações olímpicas para teste {test.id}")
             
             # 2. Excluir formulários físicos e suas respostas
             from app.models.physicalTestForm import PhysicalTestForm
@@ -1131,10 +1138,17 @@ def deletar_avaliacao(test_id):
         
         # 1. Excluir respostas dos alunos
         from app.models.studentAnswer import StudentAnswer
+        from app.models.studentTestOlimpics import StudentTestOlimpics
         student_answers = StudentAnswer.query.filter_by(test_id=test_id).all()
         for answer in student_answers:
             db.session.delete(answer)
         logging.info(f"🗑️ Excluídas {len(student_answers)} respostas de alunos")
+        
+        # 1.1 Excluir aplicações olímpicas vinculadas a este teste
+        olympic_applications = StudentTestOlimpics.query.filter_by(test_id=test_id).all()
+        for olympic in olympic_applications:
+            db.session.delete(olympic)
+        logging.info(f"🗑️ Excluídas {len(olympic_applications)} aplicações olímpicas")
         
         # 2. Excluir formulários físicos e suas respostas
         from app.models.physicalTestForm import PhysicalTestForm

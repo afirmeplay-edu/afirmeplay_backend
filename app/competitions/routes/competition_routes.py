@@ -7,13 +7,7 @@ from flask import Blueprint, request, jsonify
 from flask_jwt_extended import jwt_required
 from app import db
 from app.permissions import role_required, get_current_user_from_token
-from app.competitions.models import (
-    Competition,
-    CompetitionEnrollment,
-    CompetitionRankingPayout,
-    CompetitionResult,
-    CompetitionReward,
-)
+from app.competitions.models import Competition, CompetitionEnrollment
 from app.competitions.services import CompetitionService, ValidationError, validate_reward_config
 from app.services.competition_ranking_service import CompetitionRankingService
 from app.models.student import Student
@@ -793,21 +787,10 @@ def update_competition(competition_id):
 @role_required(*ROLES_EDIT)
 def delete_competition(competition_id):
     """Remove competição (apenas rascunho ou cancelada). Remove inscrições e dados relacionados."""
-    c = Competition.query.get_or_404(competition_id)
-    if c.status not in ('rascunho', 'cancelada'):
-        return jsonify({
-            "error": "Só é possível excluir competição em rascunho ou cancelada. Cancele a competição antes de excluir."
-        }), 400
-
-    # Tabelas com FK sem ON DELETE CASCADE precisam ser apagadas antes
-    CompetitionRankingPayout.query.filter_by(competition_id=c.id).delete()
-    # Inscrições, recompensas e resultados têm CASCADE no banco; removemos em código para controle
-    CompetitionResult.query.filter_by(competition_id=c.id).delete()
-    CompetitionReward.query.filter_by(competition_id=c.id).delete()
-    CompetitionEnrollment.query.filter_by(competition_id=c.id).delete()
-
-    db.session.delete(c)
-    db.session.commit()
+    try:
+        CompetitionService.delete_competition(competition_id)
+    except ValidationError as e:
+        return jsonify({"error": str(e)}), 400
     return jsonify({"message": "Competição excluída"}), 200
 
 

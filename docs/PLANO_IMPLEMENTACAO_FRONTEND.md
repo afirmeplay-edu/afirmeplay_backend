@@ -267,6 +267,10 @@ export const CompetitionList: React.FC = () => {
 4. Recompensas (participação, ranking)
 5. Avançado (critério ranking, visibilidade, limite)
 
+**Endpoints para o campo Escopo (Etapa 1):**
+- **Escopos permitidos para o usuário:** `GET /competitions/allowed-scopes` — retorna `{ "allowed_scopes": ["individual", "turma", ...] }`. Montar o select de “Escopo” **somente** com esses valores (cada perfil vê apenas o que pode usar: admin = todos; tec adm = individual, turma, escola, municipio; diretor/coordenador = individual, turma, escola; professor = individual, turma). Não há mais escopo "série".
+- **Turma:** `GET /competitions/eligible-classes?level=1` ou `?level=2`. **Escola:** 1) `GET /city/states` 2) `GET /city/municipalities/state/<state>` 3) `GET /schools?city_id=<id>`. **Município:** 1) `GET /city/states` 2) `GET /city/municipalities/state/<state>`. **Estado:** `GET /city/states`. Enviar `scope` e `scope_filter` conforme plano de competições.
+
 **Implementação** (resumida):
 ```typescript
 export const CreateCompetitionModal: React.FC<Props> = ({ open, onClose, onSuccess }) => {

@@ -14,7 +14,11 @@ from app.models.student import Student
 from app.models.studentTestOlimpics import StudentTestOlimpics
 from app.models.testQuestion import TestQuestion
 from app.models.testSession import TestSession
-from app.competitions.constants import is_valid_level, LEVEL_OPTIONS
+from app.competitions.constants import is_valid_level, LEVEL_OPTIONS, validate_scope_and_filter
+from app.competitions.scope_permissions import (
+    get_allowed_competition_scopes,
+    validate_scope_and_filter_for_user,
+)
 from app.utils.timezone_utils import get_local_time
 from sqlalchemy.exc import SQLAlchemyError, IntegrityError
 import logging
@@ -691,6 +695,66 @@ def get_competition(competition_id):
     return jsonify(_competition_to_dict(c)), 200
 
 
+@bp.route('/allowed-scopes', methods=['GET'])
+@jwt_required()
+@role_required(*ROLES_EDIT)
+def get_allowed_scopes():
+    """Retorna os escopos que o usuário pode usar ao criar/editar competição (conforme seu perfil)."""
+    user = get_current_user_from_token()
+    if not user:
+        return jsonify({"error": "Usuário não autenticado"}), 401
+    allowed = get_allowed_competition_scopes(user)
+    return jsonify({"allowed_scopes": allowed}), 200
+
+
+@bp.route('/eligible-classes', methods=['GET'])
+@jwt_required()
+@role_required(*ROLES_EDIT)
+def get_eligible_classes():
+    """
+    Lista turmas elegíveis para escopo 'turma', filtradas pelo nível da competição (1 ou 2).
+    Query param: level (obrigatório) = 1 ou 2. Só retorna turmas cuja série (grade) pertence ao nível.
+    """
+    from app.competitions.constants import STAGE_NAMES_BY_LEVEL, is_valid_level
+    from app.models.studentClass import Class
+    from app.models.school import School
+    from app.models.grades import Grade
+    from app.models.educationStage import EducationStage
+
+    level_param = request.args.get('level')
+    if level_param is None:
+        return jsonify({"error": "Query param 'level' é obrigatório (1 ou 2)"}), 400
+    try:
+        level = int(level_param)
+    except (TypeError, ValueError):
+        return jsonify({"error": "level deve ser 1 ou 2"}), 400
+    if not is_valid_level(level):
+        return jsonify({"error": "level deve ser 1 ou 2"}), 400
+
+    stage_names = STAGE_NAMES_BY_LEVEL.get(level)
+    if not stage_names:
+        return jsonify([]), 200
+
+    classes = (
+        Class.query.join(Grade, Class.grade_id == Grade.id)
+        .join(EducationStage, Grade.education_stage_id == EducationStage.id)
+        .filter(EducationStage.name.in_(stage_names))
+        .outerjoin(School, Class.school_id == School.id)
+        .all()
+    )
+    results = []
+    for c in classes:
+        results.append({
+            'id': str(c.id),
+            'name': c.name or '',
+            'school_id': str(c.school_id) if c.school_id else None,
+            'school_name': c.school.name if c.school else None,
+            'grade_id': str(c.grade_id) if c.grade_id else None,
+            'grade_name': c.grade.name if c.grade else None,
+        })
+    return jsonify(results), 200
+
+
 @bp.route('', methods=['POST'])
 @jwt_required()
 @role_required(*ROLES_EDIT)
@@ -706,6 +770,14 @@ def create_competition():
     for field in required:
         if field not in data:
             return jsonify({"error": f"Campo obrigatório ausente: {field}"}), 400
+    try:
+        validate_scope_and_filter_for_user(
+            data.get('scope', 'individual'),
+            data.get('scope_filter'),
+            user,
+        )
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
     competition = CompetitionService.create_competition(data, user['id'])
     return jsonify(_competition_to_dict(competition)), 201
 
@@ -769,6 +841,21 @@ def update_competition(competition_id):
                     validate_reward_config(val)
                 except ValidationError as e:
                     return jsonify({"error": str(e)}), 400
+            if key in ('scope', 'scope_filter'):
+                scope_val = val if key == 'scope' else data.get('scope', c.scope)
+                scope_filter_val = val if key == 'scope_filter' else data.get('scope_filter', c.scope_filter)
+                try:
+                    validate_scope_and_filter(scope_val, scope_filter_val)
+                except ValueError as e:
+                    return jsonify({"error": str(e)}), 400
+                user = get_current_user_from_token()
+                if user:
+                    try:
+                        validate_scope_and_filter_for_user(
+                            scope_val, scope_filter_val, user
+                        )
+                    except ValueError as e:
+                        return jsonify({"error": str(e)}), 400
             setattr(c, key, val)
 
     # Se passou para auto_random com question_rules e ainda não tem prova, sorteia questões e cria o Test

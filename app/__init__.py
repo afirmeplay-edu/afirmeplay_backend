@@ -61,14 +61,6 @@ def create_app():
     jwt.init_app(app)
     migrate.init_app(app, db)
     
-    # Inicializar SocketIO para comunicação em tempo real
-    try:
-        from app.socketio import socketio
-        socketio.init_app(app)
-        app.logger.info("SocketIO inicializado com sucesso")
-    except Exception as e:
-        app.logger.warning(f"SocketIO não pôde ser inicializado: {str(e)}. Comunicação em tempo real desabilitada.")
-    
     # Registrar filtros Jinja2 globais
     @app.template_filter('formatar_texto_ia')
     def formatar_texto_ia(texto):

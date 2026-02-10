@@ -173,11 +173,16 @@ class CompetitionRankingService:
         Pode ser chamado por um job em background (thread) ou pela task Celery.
         Retorna: { "processed": int, "total_candidates": int, "errors": list }.
         """
-        now = datetime.utcnow()
-        competitions = Competition.query.filter(
-            Competition.expiration < now,
+        # Buscar todas as competições abertas ou em andamento
+        # e filtrar usando a property is_finished que já considera o timezone corretamente
+        candidate_competitions = Competition.query.filter(
             Competition.status.in_(['aberta', 'em_andamento']),
         ).all()
+        
+        # Filtrar apenas as que realmente estão expiradas usando is_finished property
+        # que já interpreta os horários corretamente no timezone da competição
+        competitions = [c for c in candidate_competitions if c.is_finished]
+        
         processed = 0
         errors = []
         for competition in competitions:

@@ -401,13 +401,12 @@ def start_competition_test(competition_id):
     if not enrollment:
         return jsonify({"error": "Aluno não inscrito nesta competição"}), 403
 
-    # Período de aplicação (application / expiration)
-    now = get_local_time()
-    now_naive = now.replace(tzinfo=None) if now.tzinfo else now
-    if c.application and now_naive < c.application:
-        return jsonify({"error": "Fora do período de aplicação da competição"}), 410
-    if c.expiration and now_naive > c.expiration:
-        return jsonify({"error": "Período de aplicação da competição encerrado"}), 410
+    # Período de aplicação - usar property que já considera timezone correto
+    if not c.is_application_open:
+        if c.is_finished:
+            return jsonify({"error": "Período de aplicação da competição encerrado"}), 410
+        else:
+            return jsonify({"error": "Fora do período de aplicação da competição"}), 410
 
     # Sessão existente: em_andamento → retornar (mesmo formato de sucesso para o front abrir a prova); finalizada/expirada → não permitir nova
     existing = (
@@ -543,15 +542,14 @@ def finalize_competition(competition_id):
     paga moedas de ranking e define status='encerrada'.
     Só permite se expiration já passou e status é aberta/em_andamento.
     """
-    from datetime import datetime
     c = Competition.query.get_or_404(competition_id)
-    now_utc = datetime.utcnow()
     if c.status not in ('aberta', 'em_andamento'):
         return jsonify({
             "error": "Competição já encerrada ou não está aberta.",
             "status": c.status,
         }), 400
-    if c.expiration and c.expiration > now_utc:
+    # Usar property is_finished que já considera o timezone correto
+    if not c.is_finished:
         return jsonify({
             "error": "Competição ainda não expirou. Aguarde a data de expiração.",
             "expiration": c.expiration.isoformat() if c.expiration else None,
@@ -600,8 +598,6 @@ def list_eligible_students(competition_id):
     include_meta = request.args.get('include_meta', '').lower() in ('1', 'true', 'yes')
 
     # Verificações globais da competição
-    now = get_local_time()
-    now_naive = now.replace(tzinfo=None) if now.tzinfo else now
     if competition.status != 'aberta' or not competition.test_id:
         if include_meta:
             return jsonify({
@@ -613,18 +609,27 @@ def list_eligible_students(competition_id):
                 },
             }), 200
         return jsonify([]), 200
-    if competition.enrollment_start and now_naive < competition.enrollment_start:
+    
+    # Usar property is_enrollment_open que já considera timezone correto
+    if not competition.is_enrollment_open:
+        # Determinar se está antes ou depois do período
+        from app.utils.timezone_utils import get_local_time
+        from app.competitions.models.competition import _normalize_datetime_for_comparison
+        now = get_local_time()
+        now_naive = _normalize_datetime_for_comparison(now)
+        start_normalized = _normalize_datetime_for_comparison(competition.enrollment_start, competition.timezone)
+        
+        if start_normalized and now_naive < start_normalized:
+            reason = "before_enrollment_period"
+            detail = {"enrollment_start": competition.enrollment_start.isoformat() if competition.enrollment_start else None}
+        else:
+            reason = "after_enrollment_period"
+            detail = {"enrollment_end": competition.enrollment_end.isoformat() if competition.enrollment_end else None}
+        
         if include_meta:
             return jsonify({
                 "eligible": [],
-                "meta": {"reason": "before_enrollment_period", "enrollment_start": competition.enrollment_start.isoformat() if competition.enrollment_start else None},
-            }), 200
-        return jsonify([]), 200
-    if competition.enrollment_end and now_naive > competition.enrollment_end:
-        if include_meta:
-            return jsonify({
-                "eligible": [],
-                "meta": {"reason": "after_enrollment_period", "enrollment_end": competition.enrollment_end.isoformat() if competition.enrollment_end else None},
+                "meta": {"reason": reason, **detail},
             }), 200
         return jsonify([]), 200
 

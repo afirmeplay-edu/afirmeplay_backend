@@ -332,24 +332,23 @@ class CompetitionService:
         if not student:
             return []
 
-        # Usar o mesmo conceito de "agora" da parte de avaliações:
-        # horário local do servidor (respeitando TZ configurado), não UTC puro.
-        now = get_local_time()
-        # Normalizar para naive datetime para comparação com campos TIMESTAMP do banco
-        now_naive = now.replace(tzinfo=None) if now.tzinfo else now
+        # Buscar todas as competições abertas com test_id
         query = (
             Competition.query.filter(
                 Competition.status == 'aberta',
                 Competition.test_id.isnot(None),
-                # A competição é considerada "disponível" para listagem enquanto estiver
-                # ativa no ciclo dela: inscrições abertas ou prova em andamento.
-                Competition.enrollment_start <= now_naive,
-                Competition.expiration >= now_naive,
             )
         )
         if subject_id:
             query = query.filter(Competition.subject_id == subject_id)
-        candidates = query.all()
+        all_competitions = query.all()
+        
+        # Filtrar usando as properties que já consideram timezone correto
+        # A competição é considerada "disponível" se: inscrições abertas OU aplicação aberta (mas não finalizada)
+        candidates = [
+            c for c in all_competitions 
+            if (c.is_enrollment_open or c.is_application_open) and not c.is_finished
+        ]
 
         result = []
         for c in candidates:
@@ -379,13 +378,8 @@ class CompetitionService:
         if competition.status != 'aberta':
             raise ValidationError("Competição não está aberta para inscrição")
 
-        # Usar horário local do servidor (mesma lógica de get_available_competitions_for_student)
-        now = get_local_time()
-        # Normalizar para naive datetime para comparação com campos TIMESTAMP do banco
-        now_naive = now.replace(tzinfo=None) if now.tzinfo else now
-        if competition.enrollment_start and now_naive < competition.enrollment_start:
-            raise ValidationError("Fora do período de inscrição")
-        if competition.enrollment_end and now_naive > competition.enrollment_end:
+        # Usar property is_enrollment_open que já considera o timezone correto
+        if not competition.is_enrollment_open:
             raise ValidationError("Fora do período de inscrição")
 
         if not competition.test_id:
@@ -452,8 +446,8 @@ class CompetitionService:
         if not competition:
             raise ValidationError("Competição não encontrada")
 
-        now = datetime.utcnow()
-        if competition.application and now >= competition.application:
+        # Usar property is_application_open que já considera o timezone correto
+        if competition.is_application_open or competition.is_finished:
             raise ValidationError("Não é possível cancelar inscrição após o início do período de aplicação")
 
         enrollment = CompetitionEnrollment.query.filter_by(

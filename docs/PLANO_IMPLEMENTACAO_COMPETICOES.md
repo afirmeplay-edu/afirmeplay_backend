@@ -496,10 +496,45 @@ class CompetitionService:
 - Descrição (textarea, opcional)
 - Disciplina (select)
 - Nível (select: 1, 2, 3... ou labels: Anos Iniciais, Anos Finais, etc.)
-- Escopo (select: Individual, Turma, Escola, Município)
-  - Se Turma: multi-select de turmas
-  - Se Escola: multi-select de escolas
-  - Se Município: multi-select de municípios
+- Escopo (select: Individual, Turma, Escola, Município, Estado) — valores da API: `individual`, `turma`, `escola`, `municipio`, `estado` (não há mais escopo "série").
+  - **Individual:** nenhum filtro; enviar `scope_filter: {}`.
+  - **Turma:** multi-select de turmas **do nível selecionado** na competição. Chamar `GET /competitions/eligible-classes?level=1` ou `level=2` (conforme o nível da competição); só aparecem turmas cuja série pertence a esse nível. Enviar `scope_filter: { "class_ids": ["uuid", ...] }`.
+  - **Escola:** filtro em cascata: **Estado** → **Município** → escolas. 1) Listar estados: `GET /city/states`. 2) Listar municípios do estado: `GET /city/municipalities/state/<state_name>`. 3) Listar escolas do município: `GET /schools?city_id=<city_id>`. Enviar `scope_filter: { "school_ids": ["uuid", ...] }`.
+  - **Município:** filtro por **Estado** primeiro. 1) Listar estados: `GET /city/states`. 2) Listar municípios: `GET /city/municipalities/state/<state_name>`. Enviar `scope_filter: { "city_ids": ["uuid", ...] }` ou `"municipality_ids"`.
+  - **Estado:** sem filtro; listar estados com `GET /city/states` e multi-select. Enviar `scope_filter: { "state_names": ["SP", "RJ", ...] }` ou `"state"`.
+  - Para escopos não-individual, o backend exige ao menos um item no filtro correspondente.
+  - **Quem pode usar cada escopo** depende do seu perfil (veja abaixo). O frontend deve chamar `GET /competitions/allowed-scopes` e exibir no select apenas os escopos retornados.
+
+**Permissões de escopo por perfil (role)** — instruções simples
+
+Quem cria a competição tem um **perfil** (administrador, tec adm, diretor, coordenador ou professor). Cada perfil só pode escolher certos tipos de escopo. O sistema bloqueia o que não for permitido.
+
+- **Administrador**
+  - Pode usar **todos** os escopos: Individual, Turma, Escola, Município, Estado.
+  - O escopo **Individual** para o admin significa “competição aberta para todo o sistema” (qualquer aluno que atenda ao nível pode participar). Funciona como “geral”.
+
+- **Tec adm (administrador técnico do município)**
+  - Pode usar apenas o que for **do seu município**:
+    - **Individual** (quem estiver no seu município, conforme regras do sistema).
+    - **Município**: só o **seu** município (não pode escolher outro).
+    - **Escola**: só escolas que pertencem ao seu município.
+    - **Turma**: só turmas de escolas do seu município (e do nível da competição).
+  - **Não** pode usar escopo por Estado (vários municípios).
+
+- **Diretor e Coordenador**
+  - Pode usar apenas o que for **da sua escola**:
+    - **Individual** (no âmbito da sua escola, conforme regras do sistema).
+    - **Escola**: só **a sua** escola (não pode escolher outra).
+    - **Turma**: só turmas da sua escola (e do nível da competição).
+  - **Não** pode usar escopo por Município nem por Estado.
+
+- **Professor**
+  - Pode usar apenas:
+    - **Individual** (no âmbito em que o sistema permitir).
+    - **Turma**: só turmas **em que você dá aula** (vinculadas a você), do nível da competição. Não pode escolher turmas de outros professores.
+  - **Não** pode usar escopo por Escola, Município ou Estado.
+
+Resumo para o frontend: chamar `GET /competitions/allowed-scopes` ao abrir o formulário de criação/edição e montar o select de “Escopo” apenas com os valores retornados em `allowed_scopes`. Ao salvar, o backend valida de novo; se o usuário tiver alterado algo e estiver fora do permitido, retorna erro 400 com mensagem clara.
 
 **Etapa 2: Datas**
 

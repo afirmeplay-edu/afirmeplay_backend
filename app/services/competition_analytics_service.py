@@ -158,9 +158,25 @@ class CompetitionAnalyticsService:
             }
 
         if competition.status == 'encerrada':
-            # Usar competition_results
+            # Usar competition_results se existirem (snapshot oficial)
             results = CompetitionResult.query.filter_by(competition_id=competition_id).all()
-            if not results:
+            if results:
+                grades = [r.grade for r in results if r.grade is not None]
+                durations = [r.tempo_gasto for r in results if r.tempo_gasto is not None]
+                corrects = [r.correct_answers for r in results if r.correct_answers is not None]
+                profs = [r.proficiency for r in results if r.proficiency is not None]
+
+                return {
+                    "grade": round(sum(grades) / len(grades), 2) if grades else 0.0,
+                    "duration_minutes": round(sum(durations) / len(durations), 2) if durations else 0.0,
+                    "correct_answers": round(sum(corrects) / len(corrects), 2) if corrects else 0.0,
+                    "proficiency": round(sum(profs) / len(profs), 2) if profs else 0.0,
+                }
+
+            # Fallback: se ainda não houver snapshot (bug/estado inconsistente), reutilizar cálculo do ranking
+            from app.services.competition_ranking_service import CompetitionRankingService
+            ranking = CompetitionRankingService.calculate_ranking(competition_id)
+            if not ranking:
                 return {
                     "grade": 0.0,
                     "duration_minutes": 0.0,
@@ -168,10 +184,10 @@ class CompetitionAnalyticsService:
                     "proficiency": 0.0,
                 }
 
-            grades = [r.grade for r in results if r.grade is not None]
-            durations = [r.tempo_gasto for r in results if r.tempo_gasto is not None]
-            corrects = [r.correct_answers for r in results if r.correct_answers is not None]
-            profs = [r.proficiency for r in results if r.proficiency is not None]
+            grades = [item.get("grade") for item in ranking if item.get("grade") is not None]
+            durations = [item.get("duration_minutes") for item in ranking if item.get("duration_minutes") is not None]
+            corrects = [item.get("correct_answers") for item in ranking if item.get("correct_answers") is not None]
+            profs = [item.get("proficiency") for item in ranking if item.get("proficiency") is not None]
 
             return {
                 "grade": round(sum(grades) / len(grades), 2) if grades else 0.0,
@@ -222,7 +238,23 @@ class CompetitionAnalyticsService:
         # Buscar notas
         if competition.status == 'encerrada':
             results = CompetitionResult.query.filter_by(competition_id=competition_id).all()
-            grades = [r.grade for r in results if r.grade is not None]
+            if results:
+                grades = [r.grade for r in results if r.grade is not None]
+            else:
+                # Fallback: se não houver snapshot, usar sessões/avaliações como em calculate_ranking
+                sessions = TestSession.query.filter(
+                    TestSession.test_id == competition.test_id,
+                    TestSession.status.in_(['finalizada', 'expirada', 'corrigida', 'revisada']),
+                ).all()
+
+                from app.competitions.services.competition_service import _student_in_scope
+                filtered_sessions = []
+                for session in sessions:
+                    student = Student.query.get(session.student_id)
+                    if student and _student_in_scope(student, competition):
+                        filtered_sessions.append(session)
+
+                grades = [s.grade for s in filtered_sessions if s.grade is not None]
         else:
             sessions = TestSession.query.filter(
                 TestSession.test_id == competition.test_id,

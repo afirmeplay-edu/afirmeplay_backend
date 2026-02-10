@@ -1689,8 +1689,9 @@ def list_classes():
 @role_required("admin", "professor", "coordenador", "diretor", "tecadm")
 def list_schools():
     """
-    Lista todas as escolas
-    
+    Lista escolas. Query params opcionais para filtro (escopo competição):
+    - city_id: lista apenas escolas do município (útil após selecionar estado e município).
+    - state: lista apenas escolas do estado (usa City.state; ex: SP, RJ).
     Returns:
         [
             {
@@ -1702,8 +1703,15 @@ def list_schools():
         ]
     """
     try:
-        schools = School.query.all()
-        
+        query = School.query
+        city_id = request.args.get('city_id')
+        state = request.args.get('state')
+        if city_id:
+            query = query.filter(School.city_id == city_id)
+        elif state:
+            from app.models.city import City
+            query = query.join(City, School.city_id == City.id).filter(City.state.ilike(state))
+        schools = query.all()
         results = []
         for school in schools:
             results.append({
@@ -1712,9 +1720,7 @@ def list_schools():
                 'address': school.address,
                 'city_id': school.city_id
             })
-        
         return jsonify(results), 200
-        
     except Exception as e:
         logging.error(f"Erro ao listar escolas: {str(e)}", exc_info=True)
         return jsonify({"error": "Erro ao listar escolas", "details": str(e)}), 500 

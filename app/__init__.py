@@ -40,7 +40,12 @@ def create_app():
         r"/*": {
             "origins": [os.getenv('FRONTEND_URL'), "http://localhost:8080",],
             "methods": ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-            "allow_headers": ["Content-Type", "Authorization"],
+            "allow_headers": [
+                "Content-Type", 
+                "Authorization",
+                "X-City-ID",      # Header para admin especificar cidade por UUID
+                "X-City-Slug"     # Header para admin especificar cidade por slug
+            ],
             "expose_headers": ["Authorization"],
             "supports_credentials": True
         }
@@ -60,6 +65,49 @@ def create_app():
     db.init_app(app)
     jwt.init_app(app)
     migrate.init_app(app, db)
+    
+    # ========================================
+    # MIDDLEWARE MULTI-TENANT
+    # ========================================
+    # Resolução automática de schema PostgreSQL por request
+    # baseado em: JWT token, headers X-City-ID/Slug, e subdomínio
+    
+    from .utils.tenant_middleware import tenant_middleware
+    from sqlalchemy import text
+    
+    @app.before_request
+    def handle_tenant_resolution():
+        """Middleware de resolução de contexto de tenant (cidade/município)"""
+        return tenant_middleware()
+    
+    @app.teardown_appcontext
+    def reset_search_path(exception=None):
+        """
+        Reseta o search_path do PostgreSQL após cada request.
+        Garante isolamento entre requests e compatibilidade com pool de conexões.
+        """
+        try:
+            if exception:
+                db.session.rollback()
+            else:
+                try:
+                    db.session.commit()
+                except Exception as commit_error:
+                    app.logger.warning(f"Erro ao fazer commit no teardown: {commit_error}")
+                    db.session.rollback()
+            
+            # Resetar search_path para public (estado limpo)
+            db.session.execute(text("SET search_path TO public"))
+            
+        except Exception as e:
+            app.logger.error(f"Erro ao resetar search_path: {e}")
+        finally:
+            # Remover sessão do pool (importante para pool de conexões)
+            db.session.remove()
+    
+    # ========================================
+    # FIM MIDDLEWARE MULTI-TENANT
+    # ========================================
     
     # Registrar filtros Jinja2 globais
     @app.template_filter('formatar_texto_ia')

@@ -7,6 +7,7 @@ Endpoint para geração de relatórios completos com estatísticas detalhadas
 from flask import Blueprint, request, jsonify, render_template_string, send_file, make_response
 from flask_jwt_extended import jwt_required
 from app.permissions import role_required, get_current_user_from_token
+from app.decorators import requires_city_context
 from app.models.test import Test
 from app.models.student import Student
 from app.models.studentAnswer import StudentAnswer

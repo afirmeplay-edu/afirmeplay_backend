@@ -3,6 +3,7 @@ from app.models.studentClass import Class
 from app import db
 from flask_jwt_extended import jwt_required
 from app.decorators.role_required import role_required, get_current_user_from_token
+from app.decorators import requires_city_context
 from app.utils.uuid_helpers import ensure_uuid, ensure_uuid_list
 from sqlalchemy.exc import SQLAlchemyError, IntegrityError
 from sqlalchemy import cast
@@ -37,6 +38,7 @@ def handle_generic_error(error):
 @bp.route('/filtered', methods=['GET'])
 @jwt_required()
 @role_required("admin", "professor", "coordenador", "diretor", "tecadm")
+@requires_city_context
 def get_filtered_classes():
     """
     Busca turmas com filtros avançados

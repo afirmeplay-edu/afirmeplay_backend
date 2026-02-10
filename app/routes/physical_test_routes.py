@@ -8,6 +8,7 @@ Suporta correção única (síncrona) e em lote (assíncrona com polling)
 from flask import Blueprint, request, jsonify, send_file
 from flask_jwt_extended import jwt_required, get_jwt_identity
 from app.decorators.role_required import role_required
+from app.decorators import requires_city_context
 from app import db
 from app.models.test import Test
 from app.models.student import Student

@@ -68,10 +68,20 @@ def login():
             tenant_id = usuario.city_id
 
 
+        # Buscar informações da cidade (se houver tenant_id)
+        from app.models.city import City
+        city = None
+        city_slug = None
+        if tenant_id:
+            city = City.query.get(tenant_id)
+            if city:
+                city_slug = city.slug
+        
         token_payload = {
             "sub": usuario.id,
             "tenant_id": tenant_id,
             "role": usuario.role.value,
+            "city_slug": city_slug,  # Incluir slug no token para facilitar resolução
             "exp": datetime.datetime.utcnow() + datetime.timedelta(hours=1)
         }
 
@@ -83,6 +93,7 @@ def login():
             "email": usuario.email,
             "registration": usuario.registration,
             "tenant_id": tenant_id,
+            "city_slug": city_slug,  # Incluir slug na resposta
             "created_at": usuario.created_at,
             "role": usuario.role.value
         }

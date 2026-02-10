@@ -6,6 +6,7 @@ from flask import Blueprint, request, jsonify
 from flask_jwt_extended import jwt_required
 from app import db
 from app.decorators.role_required import role_required, get_current_user_from_token
+from app.decorators import requires_city_context
 from app.certification.models import CertificateTemplate, Certificate
 from app.certification.services.certificate_service import CertificateService
 from app.models.student import Student
@@ -38,6 +39,7 @@ def handle_generic_error(error):
 
 @bp.route('/template/<string:evaluation_id>', methods=['GET'])
 @jwt_required()
+@requires_city_context
 def get_template(evaluation_id):
     """Busca template de certificado para uma avaliação"""
     try:
@@ -56,6 +58,7 @@ def get_template(evaluation_id):
 @bp.route('/template', methods=['POST'])
 @jwt_required()
 @role_required("admin", "professor", "coordenador", "diretor", "tecadm")
+@requires_city_context
 def save_template():
     """Cria ou atualiza template de certificado"""
     try:

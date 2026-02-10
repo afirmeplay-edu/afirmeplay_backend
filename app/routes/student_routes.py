@@ -6,6 +6,7 @@ from app.models.studentPasswordLog import StudentPasswordLog
 from sqlalchemy.exc import SQLAlchemyError, IntegrityError
 import logging
 from app.decorators.role_required import role_required, get_current_user_from_token
+from app.decorators import requires_city_context
 from app.decorators.role_required import get_current_tenant_id
 from datetime import datetime
 from app import db
@@ -47,6 +48,7 @@ def handle_generic_error(error):
 @bp.route("", methods=['POST'])
 @jwt_required()
 @role_required("admin", "professor", "coordenador", "diretor", "tecadm")
+@requires_city_context
 def criar_usuario_e_aluno():
     try:
         logging.info("Iniciando criação de usuário/aluno combinada")

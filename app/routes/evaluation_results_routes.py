@@ -314,14 +314,16 @@ def verificar_permissao_filtros(user: dict, scope_info: dict = None) -> Dict[str
 @role_required("admin", "professor", "coordenador", "diretor", "tecadm")
 def listar_grades():
     """
-    Lista todas as grades (séries) disponíveis
+    Lista todas as grades (séries) disponíveis.
+    Inclui education_stage_name para exibição em cards (ex.: modal de seleção de escopo).
     """
     try:
-        grades = Grade.query.all()
+        grades = Grade.query.options(joinedload(Grade.education_stage)).all()
         result = [{
             "id": str(grade.id),
             "name": grade.name,
-            "education_stage_id": str(grade.education_stage_id) if grade.education_stage_id else None
+            "education_stage_id": str(grade.education_stage_id) if grade.education_stage_id else None,
+            "education_stage_name": grade.education_stage.name if getattr(grade, "education_stage", None) else None,
         } for grade in grades]
         
         return jsonify(result), 200

@@ -6,21 +6,40 @@ from datetime import datetime, timezone
 from app.utils.timezone_utils import get_local_time
 
 
-def _normalize_datetime_for_comparison(dt):
+def _normalize_datetime_for_comparison(dt, competition_timezone=None):
     """
-    Normaliza datetime para comparação: se for naive, mantém naive;
-    se for timezone-aware, converte para UTC e depois remove timezone.
-    Garante que todas as comparações sejam feitas com datetimes naive.
+    Normaliza datetime para comparação consistente em UTC naive.
+    
+    Args:
+        dt: datetime a ser normalizado
+        competition_timezone: timezone da competição (ex: 'America/Sao_Paulo')
+                            usado para interpretar datetimes naive do banco
+    
+    Returns:
+        datetime naive em UTC para comparação
     """
     if dt is None:
         return None
     if isinstance(dt, datetime):
-        # Se for timezone-aware, converter para UTC primeiro, depois remover timezone
+        # Se for timezone-aware, converter para UTC e remover timezone
         if dt.tzinfo is not None:
-            # Converter para UTC e depois remover timezone
             dt_utc = dt.astimezone(timezone.utc)
             return dt_utc.replace(tzinfo=None)
-        # Se já é naive, retornar como está (assumindo que está em UTC ou timezone local)
+        # Se for naive (horários do banco), interpretar como timezone da competição
+        # antes de converter para UTC
+        if competition_timezone:
+            try:
+                import pytz
+                tz = pytz.timezone(competition_timezone)
+                # Localizar o datetime naive no timezone da competição
+                dt_aware = tz.localize(dt)
+                # Converter para UTC e remover timezone
+                dt_utc = dt_aware.astimezone(timezone.utc)
+                return dt_utc.replace(tzinfo=None)
+            except Exception:
+                # Se falhar, assumir que já está em UTC
+                pass
+        # Se não tem timezone da competição ou falhou, assumir que está em UTC
         return dt
     return dt
 
@@ -68,12 +87,12 @@ class Competition(db.Model):
     @property
     def is_enrollment_open(self) -> bool:
         """Verifica se está no período de inscrição."""
-        # Alinha com lógica de avaliações: usar horário local do servidor
-        # (get_local_time) em vez de UTC puro para comparações.
+        # Usar horário local do servidor convertido para UTC naive
         now = get_local_time()
         now_naive = _normalize_datetime_for_comparison(now)
-        start = _normalize_datetime_for_comparison(self.enrollment_start)
-        end = _normalize_datetime_for_comparison(self.enrollment_end)
+        # Interpretar horários do banco como timezone da competição
+        start = _normalize_datetime_for_comparison(self.enrollment_start, self.timezone)
+        end = _normalize_datetime_for_comparison(self.enrollment_end, self.timezone)
         if start is None or end is None:
             return False
         return start <= now_naive <= end
@@ -83,8 +102,9 @@ class Competition(db.Model):
         """Verifica se está no período de aplicação."""
         now = get_local_time()
         now_naive = _normalize_datetime_for_comparison(now)
-        app_start = _normalize_datetime_for_comparison(self.application)
-        exp = _normalize_datetime_for_comparison(self.expiration)
+        # Interpretar horários do banco como timezone da competição
+        app_start = _normalize_datetime_for_comparison(self.application, self.timezone)
+        exp = _normalize_datetime_for_comparison(self.expiration, self.timezone)
         if app_start is None or exp is None:
             return False
         return app_start <= now_naive <= exp
@@ -94,7 +114,8 @@ class Competition(db.Model):
         """Verifica se já expirou."""
         now = get_local_time()
         now_naive = _normalize_datetime_for_comparison(now)
-        exp = _normalize_datetime_for_comparison(self.expiration)
+        # Interpretar horário do banco como timezone da competição
+        exp = _normalize_datetime_for_comparison(self.expiration, self.timezone)
         if exp is None:
             return False
         return now_naive > exp

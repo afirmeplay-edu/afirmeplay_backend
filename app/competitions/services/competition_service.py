@@ -12,7 +12,7 @@ from app.competitions.models import (
     CompetitionResult,
     CompetitionReward,
 )
-from app.competitions.constants import is_valid_level, student_grade_matches_level
+from app.competitions.constants import is_valid_level, student_grade_matches_level, validate_scope_and_filter
 from app.competitions.exceptions import ValidationError
 from app.models.test import Test
 from app.models.testQuestion import TestQuestion
@@ -65,6 +65,11 @@ class CompetitionService:
 
         reward_config = data.get('reward_config')
         _validate_reward_config(reward_config)
+
+        try:
+            validate_scope_and_filter(data.get('scope', 'individual'), data.get('scope_filter'))
+        except ValueError as e:
+            raise ValidationError(str(e))
 
         competition = Competition(
             name=data['name'],
@@ -327,24 +332,23 @@ class CompetitionService:
         if not student:
             return []
 
-        # Usar o mesmo conceito de "agora" da parte de avaliações:
-        # horário local do servidor (respeitando TZ configurado), não UTC puro.
-        now = get_local_time()
-        # Normalizar para naive datetime para comparação com campos TIMESTAMP do banco
-        now_naive = now.replace(tzinfo=None) if now.tzinfo else now
+        # Buscar todas as competições abertas com test_id
         query = (
             Competition.query.filter(
                 Competition.status == 'aberta',
                 Competition.test_id.isnot(None),
-                # A competição é considerada "disponível" para listagem enquanto estiver
-                # ativa no ciclo dela: inscrições abertas ou prova em andamento.
-                Competition.enrollment_start <= now_naive,
-                Competition.expiration >= now_naive,
             )
         )
         if subject_id:
             query = query.filter(Competition.subject_id == subject_id)
-        candidates = query.all()
+        all_competitions = query.all()
+        
+        # Filtrar usando as properties que já consideram timezone correto
+        # A competição é considerada "disponível" se: inscrições abertas OU aplicação aberta (mas não finalizada)
+        candidates = [
+            c for c in all_competitions 
+            if (c.is_enrollment_open or c.is_application_open) and not c.is_finished
+        ]
 
         result = []
         for c in candidates:
@@ -362,6 +366,80 @@ class CompetitionService:
         return result
 
     @staticmethod
+    def get_student_competitions(student_id: str, status: str | None = None):
+        """
+        Lista competições relacionadas ao aluno (histórico).
+
+        Inclui competições onde:
+        - o aluno está/esteve inscrito (CompetitionEnrollment)
+        - ou o aluno possui StudentTestOlimpics vinculado ao test_id da competição
+
+        Filtro opcional de status (string):
+        - "finished": somente competições finalizadas
+        - "active"  : competições não finalizadas, com inscrições ou aplicação abertas ou status em_andamento
+        - "upcoming": competições não finalizadas e ainda não iniciadas (antes de inscrição e aplicação)
+        - None ou outro valor: retorna todas as competições relacionadas ao aluno
+        """
+        student = Student.query.get(student_id)
+        if not student:
+            return []
+
+        # Competitions via inscrições
+        enrolled_competitions = (
+            Competition.query.join(
+                CompetitionEnrollment,
+                Competition.id == CompetitionEnrollment.competition_id,
+            )
+            .filter(
+                CompetitionEnrollment.student_id == student_id,
+            )
+            .all()
+        )
+
+        # Competitions via StudentTestOlimpics (provas de competição feitas pelo aluno)
+        olympics_competitions = (
+            Competition.query.join(
+                StudentTestOlimpics,
+                Competition.test_id == StudentTestOlimpics.test_id,
+            )
+            .filter(
+                StudentTestOlimpics.student_id == student_id,
+            )
+            .all()
+        )
+
+        # Unir as duas fontes (inscrições + provas realizadas) em memória, evitando UNION no banco
+        all_competitions_dict = {}
+        for c in enrolled_competitions + olympics_competitions:
+            all_competitions_dict[c.id] = c
+        all_competitions = list(all_competitions_dict.values())
+
+        def _match_status(c: Competition) -> bool:
+            # Usar as properties que já consideram timezone corretamente
+            if status is None:
+                return True
+
+            s = (status or "").strip().lower()
+            if s == "finished":
+                return c.is_finished or (c.status or "").strip().lower() == "encerrada"
+            if s == "active":
+                # Competição em andamento (inscrição ou aplicação aberta) e não finalizada
+                return (c.is_enrollment_open or c.is_application_open or (c.status or "").strip().lower() == "em_andamento") and not c.is_finished
+            if s == "upcoming":
+                # Ainda não começou (sem inscrição/aplicação aberta e não finalizada)
+                return (not c.is_enrollment_open and not c.is_application_open) and not c.is_finished
+
+            # Qualquer outro valor: não filtra por status
+            return True
+
+        # Aplicar filtro de status em Python (já temos as properties prontas)
+        competitions = [c for c in all_competitions if _match_status(c)]
+
+        # Ordenar por data de criação (mais recentes primeiro)
+        competitions.sort(key=lambda c: c.created_at or datetime.min, reverse=True)
+        return competitions
+
+    @staticmethod
     def enroll_student(competition_id: str, student_id: str):
         """
         Inscreve o aluno na competição: cria CompetitionEnrollment e StudentTestOlimpics.
@@ -374,13 +452,8 @@ class CompetitionService:
         if competition.status != 'aberta':
             raise ValidationError("Competição não está aberta para inscrição")
 
-        # Usar horário local do servidor (mesma lógica de get_available_competitions_for_student)
-        now = get_local_time()
-        # Normalizar para naive datetime para comparação com campos TIMESTAMP do banco
-        now_naive = now.replace(tzinfo=None) if now.tzinfo else now
-        if competition.enrollment_start and now_naive < competition.enrollment_start:
-            raise ValidationError("Fora do período de inscrição")
-        if competition.enrollment_end and now_naive > competition.enrollment_end:
+        # Usar property is_enrollment_open que já considera o timezone correto
+        if not competition.is_enrollment_open:
             raise ValidationError("Fora do período de inscrição")
 
         if not competition.test_id:
@@ -447,8 +520,8 @@ class CompetitionService:
         if not competition:
             raise ValidationError("Competição não encontrada")
 
-        now = datetime.utcnow()
-        if competition.application and now >= competition.application:
+        # Usar property is_application_open que já considera o timezone correto
+        if competition.is_application_open or competition.is_finished:
             raise ValidationError("Não é possível cancelar inscrição após o início do período de aplicação")
 
         enrollment = CompetitionEnrollment.query.filter_by(
@@ -632,11 +705,12 @@ def _extract_scope_arrays(competition: Competition) -> dict:
         'classes': None,
     }
     
-    if competition.scope == 'municipio':
+    scope = (competition.scope or '').strip().lower()
+    if scope == 'municipio':
         result['municipalities'] = scope_filter.get('municipality_ids') or scope_filter.get('city_ids')
-    elif competition.scope == 'escola':
+    elif scope == 'escola':
         result['schools'] = scope_filter.get('school_ids')
-    elif competition.scope == 'turma':
+    elif scope == 'turma':
         result['classes'] = scope_filter.get('class_ids')
     
     return result

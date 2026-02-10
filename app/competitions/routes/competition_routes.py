@@ -14,7 +14,11 @@ from app.models.student import Student
 from app.models.studentTestOlimpics import StudentTestOlimpics
 from app.models.testQuestion import TestQuestion
 from app.models.testSession import TestSession
-from app.competitions.constants import is_valid_level, LEVEL_OPTIONS
+from app.competitions.constants import is_valid_level, LEVEL_OPTIONS, validate_scope_and_filter
+from app.competitions.scope_permissions import (
+    get_allowed_competition_scopes,
+    validate_scope_and_filter_for_user,
+)
 from app.utils.timezone_utils import get_local_time
 from sqlalchemy.exc import SQLAlchemyError, IntegrityError
 import logging
@@ -237,6 +241,31 @@ def list_available_competitions():
     return jsonify([_competition_to_dict_with_enrolled(c, student_id) for c in competitions]), 200
 
 
+@bp.route('/my', methods=['GET'])
+@jwt_required()
+@role_required(*ROLES_STUDENT_OR_EDIT)
+def list_my_competitions():
+    """
+    Lista competições do aluno (histórico).
+
+    Critérios:
+    - competições em que o aluno está/esteve inscrito
+    - competições em que o aluno possui StudentTestOlimpics (prova agendada/realizada)
+
+    Query params opcionais:
+    - status=finished  → apenas competições finalizadas
+    - status=active    → competições ativas (não finalizadas)
+    - status=upcoming  → competições futuras (ainda não iniciadas)
+    - status=qualquer/coisa ou ausente → todas
+    """
+    student_id, err = _resolve_student_id()
+    if err:
+        return err[0], err[1]
+    status = request.args.get('status')
+    competitions = CompetitionService.get_student_competitions(student_id, status=status)
+    return jsonify([_competition_to_dict_with_enrolled(c, student_id) for c in competitions]), 200
+
+
 @bp.route('/<competition_id>/details', methods=['GET'])
 @jwt_required()
 @role_required(*ROLES_STUDENT_OR_EDIT)
@@ -397,13 +426,12 @@ def start_competition_test(competition_id):
     if not enrollment:
         return jsonify({"error": "Aluno não inscrito nesta competição"}), 403
 
-    # Período de aplicação (application / expiration)
-    now = get_local_time()
-    now_naive = now.replace(tzinfo=None) if now.tzinfo else now
-    if c.application and now_naive < c.application:
-        return jsonify({"error": "Fora do período de aplicação da competição"}), 410
-    if c.expiration and now_naive > c.expiration:
-        return jsonify({"error": "Período de aplicação da competição encerrado"}), 410
+    # Período de aplicação - usar property que já considera timezone correto
+    if not c.is_application_open:
+        if c.is_finished:
+            return jsonify({"error": "Período de aplicação da competição encerrado"}), 410
+        else:
+            return jsonify({"error": "Fora do período de aplicação da competição"}), 410
 
     # Sessão existente: em_andamento → retornar (mesmo formato de sucesso para o front abrir a prova); finalizada/expirada → não permitir nova
     existing = (
@@ -539,15 +567,14 @@ def finalize_competition(competition_id):
     paga moedas de ranking e define status='encerrada'.
     Só permite se expiration já passou e status é aberta/em_andamento.
     """
-    from datetime import datetime
     c = Competition.query.get_or_404(competition_id)
-    now_utc = datetime.utcnow()
     if c.status not in ('aberta', 'em_andamento'):
         return jsonify({
             "error": "Competição já encerrada ou não está aberta.",
             "status": c.status,
         }), 400
-    if c.expiration and c.expiration > now_utc:
+    # Usar property is_finished que já considera o timezone correto
+    if not c.is_finished:
         return jsonify({
             "error": "Competição ainda não expirou. Aguarde a data de expiração.",
             "expiration": c.expiration.isoformat() if c.expiration else None,
@@ -596,8 +623,6 @@ def list_eligible_students(competition_id):
     include_meta = request.args.get('include_meta', '').lower() in ('1', 'true', 'yes')
 
     # Verificações globais da competição
-    now = get_local_time()
-    now_naive = now.replace(tzinfo=None) if now.tzinfo else now
     if competition.status != 'aberta' or not competition.test_id:
         if include_meta:
             return jsonify({
@@ -609,18 +634,27 @@ def list_eligible_students(competition_id):
                 },
             }), 200
         return jsonify([]), 200
-    if competition.enrollment_start and now_naive < competition.enrollment_start:
+    
+    # Usar property is_enrollment_open que já considera timezone correto
+    if not competition.is_enrollment_open:
+        # Determinar se está antes ou depois do período
+        from app.utils.timezone_utils import get_local_time
+        from app.competitions.models.competition import _normalize_datetime_for_comparison
+        now = get_local_time()
+        now_naive = _normalize_datetime_for_comparison(now)
+        start_normalized = _normalize_datetime_for_comparison(competition.enrollment_start, competition.timezone)
+        
+        if start_normalized and now_naive < start_normalized:
+            reason = "before_enrollment_period"
+            detail = {"enrollment_start": competition.enrollment_start.isoformat() if competition.enrollment_start else None}
+        else:
+            reason = "after_enrollment_period"
+            detail = {"enrollment_end": competition.enrollment_end.isoformat() if competition.enrollment_end else None}
+        
         if include_meta:
             return jsonify({
                 "eligible": [],
-                "meta": {"reason": "before_enrollment_period", "enrollment_start": competition.enrollment_start.isoformat() if competition.enrollment_start else None},
-            }), 200
-        return jsonify([]), 200
-    if competition.enrollment_end and now_naive > competition.enrollment_end:
-        if include_meta:
-            return jsonify({
-                "eligible": [],
-                "meta": {"reason": "after_enrollment_period", "enrollment_end": competition.enrollment_end.isoformat() if competition.enrollment_end else None},
+                "meta": {"reason": reason, **detail},
             }), 200
         return jsonify([]), 200
 
@@ -691,6 +725,66 @@ def get_competition(competition_id):
     return jsonify(_competition_to_dict(c)), 200
 
 
+@bp.route('/allowed-scopes', methods=['GET'])
+@jwt_required()
+@role_required(*ROLES_EDIT)
+def get_allowed_scopes():
+    """Retorna os escopos que o usuário pode usar ao criar/editar competição (conforme seu perfil)."""
+    user = get_current_user_from_token()
+    if not user:
+        return jsonify({"error": "Usuário não autenticado"}), 401
+    allowed = get_allowed_competition_scopes(user)
+    return jsonify({"allowed_scopes": allowed}), 200
+
+
+@bp.route('/eligible-classes', methods=['GET'])
+@jwt_required()
+@role_required(*ROLES_EDIT)
+def get_eligible_classes():
+    """
+    Lista turmas elegíveis para escopo 'turma', filtradas pelo nível da competição (1 ou 2).
+    Query param: level (obrigatório) = 1 ou 2. Só retorna turmas cuja série (grade) pertence ao nível.
+    """
+    from app.competitions.constants import STAGE_NAMES_BY_LEVEL, is_valid_level
+    from app.models.studentClass import Class
+    from app.models.school import School
+    from app.models.grades import Grade
+    from app.models.educationStage import EducationStage
+
+    level_param = request.args.get('level')
+    if level_param is None:
+        return jsonify({"error": "Query param 'level' é obrigatório (1 ou 2)"}), 400
+    try:
+        level = int(level_param)
+    except (TypeError, ValueError):
+        return jsonify({"error": "level deve ser 1 ou 2"}), 400
+    if not is_valid_level(level):
+        return jsonify({"error": "level deve ser 1 ou 2"}), 400
+
+    stage_names = STAGE_NAMES_BY_LEVEL.get(level)
+    if not stage_names:
+        return jsonify([]), 200
+
+    classes = (
+        Class.query.join(Grade, Class.grade_id == Grade.id)
+        .join(EducationStage, Grade.education_stage_id == EducationStage.id)
+        .filter(EducationStage.name.in_(stage_names))
+        .outerjoin(School, Class.school_id == School.id)
+        .all()
+    )
+    results = []
+    for c in classes:
+        results.append({
+            'id': str(c.id),
+            'name': c.name or '',
+            'school_id': str(c.school_id) if c.school_id else None,
+            'school_name': c.school.name if c.school else None,
+            'grade_id': str(c.grade_id) if c.grade_id else None,
+            'grade_name': c.grade.name if c.grade else None,
+        })
+    return jsonify(results), 200
+
+
 @bp.route('', methods=['POST'])
 @jwt_required()
 @role_required(*ROLES_EDIT)
@@ -706,6 +800,14 @@ def create_competition():
     for field in required:
         if field not in data:
             return jsonify({"error": f"Campo obrigatório ausente: {field}"}), 400
+    try:
+        validate_scope_and_filter_for_user(
+            data.get('scope', 'individual'),
+            data.get('scope_filter'),
+            user,
+        )
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
     competition = CompetitionService.create_competition(data, user['id'])
     return jsonify(_competition_to_dict(competition)), 201
 
@@ -769,6 +871,21 @@ def update_competition(competition_id):
                     validate_reward_config(val)
                 except ValidationError as e:
                     return jsonify({"error": str(e)}), 400
+            if key in ('scope', 'scope_filter'):
+                scope_val = val if key == 'scope' else data.get('scope', c.scope)
+                scope_filter_val = val if key == 'scope_filter' else data.get('scope_filter', c.scope_filter)
+                try:
+                    validate_scope_and_filter(scope_val, scope_filter_val)
+                except ValueError as e:
+                    return jsonify({"error": str(e)}), 400
+                user = get_current_user_from_token()
+                if user:
+                    try:
+                        validate_scope_and_filter_for_user(
+                            scope_val, scope_filter_val, user
+                        )
+                    except ValueError as e:
+                        return jsonify({"error": str(e)}), 400
             setattr(c, key, val)
 
     # Se passou para auto_random com question_rules e ainda não tem prova, sorteia questões e cria o Test

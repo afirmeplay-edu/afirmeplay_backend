@@ -38,15 +38,19 @@ def get_teacher_schools(user_id: str) -> List[str]:
         user_id: ID do usuário professor
         
     Returns:
-        List[str]: Lista de IDs de escolas onde o professor está vinculado
+        List[str]: Lista de IDs de escolas (sempre strings) onde o professor está vinculado
     """
+    from app.utils.uuid_helpers import uuid_list_to_str
+    
     try:
         teacher = Teacher.query.filter_by(user_id=user_id).first()
         if not teacher:
             return []
         
         school_teachers = SchoolTeacher.query.filter_by(teacher_id=teacher.id).all()
-        return [st.school_id for st in school_teachers]
+        school_ids = [st.school_id for st in school_teachers]
+        # ✅ CORRIGIDO: Sempre retornar strings (School.id é VARCHAR)
+        return uuid_list_to_str(school_ids)
     except Exception:
         return []
 
@@ -64,12 +68,15 @@ def get_manager_school(user_id: str) -> Optional[str]:
         user_id: ID do usuário diretor/coordenador
         
     Returns:
-        Optional[str]: ID da escola ou None se não encontrar
+        Optional[str]: ID da escola (sempre string) ou None se não encontrar
     """
+    from app.utils.uuid_helpers import uuid_to_str
+    
     try:
         manager = Manager.query.filter_by(user_id=user_id).first()
         if manager and manager.school_id:
-            return manager.school_id
+            # ✅ CORRIGIDO: Sempre retornar string (School.id é VARCHAR)
+            return uuid_to_str(manager.school_id)
         return None
     except Exception:
         return None
@@ -197,12 +204,13 @@ def get_user_scope(user: Dict[str, Any]) -> Dict[str, Any]:
     elif role in [Roles.DIRETOR, Roles.COORDENADOR]:
         school_id = get_manager_school(user['id'])
         city_id = user.get('city_id') or user.get('tenant_id')
-        return {
+        result = {
             'scope': 'escola',
             'city_id': city_id,
             'school_id': school_id,
             'school_ids': [school_id] if school_id else []
         }
+        return result
     
     elif role == Roles.PROFESSOR:
         school_ids = get_teacher_schools(user['id'])

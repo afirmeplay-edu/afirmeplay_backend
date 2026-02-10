@@ -2,9 +2,12 @@ from flask import Blueprint, request, jsonify
 from app.models.school import School
 from app import db
 from app.decorators.role_required import role_required, get_current_user_from_token
+from app.utils.uuid_helpers import ensure_uuid, ensure_uuid_list
 from flask_jwt_extended import jwt_required
 from app.decorators.role_required import get_current_tenant_id
 from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy import cast
+from sqlalchemy.dialects.postgresql import UUID as PostgresUUID
 import logging
 from app.models.city import City
 from app.models.studentClass import Class
@@ -103,7 +106,7 @@ def listar_escolas():
         ).outerjoin(
             Student, School.id == Student.school_id
         ).outerjoin(
-            Class, School.id == Class.school_id
+            Class, cast(School.id, PostgresUUID) == Class.school_id
         ).group_by(
             School.id, City.id
         )
@@ -140,7 +143,10 @@ def listar_escolas():
             if not manager.school_id:
                 return jsonify({"error": "Diretor/Coordenador não está vinculado a nenhuma escola"}), 400
             
-            schools = query.filter(School.id == manager.school_id).all()
+            # ✅ CORRIGIDO: School.id é VARCHAR, converter manager.school_id para string
+            from app.utils.uuid_helpers import uuid_to_str
+            school_id_str = uuid_to_str(manager.school_id)
+            schools = query.filter(School.id == school_id_str).all() if school_id_str else []
         else:
             # TecAdmin vê escolas do município
             city_id = user.get('tenant_id') or user.get('city_id')
@@ -288,7 +294,7 @@ def buscar_escola(escola_id):
         ).outerjoin(
             Student, School.id == Student.school_id
         ).outerjoin(
-            Class, School.id == Class.school_id
+            Class, cast(School.id, PostgresUUID) == Class.school_id
         ).filter(
             School.id == escola_id
         ).group_by(
@@ -381,7 +387,7 @@ def buscar_escolas_por_cidade(city_id):
         ).outerjoin(
             Student, School.id == Student.school_id
         ).outerjoin(
-            Class, School.id == Class.school_id
+            Class, cast(School.id, PostgresUUID) == Class.school_id
         ).filter(
             School.city_id == city_id
         ).group_by(
@@ -476,7 +482,7 @@ def buscar_escolas_por_serie(grade_id):
         ).join(
             City, School.city_id == City.id
         ).join(
-            Class, School.id == Class.school_id
+            Class, cast(School.id, PostgresUUID) == Class.school_id
         ).outerjoin(
             Student, School.id == Student.school_id
         ).filter(
@@ -525,7 +531,10 @@ def buscar_escolas_por_serie(grade_id):
             if not manager.school_id:
                 return jsonify({"error": "Diretor/Coordenador não está vinculado a nenhuma escola"}), 400
             
-            schools = query.filter(School.id == manager.school_id).all()
+            # ✅ CORRIGIDO: School.id é VARCHAR, converter manager.school_id para string
+            from app.utils.uuid_helpers import uuid_to_str
+            school_id_str = uuid_to_str(manager.school_id)
+            schools = query.filter(School.id == school_id_str).all() if school_id_str else []
         else:
             # TecAdmin vê escolas do município
             city_id = user.get('tenant_id') or user.get('city_id')

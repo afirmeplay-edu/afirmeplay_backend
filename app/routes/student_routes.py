@@ -68,7 +68,10 @@ def criar_usuario_e_aluno():
             return jsonify({"error": "Class not found"}), 404
         
         # Buscar escola da turma
-        school = School.query.get(class_obj.school_id)
+        # ✅ CORRIGIDO: Converter para string (School.id é VARCHAR)
+        from app.utils.uuid_helpers import uuid_to_str
+        school_id_str = uuid_to_str(class_obj.school_id)
+        school = School.query.filter(School.id == school_id_str).first() if school_id_str else None
         if not school:
             return jsonify({"error": "School not found for the specified class"}), 404
         
@@ -534,7 +537,10 @@ def atualizar_aluno(student_id, class_id):
 
         # Atualizar city_id do usuário se o aluno foi movido para outra escola
         if aluno.school_id:
-            school = School.query.get(aluno.school_id)
+            # ✅ CORRIGIDO: Converter para string (School.id é VARCHAR)
+            from app.utils.uuid_helpers import uuid_to_str
+            school_id_str = uuid_to_str(aluno.school_id)
+            school = School.query.filter(School.id == school_id_str).first() if school_id_str else None
             if school and school.city_id != usuario.city_id:
                 usuario.city_id = school.city_id
                 logging.info(f"Atualizando city_id do aluno {usuario.id} para {school.city_id}")
@@ -823,8 +829,14 @@ def get_students_by_class(class_id):
     try:
         logging.info(f"Fetching students for class_id: {class_id}")
 
+        # Converter class_id para UUID (Class.id é UUID)
+        from app.utils.uuid_helpers import ensure_uuid
+        class_id_uuid = ensure_uuid(class_id)
+        if not class_id_uuid:
+            return jsonify({"message": "ID de turma inválido"}), 400
+        
         # Check if the class exists (optional, but good practice)
-        class_obj = Class.query.get(class_id)
+        class_obj = Class.query.get(class_id_uuid)
         if not class_obj:
             logging.warning(f"Class not found with ID: {class_id}")
             return jsonify({"message": "Class not found"}), 404
@@ -845,7 +857,7 @@ def get_students_by_class(class_id):
         ).outerjoin(
             Grade, Student.grade_id == Grade.id
         ).filter(
-            Student.class_id == class_id
+            Student.class_id == class_id_uuid
         ).all()
 
         if not students:
@@ -875,21 +887,37 @@ def get_students_by_school_and_class(school_id, class_id):
             logging.warning(f"School not found with id: {school_id}")
             return jsonify({"error": "School not found"}), 404
 
-        class_obj = Class.query.get(class_id)
+        # Converter class_id para UUID (Class.id é UUID)
+        from app.utils.uuid_helpers import ensure_uuid
+        class_id_uuid = ensure_uuid(class_id)
+        if not class_id_uuid:
+            return jsonify({"error": "ID de turma inválido"}), 400
+        
+        class_obj = Class.query.get(class_id_uuid)
         if not class_obj:
             logging.warning(f"Class not found with id: {class_id}")
             return jsonify({"error": "Class not found"}), 404
 
         # Validar se a turma pertence à escola especificada
-        if class_obj.school_id != school_id:
+        # Converter school_id para UUID (Class.school_id é UUID)
+        school_id_uuid = ensure_uuid(school_id)
+        if not school_id_uuid:
+            return jsonify({"error": "ID de escola inválido"}), 400
+        
+        if class_obj.school_id != school_id_uuid:
             logging.warning(f"Class {class_id} does not belong to school {school_id}")
             return jsonify({"error": "Class does not belong to the specified school"}), 400
 
         # Agora buscar os alunos com validação correta
         # Primeiro buscar apenas os alunos para garantir que todos sejam retornados
+        # Converter class_id para UUID (Student.class_id é UUID)
+        class_id_uuid = ensure_uuid(class_id)
+        if not class_id_uuid:
+            return jsonify({"error": "ID de turma inválido"}), 400
+        
         students = Student.query.filter_by(
             school_id=school_id,
-            class_id=class_id
+            class_id=class_id_uuid
         ).all()
         
         if not students:
@@ -900,7 +928,10 @@ def get_students_by_school_and_class(school_id, class_id):
         formatted_students = []
         for student in students:
             user = User.query.get(student.user_id)
-            school = School.query.get(student.school_id)
+            # ✅ CORRIGIDO: Converter para string (School.id é VARCHAR)
+            from app.utils.uuid_helpers import uuid_to_str
+            school_id_str = uuid_to_str(student.school_id)
+            school = School.query.filter(School.id == school_id_str).first() if school_id_str else None
             class_obj = Class.query.get(student.class_id)
             grade = Grade.query.get(student.grade_id) if student.grade_id else None
             

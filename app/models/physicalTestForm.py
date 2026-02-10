@@ -1,7 +1,7 @@
 from app import db
 import uuid
 from datetime import datetime
-from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.dialects.postgresql import UUID, JSON
 
 class PhysicalTestForm(db.Model):
     """
@@ -33,6 +33,16 @@ class PhysicalTestForm(db.Model):
     status = db.Column(db.String, default='gerado')  # gerado, preenchido, corrigido, processado
     is_corrected = db.Column(db.Boolean, default=False)
     form_type = db.Column(db.String, default='institutional')  # institutional, projeto_style
+    
+    # =========================================================================
+    # ✅ CAMPOS PARA CORREÇÃO (adicionados para separar de AnswerSheetGabarito)
+    # =========================================================================
+    # Configuração do formulário físico (similar ao AnswerSheetGabarito)
+    num_questions = db.Column(db.Integer, nullable=True)  # Total de questões
+    use_blocks = db.Column(db.Boolean, default=False)  # Se usa blocos
+    blocks_config = db.Column(JSON, nullable=True)  # {num_blocks, questions_per_block, topology: {...}}
+    correct_answers = db.Column(JSON, nullable=True)  # {1: "A", 2: "B", ...}
+    # =========================================================================
     
     # Metadados
     generated_at = db.Column(db.DateTime, default=datetime.utcnow)

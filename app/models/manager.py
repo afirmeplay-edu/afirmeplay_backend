@@ -17,7 +17,8 @@ class Manager(db.Model):
     user_id = db.Column(db.String, db.ForeignKey('users.id'), unique=True)
     
     # Relacionamento com School (para diretores e coordenadores)
-    school_id = db.Column(db.String, db.ForeignKey('school.id'), nullable=True)
+    # ✅ CORRIGIDO: Explicitamente String(36) para garantir tipo correto
+    school_id = db.Column(db.String(36), db.ForeignKey('school.id'), nullable=True)
     
     # Relacionamento com City (para tecadm)
     city_id = db.Column(db.String, db.ForeignKey('city.id'), nullable=True)

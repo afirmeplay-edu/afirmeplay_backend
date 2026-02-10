@@ -237,8 +237,8 @@ class EvaluationFilters:
         return Student.query.options(
             joinedload(Student.school),
             joinedload(Student.user),
-            joinedload(Student.class_).joinedload(Class.grade),
-            joinedload(Student.class_).joinedload(Class.school)
+            joinedload(Student.class_).joinedload(Class.grade)
+            # ❌ REMOVIDO: joinedload(Student.class_).joinedload(Class.school) - Class.school é property
         )
 
     @classmethod

@@ -19,17 +19,29 @@ import logging
 scheduler = BackgroundScheduler()
 
 
-def check_expired_evaluations():
+def check_expired_evaluations(app=None):
     """
     Verifica todas as avaliações expiradas e atualiza seus status
     Executa a cada 5 minutos
+    
+    Args:
+        app: Instância da aplicação Flask (opcional, tenta usar current_app se não fornecido)
     
     IMPORTANTE: Esta função deve ser chamada dentro do contexto da aplicação Flask
     """
     from flask import current_app
     
+    # Se app não foi fornecido, tentar usar current_app
+    if app is None:
+        try:
+            app = current_app._get_current_object()
+        except RuntimeError:
+            # Se não há contexto, precisamos criar a app
+            from app import create_app
+            app = create_app()
+    
     # Garantir que estamos dentro do contexto da aplicação
-    with current_app.app_context():
+    with app.app_context():
         try:
             logging.info("Iniciando verificação de avaliações expiradas...")
             
@@ -121,17 +133,26 @@ def check_expired_evaluations():
             db.session.rollback()
 
 
-def start_scheduler():
-    """Inicia o scheduler de tarefas agendadas"""
+def start_scheduler(app=None):
+    """
+    Inicia o scheduler de tarefas agendadas
+    
+    Args:
+        app: Instância da aplicação Flask (opcional, mas recomendado)
+    """
     try:
         # Verificar se o scheduler já está rodando
         if scheduler.running:
             logging.warning("Scheduler já está em execução")
             return
         
+        # Criar wrapper que passa a app para a função
+        def job_wrapper():
+            check_expired_evaluations(app)
+        
         # Adicionar job para verificar avaliações expiradas a cada 5 minutos
         scheduler.add_job(
-            check_expired_evaluations,
+            job_wrapper,  # Usar wrapper ao invés da função diretamente
             trigger=CronTrigger(minute='*/5'),  # A cada 5 minutos
             id='check_expired_evaluations',
             name='Verificar avaliações expiradas',

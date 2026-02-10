@@ -14,6 +14,7 @@ from app.models.test import Test
 from app.models.student import Student
 from app.models.studentAnswer import StudentAnswer
 from app.models.testSession import TestSession
+from app.utils.uuid_helpers import ensure_uuid, ensure_uuid_list
 from app import db
 from sqlalchemy import func
 from datetime import datetime, timedelta
@@ -110,7 +111,7 @@ def dashboard_stats():
                 # Filtrar testes que têm turmas das escolas da cidade
                 class_tests = ClassTest.query.filter(
                     ClassTest.class_id.in_(
-                        Class.query.filter(Class.school_id.in_(school_ids)).with_entities(Class.id)
+                        Class.query.filter(Class.school_id.in_(ensure_uuid_list(school_ids))).with_entities(Class.id)
                     )
                 ).with_entities(ClassTest.test_id).all()
                 test_ids = [ct.test_id for ct in class_tests]
@@ -151,14 +152,17 @@ def dashboard_stats():
                 return jsonify({"erro": "Usuário não está vinculado a nenhuma escola"}), 400
             
             # Buscar a escola do manager
-            school = School.query.get(manager.school_id)
+            # ✅ CORRIGIDO: Converter para string (School.id é VARCHAR)
+            from app.utils.uuid_helpers import uuid_to_str
+            school_id_str = uuid_to_str(manager.school_id)
+            school = School.query.filter(School.id == school_id_str).first() if school_id_str else None
             if not school:
                 return jsonify({"erro": "Escola não encontrada"}), 400
             
             # Filtrar testes que têm turmas da escola
             class_tests = ClassTest.query.filter(
                 ClassTest.class_id.in_(
-                    Class.query.filter_by(school_id=school.id).with_entities(Class.id)
+                    Class.query.filter_by(school_id=ensure_uuid(school.id)).with_entities(Class.id)
                 )
             ).with_entities(ClassTest.test_id).all()
             test_ids = [ct.test_id for ct in class_tests]
@@ -193,7 +197,7 @@ def dashboard_stats():
                 # Filtrar testes que têm turmas das escolas da cidade
                 class_tests = ClassTest.query.filter(
                     ClassTest.class_id.in_(
-                        Class.query.filter(Class.school_id.in_(school_ids)).with_entities(Class.id)
+                        Class.query.filter(Class.school_id.in_(ensure_uuid_list(school_ids))).with_entities(Class.id)
                     )
                 ).with_entities(ClassTest.test_id).all()
                 test_ids = [ct.test_id for ct in class_tests]
@@ -327,7 +331,7 @@ def comprehensive_dashboard_stats():
                 student_query = student_query.filter(Student.school_id.in_(school_ids))
                 
                 # Filtrar turmas por escolas da cidade
-                class_query = class_query.filter(Class.school_id.in_(school_ids))
+                class_query = class_query.filter(Class.school_id.in_(ensure_uuid_list(school_ids)))
                 
                 # Filtrar professores por escolas da cidade através da tabela de associação
                 teacher_query = teacher_query.join(SchoolTeacher).filter(SchoolTeacher.school_id.in_(school_ids))
@@ -335,7 +339,7 @@ def comprehensive_dashboard_stats():
                 # Filtrar testes que têm turmas das escolas da cidade
                 class_tests = ClassTest.query.filter(
                     ClassTest.class_id.in_(
-                        Class.query.filter(Class.school_id.in_(school_ids)).with_entities(Class.id)
+                        Class.query.filter(Class.school_id.in_(ensure_uuid_list(school_ids))).with_entities(Class.id)
                     )
                 ).with_entities(ClassTest.test_id).all()
                 test_ids = [ct.test_id for ct in class_tests]
@@ -379,7 +383,10 @@ def comprehensive_dashboard_stats():
                 return jsonify({"erro": "Usuário não está vinculado a nenhuma escola"}), 400
             
             # Buscar a escola do manager
-            school = School.query.get(manager.school_id)
+            # ✅ CORRIGIDO: Converter para string (School.id é VARCHAR)
+            from app.utils.uuid_helpers import uuid_to_str
+            school_id_str = uuid_to_str(manager.school_id)
+            school = School.query.filter(School.id == school_id_str).first() if school_id_str else None
             if not school:
                 return jsonify({"erro": "Escola não encontrada"}), 400
             
@@ -390,7 +397,7 @@ def comprehensive_dashboard_stats():
             student_query = student_query.filter_by(school_id=school.id)
             
             # Filtrar turmas por escola
-            class_query = class_query.filter_by(school_id=school.id)
+            class_query = class_query.filter_by(school_id=ensure_uuid(school.id))
             
             # Filtrar professores por escola através da tabela de associação
             teacher_query = teacher_query.join(SchoolTeacher).filter(SchoolTeacher.school_id == school.id)
@@ -398,7 +405,7 @@ def comprehensive_dashboard_stats():
             # Filtrar testes que têm turmas da escola
             class_tests = ClassTest.query.filter(
                 ClassTest.class_id.in_(
-                    Class.query.filter_by(school_id=school.id).with_entities(Class.id)
+                    Class.query.filter_by(school_id=ensure_uuid(school.id)).with_entities(Class.id)
                 )
             ).with_entities(ClassTest.test_id).all()
             test_ids = [ct.test_id for ct in class_tests]
@@ -437,7 +444,7 @@ def comprehensive_dashboard_stats():
                 student_query = student_query.filter(Student.school_id.in_(school_ids))
                 
                 # Filtrar turmas por escolas da cidade
-                class_query = class_query.filter(Class.school_id.in_(school_ids))
+                class_query = class_query.filter(Class.school_id.in_(ensure_uuid_list(school_ids)))
                 
                 # Filtrar professores por escolas da cidade através da tabela de associação
                 teacher_query = teacher_query.join(SchoolTeacher).filter(SchoolTeacher.school_id.in_(school_ids))
@@ -445,7 +452,7 @@ def comprehensive_dashboard_stats():
                 # Filtrar testes que têm turmas das escolas da cidade
                 class_tests = ClassTest.query.filter(
                     ClassTest.class_id.in_(
-                        Class.query.filter(Class.school_id.in_(school_ids)).with_entities(Class.id)
+                        Class.query.filter(Class.school_id.in_(ensure_uuid_list(school_ids))).with_entities(Class.id)
                     )
                 ).with_entities(ClassTest.test_id).all()
                 test_ids = [ct.test_id for ct in class_tests]
@@ -553,7 +560,7 @@ def evaluations_stats():
                 # Filtrar testes que têm turmas das escolas da cidade
                 class_tests = ClassTest.query.filter(
                     ClassTest.class_id.in_(
-                        Class.query.filter(Class.school_id.in_(school_ids)).with_entities(Class.id)
+                        Class.query.filter(Class.school_id.in_(ensure_uuid_list(school_ids))).with_entities(Class.id)
                     )
                 ).with_entities(ClassTest.test_id).all()
                 test_ids = [ct.test_id for ct in class_tests]
@@ -602,14 +609,17 @@ def evaluations_stats():
                 return jsonify({"erro": "Usuário não está vinculado a nenhuma escola"}), 400
             
             # Buscar a escola do manager
-            school = School.query.get(manager.school_id)
+            # ✅ CORRIGIDO: Converter para string (School.id é VARCHAR)
+            from app.utils.uuid_helpers import uuid_to_str
+            school_id_str = uuid_to_str(manager.school_id)
+            school = School.query.filter(School.id == school_id_str).first() if school_id_str else None
             if not school:
                 return jsonify({"erro": "Escola não encontrada"}), 400
             
             # Filtrar testes que têm turmas da escola
             class_tests = ClassTest.query.filter(
                 ClassTest.class_id.in_(
-                    Class.query.filter_by(school_id=school.id).with_entities(Class.id)
+                    Class.query.filter_by(school_id=ensure_uuid(school.id)).with_entities(Class.id)
                 )
             ).with_entities(ClassTest.test_id).all()
             test_ids = [ct.test_id for ct in class_tests]
@@ -648,7 +658,7 @@ def evaluations_stats():
                 # Filtrar testes que têm turmas das escolas da cidade
                 class_tests = ClassTest.query.filter(
                     ClassTest.class_id.in_(
-                        Class.query.filter(Class.school_id.in_(school_ids)).with_entities(Class.id)
+                        Class.query.filter(Class.school_id.in_(ensure_uuid_list(school_ids))).with_entities(Class.id)
                     )
                 ).with_entities(ClassTest.test_id).all()
                 test_ids = [ct.test_id for ct in class_tests]
@@ -1652,7 +1662,9 @@ def list_classes():
         ]
     """
     try:
-        classes = Class.query.join(School).join(Grade).all()
+        from sqlalchemy import cast
+        from sqlalchemy.dialects.postgresql import UUID as PostgresUUID
+        classes = Class.query.join(School, Class.school_id == cast(School.id, PostgresUUID)).join(Grade).all()
         
         results = []
         for class_obj in classes:
@@ -1677,8 +1689,9 @@ def list_classes():
 @role_required("admin", "professor", "coordenador", "diretor", "tecadm")
 def list_schools():
     """
-    Lista todas as escolas
-    
+    Lista escolas. Query params opcionais para filtro (escopo competição):
+    - city_id: lista apenas escolas do município (útil após selecionar estado e município).
+    - state: lista apenas escolas do estado (usa City.state; ex: SP, RJ).
     Returns:
         [
             {
@@ -1690,8 +1703,15 @@ def list_schools():
         ]
     """
     try:
-        schools = School.query.all()
-        
+        query = School.query
+        city_id = request.args.get('city_id')
+        state = request.args.get('state')
+        if city_id:
+            query = query.filter(School.city_id == city_id)
+        elif state:
+            from app.models.city import City
+            query = query.join(City, School.city_id == City.id).filter(City.state.ilike(state))
+        schools = query.all()
         results = []
         for school in schools:
             results.append({
@@ -1700,9 +1720,7 @@ def list_schools():
                 'address': school.address,
                 'city_id': school.city_id
             })
-        
         return jsonify(results), 200
-        
     except Exception as e:
         logging.error(f"Erro ao listar escolas: {str(e)}", exc_info=True)
         return jsonify({"error": "Erro ao listar escolas", "details": str(e)}), 500 
@@ -1752,7 +1770,10 @@ def recent_schools():
                 return jsonify({"erro": "Usuário não está vinculado a nenhuma escola"}), 400
             
             # Buscar a escola do manager
-            school = School.query.get(manager.school_id)
+            # ✅ CORRIGIDO: Converter para string (School.id é VARCHAR)
+            from app.utils.uuid_helpers import uuid_to_str
+            school_id_str = uuid_to_str(manager.school_id)
+            school = School.query.filter(School.id == school_id_str).first() if school_id_str else None
             if not school:
                 return jsonify({"erro": "Escola não encontrada"}), 400
             
@@ -1775,7 +1796,7 @@ def recent_schools():
         for school in recent_schools:
             # Contar alunos e turmas desta escola
             students_count = Student.query.filter_by(school_id=school.id).count()
-            classes_count = Class.query.filter_by(school_id=school.id).count()
+            classes_count = Class.query.filter_by(school_id=ensure_uuid(school.id)).count()
             
             school_data = {
                 "id": school.id,
@@ -1857,7 +1878,10 @@ def recent_students():
                 return jsonify({"erro": "Usuário não está vinculado a nenhuma escola"}), 400
             
             # Buscar a escola do manager
-            school = School.query.get(manager.school_id)
+            # ✅ CORRIGIDO: Converter para string (School.id é VARCHAR)
+            from app.utils.uuid_helpers import uuid_to_str
+            school_id_str = uuid_to_str(manager.school_id)
+            school = School.query.filter(School.id == school_id_str).first() if school_id_str else None
             if not school:
                 return jsonify({"erro": "Escola não encontrada"}), 400
             
@@ -1983,7 +2007,10 @@ def recent_questions():
                 return jsonify({"erro": "Usuário não está vinculado a nenhuma escola"}), 400
             
             # Buscar a escola do manager
-            school = School.query.get(manager.school_id)
+            # ✅ CORRIGIDO: Converter para string (School.id é VARCHAR)
+            from app.utils.uuid_helpers import uuid_to_str
+            school_id_str = uuid_to_str(manager.school_id)
+            school = School.query.filter(School.id == school_id_str).first() if school_id_str else None
             if not school:
                 return jsonify({"erro": "Escola não encontrada"}), 400
             
@@ -2102,7 +2129,7 @@ def get_evaluation_results_stats():
                 # Filtrar testes que têm turmas das escolas da cidade
                 class_tests = ClassTest.query.filter(
                     ClassTest.class_id.in_(
-                        Class.query.filter(Class.school_id.in_(school_ids)).with_entities(Class.id)
+                        Class.query.filter(Class.school_id.in_(ensure_uuid_list(school_ids))).with_entities(Class.id)
                     )
                 ).with_entities(ClassTest.test_id).all()
                 test_ids = [ct.test_id for ct in class_tests]
@@ -2145,14 +2172,17 @@ def get_evaluation_results_stats():
                 return jsonify({"erro": "Usuário não está vinculado a nenhuma escola"}), 400
             
             # Buscar a escola do manager
-            school = School.query.get(manager.school_id)
+            # ✅ CORRIGIDO: Converter para string (School.id é VARCHAR)
+            from app.utils.uuid_helpers import uuid_to_str
+            school_id_str = uuid_to_str(manager.school_id)
+            school = School.query.filter(School.id == school_id_str).first() if school_id_str else None
             if not school:
                 return jsonify({"erro": "Escola não encontrada"}), 400
             
             # Filtrar testes que têm turmas da escola
             class_tests = ClassTest.query.filter(
                 ClassTest.class_id.in_(
-                    Class.query.filter_by(school_id=school.id).with_entities(Class.id)
+                    Class.query.filter_by(school_id=ensure_uuid(school.id)).with_entities(Class.id)
                 )
             ).with_entities(ClassTest.test_id).all()
             test_ids = [ct.test_id for ct in class_tests]
@@ -2188,7 +2218,7 @@ def get_evaluation_results_stats():
                 # Filtrar testes que têm turmas das escolas da cidade
                 class_tests = ClassTest.query.filter(
                     ClassTest.class_id.in_(
-                        Class.query.filter(Class.school_id.in_(school_ids)).with_entities(Class.id)
+                        Class.query.filter(Class.school_id.in_(ensure_uuid_list(school_ids))).with_entities(Class.id)
                     )
                 ).with_entities(ClassTest.test_id).all()
                 test_ids = [ct.test_id for ct in class_tests]

@@ -137,8 +137,20 @@ def end_test_session(session_id):
             session.score = 0.0
         
         db.session.commit()
+
+        # Etapa 4: recompensa de participação em competição (moedas)
+        coins_earned = 0
+        try:
+            from app.competitions.services import CompetitionService
+            coins_earned = CompetitionService.process_participation_reward(
+                test_id=session.test_id,
+                student_id=session.student_id,
+                test_session_id=session.id,
+            )
+        except Exception as coins_err:
+            logging.error(f"Erro ao processar recompensa de competição: {str(coins_err)}", exc_info=True)
         
-        return jsonify({
+        response_payload = {
             'message': 'Sessão encerrada com sucesso',
             'session_id': session.id,
             'status': session.status,
@@ -148,7 +160,10 @@ def end_test_session(session_id):
             'correct_answers': session.correct_answers,
             'score': session.score,
             'grade': session.grade
-        }), 200
+        }
+        if coins_earned > 0:
+            response_payload['coins_earned'] = coins_earned
+        return jsonify(response_payload), 200
         
     except Exception as e:
         logging.error(f"Erro ao encerrar sessão: {str(e)}", exc_info=True)
@@ -241,19 +256,48 @@ def submit_answers():
         if not session:
             return jsonify({'error': 'Sessão não encontrada'}), 404
         
-        # Verificar se a avaliação não expirou
+        # Verificar se a avaliação não expirou (turma e/ou olimpíada)
+        # Ambos funcionam simultaneamente - não há exclusão mútua
         from app.models.classTest import ClassTest
+        from app.models.studentTestOlimpics import StudentTestOlimpics
+        from sqlalchemy.exc import SQLAlchemyError
+        student = session.student
         class_test = ClassTest.query.filter_by(
+            class_id=student.class_id,
             test_id=session.test_id
-        ).first()
-        
-        if class_test and class_test.expiration:
-            current_time = datetime.utcnow()
-            # Garantir que ambas as datas estejam em UTC para comparação
+        ).first() if student and student.class_id else None
+        olympics = None
+        if student:
+            try:
+                olympics = StudentTestOlimpics.query.filter_by(
+                    student_id=session.student_id,
+                    test_id=session.test_id
+                ).first()
+            except (SQLAlchemyError, Exception) as e:
+                # Se a tabela não existir, continuar apenas com ClassTest
+                error_str = str(e).lower()
+                if 'student_test_olimpics' in error_str or 'does not exist' in error_str or 'undefinedtable' in error_str:
+                    logging.warning(f"Tabela student_test_olimpics não encontrada, continuando apenas com ClassTest: {str(e)}")
+                    olympics = None
+                else:
+                    logging.warning(f"Erro ao buscar StudentTestOlimpics, continuando apenas com ClassTest: {str(e)}")
+                    olympics = None
+        # Priorizar StudentTestOlimpics se ambos existirem (mais específico para o aluno)
+        # Ambos funcionam simultaneamente - não há exclusão mútua
+        app_record = olympics if olympics else class_test
 
+        # Para competição (StudentTestOlimpics): se a sessão já está em_andamento, permitir submissão
+        # mesmo após o horário de expiração da competição (o aluno já começou e deve poder entregar).
+        is_competition_session = app_record is olympics
+        if app_record and app_record.expiration and not is_competition_session:
+            current_time = datetime.utcnow()
             import dateutil.parser
-            expiration_dt = dateutil.parser.parse(class_test.expiration)
-            expiration_utc = expiration_dt.replace(tzinfo=None) if expiration_dt.tzinfo else expiration_dt
+            from datetime import timezone as tz
+            expiration_dt = dateutil.parser.parse(app_record.expiration)
+            if expiration_dt.tzinfo:
+                expiration_utc = expiration_dt.astimezone(tz.utc).replace(tzinfo=None)
+            else:
+                expiration_utc = expiration_dt
             current_utc = current_time.replace(tzinfo=None) if current_time.tzinfo else current_time
             if current_utc > expiration_utc:
                 session.status = 'expirada'
@@ -261,7 +305,7 @@ def submit_answers():
                 return jsonify({
                     'error': 'Avaliação expirada. Não é possível submeter respostas.'
                 }), 410
-        
+
         # Validar se sessão ainda está ativa
         if session.status != 'em_andamento':
             return jsonify({
@@ -363,16 +407,36 @@ def submit_answers():
         # ✅ NOVO: Calcular resultado completo e salvar
         from app.services.evaluation_result_service import EvaluationResultService
         
-        evaluation_result = EvaluationResultService.calculate_and_save_result(
-            test_id=session.test_id,
-            student_id=session.student_id,
-            session_id=session.id
-        )
+        try:
+            evaluation_result = EvaluationResultService.calculate_and_save_result(
+                test_id=session.test_id,
+                student_id=session.student_id,
+                session_id=session.id
+            )
+        except Exception as calc_error:
+            logging.error(f"Erro ao calcular resultado: {str(calc_error)}", exc_info=True)
+            evaluation_result = None
         
         # Não alterar o status global da avaliação
         # Cada aluno tem seu próprio status individual
-        db.session.commit()
-        
+        try:
+            db.session.commit()
+        except Exception as commit_error:
+            logging.error(f"Erro no commit: {str(commit_error)}", exc_info=True)
+            raise
+
+        # Etapa 4: recompensa de participação em competição (moedas)
+        coins_earned = 0
+        try:
+            from app.competitions.services import CompetitionService
+            coins_earned = CompetitionService.process_participation_reward(
+                test_id=session.test_id,
+                student_id=session.student_id,
+                test_session_id=session.id,
+            )
+        except Exception as coins_err:
+            logging.error(f"Erro ao processar recompensa de competição: {str(coins_err)}", exc_info=True)
+
         # ✅ NOVO: Retornar resultados completos calculados
         if evaluation_result:
             results = {
@@ -401,7 +465,8 @@ def submit_answers():
                 'duration_minutes': session.duration_minutes,
                 'message': 'Avaliação enviada com sucesso! (Cálculo básico)'
             }
-        
+        if coins_earned > 0:
+            results['coins_earned'] = coins_earned
         return jsonify(results), 201
         
     except Exception as e:
@@ -445,19 +510,45 @@ def save_partial_answers():
         if not session:
             return jsonify({'error': 'Sessão não encontrada'}), 404
         
-        # Verificar se a avaliação não expirou
+        # Verificar se a avaliação não expirou (turma e/ou olimpíada)
+        # Ambos funcionam simultaneamente - não há exclusão mútua
         from app.models.classTest import ClassTest
+        from app.models.studentTestOlimpics import StudentTestOlimpics
+        from sqlalchemy.exc import SQLAlchemyError
+        student = session.student
         class_test = ClassTest.query.filter_by(
+            class_id=student.class_id,
             test_id=session.test_id
-        ).first()
-        
-        if class_test and class_test.expiration:
-            current_time = datetime.utcnow()
-            # Garantir que ambas as datas estejam em UTC para comparação
+        ).first() if student and student.class_id else None
+        olympics = None
+        if student:
+            try:
+                olympics = StudentTestOlimpics.query.filter_by(
+                    student_id=session.student_id,
+                    test_id=session.test_id
+                ).first()
+            except (SQLAlchemyError, Exception) as e:
+                # Se a tabela não existir, continuar apenas com ClassTest
+                error_str = str(e).lower()
+                if 'student_test_olimpics' in error_str or 'does not exist' in error_str or 'undefinedtable' in error_str:
+                    logging.warning(f"Tabela student_test_olimpics não encontrada, continuando apenas com ClassTest: {str(e)}")
+                    olympics = None
+                else:
+                    logging.warning(f"Erro ao buscar StudentTestOlimpics, continuando apenas com ClassTest: {str(e)}")
+                    olympics = None
+        # Priorizar StudentTestOlimpics se ambos existirem (mais específico para o aluno)
+        app_record = olympics if olympics else class_test
+        is_competition_session = app_record is olympics
 
+        if app_record and app_record.expiration and not is_competition_session:
+            current_time = datetime.utcnow()
             import dateutil.parser
-            expiration_dt = dateutil.parser.parse(class_test.expiration)
-            expiration_utc = expiration_dt.replace(tzinfo=None) if expiration_dt.tzinfo else expiration_dt
+            from datetime import timezone as tz
+            expiration_dt = dateutil.parser.parse(app_record.expiration)
+            if expiration_dt.tzinfo:
+                expiration_utc = expiration_dt.astimezone(tz.utc).replace(tzinfo=None)
+            else:
+                expiration_utc = expiration_dt
             current_utc = current_time.replace(tzinfo=None) if current_time.tzinfo else current_time
             if current_utc > expiration_utc:
                 session.status = 'expirada'
@@ -465,13 +556,13 @@ def save_partial_answers():
                 return jsonify({
                     'error': 'Avaliação expirada. Não é possível salvar respostas.'
                 }), 410
-        
+
         # Validar se sessão ainda está ativa
         if session.status != 'em_andamento':
             return jsonify({
                 'error': f'Sessão não está ativa. Status atual: {session.status}'
             }), 400
-        
+
         # Validar tempo limite (cálculo no frontend, mas validação adicional aqui)
         if session.started_at and session.time_limit_minutes:
             from app.utils.timezone_utils import get_local_time
@@ -754,53 +845,63 @@ def get_student_all_tests_status():
     try:
         from app.models.student import Student
         from app.models.classTest import ClassTest
-        
-        # Obter user_id do JWT token
+        from app.models.studentTestOlimpics import StudentTestOlimpics
+
         current_user_id = get_jwt_identity()
-        
-        # Buscar estudante pelo user_id
         student = Student.query.filter_by(user_id=current_user_id).first()
         if not student:
             return jsonify({'error': 'Estudante não encontrado para este usuário'}), 404
-        
-        # Determinar classe (parâmetro ou classe do aluno)
+
         class_id = request.args.get('class_id', student.class_id)
-        if not class_id:
-            return jsonify({'error': 'Aluno não está matriculado em nenhuma classe'}), 400
-        
-        # Buscar todas as avaliações aplicadas na classe
-        class_tests = ClassTest.query.filter_by(class_id=class_id).all()
-        if not class_tests:
+        class_tests = ClassTest.query.filter_by(class_id=class_id).all() if class_id else []
+        olympics = []
+        try:
+            from sqlalchemy.exc import SQLAlchemyError
+            olympics = StudentTestOlimpics.query.filter_by(student_id=student.id).all()
+        except (SQLAlchemyError, Exception) as e:
+            # Se a tabela não existir, continuar apenas com ClassTest
+            error_str = str(e).lower()
+            if 'student_test_olimpics' in error_str or 'does not exist' in error_str or 'undefinedtable' in error_str:
+                logging.warning(f"Tabela student_test_olimpics não encontrada, continuando apenas com ClassTest: {str(e)}")
+                olympics = []
+            else:
+                logging.warning(f"Erro ao buscar StudentTestOlimpics, continuando apenas com ClassTest: {str(e)}")
+                olympics = []
+
+        class_test_map = {ct.test_id: ct for ct in class_tests}
+        olympics_map = {o.test_id: o for o in olympics}
+        all_test_ids = list(set(class_test_map.keys()) | set(olympics_map.keys()))
+
+        if not all_test_ids:
             return jsonify({
                 'student_id': student.id,
                 'class_id': class_id,
                 'tests_status': []
             }), 200
-        
-        # Buscar todas as sessões do aluno para estas avaliações
-        test_ids = [ct.test_id for ct in class_tests]
+
         sessions = TestSession.query.filter_by(student_id=student.id).filter(
-            TestSession.test_id.in_(test_ids)
+            TestSession.test_id.in_(all_test_ids)
         ).all()
-        
-        # Criar dicionário de sessões por test_id
-        sessions_dict = {session.test_id: session for session in sessions}
-        
-        # Preparar resposta
+        sessions_dict = {s.test_id: s for s in sessions}
+
         tests_status = []
-        for class_test in class_tests:
-            session = sessions_dict.get(class_test.test_id)
-            
+        for tid in all_test_ids:
+            ct = class_test_map.get(tid)
+            o = olympics_map.get(tid)
+            session = sessions_dict.get(tid)
+
+            class_test_id = ct.id if ct else None
+            student_test_olimpics_id = o.id if o else None
+
             if session:
-                # Verificar se há respostas salvas
                 has_answers = StudentAnswer.query.filter_by(
                     student_id=student.id,
-                    test_id=class_test.test_id
+                    test_id=tid
                 ).first() is not None
-                
                 test_status = {
-                    'test_id': class_test.test_id,
-                    'class_test_id': class_test.id,
+                    'test_id': tid,
+                    'class_test_id': class_test_id,
+                    'student_test_olimpics_id': student_test_olimpics_id,
                     'has_completed': session.status in ['finalizada', 'expirada', 'corrigida', 'revisada'],
                     'session_status': session.status,
                     'completed_at': session.submitted_at.isoformat() if session.submitted_at else None,
@@ -813,8 +914,9 @@ def get_student_all_tests_status():
                 }
             else:
                 test_status = {
-                    'test_id': class_test.test_id,
-                    'class_test_id': class_test.id,
+                    'test_id': tid,
+                    'class_test_id': class_test_id,
+                    'student_test_olimpics_id': student_test_olimpics_id,
                     'has_completed': False,
                     'session_status': 'nao_iniciada',
                     'completed_at': None,
@@ -825,9 +927,8 @@ def get_student_all_tests_status():
                     'has_answers': False,
                     'can_start': True
                 }
-            
             tests_status.append(test_status)
-        
+
         return jsonify({
             'student_id': student.id,
             'class_id': class_id,
@@ -973,28 +1074,45 @@ def can_student_start_test(test_id):
     try:
         from app.models.student import Student
         from app.models.classTest import ClassTest
+        from app.models.studentTestOlimpics import StudentTestOlimpics
 
-        
-        # Obter user_id do JWT token
         current_user_id = get_jwt_identity()
-        
-        # Buscar estudante pelo user_id
+
         student = Student.query.filter_by(user_id=current_user_id).first()
         if not student:
             return jsonify({'error': 'Estudante não encontrado para este usuário'}), 404
-        
-        # Verificar se o teste existe
+
         test = Test.query.get(test_id)
         if not test:
             return jsonify({'error': 'Teste não encontrado'}), 404
-        
-        # Verificar se o teste está aplicado na classe do aluno
+
+        # Turma (ClassTest) e/ou olimpíada (StudentTestOlimpics)
+        # Ambos funcionam simultaneamente - não há exclusão mútua
+        from sqlalchemy.exc import SQLAlchemyError
         class_test = ClassTest.query.filter_by(
             class_id=student.class_id,
             test_id=test_id
         ).first()
-        
-        if not class_test:
+        olympics = None
+        try:
+            olympics = StudentTestOlimpics.query.filter_by(
+                student_id=student.id,
+                test_id=str(test_id)
+            ).first()
+        except (SQLAlchemyError, Exception) as e:
+            # Se a tabela não existir, continuar apenas com ClassTest
+            error_str = str(e).lower()
+            if 'student_test_olimpics' in error_str or 'does not exist' in error_str or 'undefinedtable' in error_str:
+                logging.warning(f"Tabela student_test_olimpics não encontrada, continuando apenas com ClassTest: {str(e)}")
+                olympics = None
+            else:
+                logging.warning(f"Erro ao buscar StudentTestOlimpics, continuando apenas com ClassTest: {str(e)}")
+                olympics = None
+
+        # Priorizar StudentTestOlimpics se ambos existirem (mais específico para o aluno)
+        # Ambos funcionam simultaneamente - não há exclusão mútua
+        app_record = olympics if olympics else class_test
+        if not app_record:
             return jsonify({
                 'can_start': False,
                 'reason': 'Avaliação não está aplicada na sua classe',
@@ -1009,37 +1127,31 @@ def can_student_start_test(test_id):
                     'has_completed': False
                 }
             }), 200
-        
-        # ✅ CORRIGIDO: Verificar se já completou, se a avaliação está disponível E se não expirou
-        can_start = False  # Por padrão, não pode iniciar
+
+        can_start = False
         reason = "Verificando disponibilidade..."
-        
-        # Buscar sessão do aluno (sempre buscar, independente da expiração)
+
         session = TestSession.query.filter_by(
             student_id=student.id,
             test_id=test_id
         ).first()
-        
-        # Verificar se já completou
+
         has_completed = False
         if session:
             has_completed = session.status in ['finalizada', 'expirada', 'corrigida', 'revisada']
-        
-        # Se já completou, não pode iniciar novamente
+
         if has_completed:
             can_start = False
             reason = "Avaliação já foi completada"
         else:
-            # Verificar se a avaliação está disponível (data de aplicação) e não expirou (data de expiração)
             is_available_now = False
             is_expired = False
-            
-            # ✅ REGRA 4: Obter tempo atual no timezone da aplicação
+
             current_time = None
-            if class_test.timezone:
+            if app_record.timezone:
                 import pytz
                 try:
-                    target_tz = pytz.timezone(class_test.timezone)
+                    target_tz = pytz.timezone(app_record.timezone)
                     current_time = datetime.now(target_tz)
                 except pytz.exceptions.UnknownTimeZoneError:
                     from app.utils.timezone_utils import get_local_time
@@ -1047,82 +1159,53 @@ def can_student_start_test(test_id):
             else:
                 from app.utils.timezone_utils import get_local_time
                 current_time = get_local_time()
-            
-            # Verificar se a avaliação já está disponível (data de aplicação)
-            if class_test.application and class_test.application is not None:
+
+            if app_record.application and app_record.application is not None:
                 try:
-                    # ✅ REGRA 4: Comparar no mesmo timezone da aplicação
-                    if class_test.timezone:
+                    if app_record.timezone:
                         import pytz
                         try:
-                            # Obter timezone da aplicação
-                            target_tz = pytz.timezone(class_test.timezone)
-                            
-                            # Converter string para datetime com timezone
-                            application_dt = dateutil.parser.parse(class_test.application)
+                            target_tz = pytz.timezone(app_record.timezone)
+                            application_dt = dateutil.parser.parse(app_record.application)
                             if application_dt.tzinfo is None:
                                 application_dt = application_dt.replace(tzinfo=target_tz)
-                            
-                            # ✅ REGRA 4: Comparar diretamente no mesmo timezone
                             is_available_now = current_time >= application_dt
-                            
                         except pytz.exceptions.UnknownTimeZoneError:
-                            # Se o timezone for inválido, usar lógica de fallback
-                            logging.warning(f"Timezone inválido: {class_test.timezone}, usando fallback")
-                            raise Exception(f"Timezone inválido: {class_test.timezone}")
+                            logging.warning(f"Timezone inválido: {app_record.timezone}, usando fallback")
+                            raise Exception(f"Timezone inválido: {app_record.timezone}")
                     else:
-                        # Fallback para lógica antiga se não houver timezone
-                        # Converter string para datetime
-                        application_dt = dateutil.parser.parse(class_test.application)
+                        application_dt = dateutil.parser.parse(app_record.application)
                         if application_dt.tzinfo is None:
                             application_dt = application_dt.replace(tzinfo=current_time.tzinfo)
-                        
                         is_available_now = current_time >= application_dt
-                        
                 except Exception as e:
-                    # Se houver erro na conversão, não disponível
                     logging.error(f"Erro ao converter data de aplicação para teste {test_id}: {str(e)}")
                     is_available_now = False
             else:
-                # Se não há data de aplicação definida, não está disponível
                 is_available_now = False
-            
-            # Verificar se a avaliação não expirou (data de expiração)
-            if class_test.expiration and class_test.expiration is not None:
+
+            if app_record.expiration and app_record.expiration is not None:
                 try:
-                    # ✅ REGRA 4: Comparar no mesmo timezone da aplicação
-                    if class_test.timezone:
+                    if app_record.timezone:
                         import pytz
                         try:
-                            # Obter timezone da aplicação
-                            target_tz = pytz.timezone(class_test.timezone)
-                            
-                            # Converter string para datetime com timezone
-                            expiration_dt = dateutil.parser.parse(class_test.expiration)
+                            target_tz = pytz.timezone(app_record.timezone)
+                            expiration_dt = dateutil.parser.parse(app_record.expiration)
                             if expiration_dt.tzinfo is None:
                                 expiration_dt = expiration_dt.replace(tzinfo=target_tz)
-                            
-                            # ✅ REGRA 4: Comparar diretamente no mesmo timezone
                             is_expired = current_time > expiration_dt
-                            
                         except pytz.exceptions.UnknownTimeZoneError:
-                            logging.warning(f"Timezone inválido: {class_test.timezone}, usando fallback")
-                            raise Exception(f"Timezone inválido: {class_test.timezone}")
+                            logging.warning(f"Timezone inválido: {app_record.timezone}, usando fallback")
+                            raise Exception(f"Timezone inválido: {app_record.timezone}")
                     else:
-                        # Fallback para lógica antiga
-                        # Converter string para datetime
-                        expiration_dt = dateutil.parser.parse(class_test.expiration)
+                        expiration_dt = dateutil.parser.parse(app_record.expiration)
                         if expiration_dt.tzinfo is None:
                             expiration_dt = expiration_dt.replace(tzinfo=current_time.tzinfo)
-                        
                         is_expired = current_time > expiration_dt
-                        
                 except Exception as e:
-                    # Se houver erro na conversão, não expirada
                     logging.error(f"Erro ao converter data de expiração para teste {test_id}: {str(e)}")
                     is_expired = False
-            
-            # Determinar se pode iniciar baseado na disponibilidade e expiração
+
             if test.status in ['agendada', 'em_andamento']:
                 if is_available_now and not is_expired:
                     can_start = True
@@ -1137,9 +1220,8 @@ def can_student_start_test(test_id):
                 can_start = False
                 reason = f"Status da avaliação não permite início: {test.status}"
 
-        # Log de debug para o resultado final
         logging.info(f"DEBUG CAN-START FINAL - Test: {test_id}, Can Start: {can_start}, Reason: {reason}")
-        
+
         return jsonify({
             'can_start': can_start,
             'reason': reason,
@@ -1147,13 +1229,13 @@ def can_student_start_test(test_id):
                 'id': test_id,
                 'title': test.title,
                 'status': test.status,
-                'application': class_test.application if class_test.application else None,
-                'expiration': class_test.expiration if class_test.expiration else None
+                'application': app_record.application if app_record.application else None,
+                'expiration': app_record.expiration if app_record.expiration else None
             },
             'student_info': {
                 'id': student.id,
                 'session_status': session.status if session else 'nao_iniciada',
-                'has_completed': session.status in ['finalizada', 'expirada', 'corrigida', 'revisada'] if session else False
+                'has_completed': has_completed
             }
         }), 200
         
@@ -1175,23 +1257,43 @@ def debug_session_status(session_id):
         session = TestSession.query.get(session_id)
         if not session:
             return jsonify({'error': 'Sessão não encontrada'}), 404
-        
-        # Buscar informações do teste
+
         test = Test.query.get(session.test_id)
+        from app.models.classTest import ClassTest
+        from app.models.studentTestOlimpics import StudentTestOlimpics
+        student = session.student
         class_test = None
-        if test:
-            from app.models.classTest import ClassTest
+        if test and student and student.class_id:
             class_test = ClassTest.query.filter_by(
-                class_id=session.student.class_id,
+                class_id=student.class_id,
                 test_id=session.test_id
             ).first()
-        
-        # Buscar respostas do aluno
+        olympics = None
+        if student:
+            try:
+                from sqlalchemy.exc import SQLAlchemyError
+                olympics = StudentTestOlimpics.query.filter_by(
+                    student_id=session.student_id,
+                    test_id=session.test_id
+                ).first()
+            except (SQLAlchemyError, Exception) as e:
+                # Se a tabela não existir, continuar apenas com ClassTest
+                error_str = str(e).lower()
+                if 'student_test_olimpics' in error_str or 'does not exist' in error_str or 'undefinedtable' in error_str:
+                    logging.warning(f"Tabela student_test_olimpics não encontrada, continuando apenas com ClassTest: {str(e)}")
+                    olympics = None
+                else:
+                    logging.warning(f"Erro ao buscar StudentTestOlimpics, continuando apenas com ClassTest: {str(e)}")
+                    olympics = None
+        # Priorizar StudentTestOlimpics se ambos existirem (mais específico para o aluno)
+        # Ambos funcionam simultaneamente - não há exclusão mútua
+        app_record = olympics if olympics else class_test
+
         answers = StudentAnswer.query.filter_by(
             student_id=session.student_id,
             test_id=session.test_id
         ).all()
-        
+
         debug_info = {
             'session': {
                 'id': session.id,
@@ -1213,10 +1315,12 @@ def debug_session_status(session_id):
                 'status': test.status if test else None
             },
             'class_test': {
-                'id': class_test.id if class_test else None,
-                'application': class_test.application if class_test else None,
-                'expiration': class_test.expiration if class_test else None,
-                'timezone': class_test.timezone if class_test else None
+                'id': app_record.id if app_record else None,
+                'class_test_id': class_test.id if class_test else None,
+                'student_test_olimpics_id': olympics.id if olympics else None,
+                'application': app_record.application if app_record else None,
+                'expiration': app_record.expiration if app_record else None,
+                'timezone': app_record.timezone if app_record else None
             },
             'answers': {
                 'total_answers': len(answers),
@@ -1229,76 +1333,9 @@ def debug_session_status(session_id):
                 ]
             }
         }
-        
+
         return jsonify(debug_info), 200
-        
-    except Exception as e:
-        logging.error(f"Erro no debug de sessão: {str(e)}", exc_info=True)
-        return jsonify({"error": "Erro no debug", "details": str(e)}), 500
-    """
-    Endpoint de debug para verificar o status detalhado de uma sessão
-    """
-    try:
-        session = TestSession.query.get(session_id)
-        if not session:
-            return jsonify({'error': 'Sessão não encontrada'}), 404
-        
-        # Buscar informações do teste
-        test = Test.query.get(session.test_id)
-        class_test = None
-        if test:
-            from app.models.classTest import ClassTest
-            class_test = ClassTest.query.filter_by(
-                class_id=session.student.class_id,
-                test_id=session.test_id
-            ).first()
-        
-        # Buscar respostas do aluno
-        answers = StudentAnswer.query.filter_by(
-            student_id=session.student_id,
-            test_id=session.test_id
-        ).all()
-        
-        debug_info = {
-            'session': {
-                'id': session.id,
-                'student_id': session.student_id,
-                'test_id': session.test_id,
-                'status': session.status,
-                'started_at': session.started_at.isoformat() if session.started_at else None,
-                'submitted_at': session.submitted_at.isoformat() if session.submitted_at else None,
-                'time_limit_minutes': session.time_limit_minutes,
-                'total_questions': session.total_questions,
-                'correct_answers': session.correct_answers,
-                'score': session.score,
-                'grade': session.grade,
-                'duration_minutes': session.duration_minutes
-            },
-            'test': {
-                'id': test.id if test else None,
-                'title': test.title if test else None,
-                'status': test.status if test else None
-            },
-            'class_test': {
-                'id': class_test.id if class_test else None,
-                'application': class_test.application if class_test else None,
-                'expiration': class_test.expiration if class_test else None,
-                'timezone': class_test.timezone if class_test else None
-            },
-            'answers': {
-                'total_answers': len(answers),
-                'answers_list': [
-                    {
-                        'question_id': answer.question_id,
-                        'answer': answer.answer,
-                        'answered_at': answer.answered_at.isoformat() if answer.answered_at else None
-                    } for answer in answers
-                ]
-            }
-        }
-        
-        return jsonify(debug_info), 200
-        
+
     except Exception as e:
         logging.error(f"Erro no debug de sessão: {str(e)}", exc_info=True)
         return jsonify({"error": "Erro no debug", "details": str(e)}), 500

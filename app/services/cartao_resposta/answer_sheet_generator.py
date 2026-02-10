@@ -11,6 +11,7 @@ import base64
 import logging
 import json
 import qrcode
+import gc
 from datetime import datetime
 from typing import List, Dict, Any, Optional
 from io import BytesIO
@@ -32,13 +33,14 @@ class AnswerSheetGenerator:
         # Adicionar filtros personalizados
         self.env.filters['safe'] = lambda x: x
 
-    def generate_answer_sheets(self, class_id: str, test_data: Dict, 
+    def generate_answer_sheet_for_class(self, class_id: str, test_data: Dict, 
                               num_questions: int, use_blocks: bool,
                               blocks_config: Dict, correct_answers: Dict,
-                              gabarito_id: str = None) -> List[Dict]:
+                              gabarito_id: str = None, questions_options: Dict = None,
+                              output_dir: str = None, class_name_suffix: str = None) -> Dict:
         """
-        Gera PDFs de cartões resposta para todos os alunos de uma turma
-
+        Gera 1 PDF único com múltiplas páginas (1 página por aluno) para uma turma
+        
         Args:
             class_id: ID da turma
             test_data: Dados da prova (title, municipality, state, etc.)
@@ -46,14 +48,24 @@ class AnswerSheetGenerator:
             use_blocks: Se usa blocos ou não
             blocks_config: Configuração de blocos {num_blocks, questions_per_block, separate_by_subject}
             correct_answers: Dict com respostas corretas {1: "A", 2: "B", ...}
-            gabarito_id: ID do gabarito salvo (opcional)
+            gabarito_id: ID do gabarito salvo (obrigatório para QR code)
+            questions_options: Dict com alternativas de cada questão {1: ['A', 'B', 'C'], 2: ['A', 'B', 'C', 'D'], ...}
+                              Se não fornecido, usa padrão A, B, C, D para todas
+            output_dir: Diretório para salvar PDF em disco (padrão: /tmp/celery_pdfs/answer_sheets)
+            class_name_suffix: Sufixo para nome do arquivo (ex: "Turma A")
 
         Returns:
-            Lista com informações dos PDFs gerados
+            Dict com informações do PDF gerado: {'pdf_path': str, 'total_students': int, 'class_name': str},
+            ou None se a turma não tiver alunos (a task deve pular essa turma).
         """
+        # Definir output_dir padrão para containers Linux
+        if output_dir is None:
+            output_dir = '/tmp/celery_pdfs/answer_sheets'
+        
         try:
             from app.models.student import Student
             from app.models.studentClass import Class
+            from app.models.grades import Grade
 
             # Buscar turma
             class_obj = Class.query.get(class_id)
@@ -62,54 +74,149 @@ class AnswerSheetGenerator:
 
             # Buscar alunos da turma
             students = Student.query.filter_by(class_id=class_id).all()
+            print(f"\n=== DEBUG GENERATOR ===")
+            print(f"Turma: {class_obj.name} (ID: {class_id})")
+            print(f"Estudantes encontrados no generator: {len(students)}")
+            for student in students:
+                print(f"  - {student.name} (ID: {student.id})")
+            print(f"======================\n")
+            
             if not students:
-                raise ValueError(f"Nenhum aluno encontrado na turma {class_id}")
+                logging.warning(f"[GENERATOR] Turma {class_obj.name} ({class_id}) sem alunos — será pulada")
+                return None
 
-            generated_files = []
+            # Criar diretório de saída
+            # Criar diretório de saída
+            os.makedirs(output_dir, exist_ok=True)
+
+            # Processar questions_options: converter chaves string para int
+            questions_map = {}
+            if questions_options:
+                for key, value in questions_options.items():
+                    try:
+                        q_num = int(key)
+                        if isinstance(value, list) and len(value) >= 2:
+                            questions_map[q_num] = value
+                        else:
+                            questions_map[q_num] = ['A', 'B', 'C', 'D']
+                    except (ValueError, TypeError):
+                        continue
+            
+            # Se questions_map vazio, preencher com padrão
+            if not questions_map:
+                for q in range(1, num_questions + 1):
+                    questions_map[q] = ['A', 'B', 'C', 'D']
+            else:
+                # Garantir que todas questões existam
+                for q in range(1, num_questions + 1):
+                    if q not in questions_map:
+                        questions_map[q] = ['A', 'B', 'C', 'D']
 
             # Organizar questões por blocos se necessário
             questions_by_block = None
             if use_blocks:
                 questions_by_block = self._organize_questions_by_blocks(
-                    num_questions, blocks_config
+                    num_questions, blocks_config, questions_map
                 )
 
+            # ========================================================================
+            # ✅ NOVO: Gerar dados completos para TODOS os alunos com QR codes
+            # ========================================================================
+            students_with_qr = []
             for student in students:
-                try:
-                    # Gerar PDF individual para cada aluno
-                    pdf_data = self._generate_individual_answer_sheet(
-                        student, test_data, num_questions, use_blocks,
-                        blocks_config, questions_by_block, gabarito_id
-                    )
+                student_data = self._get_complete_student_data(student)
+                
+                # Gerar QR code com metadados
+                qr_code_base64 = self._generate_qr_code(
+                    student_id=student_data['id'],
+                    test_id=test_data.get('id'),
+                    gabarito_id=gabarito_id
+                )
+                
+                student_data['qr_code'] = qr_code_base64
+                students_with_qr.append(student_data)
 
-                    if pdf_data:
-                        generated_files.append({
-                            'student_id': student.id,
-                            'student_name': student.name,
-                            'pdf_data': pdf_data,
-                            'has_pdf_data': True
-                        })
+            # ========================================================================
+            # ✅ NOVO: Gerar 1 PDF ÚNICO com múltiplas páginas
+            # ========================================================================
+            logging.info(f"[GENERATOR] Gerando PDF único para turma {class_obj.name} com {len(students)} alunos")
+            
+            # Preparar dados para o template
+            template_data = {
+                'test_data': test_data,
+                'students': students_with_qr,  # ✅ LISTA de alunos (mudança principal)
+                'questions_by_block': questions_by_block,
+                'questions_map': questions_map,
+                'blocks_config': blocks_config if use_blocks else None,
+                'total_questions': num_questions,
+                'datetime': datetime,
+                'generated_date': datetime.now().strftime('%d/%m/%Y %H:%M')
+            }
 
-                except Exception as e:
-                    logging.error(f"Erro ao gerar cartão resposta para aluno {student.id}: {str(e)}")
-                    import traceback
-                    logging.error(traceback.format_exc())
-                    continue
+            # Renderizar template HTML com TODOS os alunos
+            template = self.env.get_template('answer_sheet.html')
+            html_content = template.render(**template_data)
 
-            return generated_files
+            # Gerar PDF único com WeasyPrint
+            pdf_buffer = io.BytesIO()
+            HTML(string=html_content).write_pdf(pdf_buffer)
+            pdf_buffer.seek(0)
+            pdf_data = pdf_buffer.read()
+
+            # Gerar nome do arquivo baseado na turma
+            grade_name = test_data.get('grade_name', '')
+            if not grade_name and class_obj.grade_id:
+                grade_obj = Grade.query.get(class_obj.grade_id)
+                if grade_obj:
+                    grade_name = grade_obj.name
+            
+            # Nome do arquivo: "Serie - Turma.pdf"
+            if class_name_suffix:
+                filename = f"{class_name_suffix}.pdf"
+            elif grade_name:
+                class_name = class_obj.name or 'Turma'
+                filename = f"{grade_name} - {class_name}.pdf"
+            else:
+                filename = f"Turma {class_obj.name or class_id[:8]}.pdf"
+            
+            # Limpar nome do arquivo
+            filename = filename.replace('/', '_').replace('\\', '_')
+            pdf_path = os.path.join(output_dir, filename)
+            
+            # Salvar PDF em disco
+            with open(pdf_path, 'wb') as f:
+                f.write(pdf_data)
+            
+            logging.info(f"[GENERATOR] ✅ PDF único gerado: {filename} ({len(students)} páginas)")
+            
+            # Liberar memória
+            del pdf_data
+            gc.collect()
+
+            return {
+                'pdf_path': pdf_path,
+                'filename': filename,
+                'total_students': len(students),
+                'total_pages': len(students),
+                'class_id': str(class_id),
+                'class_name': class_obj.name,
+                'grade_name': grade_name,
+                'students': [{'student_id': s['id'], 'student_name': s['name']} for s in students_with_qr]
+            }
 
         except Exception as e:
-            logging.error(f"Erro ao gerar cartões resposta: {str(e)}")
-            import traceback
-            logging.error(traceback.format_exc())
+            logging.error(f"Erro ao gerar cartão resposta para turma: {str(e)}", exc_info=True)
             raise
 
     def _generate_individual_answer_sheet(self, student: Dict, test_data: Dict,
                                          num_questions: int, use_blocks: bool,
                                          blocks_config: Dict, questions_by_block: List[Dict],
-                                         gabarito_id: str = None) -> Optional[bytes]:
+                                         gabarito_id: str = None, questions_map: Dict = None) -> Optional[bytes]:
         """
         Gera PDF individual de cartão resposta para um aluno
+        
+        Args:
+            questions_map: Dict {question_num: [options]} para passar ao template
         """
         try:
             # Buscar dados completos do aluno
@@ -131,6 +238,7 @@ class AnswerSheetGenerator:
                 'test_data': test_data,
                 'student': student_with_qr,
                 'questions_by_block': questions_by_block,
+                'questions_map': questions_map or {},  # Mapa de alternativas por questão
                 'blocks_config': blocks_config if use_blocks else None,
                 'total_questions': num_questions,
                 'datetime': datetime,
@@ -154,60 +262,100 @@ class AnswerSheetGenerator:
             logging.error(traceback.format_exc())
             return None
 
-    def _organize_questions_by_blocks(self, num_questions: int, blocks_config: Dict) -> List[Dict]:
+    def _organize_questions_by_blocks(self, num_questions: int, blocks_config: Dict, 
+                                      questions_map: Dict = None) -> List[Dict]:
         """
         Organiza questões por blocos conforme configuração
         
         Args:
             num_questions: Total de questões
             blocks_config: Configuração de blocos
+            questions_map: Dict {question_num: [options]} com alternativas de cada questão
             
         Returns:
             Lista de blocos, cada um contendo:
             - block_number: número do bloco
-            - questions: lista de questões do bloco (apenas números)
+            - subject_name: nome da disciplina (se fornecido)
+            - questions: lista de questões com {question_number, options}
             - start_question_num: número da primeira questão
             - end_question_num: número da última questão
         """
         blocks = []
         
-        num_blocks = blocks_config.get('num_blocks', 1)
-        questions_per_block = blocks_config.get('questions_per_block', 12)
-        separate_by_subject = blocks_config.get('separate_by_subject', False)
+        # Garantir questions_map
+        if questions_map is None:
+            questions_map = {}
         
-        if separate_by_subject:
-            # Se separar por disciplina, precisaríamos de dados de disciplinas
-            # Por enquanto, vamos distribuir sequencialmente
-            # TODO: Implementar separação por disciplina se necessário
-            pass
+        # ✅ NOVO: Verificar se há blocos personalizados
+        custom_blocks = blocks_config.get('blocks', [])
         
-        # Distribuir questões sequencialmente pelos blocos
-        for block_num in range(1, num_blocks + 1):
-            start_question = (block_num - 1) * questions_per_block + 1
-            end_question = min(block_num * questions_per_block, num_questions)
-            
-            # Criar lista de questões (apenas números para o template)
-            questions = []
-            for q_num in range(start_question, end_question + 1):
-                questions.append({
-                    'question_number': q_num
-                })
-            
-            if questions:
+        if custom_blocks:
+            # ✅ Blocos personalizados com disciplinas
+            for block_def in custom_blocks:
+                block_id = block_def.get('block_id')
+                subject_name = block_def.get('subject_name')  # ✅ NOVO
+                start_q = block_def.get('start_question')
+                end_q = block_def.get('end_question')
+                
+                questions = []
+                for q_num in range(start_q, end_q + 1):
+                    options = questions_map.get(q_num, ['A', 'B', 'C', 'D'])
+                    questions.append({
+                        'question_number': q_num,
+                        'options': options
+                    })
+                
                 blocks.append({
-                    'block_number': block_num,
-                    'subject_name': None,
+                    'block_number': block_id,
+                    'subject_name': subject_name,  # ✅ NOVO
                     'questions': questions,
-                    'start_question_num': start_question,
-                    'end_question_num': end_question
+                    'start_question_num': start_q,
+                    'end_question_num': end_q
                 })
+        else:
+            # ✅ Fallback: distribuir automaticamente (comportamento original)
+            num_blocks = blocks_config.get('num_blocks', 1)
+            questions_per_block = blocks_config.get('questions_per_block', 12)
+            separate_by_subject = blocks_config.get('separate_by_subject', False)
+            
+            if separate_by_subject:
+                # Se separar por disciplina, precisaríamos de dados de disciplinas
+                # Por enquanto, vamos distribuir sequencialmente
+                # TODO: Implementar separação por disciplina automática se necessário
+                pass
+            
+            # Distribuir questões sequencialmente pelos blocos
+            for block_num in range(1, num_blocks + 1):
+                start_question = (block_num - 1) * questions_per_block + 1
+                end_question = min(block_num * questions_per_block, num_questions)
+                
+                # Criar lista de questões com alternativas
+                questions = []
+                for q_num in range(start_question, end_question + 1):
+                    # Buscar alternativas da questão ou usar padrão
+                    options = questions_map.get(q_num, ['A', 'B', 'C', 'D'])
+                    questions.append({
+                        'question_number': q_num,
+                        'options': options
+                    })
+                
+                if questions:
+                    blocks.append({
+                        'block_number': block_num,
+                        'subject_name': None,
+                        'questions': questions,
+                        'start_question_num': start_question,
+                        'end_question_num': end_question
+                    })
         
         # Validar que temos pelo menos um bloco
         if not blocks:
             questions = []
             for q_num in range(1, num_questions + 1):
+                options = questions_map.get(q_num, ['A', 'B', 'C', 'D'])
                 questions.append({
-                    'question_number': q_num
+                    'question_number': q_num,
+                    'options': options
                 })
             
             if questions:
@@ -323,4 +471,3 @@ class AnswerSheetGenerator:
             import traceback
             logging.error(traceback.format_exc())
             return ""
-

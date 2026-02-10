@@ -1,4 +1,5 @@
 from app import db
+from sqlalchemy.dialects.postgresql import UUID
 import uuid
 from datetime import datetime
 
@@ -33,7 +34,7 @@ class GameClass(db.Model):
     
     id = db.Column(db.String, primary_key=True, default=lambda: str(uuid.uuid4()))
     game_id = db.Column(db.String, db.ForeignKey('games.id'), nullable=False)
-    class_id = db.Column(db.String, db.ForeignKey('class.id'), nullable=False)
+    class_id = db.Column(UUID(as_uuid=True), db.ForeignKey('class.id'), nullable=False)
     created_at = db.Column(db.TIMESTAMP, server_default=db.text('CURRENT_TIMESTAMP'))
     
     # Relacionamentos

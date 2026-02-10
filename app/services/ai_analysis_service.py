@@ -4,8 +4,10 @@ Serviço para análise de relatórios usando OpenRouter AI
 """
 
 import logging
+import os
 import re
 from typing import Dict, Any, Optional
+import google.generativeai as genai
 from app.openai_config.openai_config import (
     OPENROUTER_MODEL,
     OPENROUTER_MAX_TOKENS,
@@ -28,8 +30,17 @@ class AIAnalysisService:
     
     def __init__(self):
         self.logger = logging.getLogger(__name__)
+        # Mantido por compatibilidade (não usado no fluxo Gemini),
+        # mas deixamos visível em runtime qual provedor/vars estão ativos.
         self.client = get_openrouter_client()
-        self.logger.info("Usando OpenRouter AI para análise de relatórios")
+
+        google_key_set = bool(os.getenv("GOOGLE_AI_STUDIO_API_KEY"))
+        google_model = os.getenv("GOOGLE_AI_STUDIO_MODEL", "gemini-1.5-pro")
+        print(
+            f"[AIAnalysisService] init | GOOGLE_AI_STUDIO_API_KEY set? {google_key_set} | "
+            f"GOOGLE_AI_STUDIO_MODEL={google_model}"
+        )
+        print("[AIAnalysisService] init | Provedor esperado para análise: Google AI Studio (Gemini)")
     
     def analyze_report_data(self, report_data: Dict[str, Any]) -> Dict[str, Any]:
         """
@@ -46,10 +57,25 @@ class AIAnalysisService:
                 'participacao': str,
                 'proficiencia': Dict[str, str],  # {disciplina: análise}
                 'notas': str,
-                'niveis_aprendizagem': Dict[str, str]  # {disciplina: análise}
+                'niveis_aprendizagem': Dict[str, str],  # {disciplina: análise}
+                'habilidades': Dict[str, str]  # {disciplina: análise}
             }
         """
         try:
+            # Validar que temos dados mínimos necessários
+            if not report_data:
+                self.logger.error("report_data está vazio")
+                return self._get_fallback_texts(report_data)
+            
+            # Validar presença de dados principais
+            has_participacao = bool(report_data.get('total_alunos', {}).get('total_geral', {}).get('avaliados', 0) > 0)
+            has_proficiencia = bool(report_data.get('proficiencia', {}).get('por_disciplina', {}))
+            has_notas = bool(report_data.get('nota_geral', {}).get('por_disciplina', {}))
+            has_niveis = bool(report_data.get('niveis_aprendizagem', {}))
+            has_habilidades = bool(report_data.get('acertos_por_habilidade', {}))
+            
+            self.logger.info(f"Validação de dados: participacao={has_participacao}, proficiencia={has_proficiencia}, notas={has_notas}, niveis={has_niveis}, habilidades={has_habilidades}")
+            
             # Preparar dados para análise
             analysis_data = self._prepare_analysis_data(report_data)
             avaliacao_titulo = report_data.get('avaliacao', {}).get('titulo', '') or report_data.get('avaliacao', {}).get('title', '')
@@ -58,17 +84,21 @@ class AIAnalysisService:
             # Construir prompt unificado com todos os dados
             unified_prompt = self._build_unified_prompt(report_data, analysis_data, avaliacao_titulo, scope_type)
             
+            
             # Fazer UMA ÚNICA chamada à IA
             unified_response = self._call_openai(unified_prompt)
             
             # Processar resposta e extrair as diferentes seções
             analysis_texts = self._parse_unified_response(unified_response, report_data)
             
+            # Validação final: garantir que todas as seções esperadas foram geradas
+            self._validate_analysis_completeness(analysis_texts, report_data)
+            
             return analysis_texts
             
         except Exception as e:
             self.logger.error(f"Erro na análise da IA: {str(e)}", exc_info=True)
-            return self._get_fallback_texts()
+            return self._get_fallback_texts(report_data)
     
     def _prepare_analysis_data(self, report_data: Dict[str, Any]) -> Dict[str, Any]:
         """Prepara dados para análise da IA"""
@@ -446,6 +476,89 @@ class AIAnalysisService:
         else:
             return "LP"  # Padrão
     
+    def _normalize_discipline_name(self, disciplina_nome: str, report_data: Dict[str, Any] = None) -> str:
+        """
+        Normaliza nome de disciplina extraído da IA para o nome padrão do banco de dados.
+        
+        Mapeia variações como "Língua Portuguesa" para "Português" (nome do banco).
+        
+        Args:
+            disciplina_nome: Nome da disciplina extraído do marcador [DISCIPLINA: ...]
+            report_data: Dados do relatório (opcional, para buscar disciplinas do payload)
+            
+        Returns:
+            Nome normalizado da disciplina (nome do banco de dados)
+        """
+        if not disciplina_nome or disciplina_nome.strip() == '':
+            return disciplina_nome
+        
+        # Se for GERAL, manter como está (aceita variações como "GERAL (Todas as Disciplinas)")
+        disciplina_upper = disciplina_nome.upper().strip()
+        if disciplina_upper == 'GERAL' or disciplina_upper.startswith('GERAL'):
+            return 'GERAL'
+        
+        # Normalizar para comparação (remover acentos, lowercase)
+        import unicodedata
+        def normalize_for_comparison(name: str) -> str:
+            if not name:
+                return ""
+            name = unicodedata.normalize('NFKD', name).encode('ASCII', 'ignore').decode('ASCII')
+            return name.lower().strip()
+        
+        # Normalizar para comparação (remover acentos, lowercase)
+        disciplina_normalized = normalize_for_comparison(disciplina_nome)
+        
+        # 1. Mapeamento direto de variações conhecidas para nomes do banco
+        # Baseado no resultado do script: banco tem "Português", não "Língua Portuguesa"
+        # Mapeamento de variações de Português
+        if 'lingua' in disciplina_normalized and 'portug' in disciplina_normalized:
+            # "Língua Portuguesa", "Lingua Portuguesa", etc. → "Português"
+            return "Português"
+        elif disciplina_normalized == 'portugues' or disciplina_normalized == 'português':
+            return "Português"
+        
+        # Mapeamento de variações de Matemática
+        if disciplina_normalized == 'matematica' or disciplina_normalized == 'matemática':
+            return "Matemática"
+        
+        # 2. Se temos report_data, tentar encontrar a disciplina correspondente no payload
+        # Isso garante que usamos o nome exato que está no payload (que vem do banco)
+        if report_data:
+            # Buscar disciplinas no payload de proficiência
+            prof_disciplinas = report_data.get('proficiencia', {}).get('por_disciplina', {})
+            for disc_payload in prof_disciplinas.keys():
+                if disc_payload == 'GERAL':
+                    continue
+                # Comparar normalizado para encontrar correspondência mesmo com variações
+                if normalize_for_comparison(disc_payload) == disciplina_normalized:
+                    return disc_payload
+            
+            # Buscar disciplinas no payload de níveis de aprendizagem
+            niveis_disciplinas = report_data.get('niveis_aprendizagem', {})
+            for disc_payload in niveis_disciplinas.keys():
+                if disc_payload == 'GERAL':
+                    continue
+                # Comparar normalizado para encontrar correspondência mesmo com variações
+                if normalize_for_comparison(disc_payload) == disciplina_normalized:
+                    return disc_payload
+        
+        # 3. Se não encontrou correspondência, buscar no banco de dados
+        try:
+            from app.models.subject import Subject
+            from app import db
+            
+            # Buscar todas as disciplinas do banco
+            all_subjects = Subject.query.all()
+            for subject in all_subjects:
+                if subject.name and normalize_for_comparison(subject.name) == disciplina_normalized:
+                    return subject.name
+        except Exception as e:
+            self.logger.warning(f"Erro ao buscar disciplinas no banco para normalização: {str(e)}")
+        
+        # 4. Se não encontrou correspondência, retornar o nome original (pode ser uma disciplina nova)
+        self.logger.warning(f"Disciplina '{disciplina_nome}' não foi normalizada - usando nome original")
+        return disciplina_nome
+    
     def _analyze_proficiency_disciplinas(self, report_data: Dict[str, Any], avaliacao_titulo: str = "") -> Dict[str, str]:
         """
         Analisa proficiência por disciplina (exceto GERAL)
@@ -579,7 +692,7 @@ class AIAnalysisService:
     
     def _analyze_niveis_aprendizagem_disciplinas(self, report_data: Dict[str, Any], avaliacao_titulo: str = "") -> Dict[str, str]:
         """
-        Analisa níveis de aprendizagem por disciplina (exceto GERAL)
+        Analisa níveis de aprendizagem por disciplina (incluindo GERAL)
         
         Args:
             report_data: Dados completos do relatório
@@ -596,10 +709,8 @@ class AIAnalysisService:
             
             analises_por_disciplina = {}
             
-            # Processar cada disciplina (exceto GERAL)
+            # Processar cada disciplina (incluindo GERAL)
             for disciplina, dados in niveis_aprendizagem.items():
-                if disciplina == 'GERAL':
-                    continue
                 
                 # Obter dados gerais da disciplina (total)
                 disc_data = dados.get('geral') or dados.get('total_geral', {})
@@ -623,22 +734,26 @@ class AIAnalysisService:
                 perc_adequado = (adequado / total_alunos * 100) if total_alunos > 0 else 0
                 perc_avancado = (avancado / total_alunos * 100) if total_alunos > 0 else 0
                 
+                # Ajustar nome da disciplina para GERAL
+                disciplina_nome = "GERAL" if disciplina == 'GERAL' else disciplina
+                disciplina_label = "GERAL (Todas as Disciplinas)" if disciplina == 'GERAL' else disciplina
+                
                 # Preencher o template do prompt (ordem importa)
                 prompt = NIVEIS_APRENDIZAGEM_ANALYSIS_PROMPT_TEMPLATE.replace(
                     "[DISCIPLINA]",
-                    disciplina
+                    disciplina_label
                 ).replace(
                     "[Avaliação]",
                     avaliacao_titulo or "Avaliação Diagnóstica"
                 ).replace(
                     "[Disciplina]",
-                    disciplina
+                    disciplina_label
                 ).replace(
                     "[Série/Ano]",
                     "9º ano"  # Pode ser ajustado dinamicamente no futuro
                 ).replace(
                     "- Disciplina: [PREENCHER DISCIPLINA: ex: Matemática / Língua Portuguesa]",
-                    f"- Disciplina: {disciplina}"
+                    f"- Disciplina: {disciplina_label}"
                 ).replace(
                     "- Avaliação: [AVALIAÇÃO: ex: Avaliação Diagnóstica 2025.1]",
                     f"- Avaliação: {avaliacao_titulo or 'Avaliação Diagnóstica'}"
@@ -661,6 +776,7 @@ class AIAnalysisService:
                 
                 try:
                     response = self._call_openai(prompt)
+                    # Usar a chave original da disciplina (incluindo 'GERAL')
                     analises_por_disciplina[disciplina] = response.strip()
                 except Exception as e:
                     self.logger.error(f"Erro ao gerar análise de níveis para {disciplina}: {str(e)}")
@@ -860,43 +976,79 @@ e recomendações práticas para a escola.
         return formatted
     
     def _call_openai(self, prompt: str) -> str:
-        """Chama API OpenRouter via cliente OpenAI"""
+        """
+        Chama a API do Google AI Studio (Gemini) para gerar análise.
+        Mantém a mesma assinatura usada anteriormente com OpenRouter.
+        """
         try:
-            system_prompt = "Você é um especialista em educação e análise de dados educacionais. Sempre gere texto humanizado e profissional, SEM usar formatação markdown (sem #, ##, *, **, etc). Use apenas parágrafos normais e títulos em maiúsculas seguidos de dois pontos."
-            
-            # Obter headers extras do OpenRouter (opcionais)
-            extra_headers = get_openrouter_extra_headers()
-            
-            # Fazer chamada usando cliente OpenAI
-            completion = self.client.chat.completions.create(
-                model=OPENROUTER_MODEL,
-                messages=[
-                    {
-                        "role": "system",
-                        "content": system_prompt
-                    },
-                    {
-                        "role": "user",
-                        "content": prompt
-                    }
-                ],
-                temperature=OPENROUTER_TEMPERATURE,
-                max_tokens=OPENROUTER_MAX_TOKENS,
-                extra_headers=extra_headers if extra_headers else {}
+            # Chave da API do Google AI Studio deve vir de variável de ambiente
+            api_key = os.getenv("GOOGLE_AI_STUDIO_API_KEY")
+            if not api_key:
+                self.logger.error("GOOGLE_AI_STUDIO_API_KEY não configurada no ambiente")
+                raise RuntimeError("Chave da API do Google AI Studio não configurada")
+
+            # Configurar cliente global do Gemini
+            genai.configure(api_key=api_key)
+
+            # Modelo: sempre usar GOOGLE_AI_STUDIO_MODEL do ambiente (ex: gemini-3-pro-preview)
+            model_name = (os.getenv("GOOGLE_AI_STUDIO_MODEL") or "gemini-1.5-pro").strip()
+            if not model_name:
+                model_name = "gemini-1.5-pro"
+            print(f"[AIAnalysisService] call | Google AI Studio (Gemini) | model={model_name}")
+
+            system_prompt = (
+                "Você é um especialista em educação e análise de dados educacionais. "
+                "Sempre gere texto humanizado e profissional, SEM usar formatação markdown "
+                "(sem #, ##, *, **, etc). Use apenas parágrafos normais e títulos em "
+                "maiúsculas seguidos de dois pontos."
             )
-            
-            # Extrair conteúdo da resposta
-            if completion.choices and len(completion.choices) > 0:
-                content = completion.choices[0].message.content
-                if content:
-                    return content
-            
-            # Se não houver conteúdo, lançar exceção
-            self.logger.error(f"Resposta do OpenRouter em formato inesperado: {completion}")
-            raise Exception("Resposta do OpenRouter em formato inesperado")
-                
+
+            # Gemini 3 usa "thinking" interno: com prompt longo pode consumir todos os tokens
+            # e devolver finish_reason=MAX_TOKENS sem Part. Reservar mais tokens para a saída.
+            max_tokens = OPENROUTER_MAX_TOKENS
+            if "gemini-3" in (model_name or "").lower():
+                max_tokens = int(os.getenv("GOOGLE_AI_STUDIO_MAX_OUTPUT_TOKENS", "32768"))
+                self.logger.info("Gemini 3 detectado: max_output_tokens=%s (evita resposta vazia com prompts longos)", max_tokens)
+            generation_config = {
+                "temperature": OPENROUTER_TEMPERATURE,
+                "max_output_tokens": max_tokens,
+            }
+
+            model = genai.GenerativeModel(
+                model_name,
+                system_instruction=system_prompt,
+                generation_config=generation_config,
+            )
+
+            response = model.generate_content(prompt)
+
+            # Extrair texto dos candidates/parts (evita ValueError quando response.text
+            # não existe por finish_reason=MAX_TOKENS/SAFETY/etc. ou Part vazia)
+            candidates = getattr(response, "candidates", None) or []
+            for cand in candidates:
+                content = getattr(cand, "content", None)
+                if not content:
+                    continue
+                parts = getattr(content, "parts", None) or []
+                texts = [getattr(p, "text", "") for p in parts if getattr(p, "text", "")]
+                joined = "\n".join(texts).strip()
+                if joined:
+                    return joined
+
+            # Sem texto: logar finish_reason para diagnóstico (2=MAX_TOKENS, 3=SAFETY, etc.)
+            finish_reasons = [getattr(c, "finish_reason", None) for c in candidates]
+            self.logger.error(
+                "Resposta do Google AI sem Part válida. finish_reason(s)=%s. "
+                "Se 2 (MAX_TOKENS), aumente OPENROUTER_MAX_TOKENS ou use modelo com mais saída.",
+                finish_reasons,
+            )
+            raise RuntimeError(
+                "Resposta do Google AI sem conteúdo (finish_reason pode ser MAX_TOKENS ou SAFETY). "
+                "Tente aumentar max_output_tokens ou outro modelo."
+            )
+
         except Exception as e:
-            self.logger.error(f"Erro ao chamar OpenRouter AI: {str(e)}", exc_info=True)
+            self.logger.error(f"Erro ao chamar Google AI Studio: {str(e)}", exc_info=True)
             raise
     
     def _process_ai_response(self, ai_response: str) -> Dict[str, str]:
@@ -1035,11 +1187,9 @@ e recomendações práticas para a escola.
                 notas_data_str += f"  - Média Municipal: {media_municipal_disc:.2f}\n"
             notas_data_str += f"  - Notas por {unidade_label}:\n{detalhes_str}\n"
         
-        # Dados de níveis de aprendizagem por disciplina
+        # Dados de níveis de aprendizagem por disciplina (incluindo GERAL)
         niveis_data_str = ""
         for disciplina, dados in niveis_aprendizagem.items():
-            if disciplina == 'GERAL':
-                continue
             disc_data = dados.get('geral') or dados.get('total_geral', {})
             if not disc_data:
                 continue
@@ -1054,12 +1204,45 @@ e recomendações práticas para a escola.
             perc_basico = (basico / total_alunos * 100) if total_alunos > 0 else 0
             perc_adequado = (adequado / total_alunos * 100) if total_alunos > 0 else 0
             perc_avancado = (avancado / total_alunos * 100) if total_alunos > 0 else 0
-            niveis_data_str += f"\n{disciplina}:\n"
+            # Ajustar nome da disciplina para GERAL
+            disciplina_label = "GERAL (Todas as Disciplinas)" if disciplina == 'GERAL' else disciplina
+            niveis_data_str += f"\n{disciplina_label}:\n"
             niveis_data_str += f"  - Total de alunos: {total_alunos}\n"
             niveis_data_str += f"  - Abaixo do Básico: {abaixo_basico} alunos ({perc_abaixo:.1f}%)\n"
             niveis_data_str += f"  - Básico: {basico} alunos ({perc_basico:.1f}%)\n"
             niveis_data_str += f"  - Adequado: {adequado} alunos ({perc_adequado:.1f}%)\n"
             niveis_data_str += f"  - Avançado: {avancado} alunos ({perc_avancado:.1f}%)\n"
+        
+        # Dados de acertos por habilidade
+        acertos_habilidade = report_data.get('acertos_por_habilidade', {})
+        habilidades_data_str = ""
+        
+        for disciplina, dados in acertos_habilidade.items():
+            questoes = dados.get('questoes', [])
+            if not questoes:
+                continue
+            
+            # Ajustar nome da disciplina para GERAL
+            disciplina_label = "GERAL (Todas as Disciplinas)" if disciplina == 'GERAL' else disciplina
+            
+            habilidades_data_str += f"\n{disciplina_label}:\n"
+            for questao in questoes:
+                codigo = questao.get('codigo', 'N/A')
+                descricao = questao.get('descricao', 'N/A')
+                acertos = questao.get('acertos', 0)
+                total = questao.get('total', 0)
+                percentual = questao.get('percentual', 0.0)
+                
+                # Classificar habilidade
+                if percentual >= 70:
+                    status = "CONCLUÍDO"
+                elif percentual >= 50:
+                    status = "REVISAR"
+                else:
+                    status = "REAVALIAR"
+                
+                habilidades_data_str += f"  - Questão {questao.get('numero_questao', 'N/A')}: {codigo} - {descricao}\n"
+                habilidades_data_str += f"    Acertos: {acertos}/{total} ({percentual:.1f}%) | Status: {status}\n"
         
         # Obter ano/série
         ano_serie = self._obter_ano_serie(report_data)
@@ -1196,7 +1379,7 @@ DADOS DE NÍVEIS DE APRENDIZAGEM:
 {niveis_data_str}
 
 INSTRUÇÕES PARA ANÁLISE DE NÍVEIS:
-Para CADA disciplina listada acima, gere um PARECER TÉCNICO DE NÍVEIS DE APRENDIZAGEM seguindo este formato:
+Para CADA disciplina listada acima (incluindo "GERAL (Todas as Disciplinas)" se presente), gere um PARECER TÉCNICO DE NÍVEIS DE APRENDIZAGEM seguindo este formato:
 
 PARECER TÉCNICO: NÍVEIS DE APRENDIZAGEM EM [Disciplina] ({avaliacao_titulo or 'Avaliação Diagnóstica'})
 [Aqui comece o primeiro parágrafo explicando o que são os Níveis de Aprendizagem e sua importância como diagnóstico pedagógico. Em seguida, explique os 4 níveis usando as definições do INEP, deixando claro que "Adequado" é a meta esperada.]
@@ -1210,6 +1393,48 @@ Calcule e apresente claramente:
 - O percentual total de alunos que NÃO ATINGIRAM A META (soma de Abaixo do Básico + Básico)
 - O percentual total de alunos que ATINGIRAM A META (soma de Adequado + Avançado)
 - Detalhe cada nível com números específicos (ex: "42% (19 alunos) estão no nível Abaixo do Básico")
+
+IMPORTANTE: Se "GERAL (Todas as Disciplinas)" estiver listado acima, você DEVE incluir uma análise para ele também. Use o nome "GERAL" ou "GERAL (Todas as Disciplinas)" no marcador [DISCIPLINA: ...].
+
+===========================================
+5. ANÁLISE DE ACERTOS POR HABILIDADE
+===========================================
+
+Você é um Analista de Dados Educacionais e Especialista em Avaliação Diagnóstica e Formativa com profundo conhecimento em BNCC, Matrizes SAEB/CAED, Educação Especial e Andragogia (EJA).
+
+METODOLOGIA DE CLASSIFICAÇÃO (MAPA DE CALOR):
+Classifique cada habilidade/objetivo com base nos acertos:
+✅ CONCLUÍDO (Consolidação): Acertos ≥ 70%. O estudante demonstra autonomia e domínio dos processos cognitivos exigidos.
+⚠️ REVISAR (Fragilidade): Acertos entre 50% e 69%. Proficiência parcial; apresenta lacunas que demandam reforço e retomada.
+🚨 REAVALIAR (Defasagem): Acertos < 50%. Habilidade não desenvolvida; requer intervenção imediata ou remediação pedagógica.
+
+DADOS DE ACERTOS POR HABILIDADE:
+{habilidades_data_str}
+
+INSTRUÇÕES PARA ANÁLISE DE HABILIDADES:
+Para CADA disciplina listada acima (incluindo GERAL se presente), gere um PARECER PEDAGÓGICO ANALÍTICO seguindo esta estrutura:
+
+PARECER PEDAGÓGICO: ACERTOS POR HABILIDADE EM [Disciplina] ({avaliacao_titulo or 'Avaliação Diagnóstica'})
+
+A. Mapa de Calor de Proficiência:
+Gere uma análise textual (não tabela) descrevendo o desempenho por habilidade, mencionando:
+- Código da Habilidade/Objetivo
+- Conteúdo Relacionado (descrição)
+- Percentual de acertos
+- Status (CONCLUÍDO, REVISAR ou REAVALIAR)
+
+B. Diagnóstico Cognitivo (Análise Qualitativa):
+Descreva tecnicamente a mobilização de esquemas mentais, focando em processos como inferência, dedução, análise crítica e resolução de problemas. Identifique padrões de desempenho e áreas de maior e menor domínio.
+
+C. Proposta de Intervenção (Plano de Ação):
+Para cada habilidade classificada como REVISAR ou REAVALIAR, sugira:
+- Estratégia Didática: Metodologias ativas, agrupamentos produtivos ou ensino estruturado
+- Recursos/Suportes: Gêneros textuais, simuladores, materiais manipuláveis ou tecnologia assistiva
+
+D. Síntese do Desempenho Global:
+Forneça um resumo técnico sobre a proficiência geral, tendências de aprendizagem e prioridades estratégicas para o próximo ciclo, alinhado à Matriz de Referência 2025.
+
+IMPORTANTE: Se "GERAL (Todas as Disciplinas)" estiver listado acima, você DEVE incluir uma análise para ele também. Use o nome "GERAL" ou "GERAL (Todas as Disciplinas)" no marcador [DISCIPLINA: ...].
 
 ===========================================
 FORMATO DA RESPOSTA
@@ -1232,14 +1457,30 @@ Sua resposta deve seguir EXATAMENTE este formato, usando os marcadores abaixo pa
 [Análise completa de notas aqui]
 
 [MARCADOR: NIVEIS]
-[Para cada disciplina, use o formato:]
+[Para cada disciplina listada nos dados acima (incluindo GERAL se presente), use o formato:]
 [DISCIPLINA: Nome da Disciplina]
 [Análise de níveis de aprendizagem para esta disciplina]
 
 [DISCIPLINA: Próxima Disciplina]
 [Análise de níveis de aprendizagem para esta disciplina]
 
-IMPORTANTE: Use os marcadores exatos [MARCADOR: PARTICIPACAO], [MARCADOR: PROFICIENCIA], [MARCADOR: NOTAS], [MARCADOR: NIVEIS] e [DISCIPLINA: ...] para que possamos processar sua resposta corretamente.
+[DISCIPLINA: GERAL]
+[Se "GERAL (Todas as Disciplinas)" estiver nos dados acima, você DEVE incluir uma análise de níveis de aprendizagem para GERAL aqui. Use exatamente o marcador [DISCIPLINA: GERAL] ou [DISCIPLINA: GERAL (Todas as Disciplinas)].]
+
+[MARCADOR: HABILIDADES]
+[Para cada disciplina listada nos dados de acertos por habilidade acima (incluindo GERAL se presente), use o formato:]
+[DISCIPLINA: Nome da Disciplina]
+[Análise completa de acertos por habilidade para esta disciplina (incluindo Mapa de Calor, Diagnóstico Cognitivo, Proposta de Intervenção e Síntese)]
+
+[DISCIPLINA: Próxima Disciplina]
+[Análise completa de acertos por habilidade para esta disciplina]
+
+[DISCIPLINA: GERAL]
+[Se "GERAL (Todas as Disciplinas)" estiver nos dados de acertos por habilidade acima, você DEVE incluir uma análise para GERAL aqui. Use exatamente o marcador [DISCIPLINA: GERAL] ou [DISCIPLINA: GERAL (Todas as Disciplinas)].]
+
+IMPORTANTE: Use os marcadores exatos [MARCADOR: PARTICIPACAO], [MARCADOR: PROFICIENCIA], [MARCADOR: NOTAS], [MARCADOR: NIVEIS], [MARCADOR: HABILIDADES] e [DISCIPLINA: ...] para que possamos processar sua resposta corretamente. 
+
+ATENÇÃO ESPECIAL: Se você viu "GERAL (Todas as Disciplinas)" nos dados de níveis de aprendizagem acima, você DEVE gerar uma análise para ele usando o marcador [DISCIPLINA: GERAL] ou [DISCIPLINA: GERAL (Todas as Disciplinas)]. Não pule esta análise!
 """
         return prompt
     
@@ -1257,32 +1498,42 @@ IMPORTANTE: Use os marcadores exatos [MARCADOR: PARTICIPACAO], [MARCADOR: PROFIC
                 'participacao': str,
                 'proficiencia': Dict[str, str],
                 'notas': str,
-                'niveis_aprendizagem': Dict[str, str]
+                'niveis_aprendizagem': Dict[str, str],
+                'habilidades': Dict[str, str]
             }
         """
         result = {
             'participacao': '',
             'proficiencia': {},
             'notas': '',
-            'niveis_aprendizagem': {}
+            'niveis_aprendizagem': {},
+            'habilidades': {}
         }
         
+        
         try:
+            
             # Extrair seção de participação
             if '[MARCADOR: PARTICIPACAO]' in unified_response:
                 parts = unified_response.split('[MARCADOR: PARTICIPACAO]', 1)
                 if len(parts) > 1:
-                    participacao_section = parts[1].split('[MARCADOR: PROFICIENCIA]', 1)[0]
-                    result['participacao'] = participacao_section.strip()
+                    if '[MARCADOR: PROFICIENCIA]' in parts[1]:
+                        participacao_section = parts[1].split('[MARCADOR: PROFICIENCIA]', 1)[0]
+                        result['participacao'] = participacao_section.strip()
+                    else:
+                        result['participacao'] = parts[1].strip()
             
             # Extrair seção de proficiência
             if '[MARCADOR: PROFICIENCIA]' in unified_response:
                 parts = unified_response.split('[MARCADOR: PROFICIENCIA]', 1)
                 if len(parts) > 1:
-                    prof_section = parts[1].split('[MARCADOR: NOTAS]', 1)[0]
+                    if '[MARCADOR: NOTAS]' in parts[1]:
+                        prof_section = parts[1].split('[MARCADOR: NOTAS]', 1)[0]
+                    else:
+                        prof_section = parts[1]
                     # Extrair todas as disciplinas usando regex
                     disciplina_pattern = r'\[DISCIPLINA:\s*([^\]]+)\]'
-                    matches = re.finditer(disciplina_pattern, prof_section)
+                    matches = list(re.finditer(disciplina_pattern, prof_section))
                     for match in matches:
                         disciplina_nome = match.group(1).strip()
                         start_pos = match.end()
@@ -1293,23 +1544,37 @@ IMPORTANTE: Use os marcadores exatos [MARCADOR: PARTICIPACAO], [MARCADOR: PROFIC
                         else:
                             end_pos = len(prof_section)
                         disc_analysis = prof_section[start_pos:end_pos].strip()
-                        result['proficiencia'][disciplina_nome] = disc_analysis
+                        # Normalizar nome da disciplina para o nome padrão do banco
+                        disciplina_key = self._normalize_discipline_name(disciplina_nome, report_data)
+                        result['proficiencia'][disciplina_key] = disc_analysis
             
             # Extrair seção de notas
             if '[MARCADOR: NOTAS]' in unified_response:
                 parts = unified_response.split('[MARCADOR: NOTAS]', 1)
                 if len(parts) > 1:
-                    notas_section = parts[1].split('[MARCADOR: NIVEIS]', 1)[0]
-                    result['notas'] = notas_section.strip()
+                    if '[MARCADOR: NIVEIS]' in parts[1]:
+                        notas_section = parts[1].split('[MARCADOR: NIVEIS]', 1)[0]
+                        result['notas'] = notas_section.strip()
+                    elif '[MARCADOR: HABILIDADES]' in parts[1]:
+                        notas_section = parts[1].split('[MARCADOR: HABILIDADES]', 1)[0]
+                        result['notas'] = notas_section.strip()
+                    else:
+                        result['notas'] = parts[1].strip()
             
             # Extrair seção de níveis
             if '[MARCADOR: NIVEIS]' in unified_response:
                 parts = unified_response.split('[MARCADOR: NIVEIS]', 1)
                 if len(parts) > 1:
-                    niveis_section = parts[1]
+                    # Verificar se há marcador de HABILIDADES após NIVEIS
+                    if '[MARCADOR: HABILIDADES]' in parts[1]:
+                        niveis_section = parts[1].split('[MARCADOR: HABILIDADES]', 1)[0]
+                    else:
+                        niveis_section = parts[1]
+                    
                     # Extrair todas as disciplinas usando regex
                     disciplina_pattern = r'\[DISCIPLINA:\s*([^\]]+)\]'
-                    matches = re.finditer(disciplina_pattern, niveis_section)
+                    matches = list(re.finditer(disciplina_pattern, niveis_section))
+                    
                     for match in matches:
                         disciplina_nome = match.group(1).strip()
                         start_pos = match.end()
@@ -1320,7 +1585,53 @@ IMPORTANTE: Use os marcadores exatos [MARCADOR: PARTICIPACAO], [MARCADOR: PROFIC
                         else:
                             end_pos = len(niveis_section)
                         disc_analysis = niveis_section[start_pos:end_pos].strip()
-                        result['niveis_aprendizagem'][disciplina_nome] = disc_analysis
+                        
+                        # Normalizar nome da disciplina para o nome padrão do banco
+                        disciplina_key = self._normalize_discipline_name(disciplina_nome, report_data)
+                        
+                        result['niveis_aprendizagem'][disciplina_key] = disc_analysis
+                    
+                    # Tentar buscar GERAL na seção de níveis mesmo sem marcador explícito
+                    if 'GERAL' not in result['niveis_aprendizagem'] and 'GERAL' in niveis_section.upper():
+                        # Procurar por padrões que indiquem análise de GERAL
+                        geral_patterns = [
+                            r'PARECER TÉCNICO[^\n]*NÍVEIS[^\n]*GERAL[^\n]*\n(.*?)(?=\[DISCIPLINA:|PARECER TÉCNICO|$)',
+                            r'GERAL[^\n]*TODAS AS DISCIPLINAS[^\n]*\n(.*?)(?=\[DISCIPLINA:|PARECER TÉCNICO|$)',
+                            r'NÍVEIS DE APRENDIZAGEM[^\n]*GERAL[^\n]*\n(.*?)(?=\[DISCIPLINA:|PARECER TÉCNICO|$)',
+                        ]
+                        for pattern in geral_patterns:
+                            match = re.search(pattern, niveis_section, re.IGNORECASE | re.DOTALL)
+                            if match:
+                                geral_analysis = match.group(1).strip()
+                                if len(geral_analysis) > 100:  # Garantir que é uma análise válida
+                                    result['niveis_aprendizagem']['GERAL'] = geral_analysis
+                                    break
+            
+            # Extrair seção de habilidades
+            if '[MARCADOR: HABILIDADES]' in unified_response:
+                parts = unified_response.split('[MARCADOR: HABILIDADES]', 1)
+                if len(parts) > 1:
+                    habilidades_section = parts[1]
+                    
+                    # Extrair todas as disciplinas usando regex
+                    disciplina_pattern = r'\[DISCIPLINA:\s*([^\]]+)\]'
+                    matches = list(re.finditer(disciplina_pattern, habilidades_section))
+                    
+                    for match in matches:
+                        disciplina_nome = match.group(1).strip()
+                        start_pos = match.end()
+                        # Encontrar próxima disciplina ou fim da seção
+                        next_match = re.search(disciplina_pattern, habilidades_section[start_pos:])
+                        if next_match:
+                            end_pos = start_pos + next_match.start()
+                        else:
+                            end_pos = len(habilidades_section)
+                        disc_analysis = habilidades_section[start_pos:end_pos].strip()
+                        
+                        # Normalizar nome da disciplina para o nome padrão do banco
+                        disciplina_key = self._normalize_discipline_name(disciplina_nome, report_data)
+                        
+                        result['habilidades'][disciplina_key] = disc_analysis
             
             # Fallback: se não encontrou marcadores, tentar parsing mais flexível
             if not result['participacao'] and not result['proficiencia']:
@@ -1334,26 +1645,56 @@ IMPORTANTE: Use os marcadores exatos [MARCADOR: PARTICIPACAO], [MARCADOR: PROFIC
             
         except Exception as e:
             self.logger.error(f"Erro ao processar resposta unificada: {str(e)}", exc_info=True)
-            # Retornar fallback
-            return self._get_fallback_texts()
+            # Retornar fallback com dados do report_data
+            return self._get_fallback_texts(report_data)
         
         # Garantir que pelo menos temos fallback para campos vazios
+        
+        # Garantir que todas as seções tenham conteúdo, mesmo que vazio
+        # Seção de participação
         if not result['participacao']:
             result['participacao'] = 'Análise de participação não disponível no momento.'
+        
+        # Seção de notas
         if not result['notas']:
             result['notas'] = 'Análise de notas não disponível no momento.'
-        if not result['proficiencia']:
-            # Tentar obter disciplinas do report_data
-            prof_disciplinas = report_data.get('proficiencia', {}).get('por_disciplina', {})
+        
+        # Seção de proficiência - garantir que todas as disciplinas tenham análise
+        prof_disciplinas = report_data.get('proficiencia', {}).get('por_disciplina', {})
+        if prof_disciplinas:
             for disciplina in prof_disciplinas.keys():
                 if disciplina != 'GERAL':
-                    result['proficiencia'][disciplina] = f'Análise de proficiência não disponível para {disciplina}.'
-        if not result['niveis_aprendizagem']:
-            # Tentar obter disciplinas do report_data
-            niveis_disciplinas = report_data.get('niveis_aprendizagem', {})
+                    # Se não foi extraída, criar fallback
+                    if disciplina not in result['proficiencia']:
+                        result['proficiencia'][disciplina] = f'Análise de proficiência não disponível para {disciplina}.'
+                        self.logger.warning(f"Análise de proficiência não encontrada para disciplina: {disciplina}")
+        elif not result['proficiencia']:
+            # Se não há dados de proficiência, manter dict vazio
+            result['proficiencia'] = {}
+        
+        # Seção de níveis de aprendizagem - garantir que todas as disciplinas tenham análise
+        niveis_disciplinas = report_data.get('niveis_aprendizagem', {})
+        if niveis_disciplinas:
             for disciplina in niveis_disciplinas.keys():
-                if disciplina != 'GERAL':
+                # Se não foi extraída, criar fallback (incluindo GERAL)
+                if disciplina not in result['niveis_aprendizagem']:
                     result['niveis_aprendizagem'][disciplina] = f'Análise de níveis não disponível para {disciplina}.'
+                    self.logger.warning(f"Análise de níveis não encontrada para disciplina: {disciplina}")
+        elif not result['niveis_aprendizagem']:
+            # Se não há dados de níveis, manter dict vazio
+            result['niveis_aprendizagem'] = {}
+        
+        # Seção de habilidades - garantir que todas as disciplinas tenham análise
+        habilidades_disciplinas = report_data.get('acertos_por_habilidade', {})
+        if habilidades_disciplinas:
+            for disciplina in habilidades_disciplinas.keys():
+                # Se não foi extraída, criar fallback (incluindo GERAL)
+                if disciplina not in result['habilidades']:
+                    result['habilidades'][disciplina] = f'Análise de habilidades não disponível para {disciplina}.'
+                    self.logger.warning(f"Análise de habilidades não encontrada para disciplina: {disciplina}")
+        elif not result['habilidades']:
+            # Se não há dados de habilidades, manter dict vazio
+            result['habilidades'] = {}
         
         # Formatar todas as análises em HTML
         result['participacao'] = self._format_ai_text(result['participacao'])
@@ -1365,11 +1706,10 @@ IMPORTANTE: Use os marcadores exatos [MARCADOR: PARTICIPACAO], [MARCADOR: PROFIC
         
         for disciplina in result['niveis_aprendizagem']:
             result['niveis_aprendizagem'][disciplina] = self._format_ai_text(result['niveis_aprendizagem'][disciplina])
+
+        for disciplina in result['habilidades']:
+            result['habilidades'][disciplina] = self._format_ai_text(result['habilidades'][disciplina])
         
-        # Formatar acertos por habilidade se existir
-        if 'acertos_habilidade' in result:
-            for disciplina in result.get('acertos_habilidade', {}):
-                result['acertos_habilidade'][disciplina] = self._format_ai_text(result['acertos_habilidade'][disciplina])
         
         return result
     
@@ -1392,8 +1732,6 @@ IMPORTANTE: Use os marcadores exatos [MARCADOR: PARTICIPACAO], [MARCADOR: PROFIC
         if not text or not isinstance(text, str):
             return text or ''
         
-        # Log para debug (pode remover depois)
-        self.logger.debug(f"Formatando texto da IA (tamanho: {len(text)} caracteres)")
         
         # Normalizar espaços múltiplos mas preservar estrutura
         text = re.sub(r'[ \t]+', ' ', text)  # Múltiplos espaços/tabs viram um espaço
@@ -1529,11 +1867,103 @@ IMPORTANTE: Use os marcadores exatos [MARCADOR: PARTICIPACAO], [MARCADOR: PROFIC
         
         return text
     
-    def _get_fallback_texts(self) -> Dict[str, Any]:
-        """Retorna textos padrão em caso de erro"""
-        return {
+    def _get_fallback_texts(self, report_data: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """
+        Retorna textos padrão em caso de erro.
+        Se report_data for fornecido, cria fallbacks para todas as disciplinas encontradas.
+        
+        Args:
+            report_data: Dados do relatório (opcional) para criar fallbacks por disciplina
+            
+        Returns:
+            Dict com textos padrão, incluindo entradas para todas as disciplinas se report_data fornecido
+        """
+        result = {
             'participacao': 'Análise de participação não disponível no momento.',
             'proficiencia': {},
             'notas': 'Análise de notas não disponível no momento.',
-            'niveis_aprendizagem': {}
+            'niveis_aprendizagem': {},
+            'habilidades': {}
         }
+        
+        # Se report_data fornecido, criar fallbacks para todas as disciplinas
+        if report_data:
+            # Proficiência - criar fallback para cada disciplina (exceto GERAL)
+            prof_disciplinas = report_data.get('proficiencia', {}).get('por_disciplina', {})
+            if prof_disciplinas:
+                for disciplina in prof_disciplinas.keys():
+                    if disciplina != 'GERAL':
+                        result['proficiencia'][disciplina] = f'Análise de proficiência não disponível para {disciplina}.'
+                        self.logger.warning(f"Fallback criado para proficiência: {disciplina}")
+            
+            # Níveis de aprendizagem - criar fallback para cada disciplina (incluindo GERAL)
+            niveis_disciplinas = report_data.get('niveis_aprendizagem', {})
+            if niveis_disciplinas:
+                for disciplina in niveis_disciplinas.keys():
+                    result['niveis_aprendizagem'][disciplina] = f'Análise de níveis não disponível para {disciplina}.'
+                    self.logger.warning(f"Fallback criado para níveis: {disciplina}")
+            
+            # Habilidades - criar fallback para cada disciplina (incluindo GERAL)
+            habilidades_disciplinas = report_data.get('acertos_por_habilidade', {})
+            if habilidades_disciplinas:
+                for disciplina in habilidades_disciplinas.keys():
+                    result['habilidades'][disciplina] = f'Análise de habilidades não disponível para {disciplina}.'
+                    self.logger.warning(f"Fallback criado para habilidades: {disciplina}")
+        
+        return result
+    
+    def _validate_analysis_completeness(self, analysis_texts: Dict[str, Any], report_data: Dict[str, Any]) -> None:
+        """
+        Valida se todas as seções esperadas foram geradas corretamente.
+        Se alguma estiver faltando, cria fallbacks apropriados.
+        
+        Args:
+            analysis_texts: Resultado da análise gerada
+            report_data: Dados originais do relatório
+        """
+        # Validar participação
+        if not analysis_texts.get('participacao'):
+            self.logger.warning("Análise de participação está vazia, criando fallback")
+            analysis_texts['participacao'] = 'Análise de participação não disponível no momento.'
+        
+        # Validar notas
+        if not analysis_texts.get('notas'):
+            self.logger.warning("Análise de notas está vazia, criando fallback")
+            analysis_texts['notas'] = 'Análise de notas não disponível no momento.'
+        
+        # Validar proficiência - verificar se todas as disciplinas têm análise
+        prof_disciplinas = report_data.get('proficiencia', {}).get('por_disciplina', {})
+        if prof_disciplinas:
+            for disciplina in prof_disciplinas.keys():
+                if disciplina != 'GERAL' and disciplina not in analysis_texts.get('proficiencia', {}):
+                    self.logger.warning(f"Análise de proficiência faltando para disciplina: {disciplina}")
+                    if 'proficiencia' not in analysis_texts:
+                        analysis_texts['proficiencia'] = {}
+                    analysis_texts['proficiencia'][disciplina] = f'Análise de proficiência não disponível para {disciplina}.'
+        
+        # Validar níveis de aprendizagem - verificar se todas as disciplinas têm análise
+        niveis_disciplinas = report_data.get('niveis_aprendizagem', {})
+        if niveis_disciplinas:
+            for disciplina in niveis_disciplinas.keys():
+                if disciplina not in analysis_texts.get('niveis_aprendizagem', {}):
+                    self.logger.warning(f"Análise de níveis faltando para disciplina: {disciplina}")
+                    if 'niveis_aprendizagem' not in analysis_texts:
+                        analysis_texts['niveis_aprendizagem'] = {}
+                    analysis_texts['niveis_aprendizagem'][disciplina] = f'Análise de níveis não disponível para {disciplina}.'
+        
+        # Validar habilidades - verificar se todas as disciplinas têm análise
+        habilidades_disciplinas = report_data.get('acertos_por_habilidade', {})
+        if habilidades_disciplinas:
+            for disciplina in habilidades_disciplinas.keys():
+                if disciplina not in analysis_texts.get('habilidades', {}):
+                    self.logger.warning(f"Análise de habilidades faltando para disciplina: {disciplina}")
+                    if 'habilidades' not in analysis_texts:
+                        analysis_texts['habilidades'] = {}
+                    analysis_texts['habilidades'][disciplina] = f'Análise de habilidades não disponível para {disciplina}.'
+        
+        # Log final de validação
+        self.logger.info(f"Validação completa: participacao={bool(analysis_texts.get('participacao'))}, "
+                        f"notas={bool(analysis_texts.get('notas'))}, "
+                        f"proficiencia={len(analysis_texts.get('proficiencia', {}))} disciplinas, "
+                        f"niveis={len(analysis_texts.get('niveis_aprendizagem', {}))} disciplinas, "
+                        f"habilidades={len(analysis_texts.get('habilidades', {}))} disciplinas")

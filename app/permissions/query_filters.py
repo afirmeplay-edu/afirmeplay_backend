@@ -46,32 +46,43 @@ def filter_schools_by_user(query: Query, user: dict) -> Query:
     Returns:
         Query: Query filtrada de acordo com permissões do usuário
     """
-    role = Roles.normalize(user.get('role', ''))
+    from app.models.school import School
+    from app.utils.uuid_helpers import uuid_to_str, uuid_list_to_str
+    from sqlalchemy.exc import SQLAlchemyError
     
-    # Admin e TECADM veem todas as escolas
-    if Roles.is_admin_role(role):
-        return query
-    
-    # Diretor e Coordenador: apenas sua escola
-    elif role in [Roles.DIRETOR, Roles.COORDENADOR]:
-        school_id = get_manager_school(user['id'])
-        if school_id:
-            return query.filter(lambda q: q.school_id == school_id)
-        else:
-            # Se não tem escola vinculada, forçar resultado vazio
-            return query.filter(lambda q: q.school_id == None)
-    
-    # Professor: apenas escolas onde está vinculado
-    elif role == Roles.PROFESSOR:
-        school_ids = get_teacher_schools(user['id'])
-        if school_ids:
-            return query.filter(lambda q: q.school_id.in_(school_ids))
-        else:
-            # Se não tem escolas vinculadas, forçar resultado vazio
-            return query.filter(lambda q: q.school_id == None)
-    
-    # Outros roles (ALUNO): resultado vazio
-    return query.filter(lambda q: q.school_id == None)
+    try:
+        role = Roles.normalize(user.get('role', ''))
+        
+        # Admin e TECADM veem todas as escolas
+        if Roles.is_admin_role(role):
+            return query
+        
+        # Diretor e Coordenador: apenas sua escola
+        elif role in [Roles.DIRETOR, Roles.COORDENADOR]:
+            school_id = get_manager_school(user['id'])
+            if school_id:
+                # ✅ CORRIGIDO: Converter para string (School.id é VARCHAR)
+                school_id_str = uuid_to_str(school_id)
+                return query.filter(School.id == school_id_str)
+            else:
+                return query.filter(School.id == None)
+        
+        # Professor: apenas escolas onde está vinculado
+        elif role == Roles.PROFESSOR:
+            school_ids = get_teacher_schools(user['id'])
+            if school_ids:
+                # ✅ CORRIGIDO: Converter para strings
+                school_ids_str = uuid_list_to_str(school_ids)
+                return query.filter(School.id.in_(school_ids_str))
+            else:
+                return query.filter(School.id == None)
+        
+        # Outros roles (ALUNO): resultado vazio
+        return query.filter(School.id == None)
+    except SQLAlchemyError as e:
+        from app import db
+        db.session.rollback()
+        raise
 
 
 def filter_classes_by_user(query: Query, user: dict) -> Query:
@@ -98,13 +109,16 @@ def filter_classes_by_user(query: Query, user: dict) -> Query:
     
     # Diretor e Coordenador: apenas turmas de sua escola
     elif role in [Roles.DIRETOR, Roles.COORDENADOR]:
+        from app.utils.uuid_helpers import uuid_to_str
         school_id = get_manager_school(user['id'])
         if school_id:
-            return query.filter(ClassModel.school_id == school_id)
-        else:
-            return query.filter(ClassModel.school_id == None)
+            # ✅ CORRIGIDO: Converter school_id para string (Class.school_id é VARCHAR, igual School.id)
+            school_id_str = uuid_to_str(school_id)
+            if school_id_str:
+                return query.filter(ClassModel.school_id == school_id_str)
+        return query.filter(ClassModel.school_id == None)
     
-        # Professor: apenas turmas onde está vinculado
+    # Professor: apenas turmas onde está vinculado
     elif role == Roles.PROFESSOR:
         teacher = get_teacher(user['id'])
         if teacher:
@@ -113,6 +127,7 @@ def filter_classes_by_user(query: Query, user: dict) -> Query:
             class_ids = [tc.class_id for tc in teacher_classes]
             
             if class_ids:
+                # class_ids já são UUIDs (TeacherClass.class_id é UUID)
                 return query.filter(ClassModel.id.in_(class_ids))
         
         return query.filter(ClassModel.id == None)
@@ -212,7 +227,10 @@ def filter_tests_by_user(query: Query, user: dict, escola_id: str = None, requir
         
         # Filtrar avaliações que foram aplicadas em turmas da escola
         # Buscar turmas da escola
-        classes = ClassModel.query.filter_by(school_id=school_id).all()
+        # ✅ CORRIGIDO: Converter school_id para string (Class.school_id é VARCHAR)
+        from app.utils.uuid_helpers import uuid_to_str
+        school_id_str = uuid_to_str(school_id)
+        classes = ClassModel.query.filter_by(school_id=school_id_str).all() if school_id_str else []
         class_ids = [c.id for c in classes]
         
         if class_ids:
@@ -250,19 +268,25 @@ def filter_students_by_user(query: Query, user: dict) -> Query:
     
     # Diretor e Coordenador: apenas estudantes de sua escola
     elif role in [Roles.DIRETOR, Roles.COORDENADOR]:
+        from app.utils.uuid_helpers import uuid_to_str
         school_id = get_manager_school(user['id'])
         if school_id:
-            return query.filter(lambda q: q.school_id == school_id)
+            # ✅ CORRIGIDO: Converter para string (Student.school_id é VARCHAR)
+            school_id_str = uuid_to_str(school_id)
+            return query.filter(Student.school_id == school_id_str)
         else:
-            return query.filter(lambda q: q.school_id == None)
+            return query.filter(Student.school_id == None)
     
     # Professor: apenas estudantes de suas turmas
     elif role == Roles.PROFESSOR:
+        from app.utils.uuid_helpers import uuid_list_to_str
         school_ids = get_teacher_schools(user['id'])
         if school_ids:
-            return query.filter(lambda q: q.school_id.in_(school_ids))
+            # ✅ CORRIGIDO: Converter para strings
+            school_ids_str = uuid_list_to_str(school_ids)
+            return query.filter(Student.school_id.in_(school_ids_str))
         else:
-            return query.filter(lambda q: q.school_id == None)
+            return query.filter(Student.school_id == None)
     
     # Outros roles: resultado vazio
     return query.filter(lambda q: q.school_id == None)

@@ -37,7 +37,8 @@ class CalendarEvent(db.Model):
     visibility_scope = db.Column(db.Enum(CalendarVisibilityScope), nullable=False)
 
     municipality_id = db.Column(db.String, db.ForeignKey('city.id'), nullable=True)
-    school_id = db.Column(db.String, db.ForeignKey('school.id'), nullable=True)
+    # ✅ CORRIGIDO: Explicitamente String(36) para garantir tipo correto
+    school_id = db.Column(db.String(36), db.ForeignKey('school.id'), nullable=True)
 
     metadata_json = db.Column(db.JSON, nullable=True)
 

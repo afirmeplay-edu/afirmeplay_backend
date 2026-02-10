@@ -227,145 +227,117 @@ def format_question_response(q, exclude_fields=None):
 
 
 def format_test_response(test):
-    # Campos do Test que são análogos aos da Question e que serão excluídos da formatação da questão
-    exclude_from_question = ['grade', 'createdBy', 'title', 'description']
+    """
+    Formata a resposta de um teste com todas as informações relacionadas.
+    Inclui tratamento de erros com rollback para evitar transações abortadas.
+    """
+    from app import db
     
-    # Busca os nomes para os campos que armazenam IDs de forma segura
-    course_obj = _get_education_stage_safely(test.course)
-    
-    # Buscar todas as disciplinas da avaliação (única + múltiplas)
-    all_subjects = _get_all_subjects_from_test(test)
-    
-    municipalities_list = []
-    if test.municipalities:
-        try:
-            # Verificar se municipalities é uma lista ou string
-            municipality_ids = []
-            if isinstance(test.municipalities, list):
-                municipality_ids = test.municipalities
-            elif isinstance(test.municipalities, str):
-                municipality_ids = [test.municipalities]
-            
-            if municipality_ids:
-                municipalities_objs = City.query.filter(City.id.in_(municipality_ids)).all()
-                municipalities_list = [{'id': m.id, 'name': m.name} for m in municipalities_objs]
-        except Exception as e:
-            logging.warning(f"Erro ao buscar municípios: {str(e)}")
-            municipalities_list = []
-
-    schools_list = []
-    if test.schools:
-        try:
-            # Verificar se schools é uma lista ou string
-            school_ids = []
-            if isinstance(test.schools, list):
-                school_ids = test.schools
-            elif isinstance(test.schools, str):
-                school_ids = [test.schools]
-            
-            if school_ids:
-                schools_objs = School.query.filter(School.id.in_(school_ids)).all()
-                schools_list = [{'id': s.id, 'name': s.name} for s in schools_objs]
-        except Exception as e:
-            logging.warning(f"Erro ao buscar escolas: {str(e)}")
-            schools_list = []
-
-    # Buscar informações completas das classes específicas (campo classes)
-    classes_info = []
-    if test.classes:
-        try:
-            class_ids = []
-            if isinstance(test.classes, list):
-                class_ids = test.classes
-            elif isinstance(test.classes, str):
-                class_ids = [test.classes]
-            
-            if class_ids:
-                specific_classes = Class.query.filter(Class.id.in_(class_ids)).all()
-                
-                for class_obj in specific_classes:
-                    try:
-                        school_obj = School.query.get(class_obj.school_id)
-                        grade_obj = Grade.query.get(class_obj.grade_id)
-                        
-                        # Contar alunos na turma
-                        students_count = len(class_obj.students) if class_obj.students else 0
-                        
-                        classes_info.append({
-                            "id": class_obj.id,
-                            "name": class_obj.name,
-                            "students_count": students_count,
-                            "school": {
-                                "id": school_obj.id,
-                                "name": school_obj.name
-                            } if school_obj else None,
-                            "grade": {
-                                "id": grade_obj.id,
-                                "name": grade_obj.name
-                            } if grade_obj else None
-                        })
-                    except Exception as e:
-                        logging.warning(f"Erro ao processar classe {class_obj.id}: {str(e)}")
-                        continue
-        except Exception as e:
-            logging.warning(f"Erro ao buscar classes específicas: {str(e)}")
-            classes_info = []
-    
-    # Buscar informações sobre as classes onde a avaliação foi aplicada
-    applied_classes_info = []
-    total_students = 0
-    
-    # Primeira prioridade: usar class_tests (quando a avaliação foi aplicada)
-    if test.class_tests:
-        for ct in test.class_tests:
+    try:
+        # Campos do Test que são análogos aos da Question e que serão excluídos da formatação da questão
+        exclude_from_question = ['grade', 'createdBy', 'title', 'description']
+        
+        # Busca os nomes para os campos que armazenam IDs de forma segura
+        course_obj = _get_education_stage_safely(test.course)
+        
+        # Buscar todas as disciplinas da avaliação (única + múltiplas)
+        all_subjects = _get_all_subjects_from_test(test)
+        
+        municipalities_list = []
+        if test.municipalities:
             try:
-                class_obj = Class.query.get(ct.class_id)
-                if class_obj:
-                    school_obj = School.query.get(class_obj.school_id)
-                    grade_obj = Grade.query.get(class_obj.grade_id)
-                    
-                    # Contar alunos na turma
-                    students_count = len(class_obj.students) if class_obj.students else 0
-                    total_students += students_count
-                    
-                    applied_classes_info.append({
-                        "class_test_id": ct.id,
-                        "class": {
-                            "id": class_obj.id,
-                            "name": class_obj.name,
-                            "students_count": students_count,
-                            "school": {
-                                "id": school_obj.id,
-                                "name": school_obj.name
-                            } if school_obj else None,
-                            "grade": {
-                                "id": grade_obj.id,
-                                "name": grade_obj.name
-                            } if grade_obj else None
-                        },
-                        "application": ct.application if ct.application else None,
-                        "expiration": ct.expiration if ct.expiration else None
-                    })
-            except Exception as e:
-                logging.warning(f"Erro ao processar class_test {ct.id}: {str(e)}")
-                continue
-    
-    # Fallback: usar schools quando não há class_tests (avaliação ainda não aplicada)
-    elif test.schools:
-        try:
-            school_ids = []
-            if isinstance(test.schools, list):
-                school_ids = test.schools
-            elif isinstance(test.schools, str):
-                school_ids = [test.schools]
-            
-            # Buscar todas as turmas das escolas selecionadas
-            if school_ids:
-                classes_objs = Class.query.filter(Class.school_id.in_(school_ids)).all()
+                # Verificar se municipalities é uma lista ou string
+                municipality_ids = []
+                if isinstance(test.municipalities, list):
+                    municipality_ids = test.municipalities
+                elif isinstance(test.municipalities, str):
+                    municipality_ids = [test.municipalities]
                 
-                for class_obj in classes_objs:
-                    try:
-                        school_obj = School.query.get(class_obj.school_id)
+                if municipality_ids:
+                    municipalities_objs = City.query.filter(City.id.in_(municipality_ids)).all()
+                    municipalities_list = [{'id': m.id, 'name': m.name} for m in municipalities_objs]
+            except Exception as e:
+                logging.warning(f"Erro ao buscar municípios: {str(e)}")
+                municipalities_list = []
+
+        schools_list = []
+        if test.schools:
+            try:
+                # Verificar se schools é uma lista ou string
+                school_ids = []
+                if isinstance(test.schools, list):
+                    school_ids = test.schools
+                elif isinstance(test.schools, str):
+                    school_ids = [test.schools]
+                
+                if school_ids:
+                    schools_objs = School.query.filter(School.id.in_(school_ids)).all()
+                    schools_list = [{'id': s.id, 'name': s.name} for s in schools_objs]
+            except Exception as e:
+                logging.warning(f"Erro ao buscar escolas: {str(e)}")
+                schools_list = []
+
+        # Buscar informações completas das classes específicas (campo classes)
+        classes_info = []
+        if test.classes:
+            try:
+                class_ids = []
+                if isinstance(test.classes, list):
+                    class_ids = test.classes
+                elif isinstance(test.classes, str):
+                    class_ids = [test.classes]
+                
+                if class_ids:
+                    # Converter class_ids para UUID (Class.id é UUID)
+                    from app.utils.uuid_helpers import ensure_uuid_list
+                    class_ids_uuids = ensure_uuid_list(class_ids)
+                    specific_classes = Class.query.filter(Class.id.in_(class_ids_uuids)).all()
+                    
+                    for class_obj in specific_classes:
+                        try:
+                            # class_obj.school_id é UUID, School.id é VARCHAR - converter para string
+                            school_obj = School.query.filter(School.id == str(class_obj.school_id)).first()
+                            grade_obj = Grade.query.get(class_obj.grade_id)
+                            
+                            # Contar alunos na turma
+                            students_count = len(class_obj.students) if class_obj.students else 0
+                            
+                            classes_info.append({
+                                "id": class_obj.id,
+                                "name": class_obj.name,
+                                "students_count": students_count,
+                                "school": {
+                                    "id": school_obj.id,
+                                    "name": school_obj.name
+                                } if school_obj else None,
+                                "grade": {
+                                    "id": grade_obj.id,
+                                    "name": grade_obj.name
+                                } if grade_obj else None
+                            })
+                        except Exception as e:
+                            logging.warning(f"Erro ao processar classe {class_obj.id}: {str(e)}")
+                            continue
+            except Exception as e:
+                logging.warning(f"Erro ao buscar classes específicas: {str(e)}")
+                classes_info = []
+        
+        # Buscar informações sobre as classes onde a avaliação foi aplicada
+        applied_classes_info = []
+        total_students = 0
+        
+        # Primeira prioridade: usar class_tests (quando a avaliação foi aplicada)
+        # Carregar class_tests de forma explícita para evitar problemas de transação
+        from app.models.classTest import ClassTest
+        class_tests_list = ClassTest.query.filter_by(test_id=str(test.id)).all()
+        
+        if class_tests_list:
+            for ct in class_tests_list:
+                try:
+                    class_obj = Class.query.get(ct.class_id)
+                    if class_obj:
+                        # class_obj.school_id é UUID, School.id é VARCHAR - converter para string
+                        school_obj = School.query.filter(School.id == str(class_obj.school_id)).first()
                         grade_obj = Grade.query.get(class_obj.grade_id)
                         
                         # Contar alunos na turma
@@ -373,7 +345,7 @@ def format_test_response(test):
                         total_students += students_count
                         
                         applied_classes_info.append({
-                            "class_test_id": None,  # Não há class_test ainda
+                            "class_test_id": ct.id,
                             "class": {
                                 "id": class_obj.id,
                                 "name": class_obj.name,
@@ -387,35 +359,85 @@ def format_test_response(test):
                                     "name": grade_obj.name
                                 } if grade_obj else None
                             },
-                            "application": None,  # Ainda não aplicada
-                            "expiration": None    # Ainda não aplicada
+                            "application": ct.application if ct.application else None,
+                            "expiration": ct.expiration if ct.expiration else None
                         })
-                    except Exception as e:
-                        logging.warning(f"Erro ao processar classe {class_obj.id}: {str(e)}")
-                        continue
-        except Exception as e:
-            logging.warning(f"Erro ao buscar turmas das escolas: {str(e)}")
-            applied_classes_info = []
+                except Exception as e:
+                    logging.warning(f"Erro ao processar class_test {ct.id}: {str(e)}")
+                    continue
+        
+        # Fallback: usar schools quando não há class_tests (avaliação ainda não aplicada)
+        elif test.schools:
+            try:
+                school_ids = []
+                if isinstance(test.schools, list):
+                    school_ids = test.schools
+                elif isinstance(test.schools, str):
+                    school_ids = [test.schools]
+                
+                # Buscar todas as turmas das escolas selecionadas
+                if school_ids:
+                    # Converter school_ids para UUID (Class.school_id é UUID)
+                    from app.utils.uuid_helpers import ensure_uuid_list
+                    from sqlalchemy import cast
+                    from sqlalchemy.dialects.postgresql import UUID as PostgresUUID
+                    school_ids_uuids = ensure_uuid_list(school_ids)
+                    classes_objs = Class.query.filter(Class.school_id.in_(school_ids_uuids)).all()
+                    
+                    for class_obj in classes_objs:
+                        try:
+                            # class_obj.school_id é UUID, School.id é VARCHAR - converter para string
+                            school_obj = School.query.filter(School.id == str(class_obj.school_id)).first()
+                            grade_obj = Grade.query.get(class_obj.grade_id)
+                            
+                            # Contar alunos na turma
+                            students_count = len(class_obj.students) if class_obj.students else 0
+                            total_students += students_count
+                            
+                            applied_classes_info.append({
+                                "class_test_id": None,  # Não há class_test ainda
+                                "class": {
+                                    "id": class_obj.id,
+                                    "name": class_obj.name,
+                                    "students_count": students_count,
+                                    "school": {
+                                        "id": school_obj.id,
+                                        "name": school_obj.name
+                                    } if school_obj else None,
+                                    "grade": {
+                                        "id": grade_obj.id,
+                                        "name": grade_obj.name
+                                    } if grade_obj else None
+                                },
+                                "application": None,  # Ainda não aplicada
+                                "expiration": None    # Ainda não aplicada
+                            })
+                        except Exception as e:
+                            logging.warning(f"Erro ao processar classe {class_obj.id}: {str(e)}")
+                            continue
+            except Exception as e:
+                logging.warning(f"Erro ao buscar turmas das escolas: {str(e)}")
+                applied_classes_info = []
 
-    # Usar duração do modelo ou calcular dinamicamente como fallback
-    duration = test.duration if test.duration is not None else 90  # Duração padrão em minutos
-    if duration is None:
-        try:
-            if test.time_limit and test.end_time:
-                # Calcular duração real baseada no end_time - time_limit
-                duration_delta = test.end_time - test.time_limit
-                duration = int(duration_delta.total_seconds() / 60)  # Converter para minutos
-            elif test.time_limit:
-                # Se não tiver end_time, usar duração padrão de 90 minutos
+        # Usar duração do modelo ou calcular dinamicamente como fallback
+        duration = test.duration if test.duration is not None else 90  # Duração padrão em minutos
+        if duration is None:
+            try:
+                if test.time_limit and test.end_time:
+                    # Calcular duração real baseada no end_time - time_limit
+                    duration_delta = test.end_time - test.time_limit
+                    duration = int(duration_delta.total_seconds() / 60)  # Converter para minutos
+                elif test.time_limit:
+                    # Se não tiver end_time, usar duração padrão de 90 minutos
+                    duration = 90
+            except Exception as e:
+                logging.warning(f"Erro ao calcular duração: {str(e)}")
                 duration = 90
-        except Exception as e:
-            logging.warning(f"Erro ao calcular duração: {str(e)}")
-            duration = 90
 
-    # Determinar se a avaliação foi aplicada baseado na existência de class_tests
-    is_applied = len(test.class_tests) > 0 if test.class_tests else False
+        # Determinar se a avaliação foi aplicada baseado na existência de class_tests
+        is_applied = len(class_tests_list) > 0 if class_tests_list else False
 
-    return {
+        return {
         'id': test.id,
         'title': test.title,
         'description': test.description,
@@ -448,4 +470,12 @@ def format_test_response(test):
         'applied_classes_count': len(applied_classes_info),
         'total_students': total_students,
         'questions': [format_question_response(q, exclude_fields=exclude_from_question) for q in test.questions]
-    } 
+    }
+    except SQLAlchemyError as e:
+        db.session.rollback()
+        logging.error(f"Erro SQLAlchemy em format_test_response para teste {test.id}: {str(e)}", exc_info=True)
+        raise
+    except Exception as e:
+        db.session.rollback()
+        logging.error(f"Erro inesperado em format_test_response para teste {test.id}: {str(e)}", exc_info=True)
+        raise 

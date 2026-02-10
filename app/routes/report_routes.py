@@ -19,12 +19,15 @@ from app.models.studentClass import Class
 from app.models.grades import Grade
 from app.models.classTest import ClassTest
 from app.models.evaluationResult import EvaluationResult
+from app.utils.uuid_helpers import ensure_uuid, ensure_uuid_list
 from app import db
 import logging
 from typing import Dict, Any, List, Optional, Union
 import math
+import re
 import unicodedata
-from sqlalchemy import func, case, desc
+from sqlalchemy import func, case, desc, cast
+from sqlalchemy.dialects.postgresql import UUID as PostgresUUID
 from datetime import datetime
 from sqlalchemy.orm import joinedload
 from collections import defaultdict, OrderedDict
@@ -32,6 +35,7 @@ import os
 from jinja2 import Template
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 import tempfile
+from pathlib import Path
 from reportlab.lib.pagesizes import A4
 from reportlab.platypus import BaseDocTemplate, PageTemplate, Frame, Paragraph, Spacer, Table, TableStyle, PageBreak, KeepTogether, Image
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
@@ -44,6 +48,7 @@ from app.services.ai_analysis_service import AIAnalysisService
 from app.services.evaluation_result_service import EvaluationResultService
 from app.report_analysis.services import ReportAggregateService
 from weasyprint import HTML
+from markupsafe import Markup
 import base64
 
 # Importar docxtpl para template Word (comentado - usando PDF agora)
@@ -448,7 +453,8 @@ def relatorio_completo(evaluation_id: str):
 #             return jsonify({"error": "Avaliação não encontrada"}), 404
 #         
 #         # Buscar turmas onde a avaliação foi aplicada
-#         class_tests = ClassTest.query.filter_by(test_id=evaluation_id).all()
+#         # ✅ CORRIGIDO: ClassTest.test_id é VARCHAR, converter evaluation_id para string
+        class_tests = ClassTest.query.filter_by(test_id=str(evaluation_id)).all()
 #         if not class_tests:
 #             return jsonify({"error": "Avaliação não foi aplicada em nenhuma turma"}), 404
 #         
@@ -854,8 +860,10 @@ def _montar_resposta_relatorio_por_turmas(
     # Tentar obter informações da escola e município da primeira turma
     try:
         if unique_class_ids:
+            # unique_class_ids já são UUIDs (vêm de ClassTest.class_id que é UUID)
             first_class = Class.query.get(unique_class_ids[0])
             if first_class and first_class.school_id:
+                # first_class.school_id já é UUID
                 school = School.query.get(first_class.school_id)
                 if school:
                     metadados.update({
@@ -989,8 +997,6 @@ def relatorio_pdf(evaluation_id: str):
         templates_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'templates')
         env = Environment(loader=FileSystemLoader(templates_dir), autoescape=select_autoescape(['html', 'xml']))
 
-        import math
-
         def sum_values(items, attr='value'):
             try:
                 return sum(item.get(attr, 0) if isinstance(item, dict) else getattr(item, attr, 0) for item in items)
@@ -1009,14 +1015,98 @@ def relatorio_pdf(evaluation_id: str):
             except (TypeError, ValueError):
                 return 0
 
+        def formatar_texto_ia(texto):
+            """
+            Formata texto da IA para HTML preservando quebras de linha e formatação
+            Converte quebras de linha duplas em parágrafos e simples em <br/>
+            """
+            if not texto:
+                return Markup("")
+            
+            # Se não houver quebras de linha duplas, tentar detectar padrões para quebrar
+            if '\n\n' not in texto:
+                # Detectar padrões de títulos no meio do texto
+                texto = texto.replace('Destaques e Recomendações:', '\n\nDestaques e Recomendações:')
+                texto = texto.replace('Classificação:', '\n\nClassificação:')
+                texto = texto.replace('PARECER TÉCNICO:', '\n\nPARECER TÉCNICO:')
+                # Detectar números como títulos (ex: "1. ", "2. ", "3. ")
+                texto = re.sub(r'(\d+\.\s)', r'\n\n\1', texto)
+                # Detectar títulos em maiúsculas seguidas de dois pontos
+                texto = re.sub(r'([A-ZÁÊÔÇ][A-ZÁÊÔÇ\s]{10,}:)', r'\n\n\1', texto)
+            
+            # Dividir por quebras de linha duplas (parágrafos)
+            paragrafos = texto.split('\n\n')
+            
+            resultado = []
+            for paragrafo in paragrafos:
+                paragrafo = paragrafo.strip()
+                if not paragrafo:
+                    continue
+                
+                # Verificar se é um título (maiúsculas seguidas de dois pontos, ou números como "1. ", "2. ")
+                if (len(paragrafo) > 10 and paragrafo.isupper() and paragrafo.endswith(':')) or \
+                   (len(paragrafo) > 2 and paragrafo[0].isdigit() and paragrafo[1] == '.' and paragrafo[2] == ' '):
+                    # É um título - converter para negrito
+                    resultado.append(f'<p style="font-weight: bold; margin-top: 12px; margin-bottom: 8px;">{paragrafo}</p>')
+                # Verificar se começa com títulos específicos
+                elif paragrafo.startswith('Destaques e Recomendações:') or \
+                     paragrafo.startswith('Classificação:') or \
+                     paragrafo.startswith('PARECER TÉCNICO:') or \
+                     paragrafo.startswith('PARECER TÉCNICO DE PARTICIPAÇÃO:') or \
+                     paragrafo.startswith('PARECER TÉCNICO: NOTA IDAV:'):
+                    # É um título - converter para negrito
+                    resultado.append(f'<p style="font-weight: bold; margin-top: 12px; margin-bottom: 8px;">{paragrafo}</p>')
+                # Verificar se contém bullets (•) - converter em lista
+                elif '•' in paragrafo:
+                    # Dividir por bullets
+                    partes = paragrafo.split('•')
+                    primeira_parte = partes[0].strip()
+                    itens_lista = [item.strip() for item in partes[1:] if item.strip()]
+                    
+                    if primeira_parte:
+                        resultado.append(f'<p>{primeira_parte}</p>')
+                    
+                    if itens_lista:
+                        resultado.append('<ul style="margin-left: 20px; margin-top: 8px; margin-bottom: 8px;">')
+                        for item in itens_lista:
+                            resultado.append(f'<li style="margin-bottom: 4px;">{item}</li>')
+                        resultado.append('</ul>')
+                else:
+                    # Parágrafo normal - converter quebras de linha simples em <br/>
+                    paragrafo_html = paragrafo.replace('\n', '<br/>')
+                    resultado.append(f'<p style="margin-top: 8px; margin-bottom: 8px;">{paragrafo_html}</p>')
+            
+            return Markup(''.join(resultado)) if resultado else Markup("")
+
         env.filters['sum_values'] = sum_values
         env.filters['cos'] = cos_filter
         env.filters['sin'] = sin_filter
+        # formatar_texto_ia está registrado globalmente no Flask app.jinja_env
+        # Mas também registramos aqui para garantir compatibilidade com Environment customizado
+        env.filters['formatar_texto_ia'] = formatar_texto_ia
 
-        template = env.get_template('report.html')
+        template = env.get_template('report_organized.html')
         html_content = template.render(**context)
 
-        pdf_content = HTML(string=html_content, base_url=templates_dir).write_pdf()
+        # SOLUÇÃO: Salvar HTML em arquivo temporário e usar filename em vez de string
+        # Isso faz o WeasyPrint processar o documento como arquivo, preservando a ordem semântica
+        # e evitando que o layout engine reorganize os blocos (DADOS/ANÁLISE)
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.html', delete=False, encoding='utf-8') as temp_html:
+            temp_html.write(html_content)
+            temp_html_path = temp_html.name
+        
+        try:
+            # Usar filename em vez de string para preservar ordem semântica do documento
+            pdf_content = HTML(
+                filename=temp_html_path,
+                base_url=templates_dir
+            ).write_pdf()
+        finally:
+            # Limpar arquivo temporário
+            try:
+                os.unlink(temp_html_path)
+            except OSError:
+                pass  # Ignorar erros ao deletar arquivo temporário
 
         test = Test.query.get(evaluation_id)
         nome_avaliacao = (test.title if test else 'relatorio')
@@ -1253,8 +1343,25 @@ def relatorio_escolar_pdf():
         template = env.get_template('relatorio_escolar_pdf.html')
         html_content = template.render(**template_data)
         
-        # Gerar PDF com WeasyPrint
-        pdf_content = HTML(string=html_content, base_url=templates_dir).write_pdf()
+        # SOLUÇÃO: Salvar HTML em arquivo temporário e usar filename em vez de string
+        # Isso faz o WeasyPrint processar o documento como arquivo, preservando a ordem semântica
+        # e evitando que o layout engine reorganize os blocos
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.html', delete=False, encoding='utf-8') as temp_html:
+            temp_html.write(html_content)
+            temp_html_path = temp_html.name
+        
+        try:
+            # Usar filename em vez de string para preservar ordem semântica do documento
+            pdf_content = HTML(
+                filename=temp_html_path,
+                base_url=templates_dir
+            ).write_pdf()
+        finally:
+            # Limpar arquivo temporário
+            try:
+                os.unlink(temp_html_path)
+            except OSError:
+                pass  # Ignorar erros ao deletar arquivo temporário
         
         # Preparar nome do arquivo
         evaluation_title = template_data.get('evaluation', {}).get('title', 'relatorio')
@@ -1289,7 +1396,8 @@ def test_html_template(evaluation_id: str):
             return jsonify({"error": "Avaliação não encontrada"}), 404
         
         # Buscar turmas onde a avaliação foi aplicada
-        class_tests = ClassTest.query.filter_by(test_id=evaluation_id).all()
+        # ✅ CORRIGIDO: ClassTest.test_id é VARCHAR, converter evaluation_id para string
+        class_tests = ClassTest.query.filter_by(test_id=str(evaluation_id)).all()
         if not class_tests:
             return jsonify({"error": "Avaliação não foi aplicada em nenhuma turma"}), 404
         
@@ -1757,14 +1865,18 @@ def _buscar_turmas_por_escopo(evaluation_id: str, scope_type: str, scope_id: str
     Returns:
         List[ClassTest]: Lista de turmas filtradas
     """
-    query = ClassTest.query.filter_by(test_id=evaluation_id)
+    # ✅ CORRIGIDO: ClassTest.test_id é VARCHAR, converter evaluation_id para string
+    query = ClassTest.query.filter_by(test_id=str(evaluation_id))
     
     if scope_type == 'school':
         # Filtrar por escola específica
-        query = query.join(Class).filter(Class.school_id == scope_id)
+        # Converter scope_id para UUID (Class.school_id é UUID)
+        school_id_uuid = ensure_uuid(scope_id)
+        if school_id_uuid:
+            query = query.join(Class).filter(Class.school_id == school_id_uuid)
     elif scope_type == 'city':
         # Filtrar por município (todas as escolas do município)
-        query = query.join(Class).join(School).filter(School.city_id == scope_id)
+        query = query.join(Class).join(School, Class.school_id == cast(School.id, PostgresUUID)).filter(School.city_id == scope_id)
     # Se scope_type == 'all', não aplicar filtros adicionais
     
     return query.all()
@@ -3248,8 +3360,8 @@ def _calcular_totais_alunos_por_municipio(evaluation_id: str, class_tests: List[
     # Buscar todos os alunos das turmas onde a avaliação foi aplicada
     from sqlalchemy.orm import joinedload as jl
     students = Student.query.options(
-        jl(Student.class_),
-        jl(Student.class_, Class.school)
+        jl(Student.class_)
+        # ❌ REMOVIDO: jl(Student.class_, Class.school) - Class.school é property, não relationship
     ).filter(Student.class_id.in_(class_ids)).all()
     
     # Buscar resultados da avaliação (alunos que realizaram)
@@ -3468,8 +3580,8 @@ def _calcular_niveis_aprendizagem_por_municipio(evaluation_id: str, class_tests:
     from sqlalchemy.orm import joinedload as jl
     evaluation_results = EvaluationResult.query.options(
         jl(EvaluationResult.student),
-        jl(EvaluationResult.student, Student.class_),
-        jl(EvaluationResult.student, Student.class_, Class.school)
+        jl(EvaluationResult.student, Student.class_)
+        # ❌ REMOVIDO: jl(EvaluationResult.student, Student.class_, Class.school) - Class.school é property
     ).filter_by(test_id=evaluation_id).all()
     
     # Agrupar por escola e disciplina
@@ -3560,7 +3672,8 @@ def _calcular_niveis_aprendizagem_por_municipio(evaluation_id: str, class_tests:
     escolas_no_escopo: Dict[str, School] = {}
     class_ids_escopo = [ct.class_id for ct in class_tests if getattr(ct, "class_id", None)]
     if class_ids_escopo:
-        classes = Class.query.options(joinedload(Class.school)).filter(Class.id.in_(class_ids_escopo)).all()
+        # ❌ REMOVIDO: joinedload(Class.school) - Class.school é property, não relationship
+        classes = Class.query.filter(Class.id.in_(class_ids_escopo)).all()
         for cls in classes:
             if cls and cls.school:
                 escolas_no_escopo[str(cls.school.id)] = cls.school
@@ -4110,8 +4223,8 @@ def _calcular_proficiencia_por_municipio(evaluation_id: str, class_tests: List[C
     from sqlalchemy.orm import joinedload as jl
     evaluation_results = EvaluationResult.query.options(
         jl(EvaluationResult.student),
-        jl(EvaluationResult.student, Student.class_),
-        jl(EvaluationResult.student, Student.class_, Class.school)
+        jl(EvaluationResult.student, Student.class_)
+        # ❌ REMOVIDO: jl(EvaluationResult.student, Student.class_, Class.school) - Class.school é property
     ).filter_by(test_id=evaluation_id).all()
 
     # Buscar respostas dos alunos
@@ -4683,8 +4796,8 @@ def _calcular_nota_geral_por_municipio(evaluation_id: str, class_tests: List[Cla
     from sqlalchemy.orm import joinedload as jl
     evaluation_results = EvaluationResult.query.options(
         jl(EvaluationResult.student),
-        jl(EvaluationResult.student, Student.class_),
-        jl(EvaluationResult.student, Student.class_, Class.school)
+        jl(EvaluationResult.student, Student.class_)
+        # ❌ REMOVIDO: jl(EvaluationResult.student, Student.class_, Class.school) - Class.school é property
     ).filter_by(test_id=evaluation_id).all()
 
     # Buscar respostas dos alunos
@@ -5552,7 +5665,8 @@ def _calcular_media_municipal(evaluation_id: str) -> float:
             return 0.0
         
         # Buscar turmas da avaliação
-        class_tests = ClassTest.query.filter_by(test_id=evaluation_id).all()
+        # ✅ CORRIGIDO: ClassTest.test_id é VARCHAR, converter evaluation_id para string
+        class_tests = ClassTest.query.filter_by(test_id=str(evaluation_id)).all()
         if not class_tests:
             return 0.0
         
@@ -5569,7 +5683,7 @@ def _calcular_media_municipal(evaluation_id: str) -> float:
         ).join(
             Class, Student.class_id == Class.id
         ).join(
-            School, Class.school_id == School.id
+            School, Class.school_id == cast(School.id, PostgresUUID)
         ).filter(
             School.city_id == city_id,
             EvaluationResult.test_id == evaluation_id
@@ -5595,7 +5709,8 @@ def _calcular_media_municipal_nota(evaluation_id: str) -> float:
             return 0.0
         
         # Buscar turmas da avaliação
-        class_tests = ClassTest.query.filter_by(test_id=evaluation_id).all()
+        # ✅ CORRIGIDO: ClassTest.test_id é VARCHAR, converter evaluation_id para string
+        class_tests = ClassTest.query.filter_by(test_id=str(evaluation_id)).all()
         if not class_tests:
             return 0.0
         
@@ -5612,7 +5727,7 @@ def _calcular_media_municipal_nota(evaluation_id: str) -> float:
         ).join(
             Class, Student.class_id == Class.id
         ).join(
-            School, Class.school_id == School.id
+            School, Class.school_id == cast(School.id, PostgresUUID)
         ).filter(
             School.city_id == city_id,
             EvaluationResult.test_id == evaluation_id
@@ -5638,7 +5753,8 @@ def _calcular_media_municipal_por_disciplina(evaluation_id: str, question_discip
             return {}
         
         # Buscar turmas da avaliação
-        class_tests = ClassTest.query.filter_by(test_id=evaluation_id).all()
+        # ✅ CORRIGIDO: ClassTest.test_id é VARCHAR, converter evaluation_id para string
+        class_tests = ClassTest.query.filter_by(test_id=str(evaluation_id)).all()
         if not class_tests:
             return {}
         
@@ -5655,7 +5771,7 @@ def _calcular_media_municipal_por_disciplina(evaluation_id: str, question_discip
         ).join(
             Class, Student.class_id == Class.id
         ).join(
-            School, Class.school_id == School.id
+            School, Class.school_id == cast(School.id, PostgresUUID)
         ).filter(
             School.city_id == city_id,
             EvaluationResult.test_id == evaluation_id
@@ -5739,7 +5855,8 @@ def _calcular_media_municipal_nota_por_disciplina(evaluation_id: str, question_d
             return {}
         
         # Buscar turmas da avaliação
-        class_tests = ClassTest.query.filter_by(test_id=evaluation_id).all()
+        # ✅ CORRIGIDO: ClassTest.test_id é VARCHAR, converter evaluation_id para string
+        class_tests = ClassTest.query.filter_by(test_id=str(evaluation_id)).all()
         if not class_tests:
             return {}
         
@@ -5756,7 +5873,7 @@ def _calcular_media_municipal_nota_por_disciplina(evaluation_id: str, question_d
         ).join(
             Class, Student.class_id == Class.id
         ).join(
-            School, Class.school_id == School.id
+            School, Class.school_id == cast(School.id, PostgresUUID)
         ).filter(
             School.city_id == city_id,
             EvaluationResult.test_id == evaluation_id

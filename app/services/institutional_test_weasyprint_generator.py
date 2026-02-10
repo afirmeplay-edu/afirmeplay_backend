@@ -12,6 +12,7 @@ import io
 import base64
 import logging
 import json
+import gc
 from datetime import datetime
 from typing import List, Dict, Any, Optional
 from PIL import Image as PILImage
@@ -35,22 +36,36 @@ class InstitutionalTestWeasyPrintGenerator:
         self.env.filters['safe'] = lambda x: x
 
     def generate_institutional_test_pdf(self, test_data: Dict, students_data: List[Dict],
-                                      questions_data: List[Dict], class_test_id: str = None) -> List[Dict]:
+                                      questions_data: List[Dict], class_test_id: str = None,
+                                      output_dir: str = None) -> List[Dict]:
         """
         Gera PDFs de provas institucionais para todos os alunos usando WeasyPrint
+        PROCESSAMENTO INCREMENTAL: gera → salva em disco → libera memória
 
         Args:
             test_data: Dados da prova (test_id, title, description, etc.)
             students_data: Lista de alunos com dados (id, nome, email, etc.)
             questions_data: Lista de questões ordenadas
             class_test_id: ID da aplicação da prova (ClassTest)
+            output_dir: Diretório para salvar PDFs em disco (padrão: /tmp/celery_pdfs/physical_tests)
 
         Returns:
-            Lista com informações dos PDFs gerados e salvos no banco
+            Lista com informações dos PDFs gerados (com pdf_path se output_dir fornecido)
         """
+        # Definir output_dir padrão para containers Linux
+        if output_dir is None:
+            output_dir = '/tmp/celery_pdfs/physical_tests'
+        
+        # Criar diretório de saída
+        os.makedirs(output_dir, exist_ok=True)
+        
+        # Mapear coordenadas uma única vez (reutilizar para todos)
+        coordinates = self._map_existing_form_coordinates(questions_data)
+        
         generated_files = []
+        total_students = len(students_data)
 
-        for student in students_data:
+        for idx, student in enumerate(students_data, 1):
             try:
                 # Gerar PDF individual para cada aluno
                 pdf_data = self._generate_individual_institutional_pdf_data(
@@ -58,26 +73,47 @@ class InstitutionalTestWeasyPrintGenerator:
                 )
 
                 if pdf_data:
-                    # Mapear coordenadas e gerar QR code (mantido para compatibilidade)
-                    coordinates = self._map_existing_form_coordinates(questions_data)
+                    # Gerar QR code
                     qr_data = self._generate_qr_code_with_metadata(
                         student['id'], test_data['id']
                     )
-
-                    generated_files.append({
+                    
+                    file_info = {
                         'student_id': student['id'],
                         'student_name': student.get('name', student.get('nome', 'Nome não informado')),
-                        'pdf_data': pdf_data,
                         'qr_code_data': json.dumps(qr_data),
                         'coordinates': coordinates,
                         'has_pdf_data': True,
                         'has_answer_sheet_data': False
-                    })
+                    }
+                    
+                    if output_dir:
+                        # Salvar em disco e liberar memória imediatamente
+                        student_name_safe = student.get('name', student.get('nome', 'aluno')).replace(' ', '_').replace('/', '_')
+                        pdf_path = os.path.join(output_dir, f"prova_{student_name_safe}_{student['id']}.pdf")
+                        
+                        with open(pdf_path, 'wb') as f:
+                            f.write(pdf_data)
+                        
+                        file_info['pdf_path'] = pdf_path
+                        # NÃO incluir pdf_data quando salvo em disco
+                        del pdf_data
+                    else:
+                        # Modo compatibilidade: retornar bytes em memória
+                        file_info['pdf_data'] = pdf_data
+                    
+                    generated_files.append(file_info)
+                    
+                    # Liberar memória explicitamente após cada PDF
+                    gc.collect()
+                
+                # Log de progresso apenas a cada 10 alunos ou no final
+                if idx % 10 == 0 or idx == total_students:
+                    logging.debug(f"Gerados {idx}/{total_students} PDFs institucionais")
 
             except Exception as e:
-                logging.error(f"Erro ao gerar PDF institucional WeasyPrint para aluno {student.get('id', 'N/A')}: {str(e)}")
-                import traceback
-                logging.error(traceback.format_exc())
+                # Log apenas em caso de erro (não dentro do loop normal)
+                logging.error(f"Erro ao gerar PDF institucional WeasyPrint para aluno {student.get('id', 'N/A')}: {str(e)}", exc_info=True)
                 continue
 
         return generated_files
@@ -120,11 +156,13 @@ class InstitutionalTestWeasyPrintGenerator:
                 student, questions_data, test_data
             )
             
-            # Gerar QR code no formato ultra-compacto (reduz densidade)
-            # Formato: s12345678t87654321 (últimos 8 caracteres de cada UUID)
+            # Gerar QR code no formato JSON (igual ao answer_sheet.html)
+            # Formato: {"student_id": "...", "test_id": "..."}
+            # O correction_n.py buscará o gabarito pelo test_id
             import qrcode
             from io import BytesIO
             import base64
+            import json
             
             total_questions = len(questions_data)
             
@@ -132,20 +170,20 @@ class InstitutionalTestWeasyPrintGenerator:
             student_id = str(student.get('id', ''))
             test_id = str(test_data.get('id', ''))
             
-            # Encurtar IDs: usar últimos 8 caracteres (sem hífens)
-            # Exemplo: "a1b2c3d4-e5f6-7890-abcd-ef1234567890" -> "12345678"
-            short_student_id = student_id.replace('-', '')[-8:] if student_id else ''
-            short_test_id = test_id.replace('-', '')[-8:] if test_id else ''
+            # Criar metadados do QR code no formato JSON
+            qr_metadata = {
+                "student_id": student_id,
+                "test_id": test_id  # Usar test_id para buscar gabarito depois
+            }
             
-            # Formato ultra-compacto: s12345678t87654321
-            qr_data = f"s{short_student_id}t{short_test_id}"
+            # Converter para JSON
+            qr_data = json.dumps(qr_metadata)
             
-            # Gerar QR code com formato ultra-compacto
-            # box_size aumentado para facilitar leitura mesmo com qualidade ruim
+            # Gerar QR code
             qr = qrcode.QRCode(
                 version=1,
                 error_correction=qrcode.constants.ERROR_CORRECT_L,
-                box_size=12,  # Aumentado de 10 para 12 (módulos maiores)
+                box_size=10,  # Tamanho padrão (pode ajustar se necessário)
                 border=2,
             )
             qr.add_data(qr_data)
@@ -167,6 +205,39 @@ class InstitutionalTestWeasyPrintGenerator:
             # Carregar logo padrão (afirme_logo.png) se não houver logo do município
             default_logo_base64 = self._load_default_logo()
             
+            # Gerar questions_map: mapear número da questão para lista de letras das alternativas
+            # Formato: {1: ["A", "B", "C"], 2: ["A", "B", "C", "D"], ...}
+            questions_map = {}
+            letters = ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H']
+            
+            for question in questions_data:
+                question_num = question.get('question_number')
+                if not question_num:
+                    continue
+                
+                alternatives = question.get('alternatives', [])
+                if isinstance(alternatives, str):
+                    try:
+                        alternatives = json.loads(alternatives)
+                    except:
+                        alternatives = []
+                
+                # Extrair letras das alternativas
+                options_list = []
+                if isinstance(alternatives, list) and len(alternatives) > 0:
+                    for idx, alt in enumerate(alternatives):
+                        if idx < len(letters):
+                            options_list.append(letters[idx])
+                else:
+                    # Se não tem alternativas definidas, usar padrão A, B, C, D
+                    options_list = ['A', 'B', 'C', 'D']
+                
+                # Garantir pelo menos 2 alternativas
+                if len(options_list) < 2:
+                    options_list = ['A', 'B', 'C', 'D']
+                
+                questions_map[question_num] = options_list
+            
             # Preparar dados para o template
             template_data = {
                 'test_data': test_data,
@@ -174,6 +245,7 @@ class InstitutionalTestWeasyPrintGenerator:
                 'questions_by_subject': questions_by_subject,  # Mantido para compatibilidade
                 'questions_by_block': questions_by_block,  # Nova estrutura de blocos
                 'blocks_config': blocks_config,  # Configuração de blocos
+                'questions_map': questions_map,  # Mapa de alternativas por questão (igual ao answer_sheet.html)
                 'answer_sheet_image': answer_sheet_image,
                 'total_questions': total_questions,
                 'datetime': datetime,

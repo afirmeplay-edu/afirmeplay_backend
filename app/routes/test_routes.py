@@ -3,7 +3,9 @@ from app.models.test import Test
 from app.models.question import Question
 from app.models.testQuestion import TestQuestion
 from app.models.classTest import ClassTest
+from app.models.studentTestOlimpics import StudentTestOlimpics
 from app.models.studentClass import Class
+from app.models.user import User, RoleEnum
 from app.models.school import School
 from app.models.grades import Grade
 from app.models.student import Student
@@ -11,6 +13,7 @@ from app.models.schoolTeacher import SchoolTeacher
 from app.models.teacher import Teacher
 from app import db
 from app.decorators.role_required import get_current_tenant_id
+from app.utils.uuid_helpers import ensure_uuid, ensure_uuid_list
 from flask_jwt_extended import jwt_required
 from app.decorators.role_required import role_required, get_current_user_from_token
 from sqlalchemy.exc import SQLAlchemyError, IntegrityError
@@ -174,14 +177,18 @@ def criar_avaliacao():
                 class_ids = [data['classes']]
             
             # Verificar se todas as turmas existem
-            existing_classes = Class.query.filter(Class.id.in_(class_ids)).all()
-            if len(existing_classes) != len(class_ids):
+            # Converter class_ids para UUID (Class.id é UUID)
+            class_ids_uuids = ensure_uuid_list(class_ids)
+            existing_classes = Class.query.filter(Class.id.in_(class_ids_uuids)).all()
+            if len(existing_classes) != len(class_ids_uuids):
                 return jsonify({"error": "Uma ou mais turmas não foram encontradas"}), 400
             
             # Se turmas foram especificadas, extrair as escolas das turmas
             school_ids_from_classes = list(set([c.school_id for c in existing_classes]))
-            data['schools'] = school_ids_from_classes
-            data['classes'] = class_ids  # Salvar as classes específicas
+            # Converter UUIDs para strings para salvar no campo JSON
+            from app.utils.uuid_helpers import uuid_list_to_str
+            data['schools'] = uuid_list_to_str(school_ids_from_classes) if school_ids_from_classes else []
+            data['classes'] = uuid_list_to_str(class_ids_uuids)  # Salvar as classes específicas como strings
 
         logging.info("Criando nova avaliação com os dados fornecidos")
         print(data)
@@ -330,11 +337,13 @@ def listar_avaliacoes():
             query = Test.query
         else:
             # Para dados completos, carregar apenas relacionamentos essenciais
+            # Não carregar class_tests aqui para evitar problemas de transação
             query = Test.query.options(
                 joinedload(Test.creator),
                 joinedload(Test.subject_rel),
                 joinedload(Test.grade)
                 # Remover subqueryload de questions para melhor performance
+                # Não carregar class_tests aqui - será carregado sob demanda em format_test_response
             )
 
         # Filtrar por município se for tecadm
@@ -386,7 +395,9 @@ def listar_avaliacoes():
                 for school_id in school_ids:
                     # Fazer cast explícito para JSONB na coluna e usar operador @> para verificar se contém o valor
                     # Usar cast() para converter a coluna para JSONB e passar o valor como lista Python
-                    filters.append(cast(Test.schools, JSONB).op('@>')([school_id]))
+                    # Garantir que school_id seja string (JSONB sempre armazena strings)
+                    school_id_str = str(school_id)
+                    filters.append(cast(Test.schools, JSONB).op('@>')([school_id_str]))
             
             # Aplicar filtros se houver algum
             if filters:
@@ -448,7 +459,9 @@ def listar_avaliacoes():
                 
                 # Critério 3: Avaliações que têm escolas especificadas da cidade
                 for school_id in school_ids:
-                    filters.append(cast(Test.schools, JSONB).op('@>')([school_id]))
+                    # Garantir que school_id seja string (JSONB sempre armazena strings)
+                    school_id_str = str(school_id)
+                    filters.append(cast(Test.schools, JSONB).op('@>')([school_id_str]))
             
             # Aplicar filtros se houver algum
             if filters:
@@ -532,6 +545,7 @@ def listar_avaliacoes():
         return jsonify(response_data), 200
 
     except Exception as e:
+        db.session.rollback()
         logging.error(f"Error listing tests: {str(e)}", exc_info=True)
         return jsonify({"error": "Error listing tests", "details": str(e)}), 500
 
@@ -859,14 +873,18 @@ def atualizar_avaliacao(test_id):
                 class_ids = [data['classes']]
             
             # Verificar se todas as turmas existem
-            existing_classes = Class.query.filter(Class.id.in_(class_ids)).all()
-            if len(existing_classes) != len(class_ids):
+            # Converter class_ids para UUID (Class.id é UUID)
+            class_ids_uuids = ensure_uuid_list(class_ids)
+            existing_classes = Class.query.filter(Class.id.in_(class_ids_uuids)).all()
+            if len(existing_classes) != len(class_ids_uuids):
                 return jsonify({"error": "Uma ou mais turmas não foram encontradas"}), 400
             
             # Se turmas foram especificadas, extrair as escolas das turmas
             school_ids_from_classes = list(set([c.school_id for c in existing_classes]))
-            data['schools'] = school_ids_from_classes
-            data['classes'] = class_ids  # Salvar as classes específicas
+            # Converter UUIDs para strings para salvar no campo JSON
+            from app.utils.uuid_helpers import uuid_list_to_str
+            data['schools'] = uuid_list_to_str(school_ids_from_classes) if school_ids_from_classes else []
+            data['classes'] = uuid_list_to_str(class_ids_uuids)  # Salvar as classes específicas como strings
 
         # Campos que podem ser atualizados
         campos = [
@@ -887,6 +905,36 @@ def atualizar_avaliacao(test_id):
                     setattr(test, campo, data.get('subjects') or data.get('subjects_info'))
                 else:
                     setattr(test, campo, data[campo])
+
+        # Processar questões se fornecidas
+        if 'questions' in data and isinstance(data['questions'], list):
+            # Remover todas as associações existentes
+            # As questões permanecem no banco para reutilização futura
+            existing_test_questions = TestQuestion.query.filter_by(test_id=test.id).all()
+            for test_question in existing_test_questions:
+                db.session.delete(test_question)
+            logging.info(f"Removidas {len(existing_test_questions)} associações de questões existentes")
+            
+            # Criar novas associações
+            for index, question_data in enumerate(data['questions']):
+                if 'id' in question_data and question_data['id']:
+                    # Verificar se a questão existe
+                    existing_question = Question.query.get(question_data['id'])
+                    if existing_question:
+                        # Usar o campo 'number' como order se fornecido, caso contrário usar índice + 1
+                        order = question_data.get('number', index + 1)
+                        
+                        test_question = TestQuestion(
+                            test_id=test.id,
+                            question_id=existing_question.id,
+                            order=order
+                        )
+                        db.session.add(test_question)
+                        logging.info(f"Questão {existing_question.id} associada à avaliação com ordem {order}")
+                    else:
+                        logging.warning(f"Questão com ID {question_data['id']} não encontrada")
+                else:
+                    logging.warning(f"Questão na posição {index} não possui ID válido")
 
         db.session.commit()
         return jsonify({'message': 'Test updated successfully'}), 200
@@ -954,6 +1002,7 @@ def bulk_delete_tests():
         
         # EXCLUIR REGISTROS RELACIONADOS PARA CADA TESTE
         from app.models.studentAnswer import StudentAnswer
+        from app.models.studentTestOlimpics import StudentTestOlimpics
         from app.models.testSession import TestSession
         from app.models.question import Question
         
@@ -965,6 +1014,12 @@ def bulk_delete_tests():
             for answer in student_answers:
                 db.session.delete(answer)
             logging.info(f"🗑️ Excluídas {len(student_answers)} respostas de alunos para teste {test.id}")
+            
+            # 1.1 Excluir aplicações olímpicas vinculadas a este teste
+            olympic_applications = StudentTestOlimpics.query.filter_by(test_id=test.id).all()
+            for olympic in olympic_applications:
+                db.session.delete(olympic)
+            logging.info(f"🗑️ Excluídas {len(olympic_applications)} aplicações olímpicas para teste {test.id}")
             
             # 2. Excluir formulários físicos e suas respostas
             from app.models.physicalTestForm import PhysicalTestForm
@@ -1015,13 +1070,14 @@ def bulk_delete_tests():
             logging.info(f"🗑️ Excluídos {len(report_aggregates)} agregados de relatórios para teste {test.id}")
             
             # 5. Excluir sessões de teste
-            test_sessions = TestSession.query.filter_by(test_id=test.id).all()
-            for session in test_sessions:
-                db.session.delete(session)
-            logging.info(f"🗑️ Excluídas {len(test_sessions)} sessões de teste para teste {test.id}")
+            # IMPORTANTE: Usar query.delete() para evitar lazy loading do relacionamento competition_results
+            # que não deve ser acessado ao deletar testes (apenas AVALIACAO e OLIMPIADA, não competições)
+            sessions_count = TestSession.query.filter_by(test_id=test.id).count()
+            TestSession.query.filter_by(test_id=test.id).delete()
+            logging.info(f"🗑️ Excluídas {sessions_count} sessões de teste para teste {test.id}")
             
             # 6. Excluir aplicações de classe
-            class_tests = ClassTest.query.filter_by(test_id=test.id).all()
+            class_tests = ClassTest.query.filter_by(test_id=str(test.id)).all()
             for class_test in class_tests:
                 db.session.delete(class_test)
             logging.info(f"🗑️ Excluídas {len(class_tests)} aplicações de classe para teste {test.id}")
@@ -1082,10 +1138,17 @@ def deletar_avaliacao(test_id):
         
         # 1. Excluir respostas dos alunos
         from app.models.studentAnswer import StudentAnswer
+        from app.models.studentTestOlimpics import StudentTestOlimpics
         student_answers = StudentAnswer.query.filter_by(test_id=test_id).all()
         for answer in student_answers:
             db.session.delete(answer)
         logging.info(f"🗑️ Excluídas {len(student_answers)} respostas de alunos")
+        
+        # 1.1 Excluir aplicações olímpicas vinculadas a este teste
+        olympic_applications = StudentTestOlimpics.query.filter_by(test_id=test_id).all()
+        for olympic in olympic_applications:
+            db.session.delete(olympic)
+        logging.info(f"🗑️ Excluídas {len(olympic_applications)} aplicações olímpicas")
         
         # 2. Excluir formulários físicos e suas respostas
         from app.models.physicalTestForm import PhysicalTestForm
@@ -1136,14 +1199,15 @@ def deletar_avaliacao(test_id):
         logging.info(f"🗑️ Excluídos {len(report_aggregates)} agregados de relatórios")
         
         # 5. Excluir sessões de teste
+        # IMPORTANTE: Usar query.delete() para evitar lazy loading do relacionamento competition_results
+        # que não deve ser acessado ao deletar testes (apenas AVALIACAO e OLIMPIADA, não competições)
         from app.models.testSession import TestSession
-        test_sessions = TestSession.query.filter_by(test_id=test_id).all()
-        for session in test_sessions:
-            db.session.delete(session)
-        logging.info(f"🗑️ Excluídas {len(test_sessions)} sessões de teste")
+        sessions_count = TestSession.query.filter_by(test_id=test_id).count()
+        TestSession.query.filter_by(test_id=test_id).delete()
+        logging.info(f"🗑️ Excluídas {sessions_count} sessões de teste")
         
         # 6. Excluir aplicações de classe
-        class_tests = ClassTest.query.filter_by(test_id=test_id).all()
+        class_tests = ClassTest.query.filter_by(test_id=str(test_id)).all()
         for class_test in class_tests:
             db.session.delete(class_test)
         logging.info(f"🗑️ Excluídas {len(class_tests)} aplicações de classe")
@@ -1211,10 +1275,16 @@ def aplicar_avaliacao_classe(test_id):
                 errors.append("class_id is required for each class")
                 continue
 
+            # Converter class_id para UUID (ClassTest.class_id é UUID)
+            class_id_uuid = ensure_uuid(class_id)
+            if not class_id_uuid:
+                errors.append(f"class_id inválido: {class_id}")
+                continue
+            
             # Verificar se já existe uma aplicação para esta classe e avaliação
             existing_application = ClassTest.query.filter_by(
-                class_id=class_id,
-                test_id=test_id
+                class_id=class_id_uuid,
+                test_id=str(test_id)
             ).first()
 
             if existing_application:
@@ -1250,7 +1320,7 @@ def aplicar_avaliacao_classe(test_id):
                     # ✅ REGRA 3: Salvar o nome do timezone
                     existing_application.timezone = timezone
                         
-                    applied_classes.append(class_id)
+                    applied_classes.append(str(class_id_uuid))
                 except ValueError as e:
                     errors.append(f"Invalid date format for class {class_id}: {str(e)}")
                 except Exception as e:
@@ -1282,7 +1352,7 @@ def aplicar_avaliacao_classe(test_id):
                         expiration_dt = expiration_dt.replace(tzinfo=target_tz)
                 
                 class_test = ClassTest(
-                    class_id=class_id,
+                    class_id=class_id_uuid,
                     test_id=test_id,
                     application=application_dt.isoformat() if application_dt else None,
                     expiration=expiration_dt.isoformat() if expiration_dt else None,
@@ -1318,6 +1388,170 @@ def aplicar_avaliacao_classe(test_id):
         logging.error(f"Error applying test to classes: {str(e)}", exc_info=True)
         return jsonify({"error": "Error applying test to classes", "details": str(e)}), 500
 
+
+@bp.route('/<string:test_id>/apply-olympics', methods=['POST'])
+@jwt_required()
+@role_required("admin", "professor", "coordenador", "diretor", "tecadm")
+def aplicar_avaliacao_olympics(test_id):
+    """Aplica uma avaliação a um aluno específico (olimpíadas)."""
+    try:
+        data = request.get_json()
+        if not data:
+            return jsonify({"error": "No data provided"}), 400
+
+        test = Test.query.get(test_id)
+        if not test:
+            return jsonify({"error": "Test not found"}), 404
+
+        student_id = data.get('student_id')
+        if not student_id:
+            return jsonify({"error": "student_id is required"}), 400
+
+        student_id = str(student_id).strip()
+        student = Student.query.get(student_id)
+        if not student:
+            return jsonify({"error": "Student not found"}), 404
+
+        user = User.query.get(student.user_id) if student.user_id else None
+        if not user:
+            return jsonify({"error": "Student has no linked user"}), 400
+        if user.role != RoleEnum.ALUNO:
+            return jsonify({"error": "User linked to student must have role 'aluno'"}), 400
+
+        application = data.get('application')
+        expiration = data.get('expiration')
+        timezone = data.get('timezone', 'America/Sao_Paulo')
+
+        existing = StudentTestOlimpics.query.filter_by(
+            student_id=student_id,
+            test_id=str(test_id)
+        ).first()
+
+        if existing:
+            try:
+                if application is not None:
+                    application_dt = datetime.fromisoformat(application)
+                    if application_dt.tzinfo is None:
+                        import pytz
+                        target_tz = pytz.timezone(timezone)
+                        application_dt = application_dt.replace(tzinfo=target_tz)
+                    existing.application = application_dt.isoformat()
+
+                if expiration is not None:
+                    expiration_dt = datetime.fromisoformat(expiration)
+                    if expiration_dt.tzinfo is None:
+                        import pytz
+                        target_tz = pytz.timezone(timezone)
+                        expiration_dt = expiration_dt.replace(tzinfo=target_tz)
+                    existing.expiration = expiration_dt.isoformat()
+
+                existing.timezone = timezone
+            except (ValueError, TypeError) as e:
+                return jsonify({"error": "Invalid date format", "details": str(e)}), 400
+        else:
+            if application is None or expiration is None:
+                return jsonify({"error": "application and expiration are required when creating"}), 400
+            try:
+                application_dt = None
+                expiration_dt = None
+
+                if application is not None:
+                    application_dt = datetime.fromisoformat(application)
+                    if application_dt.tzinfo is None:
+                        import pytz
+                        target_tz = pytz.timezone(timezone)
+                        application_dt = application_dt.replace(tzinfo=target_tz)
+
+                if expiration is not None:
+                    expiration_dt = datetime.fromisoformat(expiration)
+                    if expiration_dt.tzinfo is None:
+                        import pytz
+                        target_tz = pytz.timezone(timezone)
+                        expiration_dt = expiration_dt.replace(tzinfo=target_tz)
+
+                app_val = application_dt.isoformat() if application_dt else None
+                exp_val = expiration_dt.isoformat() if expiration_dt else None
+                olympics = StudentTestOlimpics(
+                    student_id=student_id,
+                    test_id=str(test_id),
+                    application=app_val,
+                    expiration=exp_val,
+                    timezone=timezone
+                )
+                db.session.add(olympics)
+            except (ValueError, TypeError) as e:
+                return jsonify({"error": "Invalid date format", "details": str(e)}), 400
+
+        test.status = 'agendada'
+        db.session.commit()
+
+        return jsonify({
+            "message": "Test applied to student successfully",
+            "student_id": student_id,
+            "test_id": str(test_id)
+        }), 201
+
+    except IntegrityError as e:
+        db.session.rollback()
+        logging.error(f"Integrity error applying test to student: {str(e)}", exc_info=True)
+        return jsonify({"error": "Duplicate application (student already has this test)", "details": str(e)}), 400
+    except Exception as e:
+        db.session.rollback()
+        logging.error(f"Error applying test to student: {str(e)}", exc_info=True)
+        return jsonify({"error": "Error applying test to student", "details": str(e)}), 500
+
+
+@bp.route('/<string:test_id>/olympics/<string:student_id>', methods=['DELETE'])
+@jwt_required()
+@role_required("admin", "professor", "coordenador", "diretor", "tecadm")
+def remover_aplicacao_olympics(test_id, student_id):
+    """Remove a aplicação olímpica de uma avaliação para um aluno específico."""
+    try:
+        olympics = StudentTestOlimpics.query.filter_by(
+            test_id=str(test_id),
+            student_id=str(student_id).strip()
+        ).first()
+
+        if not olympics:
+            return jsonify({"error": "Olympics application not found for this test and student"}), 404
+
+        db.session.delete(olympics)
+        db.session.commit()
+
+        return jsonify({"message": "Olympics application removed successfully"}), 200
+
+    except Exception as e:
+        db.session.rollback()
+        logging.error(f"Error removing olympics application: {str(e)}", exc_info=True)
+        return jsonify({"error": "Error removing olympics application", "details": str(e)}), 500
+
+
+@bp.route('/<string:test_id>/applied-students', methods=['GET'])
+@jwt_required()
+@role_required("admin", "professor", "coordenador", "diretor", "tecadm")
+def listar_alunos_aplicados_individualmente(test_id):
+    """
+    Retorna os IDs dos alunos que tiveram a olimpíada aplicada individualmente
+    (via apply-olympics / student_test_olimpics) para o test_id informado.
+
+    Resposta aceita pelo front:
+    - Objeto com array students: { "students": ["uuid-1", "uuid-2"] }
+    """
+    try:
+        test = Test.query.get(test_id)
+        if not test:
+            return jsonify({"error": "Avaliação não encontrada"}), 404
+
+        records = StudentTestOlimpics.query.filter_by(test_id=str(test_id)).all()
+        student_ids = [r.student_id for r in records]
+
+        return jsonify({"students": student_ids}), 200
+
+    except Exception as e:
+        logging.error(f"Error listing applied students: {str(e)}", exc_info=True)
+        return jsonify({"error": "Erro ao listar alunos aplicados", "details": str(e)}), 500
+
+
 @bp.route('/<string:test_id>/classes', methods=['GET'])
 @jwt_required()
 @role_required("admin", "professor", "coordenador", "diretor",'tecadm')
@@ -1330,7 +1564,7 @@ def listar_classes_avaliacao(test_id):
             return jsonify({"error": "Test not found"}), 404
 
         # Buscar todas as aplicações da avaliação
-        class_tests = ClassTest.query.filter_by(test_id=test_id).all()
+        class_tests = ClassTest.query.filter_by(test_id=str(test_id)).all()
         
         classes_info = []
         
@@ -1340,7 +1574,8 @@ def listar_classes_avaliacao(test_id):
                 # Buscar informações da classe
                 class_obj = Class.query.get(ct.class_id)
                 if class_obj:
-                    school_obj = School.query.get(class_obj.school_id)
+                    # class_obj.school_id é UUID, School.id é VARCHAR - converter para string
+                    school_obj = School.query.filter(School.id == str(class_obj.school_id)).first()
                     grade_obj = Grade.query.get(class_obj.grade_id)
                     
                     # Contar alunos na turma
@@ -1392,7 +1627,8 @@ def listar_classes_avaliacao(test_id):
                 logging.info(f"Encontradas {len(specific_classes)} classes específicas")
                 
                 for class_obj in specific_classes:
-                    school_obj = School.query.get(class_obj.school_id)
+                    # class_obj.school_id é UUID, School.id é VARCHAR - converter para string
+                    school_obj = School.query.filter(School.id == str(class_obj.school_id)).first()
                     grade_obj = Grade.query.get(class_obj.grade_id)
                     
                     # Contar alunos na turma
@@ -1444,7 +1680,8 @@ def listar_classes_avaliacao(test_id):
                 logging.info(f"Encontradas {len(all_classes)} turmas nas escolas")
                 
                 for class_obj in all_classes:
-                    school_obj = School.query.get(class_obj.school_id)
+                    # class_obj.school_id é UUID, School.id é VARCHAR - converter para string
+                    school_obj = School.query.filter(School.id == str(class_obj.school_id)).first()
                     grade_obj = Grade.query.get(class_obj.grade_id)
                     
                     # Contar alunos na turma
@@ -1483,10 +1720,15 @@ def listar_classes_avaliacao(test_id):
 def remover_aplicacao_avaliacao(test_id, class_id):
     """Remove a aplicação de uma avaliação de uma classe específica."""
     try:
+        # Converter class_id para UUID (ClassTest.class_id é UUID)
+        class_id_uuid = ensure_uuid(class_id)
+        if not class_id_uuid:
+            return jsonify({"error": "ID de turma inválido"}), 400
+        
         # Verificar se a aplicação existe
         class_test = ClassTest.query.filter_by(
-            test_id=test_id,
-            class_id=class_id
+            test_id=str(test_id),
+            class_id=class_id_uuid
         ).first()
 
         if not class_test:
@@ -1534,10 +1776,16 @@ def remover_aplicacoes_avaliacao_multiplas(test_id):
                 errors.append("class_id cannot be empty")
                 continue
 
+            # Converter class_id para UUID (ClassTest.class_id é UUID)
+            class_id_uuid = ensure_uuid(class_id)
+            if not class_id_uuid:
+                not_found_classes.append(class_id)
+                continue
+            
             # Verificar se a aplicação existe
             class_test = ClassTest.query.filter_by(
-                test_id=test_id,
-                class_id=class_id
+                test_id=str(test_id),
+                class_id=class_id_uuid
             ).first()
 
             if not class_test:
@@ -1587,8 +1835,13 @@ def obter_avaliacoes_completas_classe(class_id):
         if not user:
             return jsonify({"error": "User not found or token invalid"}), 401
 
+        # Converter class_id para UUID (Class.id é UUID)
+        class_id_uuid = ensure_uuid(class_id)
+        if not class_id_uuid:
+            return jsonify({"error": "ID de turma inválido"}), 400
+        
         # Verificar se a classe existe
-        class_obj = Class.query.get(class_id)
+        class_obj = Class.query.get(class_id_uuid)
         if not class_obj:
             return jsonify({"error": "Class not found"}), 404
 
@@ -1596,7 +1849,7 @@ def obter_avaliacoes_completas_classe(class_id):
         if user['role'] == 'aluno':
             # Aluno só pode ver avaliações da sua própria classe
             student = Student.query.filter_by(user_id=user['id']).first()
-            if not student or student.class_id != class_id:
+            if not student or student.class_id != class_id_uuid:
                 return jsonify({"error": "You can only access tests from your own class"}), 403
         elif user['role'] == 'professor':
             # Professor só pode ver avaliações de classes onde está alocado
@@ -1612,7 +1865,7 @@ def obter_avaliacoes_completas_classe(class_id):
                 return jsonify({"error": "You don't have permission to view tests for this class"}), 403
 
         # Buscar todas as avaliações aplicadas nesta classe na tabela class_test
-        class_tests = ClassTest.query.filter_by(class_id=class_id).all()
+        class_tests = ClassTest.query.filter_by(class_id=class_id_uuid).all()
         
         if not class_tests:
             return jsonify({
@@ -1626,7 +1879,8 @@ def obter_avaliacoes_completas_classe(class_id):
             }), 200
 
         # Buscar informações da escola e série
-        school_obj = School.query.get(class_obj.school_id)
+        # class_obj.school_id é UUID, School.id é VARCHAR - converter para string
+        school_obj = School.query.filter(School.id == str(class_obj.school_id)).first()
         grade_obj = Grade.query.get(class_obj.grade_id)
 
         # Buscar todas as avaliações com seus dados completos
@@ -1830,8 +2084,13 @@ def listar_avaliacoes_por_classe(class_id):
         if not user:
             return jsonify({"error": "User not found or token invalid"}), 401
 
+        # Converter class_id para UUID (Class.id é UUID)
+        class_id_uuid = ensure_uuid(class_id)
+        if not class_id_uuid:
+            return jsonify({"error": "ID de turma inválido"}), 400
+        
         # Verificar se a classe existe
-        class_obj = Class.query.get(class_id)
+        class_obj = Class.query.get(class_id_uuid)
         if not class_obj:
             return jsonify({"error": "Class not found"}), 404
 
@@ -1850,7 +2109,7 @@ def listar_avaliacoes_por_classe(class_id):
                 return jsonify({"error": "You don't have permission to view tests for this class"}), 403
 
         # Buscar todas as aplicações de avaliações nesta classe
-        class_tests = ClassTest.query.filter_by(class_id=class_id).all()
+        class_tests = ClassTest.query.filter_by(class_id=class_id_uuid).all()
         
         if not class_tests:
             return jsonify({
@@ -1864,7 +2123,8 @@ def listar_avaliacoes_por_classe(class_id):
             }), 200
 
         # Buscar informações da escola e série
-        school_obj = School.query.get(class_obj.school_id)
+        # class_obj.school_id é UUID, School.id é VARCHAR - converter para string
+        school_obj = School.query.filter(School.id == str(class_obj.school_id)).first()
         grade_obj = Grade.query.get(class_obj.grade_id)
 
         # Buscar todas as avaliações aplicadas
@@ -1960,75 +2220,86 @@ def listar_avaliacoes_minha_classe():
         if not student:
             return jsonify({"error": "Student not found"}), 404
 
-        # Verificar se o aluno está matriculado em uma classe
-        if not student.class_id:
-            return jsonify({
-                "message": "Student is not enrolled in any class",
-                "student": {
-                    "id": student.id,
-                    "name": student.name
-                },
-                "total_tests": 0,
-                "tests": []
-            }), 200
-
-        # Buscar a classe do aluno
-        class_obj = Class.query.get(student.class_id)
-        if not class_obj:
+        # Classe do aluno (pode ser None se não matriculado)
+        class_obj = Class.query.get(student.class_id) if student.class_id else None
+        if student.class_id and not class_obj:
             return jsonify({"error": "Student's class not found"}), 404
 
-        # Buscar todas as aplicações de avaliações nesta classe
-        class_tests = ClassTest.query.filter_by(class_id=student.class_id).all()
+        # Aplicações por turma (ClassTest) e por aluno (StudentTestOlimpics)
+        class_tests = ClassTest.query.filter_by(class_id=student.class_id).all() if student.class_id else []
         
-        if not class_tests:
+        # Tentar buscar olimpíadas, mas continuar normalmente se a tabela não existir
+        olympics = []
+        try:
+            olympics = StudentTestOlimpics.query.filter_by(student_id=student.id).all()
+        except (SQLAlchemyError, Exception) as e:
+            # Se a tabela não existir ou houver outro erro, continuar apenas com ClassTest
+            error_str = str(e).lower()
+            if 'student_test_olimpics' in error_str or 'does not exist' in error_str or 'undefinedtable' in error_str:
+                logging.warning(f"Tabela student_test_olimpics não encontrada, continuando apenas com ClassTest: {str(e)}")
+                olympics = []
+            else:
+                # Se for outro erro, logar mas continuar
+                logging.warning(f"Erro ao buscar StudentTestOlimpics, continuando apenas com ClassTest: {str(e)}")
+                olympics = []
+
+        if not class_tests and not olympics:
             return jsonify({
-                "message": "No tests found for your class",
-                "student": {
-                    "id": student.id,
-                    "name": student.name
-                },
+                "message": "No tests found for your class or for you individually",
+                "student": {"id": student.id, "name": student.name},
                 "class": {
                     "id": class_obj.id,
-                    "name": class_obj.name
-                },
+                    "name": class_obj.name,
+                    "school": None,
+                    "grade": None
+                } if class_obj else None,
                 "total_tests": 0,
                 "tests": []
             }), 200
 
-        # Buscar informações da escola e série
-        school_obj = School.query.get(class_obj.school_id)
-        grade_obj = Grade.query.get(class_obj.grade_id)
+        school_obj = School.query.filter(School.id == str(class_obj.school_id)).first() if class_obj else None
+        grade_obj = Grade.query.get(class_obj.grade_id) if class_obj else None
 
-        # Buscar todas as avaliações aplicadas
-        test_ids = [ct.test_id for ct in class_tests]
+        # Criar mapas para ambos os tipos de aplicação (ambos funcionam simultaneamente)
+        class_test_map = {ct.test_id: ct for ct in class_tests}
+        olympics_map = {o.test_id: o for o in olympics}
+        # Combinar IDs de ambos os tipos (união de sets - ambos são incluídos)
+        all_test_ids = list(set(class_test_map.keys()) | set(olympics_map.keys()))
+
         tests = Test.query.options(
             joinedload(Test.creator),
             joinedload(Test.subject_rel),
             joinedload(Test.grade),
             subqueryload(Test.test_questions).subqueryload(TestQuestion.question)
-        ).filter(Test.id.in_(test_ids)).all()
+        ).filter(Test.id.in_(all_test_ids)).all()
 
-        # Criar um dicionário para mapear test_id -> ClassTest
-        class_test_map = {ct.test_id: ct for ct in class_tests}
+        def app_record_for(test_id):
+            """
+            Retorna o registro de aplicação para um teste.
+            Prioriza StudentTestOlimpics (mais específico) se ambos existirem,
+            pois pode ter datas de aplicação/expiração diferentes.
+            Ambos funcionam simultaneamente - não há exclusão mútua.
+            """
+            ct = class_test_map.get(test_id)
+            o = olympics_map.get(test_id)
+            # Priorizar StudentTestOlimpics se ambos existirem (mais específico para o aluno)
+            if o:
+                return (o, "olympics")
+            if ct:
+                return (ct, "class")
+            return (None, None)
 
-        # Preparar lista de avaliações com informações para o aluno
         tests_info = []
-        
-        # ✅ CORRIGIDO: O current_time será obtido individualmente para cada teste
-        # usando o timezone da aplicação, não o timezone local do servidor
-        
-        # Buscar todas as sessões do aluno para estas avaliações
         from app.models.testSession import TestSession
         from app.models.studentAnswer import StudentAnswer
-        
-        test_ids = [ct.test_id for ct in class_tests]
+
         sessions = TestSession.query.filter_by(student_id=student.id).filter(
-            TestSession.test_id.in_(test_ids)
+            TestSession.test_id.in_(all_test_ids)
         ).all()
         sessions_dict = {session.test_id: session for session in sessions}
-        
+
         for test in tests:
-            class_test = class_test_map.get(test.id)
+            app_record, app_source = app_record_for(test.id)
             session = sessions_dict.get(test.id)
             
             # Verificar se a avaliação está disponível para o aluno
@@ -2060,10 +2331,10 @@ def listar_avaliacoes_minha_classe():
             
             # ✅ REGRA 4: Obter tempo atual no timezone da aplicação (sempre definir)
             current_time = None
-            if class_test.timezone:
+            if app_record.timezone:
                 import pytz
                 try:
-                    target_tz = pytz.timezone(class_test.timezone)
+                    target_tz = pytz.timezone(app_record.timezone)
                     current_time = datetime.now(target_tz)
                 except pytz.exceptions.UnknownTimeZoneError:
                     from app.utils.timezone_utils import get_local_time
@@ -2071,117 +2342,58 @@ def listar_avaliacoes_minha_classe():
             else:
                 from app.utils.timezone_utils import get_local_time
                 current_time = get_local_time()
-            
+
             # ✅ REGRA 4: Verificar disponibilidade considerando status global, se já completou, data de aplicação E data de expiração
             if test.status == 'agendada' or test.status == 'em_andamento':
                 if not has_completed:
-                    
+
                     # Verificar se a avaliação já está disponível (data de aplicação)
-                    is_available_now = False  # Por padrão, não está disponível
-                    if class_test.application and class_test.application is not None:
+                    is_available_now = False
+                    if app_record.application and app_record.application is not None:
                         try:
-                            # ✅ REGRA 4: Comparar no mesmo timezone da aplicação
-                            if class_test.timezone:
+                            if app_record.timezone:
                                 import pytz
                                 try:
-                                    # Obter timezone da aplicação
-                                    target_tz = pytz.timezone(class_test.timezone)
-                                    
-                                    # Converter string para datetime com timezone
-                                    application_dt = dateutil.parser.parse(class_test.application)
+                                    target_tz = pytz.timezone(app_record.timezone)
+                                    application_dt = dateutil.parser.parse(app_record.application)
                                     if application_dt.tzinfo is None:
                                         application_dt = application_dt.replace(tzinfo=target_tz)
-                                    
-                                    # ✅ REGRA 4: Comparar diretamente no mesmo timezone
                                     is_available_now = current_time >= application_dt
-                                    
-                                    # Log para debug detalhado
-                                    logging.info(f"Teste {test.id}: DEBUG DISPONIBILIDADE (TIMEZONE APLICAÇÃO)")
-                                    logging.info(f"  - timezone_aplicacao: {class_test.timezone}")
-                                    logging.info(f"  - current_time ({class_test.timezone}): {current_time.isoformat()}")
-                                    logging.info(f"  - application_original (do banco): {class_test.application}")
-                                    logging.info(f"  - application_dt (processado): {application_dt.isoformat()}")
-                                    logging.info(f"  - current_time >= application_dt: {current_time >= application_dt}")
-                                    logging.info(f"  - is_available_now: {is_available_now}")
-                                    logging.info(f"  - Diferença: {current_time - application_dt if current_time >= application_dt else application_dt - current_time}")
-                                    
                                 except pytz.exceptions.UnknownTimeZoneError:
-                                    # Se o timezone for inválido, usar lógica de fallback
-                                    logging.warning(f"Timezone inválido: {class_test.timezone}, usando fallback")
-                                    raise Exception(f"Timezone inválido: {class_test.timezone}")
+                                    logging.warning(f"Timezone inválido: {app_record.timezone}, usando fallback")
+                                    raise Exception(f"Timezone inválido: {app_record.timezone}")
                             else:
-                                # Fallback para lógica antiga se não houver timezone
-                                # Converter string para datetime
-                                application_dt = dateutil.parser.parse(class_test.application)
+                                application_dt = dateutil.parser.parse(app_record.application)
                                 if application_dt.tzinfo is None:
                                     application_dt = application_dt.replace(tzinfo=current_time.tzinfo)
-                                
                                 is_available_now = current_time >= application_dt
-                                
-                                logging.info(f"Teste {test.id}: DEBUG DISPONIBILIDADE (FALLBACK)")
-                                logging.info(f"  - timezone_aplicacao: None (usando fallback)")
-                                logging.info(f"  - current_time (local): {current_time.isoformat()}")
-                                logging.info(f"  - application_dt (processado): {application_dt.isoformat()}")
-                                logging.info(f"  - is_available_now: {is_available_now}")
-                            
                         except Exception as e:
-                            # Se houver erro na conversão, não disponível
                             logging.error(f"Erro ao converter data de aplicação para teste {test.id}: {str(e)}")
                             is_available_now = False
                     else:
-                        # Se não há data de aplicação definida, não está disponível
                         is_available_now = False
-                    
+
                     # Verificar se a avaliação não expirou (data de expiração)
                     is_expired = False
-                    if class_test.expiration and class_test.expiration is not None:
+                    if app_record.expiration and app_record.expiration is not None:
                         try:
-                            # ✅ REGRA 4: Comparar no mesmo timezone da aplicação
-                            if class_test.timezone:
+                            if app_record.timezone:
                                 import pytz
                                 try:
-                                    # Obter timezone da aplicação
-                                    target_tz = pytz.timezone(class_test.timezone)
-                                    
-                                    # Converter string para datetime com timezone
-                                    expiration_dt = dateutil.parser.parse(class_test.expiration)
+                                    target_tz = pytz.timezone(app_record.timezone)
+                                    expiration_dt = dateutil.parser.parse(app_record.expiration)
                                     if expiration_dt.tzinfo is None:
                                         expiration_dt = expiration_dt.replace(tzinfo=target_tz)
-                                    
-                                    # ✅ REGRA 4: Comparar diretamente no mesmo timezone
                                     is_expired = current_time > expiration_dt
-                                    
-                                    # Log para debug detalhado
-                                    logging.info(f"Teste {test.id}: DEBUG EXPIRAÇÃO (TIMEZONE APLICAÇÃO)")
-                                    logging.info(f"  - timezone_aplicacao: {class_test.timezone}")
-                                    logging.info(f"  - current_time ({class_test.timezone}): {current_time.isoformat()}")
-                                    logging.info(f"  - expiration_original (do banco): {class_test.expiration}")
-                                    logging.info(f"  - expiration_dt (processado): {expiration_dt.isoformat()}")
-                                    logging.info(f"  - current_time > expiration_dt: {current_time > expiration_dt}")
-                                    logging.info(f"  - is_expired: {is_expired}")
-                                    logging.info(f"  - Diferença: {current_time - expiration_dt if current_time > expiration_dt else expiration_dt - current_time}")
-                                    
                                 except pytz.exceptions.UnknownTimeZoneError:
-                                    logging.warning(f"Timezone inválido: {class_test.timezone}, usando fallback")
-                                    raise Exception(f"Timezone inválido: {class_test.timezone}")
+                                    logging.warning(f"Timezone inválido: {app_record.timezone}, usando fallback")
+                                    raise Exception(f"Timezone inválido: {app_record.timezone}")
                             else:
-                                # Fallback para lógica antiga
-                                # Converter string para datetime
-                                expiration_dt = dateutil.parser.parse(class_test.expiration)
+                                expiration_dt = dateutil.parser.parse(app_record.expiration)
                                 if expiration_dt.tzinfo is None:
                                     expiration_dt = expiration_dt.replace(tzinfo=current_time.tzinfo)
-                                
                                 is_expired = current_time > expiration_dt
-                                
-                                logging.info(f"Teste {test.id}: DEBUG EXPIRAÇÃO (FALLBACK)")
-                                logging.info(f"  - timezone_aplicacao: None (usando fallback)")
-                                logging.info(f"  - current_time (local): {current_time.isoformat()}")
-                                logging.info(f"  - expiration_dt (processado): {expiration_dt.isoformat()}")
-                                logging.info(f"  - is_available_now: {is_available_now}")
-                                logging.info(f"  - is_expired: {is_expired}")
-                            
                         except Exception as e:
-                            # Se houver erro na conversão, não expirada
                             logging.error(f"Erro ao converter data de expiração para teste {test.id}: {str(e)}")
                             is_expired = False
                     
@@ -2196,15 +2408,6 @@ def listar_avaliacoes_minha_classe():
                         availability_status = "expired"
                         can_start = False
                     
-                    # Log final da lógica de disponibilidade
-                    logging.info(f"Teste {test.id}: RESULTADO FINAL")
-                    logging.info(f"  - is_available_now: {is_available_now}")
-                    logging.info(f"  - is_expired: {is_expired}")
-                    logging.info(f"  - is_available: {is_available}")
-                    logging.info(f"  - availability_status: {availability_status}")
-                    logging.info(f"  - can_start: {can_start}")
-                    
-
                 else:
                     availability_status = "completed"
             else:
@@ -2240,10 +2443,11 @@ def listar_avaliacoes_minha_classe():
                 } if test.creator else None,
                 "total_questions": len(test.questions),
                 "application_info": {
-                    "class_test_id": class_test.id,
-                    "application": class_test.application if class_test.application else None,
-                    "expiration": class_test.expiration if class_test.expiration else None,
-                    "timezone": class_test.timezone,
+                    "class_test_id": app_record.id if app_source == "class" else None,
+                    "student_test_olimpics_id": app_record.id if app_source == "olympics" else None,
+                    "application": app_record.application if app_record.application else None,
+                    "expiration": app_record.expiration if app_record.expiration else None,
+                    "timezone": app_record.timezone,
                     "current_time": current_time.isoformat() if current_time else None
                 },
                 "availability": {
@@ -2282,7 +2486,7 @@ def listar_avaliacoes_minha_classe():
                     "id": grade_obj.id,
                     "name": grade_obj.name
                 } if grade_obj else None
-            },
+            } if class_obj else None,
             "total_tests": len(tests_info),
             "tests": tests_info
         }
@@ -2318,22 +2522,56 @@ def start_test_session(test_id):
         if not test:
             return jsonify({"error": "Teste não encontrado"}), 404
         
-        # Verificar se o teste está aplicado na classe do aluno e não expirou
-        from app.models.classTest import ClassTest
+        # Verificar se o teste está aplicado: turma (ClassTest) e/ou olimpíada (StudentTestOlimpics)
+        # Ambos funcionam simultaneamente - não há exclusão mútua
         class_test = ClassTest.query.filter_by(
             class_id=student.class_id,
             test_id=test_id
         ).first()
-        
-        if not class_test:
+        olympics = None
+        try:
+            olympics = StudentTestOlimpics.query.filter_by(
+                student_id=student.id,
+                test_id=str(test_id)
+            ).first()
+        except (SQLAlchemyError, Exception) as e:
+            # Se a tabela não existir, continuar apenas com ClassTest
+            error_str = str(e).lower()
+            if 'student_test_olimpics' in error_str or 'does not exist' in error_str or 'undefinedtable' in error_str:
+                logging.warning(f"Tabela student_test_olimpics não encontrada, continuando apenas com ClassTest: {str(e)}")
+                olympics = None
+            else:
+                logging.warning(f"Erro ao buscar StudentTestOlimpics, continuando apenas com ClassTest: {str(e)}")
+                olympics = None
+
+        # Priorizar StudentTestOlimpics se ambos existirem (mais específico para o aluno)
+        # Ambos funcionam simultaneamente - não há exclusão mútua
+        app_record = olympics if olympics else class_test
+        if not app_record:
             return jsonify({"error": "Avaliação não está aplicada na sua classe"}), 404
-        
+
+        # Se for prova de competição (StudentTestOlimpics) e já existir sessão em andamento,
+        # retornar essa sessão sem validar application/expiration (evita 410 quando o front chama /test/start-session)
+        if app_record is olympics:
+            existing_for_test = TestSession.query.filter_by(
+                student_id=student.id,
+                test_id=test_id,
+                status='em_andamento',
+            ).first()
+            if existing_for_test:
+                return jsonify({
+                    "message": "Sessão já iniciada",
+                    "session_id": existing_for_test.id,
+                    "started_at": existing_for_test.started_at.isoformat() if existing_for_test.started_at else None,
+                    "time_limit_minutes": existing_for_test.time_limit_minutes,
+                }), 200
+
         # ✅ REGRA 4: Verificar se a avaliação está disponível (data de aplicação) e não expirou (data de expiração)
         current_time = None
-        if class_test.timezone:
+        if app_record.timezone:
             import pytz
             try:
-                target_tz = pytz.timezone(class_test.timezone)
+                target_tz = pytz.timezone(app_record.timezone)
                 current_time = datetime.now(target_tz)
             except pytz.exceptions.UnknownTimeZoneError:
                 from app.utils.timezone_utils import get_local_time
@@ -2341,36 +2579,32 @@ def start_test_session(test_id):
         else:
             from app.utils.timezone_utils import get_local_time
             current_time = get_local_time()
-        
+
         # Verificar se já passou da data de aplicação
-        if class_test.application:
-            # Converter string para datetime
-            application_dt = dateutil.parser.parse(class_test.application)
+        if app_record.application:
+            application_dt = dateutil.parser.parse(app_record.application)
             if application_dt.tzinfo is None:
-                if class_test.timezone:
+                if app_record.timezone:
                     import pytz
-                    target_tz = pytz.timezone(class_test.timezone)
+                    target_tz = pytz.timezone(app_record.timezone)
                     application_dt = application_dt.replace(tzinfo=target_tz)
                 else:
                     application_dt = application_dt.replace(tzinfo=current_time.tzinfo)
-            
-            # ✅ REGRA 4: Comparar diretamente no mesmo timezone
+
             if current_time < application_dt:
                 return jsonify({"error": "Avaliação ainda não está disponível"}), 410
-        
+
         # Verificar se a avaliação não expirou
-        if class_test.expiration:
-            # Converter string para datetime
-            expiration_dt = dateutil.parser.parse(class_test.expiration)
+        if app_record.expiration:
+            expiration_dt = dateutil.parser.parse(app_record.expiration)
             if expiration_dt.tzinfo is None:
-                if class_test.timezone:
+                if app_record.timezone:
                     import pytz
-                    target_tz = pytz.timezone(class_test.timezone)
+                    target_tz = pytz.timezone(app_record.timezone)
                     expiration_dt = expiration_dt.replace(tzinfo=target_tz)
                 else:
                     expiration_dt = expiration_dt.replace(tzinfo=current_time.tzinfo)
-            
-            # ✅ REGRA 4: Comparar diretamente no mesmo timezone
+
             if current_time > expiration_dt:
                 return jsonify({"error": "Avaliação expirada"}), 410
         
@@ -2550,7 +2784,7 @@ def debug_test_dates(test_id):
             return jsonify({'error': 'Teste não encontrado'}), 404
         
         # Buscar aplicações do teste
-        class_tests = ClassTest.query.filter_by(test_id=test_id).all()
+        class_tests = ClassTest.query.filter_by(test_id=str(test_id)).all()
         
         # ✅ REGRA 4: Obter tempo atual no timezone da aplicação (se disponível)
         current_time = None
@@ -2775,7 +3009,7 @@ def debug_test_availability(test_id):
             return jsonify({'error': 'Teste não encontrado'}), 404
         
         # Buscar aplicações do teste
-        class_tests = ClassTest.query.filter_by(test_id=test_id).all()
+        class_tests = ClassTest.query.filter_by(test_id=str(test_id)).all()
         
         # ✅ REGRA 4: Obter tempo atual no timezone da aplicação (se disponível)
         current_time = None

@@ -36,7 +36,7 @@ lock = Lock()
 logger = logging.getLogger(__name__)
 
 
-def create_job(job_id: str, total: int, test_id: str = None, gabarito_id: str = None) -> dict:
+def create_job(job_id: str, total: int, test_id: str = None, gabarito_id: str = None, user_id: str = None, task_ids: list = None) -> dict:
     """
     Cria um novo job de correção em lote
     
@@ -45,6 +45,8 @@ def create_job(job_id: str, total: int, test_id: str = None, gabarito_id: str = 
         total: Número total de imagens a processar
         test_id: ID da prova (opcional)
         gabarito_id: ID do gabarito (opcional)
+        user_id: ID do usuário que criou o job (opcional, para validação de acesso)
+        task_ids: Lista de IDs de tasks Celery associadas ao job (opcional)
     
     Returns:
         dict: Dados do job criado
@@ -58,6 +60,9 @@ def create_job(job_id: str, total: int, test_id: str = None, gabarito_id: str = 
             "status": "processing",
             "test_id": test_id,
             "gabarito_id": gabarito_id,
+            "user_id": user_id,
+            "task_ids": task_ids or [],
+            "warnings": [],
             "created_at": datetime.utcnow().isoformat(),
             "items": {str(i): {"status": "pending"} for i in range(total)},
             "results": []
@@ -154,6 +159,41 @@ def get_job(job_id: str) -> dict:
     """
     with lock:
         return progress.get(job_id)
+
+
+def update_job(job_id: str, updates: dict) -> dict:
+    """
+    Atualiza campos específicos de um job
+    
+    Args:
+        job_id: ID do job
+        updates: Dicionário com campos a atualizar
+    
+    Returns:
+        dict: Job atualizado ou None se não encontrado
+    """
+    with lock:
+        if job_id in progress:
+            progress[job_id].update(updates)
+            logger.debug(f"📝 Job {job_id} atualizado: {list(updates.keys())}")
+            return progress[job_id]
+        return None
+
+
+def get_all_active_jobs() -> list:
+    """
+    Retorna todos os jobs ativos no sistema
+    
+    Returns:
+        Lista com todos os jobs e suas informações
+    """
+    with lock:
+        jobs = []
+        for job_id, job_data in progress.items():
+            job_copy = job_data.copy()
+            job_copy['id'] = job_id
+            jobs.append(job_copy)
+        return jobs
 
 
 def delete_job(job_id: str) -> bool:

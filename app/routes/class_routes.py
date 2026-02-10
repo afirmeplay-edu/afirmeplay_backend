@@ -3,7 +3,10 @@ from app.models.studentClass import Class
 from app import db
 from flask_jwt_extended import jwt_required
 from app.decorators.role_required import role_required, get_current_user_from_token
+from app.utils.uuid_helpers import ensure_uuid, ensure_uuid_list
 from sqlalchemy.exc import SQLAlchemyError, IntegrityError
+from sqlalchemy import cast
+from sqlalchemy.dialects.postgresql import UUID as PostgresUUID
 import logging
 from app.models.student import Student
 from app.models.school import School
@@ -62,7 +65,7 @@ def get_filtered_classes():
             City,
             db.func.count(Student.id).label('students_count')
         ).join(
-            School, Class.school_id == School.id
+            School, Class.school_id == cast(School.id, PostgresUUID)
         ).join(
             City, School.city_id == City.id
         ).outerjoin(
@@ -78,10 +81,16 @@ def get_filtered_classes():
             query = query.filter(City.id == municipality_id)
             
         if school_id:
-            query = query.filter(School.id == school_id)
+            # Converter school_id para UUID (Class.school_id é UUID)
+            school_id_uuid = ensure_uuid(school_id)
+            if school_id_uuid:
+                query = query.filter(Class.school_id == school_id_uuid)
             
         if grade_id:
-            query = query.filter(Grade.id == grade_id)
+            # grade_id já é UUID, mas vamos garantir
+            grade_id_uuid = ensure_uuid(grade_id)
+            if grade_id_uuid:
+                query = query.filter(Grade.id == grade_id_uuid)
             
         if education_stage_id:
             query = query.filter(Grade.education_stage_id == education_stage_id)
@@ -192,7 +201,7 @@ def get_classes_by_school(school_id):
             EducationStage,
             db.func.count(Student.id).label('students_count')
         ).join(
-            School, Class.school_id == School.id
+            School, Class.school_id == cast(School.id, PostgresUUID)
         ).outerjoin(
             Grade, Class.grade_id == Grade.id
         ).outerjoin(
@@ -200,7 +209,7 @@ def get_classes_by_school(school_id):
         ).outerjoin(
             Student, Class.id == Student.class_id
         ).filter(
-            Class.school_id == school_id
+            Class.school_id == ensure_uuid(school_id) if school_id else None
         ).group_by(
             Class.id, School.id, Grade.id, EducationStage.id
         ).all()
@@ -255,7 +264,7 @@ def get_classes():
             School,
             Grade
         ).join(
-            School, Class.school_id == School.id
+            School, Class.school_id == cast(School.id, PostgresUUID)
         ).outerjoin(
             Grade, Class.grade_id == Grade.id
         )
@@ -293,14 +302,20 @@ def get_classes():
             if not teacher_school:
                 return jsonify({"error": "Diretor/Coordenador não está vinculado a nenhuma escola"}), 400
             
-            classes = query.filter(Class.school_id == teacher_school.school_id).all()
+            # Converter school_id para UUID (Class.school_id é UUID)
+            school_id_uuid = ensure_uuid(teacher_school.school_id)
+            if school_id_uuid:
+                classes = query.filter(Class.school_id == school_id_uuid).all()
+            else:
+                return jsonify({"error": "ID de escola inválido"}), 400
         else:
             # TecAdmin vê turmas de todas as escolas do município
             city_id = user.get('tenant_id') or user.get('city_id')
             if not city_id:
                 return jsonify({"error": "ID da cidade não disponível"}), 400
             
-            classes = query.join(School).filter(School.city_id == city_id).all()
+            # A query já tem JOIN com School usando cast, então apenas filtrar
+            classes = query.filter(School.city_id == city_id).all()
 
         return jsonify([{
             "id": c.id,
@@ -324,6 +339,11 @@ def get_classes():
 @jwt_required()
 def get_class(class_id):
     try:
+        # Converter class_id para UUID (Class.id é UUID)
+        class_id_uuid = ensure_uuid(class_id)
+        if not class_id_uuid:
+            return jsonify({"error": "ID de turma inválido"}), 400
+        
         # Query with explicit joins
         result = db.session.query(
             Class,
@@ -331,13 +351,13 @@ def get_class(class_id):
             Grade,
             Student
         ).join(
-            School, Class.school_id == School.id
+            School, Class.school_id == cast(School.id, PostgresUUID)
         ).outerjoin(
             Grade, Class.grade_id == Grade.id
         ).outerjoin(
             Student, Class.id == Student.class_id
         ).filter(
-            Class.id == class_id
+            Class.id == class_id_uuid
         ).all()
 
         if not result:
@@ -369,7 +389,12 @@ def get_class(class_id):
 @jwt_required()
 def update_class(class_id):
     try:
-        class_obj = Class.query.get(class_id)
+        # Converter class_id para UUID (Class.id é UUID)
+        class_id_uuid = ensure_uuid(class_id)
+        if not class_id_uuid:
+            return jsonify({"error": "ID de turma inválido"}), 400
+        
+        class_obj = Class.query.get(class_id_uuid)
         if not class_obj:
             return jsonify({"error": "Class not found"}), 404
 
@@ -380,7 +405,10 @@ def update_class(class_id):
         if "name" in data:
             class_obj.name = data["name"]
         if "school_id" in data:
-            class_obj.school_id = data["school_id"]
+            # Converter school_id para UUID (Class.school_id é UUID)
+            school_id_uuid = ensure_uuid(data["school_id"])
+            if school_id_uuid:
+                class_obj.school_id = school_id_uuid
         if "grade_id" in data:
             # Validar que o curso da série está vinculado à escola
             from app.models.grades import Grade
@@ -439,7 +467,12 @@ def delete_class(class_id):
             f"IP: {request.remote_addr if request else 'N/A'}"
         )
         
-        class_obj = Class.query.get(class_id)
+        # Converter class_id para UUID (Class.id é UUID)
+        class_id_uuid = ensure_uuid(class_id)
+        if not class_id_uuid:
+            return jsonify({"error": "ID de turma inválido"}), 400
+        
+        class_obj = Class.query.get(class_id_uuid)
         if not class_obj:
             logging.warning(
                 f"⚠️ Tentativa de deletar turma inexistente: {class_id} - "
@@ -564,10 +597,19 @@ def create_class():
                 }), 400
 
         # Create new class
+        # Converter school_id para UUID (Class.school_id é UUID)
+        school_id_uuid = ensure_uuid(data["school_id"])
+        if not school_id_uuid:
+            return jsonify({"error": "ID de escola inválido"}), 400
+        
+        grade_id_uuid = None
+        if data.get("grade_id"):
+            grade_id_uuid = ensure_uuid(data["grade_id"])
+        
         new_class = Class(
             name=data["name"],
-            school_id=data["school_id"],
-            grade_id=data.get("grade_id")  # Optional field
+            school_id=school_id_uuid,
+            grade_id=grade_id_uuid  # Optional field
         )
 
         db.session.add(new_class)
@@ -615,7 +657,12 @@ def add_student_to_class(class_id):
         if not student_ids:
             return jsonify({"error": "No student IDs provided"}), 400
 
-        class_obj = Class.query.get(class_id)
+        # Converter class_id para UUID (Class.id é UUID)
+        class_id_uuid = ensure_uuid(class_id)
+        if not class_id_uuid:
+            return jsonify({"error": "ID de turma inválido"}), 400
+        
+        class_obj = Class.query.get(class_id_uuid)
         if not class_obj:
             logging.warning(f"Class not found with ID: {class_id}")
             return jsonify({"error": "Class not found"}), 404
@@ -685,7 +732,12 @@ def remove_student_from_class(class_id):
 
         student_id = data["student_id"]
 
-        class_obj = Class.query.get(class_id)
+        # Converter class_id para UUID (Class.id é UUID)
+        class_id_uuid = ensure_uuid(class_id)
+        if not class_id_uuid:
+            return jsonify({"error": "ID de turma inválido"}), 400
+        
+        class_obj = Class.query.get(class_id_uuid)
         if not class_obj:
             logging.warning(f"Class not found with ID: {class_id}")
             return jsonify({"error": "Class not found"}), 404
@@ -744,8 +796,13 @@ def remove_student_from_class(class_id):
 @role_required("admin", "diretor", "coordenador", "professor", "tecadm")
 def get_class_teachers(class_id):
     try:
+        # Converter class_id para UUID (Class.id é UUID)
+        class_id_uuid = ensure_uuid(class_id)
+        if not class_id_uuid:
+            return jsonify({"erro": "ID de turma inválido"}), 400
+        
         # Verificar se a turma existe
-        class_obj = Class.query.get(class_id)
+        class_obj = Class.query.get(class_id_uuid)
         if not class_obj:
             return jsonify({"erro": "Turma não encontrada"}), 404
 

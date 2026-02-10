@@ -3,12 +3,14 @@ from flask_sqlalchemy import SQLAlchemy
 from flask_cors import CORS
 from flask_jwt_extended import JWTManager
 from flask_migrate import Migrate
+from markupsafe import Markup
 
 from .config import Config
 from dotenv import load_dotenv
 import os
 import logging
 import traceback
+import re
 
 # Importar configuração de logging e alertas Telegram
 from .utils.logging_config import setup_logging
@@ -59,6 +61,71 @@ def create_app():
     jwt.init_app(app)
     migrate.init_app(app, db)
     
+    # Registrar filtros Jinja2 globais
+    @app.template_filter('formatar_texto_ia')
+    def formatar_texto_ia(texto):
+        """
+        Formata texto da IA para HTML preservando quebras de linha e formatação
+        Converte quebras de linha duplas em parágrafos e simples em <br/>
+        """
+        if not texto:
+            return Markup("")
+        
+        # Se não houver quebras de linha duplas, tentar detectar padrões para quebrar
+        if '\n\n' not in texto:
+            # Detectar padrões de títulos no meio do texto
+            texto = texto.replace('Destaques e Recomendações:', '\n\nDestaques e Recomendações:')
+            texto = texto.replace('Classificação:', '\n\nClassificação:')
+            texto = texto.replace('PARECER TÉCNICO:', '\n\nPARECER TÉCNICO:')
+            # Detectar números como títulos (ex: "1. ", "2. ", "3. ")
+            texto = re.sub(r'(\d+\.\s)', r'\n\n\1', texto)
+            # Detectar títulos em maiúsculas seguidas de dois pontos
+            texto = re.sub(r'([A-ZÁÊÔÇ][A-ZÁÊÔÇ\s]{10,}:)', r'\n\n\1', texto)
+        
+        # Dividir por quebras de linha duplas (parágrafos)
+        paragrafos = texto.split('\n\n')
+        
+        resultado = []
+        for paragrafo in paragrafos:
+            paragrafo = paragrafo.strip()
+            if not paragrafo:
+                continue
+            
+            # Verificar se é um título (maiúsculas seguidas de dois pontos, ou números como "1. ", "2. ")
+            if (len(paragrafo) > 10 and paragrafo.isupper() and paragrafo.endswith(':')) or \
+               (len(paragrafo) > 2 and paragrafo[0].isdigit() and paragrafo[1] == '.' and paragrafo[2] == ' '):
+                # É um título - converter para negrito
+                resultado.append(f'<p style="font-weight: bold; margin-top: 12px; margin-bottom: 8px;">{paragrafo}</p>')
+            # Verificar se começa com títulos específicos
+            elif paragrafo.startswith('Destaques e Recomendações:') or \
+                 paragrafo.startswith('Classificação:') or \
+                 paragrafo.startswith('PARECER TÉCNICO:') or \
+                 paragrafo.startswith('PARECER TÉCNICO DE PARTICIPAÇÃO:') or \
+                 paragrafo.startswith('PARECER TÉCNICO: NOTA IDAV:'):
+                # É um título - converter para negrito
+                resultado.append(f'<p style="font-weight: bold; margin-top: 12px; margin-bottom: 8px;">{paragrafo}</p>')
+            # Verificar se contém bullets (•) - converter em lista
+            elif '•' in paragrafo:
+                # Dividir por bullets
+                partes = paragrafo.split('•')
+                primeira_parte = partes[0].strip()
+                itens_lista = [item.strip() for item in partes[1:] if item.strip()]
+                
+                if primeira_parte:
+                    resultado.append(f'<p>{primeira_parte}</p>')
+                
+                if itens_lista:
+                    resultado.append('<ul style="margin-left: 20px; margin-top: 8px; margin-bottom: 8px;">')
+                    for item in itens_lista:
+                        resultado.append(f'<li style="margin-bottom: 4px;">{item}</li>')
+                    resultado.append('</ul>')
+            else:
+                # Parágrafo normal - converter quebras de linha simples em <br/>
+                paragrafo_html = paragrafo.replace('\n', '<br/>')
+                resultado.append(f'<p style="margin-top: 8px; margin-bottom: 8px;">{paragrafo_html}</p>')
+        
+        return Markup(''.join(resultado)) if resultado else Markup("")
+    
     # Inicializar Celery (para processamento assíncrono de relatórios)
     try:
         from app.report_analysis.celery_app import init_celery
@@ -71,8 +138,13 @@ def create_app():
     from .routes import school_routes, test_routes, question_routes, login, logout, admin_route, educationStage_routes, grades_routes, persistUser_routes, city_routes, student_routes, user_routes, class_routes, schoolTeacher, teacherClass, professor_route, subject_routes, skill_routes,student_answer_routes, userQuickLinks_routes, evaluation_results_routes, basic_endpoints, evaluation_routes, game_routes, manager_routes, report_routes, physical_test_routes, student_grades_routes, calendar_routes, dashboard_routes, answer_sheet_routes
     from app.socioeconomic_forms.routes import socioeconomic_form_routes
     from app.socioeconomic_forms.routes import filter_routes
+    from app.socioeconomic_forms.routes import results_routes
+    from app.socioeconomic_forms.routes import aggregated_results_routes
     from .play_tv import routes as playtv_routes
-    from .competicoes import routes as competicoes_routes
+    from .plantao_online import routes as plantao_online_routes
+    from app.certification.routes import certificate_routes
+    from app.balance.routes import bp as balance_bp
+    from app.competitions.routes import bp as competitions_bp
     # Importar rotas de report_analysis (processamento assíncrono)
     from app.report_analysis import routes as report_analysis_routes
     
@@ -113,11 +185,83 @@ def create_app():
     app.register_blueprint(answer_sheet_routes.bp)
     app.register_blueprint(socioeconomic_form_routes.bp)
     app.register_blueprint(filter_routes.bp)
+    app.register_blueprint(results_routes.bp)
+    app.register_blueprint(aggregated_results_routes.bp)  # Resultados agregados de múltiplos formulários
     app.register_blueprint(playtv_routes.bp)
-    app.register_blueprint(competicoes_routes.bp)
+    app.register_blueprint(plantao_online_routes.bp)
+    app.register_blueprint(certificate_routes.bp)
+    app.register_blueprint(balance_bp)
+    app.register_blueprint(competitions_bp)
+
+    # Thread em background: finaliza competições expiradas a cada 15 min (sem depender de Celery Beat)
+    def _run_finalize_competitions_loop(app_ref):
+        import time
+        from sqlalchemy.exc import OperationalError
+        interval_seconds = 15 * 60  # 15 minutos
+        while True:
+            time.sleep(interval_seconds)
+            try:
+                with app_ref.app_context():
+                    from app.services.competition_ranking_service import CompetitionRankingService
+                    result = CompetitionRankingService.finalize_all_expired_competitions()
+                    if result.get("processed"):
+                        app_ref.logger.info(
+                            "Competições finalizadas em background: %s",
+                            result,
+                        )
+            except OperationalError as e:
+                # Conexão fechada pelo servidor/pool (idle timeout etc.): descartar sessão para próxima rodada usar conexão nova
+                if app_ref:
+                    with app_ref.app_context():
+                        try:
+                            db.session.rollback()
+                        except Exception:
+                            pass
+                        db.session.remove()
+                    if app_ref:
+                        app_ref.logger.warning(
+                            "Conexão com o banco fechada no loop de competições (será retentado em 15 min): %s",
+                            str(e),
+                        )
+            except Exception as e:
+                if app_ref:
+                    with app_ref.app_context():
+                        try:
+                            db.session.rollback()
+                        except Exception:
+                            pass
+                        db.session.remove()
+                    if app_ref:
+                        app_ref.logger.exception(
+                            "Erro no loop de finalização de competições: %s",
+                            str(e),
+                        )
+
+    try:
+        import threading
+        # Uma vez na subida: finalizar competições já expiradas
+        with app.app_context():
+            try:
+                from app.services.competition_ranking_service import CompetitionRankingService
+                r = CompetitionRankingService.finalize_all_expired_competitions()
+                if r.get("processed"):
+                    app.logger.info("Competições expiradas finalizadas na subida: %s", r)
+            except Exception as e:
+                app.logger.warning("Finalização na subida falhou: %s", str(e))
+        _competition_finalize_thread = threading.Thread(
+            target=_run_finalize_competitions_loop,
+            args=(app,),
+            daemon=True,
+            name="competition_finalize",
+        )
+        _competition_finalize_thread.start()
+        app.logger.info("Thread de finalização de competições iniciada (intervalo 15 min)")
+    except Exception as e:
+        app.logger.warning("Não foi possível iniciar thread de finalização de competições: %s", str(e))
+
     # Importar modelos para garantir que as tabelas sejam criadas
     from .models import City, School, SchoolTeacher, Teacher, Student, Subject, Class, ClassSubject, ClassTest, Test, EducationStage, Grade, Skill, Question, StudentAnswer, UserQuickLinks, TeacherClass, User, Manager
-    from .competicoes.models import Competition, CompetitionEnrollment, CompetitionResult
+    from app.certification.models import CertificateTemplate, Certificate
 
     # Rota para servir o arquivo swagger.yaml a partir do diretório raiz do projeto
     @app.route('/swagger.yaml')

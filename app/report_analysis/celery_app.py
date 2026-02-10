@@ -15,85 +15,92 @@ load_dotenv('app/.env')
 # Detectar se está rodando no Windows
 IS_WINDOWS = sys.platform == 'win32'
 
-# Configuração do Celery
+# Carregar variáveis de ambiente
+REDIS_PASSWORD = os.getenv('REDIS_PASSWORD')
 CELERY_BROKER_URL = os.getenv('CELERY_BROKER_URL', 'redis://localhost:6379/0')
 CELERY_RESULT_BACKEND = os.getenv('CELERY_RESULT_BACKEND', 'redis://localhost:6379/0')
 
-# Se houver senha do Redis separada, adicionar à URL
-REDIS_PASSWORD = os.getenv('REDIS_PASSWORD')
-if REDIS_PASSWORD and '@' not in CELERY_BROKER_URL:
-    # Adicionar senha à URL do Redis
-    # Formato: redis://:password@host:port/db
-    if CELERY_BROKER_URL.startswith('redis://'):
-        parts = CELERY_BROKER_URL.replace('redis://', '').split('/')
-        host_port = parts[0]
-        db = parts[1] if len(parts) > 1 else '0'
-        CELERY_BROKER_URL = f'redis://:{REDIS_PASSWORD}@{host_port}/{db}'
-        CELERY_RESULT_BACKEND = f'redis://:{REDIS_PASSWORD}@{host_port}/{db}'
-        # Log para debug (apenas em desenvolvimento)
-        import logging
-        logger = logging.getLogger(__name__)
-        logger.debug(f"Senha Redis aplicada. Broker: redis://:***@{host_port}/{db}")
-
-# Criar instância do Celery
-# IMPORTANTE: Usar as variáveis já modificadas (com senha se aplicável)
+# Criar instância do Celery com URLs SEM senha
+# A senha será configurada separadamente via redis_password
 celery_app = Celery(
     'report_analysis',
     broker=CELERY_BROKER_URL,
     backend=CELERY_RESULT_BACKEND,
-    include=['app.report_analysis.tasks']
+    include=[
+        'app.report_analysis.tasks',
+        'app.services.celery_tasks.physical_test_tasks',  # Tasks de geração de formulários físicos
+        'app.services.celery_tasks.answer_sheet_tasks',  # Tasks de geração de cartões de resposta
+        'app.services.celery_tasks.evaluation_recalculation_tasks',  # Tasks de recálculo de resultados
+        'app.socioeconomic_forms.services.results_tasks',  # Tasks de resultados socioeconômicos
+        'app.socioeconomic_forms.services.results_migration_tasks',  # Tasks de migração/população inicial
+        'app.services.celery_tasks.competition_tasks',  # Tasks de finalização de competições
+    ]
 )
 
-# Garantir que as URLs com senha sejam usadas (atualizar explicitamente)
-# IMPORTANTE: Atualizar antes de qualquer uso do Celery
-# Usar setdefault para garantir que as URLs sejam definidas
-celery_app.conf.broker_url = CELERY_BROKER_URL
-celery_app.conf.result_backend = CELERY_RESULT_BACKEND
-
-# Forçar atualização das conexões
-try:
-    # Limpar conexões existentes para forçar recriação com novas URLs
-    if hasattr(celery_app, '_connection_cache'):
-        celery_app._connection_cache.clear()
-    if hasattr(celery_app.backend, 'client'):
-        # Fechar conexão existente se houver
-        try:
-            celery_app.backend.client.connection_pool.disconnect()
-        except:
-            pass
-except:
-    pass  # Ignorar erros ao limpar cache
-
 # Configurações do Celery
-celery_config = {
-    'task_serializer': 'json',
-    'accept_content': ['json'],
-    'result_serializer': 'json',
-    'timezone': 'America/Sao_Paulo',
-    'enable_utc': True,
-    'task_track_started': True,
-    'task_time_limit': 300,  # 5 minutos máximo por task
-    'task_soft_time_limit': 240,  # 4 minutos soft limit
-    'task_acks_late': True,  # Ack apenas após conclusão
-    'task_always_eager': False,  # Executar de forma assíncrona
-    'task_eager_propagates': True,
-}
+celery_app.conf.update(
+    task_serializer='json',
+    accept_content=['json'],
+    result_serializer='json',
+    timezone='America/Sao_Paulo',
+    enable_utc=True,
+    task_track_started=True,
+    task_time_limit=300,  # 5 minutos máximo por task
+    task_soft_time_limit=240,  # 4 minutos soft limit
+    task_acks_late=True,  # Ack apenas após conclusão
+    task_always_eager=False,  # Executar de forma assíncrona
+    task_eager_propagates=True,
+)
+
+# 🔥 ÚNICA FORMA CORRETA DE PASSAR SENHA PARA REDIS NO CELERY
+# O Celery espera redis_password, não senha na URL nem transport_options
+if REDIS_PASSWORD:
+    celery_app.conf.redis_password = REDIS_PASSWORD
 
 # Configurações específicas por plataforma
 if IS_WINDOWS:
-    # Windows: usar pool 'solo' (não suporta prefork)
-    celery_config['worker_pool'] = 'solo'
-    celery_config['worker_concurrency'] = 1  # Apenas 1 worker no Windows
+    celery_app.conf.worker_pool = 'solo'
+    celery_app.conf.worker_concurrency = 1  # Apenas 1 worker no Windows
 else:
     # Linux/Unix: usar prefork (padrão)
-    celery_config['worker_prefetch_multiplier'] = 1  # Processar uma task por vez
-    celery_config['worker_max_tasks_per_child'] = 50  # Reiniciar worker após 50 tasks
-
-celery_app.conf.update(celery_config)
+    celery_app.conf.worker_prefetch_multiplier = 1  # Processar uma task por vez
+    celery_app.conf.worker_max_tasks_per_child = 50  # Reiniciar worker após 50 tasks
 
 # Configuração de retry
 celery_app.conf.task_default_retry_delay = 60  # 1 minuto
 celery_app.conf.task_max_retries = 3
+
+# Celery Beat: processar competições expiradas a cada hora
+from celery.schedules import crontab
+celery_app.conf.beat_schedule = {
+    'process-finished-competitions': {
+        'task': 'competition_tasks.process_finished_competitions',
+        'schedule': crontab(minute=0, hour='*'),  # a cada hora
+    },
+}
+
+# 🔥 CRÍTICO: Criar app Flask automaticamente quando o módulo é importado pelo worker
+# Isso garante que o contexto Flask esteja disponível mesmo quando iniciado via CLI
+_flask_app = None
+
+def _get_flask_app():
+    """Obtém ou cria a instância Flask (singleton)"""
+    global _flask_app
+    if _flask_app is None:
+        from app import create_app
+        _flask_app = create_app()
+    return _flask_app
+
+# Configurar FlaskTask que cria contexto automaticamente
+class FlaskTask(celery_app.Task):
+    """Task com contexto Flask automático"""
+    def __call__(self, *args, **kwargs):
+        app = _get_flask_app()
+        with app.app_context():
+            return self.run(*args, **kwargs)
+
+# Substituir classe base de Task ANTES de qualquer task ser registrada
+celery_app.Task = FlaskTask
 
 
 def init_celery(app: Flask) -> Celery:
@@ -106,15 +113,13 @@ def init_celery(app: Flask) -> Celery:
     
     Returns:
         Instância do Celery configurada
-    """
-    class FlaskTask(celery_app.Task):
-        """Task com contexto Flask automático"""
-        def __call__(self, *args, **kwargs):
-            with app.app_context():
-                return self.run(*args, **kwargs)
     
-    # Substituir classe base de Task
-    celery_app.Task = FlaskTask
+    Nota: O FlaskTask já está configurado globalmente, mas esta função
+    permite atualizar configurações específicas da app.
+    """
+    global _flask_app
+    # Armazenar a app Flask fornecida (pode ser diferente da criada automaticamente)
+    _flask_app = app
     
     # Atualizar configuração com app context
     celery_app.conf.update(
@@ -123,4 +128,3 @@ def init_celery(app: Flask) -> Celery:
     )
     
     return celery_app
-

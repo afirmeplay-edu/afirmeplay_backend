@@ -301,7 +301,9 @@ def listar_avaliacoes():
                 for school_id in school_ids:
                     # Fazer cast explícito para JSONB na coluna e usar operador @> para verificar se contém o valor
                     # Usar cast() para converter a coluna para JSONB e passar o valor como lista Python
-                    filters.append(cast(Test.schools, JSONB).op('@>')([school_id]))
+                    # ✅ CORRIGIDO: Garantir que school_id seja string (JSONB sempre armazena strings)
+                    school_id_str = str(school_id)
+                    filters.append(cast(Test.schools, JSONB).op('@>')([school_id_str]))
             
             # Aplicar filtros se houver algum
             if filters:

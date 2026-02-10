@@ -366,6 +366,80 @@ class CompetitionService:
         return result
 
     @staticmethod
+    def get_student_competitions(student_id: str, status: str | None = None):
+        """
+        Lista competições relacionadas ao aluno (histórico).
+
+        Inclui competições onde:
+        - o aluno está/esteve inscrito (CompetitionEnrollment)
+        - ou o aluno possui StudentTestOlimpics vinculado ao test_id da competição
+
+        Filtro opcional de status (string):
+        - "finished": somente competições finalizadas
+        - "active"  : competições não finalizadas, com inscrições ou aplicação abertas ou status em_andamento
+        - "upcoming": competições não finalizadas e ainda não iniciadas (antes de inscrição e aplicação)
+        - None ou outro valor: retorna todas as competições relacionadas ao aluno
+        """
+        student = Student.query.get(student_id)
+        if not student:
+            return []
+
+        # Competitions via inscrições
+        enrolled_competitions = (
+            Competition.query.join(
+                CompetitionEnrollment,
+                Competition.id == CompetitionEnrollment.competition_id,
+            )
+            .filter(
+                CompetitionEnrollment.student_id == student_id,
+            )
+            .all()
+        )
+
+        # Competitions via StudentTestOlimpics (provas de competição feitas pelo aluno)
+        olympics_competitions = (
+            Competition.query.join(
+                StudentTestOlimpics,
+                Competition.test_id == StudentTestOlimpics.test_id,
+            )
+            .filter(
+                StudentTestOlimpics.student_id == student_id,
+            )
+            .all()
+        )
+
+        # Unir as duas fontes (inscrições + provas realizadas) em memória, evitando UNION no banco
+        all_competitions_dict = {}
+        for c in enrolled_competitions + olympics_competitions:
+            all_competitions_dict[c.id] = c
+        all_competitions = list(all_competitions_dict.values())
+
+        def _match_status(c: Competition) -> bool:
+            # Usar as properties que já consideram timezone corretamente
+            if status is None:
+                return True
+
+            s = (status or "").strip().lower()
+            if s == "finished":
+                return c.is_finished or (c.status or "").strip().lower() == "encerrada"
+            if s == "active":
+                # Competição em andamento (inscrição ou aplicação aberta) e não finalizada
+                return (c.is_enrollment_open or c.is_application_open or (c.status or "").strip().lower() == "em_andamento") and not c.is_finished
+            if s == "upcoming":
+                # Ainda não começou (sem inscrição/aplicação aberta e não finalizada)
+                return (not c.is_enrollment_open and not c.is_application_open) and not c.is_finished
+
+            # Qualquer outro valor: não filtra por status
+            return True
+
+        # Aplicar filtro de status em Python (já temos as properties prontas)
+        competitions = [c for c in all_competitions if _match_status(c)]
+
+        # Ordenar por data de criação (mais recentes primeiro)
+        competitions.sort(key=lambda c: c.created_at or datetime.min, reverse=True)
+        return competitions
+
+    @staticmethod
     def enroll_student(competition_id: str, student_id: str):
         """
         Inscreve o aluno na competição: cria CompetitionEnrollment e StudentTestOlimpics.

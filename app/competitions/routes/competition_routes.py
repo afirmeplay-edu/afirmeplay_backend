@@ -241,6 +241,31 @@ def list_available_competitions():
     return jsonify([_competition_to_dict_with_enrolled(c, student_id) for c in competitions]), 200
 
 
+@bp.route('/my', methods=['GET'])
+@jwt_required()
+@role_required(*ROLES_STUDENT_OR_EDIT)
+def list_my_competitions():
+    """
+    Lista competições do aluno (histórico).
+
+    Critérios:
+    - competições em que o aluno está/esteve inscrito
+    - competições em que o aluno possui StudentTestOlimpics (prova agendada/realizada)
+
+    Query params opcionais:
+    - status=finished  → apenas competições finalizadas
+    - status=active    → competições ativas (não finalizadas)
+    - status=upcoming  → competições futuras (ainda não iniciadas)
+    - status=qualquer/coisa ou ausente → todas
+    """
+    student_id, err = _resolve_student_id()
+    if err:
+        return err[0], err[1]
+    status = request.args.get('status')
+    competitions = CompetitionService.get_student_competitions(student_id, status=status)
+    return jsonify([_competition_to_dict_with_enrolled(c, student_id) for c in competitions]), 200
+
+
 @bp.route('/<competition_id>/details', methods=['GET'])
 @jwt_required()
 @role_required(*ROLES_STUDENT_OR_EDIT)

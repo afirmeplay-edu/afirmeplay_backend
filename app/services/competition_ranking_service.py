@@ -107,10 +107,20 @@ class CompetitionRankingService:
 
         rows.sort(key=sort_key)
 
+        # Atribuir posições considerando EMPATE:
+        # - value = nota (quando criteria='nota') ou tempo (quando criteria='tempo')
+        # - todos com o mesmo value compartilham a mesma posição (ex.: empate triplo em 1º lugar)
         ranking = []
+        last_value = None
+        current_position = 0
         for idx, r in enumerate(rows, start=1):
-            r['position'] = idx
-            r['value'] = r['grade'] if criteria == CRITERIA_NOTA else r['duration_minutes']
+            value = r['grade'] if criteria == CRITERIA_NOTA else r['duration_minutes']
+            if last_value is None or value != last_value:
+                # Novo valor → posição passa a ser o índice atual (1‑based)
+                current_position = idx
+                last_value = value
+            r['position'] = current_position
+            r['value'] = value
             ranking.append(r)
         return ranking
 
@@ -173,11 +183,16 @@ class CompetitionRankingService:
         Pode ser chamado por um job em background (thread) ou pela task Celery.
         Retorna: { "processed": int, "total_candidates": int, "errors": list }.
         """
-        now = datetime.utcnow()
-        competitions = Competition.query.filter(
-            Competition.expiration < now,
+        # Buscar todas as competições abertas ou em andamento
+        # e filtrar usando a property is_finished que já considera o timezone corretamente
+        candidate_competitions = Competition.query.filter(
             Competition.status.in_(['aberta', 'em_andamento']),
         ).all()
+        
+        # Filtrar apenas as que realmente estão expiradas usando is_finished property
+        # que já interpreta os horários corretamente no timezone da competição
+        competitions = [c for c in candidate_competitions if c.is_finished]
+        
         processed = 0
         errors = []
         for competition in competitions:
@@ -223,8 +238,11 @@ class CompetitionRankingService:
             coins = reward_cfg.get('coins')
             if pos is None or coins is None or pos < 1 or coins < 1:
                 continue
-            if pos <= len(ranking):
-                item = ranking[pos - 1]
+            # Em caso de empate de posição (ex.: vários com position=1),
+            # todos os alunos com aquela posição recebem as moedas configuradas.
+            for item in ranking:
+                if item.get('position') != pos:
+                    continue
                 student_id = item['student_id']
                 try:
                     CoinService.credit_coins(
@@ -233,7 +251,7 @@ class CompetitionRankingService:
                         reason='competition_ranking',
                         competition_id=competition_id,
                         test_session_id=item.get('session_id'),
-                        description=f"Ranking posição {pos} - {competition.name}",
+                        description=f"Ranking posição {pos} (empate) - {competition.name}",
                     )
                     coins_by_student[student_id] = coins_by_student.get(student_id, 0) + coins
                     payout = CompetitionRankingPayout(
@@ -264,34 +282,43 @@ class CompetitionRankingService:
             return []
 
         if competition.status == 'encerrada':
-            # Para competições encerradas, os resultados já foram filtrados por escopo
-            # durante a finalização, então podemos ler diretamente de competition_results
+            # Para competições encerradas, preferimos ler o snapshot oficial em competition_results.
             results = (
                 CompetitionResult.query.filter_by(competition_id=competition_id)
                 .order_by(CompetitionResult.posicao)
                 .limit(limit)
                 .all()
             )
-            out = []
-            for r in results:
-                row = {
-                    'position': r.posicao,
-                    'student_id': r.student_id,
-                    'session_id': r.session_id,
-                    'value': r.grade,
-                    'grade': r.grade,
-                    'proficiency': r.proficiency,
-                    'classification': r.classification,
-                    'correct_answers': r.correct_answers,
-                    'total_questions': r.total_questions,
-                    'score_percentage': r.score_percentage,
-                    'tempo_gasto': r.tempo_gasto,
-                    'moedas_ganhas': r.moedas_ganhas,
-                }
-                if enriquecer:
-                    CompetitionRankingService._enrich_result_row(row)
-                out.append(row)
-            return out
+            if results:
+                out = []
+                for r in results:
+                    row = {
+                        'position': r.posicao,
+                        'student_id': r.student_id,
+                        'session_id': r.session_id,
+                        'value': r.grade,
+                        'grade': r.grade,
+                        'proficiency': r.proficiency,
+                        'classification': r.classification,
+                        'correct_answers': r.correct_answers,
+                        'total_questions': r.total_questions,
+                        'score_percentage': r.score_percentage,
+                        'tempo_gasto': r.tempo_gasto,
+                        'moedas_ganhas': r.moedas_ganhas,
+                    }
+                    if enriquecer:
+                        CompetitionRankingService._enrich_result_row(row)
+                    out.append(row)
+                return out
+
+            # Fallback defensivo: se status estiver 'encerrada' mas ainda não existir snapshot
+            # (ex.: bug anterior ou finalização não executada), calcular ranking em tempo real.
+            ranking = CompetitionRankingService.calculate_ranking(competition_id)[:limit]
+            if not enriquecer:
+                return ranking
+            for row in ranking:
+                CompetitionRankingService._enrich_result_row(row)
+            return ranking
         else:
             ranking = CompetitionRankingService.calculate_ranking(competition_id)[:limit]
             if not enriquecer:

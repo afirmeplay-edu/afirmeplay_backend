@@ -36,6 +36,42 @@ def login():
             logging.warning(f"Falha de login para o usuário: {identificador}")
             return jsonify({"erro": "Credenciais inválidas."}), 401
 
+        # ========================================
+        # VALIDAÇÃO DE SUBDOMÍNIO (SEGURANÇA)
+        # ========================================
+        # Usuários comuns DEVEM acessar via subdomínio do seu município
+        # Admin pode acessar qualquer subdomínio
+        
+        if usuario.role != RoleEnum('admin'):
+            # Obter contexto do subdomínio resolvido pelo middleware
+            from flask import g
+            tenant_context = getattr(g, 'tenant_context', None)
+            
+            # Verificar se há city_id no contexto (subdomínio especificado)
+            if not tenant_context or not tenant_context.city_id:
+                logging.warning(
+                    f"Tentativa de login sem subdomínio: "
+                    f"Usuário {usuario.email} (role: {usuario.role.value}, city_id: {usuario.city_id})"
+                )
+                return jsonify({
+                    "erro": "Acesso negado",
+                    "mensagem": "Você deve acessar através do subdomínio do seu município. "
+                               f"Exemplo: <seu-municipio>.afirmeplay.com.br"
+                }), 403
+            
+            # Validar se o usuário pertence ao município do subdomínio
+            if usuario.city_id != tenant_context.city_id:
+                logging.warning(
+                    f"Tentativa de login em município incorreto: "
+                    f"Usuário {usuario.email} (city_id: {usuario.city_id}) "
+                    f"tentou acessar subdomínio da cidade {tenant_context.city_id} (slug: {tenant_context.city_slug})"
+                )
+                return jsonify({
+                    "erro": "Acesso negado",
+                    "mensagem": "Você não tem permissão para acessar este município. "
+                               "Verifique se está usando o subdomínio correto."
+                }), 403
+        
         tenant_id = None
 
         # Define o tenant_id com base na role

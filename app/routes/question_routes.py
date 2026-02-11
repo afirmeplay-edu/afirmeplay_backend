@@ -264,6 +264,32 @@ def get_question(question_id):
         logging.error(f"Error getting question: {str(e)}", exc_info=True)
         return jsonify({"error": "Error getting question", "details": str(e)}), 500
 
+
+@bp.route('/<string:question_id>/quantidade-respostas', methods=['GET'])
+@jwt_required()
+@role_required("admin", "professor", "coordenador", "diretor", "tecadm")
+def get_question_answer_count(question_id):
+    """
+    Retorna a quantidade de vezes que uma questão foi respondida (total de
+    registros em StudentAnswer para essa question_id).
+    """
+    try:
+        question = Question.query.get(question_id)
+        if not question:
+            return jsonify({"error": "Questão não encontrada"}), 404
+        quantidade = StudentAnswer.query.filter(StudentAnswer.question_id == question_id).count()
+        return jsonify({
+            "question_id": question_id,
+            "quantidade": quantidade,
+        }), 200
+    except SQLAlchemyError as e:
+        db.session.rollback()
+        return jsonify({"error": "Erro ao buscar quantidade de respostas", "details": str(e)}), 500
+    except Exception as e:
+        logging.error(f"Error getting question answer count: {str(e)}", exc_info=True)
+        return jsonify({"error": "Erro ao buscar quantidade de respostas", "details": str(e)}), 500
+
+
 @bp.route('/<string:question_id>', methods=['PUT'])
 @jwt_required()
 @role_required("admin", "professor", "coordenador", "diretor","tecadm")

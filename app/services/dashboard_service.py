@@ -30,6 +30,7 @@ from app.permissions.utils import (
     get_teacher_classes,
     get_user_scope,
 )
+from app.certification.services.certificate_service import CertificateService
 
 
 class DashboardService:
@@ -227,14 +228,12 @@ class DashboardService:
             {
                 "id": "notices",
                 "label": "Avisos",
-                "value": None,
-                "status": "in_implementation",
+                "value": cls._count_notices(scope),
             },
             {
                 "id": "certificates",
                 "label": "Certificados",
-                "value": None,
-                "status": "in_implementation",
+                "value": cls._count_certificates(scope),
             },
         ]
 
@@ -571,6 +570,20 @@ class DashboardService:
             school_ids_str = uuid_list_to_str(school_ids) if school_ids else []
             query = query.filter(School.id.in_(school_ids_str)) if school_ids_str else query.filter(False)
         return query.count()
+
+    @classmethod
+    def _count_notices(cls, scope: Dict[str, Any]) -> int:
+        """
+        Retorna a quantidade de avisos no escopo do usuário.
+        Quando existir modelo/tabela de avisos, implementar a contagem aqui.
+        """
+        return 0
+
+    @classmethod
+    def _count_certificates(cls, scope: Dict[str, Any]) -> int:
+        """Retorna a quantidade de certificados emitidos no escopo do usuário."""
+        school_ids = cls._extract_school_ids(scope)
+        return CertificateService.count_issued(school_ids)
 
     @classmethod
     def _count_evaluations(cls, scope: Dict[str, Any]) -> int:

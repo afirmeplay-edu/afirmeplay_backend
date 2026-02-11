@@ -4,7 +4,6 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from app import db
 from app.decorators.role_required import get_current_user_from_token, role_required
-from app.decorators import requires_city_context
 from app.services.dashboard_service import DashboardService
 
 bp = Blueprint("dashboard_routes", __name__)
@@ -18,7 +17,6 @@ def handle_dashboard_error(error):
 @bp.route("/dashboard/admin", methods=["GET"])
 @jwt_required()
 @role_required("admin")
-@requires_city_context
 def dashboard_admin():
     try:
         user = get_current_user_from_token()
@@ -94,4 +92,19 @@ def dashboard_professor():
     except Exception as e:
         db.session.rollback()
         return jsonify({"error": "Erro ao buscar dados do dashboard", "details": str(e)}), 500
+
+
+@bp.route("/dashboard/avisos/quantidade", methods=["GET"])
+@jwt_required()
+def avisos_quantidade():
+    """
+    Retorna a quantidade de avisos no escopo do usuário logado.
+    """
+    try:
+        user = get_current_user_from_token()
+        scope = DashboardService._resolve_scope(user)
+        quantidade = DashboardService._count_notices(scope)
+        return jsonify({"quantidade": quantidade}), 200
+    except Exception as e:
+        return jsonify({"error": "Erro ao buscar quantidade de avisos", "details": str(e)}), 500
 

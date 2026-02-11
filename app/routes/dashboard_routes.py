@@ -4,6 +4,7 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from app import db
 from app.decorators.role_required import get_current_user_from_token, role_required
+from app.decorators import requires_city_context
 from app.services.dashboard_service import DashboardService
 
 bp = Blueprint("dashboard_routes", __name__)
@@ -17,6 +18,7 @@ def handle_dashboard_error(error):
 @bp.route("/dashboard/admin", methods=["GET"])
 @jwt_required()
 @role_required("admin")
+@requires_city_context
 def dashboard_admin():
     try:
         user = get_current_user_from_token()

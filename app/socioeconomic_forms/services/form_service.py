@@ -8,8 +8,10 @@ from app.socioeconomic_forms.models import Form, FormQuestion
 from app.models.city import City
 from app.models.school import School
 from app.models.grades import Grade
+from app.models.educationStage import EducationStage
 from app.models.studentClass import Class
 from app.utils.uuid_helpers import ensure_uuid, ensure_uuid_list
+from app.socioeconomic_forms.services.template_service import TemplateService
 from sqlalchemy.exc import SQLAlchemyError
 import logging
 from datetime import datetime
@@ -230,100 +232,253 @@ class FormService:
                     raise ValueError(f"Turma {class_obj.id} não pertence às séries selecionadas")
     
     @staticmethod
+    def _validate_grades_exist(grade_ids):
+        """
+        Valida que todas as séries fornecidas existem no banco de dados
+        
+        Args:
+            grade_ids: Lista de IDs de séries
+            
+        Returns:
+            list: Lista de objetos Grade encontrados
+            
+        Raises:
+            ValueError: Se alguma série não for encontrada
+        """
+        if not grade_ids:
+            return []
+        
+        # Converter para UUID se necessário
+        import uuid as uuid_lib
+        grade_uuids = []
+        for g in grade_ids:
+            if isinstance(g, str):
+                try:
+                    uuid_obj = uuid_lib.UUID(g)
+                    grade_uuids.append(uuid_obj)
+                except (ValueError, AttributeError):
+                    grade_uuids.append(g)
+            else:
+                grade_uuids.append(g)
+        
+        # Buscar todas as séries
+        grades = Grade.query.filter(Grade.id.in_(grade_uuids)).all()
+        
+        # Verificar se todas foram encontradas
+        if len(grades) != len(grade_ids):
+            found_ids = {str(g.id) for g in grades}
+            provided_ids = {str(g) for g in grade_ids}
+            missing_ids = provided_ids - found_ids
+            raise ValueError(f"Série(s) não encontrada(s) no sistema: {', '.join(missing_ids)}")
+        
+        return grades
+    
+    @staticmethod
+    def _group_grades_by_form_type(grades):
+        """
+        Agrupa séries por tipo de formulário baseado no education_stage_id
+        
+        Args:
+            grades: Lista de objetos Grade
+            
+        Returns:
+            dict: {form_type: [grade_ids]}
+        """
+        groups = {}
+        
+        for grade in grades:
+            education_stage_id = str(grade.education_stage_id)
+            form_type = FormService.EDUCATION_STAGE_TO_FORM_TYPE.get(education_stage_id)
+            
+            if not form_type:
+                # Se não encontrar mapeamento, tentar inferir
+                logging.warning(f"Education stage {education_stage_id} não mapeado para form_type")
+                continue
+            
+            if form_type not in groups:
+                groups[form_type] = []
+            
+            groups[form_type].append(str(grade.id))
+        
+        return groups
+    
+    @staticmethod
+    def _count_previous_applications(form_type, school_id):
+        """
+        Conta quantas aplicações anteriores deste tipo de formulário na escola
+        
+        Args:
+            form_type: Tipo do formulário (aluno-jovem, aluno-velho, etc.)
+            school_id: ID da escola
+            
+        Returns:
+            int: Número de aplicações anteriores + 1 (próximo número)
+        """
+        if not school_id:
+            # Se não tiver escola, retornar 1
+            return 1
+        
+        # Contar formulários do mesmo tipo nesta escola
+        count = Form.query.filter(
+            Form.form_type == form_type,
+            Form.selected_schools.isnot(None)
+        ).filter(
+            Form.selected_schools.contains([school_id])
+        ).count()
+        
+        return count + 1
+    
+    @staticmethod
+    def _get_education_stage_name(grades):
+        """
+        Obtém o nome do education stage das séries
+        Retorna o nome do primeiro education stage encontrado
+        
+        Args:
+            grades: Lista de objetos Grade
+            
+        Returns:
+            str: Nome do education stage
+        """
+        if not grades:
+            return "Questionário"
+        
+        first_grade = grades[0]
+        education_stage = EducationStage.query.get(first_grade.education_stage_id)
+        
+        if education_stage:
+            return education_stage.name
+        
+        return "Questionário"
+    
+    @staticmethod
+    def _generate_title(form_type, school_id, grade_ids, application_number):
+        """
+        Gera título automático para o formulário
+        
+        Formato: "{N}° Questionário Socioeconômico - {Education Stage} - {Escola}"
+        Exemplo: "3° Questionário Socioeconômico - Educação Infantil - Escola XYZ"
+        
+        Args:
+            form_type: Tipo do formulário
+            school_id: ID da escola
+            grade_ids: Lista de IDs de séries
+            application_number: Número da aplicação (1, 2, 3...)
+            
+        Returns:
+            str: Título gerado
+        """
+        ordinal = f"{application_number}°"
+        base_title = f"{ordinal} Questionário Socioeconômico"
+        
+        # Buscar nome da escola
+        school_name = "Escola"
+        if school_id:
+            school = School.query.get(school_id)
+            if school:
+                school_name = school.name
+        
+        # Buscar nome do education stage
+        stage_name = None
+        if grade_ids and len(grade_ids) > 0:
+            # Pegar primeira série para determinar o education stage
+            import uuid as uuid_lib
+            try:
+                grade_id = uuid_lib.UUID(grade_ids[0]) if isinstance(grade_ids[0], str) else grade_ids[0]
+                grade = Grade.query.get(grade_id)
+                if grade:
+                    education_stage = EducationStage.query.get(grade.education_stage_id)
+                    if education_stage:
+                        stage_name = education_stage.name
+            except (ValueError, AttributeError):
+                pass
+        
+        # Montar título
+        if stage_name:
+            return f"{base_title} - {stage_name} - {school_name}"
+        else:
+            return f"{base_title} - {school_name}"
+    
+    @staticmethod
     def create_form(data, created_by):
         """
-        Cria um novo formulário
+        Cria formulário(s) automaticamente baseado nas séries selecionadas
+        
+        Se as séries pertencem a diferentes education_stages (aluno-jovem vs aluno-velho),
+        cria múltiplos formulários automaticamente, um para cada tipo.
+        
+        Títulos são gerados automaticamente no formato:
+        "{N}° Questionário Socioeconômico - {Education Stage} - {Escola}"
         
         Args:
             data: Dicionário com dados do formulário
+                - selectedGrades: Lista de IDs de séries (obrigatório para aluno)
+                - selectedSchools: Lista de IDs de escolas
+                - selectedClasses: Lista de IDs de turmas
+                - formType: Tipo (opcional, será ignorado se houver múltiplas stages)
+                - deadline: Data limite
+                - isActive: Status ativo
+                - questions: Perguntas (opcional, carrega do template se não fornecido)
             created_by: ID do usuário criador
             
         Returns:
-            Form: Objeto do formulário criado
+            list ou Form: Lista de formulários criados (se múltiplos) ou Form único
         """
         try:
-            form_type = data['formType']
-            
-            # Validar perguntas
-            questions = data.get('questions', [])
-            if questions:
-                for q in questions:
-                    if not q.get('id') or not q.get('text') or not q.get('type'):
-                        raise ValueError("Perguntas devem ter id, text e type")
-            
             # Validar filtros se fornecidos
             filters = data.get('filters')
             if filters:
                 FormService._validate_filters(filters)
             
-            # Validar seleções
+            # Obter seleções
             selected_schools = data.get('selectedSchools', [])
             selected_grades = data.get('selectedGrades', [])
             selected_classes = data.get('selectedClasses', [])
             
+            # Para formulários de aluno, selectedGrades é obrigatório
+            form_type = data.get('formType')
+            if form_type in ['aluno-jovem', 'aluno-velho', None]:
+                if not filters and (not selected_grades or len(selected_grades) == 0):
+                    raise ValueError("selectedGrades é obrigatório para formulários de alunos")
+            
+            # Validar seleções básicas
             if selected_schools or selected_grades or selected_classes:
                 FormService._validate_selections(selected_schools, selected_grades, selected_classes)
             
-            # Validar selectedGrades para tipos de alunos (se não vier de filtros)
-            if form_type in ['aluno-jovem', 'aluno-velho']:
-                if not filters and (not selected_grades or len(selected_grades) == 0):
-                    raise ValueError(f"selectedGrades é obrigatório para formulários do tipo {form_type}")
+            # 1. Validar que todas as séries existem no banco
+            grades = FormService._validate_grades_exist(selected_grades) if selected_grades else []
             
-            # Validar tipo de formulário vs séries
-            # Remover duplicatas usando set para evitar problemas quando o mesmo ID
-            # aparece tanto em filters.serie quanto em selectedGrades
-            grade_ids_to_validate = []
-            if filters and filters.get('serie'):
-                grade_ids_to_validate.append(filters['serie'])
-            if selected_grades:
-                grade_ids_to_validate.extend(selected_grades)
+            # 2. Agrupar séries por tipo de formulário
+            if grades:
+                groups = FormService._group_grades_by_form_type(grades)
+                
+                # Se não há grupos, significa que nenhuma série foi mapeada
+                if not groups:
+                    raise ValueError("Nenhuma série válida foi encontrada para criar formulário")
+                
+                # Se há múltiplos grupos, criar múltiplos formulários
+                if len(groups) > 1:
+                    logging.info(f"Criando {len(groups)} formulários para diferentes education stages")
+                    created_forms = []
+                    
+                    for form_type_detected, grade_ids_for_type in groups.items():
+                        # Criar formulário para cada grupo
+                        form_data_copy = data.copy()
+                        form_data_copy['formType'] = form_type_detected
+                        form_data_copy['selectedGrades'] = grade_ids_for_type
+                        
+                        form = FormService._create_single_form(form_data_copy, created_by)
+                        created_forms.append(form)
+                    
+                    db.session.commit()
+                    return created_forms
+                
+                # Se há apenas um grupo, usar o tipo detectado
+                form_type = list(groups.keys())[0]
+                data['formType'] = form_type
             
-            # Remover duplicatas mantendo a ordem (usando dict.fromkeys que preserva ordem no Python 3.7+)
-            grade_ids_to_validate = list(dict.fromkeys(grade_ids_to_validate))
-            
-            if grade_ids_to_validate:
-                FormService._validate_form_type_vs_grades(form_type, grade_ids_to_validate)
-            
-            # Criar formulário
-            form = Form(
-                title=data['title'],
-                description=data.get('description'),
-                form_type=form_type,
-                target_groups=data.get('targetGroups', []),
-                selected_schools=selected_schools if selected_schools else None,
-                selected_grades=selected_grades if selected_grades else None,
-                selected_classes=selected_classes if selected_classes else None,
-                selected_tecadmin_users=data.get('selectedTecAdminUsers'),
-                filters=filters if filters else None,
-                is_active=data.get('isActive', True),
-                deadline=datetime.fromisoformat(data['deadline'].replace('Z', '+00:00')) if data.get('deadline') else None,
-                instructions=data.get('instructions'),
-                created_by=created_by
-            )
-            
-            db.session.add(form)
-            db.session.flush()  # Para obter o ID do formulário
-            
-            # Criar questões
-            if 'questions' in data:
-                for q_data in data['questions']:
-                    question = FormQuestion(
-                        form_id=form.id,
-                        question_id=q_data['id'],
-                        text=q_data['text'],
-                        type=q_data['type'],
-                        options=q_data.get('options'),
-                        sub_questions=q_data.get('subQuestions'),
-                        min_value=q_data.get('min'),
-                        max_value=q_data.get('max'),
-                        option_id=q_data.get('optionId'),
-                        option_text=q_data.get('optionText'),
-                        required=q_data.get('required', False),
-                        question_order=q_data.get('order', 0),
-                        depends_on=q_data.get('dependsOn')
-                    )
-                    db.session.add(question)
-            
+            # 3. Criar formulário único
+            form = FormService._create_single_form(data, created_by)
             db.session.commit()
             return form
             
@@ -331,6 +486,85 @@ class FormService:
             db.session.rollback()
             logging.error(f"Erro ao criar formulário: {str(e)}")
             raise
+    
+    @staticmethod
+    def _create_single_form(data, created_by):
+        """
+        Cria um único formulário (método interno)
+        
+        Args:
+            data: Dicionário com dados do formulário
+            created_by: ID do usuário criador
+            
+        Returns:
+            Form: Formulário criado (ainda não commitado)
+        """
+        form_type = data['formType']
+        selected_schools = data.get('selectedSchools', [])
+        selected_grades = data.get('selectedGrades', [])
+        selected_classes = data.get('selectedClasses', [])
+        
+        # Gerar título automático
+        school_id = selected_schools[0] if selected_schools else None
+        application_number = FormService._count_previous_applications(form_type, school_id)
+        title = FormService._generate_title(form_type, school_id, selected_grades, application_number)
+        
+        # Carregar perguntas do template se não fornecidas
+        questions = data.get('questions')
+        if not questions:
+            template = TemplateService.load_template(form_type)
+            if template:
+                questions = template['questions']
+            else:
+                raise ValueError(f"Template para '{form_type}' não encontrado e perguntas não fornecidas")
+        
+        # Validar perguntas
+        if questions:
+            for q in questions:
+                if not q.get('id') or not q.get('text') or not q.get('type'):
+                    raise ValueError("Perguntas devem ter id, text e type")
+        
+        # Criar formulário
+        form = Form(
+            title=title,
+            description=data.get('description'),
+            form_type=form_type,
+            target_groups=data.get('targetGroups', []),
+            selected_schools=selected_schools if selected_schools else None,
+            selected_grades=selected_grades if selected_grades else None,
+            selected_classes=selected_classes if selected_classes else None,
+            selected_tecadmin_users=data.get('selectedTecAdminUsers'),
+            filters=data.get('filters') if data.get('filters') else None,
+            is_active=data.get('isActive', True),
+            deadline=datetime.fromisoformat(data['deadline'].replace('Z', '+00:00')) if data.get('deadline') else None,
+            instructions=data.get('instructions'),
+            created_by=created_by
+        )
+        
+        db.session.add(form)
+        db.session.flush()  # Para obter o ID do formulário
+        
+        # Criar questões
+        if questions:
+            for q_data in questions:
+                question = FormQuestion(
+                    form_id=form.id,
+                    question_id=q_data['id'],
+                    text=q_data['text'],
+                    type=q_data['type'],
+                    options=q_data.get('options'),
+                    sub_questions=q_data.get('subQuestions'),
+                    min_value=q_data.get('min'),
+                    max_value=q_data.get('max'),
+                    option_id=q_data.get('optionId'),
+                    option_text=q_data.get('optionText'),
+                    required=q_data.get('required', False),
+                    question_order=q_data.get('order', 0),
+                    depends_on=q_data.get('dependsOn')
+                )
+                db.session.add(question)
+        
+        return form
     
     @staticmethod
     def get_form(form_id, include_questions=False, include_statistics=False):
@@ -353,13 +587,17 @@ class FormService:
             raise
     
     @staticmethod
-    def list_forms(form_type=None, is_active=None, page=1, limit=20):
+    def list_forms(form_type=None, is_active=None, selected_schools=None, 
+                    selected_grades=None, selected_classes=None, page=1, limit=20):
         """
-        Lista formulários com paginação
+        Lista formulários com paginação e filtros de escopo
         
         Args:
             form_type: Filtrar por tipo (opcional)
             is_active: Filtrar por status ativo (opcional)
+            selected_schools: Lista de IDs de escolas para filtrar (opcional)
+            selected_grades: Lista de IDs de séries para filtrar (opcional)
+            selected_classes: Lista de IDs de turmas para filtrar (opcional)
             page: Número da página
             limit: Itens por página
             
@@ -369,11 +607,46 @@ class FormService:
         try:
             query = Form.query
             
+            # Filtro por tipo
             if form_type:
                 query = query.filter(Form.form_type == form_type)
             
+            # Filtro por status ativo
             if is_active is not None:
                 query = query.filter(Form.is_active == is_active)
+            
+            # Filtro por escolas aplicadas
+            if selected_schools and len(selected_schools) > 0:
+                # Filtrar formulários que contenham pelo menos uma das escolas selecionadas
+                filters = []
+                for school_id in selected_schools:
+                    filters.append(Form.selected_schools.contains([school_id]))
+                
+                if filters:
+                    from sqlalchemy import or_
+                    query = query.filter(or_(*filters))
+            
+            # Filtro por séries aplicadas
+            if selected_grades and len(selected_grades) > 0:
+                # Filtrar formulários que contenham pelo menos uma das séries selecionadas
+                filters = []
+                for grade_id in selected_grades:
+                    filters.append(Form.selected_grades.contains([grade_id]))
+                
+                if filters:
+                    from sqlalchemy import or_
+                    query = query.filter(or_(*filters))
+            
+            # Filtro por turmas aplicadas
+            if selected_classes and len(selected_classes) > 0:
+                # Filtrar formulários que contenham pelo menos uma das turmas selecionadas
+                filters = []
+                for class_id in selected_classes:
+                    filters.append(Form.selected_classes.contains([class_id]))
+                
+                if filters:
+                    from sqlalchemy import or_
+                    query = query.filter(or_(*filters))
             
             # Ordenar por data de criação (mais recentes primeiro)
             query = query.order_by(Form.created_at.desc())

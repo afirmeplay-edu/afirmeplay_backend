@@ -2,6 +2,7 @@ from flask import Blueprint, request, jsonify
 from app.models.school import School
 from app import db
 from app.decorators.role_required import role_required, get_current_user_from_token
+from app.decorators import requires_city_context
 from app.utils.uuid_helpers import ensure_uuid, ensure_uuid_list
 from flask_jwt_extended import jwt_required
 from app.decorators.role_required import get_current_tenant_id
@@ -25,6 +26,7 @@ bp = Blueprint('school', __name__, url_prefix='/school')
 @bp.route('', methods=['POST'])
 @jwt_required()
 @role_required("admin",  "diretor", "coordenador","tecadm")
+@requires_city_context
 def criar_escola():
     try:
         data = request.get_json()
@@ -88,6 +90,7 @@ def criar_escola():
 @bp.route('', methods=['GET'])
 @jwt_required()
 @role_required("admin", "diretor", "coordenador", "professor", "tecadm")
+@requires_city_context
 def listar_escolas():
     try:
         user = get_current_user_from_token()

@@ -3,8 +3,9 @@
 Rotas para API de Formulários Socioeconômicos
 """
 
-from flask import Blueprint, request, jsonify
+from flask import Blueprint, request, jsonify, g
 from flask_jwt_extended import jwt_required
+from sqlalchemy import text
 from app.decorators.role_required import role_required, get_current_user_from_token
 from app.socioeconomic_forms.services.form_service import FormService
 from app.socioeconomic_forms.services.distribution_service import DistributionService
@@ -13,6 +14,7 @@ from app.socioeconomic_forms.services.report_service import ReportService
 from app.socioeconomic_forms.services.template_service import TemplateService
 from app.socioeconomic_forms.models import Form, FormRecipient, FormResponse
 from app import db
+from app.utils.tenant_middleware import get_current_tenant_context
 from sqlalchemy.exc import SQLAlchemyError
 from datetime import datetime
 import logging
@@ -52,6 +54,22 @@ def create_form():
         if not user:
             return jsonify({"error": "Usuário não encontrado"}), 404
         
+        # Debug: quem está criando e em qual schema (tenant)
+        tenant_ctx = get_current_tenant_context()
+        try:
+            current_search_path = db.session.execute(text("SHOW search_path")).scalar()
+        except Exception:
+            current_search_path = "(erro ao ler search_path)"
+        print("[forms/create] Criador: user_id=%s email=%s role=%s | tenant: schema=%s city_id=%s has_tenant=%s | search_path atual no DB: %s" % (
+            user.get("id"),
+            user.get("email"),
+            user.get("role"),
+            getattr(tenant_ctx, "schema", None) if tenant_ctx else None,
+            getattr(tenant_ctx, "city_id", None) if tenant_ctx else None,
+            getattr(tenant_ctx, "has_tenant_context", None) if tenant_ctx else None,
+            current_search_path,
+        ))
+        
         data = request.get_json()
         if not data:
             return jsonify({"error": "Dados não fornecidos"}), 400
@@ -60,34 +78,48 @@ def create_form():
         # formType é opcional - será detectado automaticamente pelas séries
         # title não é mais necessário - gerado automaticamente
         
-        # Criar formulário(s)
-        result = FormService.create_form(data, user['id'])
+        # Criar formulário(s); retorno inclui avisos de escopo (ex.: escola sem turmas compatíveis)
+        result, warnings = FormService.create_form(data, user['id'])
         
         # Determinar se foi criado único ou múltiplos
         is_multiple = isinstance(result, list)
         forms = result if is_multiple else [result]
         
-        # Distribuir para recipients (se aplicável)
+        # Distribuir para recipients (se aplicável) usando escopo persistido em cada formulário
         filters = data.get('filters')
-        selected_schools = data.get('selectedSchools', [])
-        selected_grades = data.get('selectedGrades', [])
-        selected_classes = data.get('selectedClasses', [])
-        
         forms_response = []
         
         for form in forms:
             recipients_count = 0
             sent_at = None
+            form_has_scope = bool(filters or form.selected_schools or form.selected_grades or form.selected_classes)
             
-            if filters or selected_schools or selected_grades or selected_classes:
+            if form_has_scope:
                 # Determinar destinatários para este formulário específico
                 recipients_data = DistributionService.determine_recipients_by_filters(
                     form.form_type,
                     filters=filters,
                     selected_schools=form.selected_schools,
                     selected_grades=form.selected_grades,
-                    selected_classes=selected_classes if selected_classes else None
+                    selected_classes=form.selected_classes if form.selected_classes else None
                 )
+                
+                print("[forms/create] form_id=%s form_type=%s | destinatários encontrados: %s (schema neste request: %s)" % (
+                    form.id,
+                    form.form_type,
+                    len(recipients_data),
+                    getattr(get_current_tenant_context(), "schema", None) if get_current_tenant_context() else None,
+                ))
+                
+                # Para formulários de aluno: se não houver nenhum destinatário, não criar o formulário
+                if form.form_type in ('aluno-jovem', 'aluno-velho') and len(recipients_data) == 0:
+                    # Remover formulários já criados (e questões em cascade) e retornar aviso
+                    for f in forms:
+                        db.session.delete(f)
+                    db.session.commit()
+                    return jsonify({
+                        "error": "Não há alunos nas turmas do escopo selecionado. Cadastre alunos nas turmas"
+                    }), 400
                 
                 # Criar registros de FormRecipient
                 sent_at = datetime.utcnow()
@@ -110,6 +142,16 @@ def create_form():
                         recipients_count += 1
                 
                 db.session.commit()
+                
+                try:
+                    path_after = db.session.execute(text("SHOW search_path")).scalar()
+                except Exception:
+                    path_after = "(erro)"
+                print("[forms/create] form_id=%s | FormRecipient criados: %s | persistido no schema (search_path): %s" % (
+                    form.id,
+                    recipients_count,
+                    path_after,
+                ))
             
             # Preparar resposta para este formulário
             form_data = form.to_dict(include_questions=True)
@@ -119,14 +161,20 @@ def create_form():
             
             forms_response.append(form_data)
         
-        # Retornar resposta
+        # Retornar resposta (com avisos de escopo quando houver)
         if is_multiple:
-            return jsonify({
+            payload = {
                 "message": f"{len(forms)} formulário(s) criado(s) com sucesso",
                 "forms": forms_response
-            }), 201
+            }
+            if warnings:
+                payload["warnings"] = warnings
+            return jsonify(payload), 201
         else:
-            return jsonify(forms_response[0]), 201
+            payload = forms_response[0]
+            if warnings:
+                payload["warnings"] = warnings
+            return jsonify(payload), 201
         
     except ValueError as e:
         db.session.rollback()
@@ -185,6 +233,10 @@ def list_forms():
         page = int(request.args.get('page', 1))
         limit = int(request.args.get('limit', 20))
         
+        # Apenas formulários criados pelo usuário logado
+        user = get_current_user_from_token()
+        created_by = user['id'] if user else None
+        
         result = FormService.list_forms(
             form_type=form_type,
             is_active=is_active,
@@ -192,7 +244,8 @@ def list_forms():
             selected_grades=selected_grades,
             selected_classes=selected_classes,
             page=page,
-            limit=limit
+            limit=limit,
+            created_by=created_by
         )
         
         return jsonify(result), 200
@@ -261,10 +314,21 @@ def update_form(form_id):
 
 @bp.route('/<form_id>', methods=['DELETE'])
 @jwt_required()
-@role_required("admin", "tecadm")
+@role_required("admin", "tecadm", "diretor", "coordenador", "professor", "aluno")
 def delete_form(form_id):
-    """Deleta um questionário"""
+    """Deleta um questionário. Apenas o usuário que criou o formulário pode excluí-lo."""
     try:
+        user = get_current_user_from_token()
+        if not user:
+            return jsonify({"error": "Usuário não encontrado"}), 404
+        
+        form = FormService.get_form(form_id, include_questions=False)
+        if not form:
+            return jsonify({"error": "Questionário não encontrado"}), 404
+        
+        if str(form.created_by) != str(user['id']):
+            return jsonify({"error": "Apenas o usuário que criou o questionário pode excluí-lo"}), 403
+        
         success = FormService.delete_form(form_id)
         
         if not success:

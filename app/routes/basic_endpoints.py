@@ -16,7 +16,7 @@ from app.models.studentAnswer import StudentAnswer
 from app.models.testSession import TestSession
 from app.utils.uuid_helpers import ensure_uuid, ensure_uuid_list
 from app import db
-from sqlalchemy import func
+from sqlalchemy import func, cast, String
 from datetime import datetime, timedelta
 import logging
 from app.models.question import Question
@@ -331,7 +331,7 @@ def comprehensive_dashboard_stats():
                 student_query = student_query.filter(Student.school_id.in_(school_ids))
                 
                 # Filtrar turmas por escolas da cidade
-                class_query = class_query.filter(Class.school_id.in_(ensure_uuid_list(school_ids)))
+                class_query = class_query.filter(cast(Class.school_id, String).in_(school_ids))
                 
                 # Filtrar professores por escolas da cidade através da tabela de associação
                 teacher_query = teacher_query.join(SchoolTeacher).filter(SchoolTeacher.school_id.in_(school_ids))
@@ -339,7 +339,7 @@ def comprehensive_dashboard_stats():
                 # Filtrar testes que têm turmas das escolas da cidade
                 class_tests = ClassTest.query.filter(
                     ClassTest.class_id.in_(
-                        Class.query.filter(Class.school_id.in_(ensure_uuid_list(school_ids))).with_entities(Class.id)
+                        Class.query.filter(cast(Class.school_id, String).in_(school_ids)).with_entities(Class.id)
                     )
                 ).with_entities(ClassTest.test_id).all()
                 test_ids = [ct.test_id for ct in class_tests]

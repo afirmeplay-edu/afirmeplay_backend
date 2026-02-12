@@ -230,6 +230,24 @@ def get_student_certificates(student_id):
         return jsonify({"erro": "Erro ao buscar certificados", "detalhes": str(e)}), 500
 
 
+@bp.route('/quantidade', methods=['GET'])
+@jwt_required()
+def get_certificates_count():
+    """Retorna a quantidade de certificados emitidos no escopo do usuário logado."""
+    try:
+        from app.services.dashboard_service import DashboardService
+        user = get_current_user_from_token()
+        if not user:
+            return jsonify({"erro": "Usuário não encontrado"}), 404
+        scope = DashboardService._resolve_scope(user)
+        school_ids = DashboardService._extract_school_ids(scope)
+        quantidade = CertificateService.count_issued(school_ids)
+        return jsonify({"quantidade": quantidade}), 200
+    except Exception as e:
+        logging.error(f"Erro ao buscar quantidade de certificados: {str(e)}")
+        return jsonify({"erro": "Erro ao buscar quantidade de certificados", "detalhes": str(e)}), 500
+
+
 @bp.route('/<string:certificate_id>', methods=['GET'])
 @jwt_required()
 def get_certificate(certificate_id):

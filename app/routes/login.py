@@ -19,6 +19,31 @@ def login():
     if request.method == 'OPTIONS':
         return jsonify({}), 200
     
+    # ==========================
+    # DEBUG TENANT / SUBDOMÍNIO
+    # ==========================
+    try:
+        from flask import g
+        host = request.headers.get('Host')
+        origin = request.headers.get('Origin')
+        app_env = os.getenv("APP_ENV")
+        tenant_context = getattr(g, 'tenant_context', None)
+        
+        print("=== DEBUG LOGIN TENANT CONTEXT ===")
+        print(f"APP_ENV: {app_env}")
+        print(f"Host header: {host}")
+        print(f"Origin header: {origin}")
+        if tenant_context:
+            print(f"TenantContext.city_id: {tenant_context.city_id}")
+            print(f"TenantContext.city_slug: {tenant_context.city_slug}")
+            print(f"TenantContext.schema: {tenant_context.schema}")
+            print(f"TenantContext.has_tenant_context: {tenant_context.has_tenant_context}")
+        else:
+            print("TenantContext: None (g.tenant_context não definido)")
+        print("=== FIM DEBUG LOGIN TENANT CONTEXT ===")
+    except Exception as debug_exc:
+        print(f"Erro ao imprimir debug de tenant no login: {debug_exc}")
+    
     data = request.get_json()
     identificador = data.get('registration')
     password = data.get('password')

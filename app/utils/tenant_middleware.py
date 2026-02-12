@@ -54,6 +54,8 @@ from app.models.city import City
 from app.models.user import User, RoleEnum
 
 SECRET_KEY = os.getenv("JWT_SECRET_KEY")
+# Ambiente da aplicação: "production", "development", etc.
+APP_ENV = os.getenv("APP_ENV", "development").lower()
 
 # Domínios que devem ser ignorados na resolução de subdomínio
 IGNORED_HOSTS = [
@@ -80,6 +82,16 @@ class TenantContext:
         self.has_tenant_context = False
 
 
+def city_id_to_schema_name(city_id):
+    """
+    Converte city_id (UUID com hífens) no nome do schema PostgreSQL.
+    No banco os schemas são criados com underscores (ex: city_9a2f95ed_9f70_4863_a5f1_1b6c6c262b0d).
+    """
+    if not city_id:
+        return 'public'
+    return f"city_{str(city_id).replace('-', '_')}"
+
+
 def extract_subdomain(host):
     """
     Extrai o slug do subdomínio do Host header.
@@ -101,24 +113,55 @@ def extract_subdomain(host):
     if not host:
         return None
     
-    # Remover porta se existir
+    # Remover esquema se vier de Origin (ex: http://jaru.localhost:8080)
+    if '://' in host:
+        host = host.split('://', 1)[1]
+    
+    # Remover porta se existir (ex: jiparana.afirmeplay.com.br:443 -> jiparana.afirmeplay.com.br)
     host = host.split(':')[0]
     
-    # Verificar se é um host ignorado
+    # Verificar se é um host ignorado (sem subdomínio)
     if host in IGNORED_HOSTS:
         return None
     
-    # Verificar se contém afirmeplay.com.br
-    if 'afirmeplay.com.br' not in host:
+    # ================================
+    # Ambiente de PRODUÇÃO
+    # ================================
+    # Em produção, aceitamos apenas subdomínios de afirmeplay.com.br
+    if APP_ENV == "production":
+        if 'afirmeplay.com.br' not in host:
+            return None
+        
+        parts = host.split('.')
+        # Exemplo válido: jiparana.afirmeplay.com.br
+        if len(parts) > 3:
+            slug = parts[0]
+            if re.match(r'^[a-z0-9-]+$', slug):
+                return slug
+        
         return None
     
-    # Extrair subdomínio
-    parts = host.split('.')
-    if len(parts) > 3:  # ex: jiparana.afirmeplay.com.br
-        slug = parts[0]
-        # Validar formato do slug (apenas letras, números e hífens)
-        if re.match(r'^[a-z0-9-]+$', slug):
-            return slug
+    # ================================
+    # Ambiente de DESENVOLVIMENTO
+    # ================================
+    # Em desenvolvimento, aceitamos tanto afirmeplay.com.br quanto *.localhost
+    
+    # 1) Regra original para afirmeplay.com.br (para testes locais apontando para esse domínio)
+    if 'afirmeplay.com.br' in host:
+        parts = host.split('.')
+        if len(parts) > 3:
+            slug = parts[0]
+            if re.match(r'^[a-z0-9-]+$', slug):
+                return slug
+    
+    # 2) Suporte a subdomínios em localhost: ex: jiparana.localhost, jaru.localhost
+    if host.endswith('.localhost'):
+        parts = host.split('.')
+        # Ex: ["jiparana", "localhost"]
+        if len(parts) >= 2:
+            slug = parts[0]
+            if re.match(r'^[a-z0-9-]+$', slug):
+                return slug
     
     return None
 
@@ -188,9 +231,11 @@ def get_user_from_token():
     token = auth_header.split(' ')[1]
     try:
         payload = jwt.decode(token, SECRET_KEY, algorithms=['HS256'])
+        # Aceitar tanto tenant_id quanto city_id no JWT (login emite city_id)
+        tenant_id = payload.get('tenant_id') or payload.get('city_id')
         return {
             'user_id': payload.get('sub'),
-            'tenant_id': payload.get('tenant_id'),
+            'tenant_id': tenant_id,
             'role': payload.get('role')
         }
     except jwt.ExpiredSignatureError:
@@ -233,7 +278,7 @@ def resolve_tenant_context():
             city = resolve_city_from_id(context.city_id)
             if city:
                 context.city_slug = city.slug
-                context.schema = f"city_{context.city_id}"
+                context.schema = city_id_to_schema_name(context.city_id)
             
             return context
         
@@ -252,20 +297,26 @@ def resolve_tenant_context():
             if city:
                 context.city_id = city.id
                 context.city_slug = city.slug
-                context.schema = f"city_{city.id}"
+                context.schema = city_id_to_schema_name(city.id)
                 context.has_tenant_context = True
                 return context
             
-            # 3.2. Verificar subdomínio
+            # 3.2. Verificar subdomínio (Host em produção, Origin em dev/local)
             host = request.headers.get('Host')
             slug = extract_subdomain(host)
+            
+            # Em desenvolvimento, se o backend estiver em localhost (sem subdomínio),
+            # usar o Origin do frontend para extrair o slug (ex: jaru.localhost)
+            if not slug and APP_ENV != "production":
+                origin = request.headers.get('Origin')
+                slug = extract_subdomain(origin)
             
             if slug:
                 city = resolve_city_from_slug(slug)
                 if city:
                     context.city_id = city.id
                     context.city_slug = city.slug
-                    context.schema = f"city_{city.id}"
+                    context.schema = city_id_to_schema_name(city.id)
                     context.has_tenant_context = True
                     return context
                 else:
@@ -281,12 +332,18 @@ def resolve_tenant_context():
     host = request.headers.get('Host')
     slug = extract_subdomain(host)
     
+    # Em desenvolvimento, se o backend estiver em localhost (sem subdomínio),
+    # usar o Origin do frontend para extrair o slug (ex: jaru.localhost)
+    if not slug and APP_ENV != "production":
+        origin = request.headers.get('Origin')
+        slug = extract_subdomain(origin)
+    
     if slug:
         city = resolve_city_from_slug(slug)
         if city:
             context.city_id = city.id
             context.city_slug = city.slug
-            context.schema = f"city_{city.id}"
+            context.schema = city_id_to_schema_name(city.id)
             context.has_tenant_context = True
             return context
         else:

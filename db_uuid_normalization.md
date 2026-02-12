@@ -98,16 +98,15 @@ Nestes pontos, o código foi ajustado para **eliminar erros de `UUID` x `VARCHAR
         - Objetivo: manter `School.id` como texto e apenas converter os UUIDs (do código ou de `Class.school_id`) para `str`, evitando comparações `UUID` x `VARCHAR`.
 
 - **Arquivo**: `app/routes/evaluation_results_routes.py`
-    - **Joins para obter avaliações por município em `/evaluation-results/opcoes-filtros`**:
-        - Antes:
-            - `JOIN school ON class.school_id = CAST(school.id AS UUID)`
-            - Gerando erro:
-                - `operator does not exist: character varying = uuid`
-        - Agora:
-            - `JOIN school ON school.id = CAST(class.school_id AS VARCHAR)` via SQLAlchemy:
-                - **`test_query = test_query.join(School, School.id == cast(Class.school_id, String))`**
-                - **`query_avaliacoes = ... .join(School, School.id == cast(Class.school_id, String))`**
-        - Objetivo: alinhar com o padrão geral (`School.id` como texto, `Class.school_id` convertido para texto em runtime).
+    - **Joins School ↔ Class em várias rotas** (incl. **`GET /evaluation-results/opcoes-filtros`** com `municipio` e `avaliacao`):
+        - Erros observados:
+            - `operator does not exist: uuid = character varying` em SQL do tipo `FROM school JOIN class ON CAST(school.id AS UUID) = class.school_id` (escolas por avaliação/município, séries, turmas).
+            - `operator does not exist: character varying = uuid` em outros joins.
+        - Ajustes aplicados em todos os joins **School ↔ Class** no arquivo:
+            - Antes: `Class.school_id == cast(School.id, PostgresUUID)` ou `cast(School.id, PostgresUUID) == Class.school_id`.
+            - Agora: **`School.id == cast(Class.school_id, String)`** (tanto em `.join(School, ...)` quanto em `.join(Class, ...)`).
+        - Funções/rotas afetadas (ex.): `_obter_escolas_por_avaliacao`, `_obter_series_por_escola`, `_obter_turmas_por_serie`, queries de opções de filtros, listagens por aluno, etc.
+        - Objetivo: alinhar com o padrão geral (`School.id` e `Class.school_id` como texto na comparação).
 
 - **Arquivo**: `app/routes/basic_endpoints.py`
     - **Estatísticas completas do dashboard `/dashboard/comprehensive-stats` (escopo TecAdm)**:
@@ -137,6 +136,14 @@ Nestes pontos, o código foi ajustado para **eliminar erros de `UUID` x `VARCHAR
         - **`school_ids_str = [str(s) for s in school_ids_uuids]`** e filtros **`Class.school_id.in_(school_ids_str)`** ou **`Class.school_id == school_ids_str[0]`**.
         - Em **`get_diretor_recipients`**: **`School.id.in_([str(s) for s in school_ids])`**.
     - Objetivo: alinhar com o padrão `class.school_id` e `school.id` VARCHAR.
+
+- **Arquivo**: `app/routes/grades_routes.py`
+    - **Erro**: `operator does not exist: character varying = uuid` em **`GET /grades/education-stage/<education_stage_id>`** (com filtro por role: tecadm/diretor/coordenador/professor). SQL gerado: `JOIN school ON class.school_id = CAST(school.id AS UUID)` e filtros com `School.city_id`, `cast(School.id, PostgresUUID)`, etc. A coluna `class.school_id` é VARCHAR e a comparação com `CAST(school.id AS UUID)` gera o erro.
+    - **Ajustes**:
+        - Join **Class ↔ School**: antes `Class.school_id == cast(School.id, PostgresUUID)`; agora **`School.id == cast(Class.school_id, String)`**.
+        - Filtro por escola do diretor/coordenador: **`School.id == str(manager_school_id_uuid)`** (em vez de `cast(School.id, PostgresUUID) == manager_school_id_uuid`).
+        - Filtro por escolas do professor: **`School.id.in_([str(sid) for sid in school_ids_uuids])`** (em vez de `cast(School.id, PostgresUUID).in_(school_ids_uuids)`).
+    - Objetivo: comparar sempre VARCHAR com string, alinhado ao padrão do documento.
 
 ---
 

@@ -257,6 +257,7 @@ def format_test_response(test):
                     municipalities_objs = City.query.filter(City.id.in_(municipality_ids)).all()
                     municipalities_list = [{'id': m.id, 'name': m.name} for m in municipalities_objs]
             except Exception as e:
+                db.session.rollback()
                 logging.warning(f"Erro ao buscar municípios: {str(e)}")
                 municipalities_list = []
 
@@ -274,6 +275,7 @@ def format_test_response(test):
                     schools_objs = School.query.filter(School.id.in_(school_ids)).all()
                     schools_list = [{'id': s.id, 'name': s.name} for s in schools_objs]
             except Exception as e:
+                db.session.rollback()
                 logging.warning(f"Erro ao buscar escolas: {str(e)}")
                 schools_list = []
 
@@ -316,9 +318,11 @@ def format_test_response(test):
                                 } if grade_obj else None
                             })
                         except Exception as e:
+                            db.session.rollback()
                             logging.warning(f"Erro ao processar classe {class_obj.id}: {str(e)}")
                             continue
             except Exception as e:
+                db.session.rollback()
                 logging.warning(f"Erro ao buscar classes específicas: {str(e)}")
                 classes_info = []
         
@@ -363,6 +367,7 @@ def format_test_response(test):
                             "expiration": ct.expiration if ct.expiration else None
                         })
                 except Exception as e:
+                    db.session.rollback()
                     logging.warning(f"Erro ao processar class_test {ct.id}: {str(e)}")
                     continue
         
@@ -377,12 +382,11 @@ def format_test_response(test):
                 
                 # Buscar todas as turmas das escolas selecionadas
                 if school_ids:
-                    # Converter school_ids para UUID (Class.school_id é UUID)
+                    # Class.school_id e school.id são VARCHAR; comparar como string (ver db_uuid_normalization.md)
                     from app.utils.uuid_helpers import ensure_uuid_list
-                    from sqlalchemy import cast
-                    from sqlalchemy.dialects.postgresql import UUID as PostgresUUID
-                    school_ids_uuids = ensure_uuid_list(school_ids)
-                    classes_objs = Class.query.filter(Class.school_id.in_(school_ids_uuids)).all()
+                    uuids = ensure_uuid_list(school_ids)
+                    school_ids_str = [str(s) for s in (uuids if uuids else school_ids)]
+                    classes_objs = Class.query.filter(Class.school_id.in_(school_ids_str)).all()
                     
                     for class_obj in classes_objs:
                         try:
@@ -404,18 +408,20 @@ def format_test_response(test):
                                         "id": school_obj.id,
                                         "name": school_obj.name
                                     } if school_obj else None,
-                                    "grade": {
-                                        "id": grade_obj.id,
-                                        "name": grade_obj.name
-                                    } if grade_obj else None
+                                "grade": {
+                                    "id": grade_obj.id,
+                                    "name": grade_obj.name
+                                } if grade_obj else None
                                 },
                                 "application": None,  # Ainda não aplicada
                                 "expiration": None    # Ainda não aplicada
                             })
                         except Exception as e:
+                            db.session.rollback()
                             logging.warning(f"Erro ao processar classe {class_obj.id}: {str(e)}")
                             continue
             except Exception as e:
+                db.session.rollback()
                 logging.warning(f"Erro ao buscar turmas das escolas: {str(e)}")
                 applied_classes_info = []
 

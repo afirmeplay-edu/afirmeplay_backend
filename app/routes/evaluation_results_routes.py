@@ -29,7 +29,7 @@ from app.models.city import City
 from app.models.studentClass import Class
 from app.models.grades import Grade
 from app.utils.uuid_helpers import ensure_uuid, ensure_uuid_list
-from sqlalchemy import cast
+from sqlalchemy import cast, String
 from sqlalchemy.dialects.postgresql import UUID as PostgresUUID
 from app.models.classTest import ClassTest
 from app.models.studentTestOlimpics import StudentTestOlimpics
@@ -4895,7 +4895,7 @@ def _obter_avaliacoes_por_municipio(municipio_id: str, user: dict, permissao: di
         # Aplicar joins para filtrar por município
         test_query = test_query.join(ClassTest, Test.id == ClassTest.test_id)
         test_query = test_query.join(Class, ClassTest.class_id == Class.id)
-        test_query = test_query.join(School, Class.school_id == cast(School.id, PostgresUUID))
+        test_query = test_query.join(School, School.id == cast(Class.school_id, String))
         test_query = test_query.join(City, School.city_id == City.id)
         test_query = test_query.filter(City.id == city.id)
         
@@ -4905,7 +4905,7 @@ def _obter_avaliacoes_por_municipio(municipio_id: str, user: dict, permissao: di
         query_avaliacoes = Test.query.with_entities(Test.id, Test.title)\
                             .join(ClassTest, Test.id == ClassTest.test_id)\
                             .join(Class, ClassTest.class_id == Class.id)\
-                            .join(School, Class.school_id == cast(School.id, PostgresUUID))\
+                            .join(School, School.id == cast(Class.school_id, String))\
                             .join(City, School.city_id == City.id)\
                             .filter(City.id == city.id)
         

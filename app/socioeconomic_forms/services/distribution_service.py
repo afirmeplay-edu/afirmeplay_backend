@@ -60,13 +60,15 @@ class DistributionService:
                     grade_uuids.append(g)
             
             # 1. Buscar todas as turmas que pertencem às séries selecionadas e escolas selecionadas
-            # Converter school_ids para UUID (Class.school_id é UUID)
+            # class.school_id é VARCHAR → comparar com strings para evitar operator does not exist: character varying = uuid
             school_ids_uuids = ensure_uuid_list(school_ids)
+            school_ids_str = [str(s) for s in school_ids_uuids]
             classes = Class.query.filter(
                 Class.grade_id.in_(grade_uuids),
-                Class.school_id.in_(school_ids_uuids)
+                Class.school_id.in_(school_ids_str)
             ).all()
             
+            print("[distribution/aluno-jovem] school_ids=%s grades_count=%s → turmas encontradas: %s" % (school_ids_str, len(grade_uuids), len(classes)))
             if not classes:
                 return recipients  # Nenhuma turma encontrada
             
@@ -77,6 +79,12 @@ class DistributionService:
                 Student.class_id.in_(class_ids),
                 Student.user_id.isnot(None)
             ).all()
+            
+            total_alunos_turmas = Student.query.filter(Student.class_id.in_(class_ids)).count()
+            sem_user_id = Student.query.filter(Student.class_id.in_(class_ids), Student.user_id.is_(None)).count()
+            print("[distribution/aluno-jovem] alunos nas turmas: total=%s com user_id=%s sem user_id=%s → destinatários: %s" % (total_alunos_turmas, len(students), sem_user_id, len(students)))
+            if sem_user_id:
+                print("[distribution/aluno-jovem] aviso: %s aluno(s) nas turmas sem user_id (não entram como destinatário)" % sem_user_id)
             
             for student in students:
                 if student.user_id:
@@ -127,18 +135,17 @@ class DistributionService:
                     grade_uuids.append(g)
             
             # 1. Buscar todas as turmas que pertencem às séries selecionadas e escolas selecionadas
-            # Converter school_ids para UUID (Class.school_id é UUID)
+            # class.school_id é VARCHAR → comparar com strings para evitar operator does not exist: character varying = uuid
             school_ids_uuids = ensure_uuid_list(school_ids)
+            school_ids_str = [str(s) for s in school_ids_uuids]
             
             # Construir query de forma que evite inferência de tipo incorreta quando há apenas 1 elemento
-            # Começar sempre com grade_id (que é UUID) para estabelecer o contexto correto
             query = Class.query.filter(Class.grade_id.in_(grade_uuids))
             
-            # Adicionar filtro de school_id - usar == quando há apenas 1 elemento
-            if len(school_ids_uuids) == 1:
-                query = query.filter(Class.school_id == school_ids_uuids[0])
+            if len(school_ids_str) == 1:
+                query = query.filter(Class.school_id == school_ids_str[0])
             else:
-                query = query.filter(Class.school_id.in_(school_ids_uuids))
+                query = query.filter(Class.school_id.in_(school_ids_str))
             
             # Se selected_classes for fornecido, filtrar apenas essas turmas
             # Converter class_ids para UUID (Class.id é UUID)
@@ -152,6 +159,7 @@ class DistributionService:
             
             classes = query.all()
             
+            print("[distribution/aluno-velho] school_ids=%s grades_count=%s → turmas encontradas: %s" % (school_ids_str, len(grade_uuids), len(classes)))
             if not classes:
                 return recipients  # Nenhuma turma encontrada
             
@@ -162,6 +170,12 @@ class DistributionService:
                 Student.class_id.in_(class_ids),
                 Student.user_id.isnot(None)
             ).all()
+            
+            total_alunos_turmas = Student.query.filter(Student.class_id.in_(class_ids)).count()
+            sem_user_id = Student.query.filter(Student.class_id.in_(class_ids), Student.user_id.is_(None)).count()
+            print("[distribution/aluno-velho] alunos nas turmas: total=%s com user_id=%s sem user_id=%s → destinatários: %s" % (total_alunos_turmas, len(students), sem_user_id, len(students)))
+            if sem_user_id:
+                print("[distribution/aluno-velho] aviso: %s aluno(s) nas turmas sem user_id (não entram como destinatário)" % sem_user_id)
             
             for student in students:
                 if student.user_id:
@@ -255,7 +269,9 @@ class DistributionService:
             # Por enquanto, vamos incluir todos os diretores do mesmo city_id das escolas
             if school_ids:
                 from app.models.school import School
-                schools = School.query.filter(School.id.in_(school_ids)).all()
+                # school.id é VARCHAR → comparar com strings
+                school_ids_str = [str(s) for s in school_ids]
+                schools = School.query.filter(School.id.in_(school_ids_str)).all()
                 city_ids = [s.city_id for s in schools if s.city_id]
                 
                 for user in users:

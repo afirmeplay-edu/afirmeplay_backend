@@ -7,7 +7,7 @@ from app.utils.uuid_helpers import ensure_uuid, ensure_uuid_list
 from flask_jwt_extended import jwt_required
 from app.decorators.role_required import get_current_tenant_id
 from sqlalchemy.exc import SQLAlchemyError
-from sqlalchemy import cast
+from sqlalchemy import cast, String
 from sqlalchemy.dialects.postgresql import UUID as PostgresUUID
 import logging
 from app.models.city import City
@@ -109,7 +109,7 @@ def listar_escolas():
         ).outerjoin(
             Student, School.id == Student.school_id
         ).outerjoin(
-            Class, cast(School.id, PostgresUUID) == Class.school_id
+            Class, School.id == cast(Class.school_id, String)
         ).group_by(
             School.id, City.id
         )
@@ -297,7 +297,7 @@ def buscar_escola(escola_id):
         ).outerjoin(
             Student, School.id == Student.school_id
         ).outerjoin(
-            Class, cast(School.id, PostgresUUID) == Class.school_id
+            Class, School.id == cast(Class.school_id, String)
         ).filter(
             School.id == escola_id
         ).group_by(
@@ -390,7 +390,7 @@ def buscar_escolas_por_cidade(city_id):
         ).outerjoin(
             Student, School.id == Student.school_id
         ).outerjoin(
-            Class, cast(School.id, PostgresUUID) == Class.school_id
+            Class, School.id == cast(Class.school_id, String)
         ).filter(
             School.city_id == city_id
         ).group_by(
@@ -485,7 +485,7 @@ def buscar_escolas_por_serie(grade_id):
         ).join(
             City, School.city_id == City.id
         ).join(
-            Class, cast(School.id, PostgresUUID) == Class.school_id
+            Class, School.id == cast(Class.school_id, String)
         ).outerjoin(
             Student, School.id == Student.school_id
         ).filter(

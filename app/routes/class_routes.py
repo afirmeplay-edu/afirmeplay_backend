@@ -6,7 +6,7 @@ from app.decorators.role_required import role_required, get_current_user_from_to
 from app.decorators import requires_city_context
 from app.utils.uuid_helpers import ensure_uuid, ensure_uuid_list
 from sqlalchemy.exc import SQLAlchemyError, IntegrityError
-from sqlalchemy import cast
+from sqlalchemy import cast, String
 from sqlalchemy.dialects.postgresql import UUID as PostgresUUID
 import logging
 from app.models.student import Student
@@ -67,7 +67,7 @@ def get_filtered_classes():
             City,
             db.func.count(Student.id).label('students_count')
         ).join(
-            School, Class.school_id == cast(School.id, PostgresUUID)
+            School, School.id == cast(Class.school_id, String)
         ).join(
             City, School.city_id == City.id
         ).outerjoin(
@@ -83,10 +83,10 @@ def get_filtered_classes():
             query = query.filter(City.id == municipality_id)
             
         if school_id:
-            # Converter school_id para UUID (Class.school_id é UUID)
+            # Class.school_id é armazenado como texto com UUID
             school_id_uuid = ensure_uuid(school_id)
             if school_id_uuid:
-                query = query.filter(Class.school_id == school_id_uuid)
+                query = query.filter(Class.school_id == str(school_id_uuid))
             
         if grade_id:
             # grade_id já é UUID, mas vamos garantir
@@ -203,7 +203,7 @@ def get_classes_by_school(school_id):
             EducationStage,
             db.func.count(Student.id).label('students_count')
         ).join(
-            School, Class.school_id == cast(School.id, PostgresUUID)
+            School, School.id == cast(Class.school_id, String)
         ).outerjoin(
             Grade, Class.grade_id == Grade.id
         ).outerjoin(
@@ -211,7 +211,7 @@ def get_classes_by_school(school_id):
         ).outerjoin(
             Student, Class.id == Student.class_id
         ).filter(
-            Class.school_id == ensure_uuid(school_id) if school_id else None
+            Class.school_id == str(ensure_uuid(school_id)) if school_id else None
         ).group_by(
             Class.id, School.id, Grade.id, EducationStage.id
         ).all()
@@ -266,7 +266,7 @@ def get_classes():
             School,
             Grade
         ).join(
-            School, Class.school_id == cast(School.id, PostgresUUID)
+            School, School.id == cast(Class.school_id, String)
         ).outerjoin(
             Grade, Class.grade_id == Grade.id
         )
@@ -353,7 +353,7 @@ def get_class(class_id):
             Grade,
             Student
         ).join(
-            School, Class.school_id == cast(School.id, PostgresUUID)
+            School, School.id == cast(Class.school_id, String)
         ).outerjoin(
             Grade, Class.grade_id == Grade.id
         ).outerjoin(

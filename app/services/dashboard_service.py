@@ -13,6 +13,7 @@ from app.models.game import Game
 from app.models.manager import Manager
 from app.models.question import Question
 from app.models.school import School
+from app.models.skill import Skill
 from app.models.schoolTeacher import SchoolTeacher
 from app.models.student import Student
 from app.models.studentAnswer import StudentAnswer
@@ -20,6 +21,7 @@ from app.models.studentClass import Class
 from app.models.teacher import Teacher
 from app.models.teacherClass import TeacherClass
 from app.models.test import Test
+from app.models.testQuestion import TestQuestion
 from app.models.testSession import TestSession
 from app.models.user import User
 from app.models.evaluationResult import EvaluationResult
@@ -30,6 +32,7 @@ from app.permissions.utils import (
     get_teacher_classes,
     get_user_scope,
 )
+from app.certification.services.certificate_service import CertificateService
 
 
 class DashboardService:
@@ -227,14 +230,12 @@ class DashboardService:
             {
                 "id": "notices",
                 "label": "Avisos",
-                "value": None,
-                "status": "in_implementation",
+                "value": cls._count_notices(scope),
             },
             {
                 "id": "certificates",
                 "label": "Certificados",
-                "value": None,
-                "status": "in_implementation",
+                "value": cls._count_certificates(scope),
             },
         ]
 
@@ -356,6 +357,121 @@ class DashboardService:
                     "class_name": class_name,
                 }
             )
+
+        return results
+
+    TYPE_AVALIACAO = "AVALIACAO"
+
+    @classmethod
+    def get_recent_evaluations_avaliacao(
+        cls, scope: Dict[str, Any], limit: int = MAX_LIST_SIZE
+    ) -> List[Dict[str, Any]]:
+        """
+        Retorna avaliações recentes (Tests) com type == AVALIACAO, para card/listagem.
+        Campos: quantidade de alunos que fizeram, que vão fazer, prazo, progresso,
+        status, disciplina, escola(s).
+        """
+        test_query = (
+            Test.query.filter(Test.type == cls.TYPE_AVALIACAO)
+            .with_entities(Test.id, Test.created_at)
+            .order_by(Test.created_at.desc())
+        )
+
+        if scope["scope"] == "municipio" and scope.get("city_id"):
+            city_school_ids = cls._extract_school_ids(scope) or []
+            if city_school_ids:
+                city_school_ids_str = uuid_list_to_str(city_school_ids) if city_school_ids else []
+                test_query = (
+                    test_query.join(ClassTest, ClassTest.test_id == Test.id)
+                    .join(Class, Class.id == ClassTest.class_id)
+                    .filter(Class.school_id.in_(city_school_ids_str))
+                    .distinct()
+                ) if city_school_ids_str else test_query.filter(False)
+        elif scope["scope"] == "escola":
+            school_ids = scope.get("school_ids") or []
+            if school_ids:
+                school_ids_str = uuid_list_to_str(school_ids) if school_ids else []
+                test_query = (
+                    test_query.join(ClassTest, ClassTest.test_id == Test.id)
+                    .join(Class, Class.id == ClassTest.class_id)
+                    .filter(Class.school_id.in_(school_ids_str))
+                    .distinct()
+                ) if school_ids_str else test_query.filter(False)
+        elif scope["scope"] == "all":
+            # Admin sem cidade: filtrar apenas por tipo, qualquer escola
+            test_query = (
+                test_query.join(ClassTest, ClassTest.test_id == Test.id)
+                .join(Class, Class.id == ClassTest.class_id)
+                .distinct()
+            )
+
+        test_ids = [row.id for row in test_query.limit(limit).all()]
+
+        if not test_ids:
+            return []
+
+        tests_dict = {test.id: test for test in Test.query.filter(Test.id.in_(test_ids)).all()}
+        tests = [tests_dict[tid] for tid in test_ids if tid in tests_dict]
+
+        results = []
+        for test in tests:
+            class_tests = (
+                ClassTest.query.filter(ClassTest.test_id == test.id)
+                .join(Class, Class.id == ClassTest.class_id)
+                .all()
+            )
+            class_ids = [ct.class_id for ct in class_tests]
+            alunos_que_vao_fazer = (
+                Student.query.filter(Student.class_id.in_(class_ids)).count() if class_ids else 0
+            )
+
+            sessions_row = (
+                TestSession.query.filter(TestSession.test_id == test.id)
+                .with_entities(
+                    func.count(TestSession.id).label("total"),
+                    func.sum(case((TestSession.submitted_at.isnot(None), 1), else_=0)).label("completed"),
+                )
+                .first()
+            )
+            alunos_que_fizeram = int(sessions_row.completed or 0) if sessions_row else 0
+
+            if alunos_que_vao_fazer and alunos_que_vao_fazer > 0:
+                progresso = round((alunos_que_fizeram / alunos_que_vao_fazer) * 100, 2)
+            else:
+                progresso = 0.0
+
+            # Prazo: Test.end_time (datetime) ou primeiro ClassTest.expiration (text)
+            if test.end_time:
+                prazo = test.end_time.isoformat() if hasattr(test.end_time, "isoformat") else str(test.end_time)
+            elif class_tests and class_tests[0].expiration:
+                prazo = str(class_tests[0].expiration)
+            else:
+                prazo = None
+
+            # Disciplina
+            disciplina = test.subject_rel.name if test.subject_rel else None
+
+            # Escola(s): nomes distintos das escolas das turmas aplicadas
+            escolas_nomes = []
+            for ct in class_tests:
+                if ct.class_ and getattr(ct.class_, "school", None) and ct.class_.school:
+                    nome = ct.class_.school.name
+                    if nome and nome not in escolas_nomes:
+                        escolas_nomes.append(nome)
+            escola = ", ".join(escolas_nomes) if escolas_nomes else None
+
+            results.append({
+                "avaliacao_id": test.id,
+                "titulo": test.title,
+                "quantidade_alunos_fizeram": alunos_que_fizeram,
+                "quantidade_alunos_vao_fazer": alunos_que_vao_fazer,
+                "prazo": prazo,
+                "progresso": progresso,
+                "status": test.status or "pendente",
+                "disciplina": disciplina,
+                "escola": escola,
+                "escolas": escolas_nomes,
+            })
 
         return results
 
@@ -573,6 +689,20 @@ class DashboardService:
         return query.count()
 
     @classmethod
+    def _count_notices(cls, scope: Dict[str, Any]) -> int:
+        """
+        Retorna a quantidade de avisos no escopo do usuário.
+        Quando existir modelo/tabela de avisos, implementar a contagem aqui.
+        """
+        return 0
+
+    @classmethod
+    def _count_certificates(cls, scope: Dict[str, Any]) -> int:
+        """Retorna a quantidade de certificados emitidos no escopo do usuário."""
+        school_ids = cls._extract_school_ids(scope)
+        return CertificateService.count_issued(school_ids)
+
+    @classmethod
     def _count_evaluations(cls, scope: Dict[str, Any]) -> int:
         query = Test.query.with_entities(Test.id)
 
@@ -668,6 +798,150 @@ class DashboardService:
             else:
                 return 0
         return query.count()
+
+    @classmethod
+    def _questions_base_query(cls, scope: Dict[str, Any]):
+        """Query base de questões com filtro de escopo (reutilizada para listagem e contagem)."""
+        query = Question.query
+        if scope["scope"] == "municipio" and scope.get("city_id"):
+            query = query.join(User, User.id == Question.created_by).filter(User.city_id == scope["city_id"])
+        elif scope["scope"] == "escola":
+            school_ids = scope.get("school_ids") or []
+            if school_ids:
+                school_ids_str = uuid_list_to_str(school_ids) if school_ids else []
+                teacher_ids = (
+                    Teacher.query.join(SchoolTeacher, SchoolTeacher.teacher_id == Teacher.id)
+                    .filter(SchoolTeacher.school_id.in_(school_ids_str))
+                    .with_entities(Teacher.user_id)
+                    .all()
+                )
+                user_ids = [row.user_id for row in teacher_ids if row.user_id]
+                if user_ids:
+                    query = query.filter(Question.created_by.in_(user_ids))
+                else:
+                    query = query.filter(False)
+            else:
+                query = query.filter(False)
+        return query
+
+    @classmethod
+    def get_questoes_dashboard(
+        cls, scope: Dict[str, Any], limit: int = 20, offset: int = 0
+    ) -> Dict[str, Any]:
+        """
+        Lista questões para o card do dashboard com detalhes ricos: quantidade de
+        respostas, taxa de acerto, quantidade de avaliações em que aparece,
+        última utilização, disciplina, ano, autor, dificuldade, tipo.
+        """
+        from sqlalchemy.exc import SQLAlchemyError
+
+        try:
+            query = cls._questions_base_query(scope).order_by(Question.created_at.desc())
+            total = query.count()
+            questions = (
+                query.options(
+                    db.joinedload(Question.subject),
+                    db.joinedload(Question.grade),
+                    db.joinedload(Question.creator),
+                )
+                .offset(offset)
+                .limit(limit)
+                .all()
+            )
+            if not questions:
+                return {"questoes": [], "total": total, "limit": limit, "offset": offset}
+
+            question_ids = [q.id for q in questions]
+
+            # Estatísticas de respostas por questão: total, corretas, última resposta
+            answers_subq = (
+                db.session.query(
+                    StudentAnswer.question_id,
+                    func.count(StudentAnswer.id).label("total_respostas"),
+                    func.sum(case((StudentAnswer.is_correct == True, 1), else_=0)).label("corretas"),
+                    func.max(StudentAnswer.answered_at).label("ultima_resposta"),
+                )
+                .filter(StudentAnswer.question_id.in_(question_ids))
+                .group_by(StudentAnswer.question_id)
+            ).subquery()
+
+            answers_map = {}
+            for row in db.session.query(answers_subq).all():
+                qid = str(row.question_id)
+                total_r = int(row.total_respostas or 0)
+                corretas = int(row.corretas or 0)
+                answers_map[qid] = {
+                    "quantidade_respostas": total_r,
+                    "taxa_acerto": round((corretas / total_r * 100), 2) if total_r else None,
+                    "ultima_utilizacao": row.ultima_resposta.isoformat() if row.ultima_resposta and hasattr(row.ultima_resposta, "isoformat") else str(row.ultima_resposta) if row.ultima_resposta else None,
+                }
+
+            # Quantidade de avaliações (testes) em que a questão aparece
+            tests_subq = (
+                db.session.query(
+                    TestQuestion.question_id,
+                    func.count(distinct(TestQuestion.test_id)).label("quantidade_avaliacoes"),
+                )
+                .filter(TestQuestion.question_id.in_(question_ids))
+                .group_by(TestQuestion.question_id)
+            ).subquery()
+
+            tests_map = {}
+            for row in db.session.query(tests_subq).all():
+                tests_map[str(row.question_id)] = int(row.quantidade_avaliacoes or 0)
+
+            # Resolver habilidade: Question.skill guarda ID da Skill; retornar o código (nome)
+            skill_ids_clean = set()
+            for q in questions:
+                if q.skill and str(q.skill).strip() and str(q.skill).strip() != "{}":
+                    skill_ids_clean.add(str(q.skill).strip().strip("{}"))
+            skill_code_map = {}
+            if skill_ids_clean:
+                import uuid as uuid_module
+                for sid in skill_ids_clean:
+                    skill_obj = None
+                    try:
+                        skill_uuid = uuid_module.UUID(sid)
+                        skill_obj = Skill.query.filter(Skill.id == str(skill_uuid)).first()
+                    except (ValueError, TypeError):
+                        pass
+                    if not skill_obj:
+                        skill_obj = Skill.query.filter(Skill.code == sid).first()
+                    if skill_obj:
+                        skill_code_map[sid] = skill_obj.code
+                    else:
+                        skill_code_map[sid] = sid  # fallback: usar o valor como está (ex.: já é código)
+
+            listagem = []
+            for q in questions:
+                stats = answers_map.get(q.id, {"quantidade_respostas": 0, "taxa_acerto": None, "ultima_utilizacao": None})
+                skill_raw = q.skill.strip("{}").strip() if q.skill and str(q.skill).strip() and str(q.skill).strip() != "{}" else None
+                habilidade_codigo = skill_code_map.get(skill_raw, skill_raw) if skill_raw else None
+                listagem.append({
+                    "id": q.id,
+                    "titulo": (q.title or (q.text[:80] + "..." if (q.text and len(q.text) > 80) else (q.text or ""))),
+                    "disciplina": q.subject.name if q.subject else None,
+                    "ano_serie": q.grade.name if q.grade else None,
+                    "autor": q.creator.name if q.creator else None,
+                    "data_criacao": q.created_at.isoformat() if q.created_at and hasattr(q.created_at, "isoformat") else str(q.created_at) if q.created_at else None,
+                    "dificuldade": q.difficulty_level or "Médio",
+                    "tipo_questao": q.question_type or "multipleChoice",
+                    "quantidade_respostas": stats["quantidade_respostas"],
+                    "taxa_acerto": stats["taxa_acerto"],
+                    "quantidade_avaliacoes": tests_map.get(q.id, 0),
+                    "ultima_utilizacao": stats["ultima_utilizacao"],
+                    "habilidade": habilidade_codigo,
+                })
+
+            return {
+                "questoes": listagem,
+                "total": total,
+                "limit": limit,
+                "offset": offset,
+            }
+        except SQLAlchemyError as e:
+            db.session.rollback()
+            raise
 
     @classmethod
     def _count_classes(cls, scope: Dict[str, Any]) -> int:
@@ -843,6 +1117,114 @@ class DashboardService:
             raise
 
     @classmethod
+    def get_school_ranking_card(
+        cls,
+        scope: Dict[str, Any],
+        limit: int = 20,
+        offset: int = 0,
+    ) -> Dict[str, Any]:
+        """
+        Retorna ranking de escolas para card, com métricas para exibição e ordenação.
+        Inclui: média (nota 0-10 e %), quantidade de alunos, taxa de conclusão,
+        quantidade de avaliações, total de turmas, total de provas entregues.
+        """
+        from sqlalchemy.exc import SQLAlchemyError
+        from sqlalchemy import cast
+        from sqlalchemy.dialects.postgresql import VARCHAR
+
+        try:
+            school_ids = cls._extract_school_ids(scope)
+            query = (
+                db.session.query(
+                    School.id.label("school_id"),
+                    School.name.label("school_name"),
+                    City.name.label("municipality"),
+                    func.count(distinct(Student.id)).label("total_students"),
+                    func.coalesce(func.avg(EvaluationResult.grade), 0).label("media"),
+                    func.coalesce(func.avg(EvaluationResult.score_percentage), 0).label("media_score_percent"),
+                    func.count(distinct(EvaluationResult.test_id)).label("quantidade_avaliacoes"),
+                    func.count(EvaluationResult.id).label("total_provas_entregues"),
+                )
+                .join(Student, cast(Student.school_id, VARCHAR) == cast(School.id, VARCHAR))
+                .outerjoin(EvaluationResult, EvaluationResult.student_id == Student.id)
+                .outerjoin(City, City.id == School.city_id)
+            )
+
+            if scope["scope"] == "municipio" and scope.get("city_id"):
+                query = query.filter(School.city_id == scope["city_id"])
+            elif school_ids is not None:
+                school_ids_str = uuid_list_to_str(school_ids) if school_ids else []
+                query = query.filter(School.id.in_(school_ids_str)) if school_ids_str else query.filter(False)
+
+            query = query.group_by(School.id, School.name, City.name).order_by(
+                func.coalesce(func.avg(EvaluationResult.grade), 0).desc()
+            )
+
+            # Contar total de escolas (sem limit/offset) para paginação
+            total_count = query.count()
+            school_stats = query.offset(offset).limit(limit).all()
+
+            # Taxa de conclusão: sessões finalizadas / total de sessões por escola
+            completion_subquery = (
+                db.session.query(
+                    cast(Student.school_id, VARCHAR).label("school_id"),
+                    func.sum(case((TestSession.submitted_at.isnot(None), 1), else_=0)).label("completed_sessions"),
+                    func.count(TestSession.id).label("total_sessions"),
+                )
+                .join(Student, Student.id == TestSession.student_id)
+                .group_by(Student.school_id)
+                .subquery()
+            )
+            completion_map = {
+                str(row.school_id): (row.completed_sessions or 0, row.total_sessions or 0)
+                for row in db.session.query(completion_subquery).all()
+            }
+
+            # Total de turmas por escola
+            classes_subquery = (
+                db.session.query(
+                    cast(Class._school_id, VARCHAR).label("school_id"),
+                    func.count(distinct(Class.id)).label("total_turmas"),
+                )
+                .group_by(Class._school_id)
+                .subquery()
+            )
+            classes_map = {
+                str(row.school_id): int(row.total_turmas or 0)
+                for row in db.session.query(classes_subquery).all()
+            }
+
+            ranking = []
+            for idx, row in enumerate(school_stats):
+                school_id_str = str(row.school_id)
+                completed, total = completion_map.get(school_id_str, (0, 0))
+                taxa_conclusao = round((completed / total) * 100, 2) if total else 0.0
+
+                ranking.append({
+                    "posicao": offset + idx + 1,
+                    "escola_id": school_id_str,
+                    "nome_escola": row.school_name,
+                    "municipio": row.municipality,
+                    "media": round(float(row.media or 0), 2),
+                    "media_score_percent": round(float(row.media_score_percent or 0), 2),
+                    "quantidade_alunos": int(row.total_students or 0),
+                    "taxa_conclusao": taxa_conclusao,
+                    "quantidade_avaliacoes": int(row.quantidade_avaliacoes or 0),
+                    "total_turmas": classes_map.get(school_id_str, 0),
+                    "total_provas_entregues": int(row.total_provas_entregues or 0),
+                })
+
+            return {
+                "ranking": ranking,
+                "total": total_count,
+                "limit": limit,
+                "offset": offset,
+            }
+        except SQLAlchemyError as e:
+            db.session.rollback()
+            raise
+
+    @classmethod
     def _build_student_rankings(cls, scope: Dict[str, Any]) -> List[Dict[str, Any]]:
         from sqlalchemy import cast
         from sqlalchemy.dialects.postgresql import VARCHAR
@@ -889,6 +1271,57 @@ class DashboardService:
                 }
             )
         return ranking
+
+    @classmethod
+    def get_ranking_alunos(cls, scope: Dict[str, Any], limit: int = 20) -> Dict[str, Any]:
+        """
+        Retorna o top de alunos (ranking) para o dashboard, respeitando o escopo
+        do usuário (município, escola ou global para admin).
+        """
+        from sqlalchemy import cast
+        from sqlalchemy.dialects.postgresql import VARCHAR
+
+        school_alias = aliased(School)
+        class_alias = aliased(Class)
+        limit = min(max(1, limit), 50)
+
+        query = (
+            db.session.query(
+                Student.id.label("student_id"),
+                Student.name.label("student_name"),
+                school_alias.name.label("school_name"),
+                class_alias.name.label("class_name"),
+                func.avg(EvaluationResult.grade).label("average_grade"),
+                func.count(distinct(EvaluationResult.test_id)).label("completed_evaluations"),
+            )
+            .join(EvaluationResult, EvaluationResult.student_id == Student.id)
+            .outerjoin(school_alias, cast(school_alias.id, VARCHAR) == cast(Student.school_id, VARCHAR))
+            .outerjoin(class_alias, class_alias.id == Student.class_id)
+            .group_by(Student.id, Student.name, school_alias.name, class_alias.name)
+            .order_by(func.avg(EvaluationResult.grade).desc())
+        )
+
+        if scope["scope"] == "municipio" and scope.get("city_id"):
+            query = query.filter(school_alias.city_id == scope["city_id"])
+        elif scope["scope"] == "escola":
+            school_ids = scope.get("school_ids") or []
+            school_ids_str = uuid_list_to_str(school_ids) if school_ids else []
+            query = query.filter(Student.school_id.in_(school_ids_str)) if school_ids_str else query.filter(False)
+
+        rows = query.limit(limit).all()
+        ranking = [
+            {
+                "student_id": row.student_id,
+                "name": row.student_name,
+                "school_name": row.school_name,
+                "class_name": row.class_name,
+                "average_score": round(row.average_grade or 0, 2),
+                "completed_evaluations": int(row.completed_evaluations or 0),
+                "position": idx + 1,
+            }
+            for idx, row in enumerate(rows)
+        ]
+        return {"ranking": ranking, "total": len(ranking)}
 
     # ------------------------------------------------------------------ #
     # Engajamento
@@ -1340,5 +1773,267 @@ class DashboardService:
                 }
             )
         return data
+
+    # ------------------------------------------------------------------ #
+    # Análise do sistema (modal administração)
+    # ------------------------------------------------------------------ #
+
+    @classmethod
+    def get_analise_sistema(cls) -> Dict[str, Any]:
+        """
+        Retorna dados agregados para o modal de análise do sistema: métricas gerais,
+        dados técnicos, dados por escopo (geral, estado, município, escola) e
+        séries para gráficos (evolução, distribuição, taxas).
+        """
+        import os
+        from sqlalchemy import cast
+        from sqlalchemy.dialects.postgresql import VARCHAR
+        from sqlalchemy.exc import SQLAlchemyError
+
+        scope_all = {"scope": "all", "city_id": None, "school_ids": None}
+
+        try:
+            # --- Métricas gerais (escopo global) ---
+            metricas_gerais = cls._build_summary(scope_all)
+            certificados = CertificateService.count_issued(None)
+            metricas_gerais["certificates"] = certificados
+
+            # --- Dados técnicos ---
+            dados_tecnicos = {
+                "ambiente": os.getenv("APP_ENV", "development"),
+                "timestamp": datetime.utcnow().isoformat(),
+                "timezone": "UTC",
+            }
+
+            # --- Dados de conexão (DB e backend) ---
+            try:
+                db_engine_name = (db.engine.url.drivername if db.engine and db.engine.url else None) or "unknown"
+                db_host = (db.engine.url.host if db.engine and db.engine.url else None) or ""
+                # Não expor porta/senha; apenas indicar se é remoto ou local
+                db_origem = "remoto" if (db_host and db_host not in ("localhost", "127.0.0.1")) else "local"
+            except Exception:
+                db_engine_name = "unknown"
+                db_origem = "unknown"
+            conexao = {
+                "db_engine": db_engine_name,
+                "db_origem": db_origem,
+                "db_status": "ok",
+                "verificado_em": datetime.utcnow().isoformat(),
+                "ambiente": dados_tecnicos["ambiente"],
+                "timezone": dados_tecnicos["timezone"],
+            }
+
+            # --- Por escopo: ESTADO (agregação por City.state) ---
+            estados_rows = (
+                db.session.query(
+                    City.state.label("estado"),
+                    func.count(distinct(City.id)).label("municipios"),
+                    func.count(distinct(School.id)).label("escolas"),
+                    func.count(distinct(Student.id)).label("alunos"),
+                )
+                .outerjoin(School, School.city_id == City.id)
+                .outerjoin(Student, cast(Student.school_id, VARCHAR) == cast(School.id, VARCHAR))
+                .group_by(City.state)
+                .order_by(func.count(distinct(Student.id)).desc())
+                .all()
+            )
+            por_estado = [
+                {
+                    "estado": row.estado or "N/I",
+                    "municipios": int(row.municipios or 0),
+                    "escolas": int(row.escolas or 0),
+                    "alunos": int(row.alunos or 0),
+                }
+                for row in estados_rows
+            ]
+
+            # Avaliações por estado (via Class -> School -> City)
+            test_per_state = (
+                db.session.query(
+                    City.state,
+                    func.count(distinct(Test.id)).label("avaliacoes"),
+                )
+                .join(School, School.city_id == City.id)
+                .join(Class, cast(Class._school_id, VARCHAR) == cast(School.id, VARCHAR))
+                .join(ClassTest, ClassTest.class_id == Class.id)
+                .join(Test, Test.id == ClassTest.test_id)
+                .group_by(City.state)
+                .all()
+            )
+            avaliacoes_por_estado = {str(r.state or "N/I"): int(r.avaliacoes or 0) for r in test_per_state}
+            for item in por_estado:
+                item["avaliacoes"] = avaliacoes_por_estado.get(item["estado"], 0)
+
+            # --- Por escopo: MUNICÍPIO (lista de cidades com totais) ---
+            municipios_rows = (
+                db.session.query(
+                    City.id,
+                    City.name,
+                    City.state,
+                    func.count(distinct(School.id)).label("escolas"),
+                    func.count(distinct(Student.id)).label("alunos"),
+                )
+                .outerjoin(School, School.city_id == City.id)
+                .outerjoin(Student, cast(Student.school_id, VARCHAR) == cast(School.id, VARCHAR))
+                .group_by(City.id, City.name, City.state)
+                .order_by(func.count(distinct(Student.id)).desc())
+                .limit(50)
+                .all()
+            )
+            por_municipio = [
+                {
+                    "municipio_id": str(row.id),
+                    "nome": row.name,
+                    "estado": row.state,
+                    "escolas": int(row.escolas or 0),
+                    "alunos": int(row.alunos or 0),
+                }
+                for row in municipios_rows
+            ]
+
+            # --- Por escopo: ESCOLA (lista de escolas com totais, top N) ---
+            escolas_rows = (
+                db.session.query(
+                    School.id,
+                    School.name,
+                    City.name.label("municipio_nome"),
+                    City.state,
+                    func.count(distinct(Student.id)).label("alunos"),
+                    func.count(distinct(Class.id)).label("turmas"),
+                )
+                .outerjoin(City, City.id == School.city_id)
+                .outerjoin(Student, cast(Student.school_id, VARCHAR) == cast(School.id, VARCHAR))
+                .outerjoin(Class, cast(Class._school_id, VARCHAR) == cast(School.id, VARCHAR))
+                .group_by(School.id, School.name, City.name, City.state)
+                .order_by(func.count(distinct(Student.id)).desc())
+                .limit(50)
+                .all()
+            )
+            por_escola = [
+                {
+                    "escola_id": str(row.id),
+                    "nome": row.name,
+                    "municipio": row.municipio_nome,
+                    "estado": row.state,
+                    "alunos": int(row.alunos or 0),
+                    "turmas": int(row.turmas or 0),
+                }
+                for row in escolas_rows
+            ]
+
+            # --- Gráficos: evolução últimos 12 meses (do mais antigo ao mais recente) ---
+            now = datetime.utcnow()
+            primeiro_dia_atual = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+            evolucao_meses = []
+            for i in range(11, -1, -1):
+                mes_start = primeiro_dia_atual
+                for _ in range(i):
+                    mes_start = (mes_start - timedelta(days=1)).replace(day=1)
+                mes_end = (mes_start.replace(day=28) + timedelta(days=5)).replace(day=1) - timedelta(days=1)
+                if mes_end > now:
+                    mes_end = now
+                mes_end = mes_end.replace(hour=23, minute=59, second=59, microsecond=999999)
+                label = mes_start.strftime("%Y-%m")
+                alunos_mes = Student.query.filter(
+                    Student.created_at >= mes_start,
+                    Student.created_at <= mes_end,
+                ).count()
+                avaliacoes_mes = Test.query.filter(
+                    Test.created_at >= mes_start,
+                    Test.created_at <= mes_end,
+                ).count()
+                sessoes_mes = TestSession.query.filter(
+                    TestSession.started_at >= mes_start,
+                    TestSession.started_at <= mes_end,
+                ).count()
+                evolucao_meses.append({
+                    "mes": label,
+                    "alunos": alunos_mes,
+                    "avaliacoes": avaliacoes_mes,
+                    "sessoes": sessoes_mes,
+                })
+
+            # --- Gráficos: distribuição (para gráfico de barras/pizza) ---
+            distribuicao_estado = [
+                {"estado": item["estado"], "alunos": item["alunos"], "escolas": item["escolas"]}
+                for item in por_estado
+            ]
+            distribuicao_municipio = [
+                {"municipio": item["nome"], "estado": item["estado"], "alunos": item["alunos"]}
+                for item in por_municipio[:15]
+            ]
+
+            # --- Taxa de conclusão e sessões (não repetir certificados; já está em metricas) ---
+            sessao_totais = db.session.query(
+                func.count(TestSession.id).label("total"),
+                func.sum(case((TestSession.submitted_at.isnot(None), 1), else_=0)).label("concluidas"),
+            ).first()
+            total_sessoes = int(sessao_totais.total or 0)
+            concluidas_sessoes = int(sessao_totais.concluidas or 0)
+            taxa_conclusao = round((concluidas_sessoes / total_sessoes * 100), 2) if total_sessoes else 0.0
+
+            # --- Métricas únicas para administração (evitar repetir o que já está em metricas) ---
+            media_notas_geral = db.session.query(func.avg(EvaluationResult.grade)).scalar()
+            total_respostas_questoes = StudentAnswer.query.count()
+            alunos_com_pelo_menos_uma = db.session.query(func.count(distinct(TestSession.student_id))).scalar() or 0
+            total_alunos = metricas_gerais.get("students", 0)
+            percentual_participacao = round((alunos_com_pelo_menos_uma / total_alunos * 100), 2) if total_alunos else 0.0
+            escolas_ativas = db.session.query(func.count(distinct(Student.school_id))).join(
+                TestSession, TestSession.student_id == Student.id
+            ).scalar() or 0
+            ultima_atividade = db.session.query(func.max(TestSession.submitted_at)).scalar()
+            avaliacoes_por_tipo_rows = (
+                db.session.query(Test.type, func.count(Test.id).label("total"))
+                .group_by(Test.type)
+                .all()
+            )
+            avaliacoes_por_tipo = [{"tipo": row.type or "N/I", "total": int(row.total or 0)} for row in avaliacoes_por_tipo_rows]
+            disciplinas_com_questoes = db.session.query(func.count(distinct(Question.subject_id))).filter(
+                Question.subject_id.isnot(None)
+            ).scalar() or 0
+
+            administracao = {
+                "taxa_conclusao_geral": taxa_conclusao,
+                "total_sessoes": total_sessoes,
+                "sessoes_concluidas": concluidas_sessoes,
+                "media_notas_geral": round(float(media_notas_geral or 0), 2),
+                "total_respostas_questoes": int(total_respostas_questoes or 0),
+                "alunos_com_pelo_menos_uma_avaliacao": int(alunos_com_pelo_menos_uma or 0),
+                "percentual_participacao": percentual_participacao,
+                "escolas_ativas": int(escolas_ativas or 0),
+                "ultima_atividade": ultima_atividade.isoformat() if ultima_atividade and hasattr(ultima_atividade, "isoformat") else str(ultima_atividade) if ultima_atividade else None,
+                "avaliacoes_por_tipo": avaliacoes_por_tipo,
+                "disciplinas_com_questoes": int(disciplinas_com_questoes or 0),
+            }
+
+            # --- Gráficos adicionais (dados únicos para gráficos) ---
+            participacao_grafico = {
+                "total_alunos": total_alunos,
+                "alunos_com_pelo_menos_uma_avaliacao": int(alunos_com_pelo_menos_uma or 0),
+                "percentual_participacao": percentual_participacao,
+            }
+
+            return {
+                "metricas": metricas_gerais,
+                "dados_tecnicos": dados_tecnicos,
+                "conexao": conexao,
+                "por_escopo": {
+                    "geral": metricas_gerais,
+                    "estado": por_estado,
+                    "municipio": por_municipio,
+                    "escola": por_escola,
+                },
+                "graficos": {
+                    "evolucao_ultimos_12_meses": evolucao_meses,
+                    "distribuicao_por_estado": distribuicao_estado,
+                    "distribuicao_por_municipio": distribuicao_municipio,
+                    "avaliacoes_por_tipo": avaliacoes_por_tipo,
+                    "participacao": participacao_grafico,
+                },
+                "administracao": administracao,
+            }
+        except SQLAlchemyError as e:
+            db.session.rollback()
+            raise
 
 

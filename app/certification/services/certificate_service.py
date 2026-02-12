@@ -261,3 +261,22 @@ class CertificateService:
         except SQLAlchemyError as e:
             logger.error(f"Erro ao buscar certificado: {str(e)}")
             raise
+
+    @staticmethod
+    def count_issued(school_ids: Optional[List[str]] = None) -> int:
+        """
+        Retorna a quantidade de certificados emitidos.
+        Se school_ids for None, conta todos. Se for lista vazia, retorna 0.
+        Se for lista de IDs, filtra por alunos dessas escolas.
+        """
+        try:
+            query = Certificate.query.join(Student, Certificate.student_id == Student.id)
+            if school_ids is not None:
+                if not school_ids:
+                    return 0
+                school_ids_str = [str(sid) for sid in school_ids]
+                query = query.filter(Student.school_id.in_(school_ids_str))
+            return query.count()
+        except SQLAlchemyError as e:
+            logger.error(f"Erro ao contar certificados emitidos: {str(e)}")
+            raise

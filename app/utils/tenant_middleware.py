@@ -82,6 +82,16 @@ class TenantContext:
         self.has_tenant_context = False
 
 
+def city_id_to_schema_name(city_id):
+    """
+    Converte city_id (UUID com hífens) no nome do schema PostgreSQL.
+    No banco os schemas são criados com underscores (ex: city_9a2f95ed_9f70_4863_a5f1_1b6c6c262b0d).
+    """
+    if not city_id:
+        return 'public'
+    return f"city_{str(city_id).replace('-', '_')}"
+
+
 def extract_subdomain(host):
     """
     Extrai o slug do subdomínio do Host header.
@@ -221,9 +231,11 @@ def get_user_from_token():
     token = auth_header.split(' ')[1]
     try:
         payload = jwt.decode(token, SECRET_KEY, algorithms=['HS256'])
+        # Aceitar tanto tenant_id quanto city_id no JWT (login emite city_id)
+        tenant_id = payload.get('tenant_id') or payload.get('city_id')
         return {
             'user_id': payload.get('sub'),
-            'tenant_id': payload.get('tenant_id'),
+            'tenant_id': tenant_id,
             'role': payload.get('role')
         }
     except jwt.ExpiredSignatureError:
@@ -266,7 +278,7 @@ def resolve_tenant_context():
             city = resolve_city_from_id(context.city_id)
             if city:
                 context.city_slug = city.slug
-                context.schema = f"city_{context.city_id}"
+                context.schema = city_id_to_schema_name(context.city_id)
             
             return context
         
@@ -285,7 +297,7 @@ def resolve_tenant_context():
             if city:
                 context.city_id = city.id
                 context.city_slug = city.slug
-                context.schema = f"city_{city.id}"
+                context.schema = city_id_to_schema_name(city.id)
                 context.has_tenant_context = True
                 return context
             
@@ -304,7 +316,7 @@ def resolve_tenant_context():
                 if city:
                     context.city_id = city.id
                     context.city_slug = city.slug
-                    context.schema = f"city_{city.id}"
+                    context.schema = city_id_to_schema_name(city.id)
                     context.has_tenant_context = True
                     return context
                 else:
@@ -331,7 +343,7 @@ def resolve_tenant_context():
         if city:
             context.city_id = city.id
             context.city_slug = city.slug
-            context.schema = f"city_{city.id}"
+            context.schema = city_id_to_schema_name(city.id)
             context.has_tenant_context = True
             return context
         else:

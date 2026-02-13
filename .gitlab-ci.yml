@@ -132,6 +132,7 @@ image_build:
 
             echo "GOOGLE_AI_STUDIO_API_KEY=$GOOGLE_AI_STUDIO_API_KEY" >> app/.env
             echo "GOOGLE_AI_STUDIO_MODEL=$GOOGLE_AI_STUDIO_MODEL" >> app/.env
+            echo "APP_ENV=$APP_ENV" >> app/.env
 
             docker build --no-cache -t "$IMAGE_TAG" .
 
@@ -182,7 +183,7 @@ mock_database:
             CONTAINER_ID=$(docker container ls -a -f name=^postgres_container$ -q)
 
             if [ -z "$CONTAINER_ID" ]; then
-                docker container run -d --name postgres_container --network "$ENVIRONMENT" -p 5432:5432 -e POSTGRES_USER=postgres_user -e POSTGRES_PASSWORD=postgres_password -e POSTGRES_DB=postgres_db postgres
+                docker container run -d --name postgres_container --network "$ENVIRONMENT" -e POSTGRES_USER=postgres_user -e POSTGRES_PASSWORD=postgres_password -e POSTGRES_DB=postgres_db postgres
                 
                 CONTAINER_ID=$(docker container ls -a -f name=^postgres_container$ -q)
 

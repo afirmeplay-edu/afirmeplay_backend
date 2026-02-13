@@ -153,6 +153,8 @@ async function createForm(data: CreateFormRequest) {
 
 ## 2. Listagem de Formulários
 
+A listagem retorna **apenas os formulários criados pelo usuário logado** (campo `createdBy` do formulário = ID do usuário no token).
+
 ### Endpoint
 
 ```http
@@ -252,9 +254,12 @@ GET /forms?selectedGrades=5-ano-uuid
 				"completionRate": 40.0
 			},
 			"createdAt": "2025-02-09T12:00:00Z",
-			"updatedAt": "2025-02-09T12:00:00Z"
+			"updatedAt": "2025-02-09T12:00:00Z",
+			"createdBy": "user-uuid-do-criador",
+			"selectedSchools": ["escola-uuid-1"],
+			"selectedGrades": ["serie-uuid-1", "serie-uuid-2"],
+			"selectedClasses": []
 		}
-		// ... mais formulários
 	],
 	"pagination": {
 		"page": 1,
@@ -262,6 +267,30 @@ GET /forms?selectedGrades=5-ano-uuid
 		"total": 45,
 		"totalPages": 3
 	}
+}
+```
+
+### Exclusão de formulário (DELETE)
+
+**Endpoint:** `DELETE /forms/{formId}`  
+**Regra:** Apenas o usuário que criou o formulário (`createdBy`) pode excluí-lo. Qualquer outro usuário recebe 403.
+
+**Exemplos de resposta:**
+
+- **204 No Content** — formulário excluído com sucesso (corpo vazio).
+- **403 Forbidden** — usuário não é o criador:
+
+```json
+{
+	"error": "Apenas o usuário que criou o questionário pode excluí-lo"
+}
+```
+
+- **404 Not Found** — formulário não existe:
+
+```json
+{
+	"error": "Questionário não encontrado"
 }
 ```
 
@@ -1254,17 +1283,18 @@ Authorization: Bearer <token>
 
 ## 📚 Resumo de Endpoints
 
-| Método | Endpoint                                                            | Descrição                                  |
-| ------ | ------------------------------------------------------------------- | ------------------------------------------ |
-| POST   | `/forms`                                                            | Criar formulário(s)                        |
-| GET    | `/forms?selectedSchools=...&selectedGrades=...&selectedClasses=...` | Listar formulários (com filtros de escopo) |
-| GET    | `/forms/{id}`                                                       | Obter formulário específico                |
-| GET    | `/forms/templates`                                                  | Listar templates disponíveis               |
-| GET    | `/forms/templates/{type}`                                           | Obter template específico                  |
-| GET    | `/forms/responses/my-forms`                                         | Formulários do aluno (pendentes/completos) |
-| POST   | `/forms/{id}/responses`                                             | Enviar respostas                           |
-| GET    | `/forms/{id}/results`                                               | Obter resultados                           |
-| GET    | `/forms/results/aggregated`                                         | Resultados agregados                       |
+| Método | Endpoint                                                            | Descrição                                                           |
+| ------ | ------------------------------------------------------------------- | ------------------------------------------------------------------- |
+| POST   | `/forms`                                                            | Criar formulário(s)                                                 |
+| GET    | `/forms?selectedSchools=...&selectedGrades=...&selectedClasses=...` | Listar formulários **criados pelo usuário** (com filtros de escopo) |
+| GET    | `/forms/{id}`                                                       | Obter formulário específico                                         |
+| DELETE | `/forms/{id}`                                                       | Excluir formulário (**apenas o usuário que criou** pode excluir)    |
+| GET    | `/forms/templates`                                                  | Listar templates disponíveis                                        |
+| GET    | `/forms/templates/{type}`                                           | Obter template específico                                           |
+| GET    | `/forms/responses/my-forms`                                         | Formulários do aluno (pendentes/completos)                          |
+| POST   | `/forms/{id}/responses`                                             | Enviar respostas                                                    |
+| GET    | `/forms/{id}/results`                                               | Obter resultados                                                    |
+| GET    | `/forms/results/aggregated`                                         | Resultados agregados                                                |
 
 ### Filtros de Escopo (GET /forms)
 

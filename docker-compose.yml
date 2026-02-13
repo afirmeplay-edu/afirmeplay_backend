@@ -101,6 +101,8 @@ services:
 
   # API Flask
   api:
+    profiles:
+      - backend
     build:
       context: .
       dockerfile: Dockerfile
@@ -154,6 +156,8 @@ services:
 
   # Celery Worker
   celery:
+    profiles:
+      - backend
     build:
       context: .
       dockerfile: Dockerfile

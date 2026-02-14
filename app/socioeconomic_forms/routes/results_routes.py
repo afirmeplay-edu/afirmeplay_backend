@@ -3,7 +3,7 @@
 Rotas para API de Resultados de Formulários Socioeconômicos
 """
 
-from flask import Blueprint, request, jsonify
+from flask import Blueprint, request, jsonify, g
 from flask_jwt_extended import jwt_required
 from app.decorators.role_required import role_required
 from app.socioeconomic_forms.services.results_cache_service import ResultsCacheService
@@ -12,6 +12,14 @@ from app.socioeconomic_forms.services.results_migration_tasks import populate_in
 from celery.result import AsyncResult
 from app.report_analysis.celery_app import celery_app
 import logging
+
+
+def _get_tenant_schema():
+    """Retorna o schema do tenant do request atual (multi-tenant)."""
+    ctx = getattr(g, 'tenant_context', None)
+    if ctx and getattr(ctx, 'schema', None):
+        return ctx.schema
+    return 'public'
 
 bp = Blueprint('socioeconomic_results', __name__, url_prefix='/forms')
 
@@ -44,28 +52,26 @@ def get_indices_report(form_id):
             'serie': request.args.get('serie'),
             'turma': request.args.get('turma')
         }
-        # Remover None values
         filters = {k: v for k, v in filters.items() if v}
-        
-        # Paginação
         page = int(request.args.get('page', 1))
         limit = int(request.args.get('limit', 20))
         
-        # Verificar status do cache
         status = ResultsCacheService.get_status(form_id, 'indices', filters)
         
         if status['status'] == 'ready':
-            # Cache está pronto, retornar resultado
             result = ResultsCacheService.get_result(form_id, 'indices', filters)
             return jsonify(result), 200
         
-        # Cache dirty ou não existe - disparar task
-        task = generate_indices_report.delay(form_id, filters, page, limit)
-        
+        # Disparar task sem usar result backend (evita "Connection closed by server" no Redis em Windows)
+        schema = _get_tenant_schema()
+        generate_indices_report.apply_async(
+            (form_id, filters, page, limit, schema),
+            ignore_result=True
+        )
         return jsonify({
             'status': 'processing',
-            'taskId': task.id,
-            'message': 'Relatório sendo gerado em background',
+            'message': 'Relatório sendo gerado em background. Faça polling neste mesmo endpoint (GET indices) até receber 200 com os dados.',
+            'pollSameUrl': True,
             'cacheStatus': status
         }), 202  # HTTP 202 Accepted
         
@@ -107,17 +113,19 @@ def get_profiles_report(form_id):
         status = ResultsCacheService.get_status(form_id, 'profiles', filters)
         
         if status['status'] == 'ready':
-            # Cache está pronto, retornar resultado
             result = ResultsCacheService.get_result(form_id, 'profiles', filters)
             return jsonify(result), 200
         
-        # Cache dirty ou não existe - disparar task
-        task = generate_profiles_report.delay(form_id, filters)
-        
+        # Disparar task sem usar result backend (evita "Connection closed by server" no Redis em Windows)
+        schema = _get_tenant_schema()
+        generate_profiles_report.apply_async(
+            (form_id, filters, schema),
+            ignore_result=True
+        )
         return jsonify({
             'status': 'processing',
-            'taskId': task.id,
-            'message': 'Relatório sendo gerado em background',
+            'message': 'Relatório sendo gerado em background. Faça polling neste mesmo endpoint (GET profiles) até receber 200 com os dados.',
+            'pollSameUrl': True,
             'cacheStatus': status
         }), 202  # HTTP 202 Accepted
         
@@ -134,11 +142,11 @@ def get_profiles_report(form_id):
 def check_task_status(form_id, task_id):
     """
     Verifica status de uma task Celery.
-    Frontend deve fazer polling neste endpoint até status = 'completed'.
+    Para resultados de formulários usamos ignore_result; use polling no mesmo endpoint
+    GET .../results/indices ou .../results/profiles até receber 200.
     """
     try:
         task = AsyncResult(task_id, app=celery_app)
-        
         if task.ready():
             if task.successful():
                 task_result = task.result
@@ -149,22 +157,20 @@ def check_task_status(form_id, task_id):
                     'studentCount': task_result.get('student_count', 0)
                 }), 200
             else:
-                # Task falhou
                 error_info = str(task.info) if task.info else "Erro desconhecido"
-                return jsonify({
-                    'status': 'failed',
-                    'error': error_info
-                }), 500
-        else:
-            # Task ainda está processando
-            return jsonify({
-                'status': 'processing',
-                'progress': task.info.get('progress', 0) if isinstance(task.info, dict) else 0
-            }), 200
-        
+                return jsonify({'status': 'failed', 'error': error_info}), 500
+        return jsonify({
+            'status': 'processing',
+            'progress': task.info.get('progress', 0) if isinstance(task.info, dict) else 0
+        }), 200
     except Exception as e:
-        logger.error(f"Erro ao verificar status da task: {str(e)}", exc_info=True)
-        return jsonify({"error": "Erro ao verificar status", "details": str(e)}), 500
+        # Result backend (Redis) pode falhar em alguns ambientes; orientar a usar polling no mesmo URL
+        logger.warning(f"Status da task não disponível (use polling no endpoint de indices/profiles): {e}")
+        return jsonify({
+            'status': 'processing',
+            'message': 'Faça polling no mesmo endpoint GET .../results/indices ou .../results/profiles com os mesmos filtros até receber 200 com os dados.',
+            'pollSameUrl': True
+        }), 200
 
 
 @bp.route('/<form_id>/results/cache/invalidate', methods=['POST'])
@@ -232,7 +238,8 @@ def populate_form_cache(form_id):
     Identifica automaticamente os filtros únicos e gera resultados para cada combinação.
     """
     try:
-        task = populate_initial_cache_for_form.delay(form_id)
+        schema = _get_tenant_schema()
+        task = populate_initial_cache_for_form.delay(form_id, schema)
         
         return jsonify({
             'message': 'População de cache iniciada',
@@ -251,13 +258,14 @@ def populate_form_cache(form_id):
 @role_required("admin", "tecadm")
 def populate_all_forms_cache_endpoint():
     """
-    Popula cache inicial de TODOS os formulários que têm respostas.
+    Popula cache inicial de TODOS os formulários que têm respostas (no tenant atual).
     
     ⚠️ ATENÇÃO: Esta operação pode gerar muitas tasks e levar tempo.
     Use apenas uma vez para migração inicial ou com cautela.
     """
     try:
-        task = populate_all_forms_cache.delay()
+        schema = _get_tenant_schema()
+        task = populate_all_forms_cache.delay(schema)
         
         return jsonify({
             'message': 'População de cache de todos os formulários iniciada',

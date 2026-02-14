@@ -2,11 +2,13 @@
 """
 Tasks Celery para processamento assíncrono de resultados de formulários socioeconômicos.
 Inspirado em app/report_analysis/tasks.py
+Em ambiente multi-tenant, o schema deve ser passado para as tasks (search_path).
 """
 
 import logging
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 from celery import Task
+from sqlalchemy import text
 
 from app.report_analysis.celery_app import celery_app
 from app.socioeconomic_forms.services.results_service import ResultsService
@@ -17,13 +19,28 @@ from app import db
 logger = logging.getLogger(__name__)
 
 
+def _set_tenant_schema(schema: Optional[str]) -> None:
+    """Define o search_path do PostgreSQL para a task (multi-tenant)."""
+    if not schema or schema == 'public':
+        return
+    try:
+        search_path = f'"{schema}", public'
+        db.session.execute(text(f"SET search_path TO {search_path}"))
+        db.session.commit()
+        logger.debug(f"[TENANT] search_path definido para schema={schema}")
+    except Exception as e:
+        logger.warning(f"[TENANT] Erro ao definir search_path: {e}")
+        db.session.rollback()
+
+
 @celery_app.task(bind=True, max_retries=3, default_retry_delay=60)
 def generate_indices_report(
     self: Task,
     form_id: str,
     filters: Dict[str, Any],
     page: int = 1,
-    limit: int = 20
+    limit: int = 20,
+    schema: Optional[str] = None
 ) -> Dict[str, Any]:
     """
     Task Celery para gerar relatório de índices gerais.
@@ -33,11 +50,13 @@ def generate_indices_report(
         filters: Filtros aplicados
         page: Página para paginação
         limit: Limite de registros
+        schema: Nome do schema PostgreSQL do tenant (multi-tenant). Se omitido, usa search_path atual.
     
     Returns:
         Dict com resultado do processamento
     """
     try:
+        _set_tenant_schema(schema)
         logger.info(f"[INDICES] Iniciando geração de relatório: form_id={form_id}, filters={filters}")
         
         # Verificar se o formulário existe
@@ -91,7 +110,8 @@ def generate_indices_report(
 def generate_profiles_report(
     self: Task,
     form_id: str,
-    filters: Dict[str, Any]
+    filters: Dict[str, Any],
+    schema: Optional[str] = None
 ) -> Dict[str, Any]:
     """
     Task Celery para gerar relatório de perfis.
@@ -99,11 +119,13 @@ def generate_profiles_report(
     Args:
         form_id: ID do formulário
         filters: Filtros aplicados
+        schema: Nome do schema PostgreSQL do tenant (multi-tenant). Se omitido, usa search_path atual.
     
     Returns:
         Dict com resultado do processamento
     """
     try:
+        _set_tenant_schema(schema)
         logger.info(f"[PROFILES] Iniciando geração de relatório: form_id={form_id}, filters={filters}")
         
         # Verificar se o formulário existe
@@ -154,18 +176,20 @@ def generate_profiles_report(
 
 
 @celery_app.task(bind=True, max_retries=2, default_retry_delay=30)
-def rebuild_results_for_form(self: Task, form_id: str) -> Dict[str, Any]:
+def rebuild_results_for_form(self: Task, form_id: str, schema: Optional[str] = None) -> Dict[str, Any]:
     """
     Task helper para rebuild de todos os caches dirty de um formulário.
     Similar ao rebuild_reports_for_test do report_analysis.
     
     Args:
         form_id: ID do formulário
+        schema: Nome do schema PostgreSQL do tenant (multi-tenant). Repassado às tasks de índices/perfis.
     
     Returns:
         Dict com resultado do processamento
     """
     try:
+        _set_tenant_schema(schema)
         logger.info(f"[REBUILD] Iniciando rebuild para form_id={form_id}")
         
         # Buscar todos os caches dirty deste formulário
@@ -184,13 +208,13 @@ def rebuild_results_for_form(self: Task, form_id: str) -> Dict[str, Any]:
                 'caches_processed': 0
             }
         
-        # Agendar tasks individuais para cada cache
+        # Agendar tasks individuais para cada cache (repassar schema para multi-tenant)
         task_ids = []
         for cache in dirty_caches:
             if cache.report_type == 'indices':
-                task = generate_indices_report.delay(form_id, cache.filters)
+                task = generate_indices_report.delay(form_id, cache.filters, 1, 20, schema)
             elif cache.report_type == 'profiles':
-                task = generate_profiles_report.delay(form_id, cache.filters)
+                task = generate_profiles_report.delay(form_id, cache.filters, schema)
             else:
                 continue
             

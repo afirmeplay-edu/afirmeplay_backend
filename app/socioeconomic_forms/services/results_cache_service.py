@@ -245,7 +245,6 @@ class ResultsCacheService:
             dict: Status do cache
         """
         cache = cls.get(form_id, report_type, filters)
-        
         if not cache:
             return {
                 'status': 'not_found',

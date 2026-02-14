@@ -16,6 +16,9 @@ from app.models.educationStage import EducationStage
 from app.models.teacher import Teacher
 from app.models.schoolTeacher import SchoolTeacher
 from app.models.manager import Manager
+from app.socioeconomic_forms.models import Form
+from app.socioeconomic_forms.models.form_recipient import FormRecipient
+from app.socioeconomic_forms.services.aggregated_results_service import AggregatedResultsService
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy import cast
 from sqlalchemy.dialects.postgresql import UUID as PostgresUUID
@@ -286,6 +289,121 @@ def _obter_turmas_por_serie(serie_id: str, escola_id: str, user: dict, permissao
         return []
 
 
+def _obter_formularios_por_municipio(estado: str, municipio_id: str, user: dict, permissao: dict) -> List[Dict[str, Any]]:
+    """
+    Retorna formulários aplicados no município (com respostas no escopo).
+    Usado na tela de resultados para preencher o filtro "Formulário".
+
+    Args:
+        estado: Estado (ex: "SP")
+        municipio_id: ID do município
+        user: Usuário logado
+        permissao: Retorno de get_user_permission_scope
+
+    Returns:
+        Lista no formato [{"id": "...", "titulo": "...", "name": "...", "formType": "..."}]
+    """
+    try:
+        filters = {'state': estado, 'municipio': municipio_id}
+        forms = AggregatedResultsService._find_forms_for_scope(filters)
+        result = []
+        for form in forms:
+            result.append({
+                'id': str(form.id),
+                'titulo': form.title,
+                'name': form.title,
+                'nome': form.title,
+                'formType': form.form_type or '',
+            })
+        return result
+    except Exception as e:
+        logging.error("Erro ao obter formulários por município: %s", str(e))
+        return []
+
+
+def _obter_escolas_por_formulario_municipio(
+    form_id: str, municipio_id: str, user: dict, permissao: dict
+) -> List[Dict[str, Any]]:
+    """
+    Retorna escolas do município onde o formulário foi aplicado.
+    Considera Form.selected_schools e, se vazio, FormRecipient.school_id no município.
+
+    Args:
+        form_id: ID do formulário
+        municipio_id: ID do município
+        user: Usuário logado
+        permissao: Retorno de get_user_permission_scope
+
+    Returns:
+        Lista no formato [{"id": "...", "nome": "...", "name": "..."}]
+    """
+    try:
+        form = Form.query.get(form_id)
+        if not form:
+            return []
+
+        city = City.query.get(municipio_id)
+        if not city:
+            return []
+
+        if permissao['scope'] != 'all' and user.get('city_id') != city.id:
+            return []
+
+        # Escolas do formulário no município: selected_schools ou FormRecipient
+        school_ids = set()
+        if form.selected_schools:
+            for sid in form.selected_schools:
+                school_ids.add(str(sid))
+        if not school_ids:
+            recipients = FormRecipient.query.filter_by(form_id=form_id).filter(
+                FormRecipient.school_id.isnot(None)
+            ).all()
+            for r in recipients:
+                if r.school_id:
+                    school_ids.add(str(r.school_id))
+
+        if not school_ids:
+            return []
+
+        query_escolas = School.query.filter(
+            School.id.in_(list(school_ids)),
+            School.city_id == municipio_id
+        )
+
+        if permissao['scope'] == 'escola':
+            if user.get('role') in ['diretor', 'coordenador']:
+                manager = Manager.query.filter_by(user_id=user['id']).first()
+                if manager and manager.school_id:
+                    query_escolas = query_escolas.filter(School.id == manager.school_id)
+                else:
+                    return []
+            elif user.get('role') == 'professor':
+                teacher = Teacher.query.filter_by(user_id=user['id']).first()
+                if teacher:
+                    teacher_schools = SchoolTeacher.query.filter_by(teacher_id=teacher.id).all()
+                    ids_teacher = [ts.school_id for ts in teacher_schools]
+                    if ids_teacher:
+                        query_escolas = query_escolas.filter(School.id.in_(ids_teacher))
+                    else:
+                        return []
+                else:
+                    return []
+        elif permissao['scope'] == 'municipio':
+            query_escolas = query_escolas.filter(School.city_id == user.get('city_id'))
+
+        escolas = query_escolas.all()
+        return [{
+            "id": str(e.id),
+            "nome": e.name,
+            "name": e.name,
+            "city_id": str(e.city_id) if e.city_id else None,
+            "municipio_id": str(e.city_id) if e.city_id else None,
+        } for e in escolas]
+    except Exception as e:
+        logging.error("Erro ao obter escolas por formulário e município: %s", str(e))
+        return []
+
+
 # ==================== ROTA UNIFICADA ====================
 
 @bp.route('/filter-options', methods=['GET'])
@@ -352,6 +470,74 @@ def obter_opcoes_filtros():
         
     except Exception as e:
         logging.error(f"Erro ao obter opções de filtros: {str(e)}", exc_info=True)
+        return jsonify({"error": "Erro ao obter opções de filtros", "details": str(e)}), 500
+
+
+# ==================== FILTROS PARA TELA DE RESULTADOS (COM FORMULÁRIO) ====================
+
+@bp.route('/results/filter-options', methods=['GET'])
+@jwt_required()
+@role_required("admin", "tecadm", "diretor", "coordenador", "professor")
+def obter_opcoes_filtros_resultados():
+    """
+    Retorna opções hierárquicas de filtros para a tela de RESULTADOS de formulários.
+    Inclui "formulário" na cascata: Estado → Município → Formulário → Escola → Série → Turma.
+
+    Query Parameters (cascata):
+    - estado: Estado selecionado
+    - municipio: ID do município (requer estado)
+    - formulario: ID do formulário (requer estado + municipio)
+    - escola: ID da escola (requer formulario)
+    - serie: ID da série (requer escola)
+    - turma: ID da turma (requer serie)
+
+    Exemplos:
+    - GET /forms/results/filter-options → estados
+    - GET /forms/results/filter-options?estado=SP → estados + municipios
+    - GET /forms/results/filter-options?estado=SP&municipio=uuid → estados + municipios + formularios
+    - GET /forms/results/filter-options?estado=SP&municipio=uuid&formulario=uuid → + escolas
+    - Com escola/serie → + series, turmas
+    """
+    try:
+        user = get_current_user_from_token()
+        if not user:
+            return jsonify({"error": "Usuário não encontrado"}), 401
+
+        permissao = _verificar_permissao_filtros(user)
+        if not permissao['permitted']:
+            return jsonify({"error": permissao.get('error', 'Acesso negado')}), 403
+
+        estado = request.args.get('estado')
+        municipio = request.args.get('municipio')
+        formulario = request.args.get('formulario')
+        escola = request.args.get('escola')
+        serie = request.args.get('serie')
+
+        response = {}
+
+        response["estados"] = _obter_estados_disponiveis(user, permissao)
+
+        if estado:
+            response["municipios"] = _obter_municipios_por_estado(estado, user, permissao)
+
+            if municipio:
+                response["formularios"] = _obter_formularios_por_municipio(estado, municipio, user, permissao)
+
+                if formulario:
+                    response["escolas"] = _obter_escolas_por_formulario_municipio(
+                        formulario, municipio, user, permissao
+                    )
+
+                    if escola:
+                        response["series"] = _obter_series_por_escola(escola, user, permissao)
+
+                        if serie:
+                            response["turmas"] = _obter_turmas_por_serie(serie, escola, user, permissao)
+
+        return jsonify(response), 200
+
+    except Exception as e:
+        logging.error("Erro ao obter opções de filtros (resultados): %s", str(e), exc_info=True)
         return jsonify({"error": "Erro ao obter opções de filtros", "details": str(e)}), 500
 
 

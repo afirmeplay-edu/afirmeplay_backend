@@ -2,17 +2,22 @@
 """
 Tasks Celery para popular cache inicial de resultados de formulários socioeconômicos existentes.
 Task de migração para formulários que já têm respostas mas não têm cache.
+Em ambiente multi-tenant, o schema deve ser passado (search_path).
 """
 
 import logging
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 from celery import Task
 
 from app.report_analysis.celery_app import celery_app
 from app.socioeconomic_forms.models import Form, FormResponse, FormResultCache
 from app.socioeconomic_forms.services.results_service import ResultsService
 from app.socioeconomic_forms.services.results_cache_service import ResultsCacheService
-from app.socioeconomic_forms.services.results_tasks import generate_indices_report, generate_profiles_report
+from app.socioeconomic_forms.services.results_tasks import (
+    _set_tenant_schema,
+    generate_indices_report,
+    generate_profiles_report,
+)
 from app.models import Student, School, City
 from app import db
 
@@ -22,7 +27,8 @@ logger = logging.getLogger(__name__)
 @celery_app.task(bind=True, max_retries=1, default_retry_delay=60)
 def populate_initial_cache_for_form(
     self: Task,
-    form_id: str
+    form_id: str,
+    schema: Optional[str] = None
 ) -> Dict[str, Any]:
     """
     Task para popular cache inicial de um formulário específico.
@@ -30,11 +36,13 @@ def populate_initial_cache_for_form(
     
     Args:
         form_id: ID do formulário
+        schema: Nome do schema PostgreSQL do tenant (multi-tenant).
     
     Returns:
         Dict com resultado do processamento
     """
     try:
+        _set_tenant_schema(schema)
         logger.info(f"[POPULATE] Iniciando população de cache para form_id={form_id}")
         
         form = Form.query.get(form_id)
@@ -73,10 +81,10 @@ def populate_initial_cache_for_form(
                 logger.info(f"[POPULATE] Cache já existe para {filters}. Pulando.")
                 continue
             
-            # Agendar tasks para indices e profiles
+            # Agendar tasks para indices e profiles (repassar schema para multi-tenant)
             try:
-                task_indices = generate_indices_report.delay(form_id, filters, page=1, limit=20)
-                task_profiles = generate_profiles_report.delay(form_id, filters)
+                task_indices = generate_indices_report.delay(form_id, filters, 1, 20, schema)
+                task_profiles = generate_profiles_report.delay(form_id, filters, schema)
                 
                 tasks_created.append({
                     'filters': filters,
@@ -105,15 +113,19 @@ def populate_initial_cache_for_form(
 
 
 @celery_app.task(bind=True, max_retries=1, default_retry_delay=120)
-def populate_all_forms_cache(self: Task) -> Dict[str, Any]:
+def populate_all_forms_cache(self: Task, schema: Optional[str] = None) -> Dict[str, Any]:
     """
-    Task para popular cache inicial de TODOS os formulários que têm respostas.
+    Task para popular cache inicial de TODOS os formulários que têm respostas (no tenant).
     Use com cuidado - pode gerar muitas tasks.
+    
+    Args:
+        schema: Nome do schema PostgreSQL do tenant (multi-tenant).
     
     Returns:
         Dict com resultado do processamento
     """
     try:
+        _set_tenant_schema(schema)
         logger.info("[POPULATE_ALL] Iniciando população de cache para todos os formulários")
         
         # Buscar todos os formulários que têm respostas completas
@@ -134,11 +146,11 @@ def populate_all_forms_cache(self: Task) -> Dict[str, Any]:
                 'forms_processed': 0
             }
         
-        # Agendar task individual para cada formulário
+        # Agendar task individual para cada formulário (repassar schema)
         tasks_created = []
         for form_id, response_count in forms_with_responses:
             try:
-                task = populate_initial_cache_for_form.delay(form_id)
+                task = populate_initial_cache_for_form.delay(form_id, schema)
                 tasks_created.append({
                     'form_id': form_id,
                     'response_count': response_count,

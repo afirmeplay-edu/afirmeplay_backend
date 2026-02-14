@@ -28,7 +28,8 @@ class ReportDebounceService:
         """Obtém cliente Redis (singleton)"""
         if cls._redis_client is None:
             try:
-                redis_url = os.getenv('REDIS_URL', 'redis://localhost:6379/0')
+                # Usar apenas Redis local: REDIS_URL ou CELERY_BROKER_URL (mesma instância do Celery), sem fallback para VPS
+                redis_url = os.getenv('REDIS_URL') or os.getenv('CELERY_BROKER_URL', 'redis://localhost:6379/0')
                 
                 # Se houver senha do Redis separada, adicionar à URL
                 redis_password = os.getenv('REDIS_PASSWORD')

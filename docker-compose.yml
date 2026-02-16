@@ -6,9 +6,8 @@ services:
     image: postgres:15-alpine
     container_name: postgres_container
     environment:
-      POSTGRES_USER: postgres_user
-      POSTGRES_PASSWORD: postgres_password
-      POSTGRES_DB: postgres_db
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: devpass
     ports:
       - "5432:5432"
     volumes:
@@ -16,11 +15,12 @@ services:
     networks:
       - innovaplay_network
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres_user -d postgres_db"]
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
       interval: 10s
       timeout: 5s
       retries: 5
     restart: unless-stopped
+
 
   # Redis para Celery e cache
   redis:

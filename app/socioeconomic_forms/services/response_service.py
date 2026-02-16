@@ -225,7 +225,10 @@ class ResponseService:
             if is_complete:
                 try:
                     from app.socioeconomic_forms.services.results_tasks import rebuild_results_for_form
-                    rebuild_results_for_form.delay(form_id)
+                    from app.utils.tenant_middleware import get_current_tenant_context
+                    ctx = get_current_tenant_context()
+                    schema = getattr(ctx, 'schema', None) if ctx else 'public'
+                    rebuild_results_for_form.delay(form_id, schema)
                     logging.info(f"Task de rebuild agendada para form_id={form_id}")
                 except Exception as e:
                     logging.warning(f"Erro ao agendar task de rebuild: {str(e)}")

@@ -6,19 +6,36 @@ Integração com Flask usando padrão flask-celery
 
 import os
 import sys
+from pathlib import Path
 from celery import Celery
 from flask import Flask
 from dotenv import load_dotenv
 
-load_dotenv('app/.env')
+# Carregar .env pelo caminho absoluto (funciona mesmo quando Celery é iniciado de outro diretório)
+_project_root = Path(__file__).resolve().parent.parent.parent
+_env_path = _project_root / 'app' / '.env'
+load_dotenv(_env_path)
 
 # Detectar se está rodando no Windows
 IS_WINDOWS = sys.platform == 'win32'
 
-# Carregar variáveis de ambiente
+# Carregar variáveis de ambiente — APENAS Redis local via .env (sem fallback para VPS)
 REDIS_PASSWORD = os.getenv('REDIS_PASSWORD')
 CELERY_BROKER_URL = os.getenv('CELERY_BROKER_URL', 'redis://localhost:6379/0')
 CELERY_RESULT_BACKEND = os.getenv('CELERY_RESULT_BACKEND', 'redis://localhost:6379/0')
+# Garantir que broker e backend vêm só do .env; default único é localhost:6379
+
+# Se Redis exige senha e a URL não contém senha, inserir (evita "Connection closed by server")
+def _ensure_redis_auth(url: str, password: str | None) -> str:
+    if not password or ':@' in url or url.startswith('redis://:'):
+        return url
+    # redis://localhost:6379/0 -> redis://:senha@localhost:6379/0
+    if url.startswith('redis://'):
+        return url.replace('redis://', f'redis://:{password}@', 1)
+    return url
+
+CELERY_BROKER_URL = _ensure_redis_auth(CELERY_BROKER_URL, REDIS_PASSWORD)
+CELERY_RESULT_BACKEND = _ensure_redis_auth(CELERY_RESULT_BACKEND, REDIS_PASSWORD)
 
 # Criar instância do Celery com URLs SEM senha
 # A senha será configurada separadamente via redis_password

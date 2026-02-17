@@ -90,9 +90,15 @@ celery_app.conf.task_max_retries = 3
 # Celery Beat: processar competições expiradas a cada hora
 from celery.schedules import crontab
 celery_app.conf.beat_schedule = {
-    'process-finished-competitions': {
-        'task': 'competition_tasks.process_finished_competitions',
-        'schedule': crontab(minute=0, hour='*'),  # a cada hora
+    # Finalização de competições expiradas (ranking, snapshot e pagamentos)
+    "process-finished-competitions": {
+        "task": "competition_tasks.process_finished_competitions",
+        "schedule": crontab(minute=0, hour="*"),  # a cada hora
+    },
+    # Criação automática de competições recorrentes a partir de templates
+    "create-competitions-from-templates": {
+        "task": "competition_tasks.create_competitions_from_templates",
+        "schedule": crontab(minute=0, hour=0),  # todo dia à meia-noite
     },
 }
 

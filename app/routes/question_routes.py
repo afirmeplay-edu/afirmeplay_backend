@@ -9,9 +9,11 @@ from app.models.user import User
 from app.models.studentAnswer import StudentAnswer
 from app import db
 from app.decorators.role_required import get_current_tenant_id
+from app.decorators.tenant_required import get_current_tenant_context
 from flask_jwt_extended import jwt_required
 from app.decorators.role_required import role_required, get_current_user_from_token
 from sqlalchemy.exc import SQLAlchemyError, IntegrityError
+from sqlalchemy import or_, and_, text
 from datetime import datetime
 import logging
 import base64
@@ -107,6 +109,14 @@ def create_question():
             if field not in data:
                 return jsonify({"error": f"Missing required field: {field}"}), 400
 
+        # Obter informações do usuário logado
+        current_user = get_current_user_from_token()
+        if not current_user:
+            return jsonify({"error": "User not authenticated"}), 401
+        
+        user_role = current_user.get('role')
+        user_city_id = current_user.get('tenant_id') or current_user.get('city_id')
+
         # Processa imagens do texto formatado
         images = []
         if data.get('formattedText'):
@@ -134,6 +144,24 @@ def create_question():
                 # Se vier string, usar diretamente
                 skill_value = skills_input
         
+        # Definir scope_type, owner_city_id e owner_user_id baseado na role
+        scope_type = None
+        owner_city_id = None
+        owner_user_id = None
+        
+        if user_role == 'admin':
+            scope_type = 'GLOBAL'
+            owner_city_id = None
+            owner_user_id = None
+        elif user_role == 'tecadm':
+            scope_type = 'CITY'
+            owner_city_id = user_city_id
+            owner_user_id = None
+        else:  # professor, coordenador, diretor
+            scope_type = 'PRIVATE'
+            owner_city_id = None
+            owner_user_id = current_user.get('user_id')
+        
         question = Question(
             number=data.get('number'),
             text=data.get('text'),
@@ -157,11 +185,24 @@ def create_question():
             version=data.get('version', 1),
             created_by=data.get('createdBy'),
             last_modified_by=data.get('lastModifiedBy'),
-            education_stage_id=data.get('educationStageId')
+            education_stage_id=data.get('educationStageId'),
+            scope_type=scope_type,
+            owner_city_id=owner_city_id,
+            owner_user_id=owner_user_id
         )
 
+        # MULTITENANT: Todas as questões agora vão para public.question
+        # Salvar temporariamente o search_path atual
+        current_search_path = db.session.execute(text("SHOW search_path")).fetchone()[0]
+        
+        # Mudar para public para salvar todas as questões
+        db.session.execute(text("SET search_path TO public"))
+        
         db.session.add(question)
         db.session.commit()
+        
+        # Restaurar search_path original
+        db.session.execute(text(f"SET search_path TO {current_search_path}"))
 
         return jsonify({
             "message": "Question created successfully",
@@ -173,11 +214,72 @@ def create_question():
         logging.error(f"Error creating question: {str(e)}", exc_info=True)
         return jsonify({"error": "Error creating question", "details": str(e)}), 500
 
+@bp.route('/debug', methods=['GET'])
+@jwt_required()
+@role_required("admin", "professor", "coordenador", "diretor", "tecadm")
+def debug_questions():
+    """Endpoint de debug para verificar questões e contexto"""
+    try:
+        from sqlalchemy import text
+        context = get_current_tenant_context()
+        
+        # Verificar search_path atual
+        search_path = db.session.execute(text("SHOW search_path")).scalar()
+        
+        # Contar questões sem filtro
+        total_questions = db.session.execute(text("SELECT COUNT(*) FROM public.question")).scalar()
+        
+        # Contar por scope_type
+        global_count = db.session.execute(text("SELECT COUNT(*) FROM public.question WHERE scope_type = 'GLOBAL'")).scalar()
+        city_count = db.session.execute(text("SELECT COUNT(*) FROM public.question WHERE scope_type = 'CITY'")).scalar()
+        private_count = db.session.execute(text("SELECT COUNT(*) FROM public.question WHERE scope_type = 'PRIVATE'")).scalar()
+        null_scope = db.session.execute(text("SELECT COUNT(*) FROM public.question WHERE scope_type IS NULL")).scalar()
+        
+        # Contar questões CITY para a cidade atual
+        city_questions = 0
+        if context and context.city_id:
+            city_questions = db.session.execute(
+                text("SELECT COUNT(*) FROM public.question WHERE scope_type = 'CITY' AND owner_city_id = :city_id"),
+                {"city_id": context.city_id}
+            ).scalar()
+        
+        # Testar query ORM
+        orm_count = Question.query.count()
+        
+        return jsonify({
+            "context": {
+                "city_id": context.city_id if context else None,
+                "city_slug": context.city_slug if context else None,
+                "schema": context.schema if context else None,
+                "has_tenant_context": context.has_tenant_context if context else False
+            },
+            "database": {
+                "search_path": search_path,
+                "total_questions": total_questions,
+                "global_questions": global_count,
+                "city_questions": city_count,
+                "private_questions": private_count,
+                "null_scope": null_scope,
+                "city_specific_questions": city_questions
+            },
+            "orm": {
+                "questions_found": orm_count
+            },
+            "info": "Todas as questões agora estão em public.question com scope_type: GLOBAL, CITY ou PRIVATE"
+        }), 200
+    except Exception as e:
+        logging.error(f"Error in debug endpoint: {str(e)}", exc_info=True)
+        return jsonify({"error": str(e)}), 500
+
 @bp.route('/', methods=['GET'])
 @jwt_required()
 @role_required("admin", "professor", "coordenador", "diretor", "tecadm")
 def list_questions():
     try:
+        print("\n" + "="*80)
+        print("🔍 DEBUG /questions/ - INÍCIO")
+        print("="*80)
+        
         user = get_current_user_from_token()
         if not user:
             return jsonify({"error": "User not found or token invalid"}), 401
@@ -186,6 +288,13 @@ def list_questions():
         question_type = request.args.get('type')
         subject_id = request.args.get('subject_id')
         created_by = request.args.get('created_by')
+        
+        print(f"📋 Parâmetros da request:")
+        print(f"   test_id: {test_id}")
+        print(f"   question_type: {question_type}")
+        print(f"   subject_id: {subject_id}")
+        print(f"   created_by: {created_by}")
+        print(f"👤 Usuário: {user.get('role')} - ID: {user.get('id')}")
         
         # Se um test_id foi fornecido, retorna a avaliação completa com suas questões
         if test_id:
@@ -212,6 +321,26 @@ def list_questions():
             return jsonify(format_test_response(test)), 200
         
         # Se não foi fornecido test_id, retorna apenas as questões (comportamento original)
+        print("\n📦 Iniciando query de questões...")
+        
+        # FILTRO MULTITENANT: Aplicar escopo de questões
+        context = get_current_tenant_context()
+        print(f"\n🌐 Contexto Multitenant:")
+        print(f"   context exists: {context is not None}")
+        if context:
+            print(f"   city_id: {context.city_id}")
+            print(f"   city_slug: {context.city_slug}")
+            print(f"   schema: {context.schema}")
+            print(f"   has_tenant_context: {context.has_tenant_context}")
+        
+        # Salvar search_path atual
+        current_search_path = db.session.execute(text("SHOW search_path")).fetchone()[0]
+        print(f"   PostgreSQL search_path atual: {current_search_path}")
+        
+        # Forçar busca em public.question (todas as questões agora estão aqui)
+        print("\n📋 Buscando questões de public.question...")
+        db.session.execute(text("SET search_path TO public"))
+        
         query = Question.query.options(
             joinedload(Question.subject),
             joinedload(Question.grade),
@@ -220,21 +349,64 @@ def list_questions():
             joinedload(Question.last_modifier)
         )
         
-        # ALTERAÇÃO: Permitir acesso a todo o banco de questões
-        # Anteriormente professores só viam suas próprias questões
-        # Agora todos os usuários (admin, professor, coordenador, diretor) 
-        # podem acessar todo o banco de questões para criar avaliações mais ricas
+        # Construir filtros de scope baseado na role e contexto
+        scope_filters = []
         
-        # Filtro específico por created_by apenas se solicitado explicitamente
-        if created_by:
-            query = query.filter(Question.created_by == created_by)
-
+        # 1. GLOBAL: todos podem ver
+        scope_filters.append(Question.scope_type == 'GLOBAL')
+        
+        # 2. CITY: apenas do município atual (se tiver contexto)
+        if context and context.city_id:
+            print(f"   ✅ Incluindo questões CITY do município {context.city_id}")
+            scope_filters.append(
+                and_(
+                    Question.scope_type == 'CITY',
+                    Question.owner_city_id == context.city_id
+                )
+            )
+        
+        # 3. PRIVATE: apenas do próprio usuário
+        if user.get('id'):
+            print(f"   ✅ Incluindo questões PRIVATE do usuário {user.get('id')}")
+            scope_filters.append(
+                and_(
+                    Question.scope_type == 'PRIVATE',
+                    Question.owner_user_id == user.get('id')
+                )
+            )
+        
+        # Aplicar filtro de scope (OR entre todos os filtros)
+        query = query.filter(or_(*scope_filters))
+        
+        # Aplicar filtros adicionais
         if question_type:
             query = query.filter(Question.question_type == question_type)
         if subject_id:
             query = query.filter(Question.subject_id == subject_id)
-
+        
+        # FILTRO created_by: se fornecido na URL, SEMPRE aplicar
+        if created_by:
+            print(f"   ✅ Filtro created_by aplicado: {created_by}")
+            query = query.filter(Question.created_by == created_by)
+        else:
+            print(f"   ℹ️ Sem filtro created_by - mostrando todas permitidas pelo scope")
+        
         questions = query.all()
+        print(f"\n📊 RESULTADOS FINAIS:")
+        print(f"   Total de questões retornadas: {len(questions)}")
+        if questions:
+            print(f"   Primeiras 5 questões:")
+            for i, q in enumerate(questions[:5], 1):
+                print(f"      {i}. ID: {q.id}, scope_type: {q.scope_type}, owner_city_id: {q.owner_city_id}, owner_user_id: {q.owner_user_id}")
+        else:
+            print(f"   ⚠️ NENHUMA questão retornada!")
+        
+        # Restaurar search_path original
+        db.session.execute(text(f"SET search_path TO {current_search_path}"))
+        
+        print("="*80)
+        print("🔍 DEBUG /questions/ - FIM")
+        print("="*80 + "\n")
         
         return jsonify([format_question_response(q) for q in questions]), 200
 

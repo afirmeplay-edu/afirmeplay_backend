@@ -459,55 +459,76 @@ def generate_answer_sheets():
             'grade_name': test_data.get('grade_name', '')
         }
         
-        # ✅ 8. DISPARAR 1 TASK CELERY POR TURMA (todas compartilham 1 gabarito)
-        from app.services.celery_tasks.answer_sheet_tasks import generate_answer_sheets_async
+        # ✅ 8. DISPARAR TASK CELERY BATCH (1 única task para todas as turmas)
+        from app.services.celery_tasks.answer_sheet_tasks import generate_answer_sheets_batch_async
         from app.services.progress_store import create_job
+        from app.decorators.tenant_required import get_current_tenant_context
         
-        celery_tasks = []
-        task_ids = []
-        response_tasks = []
+        # Obter contexto da cidade
+        context = get_current_tenant_context()
+        city_id = context.city_id if context else None
         
-        print(f"\n=== CRIANDO JOBS CELERY ===")
-        for i, class_obj in enumerate(classes_to_generate):
-            print(f"Criando job {i+1} para classe: {class_obj.name} (ID: {class_obj.id})")
-            celery_task = generate_answer_sheets_async.delay(
-                class_id=str(class_obj.id),
-                num_questions=num_questions,
-                correct_answers=correct_answers,
-                test_data=test_data_complete,
-                use_blocks=use_blocks,
-                blocks_config=blocks_config,
-                questions_options=questions_options,
-                gabarito_id=gabarito_id  # ✅ MESMO GABARITO PARA TODAS!
-            )
-            
-            celery_tasks.append(celery_task)
-            task_ids.append(celery_task.id)
-            print(f"  - Job criado com ID: {celery_task.id}")
-            
-            response_tasks.append({
+        if not city_id:
+            logging.error("[ROTA] ❌ Contexto de cidade não encontrado")
+            return jsonify({"error": "City context not found"}), 500
+        
+        # Extrair IDs das turmas
+        class_ids = [str(cls.id) for cls in classes_to_generate]
+        
+        # Criar job_id para batch
+        job_id = str(uuid.uuid4())
+        
+        print(f"\n=== CRIANDO JOB CELERY BATCH ===")
+        print(f"Job ID: {job_id}")
+        print(f"Scope: {scope_type}")
+        print(f"Total de turmas: {len(classes_to_generate)}")
+        print(f"Gabarito ID: {gabarito_id}")
+        
+        # ✅ UMA ÚNICA TASK BATCH
+        celery_task = generate_answer_sheets_batch_async.delay(
+            gabarito_ids=[gabarito_id],  # Lista com 1 gabarito compartilhado
+            city_id=city_id,
+            num_questions=num_questions,
+            correct_answers=correct_answers,
+            test_data=test_data_complete,
+            use_blocks=use_blocks,
+            blocks_config=blocks_config,
+            questions_options=questions_options,
+            batch_id=job_id,
+            scope=scope_type,
+            class_ids=class_ids
+        )
+        
+        task_id = celery_task.id
+        print(f"Task batch criada com ID: {task_id}")
+        print(f"================================\n")
+        
+        logging.info(f"[ROTA] ✅ Task batch disparada: {task_id} para {len(class_ids)} turma(s), gabarito {gabarito_id}")
+        
+        # Preparar resposta com informações de cada turma
+        response_tasks = [
+            {
                 'class_id': str(class_obj.id),
                 'class_name': class_obj.name,
-                'status': 'pending',
-                'task_id': celery_task.id
-            })
+                'status': 'pending'
+            }
+            for class_obj in classes_to_generate
+        ]
         
-        print(f"Total de jobs criados: {len(celery_tasks)}")
-        print(f"============================\n")
-        
-        logging.info(f"[ROTA] ✅ {len(celery_tasks)} task(s) disparada(s) para gabarito {gabarito_id}")
+        task_ids = [task_id]
         
         # ✅ 9. CRIAR JOB PARA RASTREAMENTO
-        job_id = str(uuid.uuid4())
         job = create_job(
             job_id=job_id,
             total=len(classes_to_generate),
             gabarito_id=gabarito_id,
             user_id=str(user['id']),
-            task_ids=task_ids
+            task_ids=task_ids  # Lista com ID da task batch
         )
         
-        # ✅ Atualizar job com scope_type
+        # ✅ Atualizar job com scope_type e vincular ao gabarito
+        gabarito.job_id = job_id
+        db.session.commit()
         from app.services.progress_store import update_job
         update_job(job_id, {'scope_type': scope_type})
         
@@ -1616,7 +1637,7 @@ def get_job_status(job_id):
         if job.get('user_id') != str(current_user_id):
             return jsonify({"error": "Acesso negado"}), 403
 
-        # ✅ CONSULTAR STATUS REAL DE CADA TASK
+        # ✅ CONSULTAR STATUS DA TASK BATCH (UMA ÚNICA TASK)
         task_ids = job.get('task_ids', [])
         gabarito_id = job.get('gabarito_id')
         completed = 0
@@ -1627,48 +1648,58 @@ def get_job_status(job_id):
         errors = []
         
         if task_ids:
-            for task_id in task_ids:
-                try:
-                    task_result = AsyncResult(task_id, app=generate_answer_sheets_async.app)
+            # Agora temos apenas 1 task batch
+            task_id = task_ids[0]
+            try:
+                from app.services.celery_tasks.answer_sheet_tasks import generate_answer_sheets_batch_async
+                task_result = AsyncResult(task_id, app=generate_answer_sheets_batch_async.app)
+                
+                if task_result.state == 'SUCCESS':
+                    completed = 1
+                    result = task_result.result
                     
-                    if task_result.state == 'SUCCESS':
-                        completed += 1
-                        result = task_result.result
+                    if result and result.get('success'):
+                        # Task batch retorna informações consolidadas
+                        successful = 1
+                        classes_generated = result.get('total_classes', 0)
+                        total_students_generated = result.get('total_students', 0)
                         
-                        if result and result.get('success'):
-                            successful += 1
-                            classes_generated += 1
-                            students_count = result.get('students_count', 0)
-                            total_students_generated += students_count
-                            logging.info(f"✅ Task {task_id}: {result.get('class_name', 'Unknown')} "
-                                        f"com {students_count} alunos")
-                        else:
-                            # Task retornou sucesso na execução, mas sem PDF gerado
-                            failed += 1
-                            error_msg = result.get('error') if result else 'Erro desconhecido'
-                            class_name = result.get('class_name', 'Unknown') if result else 'Unknown'
+                        # Extrair turmas puladas para erros
+                        skipped = result.get('skipped_classes', [])
+                        for skipped_class in skipped:
                             errors.append({
-                                'class_name': class_name,
-                                'error': error_msg
+                                'class_name': skipped_class.get('class_name', 'Unknown'),
+                                'error': 'Turma sem alunos registrados'
                             })
-                            logging.warning(f"❌ Task {task_id}: {class_name} - {error_msg}")
-                                
-                    elif task_result.state == 'FAILURE':
-                        completed += 1
-                        failed += 1
-                        error_msg = str(task_result.info) if task_result.info else 'Erro desconhecido'
+                        
+                        logging.info(f"✅ Task batch {task_id}: {classes_generated} turma(s), "
+                                    f"{total_students_generated} aluno(s) gerados")
+                    else:
+                        # Task retornou sucesso na execução, mas falhou na geração
+                        failed = 1
+                        error_msg = result.get('error') if result else 'Erro desconhecido'
                         errors.append({
-                            'class_name': 'Unknown',
+                            'class_name': 'Batch',
                             'error': error_msg
                         })
-                        logging.error(f"❌ Task {task_id} FAILURE: {error_msg}")
-                        
-                    elif task_result.state in ['PENDING', 'RETRY']:
-                        # Task ainda processando
-                        pass
-                        
-                except Exception as e:
-                    logging.debug(f"Erro ao consultar task {task_id}: {str(e)}")
+                        logging.warning(f"❌ Task batch {task_id}: {error_msg}")
+                            
+                elif task_result.state == 'FAILURE':
+                    completed = 1
+                    failed = 1
+                    error_msg = str(task_result.info) if task_result.info else 'Erro desconhecido'
+                    errors.append({
+                        'class_name': 'Batch',
+                        'error': error_msg
+                    })
+                    logging.error(f"❌ Task batch {task_id} FAILURE: {error_msg}")
+                    
+                elif task_result.state in ['PENDING', 'RETRY']:
+                    # Task ainda processando
+                    pass
+                    
+            except Exception as e:
+                logging.debug(f"Erro ao consultar task batch {task_id}: {str(e)}")
 
         # ✅ DETERMINAR STATUS DO JOB
         job_status = "processing"

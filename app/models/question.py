@@ -45,6 +45,13 @@ class Question(db.Model):
     updated_at = db.Column(db.TIMESTAMP, server_default=db.text('CURRENT_TIMESTAMP'), onupdate=db.text('CURRENT_TIMESTAMP'))
     last_modified_by = db.Column(db.String, db.ForeignKey('users.id'))
     
+    # Campos de escopo multitenant
+    scope_type = db.Column(db.String, default='GLOBAL')  # 'GLOBAL', 'CITY' ou 'PRIVATE'
+    owner_city_id = db.Column(db.String, db.ForeignKey('city.id'))  # ID do município dono (para CITY)
+    owner_user_id = db.Column(db.String, db.ForeignKey('users.id'))  # ID do usuário dono (para PRIVATE)
+    approved_by = db.Column(db.String, db.ForeignKey('users.id'))  # Quem aprovou para uso global
+    approved_at = db.Column(db.TIMESTAMP)  # Data de aprovação para uso global
+    
     # Relacionamentos
     subject = db.relationship('Subject', backref='questions')
     grade = db.relationship('Grade', backref='questions')

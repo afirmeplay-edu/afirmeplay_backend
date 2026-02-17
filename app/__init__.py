@@ -183,7 +183,7 @@ def create_app():
         app.logger.warning(f"Celery não pôde ser inicializado: {str(e)}. Processamento assíncrono desabilitado.")
     
     # Importar rotas
-    from .routes import school_routes, test_routes, question_routes, login, logout, admin_route, educationStage_routes, grades_routes, persistUser_routes, city_routes, student_routes, user_routes, class_routes, schoolTeacher, teacherClass, professor_route, subject_routes, skill_routes, student_answer_routes, userQuickLinks_routes, evaluation_results_routes, basic_endpoints, evaluation_routes, game_routes, manager_routes, report_routes, physical_test_routes, student_grades_routes, calendar_routes, dashboard_routes, answer_sheet_routes, subdomain_routes
+    from .routes import school_routes, test_routes, question_routes, login, logout, admin_route, educationStage_routes, grades_routes, persistUser_routes, city_routes, student_routes, user_routes, class_routes, schoolTeacher, teacherClass, professor_route, subject_routes, skill_routes, student_answer_routes, userQuickLinks_routes, evaluation_results_routes, basic_endpoints, evaluation_routes, game_routes, manager_routes, report_routes, physical_test_routes, student_grades_routes, calendar_routes, dashboard_routes, answer_sheet_routes, subdomain_routes, lista_frequencia_routes
     from app.socioeconomic_forms.routes import socioeconomic_form_routes
     from app.socioeconomic_forms.routes import filter_routes
     from app.socioeconomic_forms.routes import results_routes
@@ -192,7 +192,7 @@ def create_app():
     from .plantao_online import routes as plantao_online_routes
     from app.certification.routes import certificate_routes
     from app.balance.routes import bp as balance_bp
-    from app.competitions.routes import bp as competitions_bp
+    from app.competitions.routes import competitions_bp, competition_templates_bp
     # Importar rotas de report_analysis (processamento assíncrono)
     from app.report_analysis import routes as report_analysis_routes
     
@@ -232,6 +232,7 @@ def create_app():
     app.register_blueprint(calendar_routes.bp)
     app.register_blueprint(dashboard_routes.bp)
     app.register_blueprint(answer_sheet_routes.bp)
+    app.register_blueprint(lista_frequencia_routes.bp)
     app.register_blueprint(socioeconomic_form_routes.bp)
     app.register_blueprint(filter_routes.bp)
     app.register_blueprint(results_routes.bp)
@@ -241,11 +242,12 @@ def create_app():
     app.register_blueprint(certificate_routes.bp)
     app.register_blueprint(balance_bp)
     app.register_blueprint(competitions_bp)
+    app.register_blueprint(competition_templates_bp)
 
     # Thread em background: finaliza competições expiradas a cada 15 min (sem depender de Celery Beat)
     def _run_finalize_competitions_loop(app_ref):
         import time
-        from sqlalchemy.exc import OperationalError
+        from sqlalchemy.exc import OperationalError, ProgrammingError
         interval_seconds = 15 * 60  # 15 minutos
         while True:
             time.sleep(interval_seconds)
@@ -258,6 +260,30 @@ def create_app():
                             "Competições finalizadas em background: %s",
                             result,
                         )
+            except ProgrammingError as e:
+                # Coluna/tabela não existem (migration pendente); não logar como erro
+                err = str(getattr(e, "orig", e))
+                if "does not exist" in err or "UndefinedColumn" in err:
+                    if app_ref:
+                        app_ref.logger.debug(
+                            "Loop de competições: schema ainda não atualizado, omitindo."
+                        )
+                    if app_ref:
+                        with app_ref.app_context():
+                            try:
+                                db.session.rollback()
+                            except Exception:
+                                pass
+                            db.session.remove()
+                else:
+                    if app_ref:
+                        app_ref.logger.warning("Erro de SQL no loop de competições: %s", str(e))
+                        with app_ref.app_context():
+                            try:
+                                db.session.rollback()
+                            except Exception:
+                                pass
+                            db.session.remove()
             except OperationalError as e:
                 # Conexão fechada pelo servidor/pool (idle timeout etc.): descartar sessão para próxima rodada usar conexão nova
                 if app_ref:
@@ -288,6 +314,7 @@ def create_app():
 
     try:
         import threading
+        from sqlalchemy.exc import ProgrammingError
         # Uma vez na subida: finalizar competições já expiradas
         with app.app_context():
             try:
@@ -295,6 +322,16 @@ def create_app():
                 r = CompetitionRankingService.finalize_all_expired_competitions()
                 if r.get("processed"):
                     app.logger.info("Competições expiradas finalizadas na subida: %s", r)
+            except ProgrammingError as e:
+                # Coluna ou tabela ainda não existem (migration não rodou); ignorar na subida
+                err = str(e.orig) if getattr(e, "orig", None) else str(e)
+                if "does not exist" in err or "UndefinedColumn" in err:
+                    app.logger.debug(
+                        "Finalização na subida omitida (schema de competições ainda não atualizado): %s",
+                        err[:200],
+                    )
+                else:
+                    app.logger.warning("Finalização na subida falhou: %s", str(e))
             except Exception as e:
                 app.logger.warning("Finalização na subida falhou: %s", str(e))
         _competition_finalize_thread = threading.Thread(

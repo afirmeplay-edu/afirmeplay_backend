@@ -9,6 +9,9 @@ from app import db
 from app.permissions import role_required, get_current_user_from_token
 from app.competitions.models import Competition, CompetitionEnrollment
 from app.competitions.services import CompetitionService, ValidationError, validate_reward_config
+from app.services.competition_student_ranking_service import (
+    CompetitionStudentRankingService,
+)
 from app.services.competition_ranking_service import CompetitionRankingService
 from app.models.student import Student
 from app.models.studentTestOlimpics import StudentTestOlimpics
@@ -514,6 +517,60 @@ def get_competition_ranking(competition_id):
     return jsonify({"ranking": [_serialize_ranking_item(r) for r in ranking]}), 200
 
 
+@bp.route('/<competition_id>/ranking-by-scope', methods=['GET'])
+@jwt_required()
+@role_required(*ROLES_STUDENT_OR_EDIT)
+def get_competition_ranking_by_scope(competition_id):
+    """
+    Retorna o ranking da competição filtrado por escopo:
+    - scope=global        → ranking completo (igual ao /ranking)
+    - scope=state         → ranking por estado (query param: state)
+    - scope=municipality  → ranking por município (query param: city_id)
+    - scope=school        → ranking por escola (query param: school_id)
+
+    Usa o mesmo cálculo de ranking, apenas filtrando os itens pelo escopo solicitado.
+    """
+    scope = (request.args.get('scope') or 'global').strip().lower()
+    try:
+        limit = request.args.get('limit', type=int) or 100
+        limit = min(max(1, limit), 500)
+    except (TypeError, ValueError):
+        limit = 100
+
+    base_ranking = CompetitionRankingService.get_ranking(competition_id, limit=10000, enriquecer=True)
+
+    def _filter_item(item):
+        if scope in ('', 'global'):
+            return True
+        if scope == 'state':
+            state = (request.args.get('state') or '').strip().lower()
+            if not state:
+                return False
+            return (item.get('state_name') or '').strip().lower() == state
+        if scope == 'municipality':
+            city_id = request.args.get('city_id')
+            if city_id:
+                return str(item.get('city_id') or '').lower() == str(city_id).lower()
+            # Alternativamente, permitir filtro por nome de município
+            city_name = (request.args.get('city_name') or '').strip().lower()
+            if city_name:
+                return (item.get('city_name') or '').strip().lower() == city_name
+            return False
+        if scope == 'school':
+            school_id = request.args.get('school_id')
+            if not school_id:
+                return False
+            return str(item.get('school_id') or '').lower() == str(school_id).lower()
+        return False
+
+    filtered = [r for r in base_ranking if _filter_item(r)]
+    # Reatribuir posições dentro do escopo
+    for idx, r in enumerate(filtered, start=1):
+        r['position'] = idx
+
+    return jsonify({"ranking": [_serialize_ranking_item(r) for r in filtered[:limit]]}), 200
+
+
 @bp.route('/<competition_id>/analytics', methods=['GET'])
 @jwt_required()
 @role_required(*ROLES_EDIT)
@@ -556,6 +613,39 @@ def get_my_competition_ranking(competition_id):
             "total_participants": 0,
         }), 200
     return jsonify(result), 200
+
+
+@bp.route('/students/me/competition-ranking-classification', methods=['GET'])
+@jwt_required()
+@role_required(*ROLES_STUDENT_OR_EDIT)
+def get_my_competition_rank_classification():
+    """
+    Retorna a classificação global do aluno baseada apenas em competições.
+
+    Exemplo de resposta:
+    {
+      "band": "Destaque",
+      "first_places": 3,
+      "second_places": 2,
+      "third_places": 2,
+      "total_podiums": 7,
+    }
+    """
+    student_id, err = _resolve_student_id()
+    if err:
+        return err[0], err[1]
+    data = CompetitionStudentRankingService.get_student_competition_rank_classification(
+        student_id
+    )
+    if not data:
+        return jsonify({
+            "band": None,
+            "first_places": 0,
+            "second_places": 0,
+            "third_places": 0,
+            "total_podiums": 0,
+        }), 200
+    return jsonify(data), 200
 
 
 @bp.route('/<competition_id>/finalize', methods=['POST'])

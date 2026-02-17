@@ -7,7 +7,8 @@ Constantes de competições: níveis e mapeamento com etapas de ensino.
 COMPETITION_LEVEL_VALID = (1, 2)
 
 # Escopos aceitos na criação/edição de competições (sem série)
-SCOPE_OPTIONS = ('individual', 'turma', 'escola', 'municipio', 'estado')
+# global = competição aberta para todos (torneios automáticos Afirmeplay)
+SCOPE_OPTIONS = ('individual', 'turma', 'escola', 'municipio', 'estado', 'global')
 
 # Rótulos para exibição (frontend / API)
 LEVEL_OPTIONS = [
@@ -74,7 +75,8 @@ def validate_scope_and_filter(scope, scope_filter):
         raise ValueError(
             f"Escopo deve ser um dos: {', '.join(SCOPE_OPTIONS)}"
         )
-    if scope == 'individual':
+    # individual e global não exigem scope_filter
+    if scope in ('individual', 'global'):
         return
     sf = scope_filter or {}
     if scope == 'municipio':

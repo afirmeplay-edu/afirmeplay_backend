@@ -5,9 +5,21 @@ from app.models.test import Test
 from app import db
 from flask_jwt_extended import jwt_required
 from app.decorators.role_required import role_required, get_current_user_from_token
+from app.utils.uuid_helpers import ensure_uuid
 import logging
 
 skill_bp = Blueprint('skill_bp', __name__)
+
+
+def _skill_to_dict(skill):
+    """Retorna dicionário padrão de uma skill para resposta JSON."""
+    return {
+        "id": str(skill.id),
+        "code": skill.code,
+        "description": skill.description,
+        "subject_id": skill.subject_id,
+        "grade_id": str(skill.grade_id) if skill.grade_id else None,
+    }
 
 @skill_bp.route('/skills', methods=['GET'])
 def get_all_skills():
@@ -28,15 +40,170 @@ def get_all_skills():
     """
     try:
         skills = Skill.query.all()
-        return jsonify([{
-            "id": skill.id,
-            "code": skill.code,
-            "description": skill.description,
-            "subject_id": skill.subject_id,
-            "grade_id": skill.grade_id
-        } for skill in skills]), 200
+        return jsonify([_skill_to_dict(skill) for skill in skills]), 200
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+
+@skill_bp.route('/skills', methods=['POST'])
+@jwt_required()
+@role_required("admin", "professor", "coordenador", "diretor", "tecadm")
+def create_skill():
+    """
+    Cria uma nova habilidade (skill) no banco.
+    Body JSON: code (obrigatório), description (obrigatório), subject_id (opcional), grade_id (opcional).
+    """
+    try:
+        data = request.get_json(silent=True)
+        if not data:
+            return jsonify({"error": "Corpo JSON obrigatório"}), 400
+
+        code = (data.get("code") or "").strip()
+        description = (data.get("description") or "").strip()
+        if not code:
+            return jsonify({"error": "code é obrigatório"}), 400
+        if not description:
+            return jsonify({"error": "description é obrigatório"}), 400
+
+        subject_id = data.get("subject_id")
+        if subject_id is not None and subject_id != "":
+            subject_id = str(subject_id).strip() or None
+        else:
+            subject_id = None
+
+        grade_id = data.get("grade_id")
+        if grade_id is not None and grade_id != "":
+            grade_uuid = ensure_uuid(grade_id)
+            if grade_uuid is None:
+                return jsonify({"error": "grade_id inválido"}), 400
+        else:
+            grade_uuid = None
+
+        skill = Skill(
+            code=code,
+            description=description,
+            subject_id=subject_id,
+            grade_id=grade_uuid,
+        )
+        db.session.add(skill)
+        db.session.commit()
+        return jsonify(_skill_to_dict(skill)), 201
+    except Exception as e:
+        db.session.rollback()
+        logging.error(f"Erro ao criar skill: {str(e)}", exc_info=True)
+        return jsonify({"error": str(e)}), 500
+
+
+def _parse_skill_item(data, index):
+    """
+    Valida e extrai campos de um item de skill para criação.
+    Retorna (skill_kwargs, None) em sucesso ou (None, mensagem_erro) em falha.
+    """
+    if not isinstance(data, dict):
+        return None, "item deve ser um objeto"
+    code = (data.get("code") or "").strip()
+    description = (data.get("description") or "").strip()
+    if not code:
+        return None, "code é obrigatório"
+    if not description:
+        return None, "description é obrigatório"
+    subject_id = data.get("subject_id")
+    if subject_id is not None and subject_id != "":
+        subject_id = str(subject_id).strip() or None
+    else:
+        subject_id = None
+    grade_id = data.get("grade_id")
+    if grade_id is not None and grade_id != "":
+        grade_uuid = ensure_uuid(grade_id)
+        if grade_uuid is None:
+            return None, "grade_id inválido"
+    else:
+        grade_uuid = None
+    return {
+        "code": code,
+        "description": description,
+        "subject_id": subject_id,
+        "grade_id": grade_uuid,
+    }, None
+
+
+@skill_bp.route('/skills/batch', methods=['POST'])
+@jwt_required()
+@role_required("admin", "professor", "coordenador", "diretor", "tecadm")
+def create_skills_batch():
+    """
+    Cria várias habilidades em lote via JSON.
+    Body: { "skills": [ { "code", "description", "subject_id?", "grade_id?" }, ... ] }
+    Retorna lista de habilidades criadas e lista de erros por índice (itens inválidos são ignorados).
+    """
+    try:
+        data = request.get_json(silent=True)
+        if not data:
+            return jsonify({"error": "Corpo JSON obrigatório"}), 400
+
+        raw = data.get("skills") if isinstance(data, dict) else None
+        if not isinstance(raw, list):
+            return jsonify({"error": "Campo 'skills' deve ser um array"}), 400
+
+        created = []
+        errors = []
+        to_insert = []
+
+        for index, item in enumerate(raw):
+            kwargs, err = _parse_skill_item(item, index)
+            if err:
+                errors.append({"index": index, "error": err})
+                continue
+            to_insert.append(kwargs)
+
+        if not to_insert:
+            return jsonify({
+                "error": "Nenhum item válido para criar",
+                "errors": errors,
+            }), 400
+
+        for kwargs in to_insert:
+            skill = Skill(**kwargs)
+            db.session.add(skill)
+            db.session.flush()
+            created.append(_skill_to_dict(skill))
+
+        db.session.commit()
+        response = {"created": created, "count": len(created)}
+        if errors:
+            response["errors"] = errors
+        return jsonify(response), 201
+    except Exception as e:
+        db.session.rollback()
+        logging.error(f"Erro ao criar skills em lote: {str(e)}", exc_info=True)
+        return jsonify({"error": str(e)}), 500
+
+
+@skill_bp.route('/skills/<skill_id>', methods=['DELETE'])
+@jwt_required()
+@role_required("admin", "professor", "coordenador", "diretor", "tecadm")
+def delete_skill(skill_id):
+    """
+    Remove uma habilidade (skill) do banco pelo id.
+    Retorna 404 se não existir, 200 com mensagem em caso de sucesso.
+    """
+    try:
+        skill_uuid = ensure_uuid(skill_id)
+        if not skill_uuid:
+            return jsonify({"error": "ID da habilidade inválido"}), 400
+
+        skill = Skill.query.get(skill_uuid)
+        if not skill:
+            return jsonify({"error": "Habilidade não encontrada"}), 404
+
+        db.session.delete(skill)
+        db.session.commit()
+        return jsonify({"message": "Habilidade removida com sucesso"}), 200
+    except Exception as e:
+        db.session.rollback()
+        logging.error(f"Erro ao deletar skill {skill_id}: {str(e)}", exc_info=True)
+        return jsonify({"error": str(e)}), 500
+
 
 @skill_bp.route('/skills/subject/<subject_id>', methods=['GET'])
 def get_skills_by_subject(subject_id):
@@ -67,13 +234,7 @@ def get_skills_by_subject(subject_id):
         skills = Skill.query.filter_by(subject_id=subject_id).all()
         if not skills:
             return jsonify({"message": "Nenhuma skill encontrada para este subject."}), 404
-        return jsonify([{
-            "id": skill.id,
-            "code": skill.code,
-            "description": skill.description,
-            "subject_id": skill.subject_id,
-            "grade_id": skill.grade_id
-        } for skill in skills]), 200
+        return jsonify([_skill_to_dict(skill) for skill in skills]), 200
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
@@ -106,13 +267,7 @@ def get_skills_by_grade(grade_id):
         skills = Skill.query.filter_by(grade_id=grade_id).all()
         if not skills:
             return jsonify({"message": "Nenhuma skill encontrada para este grade."}), 404
-        return jsonify([{
-            "id": skill.id,
-            "code": skill.code,
-            "description": skill.description,
-            "subject_id": skill.subject_id,
-            "grade_id": skill.grade_id
-        } for skill in skills]), 200
+        return jsonify([_skill_to_dict(skill) for skill in skills]), 200
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 

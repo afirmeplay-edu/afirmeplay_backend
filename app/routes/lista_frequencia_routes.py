@@ -79,12 +79,40 @@ def _cabecalho_real(classe, tipo, test=None):
                 disciplinas.append(cs.subject.name.upper())
     disciplina = " E ".join(disciplinas) if disciplinas else None
 
-    # Série (do Grade) e turma separados; turma pode vir do nome da turma (ex: "6° ANO A" -> "A")
+    # Série (do Grade) e turma separados
     serie = grade.name if grade else None
     turma = getattr(classe, "turma", None)
     if turma is None and classe and classe.name:
-        partes = classe.name.strip().split()
-        turma = partes[-1] if len(partes) > 1 else None
+        name_stripped = (classe.name or "").strip()
+        if name_stripped:
+
+            def _norm(s):
+                """Normaliza para comparação: ° e º como equivalentes, maiúsculas."""
+                if not s:
+                    return ""
+                s = s.strip().upper()
+                for old, new in (("º", "O"), ("°", "O"), ("ª", "A")):
+                    s = s.replace(old, new)
+                return s
+
+            # Tenta obter turma removendo a série do início do nome (ex: "6° ANO A" com série "6º ano" -> "A")
+            if serie:
+                serie_norm = _norm(serie)
+                name_norm = _norm(name_stripped)
+                if serie_norm and name_norm.startswith(serie_norm):
+                    rest = name_stripped[len(serie_norm) :].strip().lstrip(" -–—").strip()
+                    if rest:
+                        turma = rest
+
+            # Fallback: última palavra com 1 caractere (A, B, 1) = turma; ou 3+ palavras (ex: "6° ANO A")
+            if turma is None:
+                partes = name_stripped.split()
+                if partes:
+                    ultima = partes[-1]
+                    if len(ultima) == 1:
+                        turma = ultima
+                    elif len(partes) > 2:
+                        turma = ultima
 
     return {
         "nome_prova_ano": nome_prova_ano,
@@ -126,80 +154,17 @@ def _status_estudante_avaliacao(student_ids, test_id):
     return resultado
 
 
-@bp.route("/", methods=["GET"])
-@jwt_required()
-@role_required("admin", "professor", "coordenador", "diretor", "tecadm")
-def lista_frequencia():
-    """
-    Retorna lista de frequência com dados reais.
-
-    Por turma: class_id (obrigatório). Status dos estudantes fica null.
-
-    Por avaliação já feita: test_id (obrigatório). Opcional: class_id se a avaliação
-    tiver mais de uma turma. Status preenchido: P (presente) ou A (ausente) conforme
-    TestSession (finalizada/corrigida/revisada ou submitted_at).
-    Query param opcional: tipo = avaliacao | prova_fisica | frequencia_diaria
-    """
-    test_id = request.args.get("test_id")
-    class_id = request.args.get("class_id")
-
-    classe = None
-    class_uuid = None
-    test = None
-
-    if test_id:
-        # Lista por avaliação já feita
-        test = Test.query.get(test_id)
-        if not test:
-            return jsonify({"erro": "Avaliação não encontrada"}), 404
-
-        class_tests = ClassTest.query.filter_by(test_id=test_id).all()
-        if not class_tests:
-            return jsonify({"erro": "Avaliação não está vinculada a nenhuma turma"}), 404
-
-        if len(class_tests) == 1:
-            class_uuid = class_tests[0].class_id
-        else:
-            if not class_id:
-                return jsonify({
-                    "erro": "Esta avaliação foi aplicada em mais de uma turma. Informe class_id.",
-                }), 400
-            class_uuid = ensure_uuid(class_id)
-            if not class_uuid:
-                return jsonify({"erro": "class_id inválido"}), 400
-            if not any(ct.class_id == class_uuid for ct in class_tests):
-                return jsonify({"erro": "Turma não está vinculada a esta avaliação"}), 404
-
-        classe = Class.query.get(class_uuid)
-        if not classe:
-            return jsonify({"erro": "Turma não encontrada"}), 404
-
-    else:
-        # Lista apenas por turma
-        if not class_id:
-            return jsonify({"erro": "Informe class_id ou test_id"}), 400
-        class_uuid = ensure_uuid(class_id)
-        if not class_uuid:
-            return jsonify({"erro": "class_id inválido"}), 400
-        classe = Class.query.get(class_uuid)
-        if not classe:
-            return jsonify({"erro": "Turma não encontrada"}), 404
-
-    tipo = request.args.get("tipo", "avaliacao")
-    if tipo not in ("avaliacao", "prova_fisica", "frequencia_diaria"):
-        tipo = "avaliacao"
-
+def _montar_lista_turma(classe, tipo, test, fill_status):
+    """Monta um item de lista (cabecalho + estudantes) para uma turma."""
     cabecalho = _cabecalho_real(classe, tipo, test=test)
-
     alunos = (
-        Student.query.filter_by(class_id=class_uuid)
+        Student.query.filter_by(class_id=classe.id)
         .order_by(Student.name)
         .all()
     )
-
-    if test_id:
+    if fill_status and test:
         student_ids = [str(s.id) for s in alunos]
-        status_map = _status_estudante_avaliacao(student_ids, test_id)
+        status_map = _status_estudante_avaliacao(student_ids, test.id)
         estudantes = [
             {
                 "numero": idx + 1,
@@ -217,10 +182,108 @@ def lista_frequencia():
             }
             for idx, s in enumerate(alunos)
         ]
+    return {"cabecalho": cabecalho, "estudantes": estudantes}
 
-    return jsonify(
-        {
-            "cabecalho": cabecalho,
-            "estudantes": estudantes,
-        }
-    ), 200
+
+@bp.route("/", methods=["GET"])
+@jwt_required()
+@role_required("admin", "professor", "coordenador", "diretor", "tecadm")
+def lista_frequencia():
+    """
+    Retorna lista de frequência com dados reais.
+
+    Por turma: class_id (obrigatório). Status dos estudantes fica null.
+
+    Por avaliação já feita: test_id (obrigatório). Opcional: class_id para uma turma;
+    grade_id para filtrar por série: retorna todas as turmas da avaliação com essa série
+    (resposta em turmas[]). Status P/A conforme TestSession.
+    Query param opcional: tipo = avaliacao | prova_fisica | frequencia_diaria
+    """
+    test_id = request.args.get("test_id")
+    class_id = request.args.get("class_id")
+    grade_id = request.args.get("grade_id")
+
+    classe = None
+    class_uuid = None
+    test = None
+    turmas_grade = None  # quando preenchido, resposta será { "turmas": [...] }
+
+    if test_id:
+        test = Test.query.get(test_id)
+        if not test:
+            return jsonify({"erro": "Avaliação não encontrada"}), 404
+
+        class_tests = ClassTest.query.filter_by(test_id=test_id).all()
+        if not class_tests:
+            return jsonify({"erro": "Avaliação não está vinculada a nenhuma turma"}), 404
+
+        # Filtro apenas por série: retornar todas as turmas da avaliação com essa grade_id
+        if grade_id and not class_id:
+            grade_uuid = ensure_uuid(grade_id)
+            if not grade_uuid:
+                return jsonify({"erro": "grade_id inválido"}), 400
+            class_ids_avaliacao = [ct.class_id for ct in class_tests]
+            turmas_grade = (
+                Class.query.filter(
+                    Class.id.in_(class_ids_avaliacao),
+                    Class.grade_id == grade_uuid,
+                )
+                .order_by(Class.name)
+                .all()
+            )
+            if not turmas_grade:
+                return jsonify({
+                    "erro": "Nenhuma turma desta série está vinculada a esta avaliação.",
+                }), 404
+
+        elif len(class_tests) == 1 and not grade_id:
+            class_uuid = class_tests[0].class_id
+        else:
+            if class_id:
+                class_uuid = ensure_uuid(class_id)
+                if not class_uuid:
+                    return jsonify({"erro": "class_id inválido"}), 400
+                if not any(ct.class_id == class_uuid for ct in class_tests):
+                    return jsonify({"erro": "Turma não está vinculada a esta avaliação"}), 404
+            else:
+                class_uuid = class_tests[0].class_id
+
+        if turmas_grade is None:
+            classe = Class.query.get(class_uuid)
+            if not classe:
+                return jsonify({"erro": "Turma não encontrada"}), 404
+
+    else:
+        if not class_id:
+            return jsonify({"erro": "Informe class_id ou test_id"}), 400
+        class_uuid = ensure_uuid(class_id)
+        if not class_uuid:
+            return jsonify({"erro": "class_id inválido"}), 400
+        classe = Class.query.get(class_uuid)
+        if not classe:
+            return jsonify({"erro": "Turma não encontrada"}), 404
+
+    tipo = request.args.get("tipo", "avaliacao")
+    if tipo not in ("avaliacao", "prova_fisica", "frequencia_diaria"):
+        tipo = "avaliacao"
+
+    if turmas_grade is not None:
+        # Resposta: todas as turmas da série que fizeram a avaliação
+        lista = []
+        for c in turmas_grade:
+            item = _montar_lista_turma(c, tipo, test, fill_status=True)
+            lista.append({
+                "class_id": str(c.id),
+                "cabecalho": item["cabecalho"],
+                "estudantes": item["estudantes"],
+            })
+        return jsonify({"turmas": lista}), 200
+
+    item = _montar_lista_turma(classe, tipo, test, fill_status=(test_id is not None))
+    payload = {
+        "cabecalho": item["cabecalho"],
+        "estudantes": item["estudantes"],
+    }
+    if class_uuid:
+        payload["class_id"] = str(class_uuid)
+    return jsonify(payload), 200

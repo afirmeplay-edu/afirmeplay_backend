@@ -30,6 +30,7 @@ def check_expired_evaluations(app=None):
     IMPORTANTE: Esta função deve ser chamada dentro do contexto da aplicação Flask
     """
     from flask import current_app
+    from sqlalchemy.exc import ProgrammingError
     
     # Se app não foi fornecido, tentar usar current_app
     if app is None:
@@ -45,11 +46,20 @@ def check_expired_evaluations(app=None):
         try:
             logging.info("Iniciando verificação de avaliações expiradas...")
             
-            # Buscar todas as avaliações aplicadas que ainda não estão concluídas
-            class_tests = ClassTest.query.filter(
-                ClassTest.status.in_(['agendada', 'em_andamento']),
-                ClassTest.expiration.isnot(None)
-            ).all()
+            # Verificar se a tabela class_test existe
+            try:
+                # Buscar todas as avaliações aplicadas que ainda não estão concluídas
+                class_tests = ClassTest.query.filter(
+                    ClassTest.status.in_(['agendada', 'em_andamento']),
+                    ClassTest.expiration.isnot(None)
+                ).all()
+            except ProgrammingError as e:
+                if 'class_test' in str(e) and 'does not exist' in str(e):
+                    logging.warning("⚠️  Tabela 'class_test' não existe no banco de dados. Tarefa de verificação de expiração desabilitada temporariamente.")
+                    logging.warning("   Execute as migrations para criar a tabela: flask db upgrade")
+                    return
+                else:
+                    raise
             
             updated_count = 0
             expired_sessions_count = 0

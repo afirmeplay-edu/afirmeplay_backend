@@ -105,18 +105,22 @@ class CompetitionService:
         return competition
 
     @staticmethod
-    def _create_test_with_random_questions(competition: Competition) -> None:
+    def _create_test_with_random_questions(
+        competition: Competition,
+        selected_questions: list[Question] | None = None,
+    ) -> None:
         """
         Sorteia questões aleatórias baseado em question_rules,
         delegando a lógica de filtros e aleatorização para QuestionSelectionService.
         Preenche todos os campos do Test necessários para reutilizar componente de avaliações.
         """
-        rules = competition.question_rules or {}
-        selected_questions = QuestionSelectionService.select_questions(
-            subject_id=competition.subject_id,
-            level=competition.level,
-            rules=rules,
-        )
+        if selected_questions is None:
+            rules = competition.question_rules or {}
+            selected_questions = QuestionSelectionService.select_questions(
+                subject_id=competition.subject_id,
+                level=competition.level,
+                rules=rules,
+            )
         
         # Calcular duration em minutos
         duration_minutes = None

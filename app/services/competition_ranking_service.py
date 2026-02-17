@@ -12,6 +12,8 @@ from app.competitions.models import Competition, CompetitionResult, CompetitionR
 from app.models.testSession import TestSession
 from app.models.evaluationResult import EvaluationResult
 from app.models.student import Student
+from app.models.school import School
+from app.models.city import City
 import logging
 
 logger = logging.getLogger(__name__)
@@ -145,6 +147,10 @@ class CompetitionRankingService:
 
         coins_by_student = CompetitionRankingService.pay_ranking_rewards(competition_id, ranking)
 
+        from app.services.competition_student_ranking_service import (
+            CompetitionStudentRankingService,
+        )
+
         for item in ranking:
             correct = item.get('correct_answers', 0) or 0
             total = item.get('total_questions', 0) or 0
@@ -171,6 +177,20 @@ class CompetitionRankingService:
                 calculated_at=now,
             )
             db.session.add(result)
+
+            # Se novo 1º lugar, aciona serviço de classificação para possível certificado
+            if item.get("position") == 1:
+                try:
+                    CompetitionStudentRankingService.handle_new_first_place(
+                        student_id=item["student_id"],
+                        competition_id=competition_id,
+                    )
+                except Exception:
+                    logger.exception(
+                        "Falha ao processar classificação/certificado para student_id=%s em competition_id=%s",
+                        item["student_id"],
+                        competition_id,
+                    )
 
         db.session.commit()
         logger.info(f"Competição {competition_id}: snapshot competition_results gravado e ranking pago.")
@@ -329,7 +349,7 @@ class CompetitionRankingService:
 
     @staticmethod
     def _enrich_result_row(row: Dict[str, Any]) -> None:
-        """Adiciona student_name, class_name, etc. ao item do ranking."""
+        """Adiciona student_name, class_name, school_id, school_name e state/city ao item do ranking."""
         student = Student.query.get(row.get('student_id'))
         if not student:
             row['student_name'] = None
@@ -347,15 +367,23 @@ class CompetitionRankingService:
                 row['class_name'] = None
         else:
             row['class_name'] = None
-        if getattr(student, 'school_id', None):
+        # IDs brutos de escola e cidade (úteis para filtros por escopo)
+        row["school_id"] = getattr(student, "school_id", None)
+
+        if getattr(student, "school_id", None):
             try:
-                from app.models.school import School
                 s = School.query.get(student.school_id)
-                row['school_name'] = s.name if s else None
+                row["school_name"] = s.name if s else None
+                if s and getattr(s, "city_id", None):
+                    city = City.query.get(s.city_id)
+                    if city:
+                        row["city_id"] = city.id
+                        row["city_name"] = city.name
+                        row["state_name"] = city.state
             except Exception:
-                row['school_name'] = None
+                row["school_name"] = None
         else:
-            row['school_name'] = None
+            row["school_name"] = None
 
     @staticmethod
     def get_my_ranking(competition_id: str, student_id: str) -> Optional[Dict[str, Any]]:

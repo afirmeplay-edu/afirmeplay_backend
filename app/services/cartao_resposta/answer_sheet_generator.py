@@ -84,8 +84,10 @@ class AnswerSheetGenerator:
                 print(f"  - {student.name} (ID: {student.id})")
             print(f"======================\n")
             
+            # ✅ Retornar None para turmas sem alunos (não lançar exceção)
             if not students:
-                raise ValueError(f"Nenhum aluno encontrado na turma {class_id}")
+                logging.warning(f"[GENERATOR] ⚠️ Turma {class_obj.name} sem alunos cadastrados")
+                return None
 
             # Criar diretório de saída
             os.makedirs(output_dir, exist_ok=True)
@@ -206,6 +208,14 @@ class AnswerSheetGenerator:
             file_size = os.path.getsize(pdf_path)
             logging.info(f"[GENERATOR] ✅ PDF gerado: {pdf_filename} ({file_size} bytes)")
 
+            # Buscar grade_name da turma
+            grade_name = ''
+            if class_obj.grade_id:
+                from app.models.grades import Grade
+                grade_obj = Grade.query.get(class_obj.grade_id)
+                if grade_obj:
+                    grade_name = grade_obj.name
+
             # Liberar memória
             del pdf_bytes, pdf_buffer, combined_html, html_pages
             gc.collect()
@@ -213,8 +223,11 @@ class AnswerSheetGenerator:
             return {
                 'class_id': str(class_id),
                 'class_name': class_obj.name,
+                'grade_name': grade_name,
                 'pdf_path': pdf_path,
-                'student_count': len(students),
+                'filename': pdf_filename,
+                'total_students': len(students),
+                'total_pages': len(students),
                 'file_size': file_size
             }
 

@@ -518,17 +518,57 @@ def atualizar_aluno(student_id, class_id):
             return jsonify({"error": "No data provided"}), 400
 
         # Atualiza dados do usuário vinculado
-        usuario = aluno.usuario
+        usuario = aluno.user
         if not usuario:
             return jsonify({"error": "Associated user not found"}), 404
 
-        usuario.name = dados.get("name", usuario.name)
-        usuario.email = dados.get("email", usuario.email)
-        usuario.registration = dados.get("registration", usuario.registration)
+        # Armazenar valores antigos para tracking
+        old_class_id = aluno.class_id
+        old_school_id = aluno.school_id
+        class_changed = False
+        school_changed = False
+        
+        # Processar mudança de turma
+        if "class_id" in dados and dados["class_id"] != old_class_id:
+            from app.utils.uuid_helpers import ensure_uuid
+            new_class_id = ensure_uuid(dados["class_id"])
+            
+            if not new_class_id:
+                return jsonify({"error": "ID de turma inválido"}), 400
+            
+            # Buscar nova turma
+            from app.models.studentClass import Class
+            new_class = Class.query.get(new_class_id)
+            
+            if not new_class:
+                return jsonify({"error": "Nova turma não encontrada"}), 404
+            
+            # Atualizar turma
+            aluno.class_id = new_class_id
+            class_changed = True
+            
+            # Se a turma pertence a outra escola, atualizar automaticamente
+            if new_class.school_id != old_school_id:
+                aluno.school_id = new_class.school_id
+                school_changed = True
+                
+                # Atualizar city_id do usuário
+                new_school = School.query.get(new_class.school_id)
+                if new_school and new_school.city_id != usuario.city_id:
+                    usuario.city_id = new_school.city_id
+                    logging.info(f"Aluno {student_id} movido para escola {new_class.school_id}. City_id atualizado para {new_school.city_id}")
+        
+        # Atualizar outros dados do usuário
+        if "name" in dados:
+            usuario.name = dados["name"]
+        if "email" in dados:
+            usuario.email = dados["email"]
+        if "registration" in dados:
+            usuario.registration = dados["registration"]
 
-        # Atualiza dados do aluno
-        aluno.class_id = dados.get("class_id", aluno.class_id)
-        aluno.grade_id = dados.get("grade_id", aluno.grade_id)
+        # Atualizar série
+        if "grade_id" in dados:
+            aluno.grade_id = dados["grade_id"]
 
         # Atualiza data de nascimento se enviada
         if "birth_date" in dados:
@@ -537,18 +577,42 @@ def atualizar_aluno(student_id, class_id):
             except ValueError:
                 return jsonify({"error": "Invalid date format. Use YYYY-MM-DD"}), 400
 
-        # Atualizar city_id do usuário se o aluno foi movido para outra escola
-        if aluno.school_id:
-            # ✅ CORRIGIDO: Converter para string (School.id é VARCHAR)
-            from app.utils.uuid_helpers import uuid_to_str
-            school_id_str = uuid_to_str(aluno.school_id)
-            school = School.query.filter(School.id == school_id_str).first() if school_id_str else None
+        # Se school_id mudou mas class_id não (caso raro), atualizar city_id
+        if not class_changed and aluno.school_id:
+            school = School.query.get(aluno.school_id)
             if school and school.city_id != usuario.city_id:
                 usuario.city_id = school.city_id
                 logging.info(f"Atualizando city_id do aluno {usuario.id} para {school.city_id}")
 
         db.session.commit()
-        return jsonify({"message": "Student updated successfully"}), 200
+        
+        # Preparar resposta detalhada
+        response = {
+            "message": "Aluno atualizado com sucesso",
+            "student": {
+                "id": aluno.id,
+                "name": usuario.name,
+                "email": usuario.email,
+                "class_id": str(aluno.class_id) if aluno.class_id else None,
+                "school_id": aluno.school_id,
+                "grade_id": str(aluno.grade_id) if aluno.grade_id else None
+            },
+            "changes": {
+                "class_changed": class_changed,
+                "school_changed": school_changed
+            }
+        }
+        
+        if class_changed or school_changed:
+            response["relocation"] = {
+                "old_class_id": str(old_class_id) if old_class_id else None,
+                "new_class_id": str(aluno.class_id) if aluno.class_id else None,
+                "old_school_id": old_school_id,
+                "new_school_id": aluno.school_id,
+                "city_updated": school_changed
+            }
+        
+        return jsonify(response), 200
 
     except IntegrityError as e:
         db.session.rollback()
@@ -569,8 +633,8 @@ def deletar_aluno(aluno_id):
             return jsonify({"error": "Student not found"}), 404
 
         # Verifica se existe usuário associado
-        if aluno.usuario:
-            db.session.delete(aluno.usuario)
+        if aluno.user:
+            db.session.delete(aluno.user)
         
         db.session.delete(aluno)
         db.session.commit()

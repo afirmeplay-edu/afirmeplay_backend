@@ -404,15 +404,99 @@ def update_class(class_id):
         if not data:
             return jsonify({"error": "No data provided"}), 400
 
-        if "name" in data:
-            class_obj.name = data["name"]
-        if "school_id" in data:
-            # Converter school_id para UUID (Class.school_id é UUID)
-            school_id_uuid = ensure_uuid(data["school_id"])
-            if school_id_uuid:
-                class_obj.school_id = school_id_uuid
+        # Armazenar valores antigos para logging e validação
+        old_school_id = class_obj.school_id
+        old_name = class_obj.name
+        school_changed = False
+        name_changed = False
+        students_updated = []
+        
+        # Processar mudança de escola (realocação)
+        if "school_id" in data and data["school_id"] != old_school_id:
+            new_school_id = data["school_id"]
+            
+            # Validar que a nova escola existe
+            new_school = School.query.get(new_school_id)
+            if not new_school:
+                return jsonify({"error": "Nova escola não encontrada"}), 404
+            
+            # Validar que a nova escola é do mesmo município
+            old_school = School.query.get(old_school_id)
+            if old_school and new_school.city_id != old_school.city_id:
+                return jsonify({
+                    "error": "Realocação não permitida",
+                    "details": f"A turma não pode ser movida para escola de município diferente. Escola atual: {old_school.city_id}, Escola destino: {new_school.city_id}"
+                }), 400
+            
+            # Verificar conflito de nome na escola destino
+            new_name = data.get("name", class_obj.name)
+            existing_class = Class.query.filter(
+                Class.school_id == new_school_id,
+                Class.name == new_name,
+                Class.id != class_id_uuid
+            ).first()
+            
+            if existing_class:
+                # Renomear automaticamente adicionando sufixo numérico
+                base_name = new_name
+                counter = 2
+                while existing_class:
+                    new_name = f"{base_name} ({counter})"
+                    existing_class = Class.query.filter(
+                        Class.school_id == new_school_id,
+                        Class.name == new_name,
+                        Class.id != class_id_uuid
+                    ).first()
+                    counter += 1
+                
+                logging.info(f"Turma renomeada automaticamente de '{base_name}' para '{new_name}' devido a conflito na escola destino")
+                class_obj.name = new_name
+                name_changed = True
+            
+            # Atualizar escola da turma
+            class_obj.school_id = new_school_id
+            school_changed = True
+            
+            # Atualizar automaticamente todos os alunos da turma
+            from app.models.student import Student
+            students = Student.query.filter_by(class_id=class_id_uuid).all()
+            
+            for student in students:
+                student.school_id = new_school_id
+                if student.user:
+                    student.user.city_id = new_school.city_id
+                students_updated.append({
+                    "id": student.id,
+                    "name": student.name,
+                    "old_school": old_school_id,
+                    "new_school": new_school_id
+                })
+            
+            logging.info(f"Turma {class_id} realocada de escola {old_school_id} para {new_school_id}. {len(students)} alunos atualizados.")
+        
+        # Processar mudança de nome (sem mudança de escola)
+        if "name" in data and "school_id" not in data:
+            new_name = data["name"]
+            if new_name != old_name:
+                # Verificar conflito de nome na mesma escola
+                existing_class = Class.query.filter(
+                    Class.school_id == class_obj.school_id,
+                    Class.name == new_name,
+                    Class.id != class_id_uuid
+                ).first()
+                
+                if existing_class:
+                    return jsonify({
+                        "error": "Nome duplicado",
+                        "details": f"Já existe uma turma com o nome '{new_name}' nesta escola.",
+                        "turma_existente_id": str(existing_class.id)
+                    }), 400
+                
+                class_obj.name = new_name
+                name_changed = True
+        
+        # Processar mudança de série
         if "grade_id" in data:
-            # Validar que o curso da série está vinculado à escola
             from app.models.grades import Grade
             from app.models.schoolCourse import SchoolCourse
             
@@ -440,7 +524,39 @@ def update_class(class_id):
             class_obj.grade_id = data["grade_id"]
 
         db.session.commit()
-        return jsonify({"message": "Class updated successfully"}), 200
+        
+        # Preparar resposta detalhada
+        response = {
+            "message": "Turma atualizada com sucesso",
+            "class": {
+                "id": str(class_obj.id),
+                "name": class_obj.name,
+                "school_id": class_obj.school_id,
+                "grade_id": str(class_obj.grade_id) if class_obj.grade_id else None
+            },
+            "changes": {
+                "school_changed": school_changed,
+                "name_changed": name_changed,
+                "students_updated": len(students_updated)
+            }
+        }
+        
+        if school_changed:
+            response["relocation"] = {
+                "old_school_id": old_school_id,
+                "new_school_id": class_obj.school_id,
+                "students_moved": students_updated
+            }
+        
+        if name_changed and school_changed:
+            response["auto_renamed"] = {
+                "old_name": old_name,
+                "new_name": class_obj.name,
+                "reason": "Nome duplicado na escola destino"
+            }
+        
+        return jsonify(response), 200
+        
     except Exception as e:
         db.session.rollback()
         logging.error(f"Error updating class: {str(e)}", exc_info=True)
@@ -750,7 +866,7 @@ def remove_student_from_class(class_id):
             return jsonify({"error": "Student not found"}), 404
 
         # Check if student is actually in this class (optional)
-        if student.class_id != class_id:
+        if student.class_id != class_id_uuid:
             return jsonify({"message": f"Student {student_id} is not in class {class_id}"}), 200
 
         # Update the student's class_id to null

@@ -103,6 +103,7 @@ def upload_physical_test_zip_async(
 def generate_physical_forms_async(
     self: Task,
     test_id: str,
+    city_id: str,
     force_regenerate: bool = False,
     blocks_config: Dict = None
 ) -> Dict[str, Any]:
@@ -114,6 +115,7 @@ def generate_physical_forms_async(
     
     Args:
         test_id: ID da prova (UUID)
+        city_id: ID da cidade (UUID) - necessário para configurar search_path
         force_regenerate: Se True, regenera mesmo se já existirem formulários
         blocks_config: Configuração de blocos do payload (opcional)
             {
@@ -143,6 +145,7 @@ def generate_physical_forms_async(
         # Disparar task
         task = generate_physical_forms_async.delay(
             test_id='abc-123',
+            city_id='city-uuid',
             blocks_config={'use_blocks': True, 'num_blocks': 2, 'questions_per_block': 5}
         )
         
@@ -155,9 +158,10 @@ def generate_physical_forms_async(
     try:
         print(f"[CELERY] ========== TASK CELERY INICIADA ==========")
         print(f"[CELERY] test_id: {test_id}")
+        print(f"[CELERY] city_id: {city_id}")
         print(f"[CELERY] force_regenerate: {force_regenerate}")
         print(f"[CELERY] blocks_config recebido: {blocks_config}")
-        logger.info(f"[CELERY] 🚀 Iniciando geração de formulários físicos para test_id={test_id}")
+        logger.info(f"[CELERY] 🚀 Iniciando geração de formulários físicos para test_id={test_id}, city_id={city_id}")
         
         # Imports locais para evitar problemas de circular import
         from app.models.test import Test
@@ -167,6 +171,21 @@ def generate_physical_forms_async(
         from app.models.testQuestion import TestQuestion
         from app.models.answerSheetGabarito import AnswerSheetGabarito
         from app.services.physical_test_form_service import PhysicalTestFormService
+        from app.models.city import City
+        from sqlalchemy import text
+        
+        # MULTITENANT FIX: Configurar search_path para o schema da cidade
+        city = City.query.get(city_id)
+        if not city:
+            error_msg = f"Cidade {city_id} não encontrada"
+            logger.error(f"[CELERY] ❌ {error_msg}")
+            raise ValueError(error_msg)
+        
+        city_schema = f"city_{city.id.replace('-', '_')}"
+        logger.info(f"[CELERY] 🌐 Configurando search_path para: {city_schema}, public")
+        
+        from app import db
+        db.session.execute(text(f'SET search_path TO "{city_schema}", public'))
         
         # Verificar se a prova existe
         test = Test.query.get(test_id)

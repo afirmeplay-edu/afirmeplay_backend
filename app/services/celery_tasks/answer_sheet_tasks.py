@@ -143,6 +143,105 @@ def should_consolidate_job(job_id: str) -> bool:
 
 
 # ============================================================================
+# TASK PARA GERAÇÃO DE CARTÕES POR TURMA (INDIVIDUAL)
+# ============================================================================
+
+@celery_app.task(
+    bind=True,
+    name='answer_sheet_tasks.generate_answer_sheets_async',
+    max_retries=2,
+    default_retry_delay=60,
+    time_limit=900,  # 15 minutos máximo
+    soft_time_limit=840  # 14 minutos soft limit
+)
+def generate_answer_sheets_async(
+    self: Task,
+    class_id: str,
+    city_id: str,
+    num_questions: int,
+    correct_answers: Dict,
+    test_data: Dict,
+    use_blocks: bool,
+    blocks_config: Dict,
+    questions_options: Dict = None,
+    gabarito_id: str = None
+) -> Dict[str, Any]:
+    """
+    Task Celery para geração ASSÍNCRONA de cartões de resposta para UMA turma.
+    
+    Args:
+        class_id: ID da turma (UUID)
+        city_id: ID da cidade (UUID) - necessário para configurar search_path
+        num_questions: Quantidade de questões
+        correct_answers: Dict com respostas corretas
+        test_data: Dados da prova (title, municipality, etc.)
+        use_blocks: Se usa blocos
+        blocks_config: Configuração de blocos
+        questions_options: Alternativas por questão (opcional)
+        gabarito_id: ID do gabarito (opcional)
+    
+    Returns:
+        Dict com status e informações dos cartões gerados
+    """
+    try:
+        logger.info(f"[CELERY] 🚀 Iniciando geração de cartões para turma: {class_id}")
+        
+        from app.models.answerSheetGabarito import AnswerSheetGabarito
+        from app.services.cartao_resposta.answer_sheet_generator import AnswerSheetGenerator
+        from app.models.studentClass import Class
+        from app.models.city import City
+        from sqlalchemy import text
+        
+        # MULTITENANT FIX: Configurar search_path para o schema da cidade
+        city = City.query.get(city_id)
+        if not city:
+            error_msg = f"Cidade {city_id} não encontrada"
+            logger.error(f"[CELERY] ❌ {error_msg}")
+            raise ValueError(error_msg)
+        
+        city_schema = f"city_{city.id.replace('-', '_')}"
+        logger.info(f"[CELERY] 🌐 Configurando search_path para: {city_schema}, public")
+        
+        db.session.execute(text(f'SET search_path TO "{city_schema}", public'))
+        
+        # Buscar turma
+        class_obj = Class.query.get(class_id)
+        if not class_obj:
+            error_msg = f"Turma {class_id} não encontrada"
+            logger.error(f"[CELERY] ❌ {error_msg}")
+            raise ValueError(error_msg)
+        
+        logger.info(f"[CELERY] ✅ Turma encontrada: {class_obj.name}")
+        
+        # Gerar cartões
+        generator = AnswerSheetGenerator()
+        result = generator.generate_answer_sheets(
+            class_id=class_id,
+            num_questions=num_questions,
+            correct_answers=correct_answers,
+            test_data=test_data,
+            use_blocks=use_blocks,
+            blocks_config=blocks_config,
+            questions_options=questions_options,
+            gabarito_id=gabarito_id
+        )
+        
+        logger.info(f"[CELERY] ✅ Cartões gerados com sucesso para turma {class_id}")
+        
+        return {
+            'success': True,
+            'class_id': class_id,
+            'class_name': class_obj.name,
+            'result': result
+        }
+        
+    except Exception as e:
+        logger.error(f"[CELERY] ❌ Erro ao gerar cartões: {str(e)}", exc_info=True)
+        logger.info(f"[CELERY] 🔄 Tentando novamente (retry {self.request.retries + 1}/2)...")
+        raise self.retry(exc=e)
+
+
+# ============================================================================
 # Função consolidate_answer_sheets_to_zip (versão antiga) REMOVIDA
 # A versão correta está mais abaixo no arquivo (linha ~566)
 # ============================================================================
@@ -159,6 +258,7 @@ def should_consolidate_job(job_id: str) -> bool:
 def generate_answer_sheets_batch_async(
     self: Task,
     gabarito_ids: List[str],
+    city_id: str,
     num_questions: int,
     correct_answers: Dict,
     test_data: Dict,
@@ -177,6 +277,7 @@ def generate_answer_sheets_batch_async(
     
     Args:
         gabarito_ids: Lista de IDs dos gabaritos (1 por turma)
+        city_id: ID da cidade (UUID) - necessário para configurar search_path
         num_questions: Quantidade de questões
         correct_answers: Dict com respostas corretas
         test_data: Dados da prova (title, municipality, etc.)
@@ -185,6 +286,7 @@ def generate_answer_sheets_batch_async(
         questions_options: Alternativas por questão (opcional)
         batch_id: ID do batch (opcional, para agrupar múltiplas turmas)
         scope: Escopo da geração ('class', 'grade' ou 'school')
+        class_ids: Lista de IDs das turmas (opcional, para escopo hierárquico)
     
     Returns:
         Dict com status e informações dos cartões gerados
@@ -195,6 +297,21 @@ def generate_answer_sheets_batch_async(
         from app.models.answerSheetGabarito import AnswerSheetGabarito
         from app.services.cartao_resposta.answer_sheet_generator import AnswerSheetGenerator
         from app.models.studentClass import Class
+        from app.models.city import City
+        from sqlalchemy import text
+        from app import db
+        
+        # MULTITENANT FIX: Configurar search_path para o schema da cidade
+        city = City.query.get(city_id)
+        if not city:
+            error_msg = f"Cidade {city_id} não encontrada"
+            logger.error(f"[CELERY-BATCH] ❌ {error_msg}")
+            raise ValueError(error_msg)
+        
+        city_schema = f"city_{city.id.replace('-', '_')}"
+        logger.info(f"[CELERY-BATCH] 🌐 Configurando search_path para: {city_schema}, public")
+        
+        db.session.execute(text(f'SET search_path TO "{city_schema}", public'))
         
         # Buscar todos os gabaritos
         gabaritos = []
@@ -242,7 +359,7 @@ def generate_answer_sheets_batch_async(
                 try:
                     logger.info(f"[CELERY-BATCH] 🔨 Gerando PDF {idx}/{len(classes)} para turma {class_obj.id}...")
 
-                    pdf_result = generator.generate_answer_sheet_for_class(
+                    pdf_result = generator.generate_answer_sheets(
                         class_id=str(class_obj.id),
                         test_data=test_data,
                         num_questions=num_questions,
@@ -302,7 +419,7 @@ def generate_answer_sheets_batch_async(
                         continue
                     
                     # Gerar 1 PDF único para a turma (múltiplas páginas)
-                    pdf_result = generator.generate_answer_sheet_for_class(
+                    pdf_result = generator.generate_answer_sheets(
                         class_id=str(gabarito.class_id),
                         test_data=test_data,
                         num_questions=num_questions,

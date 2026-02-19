@@ -317,6 +317,7 @@ def get_current_user_from_token():
 @bp.route('/test/<string:test_id>/generate-forms', methods=['POST'])
 @jwt_required()
 @role_required("admin", "professor", "coordenador", "diretor", "tecadm")
+@requires_city_context
 def generate_physical_forms(test_id):
     """
     Dispara geração ASSÍNCRONA de formulários físicos usando Celery
@@ -383,14 +384,24 @@ def generate_physical_forms(test_id):
             }
             print(f"[ROTA] blocks_config montado a partir de parâmetros: {blocks_config}")
         
+        # ✅ OBTER CONTEXTO DA CIDADE
+        from app.decorators.tenant_required import get_current_tenant_context
+        context = get_current_tenant_context()
+        city_id = context.city_id if context else None
+        
+        if not city_id:
+            logging.error("❌ Contexto de cidade não encontrado")
+            return jsonify({"error": "City context not found"}), 500
+        
         # ✅ DISPARAR TASK CELERY (assíncrono)
         from app.services.celery_tasks.physical_test_tasks import generate_physical_forms_async
         
-        print(f"[ROTA] 🚀 Disparando task Celery com blocks_config: {blocks_config}")
-        logging.info(f"🚀 Disparando task Celery para geração de formulários: test_id={test_id}, blocks_config={blocks_config}")
+        print(f"[ROTA] 🚀 Disparando task Celery com blocks_config: {blocks_config}, city_id: {city_id}")
+        logging.info(f"🚀 Disparando task Celery para geração de formulários: test_id={test_id}, city_id={city_id}, blocks_config={blocks_config}")
         
         task = generate_physical_forms_async.delay(
             test_id=test_id,
+            city_id=city_id,
             force_regenerate=force_regenerate,
             blocks_config=blocks_config
         )
@@ -1608,7 +1619,7 @@ def delete_physical_form(form_id):
 
 @bp.route('/test/<string:test_id>/forms', methods=['DELETE'])
 @jwt_required()
-@role_required("admin", "professor", "coordenador", "diretor")
+@role_required("admin", "professor", "coordenador", "diretor", "tecadm")
 def delete_all_physical_forms_by_test(test_id):
     """
     Exclui todos os formulários físicos de uma prova
@@ -1628,7 +1639,23 @@ def delete_all_physical_forms_by_test(test_id):
             return jsonify({"error": "Prova não encontrada"}), 404
         
         # Verificar permissões
-        if user['role'] == 'professor' and test.created_by != user['id']:
+        user_role = user.get('role')
+        user_id = user.get('id')
+        user_city_id = user.get('tenant_id') or user.get('city_id')
+        
+        can_delete = False
+        
+        if user_role == 'admin':
+            # Admin pode excluir qualquer formulário
+            can_delete = True
+        elif test.created_by == user_id:
+            # Criador pode excluir seus próprios formulários
+            can_delete = True
+        elif user_city_id and test.creator and test.creator.city_id == user_city_id:
+            # Usuários do mesmo município podem excluir
+            can_delete = True
+        
+        if not can_delete:
             return jsonify({"error": "Você não tem permissão para excluir formulários desta prova"}), 403
         
         # Buscar todos os formulários da prova

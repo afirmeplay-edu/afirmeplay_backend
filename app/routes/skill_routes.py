@@ -5,7 +5,9 @@ from app.models.test import Test
 from app import db
 from flask_jwt_extended import jwt_required
 from app.decorators.role_required import role_required, get_current_user_from_token
+from app.utils.question_helpers import get_questions_from_test
 from app.utils.uuid_helpers import ensure_uuid
+
 import logging
 
 skill_bp = Blueprint('skill_bp', __name__)
@@ -313,11 +315,8 @@ def get_skills_by_evaluation(test_id):
         if user['role'] == 'professor' and test.created_by != user['id']:
             return jsonify({"error": "Acesso negado"}), 403
 
-        # Buscar questões da avaliação
-        # Buscar questões do teste através da tabela de associação
-        from app.models.testQuestion import TestQuestion
-        test_question_ids = [tq.question_id for tq in TestQuestion.query.filter_by(test_id=test_id).order_by(TestQuestion.order).all()]
-        questions = Question.query.filter(Question.id.in_(test_question_ids)).all() if test_question_ids else []
+        # Buscar questões da avaliação usando helper multitenant
+        questions = get_questions_from_test(test_id, order_by_test_question=True)
         
         if not questions:
             return jsonify({"message": "Avaliação não possui questões."}), 404

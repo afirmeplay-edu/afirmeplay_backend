@@ -18,6 +18,7 @@ from app.utils.uuid_helpers import ensure_uuid, ensure_uuid_list
 from flask_jwt_extended import jwt_required
 from app.decorators.role_required import role_required, get_current_user_from_token
 from sqlalchemy.exc import SQLAlchemyError, IntegrityError
+from sqlalchemy import text
 from datetime import datetime, timedelta
 import logging
 import json
@@ -133,6 +134,15 @@ def criar_avaliacao():
             if field not in data:
                 logging.error(f"Campo obrigatório ausente: {field}")
                 return jsonify({"error": f"Missing required field: {field}"}), 400
+
+        # Obter informações do usuário logado para definir scope de questões
+        current_user = get_current_user_from_token()
+        if not current_user:
+            return jsonify({"error": "User not authenticated"}), 401
+        
+        user_role = current_user.get('role')
+        user_city_id = current_user.get('tenant_id') or current_user.get('city_id')
+        user_id = current_user.get('user_id')
 
         # Validação do campo duration se fornecido
         if 'duration' in data and data['duration'] is not None:
@@ -264,6 +274,24 @@ def criar_avaliacao():
                             # Se vier string, usar diretamente
                             skill_value = skills_input
                     
+                    # Definir scope_type e owner baseado na role do criador
+                    scope_type = None
+                    owner_city_id = None
+                    owner_user_id = None
+                    
+                    if user_role == 'admin':
+                        scope_type = 'GLOBAL'
+                        owner_city_id = None
+                        owner_user_id = None
+                    elif user_role == 'tecadm':
+                        scope_type = 'CITY'
+                        owner_city_id = user_city_id
+                        owner_user_id = None
+                    else:  # professor, coordenador, diretor
+                        scope_type = 'PRIVATE'
+                        owner_city_id = None
+                        owner_user_id = user_id
+                    
                     question = Question(
                         number=question_data.get('number'),
                         text=question_data.get('text'),
@@ -286,10 +314,21 @@ def criar_avaliacao():
                         topics=question_data.get('topics'),
                         education_stage_id=question_data.get('educationStageId'),
                         created_by=question_data.get('created_by') or data.get('created_by'),
-                        last_modified_by=question_data.get('lastModifiedBy') or data.get('lastModifiedBy')
+                        last_modified_by=question_data.get('lastModifiedBy') or data.get('lastModifiedBy'),
+                        scope_type=scope_type,
+                        owner_city_id=owner_city_id,
+                        owner_user_id=owner_user_id
                     )
+                    
+                    # Salvar questão em public.question (forçar search_path)
+                    current_search_path = db.session.execute(text("SHOW search_path")).fetchone()[0]
+                    db.session.execute(text("SET search_path TO public"))
+                    
                     db.session.add(question)
                     db.session.flush()  # Para obter o ID da questão
+                    
+                    # Restaurar search_path original
+                    db.session.execute(text(f"SET search_path TO {current_search_path}"))
                     
                     # Criar associação na tabela test_questions
                     from app.models.testQuestion import TestQuestion
@@ -808,22 +847,64 @@ def atualizar_status_avaliacao(test_id):
 @role_required("admin", "professor", "coordenador", "diretor", "aluno","tecadm")
 def obter_avaliacao(test_id):
     try:
+        print("\n" + "="*80)
+        print(f"🔍 DEBUG GET /test/{test_id}")
+        print("="*80)
+        
+        # Verificar search_path
+        from sqlalchemy import text
+        search_path_result = db.session.execute(text("SHOW search_path")).fetchone()
+        print(f"📍 PostgreSQL search_path: {search_path_result[0]}")
+        
+        # MULTITENANT FIX: Buscar test em city_xxx e questões em public
+        # Salvar search_path atual
+        current_search_path = search_path_result[0]
+        
+        # Buscar test no schema city_xxx (padrão)
         test = Test.query.options(
             joinedload(Test.creator),
             joinedload(Test.subject_rel),
-            joinedload(Test.grade),
-            subqueryload(Test.test_questions).subqueryload(TestQuestion.question).options(
-                joinedload(Question.subject),
-                joinedload(Question.grade),
-                joinedload(Question.education_stage),
-                joinedload(Question.creator),
-                joinedload(Question.last_modifier)
-            )
+            joinedload(Test.grade)
         ).get(test_id)
         
         if not test:
+            print(f"❌ Test {test_id} não encontrado!")
+            print("="*80 + "\n")
             return jsonify({"error": "Test not found"}), 404
-
+        
+        print(f"✅ Test encontrado: {test.title}")
+        
+        # Carregar test_questions manualmente
+        from app.models.testQuestion import TestQuestion
+        test_questions_list = TestQuestion.query.filter_by(test_id=test.id).order_by(TestQuestion.order).all()
+        print(f"📋 test_questions carregados: {len(test_questions_list)}")
+        
+        # Mudar para public para carregar as questões
+        db.session.execute(text("SET search_path TO public"))
+        
+        # Carregar questões com seus relacionamentos
+        from app.models.question import Question
+        from sqlalchemy.orm import joinedload as jl
+        
+        question_ids = [tq.question_id for tq in test_questions_list]
+        if question_ids:
+            questions_loaded = Question.query.filter(Question.id.in_(question_ids)).options(
+                jl(Question.subject),
+                jl(Question.grade),
+                jl(Question.education_stage),
+                jl(Question.creator),
+                jl(Question.last_modifier)
+            ).all()
+            print(f"📊 Questões carregadas de public.question: {len(questions_loaded)}")
+        else:
+            questions_loaded = []
+            print(f"⚠️ NENHUMA questão para carregar")
+        
+        # Restaurar search_path
+        db.session.execute(text(f"SET search_path TO {current_search_path}"))
+        
+        print("="*80 + "\n")
+        
         return jsonify(format_test_response(test)), 200
 
     except Exception as e:
@@ -841,12 +922,41 @@ def get_test_details(test_id):
 
 @bp.route('/<string:test_id>', methods=['PUT'])
 @jwt_required()
-@role_required("admin", "professor", "coordenador", "diretor")
+@role_required("admin", "professor", "coordenador", "diretor", "tecadm")
 def atualizar_avaliacao(test_id):
     try:
+        # Obter usuário logado
+        user = get_current_user_from_token()
+        if not user:
+            return jsonify({"error": "User not authenticated"}), 401
+        
         test = Test.query.get(test_id)
         if not test:
             return jsonify({"error": "Test not found"}), 404
+
+        # VERIFICAR PERMISSÕES: Permitir edição se:
+        # 1. Usuário é admin (sem restrições)
+        # 2. Usuário é o criador da avaliação
+        # 3. Usuário é do mesmo município que o criador da avaliação
+        user_role = user.get('role')
+        user_id = user.get('id')
+        user_city_id = user.get('tenant_id') or user.get('city_id')
+        
+        can_edit = False
+        
+        if user_role == 'admin':
+            # Admin pode editar qualquer avaliação
+            can_edit = True
+        elif test.created_by == user_id:
+            # Criador pode editar sua própria avaliação
+            can_edit = True
+        elif user_city_id and test.creator and test.creator.city_id == user_city_id:
+            # Usuários do mesmo município podem editar
+            can_edit = True
+        
+        if not can_edit:
+            logging.warning(f"Acesso negado: user {user_id} ({user_role}) tentou editar test {test_id} criado por {test.created_by}")
+            return jsonify({"erro": "Acesso negado. Você não tem permissão para editar esta avaliação."}), 403
 
         data = request.get_json()
         if not data:
@@ -936,7 +1046,98 @@ def atualizar_avaliacao(test_id):
                     else:
                         logging.warning(f"Questão com ID {question_data['id']} não encontrada")
                 else:
-                    logging.warning(f"Questão na posição {index} não possui ID válido")
+                    # Criar nova questão (mesmo padrão da rota de criação)
+                    logging.info(f"Criando nova questão na posição {index}")
+                    
+                    # Extrai o ID do grade se for um objeto
+                    grade_level = question_data.get('grade')
+                    if isinstance(grade_level, dict) and 'id' in grade_level:
+                        grade_level = grade_level['id']
+                    
+                    # Processa imagens
+                    images = []
+                    if question_data.get('formattedText'):
+                        from app.routes.question_routes import extract_images_from_html
+                        images.extend(extract_images_from_html(question_data['formattedText']))
+                    
+                    if question_data.get('formattedSolution'):
+                        from app.routes.question_routes import extract_images_from_html
+                        images.extend(extract_images_from_html(question_data['formattedSolution']))
+                    
+                    # Normalizar skills
+                    skills_input = question_data.get('skills')
+                    skill_value = None
+                    if skills_input:
+                        if isinstance(skills_input, list):
+                            skill_value = skills_input[0] if skills_input else None
+                        else:
+                            skill_value = skills_input
+                    
+                    # Definir scope_type e owner baseado na role do usuário que está atualizando
+                    scope_type = None
+                    owner_city_id = None
+                    owner_user_id = None
+                    
+                    if user_role == 'admin':
+                        scope_type = 'GLOBAL'
+                        owner_city_id = None
+                        owner_user_id = None
+                    elif user_role == 'tecadm':
+                        scope_type = 'CITY'
+                        owner_city_id = user_city_id
+                        owner_user_id = None
+                    else:  # professor, coordenador, diretor
+                        scope_type = 'PRIVATE'
+                        owner_city_id = None
+                        owner_user_id = user_id
+                    
+                    question = Question(
+                        number=question_data.get('number'),
+                        text=question_data.get('text'),
+                        formatted_text=question_data.get('formattedText'),
+                        secondstatement=question_data.get('secondStatement'),
+                        images=images,
+                        subject_id=question_data.get('subjectId') or question_data.get('subject_id'),
+                        title=question_data.get('title'),
+                        description=question_data.get('description'),
+                        command=question_data.get('command'),
+                        subtitle=question_data.get('subtitle'),
+                        alternatives=question_data.get('options'),
+                        skill=skill_value,
+                        grade_level=grade_level,
+                        difficulty_level=question_data.get('difficulty'),
+                        correct_answer=question_data.get('solution'),
+                        formatted_solution=question_data.get('formattedSolution'),
+                        question_type=question_data.get('type'),
+                        value=question_data.get('value'),
+                        topics=question_data.get('topics'),
+                        education_stage_id=question_data.get('educationStageId'),
+                        created_by=question_data.get('created_by') or user_id,
+                        last_modified_by=question_data.get('lastModifiedBy') or user_id,
+                        scope_type=scope_type,
+                        owner_city_id=owner_city_id,
+                        owner_user_id=owner_user_id
+                    )
+                    
+                    # Salvar questão em public.question (forçar search_path)
+                    current_search_path = db.session.execute(text("SHOW search_path")).fetchone()[0]
+                    db.session.execute(text("SET search_path TO public"))
+                    
+                    db.session.add(question)
+                    db.session.flush()  # Para obter o ID da questão
+                    
+                    # Restaurar search_path original
+                    db.session.execute(text(f"SET search_path TO {current_search_path}"))
+                    
+                    # Criar associação
+                    order = question_data.get('number', index + 1)
+                    test_question = TestQuestion(
+                        test_id=test.id,
+                        question_id=question.id,
+                        order=order
+                    )
+                    db.session.add(test_question)
+                    logging.info(f"Nova questão criada e associada à avaliação com ordem {order}")
 
         db.session.commit()
         return jsonify({'message': 'Test updated successfully'}), 200
@@ -987,16 +1188,30 @@ def bulk_delete_tests():
         permission_errors = []
         valid_tests = []
         
+        user_city_id = user.get('tenant_id') or user.get('city_id')
+        
         for test in tests_to_delete:
-            if user['role'] == 'professor' and test.created_by != user['id']:
-                permission_errors.append(f"Test {test.id} (created by {test.created_by})")
-            else:
+            can_delete = False
+            
+            if user['role'] == 'admin':
+                # Admin pode deletar qualquer avaliação
+                can_delete = True
+            elif test.created_by == user['id']:
+                # Criador pode deletar sua própria avaliação
+                can_delete = True
+            elif user_city_id and test.creator and test.creator.city_id == user_city_id:
+                # Usuários do mesmo município podem deletar
+                can_delete = True
+            
+            if can_delete:
                 valid_tests.append(test)
+            else:
+                permission_errors.append(f"Test {test.id} (created by {test.created_by})")
         
         if permission_errors:
             logging.error(f"❌ Erros de permissão: {permission_errors}")
             return jsonify({
-                "error": "You can only delete tests you created",
+                "error": "You can only delete tests you created or from your municipality",
                 "details": f"Permission denied for: {', '.join(permission_errors)}"
             }), 403
 

@@ -1,4 +1,7 @@
 import re
+import unicodedata
+import logging
+from urllib.parse import unquote
 from flask import Blueprint, request, jsonify
 from app import db
 from app.models.city import City
@@ -81,7 +84,8 @@ def listar_municipios():
         cities = City.query.all()
     else:
         # Outros usuários só podem ver sua própria cidade
-        city_id = user.get("city_id")
+        # Usar tenant_id como fallback para city_id
+        city_id = user.get("tenant_id") or user.get("city_id")
         if not city_id:
             return jsonify({"erro": "Cidade não encontrada para este usuário"}), 404
         cities = City.query.filter_by(id=city_id).all()
@@ -188,7 +192,9 @@ def buscar_municipio(municipio_id):
     user = get_current_user_from_token()
     
     # Verifica se o usuário tem permissão para acessar esta cidade
-    if user.get("role") != "admin" and user.get("city_id") != municipio_id:
+    # Usar tenant_id como fallback para city_id
+    user_city_id = user.get("tenant_id") or user.get("city_id")
+    if user.get("role") != "admin" and user_city_id != municipio_id:
         return jsonify({"erro": "Você não tem permissão para acessar esta cidade"}), 403
 
     municipio = City.query.get(municipio_id)
@@ -212,7 +218,9 @@ def atualizar_municipio(municipio_id):
     user = get_current_user_from_token()
     
     # Verifica se o usuário tem permissão para modificar esta cidade
-    if user.get("role") != "admin" and user.get("city_id") != municipio_id:
+    # Usar tenant_id como fallback para city_id
+    user_city_id = user.get("tenant_id") or user.get("city_id")
+    if user.get("role") != "admin" and user_city_id != municipio_id:
         return jsonify({"erro": "Você não tem permissão para modificar esta cidade"}), 403
 
     municipio = City.query.get(municipio_id)
@@ -273,7 +281,8 @@ def listar_estados():
         cities = City.query.all()
     else:
         # Outros usuários só podem ver o estado de sua própria cidade
-        city_id = user.get("city_id")
+        # Usar tenant_id como fallback para city_id
+        city_id = user.get("tenant_id") or user.get("city_id")
         if not city_id:
             return jsonify({"erro": "Cidade não encontrada para este usuário"}), 404
         user_city = City.query.get(city_id)
@@ -300,17 +309,61 @@ def listar_estados():
 def listar_municipios_por_estado(state_name):
     user = get_current_user_from_token()
     
+    # Tentar decodificar URL (caso venha com encoding)
+    try:
+        state_name_decoded = unquote(state_name)
+    except:
+        state_name_decoded = state_name
+    
+    logging.info(f"[listar_municipios_por_estado] Role: {user.get('role')}")
+    logging.info(f"[listar_municipios_por_estado] state_name original: '{state_name}'")
+    logging.info(f"[listar_municipios_por_estado] state_name decoded: '{state_name_decoded}'")
+    
     if user.get("role") == "admin":
         # Admin pode ver todos os municípios do estado
         cities = City.query.filter_by(state=state_name).all()
+        if not cities:
+            # Tentar com o nome decodificado
+            cities = City.query.filter_by(state=state_name_decoded).all()
     else:
         # Outros usuários só podem ver sua própria cidade se pertencer ao estado
-        city_id = user.get("city_id")
+        # Usar tenant_id como fallback para city_id
+        city_id = user.get("tenant_id") or user.get("city_id")
+        
+        logging.info(f"[listar_municipios_por_estado] city_id: {city_id}")
+        
         if not city_id:
             return jsonify({"erro": "Cidade não encontrada para este usuário"}), 404
+        
         user_city = City.query.get(city_id)
-        if not user_city or user_city.state != state_name:
+        if not user_city:
+            logging.error(f"[listar_municipios_por_estado] Cidade não encontrada no banco: {city_id}")
+            return jsonify({"erro": "Cidade não encontrada"}), 404
+        
+        logging.info(f"[listar_municipios_por_estado] Cidade: {user_city.name}, Estado DB: '{user_city.state}'")
+        
+        # Função para normalizar strings (remover acentos, lowercase, trim)
+        def normalize_str(s):
+            if not s:
+                return ""
+            # Normalizar NFD (decompor acentos)
+            nfd = unicodedata.normalize('NFD', s)
+            # Remover marcas diacríticas
+            without_accents = ''.join(c for c in nfd if unicodedata.category(c) != 'Mn')
+            return without_accents.lower().strip()
+        
+        db_state_norm = normalize_str(user_city.state)
+        req_state_norm = normalize_str(state_name_decoded)
+        
+        logging.info(f"[listar_municipios_por_estado] DB normalizado: '{db_state_norm}', Request normalizado: '{req_state_norm}'")
+        
+        # Comparar estados (normalizado)
+        if db_state_norm != req_state_norm:
+            logging.warning(f"[listar_municipios_por_estado] Estados não correspondem! Acesso negado.")
             return jsonify({"erro": "Você não tem permissão para acessar municípios deste estado"}), 403
+        
+        logging.info(f"[listar_municipios_por_estado] Match! Retornando cidade do usuário.")
+        # Retorna apenas o município do usuário (não todos do estado)
         cities = [user_city]
 
     return jsonify([
@@ -323,3 +376,4 @@ def listar_municipios_por_estado(state_name):
         }
         for c in cities
     ])
+

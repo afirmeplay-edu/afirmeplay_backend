@@ -252,6 +252,44 @@ def deletar_escola(escola_id):
         if not escola:
             return jsonify({"erro": "Escola não encontrada"}), 404
 
+        # Verificar dependências antes de deletar
+        from app.models.studentClass import Class
+        from app.models.student import Student
+        from app.models.schoolTeacher import SchoolTeacher
+        
+        # Contar turmas vinculadas
+        turmas = Class.query.filter(Class._school_id == escola_id).count()
+        if turmas > 0:
+            return jsonify({
+                "erro": "Não é possível excluir a escola",
+                "mensagem": f"A escola possui {turmas} turma(s) vinculada(s). Exclua ou reatribua as turmas para outra escola antes de excluir.",
+                "dependencias": {
+                    "turmas": turmas
+                }
+            }), 400
+        
+        # Contar alunos vinculados
+        alunos = Student.query.filter(Student.school_id == escola_id).count()
+        if alunos > 0:
+            return jsonify({
+                "erro": "Não é possível excluir a escola",
+                "mensagem": f"A escola possui {alunos} aluno(s) vinculado(s). Exclua ou reatribua os alunos para outra escola antes de excluir.",
+                "dependencias": {
+                    "alunos": alunos
+                }
+            }), 400
+        
+        # Contar professores vinculados
+        professores = SchoolTeacher.query.filter(SchoolTeacher.school_id == escola_id).count()
+        if professores > 0:
+            return jsonify({
+                "erro": "Não é possível excluir a escola",
+                "mensagem": f"A escola possui {professores} professor(es) vinculado(s). Desvincule os professores antes de excluir a escola.",
+                "dependencias": {
+                    "professores": professores
+                }
+            }), 400
+
         try:
             db.session.delete(escola)
             db.session.commit()

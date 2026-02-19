@@ -38,11 +38,13 @@ ENV TZ=UTC
 RUN ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone
 
 WORKDIR /code
-COPY . .
+COPY requirements.txt .
 
 # Instalar dependências Python
 RUN pip install --no-cache-dir --upgrade pip && \
     pip install --no-cache-dir -r requirements.txt
+
+COPY . .
 
 EXPOSE 5000
 

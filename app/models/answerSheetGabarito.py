@@ -26,7 +26,7 @@ class AnswerSheetGabarito(db.Model):
     # Vinculação opcional com prova ou turma
     test_id = db.Column(db.String, db.ForeignKey('test.id'), nullable=True)
     class_id = db.Column(UUID(as_uuid=True), db.ForeignKey('class.id'), nullable=True)
-    grade_id = db.Column(UUID(as_uuid=True), db.ForeignKey('grade.id'), nullable=True)
+    grade_id = db.Column(UUID(as_uuid=True), db.ForeignKey('public.grade.id'), nullable=True)
     
     # Configuração do cartão
     num_questions = db.Column(db.Integer, nullable=False)

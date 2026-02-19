@@ -65,8 +65,10 @@ class CompetitionTemplate(db.Model):
 
     # Relacionamentos
     subject = db.relationship("Subject", backref="competition_templates")
+    # Removido backref para evitar erro ao deletar usuário (tabela competition_templates 
+    # incompleta - migration pendente). Quando a migration for executada, pode reativar.
     creator = db.relationship(
-        "User", foreign_keys=[created_by], backref="competition_templates"
+        "User", foreign_keys=[created_by]
     )
 
     # A relação com Competition é definida em Competition.template (backref='competitions')

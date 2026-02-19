@@ -20,7 +20,7 @@ class Test(db.Model):
     created_at = db.Column(db.TIMESTAMP, server_default=db.text('CURRENT_TIMESTAMP'))
     updated_at = db.Column(db.TIMESTAMP, server_default=db.text('CURRENT_TIMESTAMP'), onupdate=db.text('CURRENT_TIMESTAMP'))
     subject = db.Column(db.String, db.ForeignKey('subject.id'), nullable=True)
-    grade_id = db.Column(UUID(as_uuid=True), db.ForeignKey("grade.id"))
+    grade_id = db.Column(UUID(as_uuid=True), db.ForeignKey("public.grade.id"))
     
     # Novos campos
     municipalities = db.Column(JSON)  # Lista de municípios

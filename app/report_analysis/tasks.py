@@ -6,6 +6,7 @@ Tasks Celery para processamento assíncrono de relatórios
 import logging
 from typing import Optional, Dict, Any
 from celery import Task
+from sqlalchemy import text
 
 from app.report_analysis.celery_app import celery_app
 from app.report_analysis.services import ReportAggregateService
@@ -24,9 +25,75 @@ from app.services.ai_analysis_service import AIAnalysisService
 from app.models.test import Test
 from app.models.classTest import ClassTest
 from app.models.teacherClass import TeacherClass
+from app.models.school import School
+from app.models.teacher import Teacher
+from app.utils.tenant_middleware import city_id_to_schema_name
 from app import db
 
 logger = logging.getLogger(__name__)
+
+
+def _set_tenant_schema(schema: Optional[str]) -> None:
+    """Define o search_path do PostgreSQL para a task (multi-tenant)."""
+    if not schema or schema == 'public':
+        return
+    try:
+        search_path = f'"{schema}", public'
+        db.session.execute(text(f"SET search_path TO {search_path}"))
+        db.session.commit()
+        logger.debug(f"[TENANT] search_path definido para schema={schema}")
+        print(f"[TENANT] 🔧 search_path definido: {schema}")
+    except Exception as e:
+        logger.warning(f"[TENANT] Erro ao definir search_path: {e}")
+        print(f"[TENANT] ❌ Erro ao definir search_path: {e}")
+        db.session.rollback()
+
+
+def _get_schema_for_scope(scope_type: str, scope_id: Optional[str]) -> Optional[str]:
+    """
+    Determina o schema do tenant baseado no scope_type e scope_id.
+    
+    Args:
+        scope_type: Tipo de escopo ('overall', 'city', 'school', 'teacher')
+        scope_id: ID do escopo
+        
+    Returns:
+        Nome do schema ou None para 'overall'
+    """
+    if scope_type == 'overall' or not scope_id:
+        return None
+    
+    if scope_type == 'city':
+        # Para city, scope_id já é o city_id
+        schema = city_id_to_schema_name(scope_id)
+        print(f"[TENANT] 🏙️ Scope city: scope_id={scope_id} -> schema={schema}")
+        return schema
+    
+    elif scope_type == 'school':
+        # Para school, buscar city_id da escola
+        school = School.query.get(scope_id)
+        if school and school.city_id:
+            schema = city_id_to_schema_name(school.city_id)
+            print(f"[TENANT] 🏫 Scope school: school_id={scope_id}, city_id={school.city_id} -> schema={schema}")
+            return schema
+        else:
+            print(f"[TENANT] ⚠️ Escola {scope_id} não encontrada ou sem city_id")
+            return None
+    
+    elif scope_type == 'teacher':
+        # Para teacher, buscar city_id através da primeira escola do professor
+        from app.models.schoolTeacher import SchoolTeacher
+        school_teacher = SchoolTeacher.query.filter_by(teacher_id=scope_id).first()
+        if school_teacher:
+            school = School.query.get(school_teacher.school_id)
+            if school and school.city_id:
+                schema = city_id_to_schema_name(school.city_id)
+                print(f"[TENANT] 👨‍🏫 Scope teacher: teacher_id={scope_id}, school_id={school_teacher.school_id}, city_id={school.city_id} -> schema={schema}")
+                return schema
+        print(f"[TENANT] ⚠️ Professor {scope_id} não encontrado ou sem escola/cidade")
+        return None
+    
+    return None
 
 
 @celery_app.task(bind=True, max_retries=3, default_retry_delay=60)
@@ -52,6 +119,10 @@ def rebuild_report_for_scope(
     try:
         print(f"[REBUILD] 🚀 INÍCIO - test_id={test_id}, scope_type={scope_type}, scope_id={scope_id}")
         logger.info(f"Iniciando rebuild de relatório: test_id={test_id}, scope_type={scope_type}, scope_id={scope_id}")
+        
+        # Configurar schema do tenant ANTES de qualquer consulta ao banco
+        schema = _get_schema_for_scope(scope_type, scope_id)
+        _set_tenant_schema(schema)
         
         # Verificar se a avaliação existe
         print(f"[REBUILD] 🔍 Verificando se avaliação existe: test_id={test_id}")
@@ -337,6 +408,10 @@ def trigger_rebuild_if_needed(
     print(f"[TRIGGER_REBUILD] 🚀 INÍCIO - test_id={test_id}, scope_type={scope_type}, scope_id={scope_id}")
     
     from app.report_analysis.debounce import ReportDebounceService
+    
+    # Configurar schema do tenant ANTES de qualquer consulta ao banco
+    schema = _get_schema_for_scope(scope_type, scope_id)
+    _set_tenant_schema(schema)
     
     # Verificar debounce
     print(f"[TRIGGER_REBUILD] 🔍 Verificando debounce para test_id={test_id}")

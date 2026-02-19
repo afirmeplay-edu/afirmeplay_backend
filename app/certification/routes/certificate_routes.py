@@ -232,6 +232,7 @@ def get_student_certificates(student_id):
 
 @bp.route('/quantidade', methods=['GET'])
 @jwt_required()
+@requires_city_context
 def get_certificates_count():
     """Retorna a quantidade de certificados emitidos no escopo do usuário logado."""
     try:

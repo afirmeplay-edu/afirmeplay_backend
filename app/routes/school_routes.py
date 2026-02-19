@@ -410,6 +410,7 @@ def buscar_escola(escola_id):
 @bp.route('/city/<string:city_id>', methods=['GET'])
 @jwt_required()
 @role_required("admin", "diretor", "coordenador", "professor", "tecadm")
+@requires_city_context
 def buscar_escolas_por_cidade(city_id):
     try:
         user = get_current_user_from_token()

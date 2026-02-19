@@ -4,6 +4,7 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from app import db
 from app.decorators.role_required import get_current_user_from_token, role_required
+from app.decorators import requires_city_context
 from app.services.dashboard_service import DashboardService
 
 bp = Blueprint("dashboard_routes", __name__)
@@ -33,6 +34,7 @@ def dashboard_admin():
 @bp.route("/dashboard/tecadm", methods=["GET"])
 @jwt_required()
 @role_required("tecadm")
+@requires_city_context
 def dashboard_tecadm():
     try:
         user = get_current_user_from_token()
@@ -96,6 +98,7 @@ def dashboard_professor():
 
 @bp.route("/dashboard/avisos/quantidade", methods=["GET"])
 @jwt_required()
+@requires_city_context
 def avisos_quantidade():
     """
     Retorna a quantidade de avisos no escopo do usuário logado.
@@ -160,6 +163,7 @@ def dashboard_questoes():
 @bp.route("/dashboard/avaliacoes-recentes", methods=["GET"])
 @jwt_required()
 @role_required("admin", "tecadm", "diretor", "coordenador", "professor")
+@requires_city_context
 def avaliacoes_recentes():
     """
     Retorna avaliações recentes (type AVALIACAO) com: quantidade de alunos que
@@ -186,6 +190,7 @@ def avaliacoes_recentes():
 @bp.route("/dashboard/ranking-escolas", methods=["GET"])
 @jwt_required()
 @role_required("admin", "tecadm", "diretor", "coordenador")
+@requires_city_context
 def ranking_escolas():
     """
     Retorna ranking de escolas para card: média, quantidade de alunos,

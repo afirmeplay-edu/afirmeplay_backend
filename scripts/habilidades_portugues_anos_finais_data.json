@@ -1,0 +1,1299 @@
+{
+  "habilidades": [
+    {
+      "code": "EF69LP01",
+      "description": "Diferenciar a liberdade de expressão de discursos de ódio, posicionando-se contrariamente a esse tipo de discurso e vislumbrando possibilidades de denúncia quando for o caso.",
+      "subject_id": "4d29b4f1-7bd7-42c0-84d5-111dc7025b90",
+      "grade_id": null,
+      "comment": "Compartilhada: 6º, 7º, 8º e 9º Ano"
+    },
+    {
+      "code": "EF69LP02",
+      "description": "Analisar e comparar peças publicitárias variadas, de forma a perceber a articulação entre elas em campanhas, as especificidades das várias semioses e mídias, a adequação dessas peças ao público-alvo, aos objetivos do anunciante e à construção composicional e estilo dos gêneros em questão.",
+      "subject_id": "4d29b4f1-7bd7-42c0-84d5-111dc7025b90",
+      "grade_id": null,
+      "comment": "Compartilhada: 6º, 7º, 8º e 9º Ano"
+    },
+    {
+      "code": "EF69LP03",
+      "description": "Identificar, em notícias, o fato central, suas principais circunstâncias e eventuais decorrências; em reportagens e fotorreportagens, o fato ou a temática retratada e a perspectiva de abordagem; em entrevistas, os principais temas/subtemas abordados, explicações dadas ou teses defendidas.",
+      "subject_id": "4d29b4f1-7bd7-42c0-84d5-111dc7025b90",
+      "grade_id": null,
+      "comment": "Compartilhada: 6º, 7º, 8º e 9º Ano"
+    },
+    {
+      "code": "EF69LP04",
+      "description": "Identificar e avaliar teses/opiniões/posicionamentos explícitos e argumentos em textos argumentativos (carta de leitor, comentário, artigo de opinião, resenha crítica etc.), manifestando concordância ou discordância.",
+      "subject_id": "4d29b4f1-7bd7-42c0-84d5-111dc7025b90",
+      "grade_id": null,
+      "comment": "Compartilhada: 6º, 7º, 8º e 9º Ano"
+    },
+    {
+      "code": "EF69LP05",
+      "description": "Inferir e justificar, em textos multissemióticos – tirinhas, charges, memes, gifs etc. –, o efeito de humor, ironia e/ou crítica pelo uso ambíguo de palavras, expressões ou imagens ambíguas, de clichês, de recursos iconográficos, de pontuação etc.",
+      "subject_id": "4d29b4f1-7bd7-42c0-84d5-111dc7025b90",
+      "grade_id": null,
+      "comment": "Compartilhada: 6º, 7º, 8º e 9º Ano"
+    },
+    {
+      "code": "EF69LP06",
+      "description": "Produzir e publicar notícias, fotodenúncias, fotorreportagens, reportagens, reportagens multimidiáticas, infográficos, podcasts noticiosos, entrevistas, cartas de leitor, comentários, artigos de opinião de interesse local ou global, textos de apresentação e apreciação de produção cultural (resenhas e outros), vlogs noticiosos, culturais etc.",
+      "subject_id": "4d29b4f1-7bd7-42c0-84d5-111dc7025b90",
+      "grade_id": null,
+      "comment": "Compartilhada: 6º, 7º, 8º e 9º Ano"
+    },
+    {
+      "code": "EF69LP07",
+      "description": "Produzir textos em diferentes gêneros, considerando sua adequação ao contexto de produção e circulação – os enunciadores envolvidos, os objetivos, o gênero, o suporte, a circulação –, ao modo (escrito ou oral; imagem estática ou em movimento etc.), à variedade linguística e/ou semiótica apropriada a esse contexto, à construção da textualidade relacionada às propriedades textuais e do gênero.",
+      "subject_id": "4d29b4f1-7bd7-42c0-84d5-111dc7025b90",
+      "grade_id": null,
+      "comment": "Compartilhada: 6º, 7º, 8º e 9º Ano"
+    },
+    {
+      "code": "EF69LP08",
+      "description": "Revisar/editar o texto produzido – tendo em vista sua adequação ao contexto de produção, a mídia em questão, características do gênero, aspectos linguísticos, gramaticais, ortográficos e de pontuação – e a articulação da escrita com outras linguagens.",
+      "subject_id": "4d29b4f1-7bd7-42c0-84d5-111dc7025b90",
+      "grade_id": null,
+      "comment": "Compartilhada: 6º, 7º, 8º e 9º Ano"
+    },
+    {
+      "code": "EF69LP09",
+      "description": "Planejar uma campanha publicitária sobre questões/problemas, temas, causas significativas para a escola e/ou comunidade, a partir de um levantamento de material sobre o tema ou evento, da definição do público-alvo, do texto ou peça a ser produzido, pelo grupo ou individualmente, dos meios de circulação, da mídia a ser utilizada e da organização da socialização dos resultados.",
+      "subject_id": "4d29b4f1-7bd7-42c0-84d5-111dc7025b90",
+      "grade_id": null,
+      "comment": "Compartilhada: 6º, 7º, 8º e 9º Ano"
+    },
+    {
+      "code": "EF69LP10",
+      "description": "Produzir notícias para rádios, TV ou vídeos, podcasts noticiosos e de opinião, entrevistas, comentários, vlogs, booktrailers, documentários, dentre outros, com a formatação e diagramação (visual e sonora) adequada.",
+      "subject_id": "4d29b4f1-7bd7-42c0-84d5-111dc7025b90",
+      "grade_id": null,
+      "comment": "Compartilhada: 6º, 7º, 8º e 9º Ano"
+    },
+    {
+      "code": "EF69LP11",
+      "description": "Identificar e analisar posicionamentos defendidos e refutados na escuta de interações polêmicas em entrevistas, discussões e debates (televisivo, em sala de aula, em redes sociais etc.).",
+      "subject_id": "4d29b4f1-7bd7-42c0-84d5-111dc7025b90",
+      "grade_id": null,
+      "comment": "Compartilhada: 6º, 7º, 8º e 9º Ano"
+    },
+    {
+      "code": "EF69LP12",
+      "description": "Desenvolver estratégias de planejamento, elaboração, revisão, edição, reescrita/redesign (esses três últimos quando não for situação ao vivo) e avaliação de textos orais, áudio e/ou vídeo, considerando sua adequação aos contextos em que foram produzidos.",
+      "subject_id": "4d29b4f1-7bd7-42c0-84d5-111dc7025b90",
+      "grade_id": null,
+      "comment": "Compartilhada: 6º, 7º, 8º e 9º Ano"
+    },
+    {
+      "code": "EF69LP13",
+      "description": "Engajar-se e contribuir com a busca de conclusões comuns relativas a problemas, temas ou questões polêmicas de interesse da turma e/ou de relevância social.",
+      "subject_id": "4d29b4f1-7bd7-42c0-84d5-111dc7025b90",
+      "grade_id": null,
+      "comment": "Compartilhada: 6º, 7º, 8º e 9º Ano"
+    },
+    {
+      "code": "EF69LP14",
+      "description": "Formular perguntas e decompor, com a ajuda dos colegas e dos professores, tema/questão polêmica, explicações e ou argumentos relativos ao objeto de discussão para análise mais minuciosa e buscar em fontes diversas informações ou dados que permitam analisar partes da questão e compartilhá-los com a turma.",
+      "subject_id": "4d29b4f1-7bd7-42c0-84d5-111dc7025b90",
+      "grade_id": null,
+      "comment": "Compartilhada: 6º, 7º, 8º e 9º Ano"
+    },
+    {
+      "code": "EF69LP15",
+      "description": "Apresentar argumentos e contra-argumentos coerentes, respeitando os turnos de fala, na participação em discussões sobre temas controversos e/ou polêmicos.",
+      "subject_id": "4d29b4f1-7bd7-42c0-84d5-111dc7025b90",
+      "grade_id": null,
+      "comment": "Compartilhada: 6º, 7º, 8º e 9º Ano"
+    },
+    {
+      "code": "EF69LP16",
+      "description": "Analisar e utilizar as formas de composição dos gêneros jornalísticos da ordem do relatar, tais como notícias e reportagens.",
+      "subject_id": "4d29b4f1-7bd7-42c0-84d5-111dc7025b90",
+      "grade_id": null,
+      "comment": "Compartilhada: 6º, 7º, 8º e 9º Ano"
+    },
+    {
+      "code": "EF69LP17",
+      "description": "Perceber e analisar os recursos estilísticos e semióticos dos gêneros jornalísticos e publicitários.",
+      "subject_id": "4d29b4f1-7bd7-42c0-84d5-111dc7025b90",
+      "grade_id": null,
+      "comment": "Compartilhada: 6º, 7º, 8º e 9º Ano"
+    },
+    {
+      "code": "EF69LP18",
+      "description": "Utilizar, na escrita/reescrita de textos argumentativos, recursos linguísticos que marquem as relações de sentido entre parágrafos e enunciados do texto e operadores de conexão adequados aos tipos de argumento e à forma de composição de textos argumentativos.",
+      "subject_id": "4d29b4f1-7bd7-42c0-84d5-111dc7025b90",
+      "grade_id": null,
+      "comment": "Compartilhada: 6º, 7º, 8º e 9º Ano"
+    },
+    {
+      "code": "EF69LP19",
+      "description": "Analisar, em gêneros orais que envolvam argumentação, os efeitos de sentido de elementos típicos da modalidade falada, como a pausa, a entonação, o ritmo, a gestualidade e expressão facial, as hesitações etc.",
+      "subject_id": "4d29b4f1-7bd7-42c0-84d5-111dc7025b90",
+      "grade_id": null,
+      "comment": "Compartilhada: 6º, 7º, 8º e 9º Ano"
+    },
+    {
+      "code": "EF69LP20",
+      "description": "Identificar, tendo em vista o contexto de produção, a forma de organização dos textos normativos e legais (lei, código, estatuto, regimento etc.), a lógica de hierarquização de seus itens e subitens e suas partes.",
+      "subject_id": "4d29b4f1-7bd7-42c0-84d5-111dc7025b90",
+      "grade_id": null,
+      "comment": "Compartilhada: 6º, 7º, 8º e 9º Ano"
+    },
+    {
+      "code": "EF69LP21",
+      "description": "Posicionar-se em relação a conteúdos veiculados em práticas não institucionalizadas de participação social, sobretudo àquelas vinculadas a manifestações artísticas, produções culturais, intervenções urbanas e práticas próprias das culturas juvenis que pretendam denunciar, expor uma problemática ou \"sacudir\" a sensibilidade.",
+      "subject_id": "4d29b4f1-7bd7-42c0-84d5-111dc7025b90",
+      "grade_id": null,
+      "comment": "Compartilhada: 6º, 7º, 8º e 9º Ano"
+    },
+    {
+      "code": "EF69LP22",
+      "description": "Produzir, revisar e editar textos reivindicatórios ou propositivos sobre problemas que afetam a vida escolar ou da comunidade, justificando pontos de vista, reivindicações e detalhando propostas.",
+      "subject_id": "4d29b4f1-7bd7-42c0-84d5-111dc7025b90",
+      "grade_id": null,
+      "comment": "Compartilhada: 6º, 7º, 8º e 9º Ano"
+    },
+    {
+      "code": "EF69LP23",
+      "description": "Contribuir com a escrita de textos normativos, quando houver esse tipo de demanda na escola, utilizando conhecimentos sobre a organização e recursos linguísticos desse tipo de texto.",
+      "subject_id": "4d29b4f1-7bd7-42c0-84d5-111dc7025b90",
+      "grade_id": null,
+      "comment": "Compartilhada: 6º, 7º, 8º e 9º Ano"
+    },
+    {
+      "code": "EF69LP24",
+      "description": "Discutir casos, reais ou simulações, submetidos a juízo, que envolvam (supostos) desrespeitos a artigos, do código de defesa do consumidor, do código nacional de trânsito, de regulamentações da escola, dentre outros.",
+      "subject_id": "4d29b4f1-7bd7-42c0-84d5-111dc7025b90",
+      "grade_id": null,
+      "comment": "Compartilhada: 6º, 7º, 8º e 9º Ano"
+    },
+    {
+      "code": "EF69LP25",
+      "description": "Posicionar-se de forma crítica e fundamentada em relação a propostas de intervenção na escola e na comunidade.",
+      "subject_id": "4d29b4f1-7bd7-42c0-84d5-111dc7025b90",
+      "grade_id": null,
+      "comment": "Compartilhada: 6º, 7º, 8º e 9º Ano"
+    },
+    {
+      "code": "EF69LP26",
+      "description": "Tomar nota em discussões, debates, palestras, apresentação de propostas, reuniões, como forma de documentar o evento e apoiar a própria fala.",
+      "subject_id": "4d29b4f1-7bd7-42c0-84d5-111dc7025b90",
+      "grade_id": null,
+      "comment": "Compartilhada: 6º, 7º, 8º e 9º Ano"
+    },
+    {
+      "code": "EF69LP27",
+      "description": "Analisar, em textos argumentativos, os mecanismos de modalização, de forma a reconhecer o modo como o enunciador se posiciona diante do que é dito.",
+      "subject_id": "4d29b4f1-7bd7-42c0-84d5-111dc7025b90",
+      "grade_id": null,
+      "comment": "Compartilhada: 6º, 7º, 8º e 9º Ano"
+    },
+    {
+      "code": "EF69LP28",
+      "description": "Observar os mecanismos de modalização adequados aos textos jurídicos, as modalidades deônticas, que se referem ao eixo da conduta (obrigatoriedade/permissibilidade) e as modalidades apreciativas.",
+      "subject_id": "4d29b4f1-7bd7-42c0-84d5-111dc7025b90",
+      "grade_id": null,
+      "comment": "Compartilhada: 6º, 7º, 8º e 9º Ano"
+    },
+    {
+      "code": "EF69LP29",
+      "description": "Refletir sobre a relação entre os contextos de produção dos gêneros de divulgação científica e os aspectos relativos à construção composicional e às marcas linguísticas características desses gêneros.",
+      "subject_id": "4d29b4f1-7bd7-42c0-84d5-111dc7025b90",
+      "grade_id": null,
+      "comment": "Compartilhada: 6º, 7º, 8º e 9º Ano"
+    },
+    {
+      "code": "EF69LP30",
+      "description": "Comparar, com a ajuda do professor, conteúdos, dados e informações de diferentes fontes, levando em conta seus contextos de produção e referências, identificando coincidências, complementaridades e contradições.",
+      "subject_id": "4d29b4f1-7bd7-42c0-84d5-111dc7025b90",
+      "grade_id": null,
+      "comment": "Compartilhada: 6º, 7º, 8º e 9º Ano"
+    },
+    {
+      "code": "EF69LP31",
+      "description": "Utilizar pistas linguísticas – tais como \"em primeiro lugar\", \"por outro lado\", \"em resumo\", etc. – para compreender a hierarquização das proposições.",
+      "subject_id": "4d29b4f1-7bd7-42c0-84d5-111dc7025b90",
+      "grade_id": null,
+      "comment": "Compartilhada: 6º, 7º, 8º e 9º Ano"
+    },
+    {
+      "code": "EF69LP32",
+      "description": "Selecionar informações e dados relevantes de fontes diversas (impressas, digitais, orais etc.), avaliando a qualidade e a utilidade dessas fontes, e organizar, esquematicamente, com ajuda do professor, as informações necessárias.",
+      "subject_id": "4d29b4f1-7bd7-42c0-84d5-111dc7025b90",
+      "grade_id": null,
+      "comment": "Compartilhada: 6º, 7º, 8º e 9º Ano"
+    },
+    {
+      "code": "EF69LP33",
+      "description": "Articular o verbal com outras linguagens em textos multissemióticos, na organização e apresentação de informações.",
+      "subject_id": "4d29b4f1-7bd7-42c0-84d5-111dc7025b90",
+      "grade_id": null,
+      "comment": "Compartilhada: 6º, 7º, 8º e 9º Ano"
+    },
+    {
+      "code": "EF69LP34",
+      "description": "Grifar as partes essenciais do texto, tendo em vista os objetivos de leitura, produzir marginálias, ou tomar notas em outro suporte, como estratégia de leitura.",
+      "subject_id": "4d29b4f1-7bd7-42c0-84d5-111dc7025b90",
+      "grade_id": null,
+      "comment": "Compartilhada: 6º, 7º, 8º e 9º Ano"
+    },
+    {
+      "code": "EF69LP35",
+      "description": "Planejar textos de divulgação científica, a partir da elaboração de esquema que considere as pesquisas feitas anteriormente, de notas e sínteses de leituras ou de registros de experimentos ou de estudo de campo.",
+      "subject_id": "4d29b4f1-7bd7-42c0-84d5-111dc7025b90",
+      "grade_id": null,
+      "comment": "Compartilhada: 6º, 7º, 8º e 9º Ano"
+    },
+    {
+      "code": "EF69LP36",
+      "description": "Produzir, revisar e editar textos voltados para a divulgação do conhecimento e de dados e resultados de pesquisas.",
+      "subject_id": "4d29b4f1-7bd7-42c0-84d5-111dc7025b90",
+      "grade_id": null,
+      "comment": "Compartilhada: 6º, 7º, 8º e 9º Ano"
+    },
+    {
+      "code": "EF69LP37",
+      "description": "Produzir roteiros para elaboração de vídeos de diferentes tipos (vlog científico, vídeo-minuto, programa de rádio, podcasts) para divulgação de conhecimentos científicos e resultados de pesquisa.",
+      "subject_id": "4d29b4f1-7bd7-42c0-84d5-111dc7025b90",
+      "grade_id": null,
+      "comment": "Compartilhada: 6º, 7º, 8º e 9º Ano"
+    },
+    {
+      "code": "EF69LP38",
+      "description": "Organizar os dados e informações pesquisados em apresentações orais, tendo em vista o contexto de produção e as características do gênero.",
+      "subject_id": "4d29b4f1-7bd7-42c0-84d5-111dc7025b90",
+      "grade_id": null,
+      "comment": "Compartilhada: 6º, 7º, 8º e 9º Ano"
+    },
+    {
+      "code": "EF69LP39",
+      "description": "Engajar-se ativamente em processos de planejamento, revisão/edição e reescrita tendo em vista as restrições temáticas, composicionais e estilísticas dos textos pretendidos e as configurações da situação de produção.",
+      "subject_id": "4d29b4f1-7bd7-42c0-84d5-111dc7025b90",
+      "grade_id": null,
+      "comment": "Compartilhada: 6º, 7º, 8º e 9º Ano"
+    },
+    {
+      "code": "EF69LP40",
+      "description": "Analisar, em textos de divulgação científica e outros gêneros, a organização e o tratamento da informação, bem como os recursos de coesão e as marcas linguísticas de impessoalização.",
+      "subject_id": "4d29b4f1-7bd7-42c0-84d5-111dc7025b90",
+      "grade_id": null,
+      "comment": "Compartilhada: 6º, 7º, 8º e 9º Ano"
+    },
+    {
+      "code": "EF69LP41",
+      "description": "Usar adequadamente ferramentas de apoio a apresentações orais, escolhendo e usando tipos e tamanhos de fontes que permitam boa visualização, ocupando os slides de forma harmônica.",
+      "subject_id": "4d29b4f1-7bd7-42c0-84d5-111dc7025b90",
+      "grade_id": null,
+      "comment": "Compartilhada: 6º, 7º, 8º e 9º Ano"
+    },
+    {
+      "code": "EF69LP42",
+      "description": "Analisar a construção composicional dos textos pertencentes a gêneros relacionados à divulgação de conhecimentos: título, introdução, desenvolvimento, conclusão etc.",
+      "subject_id": "4d29b4f1-7bd7-42c0-84d5-111dc7025b90",
+      "grade_id": null,
+      "comment": "Compartilhada: 6º, 7º, 8º e 9º Ano"
+    },
+    {
+      "code": "EF69LP43",
+      "description": "Identificar e utilizar os modos de introdução de outras vozes no texto – citação literal e sua formatação e paráfrase.",
+      "subject_id": "4d29b4f1-7bd7-42c0-84d5-111dc7025b90",
+      "grade_id": null,
+      "comment": "Compartilhada: 6º, 7º, 8º e 9º Ano"
+    },
+    {
+      "code": "EF69LP44",
+      "description": "Inferir a presença de valores sociais, culturais e humanos e de diferentes visões de mundo, em textos literários.",
+      "subject_id": "4d29b4f1-7bd7-42c0-84d5-111dc7025b90",
+      "grade_id": null,
+      "comment": "Compartilhada: 6º, 7º, 8º e 9º Ano"
+    },
+    {
+      "code": "EF69LP45",
+      "description": "Posicionar-se criticamente em relação a textos pertencentes a gêneros como quarta-capa, programa (de teatro, dança, concerto), sinopse, resenha crítica, comentário em blog/vlog cultural etc.",
+      "subject_id": "4d29b4f1-7bd7-42c0-84d5-111dc7025b90",
+      "grade_id": null,
+      "comment": "Compartilhada: 6º, 7º, 8º e 9º Ano"
+    },
+    {
+      "code": "EF69LP46",
+      "description": "Participar de práticas de compartilhamento de leitura/recepção de obras literárias/manifestações artísticas, como rodas de leitura, clubes de leitura, eventos de contação de histórias, de leituras dramáticas etc.",
+      "subject_id": "4d29b4f1-7bd7-42c0-84d5-111dc7025b90",
+      "grade_id": null,
+      "comment": "Compartilhada: 6º, 7º, 8º e 9º Ano"
+    },
+    {
+      "code": "EF69LP47",
+      "description": "Analisar, em textos narrativos ficcionais, as diferentes formas de composição próprias de cada gênero, os recursos coesivos e a escolha lexical típica de cada gênero.",
+      "subject_id": "4d29b4f1-7bd7-42c0-84d5-111dc7025b90",
+      "grade_id": null,
+      "comment": "Compartilhada: 6º, 7º, 8º e 9º Ano"
+    },
+    {
+      "code": "EF69LP48",
+      "description": "Interpretar, em poemas, efeitos produzidos pelo uso de recursos expressivos sonoros, semânticos, gráfico-espaciais e imagens poéticas.",
+      "subject_id": "4d29b4f1-7bd7-42c0-84d5-111dc7025b90",
+      "grade_id": null,
+      "comment": "Compartilhada: 6º, 7º, 8º e 9º Ano"
+    },
+    {
+      "code": "EF69LP49",
+      "description": "Mostrar-se interessado e envolvido pela leitura de livros de literatura e por outras produções culturais do campo artístico-literário.",
+      "subject_id": "4d29b4f1-7bd7-42c0-84d5-111dc7025b90",
+      "grade_id": null,
+      "comment": "Compartilhada: 6º, 7º, 8º e 9º Ano"
+    },
+    {
+      "code": "EF69LP50",
+      "description": "Elaborar texto teatral, a partir da adaptação de romances, contos, mitos, narrativas de enigma e de aventura, novelas, biografias romanceadas, crônicas, dentre outros.",
+      "subject_id": "4d29b4f1-7bd7-42c0-84d5-111dc7025b90",
+      "grade_id": null,
+      "comment": "Compartilhada: 6º, 7º, 8º e 9º Ano"
+    },
+    {
+      "code": "EF69LP51",
+      "description": "Engajar-se ativamente nos processos de planejamento, textualização, revisão/edição e reescrita, tendo em vista as restrições temáticas, composicionais e estilísticas dos textos pretendidos e as configurações da situação de produção.",
+      "subject_id": "4d29b4f1-7bd7-42c0-84d5-111dc7025b90",
+      "grade_id": null,
+      "comment": "Compartilhada: 6º, 7º, 8º e 9º Ano"
+    },
+    {
+      "code": "EF69LP52",
+      "description": "Representar cenas ou textos dramáticos, considerando, na caracterização dos personagens, os aspectos linguísticos e paralinguísticos das falas (timbre e tom de voz, pausas e hesitações, entonação e expressividade, variedades e registros linguísticos).",
+      "subject_id": "4d29b4f1-7bd7-42c0-84d5-111dc7025b90",
+      "grade_id": null,
+      "comment": "Compartilhada: 6º, 7º, 8º e 9º Ano"
+    },
+    {
+      "code": "EF69LP53",
+      "description": "Ler em voz alta textos literários diversos, bem como leituras orais capituladas, compartilhando com os colegas os sentidos produzidos.",
+      "subject_id": "4d29b4f1-7bd7-42c0-84d5-111dc7025b90",
+      "grade_id": null,
+      "comment": "Compartilhada: 6º, 7º, 8º e 9º Ano"
+    },
+    {
+      "code": "EF69LP54",
+      "description": "Analisar os efeitos de sentido decorrentes da interação entre os elementos linguísticos e os recursos paralinguísticos e cinésicos.",
+      "subject_id": "4d29b4f1-7bd7-42c0-84d5-111dc7025b90",
+      "grade_id": null,
+      "comment": "Compartilhada: 6º, 7º, 8º e 9º Ano"
+    },
+    {
+      "code": "EF69LP55",
+      "description": "Reconhecer as variedades da língua falada, o conceito de norma-padrão e o de preconceito linguístico.",
+      "subject_id": "4d29b4f1-7bd7-42c0-84d5-111dc7025b90",
+      "grade_id": null,
+      "comment": "Compartilhada: 6º, 7º, 8º e 9º Ano"
+    },
+    {
+      "code": "EF69LP56",
+      "description": "Fazer uso consciente e reflexivo de regras e normas da norma-padrão em situações de fala e escrita nas quais ela deve ser usada.",
+      "subject_id": "4d29b4f1-7bd7-42c0-84d5-111dc7025b90",
+      "grade_id": null,
+      "comment": "Compartilhada: 6º, 7º, 8º e 9º Ano"
+    },
+    {
+      "code": "EF67LP01",
+      "description": "Analisar a estrutura e funcionamento dos hiperlinks em textos noticiosos publicados na Web e vislumbrar possibilidades de uma escrita hipertextual.",
+      "subject_id": "4d29b4f1-7bd7-42c0-84d5-111dc7025b90",
+      "grade_id": null,
+      "comment": "Compartilhada: 6º e 7º Ano"
+    },
+    {
+      "code": "EF67LP02",
+      "description": "Explorar o espaço reservado ao leitor nos jornais, revistas, impressos e on-line, sites noticiosos etc., destacando a presença de valores sociais e culturais e o posicionamento ético.",
+      "subject_id": "4d29b4f1-7bd7-42c0-84d5-111dc7025b90",
+      "grade_id": null,
+      "comment": "Compartilhada: 6º e 7º Ano"
+    },
+    {
+      "code": "EF67LP03",
+      "description": "Comparar informações sobre um mesmo fato veiculadas em diferentes mídias e concluir sobre qual é mais confiável e por quê.",
+      "subject_id": "4d29b4f1-7bd7-42c0-84d5-111dc7025b90",
+      "grade_id": null,
+      "comment": "Compartilhada: 6º e 7º Ano"
+    },
+    {
+      "code": "EF67LP04",
+      "description": "Distinguir, em segmentos descontínuos de textos, fato da opinião enunciada em relação a esse fato.",
+      "subject_id": "4d29b4f1-7bd7-42c0-84d5-111dc7025b90",
+      "grade_id": null,
+      "comment": "Compartilhada: 6º e 7º Ano"
+    },
+    {
+      "code": "EF67LP05",
+      "description": "Identificar e avaliar teses/opiniões/posicionamentos explícitos e argumentos em textos argumentativos (carta de leitor, comentário, artigo de opinião etc.).",
+      "subject_id": "4d29b4f1-7bd7-42c0-84d5-111dc7025b90",
+      "grade_id": null,
+      "comment": "Compartilhada: 6º e 7º Ano"
+    },
+    {
+      "code": "EF67LP06",
+      "description": "Identificar os efeitos de sentido provocados pela seleção lexical, topicalização de elementos e seleção e hierarquização de informações em textos noticiosos.",
+      "subject_id": "4d29b4f1-7bd7-42c0-84d5-111dc7025b90",
+      "grade_id": null,
+      "comment": "Compartilhada: 6º e 7º Ano"
+    },
+    {
+      "code": "EF67LP07",
+      "description": "Identificar o uso de recursos persuasivos em textos argumentativos diversos (como a escolha lexical, o uso de adjetivos e advérbios avaliativos e construções que denotam certeza, probabilidade, dúvida etc.).",
+      "subject_id": "4d29b4f1-7bd7-42c0-84d5-111dc7025b90",
+      "grade_id": null,
+      "comment": "Compartilhada: 6º e 7º Ano"
+    },
+    {
+      "code": "EF67LP08",
+      "description": "Identificar os efeitos de sentido devidos à escolha de imagens estáticas, sequenciação ou sobreposição de imagens, definição de figura/fundo, ângulo, profundidade de campo, foco, tonalidade, luz, uso de cores etc.",
+      "subject_id": "4d29b4f1-7bd7-42c0-84d5-111dc7025b90",
+      "grade_id": null,
+      "comment": "Compartilhada: 6º e 7º Ano"
+    },
+    {
+      "code": "EF67LP09",
+      "description": "Planejar notícia impressa e para circulação em outras mídias, tendo em vista as condições de produção, do texto.",
+      "subject_id": "4d29b4f1-7bd7-42c0-84d5-111dc7025b90",
+      "grade_id": null,
+      "comment": "Compartilhada: 6º e 7º Ano"
+    },
+    {
+      "code": "EF67LP10",
+      "description": "Produzir notícia impressa tendo em vista características do gênero – título ou manchete com verbo no tempo presente, lide, progressão dada/nova, organização em parágrafos, citações de falas de entrevistados por meio de discurso direto e indireto etc.",
+      "subject_id": "4d29b4f1-7bd7-42c0-84d5-111dc7025b90",
+      "grade_id": null,
+      "comment": "Compartilhada: 6º e 7º Ano"
+    },
+    {
+      "code": "EF67LP11",
+      "description": "Planejar, roteirizar e produzir podcasts noticiosos e de opinião, entrevistas, comentários, vlogs etc.",
+      "subject_id": "4d29b4f1-7bd7-42c0-84d5-111dc7025b90",
+      "grade_id": null,
+      "comment": "Compartilhada: 6º e 7º Ano"
+    },
+    {
+      "code": "EF67LP12",
+      "description": "Produzir resenhas críticas, vlogs, podcasts literários, playlists comentadas de obras literárias, filmes, séries, games, dentre outros.",
+      "subject_id": "4d29b4f1-7bd7-42c0-84d5-111dc7025b90",
+      "grade_id": null,
+      "comment": "Compartilhada: 6º e 7º Ano"
+    },
+    {
+      "code": "EF67LP13",
+      "description": "Produzir, revisar e editar textos publicitários, levando em conta o contexto de produção dado, explorando recursos multissemióticos.",
+      "subject_id": "4d29b4f1-7bd7-42c0-84d5-111dc7025b90",
+      "grade_id": null,
+      "comment": "Compartilhada: 6º e 7º Ano"
+    },
+    {
+      "code": "EF67LP14",
+      "description": "Definir o contexto de produção da entrevista (objetivos, o que se pretende conseguir, escolha do entrevistado, mapa de roteiro etc.).",
+      "subject_id": "4d29b4f1-7bd7-42c0-84d5-111dc7025b90",
+      "grade_id": null,
+      "comment": "Compartilhada: 6º e 7º Ano"
+    },
+    {
+      "code": "EF67LP15",
+      "description": "Identificar a proibição de propagandas de produtos nocivos à saúde e a influência da propaganda no consumo.",
+      "subject_id": "4d29b4f1-7bd7-42c0-84d5-111dc7025b90",
+      "grade_id": null,
+      "comment": "Compartilhada: 6º e 7º Ano"
+    },
+    {
+      "code": "EF67LP16",
+      "description": "Explorar e analisar espaços de reclamação de direitos e de envio de solicitações (ouvidorias, SAC, canais de ligue-denúncia, portais de prefeituras etc.).",
+      "subject_id": "4d29b4f1-7bd7-42c0-84d5-111dc7025b90",
+      "grade_id": null,
+      "comment": "Compartilhada: 6º e 7º Ano"
+    },
+    {
+      "code": "EF67LP17",
+      "description": "Analisar, a partir do contexto de produção, a forma de organização das cartas de solicitação e de reclamação.",
+      "subject_id": "4d29b4f1-7bd7-42c0-84d5-111dc7025b90",
+      "grade_id": null,
+      "comment": "Compartilhada: 6º e 7º Ano"
+    },
+    {
+      "code": "EF67LP18",
+      "description": "Identificar o objeto da reclamação e/ou da solicitação e os argumentos e explicações utilizados para sustentá-la.",
+      "subject_id": "4d29b4f1-7bd7-42c0-84d5-111dc7025b90",
+      "grade_id": null,
+      "comment": "Compartilhada: 6º e 7º Ano"
+    },
+    {
+      "code": "EF67LP19",
+      "description": "Realizar levantamento de questões, problemas ou demandas que afetem a vida da comunidade e posicionar-se.",
+      "subject_id": "4d29b4f1-7bd7-42c0-84d5-111dc7025b90",
+      "grade_id": null,
+      "comment": "Compartilhada: 6º e 7º Ano"
+    },
+    {
+      "code": "EF67LP20",
+      "description": "Realizar pesquisa, a partir de recortes e questões definidos, usando fontes indicadas e abertas.",
+      "subject_id": "4d29b4f1-7bd7-42c0-84d5-111dc7025b90",
+      "grade_id": null,
+      "comment": "Compartilhada: 6º e 7º Ano"
+    },
+    {
+      "code": "EF67LP21",
+      "description": "Divulgar resultados de pesquisas por meio de apresentações orais, verbetes de enciclopédias colaborativas, reportagens de divulgação científica, vlogs científicos, vídeos de diferentes tipos etc.",
+      "subject_id": "4d29b4f1-7bd7-42c0-84d5-111dc7025b90",
+      "grade_id": null,
+      "comment": "Compartilhada: 6º e 7º Ano"
+    },
+    {
+      "code": "EF67LP22",
+      "description": "Produzir resumos, a partir das notas e/ou esquemas feitos, com o uso adequado de paráfrases e citações.",
+      "subject_id": "4d29b4f1-7bd7-42c0-84d5-111dc7025b90",
+      "grade_id": null,
+      "comment": "Compartilhada: 6º e 7º Ano"
+    },
+    {
+      "code": "EF67LP23",
+      "description": "Respeitar os turnos de fala, na participação em conversações e em discussões ou atividades coletivas, na sala de aula e na escola.",
+      "subject_id": "4d29b4f1-7bd7-42c0-84d5-111dc7025b90",
+      "grade_id": null,
+      "comment": "Compartilhada: 6º e 7º Ano"
+    },
+    {
+      "code": "EF67LP24",
+      "description": "Tomar nota de aulas, apresentações orais, entrevistas (ao vivo, áudio, TV, vídeo), identificando e hierarquizando as informações principais, tendo em vista o objetivo do registro.",
+      "subject_id": "4d29b4f1-7bd7-42c0-84d5-111dc7025b90",
+      "grade_id": null,
+      "comment": "Compartilhada: 6º e 7º Ano"
+    },
+    {
+      "code": "EF67LP25",
+      "description": "Reconhecer e utilizar os critérios de organização topológica (do geral para o específico, do específico para o geral etc.) e de organização cronológica.",
+      "subject_id": "4d29b4f1-7bd7-42c0-84d5-111dc7025b90",
+      "grade_id": null,
+      "comment": "Compartilhada: 6º e 7º Ano"
+    },
+    {
+      "code": "EF67LP26",
+      "description": "Reconhecer a estrutura de verbetes de enciclopédias e dicionários.",
+      "subject_id": "4d29b4f1-7bd7-42c0-84d5-111dc7025b90",
+      "grade_id": null,
+      "comment": "Compartilhada: 6º e 7º Ano"
+    },
+    {
+      "code": "EF67LP27",
+      "description": "Analisar, entre os textos literários e entre estes e outras manifestações artísticas, referências explícitas ou implícitas a outros textos.",
+      "subject_id": "4d29b4f1-7bd7-42c0-84d5-111dc7025b90",
+      "grade_id": null,
+      "comment": "Compartilhada: 6º e 7º Ano"
+    },
+    {
+      "code": "EF67LP28",
+      "description": "Ler, de forma autônoma, e compreender – selecionando procedimentos e estratégias de leitura adequados a diferentes objetivos – romances infanto-juvenis, contos populares, contos de terror, lendas brasileiras, indígenas e africanas, narrativas de aventuras, narrativas de enigma, mitos, crônicas, autobiografias, histórias em quadrinhos, mangás, poemas de forma livre e fixa, dentre outros.",
+      "subject_id": "4d29b4f1-7bd7-42c0-84d5-111dc7025b90",
+      "grade_id": null,
+      "comment": "Compartilhada: 6º e 7º Ano"
+    },
+    {
+      "code": "EF67LP29",
+      "description": "Identificar, em texto dramático, personagem, ato, cena, fala e indicações cênicas e a organização do texto: enredo, conflito, ideias principais, pontos de vista, universos de referência.",
+      "subject_id": "4d29b4f1-7bd7-42c0-84d5-111dc7025b90",
+      "grade_id": null,
+      "comment": "Compartilhada: 6º e 7º Ano"
+    },
+    {
+      "code": "EF67LP30",
+      "description": "Criar narrativas ficcionais, tais como contos populares, contos de suspense, mistério, terror, humor, narrativas de enigma, crônicas, histórias em quadrinhos, dentre outros, que explorem diferentes modos de representação.",
+      "subject_id": "4d29b4f1-7bd7-42c0-84d5-111dc7025b90",
+      "grade_id": null,
+      "comment": "Compartilhada: 6º e 7º Ano"
+    },
+    {
+      "code": "EF67LP31",
+      "description": "Criar poemas compostos por versos livres e de forma fixa (como quadras e sonetos), utilizando recursos visuais, semânticos e sonoros, tais como cadências, ritmos e rimas.",
+      "subject_id": "4d29b4f1-7bd7-42c0-84d5-111dc7025b90",
+      "grade_id": null,
+      "comment": "Compartilhada: 6º e 7º Ano"
+    },
+    {
+      "code": "EF67LP32",
+      "description": "Escrever palavras com correção ortográfica, obedecendo às convenções da língua escrita.",
+      "subject_id": "4d29b4f1-7bd7-42c0-84d5-111dc7025b90",
+      "grade_id": null,
+      "comment": "Compartilhada: 6º e 7º Ano"
+    },
+    {
+      "code": "EF67LP33",
+      "description": "Pontuar textos adequadamente.",
+      "subject_id": "4d29b4f1-7bd7-42c0-84d5-111dc7025b90",
+      "grade_id": null,
+      "comment": "Compartilhada: 6º e 7º Ano"
+    },
+    {
+      "code": "EF67LP34",
+      "description": "Formar antônimos com acréscimo de prefixos que expressam noção de negação.",
+      "subject_id": "4d29b4f1-7bd7-42c0-84d5-111dc7025b90",
+      "grade_id": null,
+      "comment": "Compartilhada: 6º e 7º Ano"
+    },
+    {
+      "code": "EF67LP35",
+      "description": "Distinguir palavras derivadas por acréscimo de afixos e palavras compostas.",
+      "subject_id": "4d29b4f1-7bd7-42c0-84d5-111dc7025b90",
+      "grade_id": null,
+      "comment": "Compartilhada: 6º e 7º Ano"
+    },
+    {
+      "code": "EF67LP36",
+      "description": "Utilizar, ao produzir texto, recursos de coesão referencial (léxica e pronominal) e sequencial e outros recursos expressivos adequados ao gênero textual.",
+      "subject_id": "4d29b4f1-7bd7-42c0-84d5-111dc7025b90",
+      "grade_id": null,
+      "comment": "Compartilhada: 6º e 7º Ano"
+    },
+    {
+      "code": "EF67LP37",
+      "description": "Analisar, em diferentes textos, os efeitos de sentido decorrentes do uso de recursos linguístico-discursivos de prescrição, causalidade, sequenciação e outros.",
+      "subject_id": "4d29b4f1-7bd7-42c0-84d5-111dc7025b90",
+      "grade_id": null,
+      "comment": "Compartilhada: 6º e 7º Ano"
+    },
+    {
+      "code": "EF67LP38",
+      "description": "Analisar os efeitos de sentido do uso de figuras de linguagem, como comparação, metáfora, metonímia, personificação, hipérbole, dentre outras.",
+      "subject_id": "4d29b4f1-7bd7-42c0-84d5-111dc7025b90",
+      "grade_id": null,
+      "comment": "Compartilhada: 6º e 7º Ano"
+    },
+    {
+      "code": "EF89LP01",
+      "description": "Analisar os interesses que movem o campo jornalístico, os efeitos das novas tecnologias no campo e as condições que fazem da informação uma mercadoria, de forma a adotar atitude crítica frente aos textos jornalísticos.",
+      "subject_id": "4d29b4f1-7bd7-42c0-84d5-111dc7025b90",
+      "grade_id": null,
+      "comment": "Compartilhada: 8º e 9º Ano"
+    },
+    {
+      "code": "EF89LP02",
+      "description": "Analisar diferentes práticas (curtir, compartilhar, comentar, curar etc.) e textos pertencentes a diferentes gêneros da cultura digital (meme, gif, comentário, charge digital etc.) envolvidos no trato com a informação e opinião.",
+      "subject_id": "4d29b4f1-7bd7-42c0-84d5-111dc7025b90",
+      "grade_id": null,
+      "comment": "Compartilhada: 8º e 9º Ano"
+    },
+    {
+      "code": "EF89LP03",
+      "description": "Analisar textos de opinião (artigos de opinião, editoriais, cartas de leitores, comentários, posts de blog e de redes sociais, charges, memes, gifs etc.) e posicionar-se de forma crítica e fundamentada, ética e respeitosa frente a fatos e opiniões relacionados a esses textos.",
+      "subject_id": "4d29b4f1-7bd7-42c0-84d5-111dc7025b90",
+      "grade_id": null,
+      "comment": "Compartilhada: 8º e 9º Ano"
+    },
+    {
+      "code": "EF89LP04",
+      "description": "Identificar e avaliar teses/opiniões/posicionamentos explícitos e implícitos, argumentos e contra-argumentos em textos argumentativos do campo.",
+      "subject_id": "4d29b4f1-7bd7-42c0-84d5-111dc7025b90",
+      "grade_id": null,
+      "comment": "Compartilhada: 8º e 9º Ano"
+    },
+    {
+      "code": "EF89LP05",
+      "description": "Analisar o efeito de sentido produzido pelo uso, em textos, de recursos de persuasão (escolha lexical, construções gramaticais, modalizadores etc.).",
+      "subject_id": "4d29b4f1-7bd7-42c0-84d5-111dc7025b90",
+      "grade_id": null,
+      "comment": "Compartilhada: 8º e 9º Ano"
+    },
+    {
+      "code": "EF89LP06",
+      "description": "Analisar o uso de recursos persuasivos em textos argumentativos diversos (como a escolha lexical, o uso de adjetivos e advérbios avaliativos e construções que denotam certeza, probabilidade, dúvida etc.).",
+      "subject_id": "4d29b4f1-7bd7-42c0-84d5-111dc7025b90",
+      "grade_id": null,
+      "comment": "Compartilhada: 8º e 9º Ano"
+    },
+    {
+      "code": "EF89LP07",
+      "description": "Analisar, em notícias, reportagens e peças publicitárias, a distinção entre fato e opinião, e os efeitos de sentido do uso de formas verbais, modalizadores etc.",
+      "subject_id": "4d29b4f1-7bd7-42c0-84d5-111dc7025b90",
+      "grade_id": null,
+      "comment": "Compartilhada: 8º e 9º Ano"
+    },
+    {
+      "code": "EF89LP08",
+      "description": "Planejar reportagem impressa e em outras mídias (rádio ou TV/vídeo, sites), tendo em vista as condições de produção do texto.",
+      "subject_id": "4d29b4f1-7bd7-42c0-84d5-111dc7025b90",
+      "grade_id": null,
+      "comment": "Compartilhada: 8º e 9º Ano"
+    },
+    {
+      "code": "EF89LP09",
+      "description": "Produzir reportagem impressa, com título, linha fina (optativa), organização composicional (expositiva, interpretativa e/ou opinativa), progressão temática e uso de recursos linguísticos compatíveis com as escolhas feitas.",
+      "subject_id": "4d29b4f1-7bd7-42c0-84d5-111dc7025b90",
+      "grade_id": null,
+      "comment": "Compartilhada: 8º e 9º Ano"
+    },
+    {
+      "code": "EF89LP10",
+      "description": "Planejar, produzir e editar artigos de opinião, tendo em vista o contexto de produção dado, assumindo posição diante de tema polêmico, argumentando de acordo com a estrutura própria desse tipo de texto.",
+      "subject_id": "4d29b4f1-7bd7-42c0-84d5-111dc7025b90",
+      "grade_id": null,
+      "comment": "Compartilhada: 8º e 9º Ano"
+    },
+    {
+      "code": "EF89LP11",
+      "description": "Produzir, revisar e editar peças e campanhas publicitárias, envolvendo o uso articulado e complementar de diferentes peças publicitárias.",
+      "subject_id": "4d29b4f1-7bd7-42c0-84d5-111dc7025b90",
+      "grade_id": null,
+      "comment": "Compartilhada: 8º e 9º Ano"
+    },
+    {
+      "code": "EF89LP12",
+      "description": "Planejar, produzir e editar textos publicitários, levando em conta o contexto de produção dado e o uso de recursos multissemióticos.",
+      "subject_id": "4d29b4f1-7bd7-42c0-84d5-111dc7025b90",
+      "grade_id": null,
+      "comment": "Compartilhada: 8º e 9º Ano"
+    },
+    {
+      "code": "EF89LP13",
+      "description": "Analisar, em debates, entrevistas, e outros gêneros, a polidez (estratégias de atenuação e de intensificação), o uso de operadores argumentativos e de modalizadores.",
+      "subject_id": "4d29b4f1-7bd7-42c0-84d5-111dc7025b90",
+      "grade_id": null,
+      "comment": "Compartilhada: 8º e 9º Ano"
+    },
+    {
+      "code": "EF89LP14",
+      "description": "Analisar, em textos argumentativos e propositivos, os movimentos argumentativos de sustentação, refutação e negociação e os tipos de argumentos.",
+      "subject_id": "4d29b4f1-7bd7-42c0-84d5-111dc7025b90",
+      "grade_id": null,
+      "comment": "Compartilhada: 8º e 9º Ano"
+    },
+    {
+      "code": "EF89LP15",
+      "description": "Utilizar, nos debates, operadores argumentativos que marcam a defesa de ideia e de diálogo com a tese do outro: concordância ou discordância parcial ou total, etc.",
+      "subject_id": "4d29b4f1-7bd7-42c0-84d5-111dc7025b90",
+      "grade_id": null,
+      "comment": "Compartilhada: 8º e 9º Ano"
+    },
+    {
+      "code": "EF89LP16",
+      "description": "Analisar a modalização realizada em textos noticiosos e argumentativos, por meio das modalidades apreciativas, viabilizadas por classes e estruturas gramaticais.",
+      "subject_id": "4d29b4f1-7bd7-42c0-84d5-111dc7025b90",
+      "grade_id": null,
+      "comment": "Compartilhada: 8º e 9º Ano"
+    },
+    {
+      "code": "EF89LP17",
+      "description": "Relacionar textos e documentos legais e normativos de âmbito universal, nacional, local ou escolar que envolvam a definição de direitos e deveres.",
+      "subject_id": "4d29b4f1-7bd7-42c0-84d5-111dc7025b90",
+      "grade_id": null,
+      "comment": "Compartilhada: 8º e 9º Ano"
+    },
+    {
+      "code": "EF89LP18",
+      "description": "Explorar e analisar instâncias e canais de participação disponíveis na escola, na comunidade, ou via internet.",
+      "subject_id": "4d29b4f1-7bd7-42c0-84d5-111dc7025b90",
+      "grade_id": null,
+      "comment": "Compartilhada: 8º e 9º Ano"
+    },
+    {
+      "code": "EF89LP19",
+      "description": "Analisar, no contexto de produção, a forma de organização das cartas de solicitação e de reclamação, abaixo-assinados e das propostas, considerando as marcas linguísticas e os argumentos selecionados.",
+      "subject_id": "4d29b4f1-7bd7-42c0-84d5-111dc7025b90",
+      "grade_id": null,
+      "comment": "Compartilhada: 8º e 9º Ano"
+    },
+    {
+      "code": "EF89LP20",
+      "description": "Comparar as propostas políticas e de solução de problemas, identificando o que se pretende fazer/implementar, por que (motivações, justificativas), para que (objetivos, benefícios) e como (ações, passos, etapas).",
+      "subject_id": "4d29b4f1-7bd7-42c0-84d5-111dc7025b90",
+      "grade_id": null,
+      "comment": "Compartilhada: 8º e 9º Ano"
+    },
+    {
+      "code": "EF89LP21",
+      "description": "Realizar enquetes e pesquisas de opinião, de forma a levantar prioridades, problemas a resolver ou proposições que possam contribuir para a melhoria da escola ou da comunidade.",
+      "subject_id": "4d29b4f1-7bd7-42c0-84d5-111dc7025b90",
+      "grade_id": null,
+      "comment": "Compartilhada: 8º e 9º Ano"
+    },
+    {
+      "code": "EF89LP22",
+      "description": "Compreender e comparar as diferentes posições e interesses em jogo em uma discussão ou debate.",
+      "subject_id": "4d29b4f1-7bd7-42c0-84d5-111dc7025b90",
+      "grade_id": null,
+      "comment": "Compartilhada: 8º e 9º Ano"
+    },
+    {
+      "code": "EF89LP23",
+      "description": "Analisar, em textos argumentativos, reivindicatórios e propositivos, os movimentos argumentativos utilizados (sustentação, refutação e negociação).",
+      "subject_id": "4d29b4f1-7bd7-42c0-84d5-111dc7025b90",
+      "grade_id": null,
+      "comment": "Compartilhada: 8º e 9º Ano"
+    },
+    {
+      "code": "EF89LP24",
+      "description": "Realizar pesquisa, estabelecendo o recorte das questões, usando fontes abertas e confiáveis.",
+      "subject_id": "4d29b4f1-7bd7-42c0-84d5-111dc7025b90",
+      "grade_id": null,
+      "comment": "Compartilhada: 8º e 9º Ano"
+    },
+    {
+      "code": "EF89LP25",
+      "description": "Divulgar o resultado de pesquisas por meio de apresentações orais, verbetes de enciclopédias colaborativas, reportagens de divulgação científica, vlogs científicos, vídeos de diferentes tipos etc.",
+      "subject_id": "4d29b4f1-7bd7-42c0-84d5-111dc7025b90",
+      "grade_id": null,
+      "comment": "Compartilhada: 8º e 9º Ano"
+    },
+    {
+      "code": "EF89LP26",
+      "description": "Produzir resenhas, vlogs, podcasts literários e aulas, verbetes de enciclopédia, dentre outros, considerando a situação comunicativa.",
+      "subject_id": "4d29b4f1-7bd7-42c0-84d5-111dc7025b90",
+      "grade_id": null,
+      "comment": "Compartilhada: 8º e 9º Ano"
+    },
+    {
+      "code": "EF89LP27",
+      "description": "Tecer considerações e formular problematizações pertinentes, em momentos oportunos, em discussões, aulas, debates, apresentações.",
+      "subject_id": "4d29b4f1-7bd7-42c0-84d5-111dc7025b90",
+      "grade_id": null,
+      "comment": "Compartilhada: 8º e 9º Ano"
+    },
+    {
+      "code": "EF89LP28",
+      "description": "Tomar nota de videoaulas, aulas digitais, apresentações multimídias, vídeos de divulgação científica, documentários e afins, identificando, em função dos objetivos, informações principais para apoio ao estudo.",
+      "subject_id": "4d29b4f1-7bd7-42c0-84d5-111dc7025b90",
+      "grade_id": null,
+      "comment": "Compartilhada: 8º e 9º Ano"
+    },
+    {
+      "code": "EF89LP29",
+      "description": "Utilizar e perceber mecanismos de progressão temática, tais como retomadas anafóricas, catáforas, uso de organizadores textuais, de coesivos etc.",
+      "subject_id": "4d29b4f1-7bd7-42c0-84d5-111dc7025b90",
+      "grade_id": null,
+      "comment": "Compartilhada: 8º e 9º Ano"
+    },
+    {
+      "code": "EF89LP30",
+      "description": "Analisar a estrutura de hipertexto e hiperlinks em textos de divulgação científica e proceder à remissão a conceitos e relações por meio de links.",
+      "subject_id": "4d29b4f1-7bd7-42c0-84d5-111dc7025b90",
+      "grade_id": null,
+      "comment": "Compartilhada: 8º e 9º Ano"
+    },
+    {
+      "code": "EF89LP31",
+      "description": "Analisar e utilizar modalização epistêmica, isto é, modos de indicar uma avaliação sobre o valor de verdade e as condições de verdade de uma proposição.",
+      "subject_id": "4d29b4f1-7bd7-42c0-84d5-111dc7025b90",
+      "grade_id": null,
+      "comment": "Compartilhada: 8º e 9º Ano"
+    },
+    {
+      "code": "EF89LP32",
+      "description": "Analisar os efeitos de sentido decorrentes do uso de mecanismos de intertextualidade (referências, alusões, retomadas) entre os textos literários, entre esses textos literários e outras manifestações artísticas.",
+      "subject_id": "4d29b4f1-7bd7-42c0-84d5-111dc7025b90",
+      "grade_id": null,
+      "comment": "Compartilhada: 8º e 9º Ano"
+    },
+    {
+      "code": "EF89LP33",
+      "description": "Ler, de forma autônoma, e compreender – selecionando procedimentos e estratégias de leitura adequados a diferentes objetivos – romances, contos contemporâneos, minicontos, fábulas contemporâneas, romances juvenis, biografias romanceadas, novelas, crônicas visuais, narrativas de ficção científica, narrativas de suspense, poemas de forma livre e fixa (como haicai), poema concreto, ciberpoema, dentre outros.",
+      "subject_id": "4d29b4f1-7bd7-42c0-84d5-111dc7025b90",
+      "grade_id": null,
+      "comment": "Compartilhada: 8º e 9º Ano"
+    },
+    {
+      "code": "EF89LP34",
+      "description": "Analisar a organização de texto dramático apresentado em teatro, televisão, cinema, identificando e caracterizando o cenário, o figurino e a encenação e reconhecendo os recursos linguísticos e semióticos envolvidos.",
+      "subject_id": "4d29b4f1-7bd7-42c0-84d5-111dc7025b90",
+      "grade_id": null,
+      "comment": "Compartilhada: 8º e 9º Ano"
+    },
+    {
+      "code": "EF89LP35",
+      "description": "Criar contos ou crônicas (em especial, líricas), crônicas visuais, minicontos, narrativas de aventura e de ficção científica, dentre outros, com temáticas próprias ao gênero.",
+      "subject_id": "4d29b4f1-7bd7-42c0-84d5-111dc7025b90",
+      "grade_id": null,
+      "comment": "Compartilhada: 8º e 9º Ano"
+    },
+    {
+      "code": "EF89LP36",
+      "description": "Parodiar poemas conhecidos da literatura e criar textos em versos (como haicais, poemas concretos, ciberpoemas, dentre outros).",
+      "subject_id": "4d29b4f1-7bd7-42c0-84d5-111dc7025b90",
+      "grade_id": null,
+      "comment": "Compartilhada: 8º e 9º Ano"
+    },
+    {
+      "code": "EF89LP37",
+      "description": "Analisar os efeitos de sentido do uso de figuras de linguagem como ironia, eufemismo, antítese, aliteração, assonância, dentre outras.",
+      "subject_id": "4d29b4f1-7bd7-42c0-84d5-111dc7025b90",
+      "grade_id": null,
+      "comment": "Compartilhada: 8º e 9º Ano"
+    },
+    {
+      "code": "EF06LP01",
+      "description": "Reconhecer a impossibilidade de uma neutralidade absoluta no relato de fatos e identificar diferentes graus de parcialidade/imparcialidade dados pelo recorte feito e pelos efeitos de sentido advindos de escolhas feitas pelo autor.",
+      "subject_id": "4d29b4f1-7bd7-42c0-84d5-111dc7025b90",
+      "grade_id": "75bea034-3427-4e98-896d-23493d36a84e",
+      "comment": "Única: 6º Ano"
+    },
+    {
+      "code": "EF06LP02",
+      "description": "Estabelecer relação entre os diferentes gêneros jornalísticos, compreendendo a centralidade da notícia.",
+      "subject_id": "4d29b4f1-7bd7-42c0-84d5-111dc7025b90",
+      "grade_id": "75bea034-3427-4e98-896d-23493d36a84e",
+      "comment": "Única: 6º Ano"
+    },
+    {
+      "code": "EF06LP03",
+      "description": "Analisar diferenças de sentido entre palavras de uma série sinonímica.",
+      "subject_id": "4d29b4f1-7bd7-42c0-84d5-111dc7025b90",
+      "grade_id": "75bea034-3427-4e98-896d-23493d36a84e",
+      "comment": "Única: 6º Ano"
+    },
+    {
+      "code": "EF06LP04",
+      "description": "Analisar a função e as flexões de substantivos e adjetivos e de verbos nos modos Indicativo, Subjuntivo e Imperativo: afirmativo e negativo.",
+      "subject_id": "4d29b4f1-7bd7-42c0-84d5-111dc7025b90",
+      "grade_id": "75bea034-3427-4e98-896d-23493d36a84e",
+      "comment": "Única: 6º Ano"
+    },
+    {
+      "code": "EF06LP05",
+      "description": "Identificar os efeitos de sentido dos modos verbais, considerando o gênero textual e a intenção comunicativa.",
+      "subject_id": "4d29b4f1-7bd7-42c0-84d5-111dc7025b90",
+      "grade_id": "75bea034-3427-4e98-896d-23493d36a84e",
+      "comment": "Única: 6º Ano"
+    },
+    {
+      "code": "EF06LP06",
+      "description": "Empregar, adequadamente, as regras de concordância nominal (relações entre os substantivos e seus determinantes) e as regras de concordância verbal (relações entre o verbo e o sujeito simples e composto).",
+      "subject_id": "4d29b4f1-7bd7-42c0-84d5-111dc7025b90",
+      "grade_id": "75bea034-3427-4e98-896d-23493d36a84e",
+      "comment": "Única: 6º Ano"
+    },
+    {
+      "code": "EF06LP07",
+      "description": "Identificar, em textos, períodos compostos por orações separadas por vírgula sem a utilização de conectivos, nomeando-os como orações coordenadas assindéticas.",
+      "subject_id": "4d29b4f1-7bd7-42c0-84d5-111dc7025b90",
+      "grade_id": "75bea034-3427-4e98-896d-23493d36a84e",
+      "comment": "Única: 6º Ano"
+    },
+    {
+      "code": "EF06LP08",
+      "description": "Identificar, em textos, termos constitutivos da oração (sujeito e seus modificadores, verbo e seus complementos e modificadores).",
+      "subject_id": "4d29b4f1-7bd7-42c0-84d5-111dc7025b90",
+      "grade_id": "75bea034-3427-4e98-896d-23493d36a84e",
+      "comment": "Única: 6º Ano"
+    },
+    {
+      "code": "EF06LP09",
+      "description": "Classificar, em textos, a palavra \"se\" (partícula apassivadora, índice de indeterminação do sujeito, conjunção condicional, conjunção integrante).",
+      "subject_id": "4d29b4f1-7bd7-42c0-84d5-111dc7025b90",
+      "grade_id": "75bea034-3427-4e98-896d-23493d36a84e",
+      "comment": "Única: 6º Ano"
+    },
+    {
+      "code": "EF06LP10",
+      "description": "Identificar sintagmas nominais e verbais como constituintes imediatos da oração.",
+      "subject_id": "4d29b4f1-7bd7-42c0-84d5-111dc7025b90",
+      "grade_id": "75bea034-3427-4e98-896d-23493d36a84e",
+      "comment": "Única: 6º Ano"
+    },
+    {
+      "code": "EF06LP11",
+      "description": "Utilizar, ao produzir texto, recursos de coesão referencial (léxica e pronominal) e sequencial e outros recursos expressivos adequados ao gênero textual.",
+      "subject_id": "4d29b4f1-7bd7-42c0-84d5-111dc7025b90",
+      "grade_id": "75bea034-3427-4e98-896d-23493d36a84e",
+      "comment": "Única: 6º Ano"
+    },
+    {
+      "code": "EF06LP12",
+      "description": "Utilizar, ao produzir texto, recursos de coesão referencial (nome e pronomes), recursos de semântica (sinonímia, antonímia e homonímia) e mecanismos de representação de diferentes vozes (discurso direto e indireto).",
+      "subject_id": "4d29b4f1-7bd7-42c0-84d5-111dc7025b90",
+      "grade_id": "75bea034-3427-4e98-896d-23493d36a84e",
+      "comment": "Única: 6º Ano"
+    },
+    {
+      "code": "EF07LP01",
+      "description": "Distinguir diferentes propostas editoriais em textos de notícias e reportagens, identificando recursos de persuasão.",
+      "subject_id": "4d29b4f1-7bd7-42c0-84d5-111dc7025b90",
+      "grade_id": "4128c187-5e33-4ff9-a96d-e7eb9ddbe04e",
+      "comment": "Única: 7º Ano"
+    },
+    {
+      "code": "EF07LP02",
+      "description": "Comparar notícias e reportagens sobre um mesmo fato divulgadas em diferentes mídias, analisando a especificidade dos meios e o tratamento da informação.",
+      "subject_id": "4d29b4f1-7bd7-42c0-84d5-111dc7025b90",
+      "grade_id": "4128c187-5e33-4ff9-a96d-e7eb9ddbe04e",
+      "comment": "Única: 7º Ano"
+    },
+    {
+      "code": "EF07LP03",
+      "description": "Formular perguntas e decompor, com a ajuda dos colegas e dos professores, tema/questão polêmica, explicações e ou argumentos relativos ao objeto de discussão para análise mais minuciosa.",
+      "subject_id": "4d29b4f1-7bd7-42c0-84d5-111dc7025b90",
+      "grade_id": "4128c187-5e33-4ff9-a96d-e7eb9ddbe04e",
+      "comment": "Única: 7º Ano"
+    },
+    {
+      "code": "EF07LP04",
+      "description": "Reconhecer, em textos, o verbo como o núcleo das orações.",
+      "subject_id": "4d29b4f1-7bd7-42c0-84d5-111dc7025b90",
+      "grade_id": "4128c187-5e33-4ff9-a96d-e7eb9ddbe04e",
+      "comment": "Única: 7º Ano"
+    },
+    {
+      "code": "EF07LP05",
+      "description": "Identificar, em orações de textos lidos ou de produção própria, verbos de predicação completa e incompleta: intransitivos e transitivos.",
+      "subject_id": "4d29b4f1-7bd7-42c0-84d5-111dc7025b90",
+      "grade_id": "4128c187-5e33-4ff9-a96d-e7eb9ddbe04e",
+      "comment": "Única: 7º Ano"
+    },
+    {
+      "code": "EF07LP06",
+      "description": "Empregar as regras básicas de concordância nominal e verbal em situações comunicativas e na produção de textos.",
+      "subject_id": "4d29b4f1-7bd7-42c0-84d5-111dc7025b90",
+      "grade_id": "4128c187-5e33-4ff9-a96d-e7eb9ddbe04e",
+      "comment": "Única: 7º Ano"
+    },
+    {
+      "code": "EF07LP07",
+      "description": "Identificar, em textos, a estrutura básica da oração: sujeito, predicado, complemento (objetos direto e indireto).",
+      "subject_id": "4d29b4f1-7bd7-42c0-84d5-111dc7025b90",
+      "grade_id": "4128c187-5e33-4ff9-a96d-e7eb9ddbe04e",
+      "comment": "Única: 7º Ano"
+    },
+    {
+      "code": "EF07LP08",
+      "description": "Identificar, em textos, o sujeito (simples, composto, oculto, indeterminado) e o predicado.",
+      "subject_id": "4d29b4f1-7bd7-42c0-84d5-111dc7025b90",
+      "grade_id": "4128c187-5e33-4ff9-a96d-e7eb9ddbe04e",
+      "comment": "Única: 7º Ano"
+    },
+    {
+      "code": "EF07LP09",
+      "description": "Identificar, em textos, os adjuntos adnominais e adverbiais, diferenciando-os dos complementos.",
+      "subject_id": "4d29b4f1-7bd7-42c0-84d5-111dc7025b90",
+      "grade_id": "4128c187-5e33-4ff9-a96d-e7eb9ddbe04e",
+      "comment": "Única: 7º Ano"
+    },
+    {
+      "code": "EF07LP10",
+      "description": "Utilizar, ao produzir texto, conhecimentos linguísticos e gramaticais: modos e tempos verbais, concordância nominal e verbal, regência nominal e verbal.",
+      "subject_id": "4d29b4f1-7bd7-42c0-84d5-111dc7025b90",
+      "grade_id": "4128c187-5e33-4ff9-a96d-e7eb9ddbe04e",
+      "comment": "Única: 7º Ano"
+    },
+    {
+      "code": "EF07LP11",
+      "description": "Identificar, em textos lidos ou de produção própria, períodos compostos por coordenação e subordinação.",
+      "subject_id": "4d29b4f1-7bd7-42c0-84d5-111dc7025b90",
+      "grade_id": "4128c187-5e33-4ff9-a96d-e7eb9ddbe04e",
+      "comment": "Única: 7º Ano"
+    },
+    {
+      "code": "EF07LP12",
+      "description": "Reconhecer recursos de coesão referencial: substituições lexicais (de substantivos por sinônimos) ou pronominais (uso de pronomes anafóricos – pessoais, possessivos, demonstrativos).",
+      "subject_id": "4d29b4f1-7bd7-42c0-84d5-111dc7025b90",
+      "grade_id": "4128c187-5e33-4ff9-a96d-e7eb9ddbe04e",
+      "comment": "Única: 7º Ano"
+    },
+    {
+      "code": "EF07LP13",
+      "description": "Estabelecer relações entre partes do texto, identificando o antecedente de um pronome relativo ou o referente comum de uma cadeia de substituições lexicais.",
+      "subject_id": "4d29b4f1-7bd7-42c0-84d5-111dc7025b90",
+      "grade_id": "4128c187-5e33-4ff9-a96d-e7eb9ddbe04e",
+      "comment": "Única: 7º Ano"
+    },
+    {
+      "code": "EF07LP14",
+      "description": "Identificar, em textos, os efeitos de sentido do uso de estratégias de modalização e argumentatividade.",
+      "subject_id": "4d29b4f1-7bd7-42c0-84d5-111dc7025b90",
+      "grade_id": "4128c187-5e33-4ff9-a96d-e7eb9ddbe04e",
+      "comment": "Única: 7º Ano"
+    },
+    {
+      "code": "EF08LP01",
+      "description": "Identificar e comparar as várias editorias de jornais impressos e digitais e de sites noticiosos, de forma a refletir sobre os tipos de fatos que são noticiados e as escolhas editoriais.",
+      "subject_id": "4d29b4f1-7bd7-42c0-84d5-111dc7025b90",
+      "grade_id": "b6760b9b-2758-4d14-a650-c3a30c0aeb3b",
+      "comment": "Única: 8º Ano"
+    },
+    {
+      "code": "EF08LP02",
+      "description": "Justificar diferenças ou semelhanças no tratamento dado a uma mesma informação veiculada em textos diferentes, consultando sites e serviços de checadores de fatos (curadoria).",
+      "subject_id": "4d29b4f1-7bd7-42c0-84d5-111dc7025b90",
+      "grade_id": "b6760b9b-2758-4d14-a650-c3a30c0aeb3b",
+      "comment": "Única: 8º Ano"
+    },
+    {
+      "code": "EF08LP03",
+      "description": "Produzir artigos de opinião, tendo em vista o contexto de produção dado, assumindo posição diante de tema polêmico, argumentando de acordo com a estrutura própria desse tipo de texto e utilizando diferentes tipos de argumentos.",
+      "subject_id": "4d29b4f1-7bd7-42c0-84d5-111dc7025b90",
+      "grade_id": "b6760b9b-2758-4d14-a650-c3a30c0aeb3b",
+      "comment": "Única: 8º Ano"
+    },
+    {
+      "code": "EF08LP04",
+      "description": "Utilizar, ao produzir texto, conhecimentos linguísticos e gramaticais: ortografia, regências e concordâncias nominal e verbal, modos e tempos verbais, pontuação etc.",
+      "subject_id": "4d29b4f1-7bd7-42c0-84d5-111dc7025b90",
+      "grade_id": "b6760b9b-2758-4d14-a650-c3a30c0aeb3b",
+      "comment": "Única: 8º Ano"
+    },
+    {
+      "code": "EF08LP05",
+      "description": "Analisar processos de formação de palavras por composição (aglutinação e justaposição), apropriando-se de regras básicas de uso do hífen em palavras compostas.",
+      "subject_id": "4d29b4f1-7bd7-42c0-84d5-111dc7025b90",
+      "grade_id": "b6760b9b-2758-4d14-a650-c3a30c0aeb3b",
+      "comment": "Única: 8º Ano"
+    },
+    {
+      "code": "EF08LP06",
+      "description": "Identificar, em textos lidos ou de produção própria, os termos constitutivos da oração (sujeito e seus modificadores, verbo e seus complementos e modificadores).",
+      "subject_id": "4d29b4f1-7bd7-42c0-84d5-111dc7025b90",
+      "grade_id": "b6760b9b-2758-4d14-a650-c3a30c0aeb3b",
+      "comment": "Única: 8º Ano"
+    },
+    {
+      "code": "EF08LP07",
+      "description": "Diferenciar, em textos lidos ou de produção própria, complementos de adjuntos.",
+      "subject_id": "4d29b4f1-7bd7-42c0-84d5-111dc7025b90",
+      "grade_id": "b6760b9b-2758-4d14-a650-c3a30c0aeb3b",
+      "comment": "Única: 8º Ano"
+    },
+    {
+      "code": "EF08LP08",
+      "description": "Identificar, em textos lidos ou de produção própria, verbos na voz ativa e na voz passiva, interpretando os efeitos de sentido de sujeito ativo e passivo (agente da passiva).",
+      "subject_id": "4d29b4f1-7bd7-42c0-84d5-111dc7025b90",
+      "grade_id": "b6760b9b-2758-4d14-a650-c3a30c0aeb3b",
+      "comment": "Única: 8º Ano"
+    },
+    {
+      "code": "EF08LP09",
+      "description": "Interpretar efeitos de sentido de modificadores (adjuntos adnominais e adverbiais) em textos.",
+      "subject_id": "4d29b4f1-7bd7-42c0-84d5-111dc7025b90",
+      "grade_id": "b6760b9b-2758-4d14-a650-c3a30c0aeb3b",
+      "comment": "Única: 8º Ano"
+    },
+    {
+      "code": "EF08LP10",
+      "description": "Interpretar, em textos lidos ou de produção própria, efeitos de sentido de modificadores do verbo (adjuntos adverbiais – tempo, lugar, modo, causa etc.).",
+      "subject_id": "4d29b4f1-7bd7-42c0-84d5-111dc7025b90",
+      "grade_id": "b6760b9b-2758-4d14-a650-c3a30c0aeb3b",
+      "comment": "Única: 8º Ano"
+    },
+    {
+      "code": "EF08LP11",
+      "description": "Identificar, em textos lidos ou de produção própria, agrupamento de orações em períodos, diferenciando coordenação de subordinação.",
+      "subject_id": "4d29b4f1-7bd7-42c0-84d5-111dc7025b90",
+      "grade_id": "b6760b9b-2758-4d14-a650-c3a30c0aeb3b",
+      "comment": "Única: 8º Ano"
+    },
+    {
+      "code": "EF08LP12",
+      "description": "Identificar, em textos lidos, orações subordinadas com conjunções de uso frequente, incorporando-as às suas próprias produções.",
+      "subject_id": "4d29b4f1-7bd7-42c0-84d5-111dc7025b90",
+      "grade_id": "b6760b9b-2758-4d14-a650-c3a30c0aeb3b",
+      "comment": "Única: 8º Ano"
+    },
+    {
+      "code": "EF08LP13",
+      "description": "Inferir efeitos de sentido decorrentes do uso de recursos de coesão sequencial: conjunções e articuladores textuais.",
+      "subject_id": "4d29b4f1-7bd7-42c0-84d5-111dc7025b90",
+      "grade_id": "b6760b9b-2758-4d14-a650-c3a30c0aeb3b",
+      "comment": "Única: 8º Ano"
+    },
+    {
+      "code": "EF08LP14",
+      "description": "Utilizar, ao produzir texto, recursos de coesão sequencial (articuladores) e referencial (léxica e pronominal), construções passivas e impessoais, discurso direto e indireto e outros recursos expressivos adequados ao gênero textual.",
+      "subject_id": "4d29b4f1-7bd7-42c0-84d5-111dc7025b90",
+      "grade_id": "b6760b9b-2758-4d14-a650-c3a30c0aeb3b",
+      "comment": "Única: 8º Ano"
+    },
+    {
+      "code": "EF08LP15",
+      "description": "Estabelecer relações entre partes do texto, identificando o antecedente de um pronome relativo ou o referente comum de uma cadeia de substituições lexicais.",
+      "subject_id": "4d29b4f1-7bd7-42c0-84d5-111dc7025b90",
+      "grade_id": "b6760b9b-2758-4d14-a650-c3a30c0aeb3b",
+      "comment": "Única: 8º Ano"
+    },
+    {
+      "code": "EF08LP16",
+      "description": "Explicar os efeitos de sentido do uso de figuras de linguagem, como ironia, eufemismo, antítese, aliteração, assonância, dentre outras.",
+      "subject_id": "4d29b4f1-7bd7-42c0-84d5-111dc7025b90",
+      "grade_id": "b6760b9b-2758-4d14-a650-c3a30c0aeb3b",
+      "comment": "Única: 8º Ano"
+    },
+    {
+      "code": "EF09LP01",
+      "description": "Analisar o fenômeno da disseminação de notícias falsas nas redes sociais e desenvolver estratégias para reconhecê-las, como a checagem da confiabilidade das fontes, a comparação entre diferentes veículos e o uso de ferramentas de curadoria.",
+      "subject_id": "4d29b4f1-7bd7-42c0-84d5-111dc7025b90",
+      "grade_id": "3c68a0b5-9613-469e-8376-6fb678c60363",
+      "comment": "Única: 9º Ano"
+    },
+    {
+      "code": "EF09LP02",
+      "description": "Analisar e comentar a cobertura da imprensa sobre fatos de relevância social, comparando diferentes enfoques por meio do uso de ferramentas de curadoria.",
+      "subject_id": "4d29b4f1-7bd7-42c0-84d5-111dc7025b90",
+      "grade_id": "3c68a0b5-9613-469e-8376-6fb678c60363",
+      "comment": "Única: 9º Ano"
+    },
+    {
+      "code": "EF09LP03",
+      "description": "Produzir artigos de opinião, tendo em vista o contexto de produção dado, assumindo posição diante de tema polêmico, argumentando de acordo com a estrutura própria desse tipo de texto.",
+      "subject_id": "4d29b4f1-7bd7-42c0-84d5-111dc7025b90",
+      "grade_id": "3c68a0b5-9613-469e-8376-6fb678c60363",
+      "comment": "Única: 9º Ano"
+    },
+    {
+      "code": "EF09LP04",
+      "description": "Escrever textos corretamente, de acordo com a norma-padrão, com estruturas sintáticas complexas no nível da oração e do período.",
+      "subject_id": "4d29b4f1-7bd7-42c0-84d5-111dc7025b90",
+      "grade_id": "3c68a0b5-9613-469e-8376-6fb678c60363",
+      "comment": "Única: 9º Ano"
+    },
+    {
+      "code": "EF09LP05",
+      "description": "Identificar, em textos lidos e em produções próprias, orações com a estrutura sujeito-verbo de ligação-predicativo.",
+      "subject_id": "4d29b4f1-7bd7-42c0-84d5-111dc7025b90",
+      "grade_id": "3c68a0b5-9613-469e-8376-6fb678c60363",
+      "comment": "Única: 9º Ano"
+    },
+    {
+      "code": "EF09LP06",
+      "description": "Diferenciar, em textos lidos e em produções próprias, o efeito de sentido do uso de verbos de ligação e de verbos significativos.",
+      "subject_id": "4d29b4f1-7bd7-42c0-84d5-111dc7025b90",
+      "grade_id": "3c68a0b5-9613-469e-8376-6fb678c60363",
+      "comment": "Única: 9º Ano"
+    },
+    {
+      "code": "EF09LP07",
+      "description": "Identificar, em textos lidos e em produções próprias, a relação que conjunções (e locuções conjuntivas) coordenativas e subordinativas estabelecem entre as orações que conectam.",
+      "subject_id": "4d29b4f1-7bd7-42c0-84d5-111dc7025b90",
+      "grade_id": "3c68a0b5-9613-469e-8376-6fb678c60363",
+      "comment": "Única: 9º Ano"
+    },
+    {
+      "code": "EF09LP08",
+      "description": "Identificar, em textos lidos e em produções próprias, a relação que as conjunções (e locuções conjuntivas) coordenativas e subordinativas estabelecem entre as orações que conectam.",
+      "subject_id": "4d29b4f1-7bd7-42c0-84d5-111dc7025b90",
+      "grade_id": "3c68a0b5-9613-469e-8376-6fb678c60363",
+      "comment": "Única: 9º Ano"
+    },
+    {
+      "code": "EF09LP09",
+      "description": "Identificar efeitos de sentido do uso de orações adjetivas restritivas e explicativas em um período composto.",
+      "subject_id": "4d29b4f1-7bd7-42c0-84d5-111dc7025b90",
+      "grade_id": "3c68a0b5-9613-469e-8376-6fb678c60363",
+      "comment": "Única: 9º Ano"
+    },
+    {
+      "code": "EF09LP10",
+      "description": "Comparar as regras de colocação pronominal na norma-padrão com o seu uso no português brasileiro coloquial.",
+      "subject_id": "4d29b4f1-7bd7-42c0-84d5-111dc7025b90",
+      "grade_id": "3c68a0b5-9613-469e-8376-6fb678c60363",
+      "comment": "Única: 9º Ano"
+    },
+    {
+      "code": "EF09LP11",
+      "description": "Inferir efeitos de sentido decorrentes do uso de recursos de coesão sequencial (conjunções e articuladores textuais).",
+      "subject_id": "4d29b4f1-7bd7-42c0-84d5-111dc7025b90",
+      "grade_id": "3c68a0b5-9613-469e-8376-6fb678c60363",
+      "comment": "Única: 9º Ano"
+    },
+    {
+      "code": "EF09LP12",
+      "description": "Identificar estrangeirismos, caracterizando-os como empréstimos ou como marcas de identidade cultural e/ou profissional.",
+      "subject_id": "4d29b4f1-7bd7-42c0-84d5-111dc7025b90",
+      "grade_id": "3c68a0b5-9613-469e-8376-6fb678c60363",
+      "comment": "Única: 9º Ano"
+    }
+  ]
+}

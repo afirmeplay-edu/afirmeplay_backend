@@ -5,6 +5,7 @@ Endpoints básicos para filtros e dropdowns do frontend
 from flask import Blueprint, jsonify, request
 from flask_jwt_extended import jwt_required
 from app.decorators.role_required import role_required
+from app.decorators import requires_city_context
 from app.models.educationStage import EducationStage
 from app.models.subject import Subject
 from app.models.studentClass import Class
@@ -271,6 +272,7 @@ def dashboard_stats():
 @bp.route('/dashboard/comprehensive-stats', methods=['GET'])
 @jwt_required()
 @role_required("admin", "professor", "coordenador", "diretor", "tecadm")
+@requires_city_context
 def comprehensive_dashboard_stats():
     """
     Retorna estatísticas mais completas do dashboard
@@ -513,6 +515,7 @@ def comprehensive_dashboard_stats():
 @bp.route('/evaluations/stats', methods=['GET'])
 @jwt_required()
 @role_required("admin", "professor", "coordenador", "diretor", "tecadm")
+@requires_city_context
 def evaluations_stats():
     """
     Retorna estatísticas específicas de avaliações de forma robusta

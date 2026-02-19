@@ -1871,13 +1871,12 @@ def _buscar_turmas_por_escopo(evaluation_id: str, scope_type: str, scope_id: str
     
     if scope_type == 'school':
         # Filtrar por escola específica
-        # Converter scope_id para UUID (Class.school_id é UUID)
-        school_id_uuid = ensure_uuid(scope_id)
-        if school_id_uuid:
-            query = query.join(Class).filter(Class.school_id == school_id_uuid)
+        # Class._school_id e School.id são ambos VARCHAR/String(36)
+        query = query.join(Class).filter(Class._school_id == scope_id)
     elif scope_type == 'city':
         # Filtrar por município (todas as escolas do município)
-        query = query.join(Class).join(School, Class.school_id == cast(School.id, PostgresUUID)).filter(School.city_id == scope_id)
+        # ✅ CORRIGIDO: Class._school_id e School.id são VARCHAR, não UUID - remover cast
+        query = query.join(Class).join(School, Class._school_id == School.id).filter(School.city_id == scope_id)
     # Se scope_type == 'all', não aplicar filtros adicionais
     
     return query.all()

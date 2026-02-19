@@ -8,7 +8,7 @@ class PlantaoOnline(db.Model):
     id = db.Column(db.String, primary_key=True, default=lambda: str(uuid.uuid4()))
     link = db.Column(db.Text, nullable=False)
     title = db.Column(db.Text, nullable=True)
-    grade_id = db.Column(UUID(as_uuid=True), db.ForeignKey('grade.id'), nullable=False)
+    grade_id = db.Column(UUID(as_uuid=True), db.ForeignKey('public.grade.id'), nullable=False)
     subject_id = db.Column(db.String, db.ForeignKey('subject.id'), nullable=False)
     created_by = db.Column(db.String, db.ForeignKey('users.id'), nullable=False)
     created_at = db.Column(db.TIMESTAMP, server_default=db.text('CURRENT_TIMESTAMP'))

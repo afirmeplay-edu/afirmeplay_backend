@@ -4,7 +4,7 @@ from app.models.user import User, RoleEnum
 from app.decorators.role_required import role_required, get_current_user_from_token
 from flask_jwt_extended import jwt_required
 from sqlalchemy.exc import SQLAlchemyError
-from sqlalchemy import func
+from sqlalchemy import func, text
 import logging
 from werkzeug.security import generate_password_hash, check_password_hash
 from app import db
@@ -19,6 +19,7 @@ from app.models.studentPasswordLog import StudentPasswordLog
 from app.models.user_settings import UserSettings
 from sqlalchemy.orm import joinedload
 from app.utils.email_service import EmailService
+from app.utils.tenant_middleware import city_id_to_schema_name
 from datetime import datetime, timedelta, date
 from flask import current_app
 import csv
@@ -693,6 +694,7 @@ def delete_user(user_id):
     """Deleta um usuário específico"""
     try:
         current_user = get_current_user_from_token()
+        
         if not current_user:
             return jsonify({"erro": "Usuário não encontrado"}), 404
         
@@ -705,65 +707,115 @@ def delete_user(user_id):
         if not user_to_delete:
             return jsonify({"erro": "Usuário não encontrado"}), 404
         
-        # Verificar se o usuário atual tem permissão para deletar o usuário alvo
-        # Tecadm só pode deletar usuários da mesma cidade
+        # Configurar search_path para a cidade do usuário que está sendo deletado
+        if user_to_delete.city_id:
+            user_schema = city_id_to_schema_name(user_to_delete.city_id)
+            search_path = f'"{user_schema}", public'
+            db.session.execute(text(f"SET search_path TO {search_path}"))
+        
+        # Verificar permissão (Tecadm só pode deletar usuários da mesma cidade)
         if current_user['role'] == "tecadm":
             current_city_id = current_user.get('tenant_id') or current_user.get('city_id')
             if user_to_delete.city_id != current_city_id:
                 return jsonify({"erro": "Sem permissão para deletar usuário de outra cidade"}), 403
         
-        # Exclusão em cascata - deletar registros relacionados primeiro
         deleted_relations = []
         
-        # Verificar e deletar se é um estudante
-        student = Student.query.filter_by(user_id=user_id).first()
-        if student:
-            db.session.delete(student)
-            deleted_relations.append("estudante")
-            logging.info(f"Deletando registro de estudante para usuário {user_id}")
-        
-        # Verificar e deletar se é um professor
+        # Buscar se é professor (precisa do teacher.id para deletar vínculos)
         teacher = Teacher.query.filter_by(user_id=user_id).first()
+        teacher_id = teacher.id if teacher else None
+        
+        # Buscar todas as cidades (apenas professor pode existir em múltiplos schemas)
+        all_cities = City.query.all() if teacher_id else []
+        
+        # Deletar vínculos com turmas (TeacherClass) - Professor pode estar em múltiplos schemas
+        if teacher_id:
+            from app.models.teacherClass import TeacherClass
+            total_deleted = 0
+            
+            for city in all_cities:
+                city_schema = city_id_to_schema_name(city.id)
+                db.session.execute(text(f'SET search_path TO "{city_schema}", public'))
+                deleted = TeacherClass.query.filter_by(teacher_id=teacher_id).delete(synchronize_session=False)
+                total_deleted += deleted
+            
+            if total_deleted > 0:
+                deleted_relations.append(f"{total_deleted} vínculos com turmas")
+                logging.info(f"Deletados {total_deleted} vínculos TeacherClass para professor {teacher_id}")
+            
+            # Reconfigurar search_path para o schema principal
+            if user_to_delete.city_id:
+                user_schema = city_id_to_schema_name(user_to_delete.city_id)
+                db.session.execute(text(f'SET search_path TO "{user_schema}", public'))
+        
+        # Deletar vínculos com escolas (SchoolTeacher) - Professor pode estar em múltiplos schemas
+        if teacher_id:
+            from app.models.schoolTeacher import SchoolTeacher
+            total_deleted = 0
+            
+            for city in all_cities:
+                city_schema = city_id_to_schema_name(city.id)
+                db.session.execute(text(f'SET search_path TO "{city_schema}", public'))
+                deleted = SchoolTeacher.query.filter_by(teacher_id=teacher_id).delete(synchronize_session=False)
+                total_deleted += deleted
+            
+            if total_deleted > 0:
+                deleted_relations.append(f"{total_deleted} vínculos escolares")
+                logging.info(f"Deletados {total_deleted} vínculos SchoolTeacher para professor {teacher_id}")
+            
+            # Reconfigurar search_path para o schema principal
+            if user_to_delete.city_id:
+                user_schema = city_id_to_schema_name(user_to_delete.city_id)
+                db.session.execute(text(f'SET search_path TO "{user_schema}", public'))
+        
+        # Flush dos vínculos do professor
+        if teacher_id:
+            db.session.flush()
+        
+        # Deletar estudante (apenas no schema do usuário)
+        deleted_count = Student.query.filter_by(user_id=user_id).delete(synchronize_session=False)
+        if deleted_count > 0:
+            deleted_relations.append("estudante")
+            logging.info(f"Deletado registro de estudante para usuário {user_id}")
+        
+        # Deletar professor de TODOS os schemas (pode trabalhar em múltiplas cidades)
         if teacher:
-            db.session.delete(teacher)
-            deleted_relations.append("professor")
-            logging.info(f"Deletando registro de professor para usuário {user_id}")
+            total_deleted = 0
+            
+            for city in all_cities:
+                city_schema = city_id_to_schema_name(city.id)
+                db.session.execute(text(f'SET search_path TO "{city_schema}", public'))
+                deleted = Teacher.query.filter_by(user_id=user_id).delete(synchronize_session=False)
+                total_deleted += deleted
+            
+            if total_deleted > 0:
+                deleted_relations.append(f"professor ({total_deleted} schemas)")
+                logging.info(f"Professor deletado de {total_deleted} schema(s) para user_id {user_id}")
+            
+            # Reconfigurar search_path para o schema principal
+            if user_to_delete.city_id:
+                user_schema = city_id_to_schema_name(user_to_delete.city_id)
+                db.session.execute(text(f'SET search_path TO "{user_schema}", public'))
         
-        # Verificar e deletar se é um diretor/coordenador/tecadm
-        manager = Manager.query.filter_by(user_id=user_id).first()
-        if manager:
-            db.session.delete(manager)
+        # Deletar manager (apenas no schema do usuário)
+        deleted_count = Manager.query.filter_by(user_id=user_id).delete(synchronize_session=False)
+        if deleted_count > 0:
             deleted_relations.append("manager")
-            logging.info(f"Deletando registro de manager para usuário {user_id}")
+            logging.info(f"Deletado registro de manager para usuário {user_id}")
         
-        # Verificar e deletar vínculos com escolas (SchoolTeacher)
-        from app.models.schoolTeacher import SchoolTeacher
-        school_teachers = SchoolTeacher.query.filter_by(teacher_id=user_id).all()
-        if school_teachers:
-            for school_teacher in school_teachers:
-                db.session.delete(school_teacher)
-            deleted_relations.append(f"{len(school_teachers)} vínculos escolares")
-            logging.info(f"Deletando {len(school_teachers)} vínculos escolares para usuário {user_id}")
-        
-        # Verificar e deletar vínculos com turmas (TeacherClass)
-        from app.models.teacherClass import TeacherClass
-        teacher_classes = TeacherClass.query.filter_by(teacher_id=user_id).all()
-        if teacher_classes:
-            for teacher_class in teacher_classes:
-                db.session.delete(teacher_class)
-            deleted_relations.append(f"{len(teacher_classes)} vínculos com turmas")
-            logging.info(f"Deletando {len(teacher_classes)} vínculos com turmas para usuário {user_id}")
-        
-        # Verificar e deletar UserQuickLinks
+        # Deletar UserQuickLinks (apenas no schema do usuário)
         from app.models.userQuickLinks import UserQuickLinks
-        user_quick_links = UserQuickLinks.query.filter_by(user_id=user_id).first()
-        if user_quick_links:
-            db.session.delete(user_quick_links)
+        deleted_count = UserQuickLinks.query.filter_by(user_id=user_id).delete(synchronize_session=False)
+        if deleted_count > 0:
             deleted_relations.append("atalhos rápidos")
-            logging.info(f"Deletando atalhos rápidos para usuário {user_id}")
+            logging.info(f"Deletados atalhos rápidos para usuário {user_id}")
+        
+        # Flush das entidades que referenciam User
+        db.session.flush()
         
         # Deletar usuário
         db.session.delete(user_to_delete)
+        
         db.session.commit()
         
         logging.info(f"Usuário {user_to_delete.email} deletado por {current_user['email']}")
@@ -785,6 +837,7 @@ def delete_user(user_id):
         logging.error(f"Erro no banco de dados ao deletar usuário: {e}")
         return jsonify({"erro": "Erro interno do servidor"}), 500
     except Exception as e:
+        db.session.rollback()
         logging.error(f"Erro inesperado ao deletar usuário: {e}", exc_info=True)
         return jsonify({"erro": "Erro interno do servidor"}), 500 
 

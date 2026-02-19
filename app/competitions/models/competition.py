@@ -84,7 +84,9 @@ class Competition(db.Model):
     # Relacionamentos
     test = db.relationship('Test', backref='competitions')
     subject = db.relationship('Subject', backref='competitions')
-    creator = db.relationship('User', foreign_keys=[created_by], backref='created_competitions')
+    # Removido backref para evitar erro ao deletar usuário (tabela competitions 
+    # incompleta - migration pendente). Quando a migration for executada, pode reativar.
+    creator = db.relationship('User', foreign_keys=[created_by])
     template = db.relationship('CompetitionTemplate', backref='competitions')
 
     @property

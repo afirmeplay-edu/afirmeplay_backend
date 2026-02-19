@@ -1,13 +1,18 @@
 """
-Script para atualizar/adicionar habilidades de Português no banco de dados.
+Script para atualizar/adicionar habilidades (qualquer disciplina) no banco de dados.
 Versão direta que evita carregar todas as rotas da aplicação.
 
 COMPORTAMENTO:
-- Se a habilidade existir (busca por code): atualiza APENAS a description
+- Se a habilidade existir (busca por code + subject_id): atualiza APENAS a description
 - Se não existir: cria nova habilidade com todos os campos do JSON
 
 USO:
+    python scripts/update_portuguese_skills_direct.py [arquivo_json]
+    
+EXEMPLOS:
     python scripts/update_portuguese_skills_direct.py
+    python scripts/update_portuguese_skills_direct.py habilidades_portugues_anos_finais_data.json
+    python scripts/update_portuguese_skills_direct.py habilidades_matematica_data.json
 """
 
 import os
@@ -28,9 +33,17 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-def load_habilidades_data():
-    """Carrega dados das habilidades do arquivo JSON."""
-    json_path = os.path.join(os.path.dirname(__file__), 'habilidades_portugues_data.json')
+def load_habilidades_data(json_path=None):
+    """Carrega dados das habilidades do arquivo JSON.
+    Se json_path não for informado, usa o primeiro argumento da linha de comando
+    ou o padrão: habilidades_portugues_data.json
+    """
+    if json_path is None and len(sys.argv) > 1:
+        json_path = sys.argv[1]
+    if json_path is None:
+        json_path = os.path.join(os.path.dirname(__file__), 'habilidades_portugues_data.json')
+    if not os.path.isabs(json_path):
+        json_path = os.path.join(os.path.dirname(__file__), os.path.basename(json_path))
     
     if not os.path.exists(json_path):
         logger.error(f"❌ Arquivo não encontrado: {json_path}")
@@ -99,12 +112,18 @@ def update_portuguese_skills():
                 continue
             
             try:
-                # Buscar habilidade existente por code
-                skill = session.query(Skill).filter_by(code=code).first()
+                # Buscar habilidade existente por code e subject_id (se fornecido)
+                if subject_id:
+                    skill = session.query(Skill).filter_by(code=code, subject_id=subject_id).first()
+                else:
+                    skill = session.query(Skill).filter_by(code=code).first()
                 
                 if skill:
-                    # EXISTE: Atualizar APENAS a description
+                    # EXISTE: Atualizar description e grade_id (se informado no JSON)
                     skill.description = description
+                    if 'grade_id' in hab:
+                        grade_id_uuid = UUID(grade_id_str) if grade_id_str else None
+                        skill.grade_id = grade_id_uuid
                     stats['updated'] += 1
                     logger.info(f"   ✏️  [{idx}/{len(habilidades)}] Atualizada: {code}")
                 else:

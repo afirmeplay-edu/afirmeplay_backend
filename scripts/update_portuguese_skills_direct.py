@@ -119,8 +119,11 @@ def update_portuguese_skills():
                     skill = session.query(Skill).filter_by(code=code).first()
                 
                 if skill:
-                    # EXISTE: Atualizar APENAS a description
+                    # EXISTE: Atualizar description e grade_id (se informado no JSON)
                     skill.description = description
+                    if 'grade_id' in hab:
+                        grade_id_uuid = UUID(grade_id_str) if grade_id_str else None
+                        skill.grade_id = grade_id_uuid
                     stats['updated'] += 1
                     logger.info(f"   ✏️  [{idx}/{len(habilidades)}] Atualizada: {code}")
                 else:

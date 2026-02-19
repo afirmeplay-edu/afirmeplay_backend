@@ -1,5 +1,6 @@
 from flask import Blueprint, jsonify, request
 from app.models.skill import Skill
+from app.models.grades import Grade
 from app.models.question import Question
 from app.models.test import Test
 from app import db
@@ -7,6 +8,7 @@ from flask_jwt_extended import jwt_required
 from app.decorators.role_required import role_required, get_current_user_from_token
 from app.utils.question_helpers import get_questions_from_test
 from app.utils.uuid_helpers import ensure_uuid
+from app.utils.eja_grade_mapping import get_effective_grade_id_for_skills
 
 import logging
 
@@ -14,13 +16,15 @@ skill_bp = Blueprint('skill_bp', __name__)
 
 
 def _skill_to_dict(skill):
-    """Retorna dicionário padrão de uma skill para resposta JSON."""
+    """Retorna dicionário padrão de uma skill para resposta JSON. grade_ids: lista de IDs das turmas."""
+    grade_ids = [str(g.id) for g in (skill.grades or [])]
     return {
         "id": str(skill.id),
         "code": skill.code,
         "description": skill.description,
         "subject_id": skill.subject_id,
-        "grade_id": str(skill.grade_id) if skill.grade_id else None,
+        "grade_ids": grade_ids,
+        "grade_id": grade_ids[0] if grade_ids else None,  # compatibilidade: primeiro da lista
     }
 
 @skill_bp.route('/skills', methods=['GET'])
@@ -53,7 +57,8 @@ def get_all_skills():
 def create_skill():
     """
     Cria uma nova habilidade (skill) no banco.
-    Body JSON: code (obrigatório), description (obrigatório), subject_id (opcional), grade_id (opcional).
+    Body JSON: code (obrigatório), description (obrigatório), subject_id (opcional),
+    grade_id (opcional, uma turma) ou grade_ids (opcional, lista de turmas).
     """
     try:
         data = request.get_json(silent=True)
@@ -73,21 +78,27 @@ def create_skill():
         else:
             subject_id = None
 
-        grade_id = data.get("grade_id")
-        if grade_id is not None and grade_id != "":
-            grade_uuid = ensure_uuid(grade_id)
-            if grade_uuid is None:
-                return jsonify({"error": "grade_id inválido"}), 400
-        else:
-            grade_uuid = None
+        grade_ids = data.get("grade_ids")
+        if not grade_ids and data.get("grade_id") not in (None, ""):
+            grade_ids = [data.get("grade_id")]
+        if not isinstance(grade_ids, list):
+            grade_ids = []
+        grade_uuids = []
+        for gid in grade_ids:
+            if gid in (None, ""):
+                continue
+            gu = ensure_uuid(gid)
+            if gu is None:
+                return jsonify({"error": f"grade_id inválido: {gid}"}), 400
+            grade_uuids.append(gu)
 
-        skill = Skill(
-            code=code,
-            description=description,
-            subject_id=subject_id,
-            grade_id=grade_uuid,
-        )
+        skill = Skill(code=code, description=description, subject_id=subject_id)
         db.session.add(skill)
+        db.session.flush()
+        for gu in grade_uuids:
+            grade = Grade.query.get(gu)
+            if grade:
+                skill.grades.append(grade)
         db.session.commit()
         return jsonify(_skill_to_dict(skill)), 201
     except Exception as e:
@@ -114,18 +125,24 @@ def _parse_skill_item(data, index):
         subject_id = str(subject_id).strip() or None
     else:
         subject_id = None
-    grade_id = data.get("grade_id")
-    if grade_id is not None and grade_id != "":
-        grade_uuid = ensure_uuid(grade_id)
-        if grade_uuid is None:
+    grade_ids = data.get("grade_ids")
+    if not grade_ids and data.get("grade_id") not in (None, ""):
+        grade_ids = [data.get("grade_id")]
+    if not isinstance(grade_ids, list):
+        grade_ids = []
+    grade_uuids = []
+    for gid in grade_ids:
+        if gid in (None, ""):
+            continue
+        gu = ensure_uuid(gid)
+        if gu is None:
             return None, "grade_id inválido"
-    else:
-        grade_uuid = None
+        grade_uuids.append(gu)
     return {
         "code": code,
         "description": description,
         "subject_id": subject_id,
-        "grade_id": grade_uuid,
+        "grade_ids": grade_uuids,
     }, None
 
 
@@ -165,9 +182,14 @@ def create_skills_batch():
             }), 400
 
         for kwargs in to_insert:
+            grade_ids = kwargs.pop("grade_ids", [])
             skill = Skill(**kwargs)
             db.session.add(skill)
             db.session.flush()
+            for gu in grade_ids:
+                grade = Grade.query.get(gu)
+                if grade:
+                    skill.grades.append(grade)
             created.append(_skill_to_dict(skill))
 
         db.session.commit()
@@ -244,6 +266,9 @@ def get_skills_by_subject(subject_id):
 def get_skills_by_grade(grade_id):
     """
     Busca skills por ID do grade.
+
+    EJA: 1º período equivale a 1º ano, 2º período a 2º ano, até 9º período a 9º ano.
+    Para grades de EJA (períodos), as skills do ano correspondente são retornadas.
     ---
     tags:
       - Skills
@@ -266,7 +291,12 @@ def get_skills_by_grade(grade_id):
         description: Erro interno no servidor.
     """
     try:
-        skills = Skill.query.filter_by(grade_id=grade_id).all()
+        effective_grade_id = get_effective_grade_id_for_skills(grade_id)
+        grade_uuid = ensure_uuid(effective_grade_id)
+        if grade_uuid:
+            skills = Skill.query.filter(Skill.grades.any(Grade.id == grade_uuid)).all()
+        else:
+            skills = []
         if not skills:
             return jsonify({"message": "Nenhuma skill encontrada para este grade."}), 404
         return jsonify([_skill_to_dict(skill) for skill in skills]), 200
@@ -351,13 +381,14 @@ def get_skills_by_evaluation(test_id):
                             skill_obj = Skill.query.filter_by(code=skill_code).first()
                         
                         if skill_obj:
-                            # Skill encontrada no banco
+                            grade_ids = [str(g.id) for g in (skill_obj.grades or [])]
                             skills_data.append({
                                 "id": skill_obj.id,
                                 "code": skill_obj.code,
                                 "description": skill_obj.description,
                                 "subject_id": skill_obj.subject_id,
-                                "grade_id": skill_obj.grade_id,
+                                "grade_ids": grade_ids,
+                                "grade_id": grade_ids[0] if grade_ids else None,
                                 "source": "database"
                             })
                         else:

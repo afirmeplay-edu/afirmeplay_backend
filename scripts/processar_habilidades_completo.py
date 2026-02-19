@@ -81,14 +81,34 @@ def processar():
         
         print(f"   ✅ {len(habilidades)} habilidades de: {serie}")
     
-    # Salvar resultado
+    # Salvar resultado JSON
     output_file = os.path.join(script_dir, 'habilidades_portugues_data.json')
     with open(output_file, 'w', encoding='utf-8') as f:
         json.dump(result, f, ensure_ascii=False, indent=2)
-    
+
+    # Gerar script SQL
+    sql_file = os.path.join(script_dir, 'habilidades_portugues_insert.sql')
+    sql_lines = []
+    for hab in result["habilidades"]:
+        code = hab['code'].replace("'", "''")
+        description = hab['description'].replace("'", "''")
+        subject_id = hab['subject_id']
+        grade_id = hab['grade_id']
+        comment = hab['comment']
+
+        # Insere a habilidade apenas se não existir
+        sql_lines.append(f"INSERT INTO public.skills (id, code, description, subject_id)\nSELECT gen_random_uuid(), '{code}', '{description}', '{subject_id}'\nWHERE NOT EXISTS (SELECT 1 FROM public.skills WHERE code = '{code}'); -- {comment}")
+
+        # Relacionamento: pega o id da habilidade existente ou recém inserida
+        if grade_id:
+            sql_lines.append(f"INSERT INTO public.skill_grade (skill_id, grade_id)\nSELECT id, '{grade_id}' FROM public.skills WHERE code = '{code}';")
+
+    with open(sql_file, 'w', encoding='utf-8') as f:
+        f.write("\n".join(sql_lines))
+
     print(f"\n✅ Arquivo salvo: habilidades_portugues_data.json")
+    print(f"✅ Script SQL salvo: habilidades_portugues_insert.sql")
     print(f"📊 Total de habilidades: {len(result['habilidades'])}")
-    print("\n🚀 Próximo passo: Execute 'python scripts/update_portuguese_skills_direct.py'")
 
 
 if __name__ == "__main__":

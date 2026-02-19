@@ -30,7 +30,7 @@ class Question(db.Model):
     subtitle = db.Column(db.String)
     alternatives = db.Column(db.JSON)  # Array de opções com formatação
     skill = db.Column(db.String)
-    grade_level = db.Column(UUID(as_uuid=True), db.ForeignKey('grade.id'))
+    grade_level = db.Column(UUID(as_uuid=True), db.ForeignKey('public.grade.id'))
     education_stage_id = db.Column(UUID(as_uuid=True), db.ForeignKey('education_stage.id'))
     difficulty_level = db.Column(db.String)
     correct_answer = db.Column(db.String)

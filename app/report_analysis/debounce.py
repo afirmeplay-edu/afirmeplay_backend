@@ -52,62 +52,86 @@ class ReportDebounceService:
         return cls._redis_client
     
     @classmethod
-    def should_trigger_rebuild(cls, test_id: str, ttl: Optional[int] = None) -> bool:
+    def _make_key(cls, test_id: str, scope_type: Optional[str] = None, scope_id: Optional[str] = None) -> str:
+        """Gera a chave Redis incluindo escopo para evitar colisão entre scopes do mesmo test."""
+        if scope_type:
+            return f"report_rebuild:{test_id}:{scope_type}:{scope_id or 'all'}"
+        return f"report_rebuild:{test_id}"
+
+    @classmethod
+    def should_trigger_rebuild(
+        cls,
+        test_id: str,
+        ttl: Optional[int] = None,
+        scope_type: Optional[str] = None,
+        scope_id: Optional[str] = None,
+    ) -> bool:
         """
         Verifica se deve disparar rebuild (debounce).
         
         Args:
             test_id: ID da avaliação
             ttl: Tempo de vida da chave em segundos (padrão: 60s)
+            scope_type: Tipo de escopo (city, school, teacher, overall)
+            scope_id: ID do escopo
         
         Returns:
             True se deve disparar rebuild, False se está em debounce
         """
         redis_client = cls._get_redis_client()
         if not redis_client:
-            # Se Redis não está disponível, sempre permite (sem debounce)
             return True
         
         ttl = ttl or cls._debounce_ttl
-        key = f"report_rebuild:{test_id}"
+        key = cls._make_key(test_id, scope_type, scope_id)
         
         try:
-            # Tentar criar chave com TTL (set if not exists)
-            # Se conseguir criar, retorna True (deve disparar)
-            # Se já existe, retorna False (debounce ativo)
             result = redis_client.set(key, "1", ex=ttl, nx=True)
             return result is True
         except Exception as e:
             logger.error(f"Erro ao verificar debounce: {str(e)}")
-            # Em caso de erro, permite disparar (fail-safe)
             return True
     
     @classmethod
-    def clear_debounce(cls, test_id: str) -> None:
+    def clear_debounce(
+        cls,
+        test_id: str,
+        scope_type: Optional[str] = None,
+        scope_id: Optional[str] = None,
+    ) -> None:
         """
-        Remove debounce manualmente (útil para testes ou rebuild forçado)
+        Remove debounce manualmente (útil para testes ou rebuild forçado).
         
         Args:
             test_id: ID da avaliação
+            scope_type: Tipo de escopo (opcional)
+            scope_id: ID do escopo (opcional)
         """
         redis_client = cls._get_redis_client()
         if not redis_client:
             return
         
-        key = f"report_rebuild:{test_id}"
+        key = cls._make_key(test_id, scope_type, scope_id)
         try:
             redis_client.delete(key)
-            logger.info(f"Debounce removido para test_id: {test_id}")
+            logger.info(f"Debounce removido para {key}")
         except Exception as e:
             logger.error(f"Erro ao remover debounce: {str(e)}")
     
     @classmethod
-    def get_remaining_ttl(cls, test_id: str) -> Optional[int]:
+    def get_remaining_ttl(
+        cls,
+        test_id: str,
+        scope_type: Optional[str] = None,
+        scope_id: Optional[str] = None,
+    ) -> Optional[int]:
         """
-        Retorna TTL restante do debounce (útil para debug)
+        Retorna TTL restante do debounce.
         
         Args:
             test_id: ID da avaliação
+            scope_type: Tipo de escopo (opcional)
+            scope_id: ID do escopo (opcional)
         
         Returns:
             TTL restante em segundos ou None se não existe
@@ -116,7 +140,7 @@ class ReportDebounceService:
         if not redis_client:
             return None
         
-        key = f"report_rebuild:{test_id}"
+        key = cls._make_key(test_id, scope_type, scope_id)
         try:
             ttl = redis_client.ttl(key)
             return ttl if ttl > 0 else None

@@ -266,7 +266,7 @@ def force_rebuild(evaluation_id: str):
         
         # Limpar debounce
         from app.report_analysis.debounce import ReportDebounceService
-        ReportDebounceService.clear_debounce(evaluation_id)
+        ReportDebounceService.clear_debounce(evaluation_id, scope_type=scope_type, scope_id=scope_ref_id)
         
         if use_sync:
             # Processar síncrono

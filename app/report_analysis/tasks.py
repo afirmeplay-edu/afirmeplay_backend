@@ -344,9 +344,9 @@ def trigger_rebuild_if_needed(
         schema = _get_schema_for_scope(scope_type, scope_id)
     _set_tenant_schema(schema)
     
-    should_trigger = ReportDebounceService.should_trigger_rebuild(test_id)
+    should_trigger = ReportDebounceService.should_trigger_rebuild(test_id, scope_type=scope_type, scope_id=scope_id)
     if not should_trigger:
-        print(f"[TRIGGER_REBUILD] ⏸️ Rebuild em debounce para test_id={test_id}. Ignorando.")
+        print(f"[TRIGGER_REBUILD] ⏸️ Rebuild em debounce para {scope_type}:{scope_id}. Ignorando.")
         logger.info(f"Rebuild em debounce para test_id={test_id}. Ignorando.")
         return {
             'success': False,

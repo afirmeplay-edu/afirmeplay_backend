@@ -1,0 +1,178 @@
+{
+  "bncc_habilidades_parte_1": {
+    "disciplinas": [
+      {
+        "nome": "Arte",
+        "habilidades_compartilhadas": [
+          {
+            "series_aplicaveis": "1º ao 5º Ano",
+            "habilidades": [
+              { "codigo": "EF15AR01", "descricao": "Identificar e apreciar formas distintas das artes visuais tradicionais e contemporâneas, cultivando a percepção, o imaginário, a capacidade de simbolizar e o repertório imagético." },
+              { "codigo": "EF15AR02", "descricao": "Explorar e reconhecer elementos constitutivos das artes visuais (ponto, linha, forma, cor, espaço, movimento etc.)." },
+              { "codigo": "EF15AR03", "descricao": "Reconhecer e analisar a influência de distintas matrizes estéticas e culturais das artes visuais nas manifestações artísticas das culturas locais, regionais e nacionais." },
+              { "codigo": "EF15AR04", "descricao": "Experimentar diferentes formas de expressão artística (desenho, pintura, colagem, quadrinhos, dobradura, escultura, modelagem, instalação, vídeo, fotografia etc.), fazendo uso sustentável de materiais, instrumentos, recursos e técnicas convencionais e não convencionais." },
+              { "codigo": "EF15AR05", "descricao": "Experimentar a criação em artes visuais de modo individual, coletivo e colaborativo, explorando diferentes espaços da escola e da comunidade." },
+              { "codigo": "EF15AR06", "descricao": "Dialogar sobre a sua criação e as dos colegas, para alcançar sentidos plurais." },
+              { "codigo": "EF15AR07", "descricao": "Reconhecer algumas categorias do sistema das artes visuais (museus, galerias, instituições, artistas, artesãos, curadores etc.)." },
+              { "codigo": "EF15AR08", "descricao": "Experimentar e apreciar formas distintas de manifestações da dança presentes em diferentes contextos, cultivando a percepção, o imaginário, a capacidade de simbolizar e o repertório corporal." },
+              { "codigo": "EF15AR09", "descricao": "Estabelecer relações entre as partes do corpo e destas com o todo corporal na construção do movimento dançado." },
+              { "codigo": "EF15AR10", "descricao": "Experimentar diferentes formas de orientação no espaço (deslocamentos, planos, direções, caminhos etc.) e ritmos de movimento (lento, moderado e rápido) na construção do movimento dançado." },
+              { "codigo": "EF15AR11", "descricao": "Criar e improvisar movimentos dançados de modo individual, coletivo e colaborativo, considerando os aspectos estruturais, dinâmicos e expressivos dos elementos constitutivos do movimento, com base nos códigos de dança." },
+              { "codigo": "EF15AR12", "descricao": "Discutir, com respeito e sem preconceito, as experiências pessoais e coletivas em dança vivenciadas na escola, como fonte para a construção de vocabulários e repertórios próprios." },
+              { "codigo": "EF15AR13", "descricao": "Identificar e apreciar criticamente diversas formas e gêneros de expressão musical, reconhecendo e analisando os usos e as funções da música em diversos contextos de circulação, em especial, aqueles da vida cotidiana." },
+              { "codigo": "EF15AR14", "descricao": "Perceber e explorar os elementos constitutivos da música (altura, intensidade, timbre, melodia, ritmo etc.), por meio de jogos, brincadeiras, canções e práticas diversas de composição/criação, execução e apreciação musical." },
+              { "codigo": "EF15AR15", "descricao": "Explorar fontes sonoras diversas, como as existentes no próprio corpo (palmas, voz, percussão corporal), na natureza e em objetos cotidianos, reconhecendo os elementos constitutivos da música e as características de instrumentos musicais variados." },
+              { "codigo": "EF15AR16", "descricao": "Explorar diferentes formas de registro musical não convencional (representação gráfica de sons, partituras criativas etc.), bem como procedimentos e técnicas de registro em áudio e audiovisual, e reconhecer a notação musical convencional." },
+              { "codigo": "EF15AR17", "descricao": "Experimentar improvisações, composições e sonorização de histórias, entre outros, utilizando vozes, sons corporais e/ou instrumentos musicais convencionais ou não convencionais, de modo individual, coletivo e colaborativo." },
+              { "codigo": "EF15AR18", "descricao": "Reconhecer e apreciar formas distintas de manifestações do teatro presentes em diferentes contextos, aprendendo a ver e a ouvir histórias dramatizadas e cultivando a percepção, o imaginário, a capacidade de simbolizar e o repertório ficcional." },
+              { "codigo": "EF15AR19", "descricao": "Descobrir teatralidades na vida cotidiana, identificando elementos teatrais (tempo, espaço, personagem, ação)." },
+              { "codigo": "EF15AR20", "descricao": "Experimentar o trabalho colaborativo, coletivo e autoral em improvisações teatrais e processos narrativos criativos em teatro, explorando desde a teatralidade dos gestos e das ações do cotidiano até elementos de diferentes matrizes estéticas e culturais." },
+              { "codigo": "EF15AR21", "descricao": "Exercitar a imitação e o faz de conta, ressignificando objetos e fatos e experimentando-se no lugar do outro, ao compor e encenar acontecimentos cênicos, por meio de músicas, imagens, textos ou outros pontos de partida, de forma intencional e reflexiva." },
+              { "codigo": "EF15AR22", "descricao": "Experimentar possibilidades criativas de movimento e de voz na criação de um personagem teatral, discutindo estereótipos." },
+              { "codigo": "EF15AR23", "descricao": "Reconhecer e experimentar, em projetos temáticos, as relações processuais entre diversas linguagens artísticas." },
+              { "codigo": "EF15AR24", "descricao": "Caracterizar e experimentar brinquedos, brincadeiras, jogos, danças, canções e histórias de diferentes matrizes estéticas e culturais." },
+              { "codigo": "EF15AR25", "descricao": "Conhecer e valorizar o patrimônio cultural, material e imaterial, de culturas diversas, em especial a brasileira, incluindo-se suas matrizes indígenas, africanas e europeias, de diferentes épocas, e favorecendo a construção de vocabulário e repertório relativos às diferentes linguagens artísticas." },
+              { "codigo": "EF15AR26", "descricao": "Explorar diferentes tecnologias e recursos digitais (animações, jogos eletrônicos, fotografias, áudios, softwares etc.) nos processos de criação artística." }
+            ]
+          },
+          {
+            "series_aplicaveis": "6º ao 9º Ano",
+            "habilidades": [
+              { "codigo": "EF69AR01", "descricao": "Pesquisar, apreciar e analisar formas distintas das artes visuais tradicionais e contemporâneas, em obras de artistas brasileiros e estrangeiros de diferentes épocas e em diferentes matrizes estéticas e culturais, de modo a ampliar a experiência com diferentes contextos e práticas artístico-visuais e cultivar a percepção, o imaginário, a capacidade de simbolizar e o repertório imagético." },
+              { "codigo": "EF69AR02", "descricao": "Pesquisar e analisar diferentes estilos visuais, contextualizando-os no tempo e no espaço." },
+              { "codigo": "EF69AR03", "descricao": "Analisar situações nas quais as linguagens das artes visuais se integram às linguagens audiovisuais (cinema, animações, vídeos etc.), gráficas (capas de livros, ilustrações de textos diversos etc.), cenográficas, coreográficas, musicais etc." },
+              { "codigo": "EF69AR04", "descricao": "Analisar os elementos constitutivos das artes visuais (ponto, linha, forma, direção, cor, tom, escala, dimensão, espaço, movimento etc.) na apreciação de diferentes produções artísticas." },
+              { "codigo": "EF69AR05", "descricao": "Experimentar e analisar diferentes formas de expressão artística (desenho, pintura, colagem, quadrinhos, dobradura, escultura, modelagem, instalação, vídeo, fotografia, performance etc.)." },
+              { "codigo": "EF69AR06", "descricao": "Desenvolver processos de criação em artes visuais, com base em temas ou interesses artísticos, de modo individual, coletivo e colaborativo, fazendo uso de materiais, instrumentos e recursos convencionais, alternativos e digitais." },
+              { "codigo": "EF69AR07", "descricao": "Dialogar com princípios conceituais, proposições temáticas, repertórios imagéticos e processos de criação nas suas produções visuais." },
+              { "codigo": "EF69AR08", "descricao": "Diferenciar as categorias de artista, artesão, produtor cultural, curador, designer, entre outras, estabelecendo relações entre os profissionais do sistema das artes visuais." },
+              { "codigo": "EF69AR09", "descricao": "Pesquisar e analisar diferentes formas de expressão, representação e encenação da dança, reconhecendo e apreciando composições de dança de artistas e grupos brasileiros e estrangeiros de diferentes épocas." },
+              { "codigo": "EF69AR10", "descricao": "Explorar elementos constitutivos do movimento cotidiano e do movimento dançado, abordando, criticamente, o desenvolvimento das formas da dança em sua história tradicional e contemporânea." },
+              { "codigo": "EF69AR11", "descricao": "Experimentar e analisar os fatores de movimento (tempo, peso, fluência e espaço) como elementos que, combinados, geram as ações corporais e o movimento dançado." },
+              { "codigo": "EF69AR12", "descricao": "Investigar e experimentar procedimentos de improvisação e criação do movimento como fonte para a construção de vocabulários e repertórios próprios." },
+              { "codigo": "EF69AR13", "descricao": "Investigar brincadeiras, jogos, danças coletivas e outras práticas de dança de diferentes matrizes estéticas e culturais como referência para a criação e a composição de danças autorais, individualmente e em grupo." },
+              { "codigo": "EF69AR14", "descricao": "Analisar e experimentar diferentes elementos (figurino, iluminação, cenário, trilha sonora etc.) e espaços (convencionais e não convencionais) para composição cênica e apresentação coreográfica." },
+              { "codigo": "EF69AR15", "descricao": "Discutir as experiências pessoais e coletivas em dança vivenciadas na escola e em outros contextos, problematizando estereótipos e preconceitos." },
+              { "codigo": "EF69AR16", "descricao": "Analisar criticamente, por meio da apreciação musical, usos e funções da música em seus contextos de produção e circulação, relacionando as práticas musicais às diferentes dimensões da vida social, cultural, política, histórica, econômica, estética e ética." },
+              { "codigo": "EF69AR17", "descricao": "Explorar e analisar, criticamente, diferentes meios e equipamentos culturais de circulação da música e do conhecimento musical." },
+              { "codigo": "EF69AR18", "descricao": "Reconhecer e apreciar os elementos constitutivos e as propriedades sonoras da música (altura, intensidade, timbre, melodia, harmonia, ritmo), por meio de jogos, brincadeiras, canções e práticas diversas de composição/criação, execução e apreciação musicais." },
+              { "codigo": "EF69AR19", "descricao": "Identificar e analisar diferentes estilos musicais, contextualizando-os no tempo e no espaço, de modo a aprimorar a capacidade de apreciação da estética musical." },
+              { "codigo": "EF69AR20", "descricao": "Explorar e analisar elementos constitutivos da música (altura, intensidade, timbre, melodia, harmonia, ritmo) e instrumentos musicais variados, através de práticas de composição/criação, execução e apreciação musicais." },
+              { "codigo": "EF69AR21", "descricao": "Explorar e analisar fontes e materiais sonoros em práticas de composição/criação, execução e apreciação musical, reconhecendo timbres e características de instrumentos musicais diversos." },
+              { "codigo": "EF69AR22", "descricao": "Explorar e identificar diferentes formas de registro musical (notação musical tradicional, partituras criativas e procedimentos da música contemporânea), bem como procedimentos e técnicas de registro em áudio e audiovisual." },
+              { "codigo": "EF69AR23", "descricao": "Explorar e criar improvisações, composições, arranjos, jingles, trilhas sonoras, entre outros, utilizando vozes, sons corporais e/ou instrumentos acústicos ou eletrônicos, convencionais ou não convencionais, expressando ideias musicais de maneira individual, coletiva e colaborativa." },
+              { "codigo": "EF69AR24", "descricao": "Reconhecer e apreciar artistas e grupos de teatro brasileiros e estrangeiros de diferentes épocas, investigando os modos de criação, produção, divulgação, circulação e organização da atuação profissional em teatro." },
+              { "codigo": "EF69AR25", "descricao": "Identificar e analisar diferentes estilos cênicos, contextualizando-os no tempo e no espaço de modo a aprimorar a capacidade de apreciação da estética teatral." },
+              { "codigo": "EF69AR26", "descricao": "Explorar diferentes elementos envolvidos na composição dos acontecimentos cênicos (figurinos, adereços, cenário, iluminação e sonoplastia) e reconhecer seus vocabulários." },
+              { "codigo": "EF69AR27", "descricao": "Pesquisar e criar formas de dramaturgias e espaços cênicos para o acontecimento teatral, em diálogo com o teatro contemporâneo." },
+              { "codigo": "EF69AR28", "descricao": "Investigar e experimentar diferentes funções teatrais e discutir os limites e desafios do trabalho artístico coletivo e colaborativo." },
+              { "codigo": "EF69AR29", "descricao": "Experimentar a gestualidade e as construções corporais e vocais de maneira imaginativa na improvisação teatral e no jogo cênico." },
+              { "codigo": "EF69AR30", "descricao": "Compor improvisações e acontecimentos cênicos com base em textos dramáticos ou outros estímulos (música, imagens, objetos etc.), caracterizando personagens (com figurinos e adereços), cenário, iluminação e sonoplastia e considerando a relação com o espectador." },
+              { "codigo": "EF69AR31", "descricao": "Relacionar as práticas artísticas às diferentes dimensões da vida social, cultural, política, histórica, econômica, estética e ética." },
+              { "codigo": "EF69AR32", "descricao": "Analisar e explorar, em projetos temáticos, as relações processuais entre diversas linguagens artísticas." },
+              { "codigo": "EF69AR33", "descricao": "Analisar aspectos históricos, sociais e políticos da produção artística, problematizando as narrativas eurocêntricas e as diversas categorizações da arte (arte, artesanato, folclore, design etc.)." },
+              { "codigo": "EF69AR34", "descricao": "Analisar e valorizar o patrimônio cultural, material e imaterial, de culturas diversas, em especial a brasileira, incluindo suas matrizes indígenas, africanas e europeias, de diferentes épocas, e favorecendo a construção de vocabulário e repertório relativos às diferentes linguagens artísticas." },
+              { "codigo": "EF69AR35", "descricao": "Identificar e manipular diferentes tecnologias e recursos digitais para acessar, apreciar, produzir, registrar e compartilhar práticas e repertórios artísticos, de modo reflexivo, ético e responsável." }
+            ]
+          }
+        ],
+        "habilidades_unicas_por_serie": []
+      },
+      {
+        "nome": "Educação Física",
+        "habilidades_compartilhadas": [
+          {
+            "series_aplicaveis": "1º e 2º Ano",
+            "habilidades": [
+              { "codigo": "EF12EF01", "descricao": "Experimentar, fruir e recriar diferentes brincadeiras e jogos da cultura popular presentes no contexto comunitário e regional, reconhecendo e respeitando as diferenças individuais de desempenho dos colegas." },
+              { "codigo": "EF12EF02", "descricao": "Explicar, por meio de múltiplas linguagens (corporal, visual, oral e escrita), as brincadeiras e os jogos populares do contexto comunitário e regional, reconhecendo e valorizando a importância desses jogos e brincadeiras para suas culturas de origem." },
+              { "codigo": "EF12EF03", "descricao": "Planejar e utilizar estratégias para resolver desafios de brincadeiras e jogos populares do contexto comunitário e regional, com base no reconhecimento das características dessas práticas." },
+              { "codigo": "EF12EF04", "descricao": "Colaborar na proposição e na produção de alternativas para a prática, em outros momentos e espaços, de brincadeiras e jogos e demais práticas corporais tematizadas na escola, produzindo textos (orais, escritos, audiovisuais) para divulgá-las na escola e na comunidade." },
+              { "codigo": "EF12EF05", "descricao": "Experimentar e fruir, prezando pelo trabalho coletivo e pelo protagonismo, a prática de esportes de marca e de precisão, identificando os elementos comuns a esses esportes." },
+              { "codigo": "EF12EF06", "descricao": "Discutir a importância da observação das normas e das regras dos esportes de marca e de precisão para assegurar a integridade própria e as dos demais participantes." },
+              { "codigo": "EF12EF07", "descricao": "Experimentar, fruir e identificar diferentes elementos básicos da ginástica (equilíbrios, saltos, giros, rotações, acrobacias, com e sem materiais) e da ginástica geral, de forma individual e em pequenos grupos, adotando procedimentos de segurança." },
+              { "codigo": "EF12EF08", "descricao": "Planejar e utilizar estratégias para a execução de diferentes elementos básicos da ginástica e da ginástica geral." },
+              { "codigo": "EF12EF09", "descricao": "Participar da ginástica geral, identificando as potencialidades e os limites do corpo, e respeitando as diferenças individuais e de desempenho corporal." },
+              { "codigo": "EF12EF10", "descricao": "Descrever, por meio de múltiplas linguagens (corporal, oral, escrita e audiovisual), as características dos elementos básicos da ginástica e da ginástica geral, identificando a presença desses elementos em distintas práticas corporais." },
+              { "codigo": "EF12EF11", "descricao": "Experimentar e fruir diferentes danças do contexto comunitário e regional (rodas cantadas, brincadeiras rítmicas e expressivas), e recriá-las, respeitando as diferenças individuais e de desempenho corporal." },
+              { "codigo": "EF12EF12", "descricao": "Identificar os elementos constitutivos (ritmo, espaço, gestos) das danças do contexto comunitário e regional, valorizando e respeitando as manifestações de diferentes culturas." }
+            ]
+          },
+          {
+            "series_aplicaveis": "3º ao 5º Ano",
+            "habilidades": [
+              { "codigo": "EF35EF01", "descricao": "Experimentar e fruir brincadeiras e jogos populares do Brasil e do mundo, incluindo aqueles de matriz indígena e africana, e recriá-los, valorizando a importância desse patrimônio histórico cultural." },
+              { "codigo": "EF35EF02", "descricao": "Planejar e utilizar estratégias para possibilitar a participação segura de todos os alunos em situações de brincadeiras e jogos, com vistas a incluir os que possuem algum tipo de deficiência ou limitações físicas." },
+              { "codigo": "EF35EF03", "descricao": "Descrever, por meio de múltiplas linguagens (corporal, oral, escrita, audiovisual), as brincadeiras e os jogos populares do Brasil e do mundo, incluindo aqueles de matriz indígena e africana, explicando suas características e a importância desse patrimônio histórico cultural na preservação das diferentes culturas." },
+              { "codigo": "EF35EF04", "descricao": "Recriar, individual e coletivamente, e experimentar, na escola e fora dela, brincadeiras e jogos, adequando os espaços, os materiais e as regras às condições e às necessidades do grupo." },
+              { "codigo": "EF35EF05", "descricao": "Experimentar e fruir diversos tipos de esportes de campo e taco, rede/parede e invasão, identificando seus elementos comuns e criando estratégias individuais e coletivas básicas para sua execução, prezando pelo trabalho coletivo e pelo protagonismo." },
+              { "codigo": "EF35EF06", "descricao": "Diferenciar os conceitos de jogo e esporte, identificando as características que os constituem na contemporaneidade e suas manifestações (profissional e comunitária/lazer)." },
+              { "codigo": "EF35EF07", "descricao": "Experimentar e fruir, de forma coletiva, combinações de diferentes elementos da ginástica geral (equilíbrios, saltos, giros, rotações, acrobacias, com e sem materiais), propondo coreografias com diferentes temas do cotidiano." },
+              { "codigo": "EF35EF08", "descricao": "Planejar e utilizar estratégias para resolver desafios na execução de elementos básicos de apresentações coletivas de ginástica geral, reconhecendo as potencialidades e os limites do corpo e adotando procedimentos de segurança." },
+              { "codigo": "EF35EF09", "descricao": "Experimentar, recriar e fruir danças populares do Brasil e do mundo e danças de matriz indígena e africana, valorizando e respeitando os diferentes sentidos e significados dessas danças em suas culturas de origem." },
+              { "codigo": "EF35EF10", "descricao": "Comparar e identificar os elementos constitutivos comuns e diferentes (ritmo, espaço, gestos) em danças populares do Brasil e do mundo e danças de matriz indígena e africana." },
+              { "codigo": "EF35EF11", "descricao": "Formular e utilizar estratégias para a execução de elementos constitutivos das danças populares do Brasil e do mundo, e das danças de matriz indígena e africana." },
+              { "codigo": "EF35EF12", "descricao": "Experimentar, fruir e recriar danças urbanas, identificando seus elementos constitutivos (ritmo, espaço, gestos)." },
+              { "codigo": "EF35EF13", "descricao": "Experimentar, fruir e recriar diferentes lutas presentes no contexto comunitário e regional e lutas de matriz indígena e africana." },
+              { "codigo": "EF35EF14", "descricao": "Planejar e utilizar estratégias básicas das lutas do contexto comunitário e regional e lutas de matriz indígena e africana respeitando o colega como oponente e as normas de segurança." },
+              { "codigo": "EF35EF15", "descricao": "Identificar as características das lutas do contexto comunitário e regional e lutas de matriz indígena e africana, reconhecendo as diferenças entre lutas e brigas e entre lutas e as demais práticas corporais." }
+            ]
+          },
+          {
+            "series_aplicaveis": "6º e 7º Ano",
+            "habilidades": [
+              { "codigo": "EF67EF01", "descricao": "Experimentar e fruir, na escola e fora dela, jogos eletrônicos voltados para a prática de exercícios físicos, selecionando-os para sua rotina de vida ativa e de lazer." },
+              { "codigo": "EF67EF02", "descricao": "Identificar as transformações nas características dos jogos eletrônicos em função dos avanços das tecnologias e nas respectivas exigências corporais colocadas por esses diferentes tipos de jogos." },
+              { "codigo": "EF67EF03", "descricao": "Experimentar e fruir esportes de marca, precisão, invasão e técnico-combinatórios, valorizando o trabalho coletivo e o protagonismo." },
+              { "codigo": "EF67EF04", "descricao": "Praticar um ou mais esportes de marca, precisão, invasão e técnico-combinatórios oferecidos pela escola, usando habilidades técnico-táticas básicas e respeitando regras." },
+              { "codigo": "EF67EF05", "descricao": "Planejar e utilizar estratégias para solucionar os desafios técnicos e táticos, tanto nos esportes de marca, precisão, invasão e técnico-combinatórios como nas modalidades esportivas escolhidas para praticar de forma específica." },
+              { "codigo": "EF67EF06", "descricao": "Analisar as transformações na organização e na prática dos esportes em suas diferentes manifestações (profissional e comunitário/lazer)." },
+              { "codigo": "EF67EF07", "descricao": "Propor e produzir alternativas para experimentação dos esportes não disponíveis e/ou acessíveis na comunidade e das demais práticas corporais tematizadas na escola." },
+              { "codigo": "EF67EF08", "descricao": "Experimentar e fruir exercícios físicos que solicitem diferentes capacidades físicas, identificando seus tipos (força, velocidade, resistência, flexibilidade) e as sensações corporais provocadas pela sua prática." },
+              { "codigo": "EF67EF09", "descricao": "Construir, coletivamente, procedimentos e normas de convívio que viabilizem a participação de todos na prática de exercícios físicos, com o objetivo de promover a saúde." },
+              { "codigo": "EF67EF10", "descricao": "Diferenciar exercício físico de atividade física e propor alternativas para a prática de exercícios físicos dentro e fora do ambiente escolar." },
+              { "codigo": "EF67EF11", "descricao": "Experimentar, fruir e recriar danças urbanas, identificando seus elementos constitutivos (ritmo, espaço, gestos)." },
+              { "codigo": "EF67EF12", "descricao": "Planejar e utilizar estratégias para aprender elementos constitutivos das danças urbanas." },
+              { "codigo": "EF67EF13", "descricao": "Diferenciar as danças urbanas das demais manifestações da dança, valorizando e respeitando os sentidos e significados atribuídos a eles por diferentes grupos sociais." },
+              { "codigo": "EF67EF14", "descricao": "Experimentar e fruir diferentes lutas do Brasil, valorizando a própria segurança e a dos colegas." },
+              { "codigo": "EF67EF15", "descricao": "Planejar e utilizar estratégias básicas das lutas do Brasil, respeitando o colega como oponente." },
+              { "codigo": "EF67EF16", "descricao": "Identificar as características (códigos, rituais, elementos técnico-táticos, indumentária, materiais, instalações, instituições) das lutas do Brasil." },
+              { "codigo": "EF67EF17", "descricao": "Problematizar preconceitos e estereótipos relacionados ao trato com o corpo no contexto das lutas e em outras práticas corporais." },
+              { "codigo": "EF67EF18", "descricao": "Experimentar e fruir diferentes práticas corporais de aventura urbanas, valorizando a própria segurança e a dos colegas." },
+              { "codigo": "EF67EF19", "descricao": "Identificar os riscos durante a realização de práticas corporais de aventura urbanas e planejar estratégias para sua superação." },
+              { "codigo": "EF67EF20", "descricao": "Executar práticas corporais de aventura urbanas, respeitando o patrimônio público e utilizando alternativas para a prática segura em diversos espaços." },
+              { "codigo": "EF67EF21", "descricao": "Identificar a origem das práticas corporais de aventura e as possibilidades de recriá-las, reconhecendo as características (instrumentos, equipamentos de segurança, indumentária, organização) e seus tipos de práticas." }
+            ]
+          },
+          {
+            "series_aplicaveis": "8º e 9º Ano",
+            "habilidades": [
+              { "codigo": "EF89EF01", "descricao": "Experimentar diferentes papéis (jogador, árbitro e técnico) e fruir os esportes de rede/parede, campo e taco, invasão e combate, valorizando o trabalho coletivo e o protagonismo." },
+              { "codigo": "EF89EF02", "descricao": "Praticar um ou mais esportes de rede/parede, campo e taco, invasão e combate oferecidos pela escola, usando habilidades técnico-táticas básicas." },
+              { "codigo": "EF89EF03", "descricao": "Formular e utilizar estratégias para solucionar os desafios técnicos e táticos, tanto nos esportes de campo e taco, rede/parede, invasão e combate como nas modalidades esportivas escolhidas para praticar de forma específica." },
+              { "codigo": "EF89EF04", "descricao": "Identificar os elementos técnicos ou técnico-táticos individuais, combinações táticas, sistemas de jogo e regras das modalidades esportivas praticadas, bem como diferenciar as modalidades esportivas com base nos critérios da lógica interna das categorias de esporte: rede/parede, campo e taco, invasão e combate." },
+              { "codigo": "EF89EF05", "descricao": "Identificar as transformações históricas do fenômeno esportivo e discutir alguns de seus problemas (doping, corrupção, violência etc.) e a forma como as mídias os apresentam." },
+              { "codigo": "EF89EF06", "descricao": "Verificar locais disponíveis na comunidade para a prática de esportes e das demais práticas corporais tematizadas na escola, propondo e produzindo alternativas para utilizá-los no tempo livre." },
+              { "codigo": "EF89EF07", "descricao": "Experimentar e fruir programas de exercícios físicos que solicitem diferentes capacidades físicas, identificando os tipos de exercícios e adequando-os aos seus limites e potencialidades." },
+              { "codigo": "EF89EF08", "descricao": "Discutir as transformações históricas dos padrões de beleza e desempenho físico e seu impacto para o trato com o corpo, visando à promoção da saúde." },
+              { "codigo": "EF89EF09", "descricao": "Problematizar a prática excessiva de exercícios físicos e o uso de medicamentos para a ampliação do rendimento ou estética, apontando seus riscos para a saúde." },
+              { "codigo": "EF89EF10", "descricao": "Experimentar e fruir um ou mais programas de exercícios físicos, desenvolvendo autonomia e identificando as exigências corporais de cada um." },
+              { "codigo": "EF89EF11", "descricao": "Identificar as diferenças e semelhanças entre a ginástica de conscientização corporal e as de condicionamento físico e discutir como a prática de cada uma dessas manifestações pode interferir na melhoria das funções cardiorrespiratórias." },
+              { "codigo": "EF89EF12", "descricao": "Experimentar, fruir e recriar danças de salão, valorizando a diversidade cultural e respeitando a tradição dessas culturas." },
+              { "codigo": "EF89EF13", "descricao": "Planejar e utilizar estratégias para aprender elementos constitutivos das danças de salão." },
+              { "codigo": "EF89EF14", "descricao": "Discutir estereótipos e preconceitos relativos às danças de salão e demais práticas corporais e propor alternativas para sua superação." },
+              { "codigo": "EF89EF15", "descricao": "Analisar as características (ritmos, gestos, coreografias e músicas) das danças de salão, bem como suas transformações históricas e os grupos de origem." },
+              { "codigo": "EF89EF16", "descricao": "Experimentar e fruir a execução dos movimentos pertencentes às lutas do mundo, adotando procedimentos de segurança e respeitando o oponente." },
+              { "codigo": "EF89EF17", "descricao": "Planejar e utilizar estratégias básicas das lutas do mundo, respeitando o colega como oponente." },
+              { "codigo": "EF89EF18", "descricao": "Discutir as transformações históricas, o processo de esportivização e a midiatização de uma ou mais lutas, valorizando e respeitando as culturas de origem." },
+              { "codigo": "EF89EF19", "descricao": "Experimentar e fruir diferentes práticas corporais de aventura na natureza, valorizando a própria segurança e a dos colegas, com respeito ao meio ambiente." },
+              { "codigo": "EF89EF20", "descricao": "Identificar riscos, formular estratégias e observar normas de segurança para superar os desafios na realização de práticas corporais de aventura na natureza." },
+              { "codigo": "EF89EF21", "descricao": "Identificar as características das práticas corporais de aventura na natureza, de suas origens, além de discutir a preservação e a recuperação ambiental, propondo alternativas de vivências com essas práticas no ambiente escolar." }
+            ]
+          }
+        ],
+        "habilidades_unicas_por_serie": []
+      }
+    ]
+  }
+}

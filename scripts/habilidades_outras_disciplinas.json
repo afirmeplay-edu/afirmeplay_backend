@@ -1,0 +1,288 @@
+{
+  "habilidades_bncc": {
+    "Arte": [
+      {
+        "codigo": "EF15AR04",
+        "descricao": "Experimentar diferentes formas de expressão artística (desenho, pintura, colagem, quadrinhos, dobradura, escultura, modelagem, instalação, vídeo, fotografia etc.), fazendo uso sustentável de materiais, instrumentos, recursos e técnicas convencionais e não convencionais.",
+        "series": "1º ao 5º ano",
+        "tipo_serie": "Compartilhada"
+      },
+      {
+        "codigo": "EF15AR05",
+        "descricao": "Experimentar a criação em artes visuais de modo individual, coletivo e colaborativo, explorando diferentes espaços da escola e da comunidade. [2]",
+        "series": "1º ao 5º ano",
+        "tipo_serie": "Compartilhada"
+      },
+      {
+        "codigo": "EF15AR09P1",
+        "descricao": "Experimentar a criação em artes visuais de modo, individual, coletivo e colaborativo, explorando diferentes espaços da escola (sala de aula, brinquedoteca, biblioteca etc.) e da comunidade. [3]",
+        "series": "1º ao 5º ano",
+        "tipo_serie": "Compartilhada"
+      },
+      {
+        "codigo": "EF15AR10",
+        "descricao": "Experimentar diferentes formas de orientação no espaço (deslocamentos, planos, direções, caminhos etc.) e ritmos de movimento. [2]",
+        "series": "1º ao 5º ano",
+        "tipo_serie": "Compartilhada"
+      },
+      {
+        "codigo": "EF15AR24",
+        "descricao": "Caracterizar e experimentar brinquedos, brincadeiras, jogos, danças, canções e histórias de diferentes matrizes estéticas e culturais. [2]",
+        "series": "1º ao 5º ano",
+        "tipo_serie": "Compartilhada"
+      },
+      {
+        "codigo": "EF15AR26",
+        "descricao": "Explorar diferentes tecnologias e recursos digitais (multimeios, animações, jogos eletrônicos, gravações em áudio e vídeo, etc.) nos processos de criação artística. [2]",
+        "series": "1º ao 5º ano",
+        "tipo_serie": "Compartilhada"
+      },
+      {
+        "codigo": "EF69AR01",
+        "descricao": "Pesquisar, apreciar e analisar formas distintas das artes visuais tradicionais e contemporâneas, em obras de artistas brasileiros e estrangeiros de diferentes épocas. [4]",
+        "series": "6º ao 9º ano",
+        "tipo_serie": "Compartilhada"
+      },
+      {
+        "codigo": "EF69AR02",
+        "descricao": "Pesquisar e analisar diferentes estilos visuais, contextualizando-os no tempo e no espaço. [2]",
+        "series": "6º ao 9º ano",
+        "tipo_serie": "Compartilhada"
+      },
+      {
+        "codigo": "EF69AR06",
+        "descricao": "Desenvolver processos de criação em artes visuais, com base em temas ou interesses artísticos, de modo individual, coletivo e colaborativo. [5]",
+        "series": "6º ao 9º ano",
+        "tipo_serie": "Compartilhada"
+      },
+      {
+        "codigo": "EF69AR31",
+        "descricao": "Relacionar as práticas artísticas às diferentes dimensões da vida social, cultural, política, histórica, econômica, estética e ética. [6]",
+        "series": "6º ao 9º ano",
+        "tipo_serie": "Compartilhada"
+      },
+      {
+        "codigo": "EF69AR35",
+        "descricao": "Identificar e manipular diferentes tecnologias e recursos digitais para acessar, gerenciar e produzir informação e arte. [4]",
+        "series": "6º ao 9º ano",
+        "tipo_serie": "Compartilhada"
+      }
+    ],
+    "Educação Física": [
+      {
+        "codigo": "EF01EF01A",
+        "descricao": "Identificar brincadeiras e jogos dos contextos familiar e comunitário, valorizando elementos da cultura popular presente nestes contextos. [7]",
+        "series": "1º ano",
+        "tipo_serie": "Única"
+      },
+      {
+        "codigo": "EF67EF01",
+        "descricao": "Experimentar e fruir, na escola e fora dela, jogos eletrônicos, valorizando os laços de amizade e o convívio social. [8]",
+        "series": "6º e 7º anos",
+        "tipo_serie": "Compartilhada"
+      },
+      {
+        "codigo": "EF67EF02",
+        "descricao": "Identificar as transformações nas características dos jogos eletrônicos em função dos avanços da tecnologia e nas respectivas exigências corporais. [2]",
+        "series": "6º e 7º anos",
+        "tipo_serie": "Compartilhada"
+      },
+      {
+        "codigo": "EF67EF07P6",
+        "descricao": "Desenvolver alternativas para experimentação dos esportes não disponíveis e/ou acessíveis na comunidade e das demais práticas corporais tematizadas. [9]",
+        "series": "6º e 7º anos",
+        "tipo_serie": "Compartilhada"
+      }
+    ],
+    "Língua Inglesa": [
+      {
+        "codigo": "EF06LI01",
+        "descricao": "Interagir em situações de intercâmbio oral, demonstrando iniciativa para utilizar a língua inglesa. [10]",
+        "series": "6º ano",
+        "tipo_serie": "Única"
+      },
+      {
+        "codigo": "EF06LI02",
+        "descricao": "Coletar informações do grupo, perguntando e respondendo sobre a família, os amigos, a escola e a comunidade. [10]",
+        "series": "6º ano",
+        "tipo_serie": "Única"
+      },
+      {
+        "codigo": "EF06LI04",
+        "descricao": "Reconhecer, com o apoio de palavras cognatas e pistas do contexto discursivo, o assunto e as informações principais em textos orais sobre temas familiares. [11]",
+        "series": "6º ano",
+        "tipo_serie": "Única"
+      },
+      {
+        "codigo": "EF06LI05",
+        "descricao": "Aplicar os conhecimentos da língua inglesa para falar de si e de outras pessoas, explicitando informações pessoais e características relacionadas a gostos, preferências e rotinas. [11]",
+        "series": "6º ano",
+        "tipo_serie": "Única"
+      },
+      {
+        "codigo": "EF06LI06",
+        "descricao": "Planejar apresentação sobre a família, a comunidade e a escola, compartilhando-a oralmente com o grupo. [11]",
+        "series": "6º ano",
+        "tipo_serie": "Única"
+      },
+      {
+        "codigo": "EF07LI03",
+        "descricao": "Mobilizar conhecimentos prévios para compreender texto oral, identificando pistas linguísticas e não linguísticas para construção de sentido. [12]",
+        "series": "7º ano",
+        "tipo_serie": "Única"
+      },
+      {
+        "codigo": "EF09LI01",
+        "descricao": "Fazer uso da língua inglesa para expor pontos de vista, argumentos e contra-argumentos, considerando o contexto e os recursos linguísticos voltados para a persuasão. [13]",
+        "series": "9º ano",
+        "tipo_serie": "Única"
+      }
+    ],
+    "Ciências": [
+      {
+        "codigo": "EF01CI01",
+        "descricao": "Comparar características de diferentes materiais presentes em objetos de uso cotidiano, discutindo sua origem, os modos como são descartados e como podem ser usados de forma mais consciente. [14]",
+        "series": "1º ano",
+        "tipo_serie": "Única"
+      },
+      {
+        "codigo": "EF01CI02",
+        "descricao": "Localizar, nomear e representar as partes do corpo humano, por meio de desenhos, aplicativos, softwares e/ou modelos tridimensionais e explicar as funções de cada parte. [15]",
+        "series": "1º ano",
+        "tipo_serie": "Única"
+      },
+      {
+        "codigo": "EF01CI06",
+        "descricao": "Comparar diferentes animais, observando seus hábitos diurnos e noturnos. [16]",
+        "series": "1º ano",
+        "tipo_serie": "Única"
+      },
+      {
+        "codigo": "EF01CI06RS-4",
+        "descricao": "Comparar diferentes animais, observando seus hábitos diurnos e noturnos. [16]",
+        "series": "1º ano",
+        "tipo_serie": "Única"
+      }
+    ],
+    "História": [
+      {
+        "codigo": "EF02HI09",
+        "descricao": "Identificar objetos e documentos pessoais que remetam à própria experiência no âmbito da família e/ou da comunidade, discutindo os motivos da preservação da memória. [2]",
+        "series": "2º ano",
+        "tipo_serie": "Única"
+      },
+      {
+        "codigo": "EF03HI09",
+        "descricao": "Mapear os espaços públicos no lugar em que vive (ruas, praças, escolas, hospitais) e identificar suas funções. [2]",
+        "series": "3º ano",
+        "tipo_serie": "Única"
+      },
+      {
+        "codigo": "EF06HI01",
+        "descricao": "Identificar diferentes formas de compreensão da noção de tempo e de periodização dos processos históricos (continuidades e rupturas). [17]",
+        "series": "6º ano",
+        "tipo_serie": "Única"
+      },
+      {
+        "codigo": "EF09HI29",
+        "descricao": "Descrever e analisar as experiências ditatoriais na América Latina, seus procedimentos e vínculos com o poder, em nível nacional e internacional, e a atuação de movimentos de contestação às ditaduras. [18]",
+        "series": "9º ano",
+        "tipo_serie": "Única"
+      },
+      {
+        "codigo": "EF09HI30",
+        "descricao": "Comparar as características dos regimes ditatoriais latino-americanos, com especial atenção para a censura e a repressão sistemática. [18]",
+        "series": "9º ano",
+        "tipo_serie": "Única"
+      }
+    ],
+    "Geografia": [
+      {
+        "codigo": "EF01GE01",
+        "descricao": "Observar e descrever características de seus lugares de vivência (moradia, escola, bairro, rua entre outros) e identificar as semelhanças e diferenças entre esses lugares. [19]",
+        "series": "1º ano",
+        "tipo_serie": "Única"
+      },
+      {
+        "codigo": "EF01GE06",
+        "descricao": "Discutir e elaborar, coletivamente, regras de convívio em diferentes espaços (sala de aula, escola etc.), reconhecendo os direitos e os deveres das crianças. [3]",
+        "series": "1º ano",
+        "tipo_serie": "Única"
+      },
+      {
+        "codigo": "EF06GE05X",
+        "descricao": "Relacionar padrões climáticos, tipos de solo, relevo e formações vegetais (biomas) no Brasil e no mundo. [20]",
+        "series": "6º ano",
+        "tipo_serie": "Única"
+      },
+      {
+        "codigo": "EF06GE06",
+        "descricao": "Identificar as características das paisagens transformadas pelo trabalho humano a partir do desenvolvimento da agropecuária e do processo de industrialização. [20]",
+        "series": "6º ano",
+        "tipo_serie": "Única"
+      },
+      {
+        "codigo": "EF09GE01",
+        "descricao": "Analisar criticamente de que forma a hegemonia europeia foi exercida em várias regiões do planeta, notadamente em situações de conflito, intervenções militares e/ou influência cultural em diferentes tempos e lugares. [21]",
+        "series": "9º ano",
+        "tipo_serie": "Única"
+      }
+    ],
+    "Ensino Religioso": [
+      {
+        "codigo": "EF01ER01",
+        "descricao": "Identificar e valorizar os saberes e práticas da própria comunidade em relação aos fenômenos e ciclos da natureza (chuvas, colheita, secas etc.) e situações da vida (nascimento, morte, doença, festas etc.).",
+        "series": "1º ano",
+        "tipo_serie": "Única"
+      },
+      {
+        "codigo": "EF01ER02",
+        "descricao": "Reconhecer que o seu nome e o das demais pessoas os identificam e os diferenciam. [22]",
+        "series": "1º ano",
+        "tipo_serie": "Única"
+      },
+      {
+        "codigo": "EF01ER03",
+        "descricao": "Reconhecer e respeitar as características físicas e subjetivas de cada um. [22]",
+        "series": "1º ano",
+        "tipo_serie": "Única"
+      },
+      {
+        "codigo": "EF01ER06RS-01",
+        "descricao": "Relacionar os diferentes saberes, memórias, lembranças, manifestando respeito com as Tradições Religiosas de sua comunidade (ritos, crenças, divindades). [23]",
+        "series": "1º ano",
+        "tipo_serie": "Única"
+      },
+      {
+        "codigo": "EF02ER09MG",
+        "descricao": "Localizar e respeitar os diversos espaços de convivência, especialmente aqueles no entorno da escola, que estão a serviço das pessoas. [3]",
+        "series": "2º ano",
+        "tipo_serie": "Única"
+      },
+      {
+        "codigo": "EF05ER01",
+        "descricao": "Identificar e respeitar acontecimentos sagrados de diferentes culturas e tradições religiosas como recurso para preservar a memória. [24]",
+        "series": "5º ano",
+        "tipo_serie": "Única"
+      },
+      {
+        "codigo": "EF06ER01PE",
+        "descricao": "Reconhecer o papel da tradição escrita na preservação de memórias, crenças e ensinamentos em diferentes tradições religiosas. [25]",
+        "series": "6º ano",
+        "tipo_serie": "Única"
+      },
+      {
+        "codigo": "EF07ER05",
+        "descricao": "Discutir estratégias que promovam a convivência ética e respeitosa entre os indivíduos e as diferentes organizações e manifestações religiosas. [2]",
+        "series": "7º ano",
+        "tipo_serie": "Única"
+      },
+      {
+        "codigo": "EF09ER01",
+        "descricao": "Analisar princípios e orientações para o cuidado da vida e nas diversas tradições religiosas e filosofias de vida. [26]",
+        "series": "9º ano",
+        "tipo_serie": "Única"
+      }
+    ]
+  }
+}

@@ -1,4 +1,4 @@
-from flask import Blueprint, request, jsonify
+from flask import Blueprint, request, jsonify, g
 from app.models.manager import Manager
 from app.models.user import User, RoleEnum
 from app.models.school import School
@@ -8,8 +8,14 @@ from app import db
 from flask_jwt_extended import jwt_required
 from werkzeug.security import generate_password_hash
 from sqlalchemy.exc import SQLAlchemyError, IntegrityError
+from sqlalchemy import text
 import logging
 from datetime import datetime
+from app.utils.tenant_middleware import (
+    city_id_to_schema_name,
+    set_search_path,
+    get_current_tenant_context,
+)
 
 bp = Blueprint('managers', __name__, url_prefix="/managers")
 
@@ -29,6 +35,40 @@ def handle_integrity_error(error):
 def handle_generic_error(error):
     logging.error(f"Unexpected error: {str(error)}", exc_info=True)
     return jsonify({"error": "An unexpected error occurred", "details": str(error)}), 500
+
+
+def _schema_for_school_id(school_id):
+    """
+    Encontra o schema (city_xxx) que contém a escola com o id dado.
+    Necessário quando o request não tem contexto de tenant (ex.: admin sem X-City-ID).
+    Retorna o nome do schema ou None se não encontrar.
+    """
+    try:
+        rp = db.session.execute(
+            text("""
+                SELECT n.nspname
+                FROM pg_namespace n
+                JOIN pg_class c ON c.relnamespace = n.oid AND c.relname = 'school'
+                WHERE n.nspname LIKE 'city_%'
+                ORDER BY n.nspname
+            """)
+        )
+        schemas = [row[0] for row in rp.fetchall()]
+        for schema in schemas:
+            try:
+                r = db.session.execute(
+                    text('SELECT 1 FROM "{}".school WHERE id = :sid'.format(schema)),
+                    {"sid": school_id},
+                )
+                if r.fetchone():
+                    return schema
+            except Exception:
+                continue
+        return None
+    except Exception as e:
+        logging.warning("Erro ao descobrir schema da escola: %s", e)
+        return None
+
 
 # POST - Criar manager (diretor, coordenador, tecadm, admin)
 @bp.route('', methods=['POST'])
@@ -401,6 +441,17 @@ def get_managers_by_school(school_id):
         user = get_current_user_from_token()
         if not user:
             return jsonify({"error": "Usuário não encontrado"}), 404
+
+        # Garantir search_path no schema do tenant: tabela school existe em city_xxx, não em public
+        ctx = get_current_tenant_context()
+        if ctx and ctx.has_tenant_context and ctx.schema and ctx.schema != "public":
+            set_search_path(ctx.schema)
+        else:
+            # Admin sem X-City-ID ou request sem tenant: descobrir schema onde está a escola
+            schema = _schema_for_school_id(school_id)
+            if not schema:
+                return jsonify({"error": "Escola não encontrada"}), 404
+            set_search_path(schema)
 
         # Verificar se a escola existe
         school = School.query.get(school_id)

@@ -15,9 +15,30 @@ import logging
 
 from app.report_analysis.services import ReportAggregateService
 from app.report_analysis.tasks import trigger_rebuild_if_needed
+from app.report_analysis.tasks import _get_schema_for_scope
+from app.utils.tenant_middleware import city_id_to_schema_name, set_search_path, get_current_tenant_context
 from app import db
 
 logger = logging.getLogger(__name__)
+
+
+def _resolve_report_schema(scope_type: str, scope_ref_id, city_id_from_request: str = None):
+    """
+    Resolve o schema PostgreSQL para as rotas de relatório (multi-tenant).
+    Deve ser chamado antes de qualquer query a Test/ClassTest/etc.
+    Retorna None se não for possível determinar o schema (ex.: admin sem city_id/school_id).
+    """
+    if scope_type == 'all' or scope_type == 'overall' or not scope_ref_id:
+        return None
+    if scope_type == 'city':
+        return city_id_to_schema_name(scope_ref_id)
+    if scope_type == 'school':
+        if city_id_from_request:
+            return city_id_to_schema_name(city_id_from_request)
+        return _get_schema_for_scope(scope_type, scope_ref_id)
+    if scope_type == 'teacher':
+        return _get_schema_for_scope(scope_type, scope_ref_id)
+    return None
 
 # Criar blueprint
 bp = Blueprint('report_analysis', __name__, url_prefix='/reports')
@@ -45,25 +66,31 @@ def dados_json(evaluation_id: str):
         - HTTP 404: Avaliação não encontrada ou sem permissão
     """
     try:
-        # Verificar se a avaliação existe
-        test = Test.query.get(evaluation_id)
-        if not test:
-            return jsonify({"error": "Avaliação não encontrada"}), 404
-        
-        # Obter usuário atual
+        # Obter usuário e escopo primeiro (multi-tenant: schema deve ser definido antes de query em Test)
         user = get_current_user_from_token()
         if not user:
             return jsonify({"error": "Usuário não autenticado"}), 401
         
-        # Obter parâmetros de filtro (usados apenas para admin)
         school_id_raw = request.args.get('school_id')
         city_id = request.args.get('city_id')
         
-        # Determinar escopo baseado no role do usuário
         try:
             scope_type, scope_ref_id = _determinar_escopo_por_role(user, school_id_raw, city_id)
         except ValueError as e:
             return jsonify({"error": str(e)}), 400
+        
+        schema = _resolve_report_schema(scope_type, scope_ref_id, city_id)
+        if not schema:
+            return jsonify({
+                "error": "Para acessar o relatório, informe city_id ou school_id na URL (ex.: ?city_id=... ou ?school_id=...)"
+            }), 400
+        
+        set_search_path(schema)
+        
+        # Verificar se a avaliação existe
+        test = Test.query.get(evaluation_id)
+        if not test:
+            return jsonify({"error": "Avaliação não encontrada"}), 404
         
         # Para professores, verificar permissões
         if scope_type == 'teacher':
@@ -94,10 +121,15 @@ def dados_json(evaluation_id: str):
             print(f"[ROUTES] 🔄 Relatório não está pronto para {scope_type}:{scope_ref_id}. Disparando rebuild.")
             logger.info(f"Relatório não está pronto para {scope_type}:{scope_ref_id}. Disparando rebuild.")
             
-            # Disparar task assíncrona (com debounce)
+            # Disparar task assíncrona (com debounce). Passar city_id para scope school/city evita query em School no worker.
+            city_id_for_task = (
+                city_id                                            # admin passa pela URL
+                or (scope_ref_id if scope_type == 'city' else None)  # escopo city: scope_ref_id já é city_id
+                or user.get('city_id')                             # diretor/coordenador/professor: city_id do token
+            )
             try:
-                print(f"[ROUTES] 📤 Enviando task trigger_rebuild_if_needed.delay({evaluation_id}, {scope_type}, {scope_ref_id})")
-                task_result = trigger_rebuild_if_needed.delay(evaluation_id, scope_type, scope_ref_id)
+                print(f"[ROUTES] 📤 Enviando task trigger_rebuild_if_needed.delay({evaluation_id}, {scope_type}, {scope_ref_id}, city_id={city_id_for_task})")
+                task_result = trigger_rebuild_if_needed.delay(evaluation_id, scope_type, scope_ref_id, city_id_for_task)
                 print(f"[ROUTES] ✅ Task enviada com sucesso! Task ID: {task_result.id}")
             except Exception as e:
                 print(f"[ROUTES] ❌ Erro ao disparar task de rebuild: {type(e).__name__}: {str(e)}")
@@ -152,25 +184,31 @@ def get_report_status(evaluation_id: str):
         JSON com status do relatório
     """
     try:
-        # Verificar se a avaliação existe
-        test = Test.query.get(evaluation_id)
-        if not test:
-            return jsonify({"error": "Avaliação não encontrada"}), 404
-        
-        # Obter usuário atual
+        # Obter usuário e parâmetros primeiro (multi-tenant: schema deve ser definido antes de query em Test)
         user = get_current_user_from_token()
         if not user:
             return jsonify({"error": "Usuário não autenticado"}), 401
         
-        # Obter parâmetros de filtro
         school_id_raw = request.args.get('school_id')
         city_id = request.args.get('city_id')
         
-        # Determinar escopo
         try:
             scope_type, scope_ref_id = _determinar_escopo_por_role(user, school_id_raw, city_id)
         except ValueError as e:
             return jsonify({"error": str(e)}), 400
+        
+        schema = _resolve_report_schema(scope_type, scope_ref_id, city_id)
+        if not schema:
+            return jsonify({
+                "error": "Para acessar o relatório, informe city_id ou school_id na URL (ex.: ?city_id=... ou ?school_id=...)"
+            }), 400
+        
+        set_search_path(schema)
+        
+        # Verificar se a avaliação existe
+        test = Test.query.get(evaluation_id)
+        if not test:
+            return jsonify({"error": "Avaliação não encontrada"}), 404
         
         # Obter status
         # Forçar refresh para garantir que estamos lendo dados atualizados do banco
@@ -204,20 +242,27 @@ def force_rebuild(evaluation_id: str):
         sync: bool (default: false) - Se true, processa síncrono
     """
     try:
-        test = Test.query.get(evaluation_id)
-        if not test:
-            return jsonify({"error": "Avaliação não encontrada"}), 404
-        
         user = get_current_user_from_token()
         school_id = request.args.get('school_id')
         city_id = request.args.get('city_id')
         use_sync = request.args.get('sync', 'false').lower() == 'true'
         
-        # Determinar escopo
         try:
             scope_type, scope_ref_id = _determinar_escopo_por_role(user, school_id, city_id)
         except ValueError as e:
             return jsonify({"error": str(e)}), 400
+        
+        schema = _resolve_report_schema(scope_type, scope_ref_id, city_id)
+        if not schema:
+            return jsonify({
+                "error": "Para forçar rebuild, informe city_id ou school_id na URL (ex.: ?city_id=... ou ?school_id=...)"
+            }), 400
+        
+        set_search_path(schema)
+        
+        test = Test.query.get(evaluation_id)
+        if not test:
+            return jsonify({"error": "Avaliação não encontrada"}), 404
         
         # Limpar debounce
         from app.report_analysis.debounce import ReportDebounceService

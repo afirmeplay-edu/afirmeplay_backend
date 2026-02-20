@@ -1,0 +1,500 @@
+{
+  "bncc_habilidades_parte_3": {
+    "disciplinas": [
+      {
+        "nome": "História",
+        "nota_estrutural": "As habilidades de História são específicas para cada ano (EF01HI a EF09HI), sem códigos compartilhados.",
+        "habilidades_compartilhadas": [],
+        "habilidades_unicas_por_serie": [
+          {
+            "serie": "1º Ano",
+            "habilidades": [
+              { "codigo": "EF01HI01", "descricao": "Identificar aspectos do seu crescimento por meio do registro das lembranças particulares ou de lembranças dos membros de sua família e/ou de sua comunidade." },
+              { "codigo": "EF01HI02", "descricao": "Identificar a relação entre as suas histórias e as histórias de sua família e de sua comunidade." },
+              { "codigo": "EF01HI03", "descricao": "Descrever e distinguir os seus papéis e responsabilidades relacionados à família, à escola e à comunidade." },
+              { "codigo": "EF01HI04", "descricao": "Identificar as diferenças entre os variados ambientes em que vive (doméstico, escolar e da comunidade), reconhecendo as especificidades dos hábitos e das regras que os regem." },
+              { "codigo": "EF01HI05", "descricao": "Identificar semelhanças e diferenças entre jogos e brincadeiras atuais e de outras épocas e lugares." },
+              { "codigo": "EF01HI06", "descricao": "Conhecer as histórias da família e da escola e identificar o papel desempenhado por diferentes sujeitos em diferentes espaços." },
+              { "codigo": "EF01HI07", "descricao": "Identificar mudanças e permanências nas formas de organização familiar." },
+              { "codigo": "EF01HI08", "descricao": "Reconhecer o significado das comemorações e festas escolares, diferenciando-as das datas festivas comemoradas no âmbito familiar ou da comunidade." }
+            ]
+          },
+          {
+            "serie": "2º Ano",
+            "habilidades": [
+              { "codigo": "EF02HI01", "descricao": "Reconhecer espaços de sociabilidade e identificar os motivos que aproximam e separam as pessoas em diferentes grupos sociais ou de parentesco." },
+              { "codigo": "EF02HI02", "descricao": "Identificar e descrever práticas e papéis sociais que as pessoas exercem em diferentes comunidades." },
+              { "codigo": "EF02HI03", "descricao": "Selecionar situações cotidianas que remetam à percepção de mudança, pertencimento e memória." },
+              { "codigo": "EF02HI04", "descricao": "Selecionar e compreender o significado de objetos e documentos pessoais como fontes de memórias e histórias nos âmbitos pessoal, familiar, escolar e comunitário." },
+              { "codigo": "EF02HI05", "descricao": "Selecionar objetos e documentos pessoais e de grupos próximos ao seu convívio e compreender sua função, seu uso e seu significado." },
+              { "codigo": "EF02HI06", "descricao": "Identificar e organizar, temporalmente, fatos da vida cotidiana, usando noções relacionadas ao tempo (antes, durante, ao mesmo tempo e depois)." },
+              { "codigo": "EF02HI07", "descricao": "Identificar e utilizar diferentes marcadores do tempo presentes na comunidade, como relógio e calendário." },
+              { "codigo": "EF02HI08", "descricao": "Compilar histórias da família e/ou da comunidade registradas em diferentes fontes." },
+              { "codigo": "EF02HI09", "descricao": "Identificar objetos e documentos pessoais que remetam à própria experiência no âmbito da família e/ou da comunidade, discutindo as razões pelas quais alguns objetos são preservados e outros são descartados." },
+              { "codigo": "EF02HI10", "descricao": "Identificar diferentes formas de trabalho existentes na comunidade em que vive, seus significados, suas especificidades e importância." },
+              { "codigo": "EF02HI11", "descricao": "Identificar impactos no ambiente causados pelas diferentes formas de trabalho existentes na comunidade em que vive." }
+            ]
+          },
+          {
+            "serie": "3º Ano",
+            "habilidades": [
+              { "codigo": "EF03HI01", "descricao": "Identificar os grupos populacionais que formam a cidade, o município e a região, as relações estabelecidas entre eles e os eventos que marcam a formação da cidade, como fenômenos migratórios (vida rural/vida urbana), desmatamentos, estabelecimento de grandes empresas etc." },
+              { "codigo": "EF03HI02", "descricao": "Selecionar, por meio da consulta de fontes de diferentes naturezas, e registrar acontecimentos ocorridos ao longo do tempo na cidade ou região em que vive." },
+              { "codigo": "EF03HI03", "descricao": "Identificar e comparar pontos de vista em relação a eventos significativos do local em que vive, aspectos relacionados a condições sociais e à presença de diferentes grupos sociais e culturais, com especial destaque para as culturas africanas, indígenas e de migrantes." },
+              { "codigo": "EF03HI04", "descricao": "Identificar os patrimônios históricos e culturais de sua cidade ou região e discutir as razões culturais, sociais e políticas para que assim sejam considerados." },
+              { "codigo": "EF03HI05", "descricao": "Identificar os marcos históricos do lugar em que vive e compreender seus significados." },
+              { "codigo": "EF03HI06", "descricao": "Identificar os registros de memória na cidade (nomes de ruas, monumentos, edifícios etc.), discutindo os critérios que explicam a escolha desses nomes." },
+              { "codigo": "EF03HI07", "descricao": "Identificar semelhanças e diferenças existentes entre comunidades de sua cidade ou região, e descrever o papel dos diferentes grupos sociais que as formam." },
+              { "codigo": "EF03HI08", "descricao": "Identificar modos de vida na cidade e no campo no presente, comparando-os com os do passado." },
+              { "codigo": "EF03HI09", "descricao": "Mapear os espaços públicos no lugar em que vive (ruas, praças, escolas, hospitais, prédios da Prefeitura e da Câmara de Vereadores etc.) e identificar suas funções." },
+              { "codigo": "EF03HI10", "descricao": "Identificar as diferenças entre o espaço doméstico, os espaços públicos e as áreas de conservação ambiental, compreendendo a importância dessa distinção." },
+              { "codigo": "EF03HI11", "descricao": "Identificar diferenças entre formas de trabalho realizadas na cidade e no campo, considerando também o uso da tecnologia nesses diferentes contextos." },
+              { "codigo": "EF03HI12", "descricao": "Comparar as relações de trabalho e lazer do presente com as de outros tempos e espaços, analisando mudanças e permanências." }
+            ]
+          },
+          {
+            "serie": "4º Ano",
+            "habilidades": [
+              { "codigo": "EF04HI01", "descricao": "Reconhecer a história como resultado da ação do ser humano no tempo e no espaço, com base na identificação de mudanças e permanências ao longo do tempo." },
+              { "codigo": "EF04HI02", "descricao": "Identificar mudanças e permanências ao longo do tempo, discutindo os sentidos dos grandes marcos da história da humanidade (nomadismo, desenvolvimento da agricultura e do pastoreio, criação da indústria etc.)." },
+              { "codigo": "EF04HI03", "descricao": "Identificar as transformações ocorridas na cidade ao longo do tempo e discutir suas interferências nos modos de vida de seus habitantes, tomando como ponto de partida o presente." },
+              { "codigo": "EF04HI04", "descricao": "Identificar as relações entre os indivíduos e a natureza e discutir o significado do nomadismo e da fixação das primeiras comunidades humanas." },
+              { "codigo": "EF04HI05", "descricao": "Relacionar os processos de ocupação do campo a intervenções na natureza, avaliando os resultados dessas intervenções." },
+              { "codigo": "EF04HI06", "descricao": "Identificar as transformações ocorridas nos processos de deslocamento das pessoas e mercadorias, analisando as formas de adaptação ou marginalização." },
+              { "codigo": "EF04HI07", "descricao": "Identificar e descrever a importância dos caminhos terrestres, fluviais e marítimos para a dinâmica da vida comercial." },
+              { "codigo": "EF04HI08", "descricao": "Identificar as transformações ocorridas nos meios de comunicação (cultura oral, imprensa, rádio, televisão, cinema, internet e demais tecnologias digitais de informação e comunicação) e discutir seus significados para os diferentes grupos ou estratos sociais." },
+              { "codigo": "EF04HI09", "descricao": "Identificar as motivações dos processos migratórios em diferentes tempos e espaços e avaliar o papel desempenhado pela migração nas regiões de destino." },
+              { "codigo": "EF04HI10", "descricao": "Analisar diferentes fluxos populacionais e suas contribuições para a formação da sociedade brasileira." },
+              { "codigo": "EF04HI11", "descricao": "Analisar, na sociedade em que vive, a existência ou não de mudanças associadas à migração (interna e internacional)." }
+            ]
+          },
+          {
+            "serie": "5º Ano",
+            "habilidades": [
+              { "codigo": "EF05HI01", "descricao": "Justificar a formação das primeiras cidades e as necessidades da organização civil, valorizando o protagonismo de diferentes grupos sociais." },
+              { "codigo": "EF05HI02", "descricao": "Identificar os mecanismos de organização do poder político com vistas à compreensão da ideia de Estado e/ou de outras formas de ordenação social." },
+              { "codigo": "EF05HI03", "descricao": "Analisar o papel das culturas e das religiões na composição identitária dos povos antigos." },
+              { "codigo": "EF05HI04", "descricao": "Associar a noção de cidadania com os princípios de respeito à diversidade, à pluralidade e aos direitos humanos." },
+              { "codigo": "EF05HI05", "descricao": "Associar o conceito de cidadania à conquista de direitos dos povos e das sociedades, compreendendo-o como conquista histórica." },
+              { "codigo": "EF05HI06", "descricao": "Comparar o uso de diferentes linguagens e tecnologias no processo de comunicação e avaliar os significados sociais, políticos e culturais atribuídos a elas." },
+              { "codigo": "EF05HI07", "descricao": "Identificar os processos de produção, hierarquização e difusão dos marcos de memória e discutir a presença e/ou a ausência de diferentes grupos que compõem a sociedade na nomeação desses marcos de memória." },
+              { "codigo": "EF05HI08", "descricao": "Identificar formas de marcação da passagem do tempo em distintas sociedades, incluindo os povos indígenas originários e os povos africanos." },
+              { "codigo": "EF05HI09", "descricao": "Comparar pontos de vista sobre temas que impactam a vida cotidiana no tempo presente, por meio do acesso a diferentes fontes, incluindo orais." },
+              { "codigo": "EF05HI10", "descricao": "Inventariar os patrimônios materiais e imateriais da humanidade e analisar mudanças e permanências desses patrimônios ao longo do tempo." }
+            ]
+          },
+          {
+            "serie": "6º Ano",
+            "habilidades": [
+              { "codigo": "EF06HI01", "descricao": "Identificar diferentes formas de compreensão da noção de tempo e de periodização dos processos históricos (continuidades e rupturas)." },
+              { "codigo": "EF06HI02", "descricao": "Identificar a gênese da produção do saber histórico e analisar o significado das fontes que originaram a construção da disciplina." },
+              { "codigo": "EF06HI03", "descricao": "Identificar as hipóteses científicas sobre o surgimento da espécie humana e sua historicidade e analisar os significados dos mitos de fundação." },
+              { "codigo": "EF06HI04", "descricao": "Conhecer as teorias sobre a origem do homem americano." },
+              { "codigo": "EF06HI05", "descricao": "Descrever modificações na natureza e na paisagem realizadas por diferentes tipos de sociedade, com destaque para os povos indígenas originários e povos africanos, e discutir a natureza e a lógica das transformações ocorridas." },
+              { "codigo": "EF06HI06", "descricao": "Identificar geograficamente as rotas de povoamento no território americano." },
+              { "codigo": "EF06HI07", "descricao": "Identificar aspectos e formas de registro das sociedades antigas na África, no Oriente Médio e nas Américas, distinguindo alguns significados presentes na cultura material e na tradição oral dessas sociedades." },
+              { "codigo": "EF06HI08", "descricao": "Identificar os espaços territoriais ocupados e os aportes culturais, científicos, sociais e econômicos dos astecas, maias e incas e dos povos indígenas de diversas regiões brasileiras." },
+              { "codigo": "EF06HI09", "descricao": "Discutir o conceito de Antiguidade Clássica, seu alcance e limite na tradição ocidental, assim como os impactos sobre outras sociedades e culturas." },
+              { "codigo": "EF06HI10", "descricao": "Explicar a formação da Grécia Antiga, com ênfase na formação da pólis e nas transformações políticas, sociais e culturais." },
+              { "codigo": "EF06HI11", "descricao": "Caracterizar o processo de formação da Roma Antiga e suas configurações sociais e políticas nos períodos monárquico e republicano." },
+              { "codigo": "EF06HI12", "descricao": "Associar o conceito de cidadania a dinâmicas de inclusão e exclusão na Grécia e Roma antigas." },
+              { "codigo": "EF06HI13", "descricao": "Conceituar \"império\" no mundo antigo, com vistas à análise das diferentes formas de equilíbrio e desequilíbrio entre as partes envolvidas." },
+              { "codigo": "EF06HI14", "descricao": "Identificar e analisar diferentes formas de contato, adaptação ou marginalização entre populações em diferentes espaços e tempos." },
+              { "codigo": "EF06HI15", "descricao": "Descrever as dinâmicas de circulação de pessoas, produtos e culturas no Mediterrâneo e seu significado." },
+              { "codigo": "EF06HI16", "descricao": "Caracterizar e comparar as dinâmicas de abastecimento e as formas de organização do trabalho e da vida social em diferentes sociedades e períodos, com destaque para as relações entre senhores e servos." },
+              { "codigo": "EF06HI17", "descricao": "Diferenciar escravidão, servidão e trabalho livre no mundo antigo." },
+              { "codigo": "EF06HI18", "descricao": "Analisar o papel da religião cristã na cultura e nos modos de organização social no período medieval." },
+              { "codigo": "EF06HI19", "descricao": "Descrever e analisar os diferentes papéis sociais das mulheres no mundo antigo e nas sociedades medievais." }
+            ]
+          },
+          {
+            "serie": "7º Ano",
+            "habilidades": [
+              { "codigo": "EF07HI01", "descricao": "Explicar o significado de \"antiguidade clássica\" e seu desdobramento para a compreensão de períodos históricos subsequentes, problematizando sua aplicabilidade." },
+              { "codigo": "EF07HI02", "descricao": "Identificar conexões e interações entre as sociedades do Novo Mundo, da Europa, da África e da Ásia no contexto das navegações e indicar a complexidade e as interações que ocorrem nos Oceanos Atlântico, Índico e Pacífico." },
+              { "codigo": "EF07HI03", "descricao": "Identificar aspectos e processos específicos das sociedades africanas e americanas antes da chegada dos europeus, com destaque para as formas de organização social e o desenvolvimento de saberes e técnicas." },
+              { "codigo": "EF07HI04", "descricao": "Identificar as principais características dos Humanismos e dos Renascimentos e analisar seus significados." },
+              { "codigo": "EF07HI05", "descricao": "Identificar e relacionar as vinculações entre as reformas religiosas e os processos culturais e sociais do período moderno na Europa e na América." },
+              { "codigo": "EF07HI06", "descricao": "Comparar as navegações no Atlântico e no Pacífico entre os séculos XIV e XVI." },
+              { "codigo": "EF07HI07", "descricao": "Descrever os processos de formação e consolidação das monarquias e suas principais características com vistas à compreensão das razões da centralização política." },
+              { "codigo": "EF07HI08", "descricao": "Descrever as dinâmicas comerciais das sociedades americanas e africanas e analisar suas interações com outras sociedades do Ocidente e do Oriente." },
+              { "codigo": "EF07HI09", "descricao": "Analisar os diferentes impactos da conquista europeia da América para as populações ameríndias e identificar as formas de resistência." },
+              { "codigo": "EF07HI10", "descricao": "Analisar, com base em documentos históricos, diferentes interpretações sobre as dinâmicas das sociedades americanas no período colonial." },
+              { "codigo": "EF07HI11", "descricao": "Analisar a formação histórico-geográfica do território da América portuguesa por meio de mapas históricos." },
+              { "codigo": "EF07HI12", "descricao": "Identificar a distribuição territorial da população brasileira em diferentes épocas, considerando a diversidade étnico-racial e étnico-cultural (indígena, africana, europeia e asiática)." },
+              { "codigo": "EF07HI13", "descricao": "Caracterizar a ação dos europeus e suas lógicas mercantis visando ao domínio no mundo atlântico." },
+              { "codigo": "EF07HI14", "descricao": "Descrever as dinâmicas comerciais das sociedades americanas e africanas e analisar suas interações com outras sociedades do Ocidente e do Oriente." },
+              { "codigo": "EF07HI15", "descricao": "Discutir o conceito de escravidão moderna e suas distinções em relação ao escravismo antigo e à servidão medieval." },
+              { "codigo": "EF07HI16", "descricao": "Analisar os mecanismos e as dinâmicas de comércio de escravizados em suas diferentes fases: identificação dos fornecedores, das rotas e das formas de comercialização." },
+              { "codigo": "EF07HI17", "descricao": "Discutir as razões da passagem do mercantilismo para o capitalismo." }
+            ]
+          },
+          {
+            "serie": "8º Ano",
+            "habilidades": [
+              { "codigo": "EF08HI01", "descricao": "Identificar os principais aspectos conceituais do iluminismo e do liberalismo e discutir a relação entre eles e a organização do mundo contemporâneo." },
+              { "codigo": "EF08HI02", "descricao": "Identificar as particularidades político-sociais da Inglaterra do século XVII e analisar os desdobramentos posteriores à Revolução Gloriosa." },
+              { "codigo": "EF08HI03", "descricao": "Analisar os impactos da Revolução Industrial na produção e circulação de povos, produtos e culturas." },
+              { "codigo": "EF08HI04", "descricao": "Identificar e relacionar os processos da Revolução Francesa e seus desdobramentos na Europa e no mundo." },
+              { "codigo": "EF08HI05", "descricao": "Explicar os movimentos e as rebeliões ocorridas na América portuguesa, articulando-os aos mecanismos de exploração com base em fontes documentais." },
+              { "codigo": "EF08HI06", "descricao": "Aplicar os conceitos de Estado, nação, território, governo e país para o entendimento de conflitos e tensões." },
+              { "codigo": "EF08HI07", "descricao": "Identificar e contextualizar as especificidades dos diversos processos de independência nas Américas, seus aspectos populacionais e suas conformações territoriais." },
+              { "codigo": "EF08HI08", "descricao": "Conhecer o ideário dos projetos revolucionários na América (Independência dos Estados Unidos e Revolução Haitiana) e seus reflexos no mundo contemporâneo." },
+              { "codigo": "EF08HI09", "descricao": "Conhecer as características e os principais pensadores do Pan-americanismo." },
+              { "codigo": "EF08HI10", "descricao": "Identificar a Revolução de São Domingos como evento singular e desdobramento da Revolução Francesa e avaliar suas implicações." },
+              { "codigo": "EF08HI11", "descricao": "Identificar e explicar os protagonismos e a atuação de diferentes grupos sociais e étnicos nas lutas de independência no Brasil, na América espanhola e no Haiti." },
+              { "codigo": "EF08HI12", "descricao": "Caracterizar a organização política e social no Brasil desde a chegada da Corte portuguesa, em 1808, até 1822 e seus desdobramentos para a história política brasileira." },
+              { "codigo": "EF08HI13", "descricao": "Analisar o processo de independência em diferentes países latino-americanos e comparar as formas de governo neles adotadas." },
+              { "codigo": "EF08HI14", "descricao": "Compreender e analisar a organização das sociedades e a relação das mesmas com a natureza." },
+              { "codigo": "EF08HI15", "descricao": "Identificar e analisar o equilíbrio das forças e os sujeitos envolvidos nas disputas políticas durante o Primeiro e o Segundo Reinado." },
+              { "codigo": "EF08HI16", "descricao": "Identificar, comparar e analisar a diversidade política, social e regional nas rebeliões e nos movimentos contestatórios ao poder centralizado." },
+              { "codigo": "EF08HI17", "descricao": "Relacionar as contradições entre os projetos das elites e as ações e modos de vida das populações escravizadas." },
+              { "codigo": "EF08HI18", "descricao": "Identificar as questões internas e externas sobre a escravidão na crise do Império." },
+              { "codigo": "EF08HI19", "descricao": "Formular questionamentos sobre o legado da escravidão nas Américas, com base na seleção e consulta de fontes de diferentes naturezas." },
+              { "codigo": "EF08HI20", "descricao": "Identificar e relacionar aspectos das estruturas sociais da atualidade com os legados da escravidão no Brasil e discutir a importância de ações afirmativas." },
+              { "codigo": "EF08HI21", "descricao": "Identificar e analisar as políticas oficiais com relação ao indígena durante o Império." },
+              { "codigo": "EF08HI22", "descricao": "Discutir o papel das culturas letradas, não letradas e das artes na produção das identidades no Brasil do século XIX." },
+              { "codigo": "EF08HI23", "descricao": "Estabelecer relações causais entre as ideologias raciais e o determinismo no contexto do imperialismo e do neocolonialismo." },
+              { "codigo": "EF08HI24", "descricao": "Reconhecer os principais produtos, utilizados pelos europeus, procedentes do continente africano durante o imperialismo e analisar os impactos sobre as comunidades locais na forma de organização e exploração econômica." },
+              { "codigo": "EF08HI25", "descricao": "Caracterizar e contextualizar aspectos das relações entre os Estados Unidos da América e a América Latina no século XIX." },
+              { "codigo": "EF08HI26", "descricao": "Identificar e contextualizar o protagonismo das populações locais na resistência ao imperialismo na África e Ásia." },
+              { "codigo": "EF08HI27", "descricao": "Identificar as tensões e os significados dos discursos civilizatórios, avaliando seus impactos negativos para os povos indígenas originários e as populações negras nas Américas." }
+            ]
+          },
+          {
+            "serie": "9º Ano",
+            "habilidades": [
+              { "codigo": "EF09HI01", "descricao": "Descrever e contextualizar os principais aspectos sociais, culturais, econômicos e políticos da emergência da República no Brasil." },
+              { "codigo": "EF09HI02", "descricao": "Caracterizar e compreender os ciclos da história republicana, identificando particularidades da história local e regional até 1954." },
+              { "codigo": "EF09HI03", "descricao": "Identificar os mecanismos de inserção dos negros na sociedade brasileira pós-abolição e avaliar os seus resultados." },
+              { "codigo": "EF09HI04", "descricao": "Discutir a importância da participação da população negra na formação econômica, política e social do Brasil." },
+              { "codigo": "EF09HI05", "descricao": "Identificar os processos de urbanização e modernização da sociedade brasileira e avaliar suas contradições e impactos na região em que vive." },
+              { "codigo": "EF09HI06", "descricao": "Identificar e discutir o papel do trabalhador e dos movimentos sociais rurais e urbanos na história recente do Brasil." },
+              { "codigo": "EF09HI07", "descricao": "Identificar e explicar as mediações culturais decorrentes dos fluxos migratórios e imigratórios." },
+              { "codigo": "EF09HI08", "descricao": "Identificar as transformações ocorridas no debate sobre as questões da diversidade no Brasil durante o século XX e compreender o significado das mudanças de abordagem em relação ao tema." },
+              { "codigo": "EF09HI09", "descricao": "Relacionar as conquistas de direitos políticos, sociais e civis à atuação de movimentos sociais." },
+              { "codigo": "EF09HI10", "descricao": "Identificar e relacionar as dinâmicas do capitalismo e suas crises, os grandes conflitos mundiais e os conflitos vivenciados na Europa." },
+              { "codigo": "EF09HI11", "descricao": "Identificar as especificidades e os desdobramentos mundiais da Revolução Russa e seu significado histórico." },
+              { "codigo": "EF09HI12", "descricao": "Analisar a crise capitalista de 1929 e seus desdobramentos em relação à economia global." },
+              { "codigo": "EF09HI13", "descricao": "Descrever e justificar os processos de emergência do fascismo e do nazismo, a consolidação dos estados totalitários e as práticas de extermínio." },
+              { "codigo": "EF09HI14", "descricao": "Caracterizar e discutir as dinâmicas do colonialismo no continente africano e asiático e as lógicas de resistência das populações locais diante das questões internacionais." },
+              { "codigo": "EF09HI15", "descricao": "Discutir as motivações que levaram à criação da Organização das Nações Unidas (ONU) no contexto do pós-guerra e os propósitos dessa organização." },
+              { "codigo": "EF09HI16", "descricao": "Relacionar a Carta dos Direitos Humanos ao processo de afirmação dos direitos fundamentais e de defesa da dignidade humana, avaliando as suas contradições." },
+              { "codigo": "EF09HI17", "descricao": "Identificar e analisar processos sociais, econômicos, culturais e políticos do Brasil a partir de 1946." },
+              { "codigo": "EF09HI18", "descricao": "Descrever e analisar as relações entre as transformações urbanas e seus impactos na dinâmica da população e nas condições de vida (esgotamento sanitário, moradia, etc.)." },
+              { "codigo": "EF09HI19", "descricao": "Identificar e compreender o processo que resultou na ditadura civil-militar no Brasil e discutir a emergência de questões relacionadas à memória e à justiça sobre os casos de violação dos direitos humanos." },
+              { "codigo": "EF09HI20", "descricao": "Discutir os processos de resistência e as propostas de reorganização da sociedade brasileira durante a ditadura civil-militar." },
+              { "codigo": "EF09HI21", "descricao": "Identificar e analisar as políticas oficiais com relação ao indígena no Brasil, e os movimentos de resistência no período republicano." },
+              { "codigo": "EF09HI22", "descricao": "Discutir o papel da mobilização da sociedade brasileira na conquista das garantias presentes na Constituição Federal de 1988." },
+              { "codigo": "EF09HI23", "descricao": "Identificar direitos civis, políticos e sociais expressos na Constituição de 1988 e relacioná-los à noção de cidadania e ao pacto da sociedade brasileira de combate a diversas formas de preconceito, como o racismo." },
+              { "codigo": "EF09HI24", "descricao": "Analisar as transformações ambientais no Brasil no século XX, suas consequências e os impasses relativos ao desenvolvimento sustentável." },
+              { "codigo": "EF09HI25", "descricao": "Identificar as transformações ocorridas na sociedade brasileira na década de 1990." },
+              { "codigo": "EF09HI26", "descricao": "Discutir e analisar as causas da violência e as questões éticas que envolvem os marginalizados no Brasil." },
+              { "codigo": "EF09HI27", "descricao": "Discutir e avaliar a participação da mulher na história da República do Brasil." },
+              { "codigo": "EF09HI28", "descricao": "Analisar o papel do Estado na economia e a dinâmica de mercado nos contextos capitalista e socialista, assim como nos blocos econômicos de integração regional." },
+              { "codigo": "EF09HI29", "descricao": "Descrever e analisar a lógica das disputas e guerras no mundo contemporâneo, discutindo o papel da diplomacia." },
+              { "codigo": "EF09HI30", "descricao": "Comparar as características da Guerra Fria, seus principais conflitos e as tensões geopolíticas no interior dos blocos liderados por soviéticos e estadunidenses." },
+              { "codigo": "EF09HI31", "descricao": "Descrever e avaliar os processos de descolonização na África e na Ásia." },
+              { "codigo": "EF09HI32", "descricao": "Analisar mudanças e permanências associadas ao processo de globalização, considerando os argumentos dos movimentos críticos às políticas neoliberais." },
+              { "codigo": "EF09HI33", "descricao": "Analisar as transformações nas relações políticas locais e globais geradas pelo desenvolvimento das tecnologias digitais de informação e comunicação." },
+              { "codigo": "EF09HI34", "descricao": "Discutir as motivações da adoção de diferentes políticas econômicas na América Latina, assim como seus impactos sociais nos países da região." },
+              { "codigo": "EF09HI35", "descricao": "Analisar os aspectos relacionados ao fenômeno do terrorismo na contemporaneidade, inclusive os movimentos separatistas e de feição religiosa." },
+              { "codigo": "EF09HI36", "descricao": "Identificar e discutir as diversidades identitárias e seus significados históricos no início do século XXI." }
+            ]
+          }
+        ]
+      },
+      {
+        "nome": "Geografia",
+        "nota_estrutural": "As habilidades de Geografia são específicas para cada ano (EF01GE a EF09GE), sem códigos compartilhados.",
+        "habilidades_compartilhadas": [],
+        "habilidades_unicas_por_serie": [
+          {
+            "serie": "1º Ano",
+            "habilidades": [
+              { "codigo": "EF01GE01", "descricao": "Descrever características observadas de seus lugares de vivência (moradia, escola etc.) e identificar semelhanças e diferenças entre esses lugares." },
+              { "codigo": "EF01GE02", "descricao": "Identificar semelhanças e diferenças entre jogos e brincadeiras de diferentes épocas e lugares." },
+              { "codigo": "EF01GE03", "descricao": "Identificar e relatar semelhanças e diferenças de usos do espaço público (praças, parques) para o lazer e diferentes manifestações." },
+              { "codigo": "EF01GE04", "descricao": "Discutir e elaborar, coletivamente, regras de convívio em diferentes espaços (sala de aula, escola etc.)." },
+              { "codigo": "EF01GE05", "descricao": "Observar e descrever ritmos naturais (dia e noite, variação de temperatura e umidade etc.) em diferentes escalas espaciais e temporais, comparando a sua realidade com outras." },
+              { "codigo": "EF01GE06", "descricao": "Descrever e comparar diferentes tipos de moradia ou objetos de uso cotidiano (brinquedos, roupas, mobiliários), considerando técnicas e materiais utilizados em sua produção." },
+              { "codigo": "EF01GE07", "descricao": "Descrever atividades de trabalho relacionadas com o dia a dia da sua comunidade." },
+              { "codigo": "EF01GE08", "descricao": "Criar mapas mentais e desenhos com base em itinerários, contos literários, histórias inventadas e brincadeiras." },
+              { "codigo": "EF01GE09", "descricao": "Elaborar e utilizar mapas simples para localizar elementos do local de vivência, considerando referenciais espaciais (frente e atrás, esquerda e direita, em cima e embaixo, dentro e fora) e tendo o corpo como referência." },
+              { "codigo": "EF01GE10", "descricao": "Descrever características de seus lugares de vivência relacionadas aos ritmos da natureza (chuva, vento, calor etc.)." },
+              { "codigo": "EF01GE11", "descricao": "Associar mudanças de vestuário e hábitos alimentares em sua comunidade às variações de temperatura e clima ao longo do ano." }
+            ]
+          },
+          {
+            "serie": "2º Ano",
+            "habilidades": [
+              { "codigo": "EF02GE01", "descricao": "Descrever a história das migrações nos bairros ou comunidades em que vive." },
+              { "codigo": "EF02GE02", "descricao": "Comparar costumes e tradições de diferentes populações inseridas no bairro ou comunidade em que vive, reconhecendo a importância do respeito às diferenças." },
+              { "codigo": "EF02GE03", "descricao": "Comparar diferentes meios de transporte e de comunicação, indicando o seu papel na conexão entre lugares." },
+              { "codigo": "EF02GE04", "descricao": "Reconhecer semelhanças e diferenças nos hábitos, nas relações com a natureza e no modo de viver de pessoas em diferentes lugares." },
+              { "codigo": "EF02GE05", "descricao": "Analisar mudanças e permanências, comparando imagens de um mesmo lugar em diferentes tempos." },
+              { "codigo": "EF02GE06", "descricao": "Relacionar o dia e a noite a diferentes tipos de atividades sociais (horário escolar, comercial, sono etc.)." },
+              { "codigo": "EF02GE07", "descricao": "Descrever as atividades extrativas (minerais, agropecuárias e industriais) de diferentes lugares." },
+              { "codigo": "EF02GE08", "descricao": "Identificar e elaborar diferentes formas de representação (croquis, maquetes) para representar componentes da paisagem dos lugares de vivência." },
+              { "codigo": "EF02GE09", "descricao": "Identificar objetos e lugares de vivência (escola e moradia) em imagens aéreas e mapas (visão vertical) e fotografias (visão oblíqua)." },
+              { "codigo": "EF02GE10", "descricao": "Aplicar princípios de localização e posição de objetos (referenciais espaciais, como frente e atrás, esquerda e direita, em cima e embaixo, dentro e fora) por meio de representações espaciais da sala de aula e da escola." },
+              { "codigo": "EF02GE11", "descricao": "Reconhecer a importância do solo e da água para a vida, identificando seus diferentes usos (plantação e extração de materiais, entre outras possibilidades) e os impactos desses usos no cotidiano." }
+            ]
+          },
+          {
+            "serie": "3º Ano",
+            "habilidades": [
+              { "codigo": "EF03GE01", "descricao": "Identificar e comparar aspectos culturais dos grupos sociais de seus lugares de vivência, seja na cidade, seja no campo." },
+              { "codigo": "EF03GE02", "descricao": "Identificar, em seus lugares de vivência, marcas de contribuição cultural e econômica de grupos de diferentes origens." },
+              { "codigo": "EF03GE03", "descricao": "Reconhecer os diferentes modos de vida de povos e comunidades tradicionais em distintos lugares." },
+              { "codigo": "EF03GE04", "descricao": "Explicar como os processos naturais e históricos atuam na produção e na mudança das paisagens naturais e antrópicas nos seus lugares de vivência." },
+              { "codigo": "EF03GE05", "descricao": "Identificar alimentos, minerais e outros produtos cultivados e extraídos da natureza, comparando as atividades de trabalho em diferentes lugares." },
+              { "codigo": "EF03GE06", "descricao": "Identificar e interpretar imagens bidimensionais e tridimensionais em diferentes tipos de representação cartográfica." },
+              { "codigo": "EF03GE07", "descricao": "Reconhecer e elaborar legendas com símbolos de diversos tipos de representações em diferentes proporções." },
+              { "codigo": "EF03GE08", "descricao": "Relacionar a produção de lixo doméstico ou da escola aos problemas causados pelo consumo excessivo e construir propostas para o consumo consciente." },
+              { "codigo": "EF03GE09", "descricao": "Investigar os usos da água para consumo e outras atividades e discutir os impactos de sua exploração, poluição e desperdício em diferentes lugares." },
+              { "codigo": "EF03GE10", "descricao": "Identificar os cuidados necessários para utilização da água na agricultura e na geração de energia de modo a garantir a manutenção do provimento de água potável." },
+              { "codigo": "EF03GE11", "descricao": "Comparar impactos das atividades econômicas urbanas e rurais sobre o ambiente físico natural." }
+            ]
+          },
+          {
+            "serie": "4º Ano",
+            "habilidades": [
+              { "codigo": "EF04GE01", "descricao": "Selecionar, em seus lugares de vivência e em suas histórias familiares e/ou da comunidade, elementos de distintas culturas, valorizando o que é próprio em cada uma delas." },
+              { "codigo": "EF04GE02", "descricao": "Descrever processos migratórios e suas contribuições para a formação da sociedade brasileira." },
+              { "codigo": "EF04GE03", "descricao": "Distinguir funções e papéis dos órgãos do poder público municipal e canais de participação social." },
+              { "codigo": "EF04GE04", "descricao": "Reconhecer especificidades e analisar a interdependência do campo e da cidade, considerando fluxos econômicos, de informações, de ideias e de pessoas." },
+              { "codigo": "EF04GE05", "descricao": "Distinguir unidades político-administrativas oficiais nacionais (Distrito, Município, Unidade da Federação e grande região)." },
+              { "codigo": "EF04GE06", "descricao": "Identificar e descrever territórios étnico-culturais existentes no Brasil (terras indígenas e de comunidades remanescentes de quilombos)." },
+              { "codigo": "EF04GE07", "descricao": "Comparar as características do trabalho no campo e na cidade." },
+              { "codigo": "EF04GE08", "descricao": "Descrever e discutir o processo de produção (transformação de matérias-primas), circulação e consumo de diferentes produtos." },
+              { "codigo": "EF04GE09", "descricao": "Utilizar as direções cardeais na localização de componentes das paisagens a partir do lugar de vivência." },
+              { "codigo": "EF04GE10", "descricao": "Comparar tipos variados de mapas, identificando suas características, elaboradores e propósitos." },
+              { "codigo": "EF04GE11", "descricao": "Identificar as características das paisagens naturais e antrópicas (relevo, cobertura vegetal, rios etc.) no ambiente em que vive." }
+            ]
+          },
+          {
+            "serie": "5º Ano",
+            "habilidades": [
+              { "codigo": "EF05GE01", "descricao": "Descrever e analisar dinâmicas populacionais na Unidade da Federação em que vive, estabelecendo relações entre migrações e condições de infraestrutura." },
+              { "codigo": "EF05GE02", "descricao": "Identificar diferenças étnico-raciais e étnico-culturais e desigualdades sociais entre grupos em diferentes territórios." },
+              { "codigo": "EF05GE03", "descricao": "Identificar as formas e funções das cidades e analisar as mudanças sociais, econômicas e ambientais provocadas pelo seu crescimento." },
+              { "codigo": "EF05GE04", "descricao": "Reconhecer as características da cidade e analisar as interações entre a cidade e o campo e entre cidades na rede urbana." },
+              { "codigo": "EF05GE05", "descricao": "Identificar e comparar as mudanças dos tipos de trabalho e desenvolvimento tecnológico na agropecuária, na indústria, no comércio e nos serviços." },
+              { "codigo": "EF05GE06", "descricao": "Identificar e comparar transformações dos meios de transporte e de comunicação." },
+              { "codigo": "EF05GE07", "descricao": "Identificar os diferentes tipos de energia utilizados na produção industrial, agrícola e extrativa e no cotidiano das populações." },
+              { "codigo": "EF05GE08", "descricao": "Analisar transformações de paisagens nas cidades, comparando sequência de fotografias, fotografias aéreas e imagens de satélite de épocas diferentes." },
+              { "codigo": "EF05GE09", "descricao": "Estabelecer conexões e hierarquias entre diferentes cidades, utilizando mapas temáticos e representações gráficas." },
+              { "codigo": "EF05GE10", "descricao": "Reconhecer e comparar atributos da qualidade ambiental e algumas formas de poluição dos cursos de água e dos oceanos." },
+              { "codigo": "EF05GE11", "descricao": "Identificar e descrever problemas ambientais que ocorrem no entorno da escola e da residência." },
+              { "codigo": "EF05GE12", "descricao": "Identificar órgãos do poder público e canais de participação social responsáveis por buscar soluções para a melhoria da qualidade de vida e das áreas de conservação ambiental." }
+            ]
+          },
+          {
+            "serie": "6º Ano",
+            "habilidades": [
+              { "codigo": "EF06GE01", "descricao": "Comparar modificações das paisagens nos lugares de vivência e os usos desses lugares em diferentes tempos." },
+              { "codigo": "EF06GE02", "descricao": "Analisar modificações de paisagens por diferentes tipos de sociedade, com destaque para os povos originários." },
+              { "codigo": "EF06GE03", "descricao": "Descrever os movimentos do planeta e sua relação com a circulação geral da atmosfera, o tempo atmosférico e os padrões climáticos." },
+              { "codigo": "EF06GE04", "descricao": "Descrever o ciclo da água, comparando o escoamento superficial no ambiente urbano e rural." },
+              { "codigo": "EF06GE05", "descricao": "Relacionar padrões climáticos, tipos de solo, relevo e formações vegetais." },
+              { "codigo": "EF06GE06", "descricao": "Identificar as características das paisagens transformadas pelo trabalho humano a partir do desenvolvimento da agropecuária e do processo de industrialização." },
+              { "codigo": "EF06GE07", "descricao": "Explicar as mudanças na interação humana com a natureza a partir do surgimento das cidades." },
+              { "codigo": "EF06GE08", "descricao": "Medir distâncias na superfície pelas escalas gráficas e numéricas dos mapas." },
+              { "codigo": "EF06GE09", "descricao": "Elaborar modelos tridimensionais, blocos-diagramas e perfis topográficos e de vegetação, visando à representação de elementos e estruturas da superfície terrestre." },
+              { "codigo": "EF06GE10", "descricao": "Explicar as diferentes formas de uso do solo (rotação de terras, terraceamento, aterros etc.) e da água em diferentes épocas." },
+              { "codigo": "EF06GE11", "descricao": "Analisar distintas interações das sociedades com a natureza, com base na distribuição dos componentes físico-naturais, incluindo as transformações da biodiversidade local e do mundo." },
+              { "codigo": "EF06GE12", "descricao": "Identificar o consumo dos recursos hídricos e o uso das principais bacias hidrográficas no Brasil e no mundo, enfatizando as transformações nos ambientes urbanos." },
+              { "codigo": "EF06GE13", "descricao": "Analisar consequências, vantagens e desvantagens das práticas humanas na dinâmica climática (ilha de calor etc.)." }
+            ]
+          },
+          {
+            "serie": "7º Ano",
+            "habilidades": [
+              { "codigo": "EF07GE01", "descricao": "Avaliar, por meio de exemplos extraídos dos meios de comunicação, ideias e estereótipos acerca das paisagens e da formação territorial do Brasil." },
+              { "codigo": "EF07GE02", "descricao": "Analisar a influência dos fluxos econômicos e populacionais na formação socioeconômica e territorial do Brasil." },
+              { "codigo": "EF07GE03", "descricao": "Selecionar argumentos que reconheçam as territorialidades dos povos indígenas originários, das comunidades remanescentes de quilombos e de outros povos e comunidades tradicionais." },
+              { "codigo": "EF07GE04", "descricao": "Analisar a distribuição territorial da população brasileira, considerando a diversidade étnico-cultural." },
+              { "codigo": "EF07GE05", "descricao": "Analisar fatos e situações para compreender a integração mundal, por meio da rede de transportes e de comunicação, reconhecendo a importância das novas tecnologias de informação." },
+              { "codigo": "EF07GE06", "descricao": "Discutir em que medida a produção, a circulação e o consumo de mercadorias provocam impactos ambientais, identificando alternativas para o uso racional de recursos naturais." },
+              { "codigo": "EF07GE07", "descricao": "Analisar a influência e o papel das redes de transporte e comunicação na configuração do território brasileiro." },
+              { "codigo": "EF07GE08", "descricao": "Estabelecer relações entre os processos de industrialização e inovação tecnológica com as transformações socioeconômicas do território brasileiro." },
+              { "codigo": "EF07GE09", "descricao": "Interpretar e elaborar mapas temáticos e históricos, inclusive utilizando tecnologias digitais, com informações demográficas e econômicas do Brasil." },
+              { "codigo": "EF07GE10", "descricao": "Elaborar e interpretar gráficos de barras, gráficos de setores e histogramas, com base em dados socioeconômicos." },
+              { "codigo": "EF07GE11", "descricao": "Caracterizar dinâmicas dos componentes físico-naturais no território nacional, bem como sua distribuição e biodiversidade." },
+              { "codigo": "EF07GE12", "descricao": "Comparar unidades de conservação existentes no Município de residência e em outras localidades brasileiras, com base na organização do Sistema Nacional de Unidades de Conservação (SNUC)." }
+            ]
+          },
+          {
+            "serie": "8º Ano",
+            "habilidades": [
+              { "codigo": "EF08GE01", "descricao": "Descrever as rotas de dispersão da população humana pelo planeta e os principais fluxos migratórios em diferentes períodos da história." },
+              { "codigo": "EF08GE02", "descricao": "Relacionar fatos e situações representativas da história das famílias do Município em que se localiza a escola, considerando a diversidade e os fluxos migratórios." },
+              { "codigo": "EF08GE03", "descricao": "Analisar aspectos representativos da dinâmica demográfica, considerando características da população (perfil etário, crescimento vegetativo e mobilidade espacial)." },
+              { "codigo": "EF08GE04", "descricao": "Compreender os fluxos de migração na América Latina, explorando as múltiplas causas, e as condições de vida dos imigrantes." },
+              { "codigo": "EF08GE05", "descricao": "Aplicar os conceitos de Estado, nação, território, governo e país para o entendimento de conflitos e tensões." },
+              { "codigo": "EF08GE06", "descricao": "Analisar a atuação das organizações mundiais nos processos de integração cultural e econômica nos contextos americano e africano." },
+              { "codigo": "EF08GE07", "descricao": "Analisar os impactos geoeconômicos, geoestratégicos e geopolíticos da ascensão dos Estados Unidos no cenário internacional." },
+              { "codigo": "EF08GE08", "descricao": "Analisar a situação do Brasil e de outros países da América Latina e da África no que se refere ao uso e posse do território." },
+              { "codigo": "EF08GE09", "descricao": "Analisar os padrões econômicos mundiais de produção, distribuição e intercâmbio dos produtos." },
+              { "codigo": "EF08GE10", "descricao": "Distinguir e analisar conflitos e tensões na América Latina, relacionados à exploração de recursos naturais." },
+              { "codigo": "EF08GE11", "descricao": "Analisar áreas de conflito e tensões nas regiões de fronteira do continente americano." },
+              { "codigo": "EF08GE12", "descricao": "Compreender os objetivos e analisar a importância dos organismos de integração do território americano (Mercosul, OEA, OEI, Nafta etc.)." },
+              { "codigo": "EF08GE13", "descricao": "Analisar a influência do desenvolvimento científico e tecnológico na caracterização dos tipos de trabalho e na economia dos espaços rurais e urbanos." },
+              { "codigo": "EF08GE14", "descricao": "Analisar os processos de desconcentração, descentralização e recentralização das atividades econômicas a partir de capital estadunidense e chinês." },
+              { "codigo": "EF08GE15", "descricao": "Analisar a importância dos principais recursos hídricos da América Latina (Aquífero Guarani, Bacias do rio da Prata, do Amazonas e do Orinoco) e discutir os desafios relacionados à sua conservação." },
+              { "codigo": "EF08GE16", "descricao": "Analisar as principais problemáticas comuns às grandes cidades latino-americanas, considerando segregação socioespacial e condições ambientais." },
+              { "codigo": "EF08GE17", "descricao": "Analisar a segregação socioespacial em ambientes urbanos da América Latina." },
+              { "codigo": "EF08GE18", "descricao": "Elaborar mapas ou outras formas de representação cartográfica para analisar as redes e as dinâmicas urbano-industriais da América Latina." },
+              { "codigo": "EF08GE19", "descricao": "Interpretar cartogramas, mapas esquemáticos (croquis) e anamorfoses geográficas com informações geográficas acerca da África e América." },
+              { "codigo": "EF08GE20", "descricao": "Analisar características de países e grupos de países da América e da África no que se refere aos aspectos populacionais, urbanos, políticos e econômicos." },
+              { "codigo": "EF08GE21", "descricao": "Analisar o papel ambiental e territorial da Antártica no contexto geopolítico e suas inter-relações com o clima no Brasil e na América do Sul." },
+              { "codigo": "EF08GE22", "descricao": "Identificar os principais recursos naturais dos continentes americano e africano e avaliar os impactos dos seus usos." },
+              { "codigo": "EF08GE23", "descricao": "Identificar paisagens da América Latina e as transformações sofridas, devido às influências econômicas ao longo do tempo." },
+              { "codigo": "EF08GE24", "descricao": "Analisar as principais características produtivas dos países latino-americanos (como exploração mineral e agropecuária) e os impactos ambientais associados." }
+            ]
+          },
+          {
+            "serie": "9º Ano",
+            "habilidades": [
+              { "codigo": "EF09GE01", "descricao": "Analisar criticamente de que forma a hegemonia europeia foi exercida em várias regiões do planeta, notadamente em situações de conflito." },
+              { "codigo": "EF09GE02", "descricao": "Analisar a atuação das corporações internacionais e das organizações econômicas mundiais na vida da população em relação ao consumo e à cultura." },
+              { "codigo": "EF09GE03", "descricao": "Identificar diferentes manifestações culturais de minorias étnicas e apontar problemas de inserção dessas áreas nas cidades europeias e asiáticas." },
+              { "codigo": "EF09GE04", "descricao": "Relacionar diferenças de paisagens aos modos de viver de diferentes povos na Europa, Ásia e Oceania." },
+              { "codigo": "EF09GE05", "descricao": "Analisar fatos e situações para compreender a integração mundial (econômica, política e cultural), comparando as diferentes interpretações (globalização, mundialização, aldeia global)." },
+              { "codigo": "EF09GE06", "descricao": "Associar o critério de divisão do mundo em Ocidente e Oriente e a inserção do Brasil nos cenários mundial, europeu, asiático e da Oceania." },
+              { "codigo": "EF09GE07", "descricao": "Analisar os componentes físico-naturais da Eurásia e as determinantes histórico-geográficas de sua divisão em Europa e Ásia." },
+              { "codigo": "EF09GE08", "descricao": "Analisar transformações territoriais decorrentes das mudanças de fronteiras na Europa, na Ásia e na Oceania." },
+              { "codigo": "EF09GE09", "descricao": "Analisar características de países e grupos de países europeus, asiáticos e da Oceania em seus aspectos populacionais, urbanos, políticos e econômicos, e os problemas decorrentes deles." },
+              { "codigo": "EF09GE10", "descricao": "Analisar os impactos do processo de industrialização na produção e circulação de produtos na Europa, Ásia e Oceania." },
+              { "codigo": "EF09GE11", "descricao": "Relacionar as mudanças técnicas e científicas decorrentes do processo de industrialização com as transformações no trabalho em diferentes regiões do mundo e suas consequências no Brasil." },
+              { "codigo": "EF09GE12", "descricao": "Relacionar o processo de urbanização às transformações da produção agropecuária, à expansão do desemprego estrutural e ao papel crescente do capital financeiro." },
+              { "codigo": "EF09GE13", "descricao": "Analisar a importância da produção agropecuária na sociedade urbano-industrial nos países que formam a Europa, a Ásia e a Oceania." },
+              { "codigo": "EF09GE14", "descricao": "Elaborar e interpretar gráficos de barras e de setores, mapas temáticos e esquemáticos (croquis) e anamorfoses geográficas para analisar, sintetizar e apresentar dados e informações sobre diversidade, diferenças e desigualdades sociopolíticas e geopolíticas mundiais." },
+              { "codigo": "EF09GE15", "descricao": "Comparar e classificar diferentes regiões do mundo com base em informações populacionais e econômicas dos países do mundo (IDH, índice de Gini etc.)." },
+              { "codigo": "EF09GE16", "descricao": "Identificar e comparar diferentes domínios morfoclimáticos da Europa, da Ásia e da Oceania." },
+              { "codigo": "EF09GE17", "descricao": "Explicar as características físico-naturais e a forma de ocupação e usos da terra em diferentes regiões da Europa, da Ásia e da Oceania." },
+              { "codigo": "EF09GE18", "descricao": "Identificar e analisar as cadeias industriais e de inovação e as consequências dos usos de recursos naturais e das diferentes fontes de energia." }
+            ]
+          }
+        ]
+      },
+      {
+        "nome": "Ensino Religioso",
+        "nota_estrutural": "As habilidades de Ensino Religioso são específicas para cada ano (EF01ER a EF09ER), sem códigos compartilhados.",
+        "habilidades_compartilhadas": [],
+        "habilidades_unicas_por_serie": [
+          {
+            "serie": "1º Ano",
+            "habilidades": [
+              { "codigo": "EF01ER01", "descricao": "Identificar e acolher as semelhanças e diferenças entre o eu, o outro e o nós." },
+              { "codigo": "EF01ER02", "descricao": "Reconhecer que o seu nome e o das demais pessoas os identificam e os diferenciam." },
+              { "codigo": "EF01ER03", "descricao": "Reconhecer e respeitar as características físicas e subjetivas de cada um." },
+              { "codigo": "EF01ER04", "descricao": "Valorizar a diversidade de formas de vida." },
+              { "codigo": "EF01ER05", "descricao": "Identificar e acolher sentimentos, lembranças, memórias e saberes de cada um." },
+              { "codigo": "EF01ER06", "descricao": "Identificar as diferentes formas pelas quais as pessoas manifestam sentimentos, ideias, memórias, gostos e crenças em diferentes espaços." }
+            ]
+          },
+          {
+            "serie": "2º Ano",
+            "habilidades": [
+              { "codigo": "EF02ER01", "descricao": "Reconhecer os diferentes espaços de convivência." },
+              { "codigo": "EF02ER02", "descricao": "Identificar costumes, crenças e formas diversas de viver em diferentes ambientes de convivência." },
+              { "codigo": "EF02ER03", "descricao": "Identificar as diferentes formas de registro das memórias pessoais, familiares e escolares." },
+              { "codigo": "EF02ER04", "descricao": "Identificar os símbolos presentes nos variados espaços de convivência." },
+              { "codigo": "EF02ER05", "descricao": "Identificar, distinguir e respeitar símbolos religiosos de distintas manifestações, tradições e instituições religiosas." },
+              { "codigo": "EF02ER06", "descricao": "Reconhecer diferentes formas de tratamento a objetos sagrados, espaços ou práticas religiosas." },
+              { "codigo": "EF02ER07", "descricao": "Identificar significados atribuídos a símbolos, lugares ou práticas religiosas de diferentes culturas." }
+            ]
+          },
+          {
+            "serie": "3º Ano",
+            "habilidades": [
+              { "codigo": "EF03ER01", "descricao": "Identificar e respeitar os diferentes espaços e territórios religiosos de diferentes tradições e movimentos religiosos." },
+              { "codigo": "EF03ER02", "descricao": "Conhecer e respeitar diferentes práticas e costumes vivenciados em lugares considerados sagrados para as tradições religiosas." },
+              { "codigo": "EF03ER03", "descricao": "Identificar e respeitar práticas celebrativas (cerimônias, orações, festividades, peregrinações, entre outras) de diferentes tradições religiosas." },
+              { "codigo": "EF03ER04", "descricao": "Caracterizar as práticas celebrativas como parte integrante do conjunto das manifestações religiosas de diferentes culturas e sociedades." },
+              { "codigo": "EF03ER05", "descricao": "Reconhecer as indumentárias (roupas, acessórios, símbolos, pinturas corporais) utilizadas em diferentes manifestações e tradições religiosas." },
+              { "codigo": "EF03ER06", "descricao": "Caracterizar as indumentárias como elementos integrantes das identidades religiosas." }
+            ]
+          },
+          {
+            "serie": "4º Ano",
+            "habilidades": [
+              { "codigo": "EF04ER01", "descricao": "Identificar ritos presentes no cotidiano pessoal, familiar, escolar e comunitário." },
+              { "codigo": "EF04ER02", "descricao": "Identificar ritos e suas funções em diferentes manifestações e tradições religiosas." },
+              { "codigo": "EF04ER03", "descricao": "Caracterizar ritos de iniciação e de passagem em diversos grupos religiosos." },
+              { "codigo": "EF04ER04", "descricao": "Identificar as diversas formas de expressão da espiritualidade (orações, cultos, gestos, cantos, danças, meditações)." },
+              { "codigo": "EF04ER05", "descricao": "Identificar representações religiosas em diferentes expressões artísticas." },
+              { "codigo": "EF04ER06", "descricao": "Identificar nomes, significados e representações de divindades nos contextos familiar e comunitário." },
+              { "codigo": "EF04ER07", "descricao": "Reconhecer e respeitar as ideias de divindades de diferentes manifestações e tradições religiosas." }
+            ]
+          },
+          {
+            "serie": "5º Ano",
+            "habilidades": [
+              { "codigo": "EF05ER01", "descricao": "Identificar e respeitar acontecimentos sagrados de diferentes culturas e tradições religiosas como recurso para preservar a memória." },
+              { "codigo": "EF05ER02", "descricao": "Identificar mitos de criação em diferentes culturas e tradições religiosas." },
+              { "codigo": "EF05ER03", "descricao": "Reconhecer funções e mensagens religiosas contidas nos mitos de criação (concepções de mundo, natureza, ser humano, divindades, vida e morte)." },
+              { "codigo": "EF05ER04", "descricao": "Reconhecer a importância da tradição oral para preservar memórias e acontecimentos religiosos." },
+              { "codigo": "EF05ER05", "descricao": "Identificar elementos da tradição oral nas culturas e religiões indígenas, afro-brasileiras, ciganas, entre outras." },
+              { "codigo": "EF05ER06", "descricao": "Identificar o papel dos sábios e anciãos na comunicação e preservação da tradição oral." },
+              { "codigo": "EF05ER07", "descricao": "Reconhecer, em textos orais, ensinamentos relacionados a modos de ser e viver." }
+            ]
+          },
+          {
+            "serie": "6º Ano",
+            "habilidades": [
+              { "codigo": "EF06ER01", "descricao": "Reconhecer o papel da tradição escrita na preservação de memórias, acontecimentos e ensinamentos religiosos." },
+              { "codigo": "EF06ER02", "descricao": "Reconhecer e valorizar a diversidade de textos religiosos escritos (textos do Budismo, Cristianismo, Espiritismo, Hinduísmo, Islamismo, Judaísmo, entre outros)." },
+              { "codigo": "EF06ER03", "descricao": "Reconhecer, em textos escritos, ensinamentos relacionados a modos de ser e viver." },
+              { "codigo": "EF06ER04", "descricao": "Reconhecer que os textos escritos são utilizados pelas tradições religiosas de maneiras diversas." },
+              { "codigo": "EF06ER05", "descricao": "Discutir como o estudo e a interpretação dos textos religiosos influenciam as atitudes e as práticas nas diferentes tradições." },
+              { "codigo": "EF06ER06", "descricao": "Reconhecer a importância dos mitos, ritos, símbolos e textos na estruturação das diferentes crenças, tradições e movimentos religiosos." },
+              { "codigo": "EF06ER07", "descricao": "Reconhecer a importância do diálogo e da compreensão de diferentes textos religiosos para a convivência respeitosa e para a promoção dos Direitos Humanos." }
+            ]
+          },
+          {
+            "serie": "7º Ano",
+            "habilidades": [
+              { "codigo": "EF07ER01", "descricao": "Reconhecer e respeitar as práticas de comunicação com as divindades em distintas manifestações e tradições religiosas." },
+              { "codigo": "EF07ER02", "descricao": "Identificar práticas de espiritualidade utilizadas pelas pessoas em determinadas situações (acidentes, doenças, fenômenos climáticos)." },
+              { "codigo": "EF07ER03", "descricao": "Reconhecer os papéis atribuídos às lideranças de diferentes tradições religiosas." },
+              { "codigo": "EF07ER04", "descricao": "Exemplificar líderes religiosos que se destacaram por suas contribuições à sociedade." },
+              { "codigo": "EF07ER05", "descricao": "Discutir como as lideranças e tradições religiosas exercem influência e podem contribuir para o diálogo em diferentes espaços sociais." },
+              { "codigo": "EF07ER06", "descricao": "Identificar princípios éticos em diferentes tradições religiosas e filosofias de vida, discutindo como podem influenciar condutas pessoais e sociais." },
+              { "codigo": "EF07ER07", "descricao": "Reconhecer e valorizar práticas e projetos que busquem a promoção da paz, da justiça e do diálogo entre as pessoas." },
+              { "codigo": "EF07ER08", "descricao": "Reconhecer o direito à liberdade de consciência, crença ou religião, bem como princípios norteadores de atitudes e valores relativos aos direitos humanos." }
+            ]
+          },
+          {
+            "serie": "8º Ano",
+            "habilidades": [
+              { "codigo": "EF08ER01", "descricao": "Discutir como as crenças e convicções podem influenciar escolhas e atitudes pessoais e coletivas." },
+              { "codigo": "EF08ER02", "descricao": "Analisar as concepções de tempo, espaço e ser humano, de acordo com as tradições e movimentos religiosos e filosofias de vida." },
+              { "codigo": "EF08ER03", "descricao": "Analisar doutrinas das diferentes tradições religiosas e suas concepções de mundo, vida e morte." },
+              { "codigo": "EF08ER04", "descricao": "Discutir como filosofias de vida, tradições e instituições religiosas podem influenciar diferentes campos do saber e da vida social." },
+              { "codigo": "EF08ER05", "descricao": "Debater sobre as possibilidades e os limites da atuação das tradições religiosas na esfera pública." },
+              { "codigo": "EF08ER06", "descricao": "Analisar práticas, projetos e políticas públicas que contribuem para a promoção da liberdade de pensamento, crença e religião." },
+              { "codigo": "EF08ER07", "descricao": "Analisar as formas de uso das mídias e tecnologias pelas diferentes denominações religiosas." }
+            ]
+          },
+          {
+            "serie": "9º Ano",
+            "habilidades": [
+              { "codigo": "EF09ER01", "descricao": "Analisar princípios e orientações para o cuidado com a vida, o ser humano e a natureza, considerando as diversas tradições religiosas e filosofias de vida." },
+              { "codigo": "EF09ER02", "descricao": "Discutir as diferentes expressões de valorização e de desrespeito à vida, por meio da análise de matérias nas diferentes mídias." },
+              { "codigo": "EF09ER03", "descricao": "Identificar as concepções sobre a morte (ancestralidade, reencarnação, transmigração, ressurreição, juízo final, extinção etc.) em diferentes tradições religiosas e filosofias de vida." },
+              { "codigo": "EF09ER04", "descricao": "Identificar concepções de vida e morte em diferentes tradições religiosas e filosofias de vida." },
+              { "codigo": "EF09ER05", "descricao": "Analisar as diferentes ideias de imortalidade elaboradas pelas tradições religiosas (ancestralidade, reencarnação, transmigração e ressurreição)." },
+              { "codigo": "EF09ER06", "descricao": "Reconhecer e valorizar o projeto de vida como elemento integrador e promotor de cidadania." },
+              { "codigo": "EF09ER07", "descricao": "Identificar princípios éticos que fundamentam a construção de projetos de vida (pessoal, coletivo e planetário)." },
+              { "codigo": "EF09ER08", "descricao": "Construir projetos de vida assentados em princípios e valores éticos, com liberdade, autonomia, responsabilidade e solidariedade." },
+              { "codigo": "EF09ER09", "descricao": "Reconhecer as religiões como fenômenos identitários que permeiam e influenciam as esferas da cultura, da política e da sociedade." }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}

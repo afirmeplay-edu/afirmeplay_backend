@@ -111,7 +111,17 @@ def listar_escolas():
         ).outerjoin(
             Class, School.id == cast(Class.school_id, String)
         ).group_by(
-            School.id, City.id
+            School.id,
+            School.name,
+            School.address,
+            School.domain,
+            School.created_at,
+            School.city_id,
+            City.id,
+            City.name,
+            City.state,
+            City.slug,
+            City.created_at
         )
 
         schools = []
@@ -339,7 +349,17 @@ def buscar_escola(escola_id):
         ).filter(
             School.id == escola_id
         ).group_by(
-            School.id, City.id
+            School.id,
+            School.name,
+            School.address,
+            School.domain,
+            School.created_at,
+            School.city_id,
+            City.id,
+            City.name,
+            City.state,
+            City.slug,
+            City.created_at
         ).first()
 
         if not result:
@@ -433,7 +453,17 @@ def buscar_escolas_por_cidade(city_id):
         ).filter(
             School.city_id == city_id
         ).group_by(
-            School.id, City.id
+            School.id,
+            School.name,
+            School.address,
+            School.domain,
+            School.created_at,
+            School.city_id,
+            City.id,
+            City.name,
+            City.state,
+            City.slug,
+            City.created_at
         )
 
         # Verifica permissões
@@ -540,7 +570,19 @@ def buscar_escolas_por_serie(grade_id):
             query = query.filter(School.city_id == city_id)
 
         # Agrupar resultados
-        query = query.group_by(School.id, City.id)
+        query = query.group_by(
+            School.id,
+            School.name,
+            School.address,
+            School.domain,
+            School.created_at,
+            School.city_id,
+            City.id,
+            City.name,
+            City.state,
+            City.slug,
+            City.created_at
+        )
 
         # Aplicar filtros de permissão baseados na role
         if user['role'] == "admin":

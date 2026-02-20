@@ -276,9 +276,6 @@ def debug_questions():
 @role_required("admin", "professor", "coordenador", "diretor", "tecadm")
 def list_questions():
     try:
-        print("\n" + "="*80)
-        print("🔍 DEBUG /questions/ - INÍCIO")
-        print("="*80)
         
         user = get_current_user_from_token()
         if not user:
@@ -289,12 +286,7 @@ def list_questions():
         subject_id = request.args.get('subject_id')
         created_by = request.args.get('created_by')
         
-        print(f"📋 Parâmetros da request:")
-        print(f"   test_id: {test_id}")
-        print(f"   question_type: {question_type}")
-        print(f"   subject_id: {subject_id}")
-        print(f"   created_by: {created_by}")
-        print(f"👤 Usuário: {user.get('role')} - ID: {user.get('id')}")
+        
         
         # Se um test_id foi fornecido, retorna a avaliação completa com suas questões
         if test_id:
@@ -321,24 +313,16 @@ def list_questions():
             return jsonify(format_test_response(test)), 200
         
         # Se não foi fornecido test_id, retorna apenas as questões (comportamento original)
-        print("\n📦 Iniciando query de questões...")
+        
         
         # FILTRO MULTITENANT: Aplicar escopo de questões
         context = get_current_tenant_context()
-        print(f"\n🌐 Contexto Multitenant:")
-        print(f"   context exists: {context is not None}")
-        if context:
-            print(f"   city_id: {context.city_id}")
-            print(f"   city_slug: {context.city_slug}")
-            print(f"   schema: {context.schema}")
-            print(f"   has_tenant_context: {context.has_tenant_context}")
+        
         
         # Salvar search_path atual
         current_search_path = db.session.execute(text("SHOW search_path")).fetchone()[0]
-        print(f"   PostgreSQL search_path atual: {current_search_path}")
         
         # Forçar busca em public.question (todas as questões agora estão aqui)
-        print("\n📋 Buscando questões de public.question...")
         db.session.execute(text("SET search_path TO public"))
         
         query = Question.query.options(
@@ -357,7 +341,6 @@ def list_questions():
         
         # 2. CITY: apenas do município atual (se tiver contexto)
         if context and context.city_id:
-            print(f"   ✅ Incluindo questões CITY do município {context.city_id}")
             scope_filters.append(
                 and_(
                     Question.scope_type == 'CITY',
@@ -367,7 +350,6 @@ def list_questions():
         
         # 3. PRIVATE: apenas do próprio usuário
         if user.get('id'):
-            print(f"   ✅ Incluindo questões PRIVATE do usuário {user.get('id')}")
             scope_filters.append(
                 and_(
                     Question.scope_type == 'PRIVATE',
@@ -386,27 +368,13 @@ def list_questions():
         
         # FILTRO created_by: se fornecido na URL, SEMPRE aplicar
         if created_by:
-            print(f"   ✅ Filtro created_by aplicado: {created_by}")
             query = query.filter(Question.created_by == created_by)
-        else:
-            print(f"   ℹ️ Sem filtro created_by - mostrando todas permitidas pelo scope")
         
         questions = query.all()
-        print(f"\n📊 RESULTADOS FINAIS:")
-        print(f"   Total de questões retornadas: {len(questions)}")
-        if questions:
-            print(f"   Primeiras 5 questões:")
-            for i, q in enumerate(questions[:5], 1):
-                print(f"      {i}. ID: {q.id}, scope_type: {q.scope_type}, owner_city_id: {q.owner_city_id}, owner_user_id: {q.owner_user_id}")
-        else:
-            print(f"   ⚠️ NENHUMA questão retornada!")
+        
         
         # Restaurar search_path original
         db.session.execute(text(f"SET search_path TO {current_search_path}"))
-        
-        print("="*80)
-        print("🔍 DEBUG /questions/ - FIM")
-        print("="*80 + "\n")
         
         return jsonify([format_question_response(q) for q in questions]), 200
 

@@ -75,7 +75,24 @@ def get_filtered_classes():
         ).outerjoin(
             Student, Class.id == Student.class_id
         ).group_by(
-            Class.id, School.id, Grade.id, City.id
+            Class.id,
+            Class.name,
+            Class.school_id,
+            Class.grade_id,
+            School.id,
+            School.name,
+            School.address,
+            School.domain,
+            School.created_at,
+            School.city_id,
+            Grade.id,
+            Grade.name,
+            Grade.education_stage_id,
+            City.id,
+            City.name,
+            City.state,
+            City.slug,
+            City.created_at
         )
         
         # Aplicar filtros
@@ -213,7 +230,21 @@ def get_classes_by_school(school_id):
         ).filter(
             Class.school_id == str(ensure_uuid(school_id)) if school_id else None
         ).group_by(
-            Class.id, School.id, Grade.id, EducationStage.id
+            Class.id,
+            Class.name,
+            Class.school_id,
+            Class.grade_id,
+            School.id,
+            School.name,
+            School.address,
+            School.domain,
+            School.created_at,
+            School.city_id,
+            Grade.id,
+            Grade.name,
+            Grade.education_stage_id,
+            EducationStage.id,
+            EducationStage.name
         ).all()
         
         if not classes:

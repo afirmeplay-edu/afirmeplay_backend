@@ -42,10 +42,8 @@ def _set_tenant_schema(schema: Optional[str]) -> None:
         db.session.execute(text(f"SET search_path TO {search_path}"))
         db.session.commit()
         logger.debug(f"[TENANT] search_path definido para schema={schema}")
-        print(f"[TENANT] 🔧 search_path definido: {schema}")
     except Exception as e:
         logger.warning(f"[TENANT] Erro ao definir search_path: {e}")
-        print(f"[TENANT] ❌ Erro ao definir search_path: {e}")
         db.session.rollback()
 
 
@@ -64,33 +62,21 @@ def _get_schema_for_scope(scope_type: str, scope_id: Optional[str]) -> Optional[
         return None
     
     if scope_type == 'city':
-        # Para city, scope_id já é o city_id
-        schema = city_id_to_schema_name(scope_id)
-        print(f"[TENANT] 🏙️ Scope city: scope_id={scope_id} -> schema={schema}")
-        return schema
+        return city_id_to_schema_name(scope_id)
     
     elif scope_type == 'school':
-        # Para school, buscar city_id da escola
         school = School.query.get(scope_id)
         if school and school.city_id:
-            schema = city_id_to_schema_name(school.city_id)
-            print(f"[TENANT] 🏫 Scope school: school_id={scope_id}, city_id={school.city_id} -> schema={schema}")
-            return schema
-        else:
-            print(f"[TENANT] ⚠️ Escola {scope_id} não encontrada ou sem city_id")
-            return None
+            return city_id_to_schema_name(school.city_id)
+        return None
     
     elif scope_type == 'teacher':
-        # Para teacher, buscar city_id através da primeira escola do professor
         from app.models.schoolTeacher import SchoolTeacher
         school_teacher = SchoolTeacher.query.filter_by(teacher_id=scope_id).first()
         if school_teacher:
             school = School.query.get(school_teacher.school_id)
             if school and school.city_id:
-                schema = city_id_to_schema_name(school.city_id)
-                print(f"[TENANT] 👨‍🏫 Scope teacher: teacher_id={scope_id}, school_id={school_teacher.school_id}, city_id={school.city_id} -> schema={schema}")
-                return schema
-        print(f"[TENANT] ⚠️ Professor {scope_id} não encontrado ou sem escola/cidade")
+                return city_id_to_schema_name(school.city_id)
         return None
     
     return None
@@ -120,24 +106,16 @@ def rebuild_report_for_scope(
         print(f"[REBUILD] 🚀 INÍCIO - test_id={test_id}, scope_type={scope_type}, scope_id={scope_id}")
         logger.info(f"Iniciando rebuild de relatório: test_id={test_id}, scope_type={scope_type}, scope_id={scope_id}")
         
-        # Configurar schema do tenant ANTES de qualquer consulta ao banco
         schema = _get_schema_for_scope(scope_type, scope_id)
         _set_tenant_schema(schema)
         
-        # Verificar se a avaliação existe
-        print(f"[REBUILD] 🔍 Verificando se avaliação existe: test_id={test_id}")
         test = Test.query.get(test_id)
         if not test:
             print(f"[REBUILD] ❌ Avaliação {test_id} não encontrada")
             raise ValueError(f"Avaliação {test_id} não encontrada")
-        print(f"[REBUILD] ✅ Avaliação encontrada: {test.name if hasattr(test, 'name') else 'N/A'}")
         
-        # Normalizar escopo
-        print(f"[REBUILD] 🔄 Normalizando escopo: scope_type={scope_type}, scope_id={scope_id}")
         scope_type, scope_id = ReportAggregateService._normalize_scope(scope_type, scope_id)
-        print(f"[REBUILD] ✅ Escopo normalizado: scope_type={scope_type}, scope_id={scope_id}")
 
-        # Verificar se já existe payload válido em cache (caso apenas a IA esteja dirty)
         aggregate_cached = ReportAggregateService.get(test_id, scope_type, scope_id)
         use_cached_payload = bool(
             aggregate_cached
@@ -146,36 +124,27 @@ def rebuild_report_for_scope(
         )
 
         if use_cached_payload:
-            print(f"[REBUILD] 💾 Usando payload já salvo no cache para {scope_type}:{scope_id} (is_dirty=False)")
+            print(f"[REBUILD] 💾 Usando payload do cache para {scope_type}:{scope_id}")
             payload = aggregate_cached.payload or {}
             student_count = (
                 payload.get('total_alunos', {})
                 .get('total_geral', {})
                 .get('avaliados', 0)
             )
-            print(f"[REBUILD] 📊 Total de alunos (cache): {student_count}")
         else:
-            # Buscar turmas conforme o escopo
             print(f"[REBUILD] 🔍 Buscando turmas para scope_type={scope_type}, scope_id={scope_id}")
             if scope_type == 'teacher':
-                # Para professor, buscar turmas específicas
-                print(f"[REBUILD] 👨‍🏫 Buscando turmas do professor: scope_id={scope_id}")
                 teacher_classes = TeacherClass.query.filter_by(teacher_id=scope_id).all()
                 teacher_class_ids = [tc.class_id for tc in teacher_classes]
-                print(f"[REBUILD] 📊 Turmas do professor encontradas: {len(teacher_class_ids)}")
                 class_tests = ClassTest.query.filter(
                     ClassTest.test_id == test_id,
                     ClassTest.class_id.in_(teacher_class_ids)
                 ).all()
             else:
-                # Para outros escopos, usar função existente
-                # CORRIGIDO: Para 'overall', scope_id é None. Para 'city' e 'school', usar scope_id diretamente
-                print(f"[REBUILD] 🌐 Buscando turmas por escopo: scope_type={scope_type}, scope_id={scope_id}")
                 class_tests = _buscar_turmas_por_escopo(test_id, scope_type, scope_id)
             
-            print(f"[REBUILD] 📊 Total de turmas encontradas: {len(class_tests) if class_tests else 0}")
+            print(f"[REBUILD] 📊 Turmas encontradas: {len(class_tests) if class_tests else 0}")
             if not class_tests:
-                print(f"[REBUILD] ⚠️ Nenhuma turma encontrada para test_id={test_id}, scope_type={scope_type}, scope_id={scope_id}")
                 logger.warning(f"Nenhuma turma encontrada para test_id={test_id}, scope_type={scope_type}, scope_id={scope_id}")
                 return {
                     'success': False,
@@ -185,34 +154,27 @@ def rebuild_report_for_scope(
                     'scope_id': scope_id
                 }
             
-            # 1. Calcular payload (dados agregados)
             print(f"[REBUILD] 📊 ETAPA 1: Calculando payload para {scope_type}:{scope_id}")
             logger.info(f"Calculando payload para {scope_type}:{scope_id}")
             
             if scope_type == 'teacher':
-                # Para professor, usar função específica
-                print(f"[REBUILD] 👨‍🏫 Usando _montar_resposta_relatorio_por_turmas para professor")
                 from app.routes.report_routes import _montar_resposta_relatorio_por_turmas
                 payload = _montar_resposta_relatorio_por_turmas(
                     test_id,
                     class_tests,
-                    include_ai=False  # IA será gerada separadamente
+                    include_ai=False
                 )
             else:
-                # Para outros escopos
                 school_id = scope_id if scope_type == 'school' else None
                 city_id = scope_id if scope_type == 'city' else None
-                print(f"[REBUILD] 🌐 Usando _montar_resposta_relatorio: school_id={school_id}, city_id={city_id}")
                 payload = _montar_resposta_relatorio(
                     test_id,
                     school_id=school_id,
                     city_id=city_id,
-                    include_ai=False  # IA será gerada separadamente
+                    include_ai=False
                 )
             
             print(f"[REBUILD] ✅ Payload calculado com sucesso")
-            
-            # Extrair student_count
             student_count = (
                 payload.get('total_alunos', {})
                 .get('total_geral', {})
@@ -220,7 +182,6 @@ def rebuild_report_for_scope(
             )
             print(f"[REBUILD] 📊 Total de alunos: {student_count}")
             
-            # 2. Salvar payload no cache
             print(f"[REBUILD] 💾 ETAPA 2: Salvando payload no cache para {scope_type}:{scope_id}")
             logger.info(f"Salvando payload no cache para {scope_type}:{scope_id}")
             ReportAggregateService.save_payload(
@@ -232,19 +193,12 @@ def rebuild_report_for_scope(
                 commit=True
             )
             print(f"[REBUILD] ✅ Payload salvo no cache")
-            
-            # Verificar se foi realmente salvo (forçar refresh)
             db.session.expire_all()
-            aggregate_check = ReportAggregateService.get(test_id, scope_type, scope_id)
-            print(f"[REBUILD] 🔍 Verificação payload: is_dirty={aggregate_check.is_dirty if aggregate_check else 'None'}, has_payload={bool(aggregate_check.payload) if aggregate_check else False}")
         
-        # 3. Gerar análise de IA
         print(f"[REBUILD] 🤖 ETAPA 3: Gerando análise de IA para {scope_type}:{scope_id}")
         logger.info(f"Gerando análise de IA para {scope_type}:{scope_id}")
         try:
-            print(f"[REBUILD] 🤖 Inicializando AIAnalysisService")
             ai_service = AIAnalysisService()
-            print(f"[REBUILD] 🤖 Chamando analyze_report_data")
             ai_analysis = ai_service.analyze_report_data({
                 "avaliacao": payload.get('avaliacao', {}),
                 "total_alunos": payload.get('total_alunos', {}),
@@ -256,21 +210,6 @@ def rebuild_report_for_scope(
                 "scope_id": scope_id
             })
             print(f"[REBUILD] ✅ Análise de IA gerada com sucesso")
-            print(f"[REBUILD] 📊 Resumo da análise de IA:")
-            participacao_text = ai_analysis.get('participacao', '') or ''
-            notas_text = ai_analysis.get('notas', '') or ''
-            niveis_dict = ai_analysis.get('niveis_aprendizagem', {}) or {}
-            prof_dict = ai_analysis.get('proficiencia', {}) or {}
-            print(f"  - Participação: {len(participacao_text)} caracteres")
-            participacao_preview = participacao_text[:300].replace('\n', ' ')
-            print(f"    Início: {participacao_preview}")
-            print(f"  - Notas: {len(notas_text)} caracteres")
-            notas_preview = notas_text[:300].replace('\n', ' ')
-            print(f"    Início: {notas_preview}")
-            print(f"  - Proficiência: {len(prof_dict)} disciplinas -> {list(prof_dict.keys())}")
-            print(f"  - Níveis: {len(niveis_dict)} disciplinas -> {list(niveis_dict.keys())}")
-            
-            # 4. Salvar análise de IA no cache
             print(f"[REBUILD] 💾 ETAPA 4: Salvando análise de IA no cache para {scope_type}:{scope_id}")
             logger.info(f"Salvando análise de IA no cache para {scope_type}:{scope_id}")
             ReportAggregateService.save_ai_analysis(
@@ -281,26 +220,15 @@ def rebuild_report_for_scope(
                 commit=True
             )
             print(f"[REBUILD] ✅ Análise de IA salva no cache")
-            
-            # Verificar se foi realmente salvo (forçar refresh)
             db.session.expire_all()
-            aggregate_check = ReportAggregateService.get(test_id, scope_type, scope_id)
-            print(f"[REBUILD] 🔍 Verificação IA: ai_analysis_is_dirty={aggregate_check.ai_analysis_is_dirty if aggregate_check else 'None'}, has_ai_analysis={bool(aggregate_check.ai_analysis) if aggregate_check else False}")
         except Exception as e:
             print(f"[REBUILD] ❌ Erro ao gerar análise de IA: {type(e).__name__}: {str(e)}")
             logger.error(f"Erro ao gerar análise de IA para {scope_type}:{scope_id}: {str(e)}", exc_info=True)
-            # Continuar mesmo se IA falhar (payload já foi salvo)
-            # Marcar IA como dirty para tentar novamente depois
-            print(f"[REBUILD] 🔄 Marcando IA como dirty para retry posterior")
             ReportAggregateService.mark_ai_dirty(test_id, scope_type, scope_id, commit=True)
         
-        # Verificação final do status após tudo ser salvo
-        db.session.expire_all()  # Garantir que estamos lendo dados frescos do banco
+        db.session.expire_all()
         final_status = ReportAggregateService.get_status(test_id, scope_type, scope_id)
-        print(f"[REBUILD] 🔍 Status final: status={final_status['status']}, is_dirty={final_status['is_dirty']}, ai_dirty={final_status['ai_analysis_is_dirty']}")
-        print(f"[REBUILD] 🔍 Status final: has_payload={final_status['has_payload']}, has_ai_analysis={final_status['has_ai_analysis']}")
-        
-        print(f"[REBUILD] ✅✅✅ REBUILD CONCLUÍDO COM SUCESSO para {scope_type}:{scope_id}")
+        print(f"[REBUILD] ✅✅✅ REBUILD CONCLUÍDO - {scope_type}:{scope_id} - status={final_status['status']}")
         logger.info(f"Rebuild concluído com sucesso para {scope_type}:{scope_id}")
         return {
             'success': True,
@@ -308,14 +236,12 @@ def rebuild_report_for_scope(
             'scope_type': scope_type,
             'scope_id': scope_id,
             'student_count': student_count,
-            'final_status': final_status  # Incluir status final no retorno
+            'final_status': final_status
         }
         
     except Exception as e:
         print(f"[REBUILD] ❌❌❌ ERRO CRÍTICO: {type(e).__name__}: {str(e)}")
         logger.error(f"Erro ao fazer rebuild de relatório: {str(e)}", exc_info=True)
-        # Retry automático
-        print(f"[REBUILD] 🔄 Tentando retry...")
         raise self.retry(exc=e)
 
 
@@ -391,7 +317,8 @@ def trigger_rebuild_if_needed(
     self: Task,
     test_id: str,
     scope_type: str,
-    scope_id: Optional[str] = None
+    scope_id: Optional[str] = None,
+    city_id: Optional[str] = None
 ) -> Dict[str, Any]:
     """
     Task helper que verifica se precisa rebuild e agenda se necessário.
@@ -401,23 +328,23 @@ def trigger_rebuild_if_needed(
         test_id: ID da avaliação
         scope_type: Tipo de escopo
         scope_id: ID do escopo
+        city_id: ID do município (opcional). Se informado para scope city/school,
+                 define o schema sem consultar School (evita relation "school" does not exist).
     
     Returns:
         Dict com resultado
     """
-    print(f"[TRIGGER_REBUILD] 🚀 INÍCIO - test_id={test_id}, scope_type={scope_type}, scope_id={scope_id}")
+    print(f"[TRIGGER_REBUILD] 🚀 INÍCIO - test_id={test_id}, scope_type={scope_type}, scope_id={scope_id}, city_id={city_id}")
     
     from app.report_analysis.debounce import ReportDebounceService
     
-    # Configurar schema do tenant ANTES de qualquer consulta ao banco
-    schema = _get_schema_for_scope(scope_type, scope_id)
+    if city_id and scope_type in ('city', 'school'):
+        schema = city_id_to_schema_name(city_id)
+    else:
+        schema = _get_schema_for_scope(scope_type, scope_id)
     _set_tenant_schema(schema)
     
-    # Verificar debounce
-    print(f"[TRIGGER_REBUILD] 🔍 Verificando debounce para test_id={test_id}")
     should_trigger = ReportDebounceService.should_trigger_rebuild(test_id)
-    print(f"[TRIGGER_REBUILD] 📊 Resultado debounce: {should_trigger}")
-    
     if not should_trigger:
         print(f"[TRIGGER_REBUILD] ⏸️ Rebuild em debounce para test_id={test_id}. Ignorando.")
         logger.info(f"Rebuild em debounce para test_id={test_id}. Ignorando.")
@@ -427,15 +354,7 @@ def trigger_rebuild_if_needed(
             'test_id': test_id
         }
     
-    # Verificar se precisa rebuild
-    print(f"[TRIGGER_REBUILD] 🔍 Verificando se precisa rebuild - test_id={test_id}, scope_type={scope_type}, scope_id={scope_id}")
     aggregate = ReportAggregateService.get(test_id, scope_type, scope_id)
-    print(f"[TRIGGER_REBUILD] 📊 Aggregate encontrado: {aggregate is not None}")
-    
-    if aggregate:
-        print(f"[TRIGGER_REBUILD] 📊 Aggregate.is_dirty: {aggregate.is_dirty}")
-        print(f"[TRIGGER_REBUILD] 📊 Aggregate.ai_analysis_is_dirty: {aggregate.ai_analysis_is_dirty}")
-    
     needs_rebuild = (
         not aggregate or 
         aggregate.is_dirty or 
@@ -454,14 +373,13 @@ def trigger_rebuild_if_needed(
             'scope_id': scope_id
         }
     
-    # Agendar rebuild
-    print(f"[TRIGGER_REBUILD] 📤 Agendando rebuild_report_for_scope.delay({test_id}, {scope_type}, {scope_id})")
     try:
         task = rebuild_report_for_scope.delay(test_id, scope_type, scope_id)
-        print(f"[TRIGGER_REBUILD] ✅ Rebuild agendado com sucesso! Task ID: {task.id}")
+        print(f"[TRIGGER_REBUILD] ✅ Rebuild agendado! Task ID: {task.id}")
         logger.info(f"Rebuild agendado para {scope_type}:{scope_id} (task_id={task.id})")
     except Exception as e:
         print(f"[TRIGGER_REBUILD] ❌ Erro ao agendar rebuild: {type(e).__name__}: {str(e)}")
+        logger.error(f"Erro ao agendar rebuild: {type(e).__name__}: {str(e)}")
         raise
     
     return {

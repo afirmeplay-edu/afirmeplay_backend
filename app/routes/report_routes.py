@@ -27,8 +27,7 @@ from typing import Dict, Any, List, Optional, Union
 import math
 import re
 import unicodedata
-from sqlalchemy import func, case, desc, cast
-from sqlalchemy.dialects.postgresql import UUID as PostgresUUID
+from sqlalchemy import func, case, desc
 from datetime import datetime
 from sqlalchemy.orm import joinedload
 from collections import defaultdict, OrderedDict
@@ -587,10 +586,15 @@ def dados_json(evaluation_id: str):
         status = ReportAggregateService.get_status(evaluation_id, scope_type, scope_ref_id)
         
         if status['status'] != 'ready':
-            # Disparar task assíncrona (com debounce)
+            # Disparar task assíncrona (com debounce). Passar city_id para scope school/city evita query em School no worker.
             from app.report_analysis.tasks import trigger_rebuild_if_needed
+            city_id_for_task = (
+                city_id                                            # admin passa pela URL
+                or (scope_ref_id if scope_type == 'city' else None)  # escopo city: scope_ref_id já é city_id
+                or user.get('city_id')                             # diretor/coordenador/professor: city_id do token
+            )
             try:
-                trigger_rebuild_if_needed.delay(evaluation_id, scope_type, scope_ref_id)
+                trigger_rebuild_if_needed.delay(evaluation_id, scope_type, scope_ref_id, city_id_for_task)
             except Exception as e:
                 logging.warning(f"Erro ao disparar task de rebuild: {str(e)}")
                 # Continuar mesmo se falhar (pode ser que Redis não esteja disponível)
@@ -5683,7 +5687,7 @@ def _calcular_media_municipal(evaluation_id: str) -> float:
         ).join(
             Class, Student.class_id == Class.id
         ).join(
-            School, Class.school_id == cast(School.id, PostgresUUID)
+            School, Class.school_id == School.id
         ).filter(
             School.city_id == city_id,
             EvaluationResult.test_id == evaluation_id
@@ -5727,7 +5731,7 @@ def _calcular_media_municipal_nota(evaluation_id: str) -> float:
         ).join(
             Class, Student.class_id == Class.id
         ).join(
-            School, Class.school_id == cast(School.id, PostgresUUID)
+            School, Class.school_id == School.id
         ).filter(
             School.city_id == city_id,
             EvaluationResult.test_id == evaluation_id
@@ -5771,7 +5775,7 @@ def _calcular_media_municipal_por_disciplina(evaluation_id: str, question_discip
         ).join(
             Class, Student.class_id == Class.id
         ).join(
-            School, Class.school_id == cast(School.id, PostgresUUID)
+            School, Class.school_id == School.id
         ).filter(
             School.city_id == city_id,
             EvaluationResult.test_id == evaluation_id
@@ -5873,7 +5877,7 @@ def _calcular_media_municipal_nota_por_disciplina(evaluation_id: str, question_d
         ).join(
             Class, Student.class_id == Class.id
         ).join(
-            School, Class.school_id == cast(School.id, PostgresUUID)
+            School, Class.school_id == School.id
         ).filter(
             School.city_id == city_id,
             EvaluationResult.test_id == evaluation_id

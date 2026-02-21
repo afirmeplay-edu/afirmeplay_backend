@@ -2,6 +2,27 @@
 """
 Funções de cálculo de relatórios.
 Importa funções do report_routes.py original para manter compatibilidade.
+
+==============================================================
+RELATÓRIOS QUE USAM ESTE ARQUIVO:
+  - Análise das Avaliações  (frontend: AnaliseAvaliacoes / analise-avaliacoes)
+  - Relatório Escolar       (frontend: RelatorioEscolar)
+
+RESPONSABILIDADE:
+  Ponto de re-exportação das funções de cálculo que vivem em
+  app/routes/report_routes.py para uso pelas tasks Celery.
+  Evita importação circular entre routes e tasks.
+
+ARQUIVOS RELACIONADOS AO SISTEMA DE RELATÓRIOS:
+  app/report_analysis/routes.py       → rotas Flask
+  app/report_analysis/tasks.py        → tasks Celery que importam deste arquivo
+  app/report_analysis/services.py     → ReportAggregateService (cache no banco)
+  app/report_analysis/calculations.py ← este arquivo (re-exportações)
+  app/report_analysis/debounce.py     → debounce Redis (evita tasks duplicadas)
+  app/report_analysis/celery_app.py   → configuração do Celery
+  app/routes/report_routes.py         → origem real das funções de cálculo
+  app/routes/evaluation_results_routes.py → dados tabulares (/avaliacoes e /opcoes-filtros)
+==============================================================
 """
 
 # Importar todas as funções de cálculo do report_routes original

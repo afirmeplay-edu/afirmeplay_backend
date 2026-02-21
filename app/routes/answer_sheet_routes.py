@@ -223,6 +223,7 @@ def generate_answer_sheets():
     - Se fornecido APENAS class_id → gera para 1 turma
     - Se fornecido grade_id (sem class_id) → gera para TODAS as turmas da série
     - Se fornecido school_id (sem grade_id) → gera para TODAS as turmas da escola
+    - Se nenhum dos três → gera para TODAS as turmas do município (via contexto do tenant)
     
     Body:
         {
@@ -332,8 +333,25 @@ def generate_answer_sheets():
                 return jsonify({"error": "Nenhuma turma encontrada para esta escola"}), 400
         
         else:
-            return jsonify({"error": "Forneça class_id, grade_id ou school_id"}), 400
-        
+            # Município inteiro: buscar todas as turmas via contexto do tenant
+            from app.decorators.tenant_required import get_current_tenant_context
+            context_scope = get_current_tenant_context()
+            city_id_scope = context_scope.city_id if context_scope else None
+
+            if not city_id_scope:
+                return jsonify({"error": "Forneça class_id, grade_id ou school_id"}), 400
+
+            scope_type = 'city'
+            school_ids_city = db.session.query(School.id).filter(
+                School.city_id == city_id_scope
+            ).subquery()
+            classes_to_generate = Class.query.filter(
+                Class.school_id.in_(school_ids_city)
+            ).all()
+
+            if not classes_to_generate:
+                return jsonify({"error": "Nenhuma turma encontrada no município"}), 400
+
         logging.info(f"[ROTA] ✅ Escopo determinado: {scope_type}, {len(classes_to_generate)} turma(s)")
         
         # ✅ 3. PREPARAR CONFIGURAÇÃO DE BLOCOS
@@ -390,8 +408,11 @@ def generate_answer_sheets():
         school_name = ''
         grade_id_for_gabarito = None
         grade_name_for_gabarito = test_data.get('grade_name', '')  # ✅ Pegar do payload primeiro
-        
-        if classes_to_generate:
+
+        if scope_type == 'city':
+            # Município inteiro: sem escola/série específica no gabarito
+            pass
+        elif classes_to_generate:
             first_class = classes_to_generate[0]
             if first_class.school_id:
                 school_id_for_gabarito = first_class.school_id
@@ -876,7 +897,27 @@ def list_gabaritos():
                     len(cls.students) if cls.students else 0 
                     for cls in classes_in_school
                 )
-            
+
+            # Buscar informações do município se necessário
+            total_classes_in_city = 0
+            total_students_in_city = 0
+            if gabarito.scope_type == "city" and gabarito.municipality:
+                city_obj_list = City.query.filter(
+                    City.name.ilike(f"%{gabarito.municipality}%")
+                ).first()
+                if city_obj_list:
+                    school_ids_city = db.session.query(School.id).filter(
+                        School.city_id == city_obj_list.id
+                    ).subquery()
+                    classes_in_city = Class.query.filter(
+                        Class.school_id.in_(school_ids_city)
+                    ).all()
+                    total_classes_in_city = len(classes_in_city)
+                    total_students_in_city = sum(
+                        len(cls.students) if cls.students else 0
+                        for cls in classes_in_city
+                    )
+
             # Determinar contagem baseada no scope_type correto
             final_students_count = 0
             final_classes_count = 0
@@ -890,6 +931,9 @@ def list_gabaritos():
             elif gabarito.scope_type == "school":
                 final_students_count = total_students_in_school
                 final_classes_count = total_classes_in_school
+            elif gabarito.scope_type == "city":
+                final_students_count = total_students_in_city
+                final_classes_count = total_classes_in_city
             else:
                 # Fallback para scope desconhecido
                 final_students_count = total_students_in_grade if total_students_in_grade > 0 else class_students_count

@@ -2,6 +2,27 @@
 """
 Serviço de gerenciamento de cache de relatórios agregados
 Refatorado para não executar cálculos (apenas consulta cache)
+
+==============================================================
+RELATÓRIOS QUE USAM ESTE ARQUIVO:
+  - Análise das Avaliações  (frontend: AnaliseAvaliacoes / analise-avaliacoes)
+  - Relatório Escolar       (frontend: RelatorioEscolar)
+
+RESPONSABILIDADE:
+  Camada de acesso ao banco para os aggregates de relatório.
+  Lê e grava os resultados calculados pelas tasks Celery.
+  NÃO executa cálculos — apenas persiste/consulta cache.
+
+ARQUIVOS RELACIONADOS AO SISTEMA DE RELATÓRIOS:
+  app/report_analysis/routes.py       → rotas Flask
+  app/report_analysis/tasks.py        → tasks Celery que gravam via este serviço
+  app/report_analysis/services.py     ← este arquivo
+  app/report_analysis/calculations.py → re-exporta funções de cálculo de report_routes.py
+  app/report_analysis/debounce.py     → debounce Redis (evita tasks duplicadas)
+  app/report_analysis/celery_app.py   → configuração do Celery
+  app/routes/report_routes.py         → funções de cálculo + _determinar_escopo_por_role
+  app/routes/evaluation_results_routes.py → dados tabulares (/avaliacoes e /opcoes-filtros)
+==============================================================
 """
 
 from __future__ import annotations

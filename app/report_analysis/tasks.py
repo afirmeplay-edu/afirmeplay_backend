@@ -1,6 +1,32 @@
 # -*- coding: utf-8 -*-
 """
 Tasks Celery para processamento assíncrono de relatórios
+
+==============================================================
+RELATÓRIOS QUE USAM ESTE ARQUIVO:
+  - Análise das Avaliações  (frontend: AnaliseAvaliacoes / analise-avaliacoes)
+  - Relatório Escolar       (frontend: RelatorioEscolar)
+
+RESPONSABILIDADE:
+  Executa os cálculos pesados em background (fora da requisição HTTP).
+  Disparado pelas rotas em app/report_analysis/routes.py via Celery.
+
+TASKS DISPONÍVEIS:
+  rebuild_report_for_scope(test_id, scope_type, scope_id, city_id)
+    → recalcula e salva o aggregate no banco para um escopo específico
+  trigger_rebuild_if_needed(test_id, scope_type, scope_id, city_id)
+    → verifica debounce e, se necessário, dispara rebuild_report_for_scope
+
+ARQUIVOS RELACIONADOS AO SISTEMA DE RELATÓRIOS:
+  app/report_analysis/routes.py       → rotas Flask que disparam estas tasks
+  app/report_analysis/tasks.py        ← este arquivo
+  app/report_analysis/services.py     → ReportAggregateService (leitura/escrita do cache no banco)
+  app/report_analysis/calculations.py → re-exporta funções de cálculo de report_routes.py
+  app/report_analysis/debounce.py     → debounce Redis (evita tasks duplicadas)
+  app/report_analysis/celery_app.py   → configuração do Celery
+  app/routes/report_routes.py         → funções de cálculo + _determinar_escopo_por_role
+  app/routes/evaluation_results_routes.py → dados tabulares (/avaliacoes e /opcoes-filtros)
+==============================================================
 """
 
 import logging
@@ -87,7 +113,8 @@ def rebuild_report_for_scope(
     self: Task,
     test_id: str,
     scope_type: str,
-    scope_id: Optional[str] = None
+    scope_id: Optional[str] = None,
+    city_id: Optional[str] = None
 ) -> Dict[str, Any]:
     """
     Task Celery para rebuild de um escopo específico.
@@ -98,6 +125,9 @@ def rebuild_report_for_scope(
         test_id: ID da avaliação
         scope_type: Tipo de escopo ('overall', 'city', 'school', 'teacher')
         scope_id: ID do escopo (None para 'overall')
+        city_id: ID do município. Usado para definir o schema multi-tenant.
+                 Obrigatório para 'overall' (que não tem scope_id),
+                 e para 'city'/'school' quando já conhecido.
     
     Returns:
         Dict com resultado do processamento
@@ -106,7 +136,10 @@ def rebuild_report_for_scope(
         print(f"[REBUILD] 🚀 INÍCIO - test_id={test_id}, scope_type={scope_type}, scope_id={scope_id}")
         logger.info(f"Iniciando rebuild de relatório: test_id={test_id}, scope_type={scope_type}, scope_id={scope_id}")
         
-        schema = _get_schema_for_scope(scope_type, scope_id)
+        if city_id and scope_type in ('overall', 'city', 'school'):
+            schema = city_id_to_schema_name(city_id)
+        else:
+            schema = _get_schema_for_scope(scope_type, scope_id)
         _set_tenant_schema(schema)
         
         test = Test.query.get(test_id)
@@ -338,7 +371,7 @@ def trigger_rebuild_if_needed(
     
     from app.report_analysis.debounce import ReportDebounceService
     
-    if city_id and scope_type in ('city', 'school'):
+    if city_id and scope_type in ('overall', 'city', 'school'):
         schema = city_id_to_schema_name(city_id)
     else:
         schema = _get_schema_for_scope(scope_type, scope_id)
@@ -374,7 +407,7 @@ def trigger_rebuild_if_needed(
         }
     
     try:
-        task = rebuild_report_for_scope.delay(test_id, scope_type, scope_id)
+        task = rebuild_report_for_scope.delay(test_id, scope_type, scope_id, city_id)
         print(f"[TRIGGER_REBUILD] ✅ Rebuild agendado! Task ID: {task.id}")
         logger.info(f"Rebuild agendado para {scope_type}:{scope_id} (task_id={task.id})")
     except Exception as e:

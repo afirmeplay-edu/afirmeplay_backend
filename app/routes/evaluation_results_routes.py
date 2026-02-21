@@ -2,6 +2,31 @@
 """
 Rotas especializadas para resultados de avaliações
 Endpoints para análise de dados, estatísticas e relatórios
+
+==============================================================
+RELATÓRIOS QUE USAM ESTE ARQUIVO:
+  - Análise das Avaliações  (frontend: AnaliseAvaliacoes / analise-avaliacoes)
+  - Relatório Escolar       (frontend: RelatorioEscolar)
+
+ROTAS USADAS PELOS RELATÓRIOS:
+  GET /evaluation-results/avaliacoes
+    → retorna tabela detalhada com alunos por disciplina (tabela_detalhada)
+    → chamada por getEvaluationsList() no frontend
+  GET /evaluation-results/opcoes-filtros
+    → retorna opções hierárquicas dos dropdowns de filtro
+      (Estado → Município → Avaliação → Escola → Série → Turma)
+    → chamada pelo FilterComponentAnalise no frontend
+
+ARQUIVOS RELACIONADOS AO SISTEMA DE RELATÓRIOS:
+  app/report_analysis/routes.py       → rotas Flask (/reports/dados-json, /reports/status)
+  app/report_analysis/tasks.py        → tasks Celery de geração assíncrona
+  app/report_analysis/services.py     → ReportAggregateService (cache no banco)
+  app/report_analysis/calculations.py → re-exporta funções de cálculo
+  app/report_analysis/debounce.py     → debounce Redis
+  app/report_analysis/celery_app.py   → configuração do Celery
+  app/routes/report_routes.py         → funções de cálculo + _determinar_escopo_por_role
+  app/routes/evaluation_results_routes.py ← este arquivo (dados tabulares + filtros)
+==============================================================
 """
 
 from flask import Blueprint, request, jsonify

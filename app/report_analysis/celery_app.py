@@ -2,6 +2,26 @@
 """
 Configuração do Celery para processamento assíncrono de relatórios
 Integração com Flask usando padrão flask-celery
+
+==============================================================
+RELATÓRIOS QUE USAM ESTE ARQUIVO:
+  - Análise das Avaliações  (frontend: AnaliseAvaliacoes / analise-avaliacoes)
+  - Relatório Escolar       (frontend: RelatorioEscolar)
+
+RESPONSABILIDADE:
+  Inicialização e configuração da instância Celery usada por
+  app/report_analysis/tasks.py para processar relatórios em background.
+
+ARQUIVOS RELACIONADOS AO SISTEMA DE RELATÓRIOS:
+  app/report_analysis/routes.py       → rotas Flask
+  app/report_analysis/tasks.py        → tasks Celery (usa esta instância)
+  app/report_analysis/services.py     → ReportAggregateService (cache no banco)
+  app/report_analysis/calculations.py → re-exporta funções de cálculo
+  app/report_analysis/debounce.py     → debounce Redis
+  app/report_analysis/celery_app.py   ← este arquivo (configuração do Celery)
+  app/routes/report_routes.py         → funções de cálculo + _determinar_escopo_por_role
+  app/routes/evaluation_results_routes.py → dados tabulares (/avaliacoes e /opcoes-filtros)
+==============================================================
 """
 
 import os

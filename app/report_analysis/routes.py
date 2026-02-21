@@ -1,6 +1,27 @@
 # -*- coding: utf-8 -*-
 """
 Rotas refatoradas para relatórios com processamento assíncrono
+
+==============================================================
+RELATÓRIOS QUE USAM ESTE ARQUIVO:
+  - Análise das Avaliações  (frontend: AnaliseAvaliacoes / analise-avaliacoes)
+  - Relatório Escolar       (frontend: RelatorioEscolar)
+
+ROTAS EXPOSTAS:
+  GET  /reports/dados-json/<evaluation_id>        → retorna payload do relatório (ou HTTP 202 se ainda processando)
+  GET  /reports/status/<evaluation_id>            → polling de status (usado pelo frontend para aguardar)
+  POST /reports/force-rebuild/<evaluation_id>     → força reprocessamento manual (somente admin)
+
+ARQUIVOS RELACIONADOS AO SISTEMA DE RELATÓRIOS:
+  app/report_analysis/routes.py       ← este arquivo (rotas Flask)
+  app/report_analysis/tasks.py        → tasks Celery de geração assíncrona
+  app/report_analysis/services.py     → ReportAggregateService (leitura/escrita do cache no banco)
+  app/report_analysis/calculations.py → re-exporta funções de cálculo de report_routes.py
+  app/report_analysis/debounce.py     → debounce Redis (evita tasks duplicadas)
+  app/report_analysis/celery_app.py   → configuração do Celery
+  app/routes/report_routes.py         → funções de cálculo + _determinar_escopo_por_role
+  app/routes/evaluation_results_routes.py → dados tabulares (/avaliacoes e /opcoes-filtros)
+==============================================================
 """
 
 from flask import Blueprint, request, jsonify
@@ -8,6 +29,7 @@ from flask_jwt_extended import jwt_required
 from app.permissions import role_required, get_current_user_from_token
 from app.models.test import Test
 from app.models.classTest import ClassTest
+from app.models.school import School
 from app.permissions.utils import get_teacher_classes, get_manager_school, get_teacher
 from app.permissions.rules import can_view_test
 from app.routes.report_routes import _determinar_escopo_por_role
@@ -86,6 +108,13 @@ def dados_json(evaluation_id: str):
             }), 400
         
         set_search_path(schema)
+        
+        # Para school scope, o frontend nunca envia city_id na URL.
+        # Recuperamos o city_id da escola agora que o search_path já está correto.
+        if scope_type == 'school' and not city_id:
+            school_obj = School.query.get(scope_ref_id)
+            if school_obj and school_obj.city_id:
+                city_id = school_obj.city_id
         
         # Verificar se a avaliação existe
         test = Test.query.get(evaluation_id)
@@ -205,6 +234,13 @@ def get_report_status(evaluation_id: str):
         
         set_search_path(schema)
         
+        # Para school scope, o frontend nunca envia city_id na URL.
+        # Recuperamos o city_id da escola agora que o search_path já está correto.
+        if scope_type == 'school' and not city_id:
+            school_obj = School.query.get(scope_ref_id)
+            if school_obj and school_obj.city_id:
+                city_id = school_obj.city_id
+        
         # Verificar se a avaliação existe
         test = Test.query.get(evaluation_id)
         if not test:
@@ -268,10 +304,16 @@ def force_rebuild(evaluation_id: str):
         from app.report_analysis.debounce import ReportDebounceService
         ReportDebounceService.clear_debounce(evaluation_id, scope_type=scope_type, scope_id=scope_ref_id)
         
+        city_id_for_rebuild = (
+            city_id
+            or (scope_ref_id if scope_type == 'city' else None)
+            or user.get('city_id')
+        )
+
         if use_sync:
             # Processar síncrono
             from app.report_analysis.tasks import rebuild_report_for_scope
-            result = rebuild_report_for_scope(evaluation_id, scope_type, scope_ref_id)
+            result = rebuild_report_for_scope(evaluation_id, scope_type, scope_ref_id, city_id_for_rebuild)
             
             if result.get('success'):
                 return jsonify({
@@ -286,7 +328,7 @@ def force_rebuild(evaluation_id: str):
         else:
             # Processar assíncrono
             from app.report_analysis.tasks import rebuild_report_for_scope
-            task = rebuild_report_for_scope.delay(evaluation_id, scope_type, scope_ref_id)
+            task = rebuild_report_for_scope.delay(evaluation_id, scope_type, scope_ref_id, city_id_for_rebuild)
             
             return jsonify({
                 "message": "Rebuild forçado agendado",

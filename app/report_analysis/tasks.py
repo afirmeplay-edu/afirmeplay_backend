@@ -1,6 +1,32 @@
 # -*- coding: utf-8 -*-
 """
 Tasks Celery para processamento assíncrono de relatórios
+
+==============================================================
+RELATÓRIOS QUE USAM ESTE ARQUIVO:
+  - Análise das Avaliações  (frontend: AnaliseAvaliacoes / analise-avaliacoes)
+  - Relatório Escolar       (frontend: RelatorioEscolar)
+
+RESPONSABILIDADE:
+  Executa os cálculos pesados em background (fora da requisição HTTP).
+  Disparado pelas rotas em app/report_analysis/routes.py via Celery.
+
+TASKS DISPONÍVEIS:
+  rebuild_report_for_scope(test_id, scope_type, scope_id, city_id)
+    → recalcula e salva o aggregate no banco para um escopo específico
+  trigger_rebuild_if_needed(test_id, scope_type, scope_id, city_id)
+    → verifica debounce e, se necessário, dispara rebuild_report_for_scope
+
+ARQUIVOS RELACIONADOS AO SISTEMA DE RELATÓRIOS:
+  app/report_analysis/routes.py       → rotas Flask que disparam estas tasks
+  app/report_analysis/tasks.py        ← este arquivo
+  app/report_analysis/services.py     → ReportAggregateService (leitura/escrita do cache no banco)
+  app/report_analysis/calculations.py → re-exporta funções de cálculo de report_routes.py
+  app/report_analysis/debounce.py     → debounce Redis (evita tasks duplicadas)
+  app/report_analysis/celery_app.py   → configuração do Celery
+  app/routes/report_routes.py         → funções de cálculo + _determinar_escopo_por_role
+  app/routes/evaluation_results_routes.py → dados tabulares (/avaliacoes e /opcoes-filtros)
+==============================================================
 """
 
 import logging

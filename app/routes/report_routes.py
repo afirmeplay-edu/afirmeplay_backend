@@ -2,6 +2,30 @@
 """
 Rotas especializadas para relatórios de avaliações
 Endpoint para geração de relatórios completos com estatísticas detalhadas
+
+==============================================================
+RELATÓRIOS QUE USAM ESTE ARQUIVO:
+  - Análise das Avaliações  (frontend: AnaliseAvaliacoes / analise-avaliacoes)
+  - Relatório Escolar       (frontend: RelatorioEscolar)
+
+RESPONSABILIDADE:
+  - Funções de cálculo estatístico usadas pelas tasks Celery
+    (importadas via app/report_analysis/calculations.py)
+  - _determinar_escopo_por_role() → define o escopo de acesso por role
+    (importada diretamente em app/report_analysis/routes.py)
+  - _determinar_escopo_relatorio() → helper para admin escolher scope por params
+  - Funções auxiliares: _montar_resposta_relatorio, _calcular_*, _buscar_turmas_*, etc.
+
+ARQUIVOS RELACIONADOS AO SISTEMA DE RELATÓRIOS:
+  app/report_analysis/routes.py       → rotas Flask (importa _determinar_escopo_por_role daqui)
+  app/report_analysis/tasks.py        → tasks Celery
+  app/report_analysis/services.py     → ReportAggregateService (cache no banco)
+  app/report_analysis/calculations.py → re-exporta as funções de cálculo deste arquivo
+  app/report_analysis/debounce.py     → debounce Redis
+  app/report_analysis/celery_app.py   → configuração do Celery
+  app/routes/report_routes.py         ← este arquivo (funções de cálculo + escopo)
+  app/routes/evaluation_results_routes.py → dados tabulares (/avaliacoes e /opcoes-filtros)
+==============================================================
 """
 
 from flask import Blueprint, request, jsonify, render_template_string, send_file, make_response

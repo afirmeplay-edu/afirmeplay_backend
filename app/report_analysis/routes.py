@@ -1,6 +1,27 @@
 # -*- coding: utf-8 -*-
 """
 Rotas refatoradas para relatórios com processamento assíncrono
+
+==============================================================
+RELATÓRIOS QUE USAM ESTE ARQUIVO:
+  - Análise das Avaliações  (frontend: AnaliseAvaliacoes / analise-avaliacoes)
+  - Relatório Escolar       (frontend: RelatorioEscolar)
+
+ROTAS EXPOSTAS:
+  GET  /reports/dados-json/<evaluation_id>        → retorna payload do relatório (ou HTTP 202 se ainda processando)
+  GET  /reports/status/<evaluation_id>            → polling de status (usado pelo frontend para aguardar)
+  POST /reports/force-rebuild/<evaluation_id>     → força reprocessamento manual (somente admin)
+
+ARQUIVOS RELACIONADOS AO SISTEMA DE RELATÓRIOS:
+  app/report_analysis/routes.py       ← este arquivo (rotas Flask)
+  app/report_analysis/tasks.py        → tasks Celery de geração assíncrona
+  app/report_analysis/services.py     → ReportAggregateService (leitura/escrita do cache no banco)
+  app/report_analysis/calculations.py → re-exporta funções de cálculo de report_routes.py
+  app/report_analysis/debounce.py     → debounce Redis (evita tasks duplicadas)
+  app/report_analysis/celery_app.py   → configuração do Celery
+  app/routes/report_routes.py         → funções de cálculo + _determinar_escopo_por_role
+  app/routes/evaluation_results_routes.py → dados tabulares (/avaliacoes e /opcoes-filtros)
+==============================================================
 """
 
 from flask import Blueprint, request, jsonify

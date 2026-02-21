@@ -487,6 +487,54 @@ def change_password():
         logging.error(f"Erro inesperado ao alterar senha: {e}", exc_info=True)
         return jsonify({"erro": "Erro interno do servidor"}), 500
 
+@bp.route('/check-email', methods=['POST'])
+@jwt_required()
+@role_required("admin", "tecadm", "diretor", "coordenador", "professor")
+def check_email_availability():
+    """Verifica se um email está disponível e sugere uma alternativa caso já esteja em uso"""
+    try:
+        data = request.get_json()
+        if not data or 'email' not in data:
+            return jsonify({"erro": "O campo 'email' é obrigatório"}), 400
+
+        email = data['email'].strip().lower()
+
+        if '@' not in email:
+            return jsonify({"erro": "Email inválido"}), 400
+
+        prefix, domain = email.split('@', 1)
+
+        if not prefix:
+            return jsonify({"erro": "Email inválido"}), 400
+
+        existing = User.query.filter(func.lower(User.email) == email).first()
+
+        if not existing:
+            return jsonify({
+                "disponivel": True,
+                "email": email
+            }), 200
+
+        # Encontrar o próximo email disponível (ex: aac2, aac3, ...)
+        suffix = 2
+        while True:
+            candidate = f"{prefix}{suffix}@{domain}"
+            if not User.query.filter(func.lower(User.email) == candidate).first():
+                return jsonify({
+                    "disponivel": False,
+                    "email": email,
+                    "email_sugerido": candidate
+                }), 200
+            suffix += 1
+
+    except SQLAlchemyError as e:
+        logging.error(f"Erro no banco de dados ao verificar email: {e}")
+        return jsonify({"erro": "Erro interno do servidor"}), 500
+    except Exception as e:
+        logging.error(f"Erro inesperado ao verificar email: {e}", exc_info=True)
+        return jsonify({"erro": "Erro interno do servidor"}), 500
+
+
 @bp.route('/validate-reset-token', methods=['POST'])
 def validate_reset_token():
     """Valida se um token de reset é válido"""

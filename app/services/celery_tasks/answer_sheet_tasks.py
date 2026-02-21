@@ -395,6 +395,7 @@ def generate_answer_sheets_batch_async(
                             'filename': pdf_result['filename'],
                             'grade_name': pdf_result.get('grade_name', gabarito_master.grade_name),
                             'class_name': pdf_result.get('class_name', class_obj.name),
+                            'school_name': class_obj.school.name if class_obj.school else 'Sem Escola',
                             'total_students': pdf_result['total_students'],
                             'total_pages': pdf_result['total_pages']
                         })
@@ -455,6 +456,7 @@ def generate_answer_sheets_batch_async(
                             'filename': pdf_result['filename'],
                             'grade_name': pdf_result.get('grade_name', gabarito.grade_name),
                             'class_name': pdf_result.get('class_name', class_obj.name),
+                            'school_name': class_obj.school.name if class_obj.school else 'Sem Escola',
                             'total_students': pdf_result['total_students'],
                             'total_pages': pdf_result['total_pages']
                         })
@@ -481,7 +483,24 @@ def generate_answer_sheets_batch_async(
         logger.info(f"[CELERY-BATCH] 📦 Criando ZIP com estrutura hierárquica...")
         
         with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zf:
-            if scope == 'school':
+            if scope == 'city':
+                # ✅ ESCOPO MUNICÍPIO: Organizar por Escola/Série
+                by_school = {}
+                for pdf_info in generated_pdfs:
+                    school = pdf_info.get('school_name', 'Sem Escola')
+                    grade = pdf_info.get('grade_name', 'Sem Serie')
+                    folder = f"{school}/{grade}"
+                    if folder not in by_school:
+                        by_school[folder] = []
+                    by_school[folder].append(pdf_info)
+
+                for folder, pdfs in by_school.items():
+                    for pdf_info in pdfs:
+                        if os.path.exists(pdf_info['pdf_path']):
+                            zip_internal_path = f"{folder}/{pdf_info['filename']}"
+                            zf.write(pdf_info['pdf_path'], zip_internal_path)
+
+            elif scope == 'school':
                 # ✅ ESCOPO ESCOLA: Organizar por série (pastas por série)
                 by_grade = {}
                 for pdf_info in generated_pdfs:
@@ -493,7 +512,6 @@ def generate_answer_sheets_batch_async(
                 for grade_name, pdfs in by_grade.items():
                     for pdf_info in pdfs:
                         if os.path.exists(pdf_info['pdf_path']):
-                            # Path: "Serie/Arquivo.pdf"
                             zip_internal_path = f"{grade_name}/{pdf_info['filename']}"
                             zf.write(pdf_info['pdf_path'], zip_internal_path)
             else:

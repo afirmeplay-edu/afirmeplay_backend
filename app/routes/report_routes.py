@@ -1834,10 +1834,12 @@ def _determinar_escopo_por_role(user: dict, school_id: str = None, city_id: str 
         return _determinar_escopo_relatorio(school_id, city_id)
     
     elif role == 'tecadm':
-        # Tecadm vê apenas seu município
+        # Tecadm vê apenas seu município, mas pode filtrar por escola específica
         city_id_user = user.get('city_id') or user.get('tenant_id')
         if not city_id_user:
             raise ValueError("Tecadm não vinculado a um município")
+        if school_id:
+            return ('school', school_id)
         return ('city', city_id_user)
     
     elif role in ['diretor', 'coordenador']:

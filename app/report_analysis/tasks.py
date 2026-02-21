@@ -87,7 +87,8 @@ def rebuild_report_for_scope(
     self: Task,
     test_id: str,
     scope_type: str,
-    scope_id: Optional[str] = None
+    scope_id: Optional[str] = None,
+    city_id: Optional[str] = None
 ) -> Dict[str, Any]:
     """
     Task Celery para rebuild de um escopo específico.
@@ -98,6 +99,9 @@ def rebuild_report_for_scope(
         test_id: ID da avaliação
         scope_type: Tipo de escopo ('overall', 'city', 'school', 'teacher')
         scope_id: ID do escopo (None para 'overall')
+        city_id: ID do município. Usado para definir o schema multi-tenant.
+                 Obrigatório para 'overall' (que não tem scope_id),
+                 e para 'city'/'school' quando já conhecido.
     
     Returns:
         Dict com resultado do processamento
@@ -106,7 +110,10 @@ def rebuild_report_for_scope(
         print(f"[REBUILD] 🚀 INÍCIO - test_id={test_id}, scope_type={scope_type}, scope_id={scope_id}")
         logger.info(f"Iniciando rebuild de relatório: test_id={test_id}, scope_type={scope_type}, scope_id={scope_id}")
         
-        schema = _get_schema_for_scope(scope_type, scope_id)
+        if city_id and scope_type in ('overall', 'city', 'school'):
+            schema = city_id_to_schema_name(city_id)
+        else:
+            schema = _get_schema_for_scope(scope_type, scope_id)
         _set_tenant_schema(schema)
         
         test = Test.query.get(test_id)
@@ -338,7 +345,7 @@ def trigger_rebuild_if_needed(
     
     from app.report_analysis.debounce import ReportDebounceService
     
-    if city_id and scope_type in ('city', 'school'):
+    if city_id and scope_type in ('overall', 'city', 'school'):
         schema = city_id_to_schema_name(city_id)
     else:
         schema = _get_schema_for_scope(scope_type, scope_id)
@@ -374,7 +381,7 @@ def trigger_rebuild_if_needed(
         }
     
     try:
-        task = rebuild_report_for_scope.delay(test_id, scope_type, scope_id)
+        task = rebuild_report_for_scope.delay(test_id, scope_type, scope_id, city_id)
         print(f"[TRIGGER_REBUILD] ✅ Rebuild agendado! Task ID: {task.id}")
         logger.info(f"Rebuild agendado para {scope_type}:{scope_id} (task_id={task.id})")
     except Exception as e:

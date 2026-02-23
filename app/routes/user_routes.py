@@ -19,7 +19,7 @@ from app.models.studentPasswordLog import StudentPasswordLog
 from app.models.user_settings import UserSettings
 from sqlalchemy.orm import joinedload
 from app.utils.email_service import EmailService
-from app.utils.tenant_middleware import city_id_to_schema_name
+from app.utils.tenant_middleware import city_id_to_schema_name, get_current_tenant_context
 from datetime import datetime, timedelta, date
 from flask import current_app
 import csv
@@ -43,6 +43,45 @@ def normalizar_nome_para_busca(nome):
     # Converter para string, remover espaços no início/fim e normalizar espaços múltiplos
     nome_normalizado = re.sub(r'\s+', ' ', str(nome).strip())
     return nome_normalizado.lower()
+
+
+def gerar_iniciais_email(nome_completo):
+    """
+    Gera a parte local do email com a primeira letra de cada nome.
+    Ex: "Artur Alexandre Calderon" -> "aac"
+    """
+    if not nome_completo:
+        return ""
+    partes = re.sub(r'\s+', ' ', str(nome_completo).strip()).split()
+    return "".join(p[0].lower() for p in partes if p)
+
+
+def gerar_primeiro_nome(nome_completo):
+    """
+    Retorna o primeiro nome em minúsculas.
+    Ex: "Artur Alexandre Calderon" -> "artur"
+    """
+    if not nome_completo:
+        return ""
+    partes = re.sub(r'\s+', ' ', str(nome_completo).strip()).split()
+    return partes[0].lower() if partes else ""
+
+
+def obter_email_disponivel(base_local, dominio="@afirmeplay.com.br", usados_nesse_batch=None):
+    """
+    Retorna um email disponível: base_local + dominio.
+    Se base_local@dominio já existir (no banco ou no batch), usa base_local1, base_local2, etc.
+    """
+    usados_nesse_batch = usados_nesse_batch or set()
+    candidato = f"{base_local}{dominio}"
+    if candidato not in usados_nesse_batch and not User.query.filter(func.lower(User.email) == candidato.lower()).first():
+        return candidato
+    suffix = 1
+    while True:
+        candidato = f"{base_local}{suffix}{dominio}"
+        if candidato not in usados_nesse_batch and not User.query.filter(func.lower(User.email) == candidato.lower()).first():
+            return candidato
+        suffix += 1
 
 def format_student_details(student):
     user_details = None
@@ -942,7 +981,12 @@ def get_user_settings(user_id):
 @role_required("admin", "tecadm", "diretor", "coordenador")
 def bulk_upload_students():
     """
-    Rota para upload em massa de alunos via arquivo CSV ou Excel
+    Rota para upload em massa de alunos via arquivo CSV ou Excel.
+    O arquivo NÃO deve conter email nem senha: o sistema gera automaticamente
+    email = primeira letra de cada nome + @afirmeplay.com.br (ex: aac@afirmeplay.com.br);
+    senha = primeiro nome + @afirmeplay (ex: artur@afirmeplay).
+    Em caso de iniciais repetidas, é acrescentado número (aac1, aac2, ...).
+    Retorna nomes, emails e senhas criados.
     """
     try:
         # Verificar se há arquivo no request
@@ -964,6 +1008,15 @@ def bulk_upload_students():
         current_user = get_current_user_from_token()
         if not current_user:
             return jsonify({"erro": "Usuário não encontrado"}), 404
+        
+        # Exigir contexto de cidade: school/student existem só em city_xxx, não em public
+        tenant_ctx = get_current_tenant_context()
+        if not tenant_ctx or not getattr(tenant_ctx, 'has_tenant_context', False) or tenant_ctx.schema == 'public':
+            return jsonify({
+                "erro": "É necessário informar o município para esta operação. "
+                        "Se for admin, envie o header X-City-ID (ou X-City-Slug). "
+                        "Se for tecadm, diretor ou coordenador, faça login com usuário vinculado a uma cidade."
+            }), 400
         
         # Ler o arquivo
         try:
@@ -1010,8 +1063,8 @@ def bulk_upload_students():
         except Exception as e:
             return jsonify({"erro": f"Erro ao ler arquivo: {str(e)}"}), 400
         
-        # Verificar colunas obrigatórias
-        required_columns = ['nome', 'email', 'senha', 'data_nascimento', 'escola', 'endereco_escola', 'estado_escola', 'municipio_escola', 'serie', 'turma']
+        # Verificar colunas obrigatórias (email e senha são gerados pelo sistema)
+        required_columns = ['nome', 'data_nascimento', 'escola', 'endereco_escola', 'estado_escola', 'municipio_escola', 'serie', 'turma']
         if rows:
             missing_columns = [col for col in required_columns if col not in rows[0].keys()]
         else:
@@ -1024,8 +1077,8 @@ def bulk_upload_students():
                 "colunas_obrigatorias": required_columns
             }), 400
         
-        # Limpar dados
-        rows = [row for row in rows if all(str(row.get(col, '')).strip() for col in ['nome', 'email', 'escola', 'endereco_escola', 'estado_escola', 'municipio_escola', 'serie', 'turma'])]
+        # Limpar dados (nome e dados da escola/turma obrigatórios; email e senha não vêm do arquivo)
+        rows = [row for row in rows if all(str(row.get(col, '')).strip() for col in ['nome', 'escola', 'endereco_escola', 'estado_escola', 'municipio_escola', 'serie', 'turma'])]
         
         # Converter data de nascimento
         def parse_date(date_value):
@@ -1090,41 +1143,38 @@ def bulk_upload_students():
         if not allowed_schools:
             return jsonify({"erro": "Usuário não tem permissão para criar alunos em nenhuma escola"}), 403
         
+        # Conjunto de emails já atribuídos neste batch (para evitar duplicatas)
+        emails_usados_no_batch = set()
+        
         # Processar cada linha
         for index, row in enumerate(rows):
             try:
-                # Validar email
-                email = str(row.get('email', '')).strip().lower()
-                if not email or '@' not in email:
+                nome_completo = str(row.get('nome', '')).strip()
+                if not nome_completo:
                     results["erros"].append({
-                        "linha": index + 2,  # +2 porque index começa em 0 e há cabeçalho
-                        "campo": "email",
-                        "valor": email,
-                        "erro": "Email inválido"
+                        "linha": index + 2,
+                        "campo": "nome",
+                        "valor": "",
+                        "erro": "Nome é obrigatório"
                     })
                     continue
                 
-                # Verificar se email já existe
-                existing_user = User.query.filter_by(email=email).first()
-                if existing_user:
-                    # Verificar se o usuário já é um aluno
-                    existing_student = Student.query.filter_by(user_id=existing_user.id).first()
-                    if existing_student:
-                        results["erros"].append({
-                            "linha": index + 2,
-                            "campo": "email",
-                            "valor": email,
-                            "erro": "Aluno já cadastrado no sistema"
-                        })
-                        continue
-                    else:
-                        results["erros"].append({
-                            "linha": index + 2,
-                            "campo": "email",
-                            "valor": email,
-                            "erro": "Email já cadastrado para outro tipo de usuário"
-                        })
-                        continue
+                # Gerar email: primeira letra de cada nome + @afirmeplay.com.br (com sufixo se duplicado)
+                base_local = gerar_iniciais_email(nome_completo)
+                if not base_local:
+                    results["erros"].append({
+                        "linha": index + 2,
+                        "campo": "nome",
+                        "valor": nome_completo,
+                        "erro": "Não foi possível gerar iniciais para o email"
+                    })
+                    continue
+                email = obter_email_disponivel(base_local, "@afirmeplay.com.br", emails_usados_no_batch)
+                emails_usados_no_batch.add(email.lower())
+                
+                # Gerar senha: primeiro nome + @afirmeplay
+                primeiro_nome = gerar_primeiro_nome(nome_completo)
+                senha = f"{primeiro_nome}@afirmeplay" if primeiro_nome else "aluno@afirmeplay"
                 
                 # Validar matrícula se fornecida (opcional)
                 matricula_raw = row.get('matricula', '')
@@ -1137,13 +1187,14 @@ def bulk_upload_students():
                     if not matricula or matricula.lower() in ['none', 'null', 'nulo', '']:
                         matricula = None
                 
-                # Verificar se matrícula já existe (apenas se foi fornecida)
-                if matricula and User.query.filter_by(registration=matricula).first():
+                # Verificar se matrícula já existe nesta cidade (Student no schema atual)
+                # Matrícula é única por cidade, não globalmente em User
+                if matricula and Student.query.filter_by(registration=matricula).first():
                     results["erros"].append({
                         "linha": index + 2,
                         "campo": "matricula",
                         "valor": matricula,
-                        "erro": "Matrícula já cadastrada"
+                        "erro": "Matrícula já cadastrada nesta cidade"
                     })
                     continue
                 
@@ -1253,24 +1304,14 @@ def bulk_upload_students():
                     })
                     continue
                 
-                # Validar senha (obrigatória)
-                senha = str(row.get('senha', '')).strip()
-                if not senha:
-                    results["erros"].append({
-                        "linha": index + 2,
-                        "campo": "senha",
-                        "valor": "",
-                        "erro": "Senha não fornecida"
-                    })
-                    continue
-                
-                # Criar usuário com senha do Excel (criptografada)
+                # Criar usuário: não gravar matrícula em User (única em public) para evitar
+                # conflito entre cidades; matrícula fica só em Student (única por city schema)
                 novo_usuario = User(
                     id=str(uuid.uuid4()),
                     name=str(row.get('nome', '')).strip(),
                     email=email,
-                    password_hash=generate_password_hash(senha),  # Senha do Excel criptografada
-                    registration=matricula if matricula else None,
+                    password_hash=generate_password_hash(senha),
+                    registration=None,  # matrícula apenas em Student (por cidade)
                     role=RoleEnum.ALUNO,
                     city_id=escola.city_id
                 )
@@ -1296,7 +1337,7 @@ def bulk_upload_students():
                 password_log = StudentPasswordLog(
                     student_name=str(row.get('nome', '')).strip(),
                     email=email,
-                    password=senha,  # Senha em texto plano (do Excel, sem hash)
+                    password=senha,  # Senha em texto plano (gerada pelo sistema)
                     registration=matricula if matricula else None,
                     user_id=novo_usuario.id,
                     student_id=novo_aluno.id,
@@ -1314,6 +1355,7 @@ def bulk_upload_students():
                 results["alunos_criados"].append({
                     "nome": novo_aluno.name,
                     "email": novo_usuario.email,
+                    "senha": senha,
                     "matricula": novo_aluno.registration,
                     "escola": escola.name,
                     "serie": serie.name,

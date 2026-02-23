@@ -187,15 +187,14 @@ def avaliacoes_recentes():
         return jsonify({"error": "Erro ao buscar avaliações recentes", "details": str(e)}), 500
 
 
-@bp.route("/dashboard/ranking-escolas", methods=["GET"])
+@bp.route("/dashboard/ranking-turmas", methods=["GET"])
 @jwt_required()
 @role_required("admin", "tecadm", "diretor", "coordenador")
 @requires_city_context
-def ranking_escolas():
+def ranking_turmas():
     """
-    Retorna ranking de escolas para card: média, quantidade de alunos,
-    taxa de conclusão por avaliações, total de turmas e provas entregues.
-    Respeita o escopo do usuário (município ou escola).
+    Retorna ranking de turmas para o card: turma, série, média, acerto,
+    conclusão, alunos, avaliações. Respeita o escopo do usuário (município ou escola).
     Query params: limit (default 20), offset (default 0).
     """
     try:
@@ -204,16 +203,16 @@ def ranking_escolas():
         scope = DashboardService._resolve_scope(user)
         limit = min(int(request.args.get("limit", 20)), 100)
         offset = max(int(request.args.get("offset", 0)), 0)
-        data = DashboardService.get_school_ranking_card(scope, limit=limit, offset=offset)
+        data = DashboardService.get_class_ranking_card(scope, limit=limit, offset=offset)
         return jsonify(data), 200
     except ValueError:
         return jsonify({"error": "Parâmetros limit e offset devem ser números"}), 400
     except SQLAlchemyError as e:
         db.session.rollback()
-        return jsonify({"error": "Erro ao buscar ranking de escolas", "details": str(e)}), 500
+        return jsonify({"error": "Erro ao buscar ranking de turmas", "details": str(e)}), 500
     except Exception as e:
         db.session.rollback()
-        return jsonify({"error": "Erro ao buscar ranking de escolas", "details": str(e)}), 500
+        return jsonify({"error": "Erro ao buscar ranking de turmas", "details": str(e)}), 500
 
 
 @bp.route("/dashboard/ranking-alunos", methods=["GET"])

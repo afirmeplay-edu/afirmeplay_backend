@@ -274,11 +274,12 @@ def resolve_tenant_context():
             context.city_id = user_info['tenant_id']
             context.has_tenant_context = True
             
-            # Buscar informações da cidade
+            # Buscar informações da cidade (obrigatório: evita search_path = public)
             city = resolve_city_from_id(context.city_id)
-            if city:
-                context.city_slug = city.slug
-                context.schema = city_id_to_schema_name(context.city_id)
+            if not city:
+                raise Exception("Município não encontrado para o tenant_id do usuário. Verifique se a cidade existe em public.city.")
+            context.city_slug = city.slug
+            context.schema = city_id_to_schema_name(context.city_id)
             
             return context
         

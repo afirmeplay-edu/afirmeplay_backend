@@ -660,17 +660,33 @@
 				background: #6b7280;
 			}
 
-			/* Estilos para tabela horizontal de acertos por habilidade */
+			/* Estilos para tabela horizontal de acertos por habilidade (em faixas) */
 			.skills-table-container {
 				margin: 20px 0;
-				overflow-x: auto;
 				page-break-inside: avoid;
+			}
+			.skills-discipline-title {
+				background: #e5e7eb;
+				color: #1e293b;
+				font-weight: 700;
+				font-size: 12pt;
+				padding: 6px 16px;
+				text-align: center;
+				text-transform: uppercase;
+				border: 1px solid #e2e8f0;
+				border-bottom: none;
 			}
 			.skills-horizontal-table {
 				width: 100%;
+				max-width: 100%;
 				border-collapse: collapse;
 				margin: 0;
-				min-width: fit-content;
+			}
+			.skills-horizontal-table.skills-horizontal-strip {
+				margin-bottom: 12px;
+			}
+			.skills-horizontal-table.skills-horizontal-strip:last-of-type {
+				margin-bottom: 0;
 			}
 			.skills-horizontal-table td {
 				padding: 8px 6px;
@@ -679,12 +695,12 @@
 				border: 1px solid #e2e8f0;
 			}
 			.skills-horizontal-table .question-number {
-				background: #6b21a8;
+				background: #1f4e79;
 				color: #ffffff;
 				font-weight: 700;
 				font-size: 9pt;
 			}
-			/* Título da disciplina dentro da tabela horizontal */
+			/* Legado: título dentro da tabela (quando não usa faixas) */
 			.skills-horizontal-table .skills-discipline-title-table {
 				background: #e5e7eb;
 				color: #1e293b;
@@ -697,13 +713,13 @@
 				border-bottom: none;
 			}
 			.skills-horizontal-table .skill-code {
-				background: #ffffff;
+				background: #ffc000;
 				color: #000000;
 				font-weight: 600;
 				font-size: 9pt;
 			}
 			.skills-horizontal-table .percentage-green {
-				background: #22c55e;
+				background: #00b050;
 				color: #ffffff;
 				font-weight: 700;
 				font-size: 9pt;
@@ -1900,35 +1916,27 @@
 			<div
 				class="discipline-block"
 				style="margin-top: {% if loop.first %}0{% else %}32px{% endif %};">
-				{% if bloco.questoes and bloco.questoes|length > 0 %} {# Nova
-				tabela horizontal #}
+				{% if bloco.questoes and bloco.questoes|length > 0 %} {# Tabela
+				horizontal em faixas (ex.: 13 questões por linha) #}
 				<div class="skills-table-container">
-					<table class="skills-horizontal-table">
+					<div class="skills-discipline-title">{{ disc_nome }}</div>
+					{% set questoes_por_faixa = 10 %} {% for faixa in
+					bloco.questoes | batch(questoes_por_faixa) %}
+					<table class="skills-horizontal-table skills-horizontal-strip">
 						<tr>
-							{# Linha 0: Título da disciplina #}
-							<td
-								class="skills-discipline-title-table"
-								colspan="{{ bloco.questoes|length }}">
-								{{ disc_nome }}
-							</td>
-						</tr>
-						<tr>
-							{# Linha 1: Números das questões #} {% for q in
-							bloco.questoes %}
+							{% for q in faixa %}
 							<td class="question-number">
 								{{ q.numero_questao }}ª Q
 							</td>
 							{% endfor %}
 						</tr>
 						<tr>
-							{# Linha 2: Códigos das habilidades #} {% for q in
-							bloco.questoes %}
+							{% for q in faixa %}
 							<td class="skill-code">{{ q.codigo }}</td>
 							{% endfor %}
 						</tr>
 						<tr>
-							{# Linha 3: Porcentagens com cores #} {% for q in
-							bloco.questoes %} {% set percent = q.percentual or 0
+							{% for q in faixa %} {% set percent = q.percentual or 0
 							%} {% if percent >= 70 %}
 							<td class="percentage-green">
 								{{ '%.1f' % percent }}%
@@ -1940,6 +1948,7 @@
 							{% endif %} {% endfor %}
 						</tr>
 					</table>
+					{% endfor %}
 
 					{# Legenda #}
 					<div class="skills-legend">

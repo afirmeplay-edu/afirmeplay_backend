@@ -1842,68 +1842,23 @@ def _adicionar_acertos_habilidade(elements: List, acertos_habilidade: Dict, aval
             # Título da disciplina
             titulo_disciplina_acertos = Paragraph(disciplina.upper(), estilos['subtitulo_tabela_style'])
             
-            # Obter questões dinâmicas
+            # Obter questões dinâmicas e dividir em faixas de 13 (uma embaixo da outra)
             questoes = dados['questoes']
+            QUESTOES_POR_FAIXA = 10
+            faixas = [questoes[i:i + QUESTOES_POR_FAIXA] for i in range(0, len(questoes), QUESTOES_POR_FAIXA)]
             
-            # Dividir questões em duas tabelas (1-13 e 14-26)
-            meio = len(questoes) // 2
-            questoes_1 = questoes[:meio] if meio > 0 else questoes
-            questoes_2 = questoes[meio:] if meio > 0 and len(questoes) > meio else []
-            
-            # Primeira tabela (questões 1-13)
-            if questoes_1:
-                # Linha 1: Números das questões
-                linha_questoes_1 = []
-                for questao in questoes_1:
-                    linha_questoes_1.append(f"{questao.get('numero_questao', 1)}ª Q")
-                
-                # Linha 2: Códigos das habilidades
-                linha_codigos_1 = []
-                for questao in questoes_1:
-                    linha_codigos_1.append(questao.get('codigo', 'N/A'))
-                
-                # Linha 3: Percentuais
-                linha_percentuais_1 = []
-                for questao in questoes_1:
-                    linha_percentuais_1.append(f"{questao.get('percentual', 0)}%")
-                
-                dados_acertos_1 = [linha_questoes_1, linha_codigos_1, linha_percentuais_1]
-                
-                # Criar tabela 1
-                tabela_acertos_1 = Table(dados_acertos_1, colWidths=[35] * len(linha_questoes_1))
-                tabela_acertos_1.setStyle(TableStyle(aplicar_cores_acertos(tabela_acertos_1, dados_acertos_1)))
-            
-            # Segunda tabela (questões 14-26)
-            if questoes_2:
-                # Linha 1: Números das questões
-                linha_questoes_2 = []
-                for questao in questoes_2:
-                    linha_questoes_2.append(f"{questao.get('numero_questao', 1)}ª Q")
-                
-                # Linha 2: Códigos das habilidades
-                linha_codigos_2 = []
-                for questao in questoes_2:
-                    linha_codigos_2.append(questao.get('codigo', 'N/A'))
-                
-                # Linha 3: Percentuais
-                linha_percentuais_2 = []
-                for questao in questoes_2:
-                    linha_percentuais_2.append(f"{questao.get('percentual', 0)}%")
-                
-                dados_acertos_2 = [linha_questoes_2, linha_codigos_2, linha_percentuais_2]
-                
-                # Criar tabela 2
-                tabela_acertos_2 = Table(dados_acertos_2, colWidths=[35] * len(linha_questoes_2))
-                tabela_acertos_2.setStyle(TableStyle(aplicar_cores_acertos(tabela_acertos_2, dados_acertos_2)))
-            
-            # Manter elementos da disciplina juntos
             elementos_disciplina_acertos = [titulo_disciplina_acertos, Spacer(1, 1)]
             
-            if questoes_1:
-                elementos_disciplina_acertos.append(tabela_acertos_1)
-                
-                if questoes_2:
-                    elementos_disciplina_acertos.append(Spacer(1, 6))  # Espaço entre tabelas
-                    elementos_disciplina_acertos.append(tabela_acertos_2)
+            for faixa in faixas:
+                linha_questoes = [f"{q.get('numero_questao', 1)}ª Q" for q in faixa]
+                linha_codigos = [q.get('codigo', 'N/A') for q in faixa]
+                linha_percentuais = [f"{q.get('percentual', 0)}%" for q in faixa]
+                dados_acertos = [linha_questoes, linha_codigos, linha_percentuais]
+                tabela = Table(dados_acertos, colWidths=[35] * len(faixa))
+                tabela.setStyle(TableStyle(aplicar_cores_acertos(tabela, dados_acertos)))
+                elementos_disciplina_acertos.append(tabela)
+                elementos_disciplina_acertos.append(Spacer(1, 6))
             
+            if len(elementos_disciplina_acertos) > 2:
+                elementos_disciplina_acertos.pop()  # remove último Spacer
             elements.append(KeepTogether(elementos_disciplina_acertos))

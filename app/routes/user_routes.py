@@ -844,6 +844,13 @@ def delete_user(user_id):
         if deleted_count > 0:
             deleted_relations.append("estudante")
 
+        # Remover logs de senha do aluno no schema da cidade (evita órfãos e duplicatas ao recadastrar)
+        if user_to_delete.city_id:
+            db.session.execute(text(f'SET search_path TO "{city_id_to_schema_name(user_to_delete.city_id)}", public'))
+            deleted_logs = StudentPasswordLog.query.filter_by(user_id=user_id).delete(synchronize_session=False)
+            if deleted_logs > 0:
+                deleted_relations.append("log de senhas (student_password_log)")
+
         if teacher:
             total_deleted = 0
             for city in all_cities:

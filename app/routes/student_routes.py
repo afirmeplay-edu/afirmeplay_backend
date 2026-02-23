@@ -1,4 +1,4 @@
-from flask import Blueprint, request, jsonify, Response
+from flask import Blueprint, request, jsonify, Response, make_response
 from app.models.student import Student
 from app.models.user import User, RoleEnum
 from app.models.school import School
@@ -26,8 +26,20 @@ from sqlalchemy.orm import joinedload
 from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill, Alignment
 from io import BytesIO
+import os
+import shutil
+import tempfile
+from jinja2 import Environment, FileSystemLoader, select_autoescape
+from weasyprint import HTML
 
 bp = Blueprint('students', __name__, url_prefix="/students")
+
+
+def _get_logo_path():
+    """Retorna o caminho absoluto da logo do app (app/assets/afirme_logo.png) ou None."""
+    app_dir = os.path.dirname(os.path.dirname(__file__))
+    logo_path = os.path.join(app_dir, 'assets', 'afirme_logo.png')
+    return logo_path if os.path.exists(logo_path) else None
 
 @bp.errorhandler(SQLAlchemyError)
 def handle_db_error(error):
@@ -1422,3 +1434,187 @@ def get_password_report():
     except Exception as e:
         logging.error(f"Erro ao gerar relatório Excel de senhas: {str(e)}", exc_info=True)
         return jsonify({"error": "Erro ao gerar relatório", "details": str(e)}), 500
+
+
+@bp.route('/password-report/pdf', methods=['GET'])
+@jwt_required()
+@role_required("admin", "professor", "coordenador", "diretor", "tecadm")
+def get_password_report_pdf():
+    """
+    Retorna relatório de alunos com e-mails e senhas em formato PDF, agrupado por turma.
+    Inclui capa com nome da escola e tabelas por turma (Nome, E-mail, Senha, Matrícula).
+
+    Query Parameters:
+        school_id: Escola (obrigatório para admin/tecadm; diretor/coordenador usam a escola vinculada)
+        grade_id: Filtrar por série (opcional) – todas as turmas dessa série
+        class_id: Filtrar por turma (opcional) – apenas uma turma
+
+    Returns:
+        Arquivo PDF com capa e tabelas por turma.
+    """
+    try:
+        user = get_current_user_from_token()
+        if not user:
+            return jsonify({"error": "Usuário não encontrado"}), 401
+
+        # Construir query base (mesma do Excel)
+        query = db.session.query(
+            StudentPasswordLog,
+            School,
+            City,
+            Class,
+            Grade
+        ).outerjoin(
+            School, StudentPasswordLog.school_id == School.id
+        ).outerjoin(
+            City, StudentPasswordLog.city_id == City.id
+        ).outerjoin(
+            Class, StudentPasswordLog.class_id == Class.id
+        ).outerjoin(
+            Grade, StudentPasswordLog.grade_id == Grade.id
+        )
+
+        # Filtros por role
+        school_id_param = request.args.get('school_id')
+        if user['role'] == "admin":
+            if not school_id_param:
+                return jsonify({"error": "Para gerar o PDF é necessário informar school_id"}), 400
+            query = query.filter(StudentPasswordLog.school_id == school_id_param)
+        elif user['role'] == "tecadm":
+            city_id = user.get('tenant_id') or user.get('city_id')
+            if not city_id:
+                return jsonify({"error": "ID da cidade não disponível para este usuário"}), 400
+            query = query.filter(StudentPasswordLog.city_id == city_id)
+            if school_id_param:
+                query = query.filter(StudentPasswordLog.school_id == school_id_param)
+        elif user['role'] in ["diretor", "coordenador"]:
+            manager = Manager.query.filter_by(user_id=user['id']).first()
+            if not manager or not manager.school_id:
+                return jsonify({"error": "Diretor/Coordenador não está vinculado a nenhuma escola"}), 400
+            query = query.filter(StudentPasswordLog.school_id == manager.school_id)
+            school_id_param = str(manager.school_id)
+        elif user['role'] == "professor":
+            teacher = Teacher.query.filter_by(user_id=user['id']).first()
+            if not teacher:
+                return jsonify({"error": "Professor não encontrado"}), 404
+            school_teachers = SchoolTeacher.query.filter_by(teacher_id=teacher.id).all()
+            school_ids = [st.school_id for st in school_teachers]
+            if not school_ids:
+                return jsonify({"error": "Professor não está vinculado a nenhuma escola"}), 400
+            query = query.filter(StudentPasswordLog.school_id.in_(school_ids))
+            if len(school_ids) > 1 and not school_id_param:
+                return jsonify({"error": "Professor vinculado a mais de uma escola. Informe school_id para gerar o PDF."}), 400
+            if not school_id_param:
+                school_id_param = school_ids[0]
+            else:
+                query = query.filter(StudentPasswordLog.school_id == school_id_param)
+
+        class_id_param = request.args.get('class_id')
+        grade_id_param = request.args.get('grade_id')
+        if class_id_param:
+            query = query.filter(StudentPasswordLog.class_id == class_id_param)
+        if grade_id_param:
+            query = query.filter(StudentPasswordLog.grade_id == grade_id_param)
+
+        # Ordenar por série, turma e nome para agrupamento
+        query = query.order_by(
+            Grade.name.asc().nullslast(),
+            Class.name.asc().nullslast(),
+            StudentPasswordLog.student_name.asc()
+        )
+        results = query.all()
+
+        # Agrupar por turma (class_id + class_name + grade_name)
+        turmas_map = {}
+        for log, school, city, class_obj, grade in results:
+            class_id_key = str(log.class_id) if log.class_id else "_sem_turma_"
+            class_name = class_obj.name if class_obj else "—"
+            grade_name = grade.name if grade else "—"
+            key = (class_id_key, class_name, grade_name)
+            if key not in turmas_map:
+                turmas_map[key] = {"class_name": class_name, "grade_name": grade_name, "alunos": []}
+            turmas_map[key]["alunos"].append({
+                "student_name": log.student_name,
+                "email": log.email,
+                "password": log.password,
+                "registration": log.registration,
+            })
+
+        turmas = list(turmas_map.values())
+
+        # Metadados para a capa
+        escola_nome = None
+        municipio_nome = None
+        serie_label = None
+        if results:
+            _, school, city, _, grade = results[0]
+            escola_nome = school.name if school else None
+            municipio_nome = city.name if city else None
+            if grade_id_param and grade:
+                serie_label = grade.name
+            elif grade:
+                serie_label = grade.name
+        if not escola_nome and school_id_param:
+            school_obj = School.query.get(school_id_param)
+            escola_nome = school_obj.name if school_obj else None
+            if school_obj and school_obj.city_id:
+                city_obj = City.query.get(school_obj.city_id)
+                municipio_nome = city_obj.name if city_obj else None
+
+        total_alunos = sum(len(t["alunos"]) for t in turmas)
+        data_geracao = datetime.now().strftime("%d/%m/%Y %H:%M")
+
+        metadados = {
+            "titulo": "Relatório de Acesso dos Alunos",
+            "escola": escola_nome,
+            "municipio": municipio_nome,
+            "data_geracao": data_geracao,
+            "serie_label": serie_label if grade_id_param else None,
+            "total_alunos": total_alunos,
+            "show_logo": False,
+        }
+
+        templates_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'templates')
+        app_dir = os.path.dirname(os.path.dirname(__file__))
+        temp_dir = tempfile.mkdtemp()
+        try:
+            logo_src = _get_logo_path()
+            if logo_src:
+                logo_dest = os.path.join(temp_dir, 'afirme_logo.png')
+                shutil.copy2(logo_src, logo_dest)
+                metadados["show_logo"] = True
+        except Exception as e:
+            logging.warning(f"Logo não copiada para temp: {e}")
+
+        env = Environment(loader=FileSystemLoader(templates_dir), autoescape=select_autoescape(['html', 'xml']))
+        template = env.get_template('student_passwords_report.html')
+        html_content = template.render(metadados=metadados, turmas=turmas)
+
+        temp_html_path = os.path.join(temp_dir, 'report.html')
+        with open(temp_html_path, 'w', encoding='utf-8') as f:
+            f.write(html_content)
+
+        try:
+            pdf_content = HTML(
+                filename=temp_html_path,
+                base_url=temp_dir
+            ).write_pdf()
+        finally:
+            try:
+                shutil.rmtree(temp_dir, ignore_errors=True)
+            except Exception:
+                pass
+
+        safe_escola = (escola_nome or "escola").replace(" ", "_").replace("/", "_")[:40]
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        nome_arquivo = f"relatorio_acesso_alunos_{safe_escola}_{timestamp}.pdf"
+
+        response = make_response(pdf_content)
+        response.headers['Content-Type'] = 'application/pdf'
+        response.headers['Content-Disposition'] = f'attachment; filename="{nome_arquivo}"'
+        logging.info(f"Relatório PDF de senhas gerado. Escola: {escola_nome}, Alunos: {total_alunos}")
+        return response
+
+    except Exception as e:
+        logging.error(f"Erro ao gerar relatório PDF de senhas: {str(e)}", exc_info=True)
+        return jsonify({"error": "Erro ao gerar relatório PDF", "details": str(e)}), 500

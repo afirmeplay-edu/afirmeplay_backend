@@ -1023,7 +1023,8 @@ def relatorio_pdf(evaluation_id: str):
         # Adicionar logo padrão ao contexto (para templates que precisam)
         context['default_logo'] = _load_default_logo()
 
-        templates_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'templates')
+        app_dir = os.path.dirname(os.path.dirname(__file__))  # app/
+        templates_dir = os.path.join(app_dir, 'templates')
         env = Environment(loader=FileSystemLoader(templates_dir), autoescape=select_autoescape(['html', 'xml']))
 
         def sum_values(items, attr='value'):
@@ -1125,10 +1126,10 @@ def relatorio_pdf(evaluation_id: str):
             temp_html_path = temp_html.name
         
         try:
-            # Usar filename em vez de string para preservar ordem semântica do documento
+            # base_url=app_dir para @font-face url("resources/Fonts/...") resolver em app/resources/
             pdf_content = HTML(
                 filename=temp_html_path,
-                base_url=templates_dir
+                base_url=app_dir
             ).write_pdf()
         finally:
             # Limpar arquivo temporário

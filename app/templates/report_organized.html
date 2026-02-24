@@ -4,6 +4,33 @@
 		<meta charset="utf-8" />
 		<title>{{ avaliacao.titulo or 'Relatório de Avaliação' }}</title>
 		<style>
+			/* Fonte padronizada (app/resources) para mesmo layout no Windows e Linux.
+			   base_url do WeasyPrint deve ser o diretório app/ para resolver resources/. */
+			@font-face {
+				font-family: "ReportFont";
+				src: url("resources/Fonts/Arial/arial.ttf") format("truetype");
+				font-weight: normal;
+				font-style: normal;
+			}
+			@font-face {
+				font-family: "ReportFont";
+				src: url("resources/Fonts/Arial/arialbd.ttf") format("truetype");
+				font-weight: 700;
+				font-style: normal;
+			}
+			@font-face {
+				font-family: "ReportFont";
+				src: url("resources/Fonts/Arial/Arial.ttf") format("truetype");
+				font-weight: normal;
+				font-style: normal;
+			}
+			@font-face {
+				font-family: "ReportFont";
+				src: url("resources/Fonts/Arial/ARIALBD.TTF") format("truetype");
+				font-weight: 700;
+				font-style: normal;
+			}
+
 			/* Reset e Base */
 			* {
 				margin: 0;
@@ -22,14 +49,14 @@
 				@bottom-left {
 					content: "AfirmePlay: Sistema de Ensino e Avaliação";
 					font-size: 8pt;
-					font-family: "Inter", -apple-system, BlinkMacSystemFont,
+					font-family: ReportFont, "Inter", -apple-system, BlinkMacSystemFont,
 						"Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
 					color: #9ca3af;
 				}
 				@bottom-center {
 					content: "Página " counter(page);
 					font-size: 8pt;
-					font-family: "Inter", -apple-system, BlinkMacSystemFont,
+					font-family: ReportFont, "Inter", -apple-system, BlinkMacSystemFont,
 						"Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
 					color: #9ca3af;
 				}
@@ -37,14 +64,14 @@
 					content: "Gerado em "
 						"{{ metadados.data_geracao or 'DD/MM/AAAA HH:MM' }}";
 					font-size: 8pt;
-					font-family: "Inter", -apple-system, BlinkMacSystemFont,
+					font-family: ReportFont, "Inter", -apple-system, BlinkMacSystemFont,
 						"Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
 					color: #9ca3af;
 				}
 			}
 
 			body {
-				font-family: "Inter", -apple-system, BlinkMacSystemFont,
+				font-family: ReportFont, "Inter", -apple-system, BlinkMacSystemFont,
 					"Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
 				color: #1e293b;
 				font-size: 11pt;

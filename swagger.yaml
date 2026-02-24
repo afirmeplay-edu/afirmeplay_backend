@@ -5667,6 +5667,31 @@ schemas:
         total_evaluations:
           type: integer
 
+    DashboardClassRankingEntry:
+      type: object
+      description: Entrada do ranking de turmas (turma, série, média, acerto, conclusão, alunos, avaliações)
+      properties:
+        position:
+          type: integer
+        class_id:
+          type: string
+        turma:
+          type: string
+        serie:
+          type: string
+        media:
+          type: number
+        acerto:
+          type: integer
+        acerto_percent:
+          type: number
+        conclusao:
+          type: number
+        alunos:
+          type: integer
+        avaliacoes:
+          type: integer
+
     DashboardStudentRankingEntry:
       type: object
       properties:
@@ -5682,18 +5707,24 @@ schemas:
         class_name:
           type: string
           nullable: true
-        average_score:
+        serie:
+          type: string
+          description: Série/ano do aluno (grade)
+          nullable: true
+        media:
           type: number
+          description: Média das notas (0-10), 2 decimais
         completed_evaluations:
           type: integer
 
     DashboardRankings:
       type: object
       properties:
-        schools:
+        classes:
           type: array
+          description: Ranking de turmas (turma, série, média, acerto, conclusão, alunos, avaliações)
           items:
-            $ref: '#/schemas/DashboardSchoolRankingEntry'
+            $ref: '#/schemas/DashboardClassRankingEntry'
         students:
           type: array
           items:
@@ -5716,7 +5747,7 @@ schemas:
               classes_count:
                 type: integer
       required:
-        - schools
+        - classes
         - students
         - teacher_rankings
 

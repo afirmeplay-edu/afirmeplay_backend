@@ -18,6 +18,7 @@ from app.models.schoolTeacher import SchoolTeacher
 from app.models.student import Student
 from app.models.studentAnswer import StudentAnswer
 from app.models.studentClass import Class
+from app.models.grades import Grade
 from app.models.teacher import Teacher
 from app.models.teacherClass import TeacherClass
 from app.models.test import Test
@@ -242,7 +243,7 @@ class DashboardService:
     @classmethod
     def _build_rankings(cls, scope: Dict[str, Any]) -> Dict[str, Any]:
         return {
-            "schools": cls._build_school_rankings(scope),
+            "classes": cls._build_class_rankings(scope),
             "students": cls._build_student_rankings(scope),
             "teacher_rankings": [],  # Ainda não suportado
         }
@@ -351,7 +352,7 @@ class DashboardService:
                     "progress_percentage": progress_percentage,
                     "total_students": student_count,
                     "completed_students": int(sessions.completed or 0) if sessions else 0,
-                    "average_score": round(avg_score or 0, 2),
+                    "average_score": float(avg_score or 0),
                     "start_date": start_date,
                     "end_date": end_date,
                     "class_name": class_name,
@@ -1105,10 +1106,94 @@ class DashboardService:
                         "school_id": school_id_str,
                         "school_name": row.school_name,
                         "municipality": row.municipality,
-                        "average_score": round(row.average_score or 0, 2),
+                        "average_score": float(row.average_score or 0),
                         "completion_rate": completion_rate,
                         "total_students": int(row.total_students or 0),
                         "total_evaluations": int(row.total_evaluations or 0),
+                    }
+                )
+            return rankings
+        except SQLAlchemyError as e:
+            db.session.rollback()
+            raise
+
+    @classmethod
+    def _build_class_rankings(cls, scope: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """Ranking de turmas: turma, série, média, acerto, conclusão, alunos, avaliações."""
+        from sqlalchemy.exc import SQLAlchemyError
+        from sqlalchemy import cast
+        from sqlalchemy.dialects.postgresql import VARCHAR
+
+        try:
+            school_ids = cls._extract_school_ids(scope)
+            if school_ids is not None:
+                school_ids_str = uuid_list_to_str(school_ids) if school_ids else []
+                if not school_ids_str:
+                    return []
+
+            query = (
+                db.session.query(
+                    Class.id.label("class_id"),
+                    Class.name.label("turma"),
+                    Grade.name.label("serie"),
+                    func.count(distinct(Student.id)).label("alunos"),
+                    func.coalesce(func.avg(EvaluationResult.grade), 0).label("media"),
+                    func.coalesce(func.sum(EvaluationResult.correct_answers), 0).label("acerto_total"),
+                    func.coalesce(func.avg(EvaluationResult.score_percentage), 0).label("acerto_percent"),
+                    func.count(distinct(EvaluationResult.test_id)).label("avaliacoes"),
+                )
+                .outerjoin(Grade, Class.grade_id == Grade.id)
+                .join(Student, Student.class_id == Class.id)
+                .outerjoin(EvaluationResult, EvaluationResult.student_id == Student.id)
+            )
+
+            if scope["scope"] == "municipio" and scope.get("city_id"):
+                query = query.join(School, cast(Class._school_id, VARCHAR) == cast(School.id, VARCHAR)).filter(
+                    School.city_id == scope["city_id"]
+                )
+            elif school_ids is not None:
+                school_ids_str = uuid_list_to_str(school_ids) if school_ids else []
+                query = query.filter(Class._school_id.in_(school_ids_str))
+
+            query = query.group_by(Class.id, Class.name, Grade.name).order_by(
+                func.coalesce(func.avg(EvaluationResult.grade), 0).desc()
+            )
+
+            class_stats = query.limit(cls.MAX_LIST_SIZE).all()
+
+            # Taxa de conclusão por turma: sessões finalizadas / total de sessões
+            completion_subquery = (
+                db.session.query(
+                    Student.class_id.label("class_id"),
+                    func.sum(case((TestSession.submitted_at.isnot(None), 1), else_=0)).label("completed_sessions"),
+                    func.count(TestSession.id).label("total_sessions"),
+                )
+                .join(Student, Student.id == TestSession.student_id)
+                .group_by(Student.class_id)
+                .subquery()
+            )
+            completion_map = {
+                str(row.class_id): (row.completed_sessions or 0, row.total_sessions or 0)
+                for row in db.session.query(completion_subquery).all()
+            }
+
+            rankings = []
+            for idx, row in enumerate(class_stats):
+                class_id_str = str(row.class_id)
+                completed, total = completion_map.get(class_id_str, (0, 0))
+                conclusao = round((completed / total) * 100, 2) if total else 0.0
+                rankings.append(
+                    {
+                        "position": idx + 1,
+                        "class_id": class_id_str,
+                        "turma": row.turma or "",
+                        "serie": row.serie or "",
+                        "media": float(row.media or 0),
+                        "acerto": int(row.acerto_total or 0),
+                        "acerto_percent": float(row.acerto_percent or 0),
+                        "conclusao": conclusao,
+                        "alunos": int(row.alunos or 0),
+                        "avaliacoes": int(row.avaliacoes or 0),
                     }
                 )
             return rankings
@@ -1205,8 +1290,8 @@ class DashboardService:
                     "escola_id": school_id_str,
                     "nome_escola": row.school_name,
                     "municipio": row.municipality,
-                    "media": round(float(row.media or 0), 2),
-                    "media_score_percent": round(float(row.media_score_percent or 0), 2),
+                    "media": float(row.media or 0),
+                    "media_score_percent": float(row.media_score_percent or 0),
                     "quantidade_alunos": int(row.total_students or 0),
                     "taxa_conclusao": taxa_conclusao,
                     "quantidade_avaliacoes": int(row.quantidade_avaliacoes or 0),
@@ -1225,10 +1310,106 @@ class DashboardService:
             raise
 
     @classmethod
+    def get_class_ranking_card(
+        cls,
+        scope: Dict[str, Any],
+        limit: int = 20,
+        offset: int = 0,
+    ) -> Dict[str, Any]:
+        """
+        Retorna ranking de turmas para o card: turma, série, média, acerto, conclusão,
+        alunos, avaliações. Respeita o escopo do usuário (município ou escola).
+        """
+        from sqlalchemy.exc import SQLAlchemyError
+        from sqlalchemy import cast
+        from sqlalchemy.dialects.postgresql import VARCHAR
+
+        try:
+            school_ids = cls._extract_school_ids(scope)
+            if school_ids is not None:
+                school_ids_str = uuid_list_to_str(school_ids) if school_ids else []
+                if not school_ids_str:
+                    return {"ranking": [], "total": 0, "limit": limit, "offset": offset}
+
+            query = (
+                db.session.query(
+                    Class.id.label("class_id"),
+                    Class.name.label("turma"),
+                    Grade.name.label("serie"),
+                    func.count(distinct(Student.id)).label("alunos"),
+                    func.coalesce(func.avg(EvaluationResult.grade), 0).label("media"),
+                    func.coalesce(func.sum(EvaluationResult.correct_answers), 0).label("acerto_total"),
+                    func.coalesce(func.avg(EvaluationResult.score_percentage), 0).label("acerto_percent"),
+                    func.count(distinct(EvaluationResult.test_id)).label("avaliacoes"),
+                )
+                .outerjoin(Grade, Class.grade_id == Grade.id)
+                .join(Student, Student.class_id == Class.id)
+                .outerjoin(EvaluationResult, EvaluationResult.student_id == Student.id)
+            )
+
+            if scope["scope"] == "municipio" and scope.get("city_id"):
+                query = query.join(School, cast(Class._school_id, VARCHAR) == cast(School.id, VARCHAR)).filter(
+                    School.city_id == scope["city_id"]
+                )
+            elif school_ids is not None:
+                school_ids_str = uuid_list_to_str(school_ids) if school_ids else []
+                query = query.filter(Class._school_id.in_(school_ids_str))
+
+            query = query.group_by(Class.id, Class.name, Grade.name).order_by(
+                func.coalesce(func.avg(EvaluationResult.grade), 0).desc()
+            )
+
+            total_count = query.count()
+            class_stats = query.offset(offset).limit(limit).all()
+
+            completion_subquery = (
+                db.session.query(
+                    Student.class_id.label("class_id"),
+                    func.sum(case((TestSession.submitted_at.isnot(None), 1), else_=0)).label("completed_sessions"),
+                    func.count(TestSession.id).label("total_sessions"),
+                )
+                .join(Student, Student.id == TestSession.student_id)
+                .group_by(Student.class_id)
+                .subquery()
+            )
+            completion_map = {
+                str(row.class_id): (row.completed_sessions or 0, row.total_sessions or 0)
+                for row in db.session.query(completion_subquery).all()
+            }
+
+            ranking = []
+            for idx, row in enumerate(class_stats):
+                class_id_str = str(row.class_id)
+                completed, total = completion_map.get(class_id_str, (0, 0))
+                conclusao = round((completed / total) * 100, 2) if total else 0.0
+                ranking.append({
+                    "posicao": offset + idx + 1,
+                    "class_id": class_id_str,
+                    "turma": row.turma or "",
+                    "serie": row.serie or "",
+                    "media": float(row.media or 0),
+                    "acerto": int(row.acerto_total or 0),
+                    "acerto_percent": float(row.acerto_percent or 0),
+                    "conclusao": conclusao,
+                    "alunos": int(row.alunos or 0),
+                    "avaliacoes": int(row.avaliacoes or 0),
+                })
+
+            return {
+                "ranking": ranking,
+                "total": total_count,
+                "limit": limit,
+                "offset": offset,
+            }
+        except SQLAlchemyError as e:
+            db.session.rollback()
+            raise
+
+    @classmethod
     def _build_student_rankings(cls, scope: Dict[str, Any]) -> List[Dict[str, Any]]:
         from sqlalchemy import cast
         from sqlalchemy.dialects.postgresql import VARCHAR
-        
+
         school_alias = aliased(School)
         class_alias = aliased(Class)
 
@@ -1238,22 +1419,22 @@ class DashboardService:
                 Student.name.label("student_name"),
                 school_alias.name.label("school_name"),
                 class_alias.name.label("class_name"),
-                func.avg(EvaluationResult.grade).label("average_grade"),
+                Grade.name.label("serie"),
+                func.coalesce(func.avg(EvaluationResult.grade), 0).label("average_grade"),
                 func.count(distinct(EvaluationResult.test_id)).label("completed_evaluations"),
             )
             .join(EvaluationResult, EvaluationResult.student_id == Student.id)
-            # ✅ CORRIGIDO: Garantir que ambos sejam strings no join (School.id é VARCHAR)
             .outerjoin(school_alias, cast(school_alias.id, VARCHAR) == cast(Student.school_id, VARCHAR))
             .outerjoin(class_alias, class_alias.id == Student.class_id)
-            .group_by(Student.id, Student.name, school_alias.name, class_alias.name)
-            .order_by(func.avg(EvaluationResult.grade).desc())
+            .outerjoin(Grade, Grade.id == Student.grade_id)
+            .group_by(Student.id, Student.name, school_alias.name, class_alias.name, Grade.name)
+            .order_by(func.coalesce(func.avg(EvaluationResult.grade), 0).desc())
         )
 
         if scope["scope"] == "municipio" and scope.get("city_id"):
             query = query.filter(school_alias.city_id == scope["city_id"])
         elif scope["scope"] == "escola":
             school_ids = scope.get("school_ids") or []
-            # ✅ CORRIGIDO: Converter school_ids para strings (Student.school_id é VARCHAR)
             school_ids_str = uuid_list_to_str(school_ids) if school_ids else []
             query = query.filter(Student.school_id.in_(school_ids_str)) if school_ids_str else query.filter(False)
 
@@ -1265,7 +1446,8 @@ class DashboardService:
                     "name": row.student_name,
                     "school_name": row.school_name,
                     "class_name": row.class_name,
-                    "average_score": round(row.average_grade or 0, 2),
+                    "serie": row.serie or "",
+                    "media": float(row.average_grade or 0),
                     "completed_evaluations": int(row.completed_evaluations or 0),
                     "position": idx + 1,
                 }
@@ -1277,6 +1459,7 @@ class DashboardService:
         """
         Retorna o top de alunos (ranking) para o dashboard, respeitando o escopo
         do usuário (município, escola ou global para admin).
+        Inclui série e média (nota 0-10, 2 decimais).
         """
         from sqlalchemy import cast
         from sqlalchemy.dialects.postgresql import VARCHAR
@@ -1291,14 +1474,16 @@ class DashboardService:
                 Student.name.label("student_name"),
                 school_alias.name.label("school_name"),
                 class_alias.name.label("class_name"),
-                func.avg(EvaluationResult.grade).label("average_grade"),
+                Grade.name.label("serie"),
+                func.coalesce(func.avg(EvaluationResult.grade), 0).label("average_grade"),
                 func.count(distinct(EvaluationResult.test_id)).label("completed_evaluations"),
             )
             .join(EvaluationResult, EvaluationResult.student_id == Student.id)
             .outerjoin(school_alias, cast(school_alias.id, VARCHAR) == cast(Student.school_id, VARCHAR))
             .outerjoin(class_alias, class_alias.id == Student.class_id)
-            .group_by(Student.id, Student.name, school_alias.name, class_alias.name)
-            .order_by(func.avg(EvaluationResult.grade).desc())
+            .outerjoin(Grade, Grade.id == Student.grade_id)
+            .group_by(Student.id, Student.name, school_alias.name, class_alias.name, Grade.name)
+            .order_by(func.coalesce(func.avg(EvaluationResult.grade), 0).desc())
         )
 
         if scope["scope"] == "municipio" and scope.get("city_id"):
@@ -1315,7 +1500,8 @@ class DashboardService:
                 "name": row.student_name,
                 "school_name": row.school_name,
                 "class_name": row.class_name,
-                "average_score": round(row.average_grade or 0, 2),
+                "serie": row.serie or "",
+                "media": float(row.average_grade or 0),
                 "completed_evaluations": int(row.completed_evaluations or 0),
                 "position": idx + 1,
             }
@@ -1454,7 +1640,7 @@ class DashboardService:
                 {
                     "class_id": row.class_id,
                     "class_name": row.class_name,
-                    "average_score": round(row.average_grade or 0, 2),
+                    "average_score": float(row.average_grade or 0),
                     "completion_rate": completion_rate,
                     "active_students": int(row.active_students or 0),
                     "position": idx + 1,
@@ -1497,7 +1683,7 @@ class DashboardService:
                 {
                     "teacher_id": row.teacher_id,
                     "teacher_name": row.teacher_name,
-                    "average_score": round(row.average_grade or 0, 2),
+                    "average_score": float(row.average_grade or 0),
                     "total_evaluations": int(row.total_evaluations or 0),
                     "classes_count": int(row.classes_count or 0),
                     "position": idx + 1,
@@ -1664,7 +1850,7 @@ class DashboardService:
             {
                 "id": "average_score",
                 "label": "Média geral",
-                "value": round(average_grade or 0, 2),
+                "value": float(average_grade or 0),
                 "trend_percentage": 0,
             },
         ]
@@ -1711,7 +1897,7 @@ class DashboardService:
                     "class_name": class_obj.name,
                     "students": len(student_ids),
                     "active_students": active_students,
-                    "average_score": round(average_grade or 0, 2),
+                    "average_score": float(average_grade or 0),
                     "pending_evaluations": pending_evaluations,
                 }
             )
@@ -1769,7 +1955,7 @@ class DashboardService:
                     "completed_students": completed,
                     "created_at": evaluation.created_at.isoformat() if evaluation.created_at else None,
                     "due_date": str(class_test.expiration) if class_test and class_test.expiration else None,
-                    "average_score": round(average_score or 0, 2),
+                    "average_score": float(average_score or 0),
                 }
             )
         return data
@@ -1996,7 +2182,7 @@ class DashboardService:
                 "taxa_conclusao_geral": taxa_conclusao,
                 "total_sessoes": total_sessoes,
                 "sessoes_concluidas": concluidas_sessoes,
-                "media_notas_geral": round(float(media_notas_geral or 0), 2),
+                "media_notas_geral": float(media_notas_geral or 0),
                 "total_respostas_questoes": int(total_respostas_questoes or 0),
                 "alunos_com_pelo_menos_uma_avaliacao": int(alunos_com_pelo_menos_uma or 0),
                 "percentual_participacao": percentual_participacao,

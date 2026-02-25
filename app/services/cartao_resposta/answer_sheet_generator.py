@@ -420,14 +420,17 @@ class AnswerSheetGenerator:
                     'nome': getattr(student, 'name', 'Nome não informado')
                 }
             
-            # Buscar dados da turma e escola
+            # Buscar dados da turma, série e escola
             class_name = ''
             school_name = ''
+            grade_name = ''
             
             if student_obj.class_id:
                 class_obj = Class.query.get(student_obj.class_id)
                 if class_obj:
                     class_name = class_obj.name or ''
+                    if class_obj.grade:
+                        grade_name = class_obj.grade.name or ''
             
             if student_obj.school_id:
                 school_obj = School.query.get(student_obj.school_id)
@@ -440,6 +443,7 @@ class AnswerSheetGenerator:
                 'nome': student_obj.name or 'Nome não informado',
                 'registration': getattr(student_obj, 'registration', ''),
                 'class_name': class_name,
+                'grade_name': grade_name,
                 'school_name': school_name,
                 'class_id': str(student_obj.class_id) if student_obj.class_id else ''
             }

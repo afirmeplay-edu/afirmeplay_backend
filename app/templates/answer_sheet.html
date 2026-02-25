@@ -615,7 +615,7 @@
 						<div class="header-info-line">
 							<span class="label">TURMA:</span>
 							<span class="value"
-								>{{ test_data.grade_name or 'Sem turma' }} - {{
+								>{{ student.grade_name or test_data.grade_name or 'Sem série' }} - {{
 								student.class_name or 'A' }}</span
 							>
 						</div>
@@ -920,7 +920,7 @@
 						<div class="header-info-line">
 							<span class="label">TURMA:</span>
 							<span class="value"
-								>{{ test_data.grade_name or 'Sem turma' }} - {{
+								>{{ student.grade_name or test_data.grade_name or 'Sem série' }} - {{
 								student.class_name or 'A' }}</span
 							>
 						</div>

@@ -409,9 +409,22 @@ def generate_answer_sheets():
         grade_id_for_gabarito = None
         grade_name_for_gabarito = test_data.get('grade_name', '')  # ✅ Pegar do payload primeiro
 
+        municipality_for_gabarito = test_data.get('municipality', '') or ''
+        state_for_gabarito = test_data.get('state', '') or ''
+
         if scope_type == 'city':
             # Município inteiro: sem escola/série específica no gabarito
-            pass
+            # Preencher municipality/state a partir do tenant se não vierem no payload
+            if not municipality_for_gabarito or not state_for_gabarito:
+                from app.decorators.tenant_required import get_current_tenant_context
+                ctx = get_current_tenant_context()
+                if ctx and ctx.city_id:
+                    city_obj = City.query.get(ctx.city_id)
+                    if city_obj:
+                        if not municipality_for_gabarito:
+                            municipality_for_gabarito = city_obj.name or ''
+                        if not state_for_gabarito:
+                            state_for_gabarito = city_obj.state or ''
         elif classes_to_generate:
             first_class = classes_to_generate[0]
             if first_class.school_id:
@@ -438,8 +451,8 @@ def generate_answer_sheets():
             scope_type=scope_type,  # ✅ NOVO CAMPO
             school_id=str(school_id_for_gabarito) if school_id_for_gabarito else None,
             school_name=school_name,
-            municipality=test_data.get('municipality', ''),
-            state=test_data.get('state', ''),
+            municipality=municipality_for_gabarito,
+            state=state_for_gabarito,
             grade_name=grade_name_for_gabarito,  # ✅ Usar variável que busca do banco se necessário
             institution=test_data.get('institution', '')
         )
@@ -898,16 +911,31 @@ def list_gabaritos():
                     for cls in classes_in_school
                 )
 
-            # Buscar informações do município se necessário
+            # Buscar informações do município se necessário (e resumo por escola)
             total_classes_in_city = 0
             total_students_in_city = 0
-            if gabarito.scope_type == "city" and gabarito.municipality:
-                city_obj_list = City.query.filter(
-                    City.name.ilike(f"%{gabarito.municipality}%")
-                ).first()
-                if city_obj_list:
+            schools_summary = []  # [{ school_id, school_name, classes_count, students_count }]
+            response_municipality = gabarito.municipality or ''
+            response_state = gabarito.state or ''
+
+            if gabarito.scope_type == "city":
+                city_obj_resolved = None
+                if gabarito.municipality:
+                    city_obj_resolved = City.query.filter(
+                        City.name.ilike(f"%{gabarito.municipality}%")
+                    ).first()
+                if not city_obj_resolved:
+                    from app.decorators.tenant_required import get_current_tenant_context
+                    ctx = get_current_tenant_context()
+                    if ctx and ctx.city_id:
+                        city_obj_resolved = City.query.get(ctx.city_id)
+                        if city_obj_resolved:
+                            response_municipality = city_obj_resolved.name or ''
+                            response_state = city_obj_resolved.state or ''
+
+                if city_obj_resolved:
                     school_ids_city = db.session.query(School.id).filter(
-                        School.city_id == city_obj_list.id
+                        School.city_id == city_obj_resolved.id
                     ).subquery()
                     classes_in_city = Class.query.filter(
                         Class.school_id.in_(school_ids_city)
@@ -917,6 +945,21 @@ def list_gabaritos():
                         len(cls.students) if cls.students else 0
                         for cls in classes_in_city
                     )
+                    # Resumo por escola: escolas x quantidades
+                    schools_in_city = School.query.filter(
+                        School.city_id == city_obj_resolved.id
+                    ).all()
+                    for school in schools_in_city:
+                        classes_school = [c for c in classes_in_city if c.school_id == school.id]
+                        students_school = sum(
+                            len(c.students) if c.students else 0 for c in classes_school
+                        )
+                        schools_summary.append({
+                            "school_id": str(school.id),
+                            "school_name": school.name or "",
+                            "classes_count": len(classes_school),
+                            "students_count": students_school,
+                        })
 
             # Determinar contagem baseada no scope_type correto
             final_students_count = 0
@@ -951,31 +994,34 @@ def list_gabaritos():
             if gabarito.minio_url or gabarito.minio_object_name:
                 generation_status = "completed"
             
-            gabaritos.append({
+            item = {
                 "id": str(gabarito.id),
                 "test_id": str(gabarito.test_id) if gabarito.test_id else None,
                 "class_id": str(gabarito.class_id) if gabarito.class_id else None,
                 "class_name": class_name,
                 "grade_id": str(gabarito.grade_id) if gabarito.grade_id else None,
-                "grade_name": grade_name or gabarito.grade_name,
+                "grade_name": grade_name or gabarito.grade_name or "",
                 "num_questions": gabarito.num_questions,
                 "use_blocks": gabarito.use_blocks,
                 "title": gabarito.title,
-                "school_name": gabarito.school_name,
-                "municipality": gabarito.municipality,
-                "state": gabarito.state,
-                "institution": gabarito.institution,
-                # ✅ CONTAGEM CORRIGIDA PARA TODOS OS SCOPE TYPES
-                "scope_type": gabarito.scope_type or "class",  # class | grade | school | city
-                "generation_status": generation_status,  # pending | completed
+                "school_id": str(gabarito.school_id) if gabarito.school_id else None,
+                "school_name": gabarito.school_name or "",
+                "municipality": response_municipality if gabarito.scope_type == "city" else (gabarito.municipality or ""),
+                "state": response_state if gabarito.scope_type == "city" else (gabarito.state or ""),
+                "institution": gabarito.institution or "",
+                "scope_type": gabarito.scope_type or "class",
+                "generation_status": generation_status,
                 "students_count": final_students_count,
                 "classes_count": final_classes_count,
                 "minio_url": gabarito.minio_url,
                 "can_download": bool(gabarito.minio_url or gabarito.minio_object_name),
                 "created_at": gabarito.created_at.isoformat() if gabarito.created_at else None,
                 "created_by": str(gabarito.created_by) if gabarito.created_by else None,
-                "creator_name": creator_name
-            })
+                "creator_name": creator_name,
+            }
+            if gabarito.scope_type == "city":
+                item["schools_summary"] = schools_summary
+            gabaritos.append(item)
         
         return jsonify({
             "gabaritos": gabaritos,

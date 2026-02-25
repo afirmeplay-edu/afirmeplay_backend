@@ -194,9 +194,11 @@ def lista_frequencia():
 
     Por turma: class_id (obrigatório). Status dos estudantes fica null.
 
-    Por avaliação já feita: test_id (obrigatório). Opcional: class_id para uma turma;
-    grade_id para filtrar por série: retorna todas as turmas da avaliação com essa série
-    (resposta em turmas[]). Status P/A conforme TestSession.
+    Por avaliação aplicada: test_id (obrigatório).
+    - Sem class_id e sem grade_id: retorna TODAS as turmas da avaliação em { "turmas": [...] }.
+    - Com grade_id (e sem class_id): retorna só as turmas daquela série em { "turmas": [...] }.
+    - Com class_id: retorna uma única turma (cabecalho + estudantes).
+    Status P/A conforme TestSession.
     Query param opcional: tipo = avaliacao | prova_fisica | frequencia_diaria
     """
     test_id = request.args.get("test_id")
@@ -217,12 +219,13 @@ def lista_frequencia():
         if not class_tests:
             return jsonify({"erro": "Avaliação não está vinculada a nenhuma turma"}), 404
 
+        class_ids_avaliacao = [ct.class_id for ct in class_tests]
+
         # Filtro apenas por série: retornar todas as turmas da avaliação com essa grade_id
         if grade_id and not class_id:
             grade_uuid = ensure_uuid(grade_id)
             if not grade_uuid:
                 return jsonify({"erro": "grade_id inválido"}), 400
-            class_ids_avaliacao = [ct.class_id for ct in class_tests]
             turmas_grade = (
                 Class.query.filter(
                     Class.id.in_(class_ids_avaliacao),
@@ -236,22 +239,27 @@ def lista_frequencia():
                     "erro": "Nenhuma turma desta série está vinculada a esta avaliação.",
                 }), 404
 
-        elif len(class_tests) == 1 and not grade_id:
-            class_uuid = class_tests[0].class_id
-        else:
-            if class_id:
-                class_uuid = ensure_uuid(class_id)
-                if not class_uuid:
-                    return jsonify({"erro": "class_id inválido"}), 400
-                if not any(ct.class_id == class_uuid for ct in class_tests):
-                    return jsonify({"erro": "Turma não está vinculada a esta avaliação"}), 404
-            else:
-                class_uuid = class_tests[0].class_id
-
-        if turmas_grade is None:
+        # Turma específica: class_id informado
+        elif class_id:
+            class_uuid = ensure_uuid(class_id)
+            if not class_uuid:
+                return jsonify({"erro": "class_id inválido"}), 400
+            if not any(ct.class_id == class_uuid for ct in class_tests):
+                return jsonify({"erro": "Turma não está vinculada a esta avaliação"}), 404
             classe = Class.query.get(class_uuid)
             if not classe:
                 return jsonify({"erro": "Turma não encontrada"}), 404
+
+        # Sem class_id nem grade_id: retornar TODAS as turmas da avaliação (ex.: "todas as turmas")
+        elif not class_id and not grade_id:
+            turmas_grade = (
+                Class.query.filter(Class.id.in_(class_ids_avaliacao))
+                .order_by(Class.grade_id, Class.name)
+                .all()
+            )
+
+        if turmas_grade is None and classe is None:
+            return jsonify({"erro": "Turma não encontrada"}), 404
 
     else:
         if not class_id:
@@ -268,7 +276,7 @@ def lista_frequencia():
         tipo = "avaliacao"
 
     if turmas_grade is not None:
-        # Resposta: todas as turmas da série que fizeram a avaliação
+        # Resposta: todas as turmas (da série ou da avaliação inteira)
         lista = []
         for c in turmas_grade:
             item = _montar_lista_turma(c, tipo, test, fill_status=True)

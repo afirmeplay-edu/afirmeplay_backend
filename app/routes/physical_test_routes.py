@@ -16,6 +16,9 @@ from app.models.user import User
 from app.models.evaluationResult import EvaluationResult
 from app.models.physicalTestForm import PhysicalTestForm
 from app.models.classTest import ClassTest
+from app.models.studentClass import Class
+from app.models.school import School
+from app.models.grades import Grade
 from app.models.testQuestion import TestQuestion
 from app.models.question import Question
 from app.models.answerSheetGabarito import AnswerSheetGabarito
@@ -311,6 +314,80 @@ def get_current_user_from_token():
         return None
 
 # ============================================================================
+# ROTA DE ESCOPO DA AVALIAÇÃO (para montar filtros no front)
+# ============================================================================
+
+@bp.route('/test/<string:test_id>/scope', methods=['GET'])
+@jwt_required()
+@role_required("admin", "professor", "coordenador", "diretor", "tecadm")
+@requires_city_context
+def get_physical_test_scope(test_id):
+    """
+    Retorna em quais escolas, séries e turmas a avaliação foi aplicada (ClassTest).
+    Usado pelo front para montar filtros e o usuário escolher para o quê gerar formulários.
+
+    Returns:
+        200 com:
+        - test_id, test_title
+        - schools: [{ id, name, grades: [{ id, name, classes: [{ id, name }] }] }]
+    """
+    try:
+        user = get_current_user_from_token()
+        if not user:
+            return jsonify({"error": "User not found or token invalid"}), 401
+
+        test = Test.query.get(test_id)
+        if not test:
+            return jsonify({"error": "Prova não encontrada"}), 404
+
+        if user['role'] == 'professor' and test.created_by != user['id']:
+            return jsonify({"error": "Você só pode ver escopo de suas próprias provas"}), 403
+
+        class_tests = ClassTest.query.filter_by(test_id=test_id).all()
+        if not class_tests:
+            return jsonify({
+                "test_id": test_id,
+                "test_title": test.title,
+                "schools": []
+            }), 200
+
+        class_ids = [ct.class_id for ct in class_tests]
+        classes = Class.query.filter(Class.id.in_(class_ids)).all()
+
+        # Montar árvore: escola -> série -> turmas (apenas turmas com ClassTest para este test_id)
+        schools_map = {}
+        for c in classes:
+            school_id = str(c.school_id) if c.school_id else None
+            grade_id = str(c.grade_id) if c.grade_id else None
+            if not school_id:
+                continue
+            school = School.query.get(school_id)
+            school_name = school.name if school else str(school_id)
+            if school_id not in schools_map:
+                schools_map[school_id] = {"id": school_id, "name": school_name, "grades": {}}
+            grades_map = schools_map[school_id]["grades"]
+            if grade_id not in grades_map:
+                grade = Grade.query.get(grade_id) if grade_id else None
+                grade_name = grade.name if grade else str(grade_id)
+                grades_map[grade_id] = {"id": grade_id, "name": grade_name, "classes": []}
+            grades_map[grade_id]["classes"].append({"id": str(c.id), "name": c.name or str(c.id)})
+
+        schools = []
+        for s in schools_map.values():
+            grades_list = [{"id": g["id"], "name": g["name"], "classes": g["classes"]} for g in s["grades"].values()]
+            schools.append({"id": s["id"], "name": s["name"], "grades": grades_list})
+
+        return jsonify({
+            "test_id": test_id,
+            "test_title": test.title,
+            "schools": schools
+        }), 200
+    except Exception as e:
+        logging.error(f"Erro ao obter escopo da prova física: {str(e)}", exc_info=True)
+        return jsonify({"error": str(e)}), 500
+
+
+# ============================================================================
 # ROTAS DE GERAÇÃO DE FORMULÁRIOS
 # ============================================================================
 
@@ -327,6 +404,10 @@ def generate_physical_forms(test_id):
     
     Body:
         - force_regenerate (opcional): Forçar regeneração mesmo se já existirem formulários (padrão: false)
+        - school_ids (opcional): Lista de IDs de escolas para gerar apenas para essas escolas
+        - grade_ids (opcional): Lista de IDs de séries para gerar apenas para essas séries
+        - class_ids (opcional): Lista de IDs de turmas para gerar apenas para essas turmas
+        Filtros são aplicados em cascata (escola -> série -> turma). Se não enviar nenhum, gera para todas as turmas aplicadas.
     
     Returns:
         202 Accepted com:
@@ -366,7 +447,16 @@ def generate_physical_forms(test_id):
         except:
             data = {}
         force_regenerate = data.get('force_regenerate', False)
-        
+        school_ids = data.get('school_ids')  # opcional: list
+        grade_ids = data.get('grade_ids')  # opcional: list
+        class_ids = data.get('class_ids')  # opcional: list
+        if school_ids is not None and not isinstance(school_ids, list):
+            school_ids = [school_ids] if school_ids else []
+        if grade_ids is not None and not isinstance(grade_ids, list):
+            grade_ids = [grade_ids] if grade_ids else []
+        if class_ids is not None and not isinstance(class_ids, list):
+            class_ids = [class_ids] if class_ids else []
+
         # Extrair blocks_config do payload
         blocks_config = data.get('blocks_config')
         print(f"[ROTA] ========== INÍCIO GERAÇÃO FORMULÁRIOS ==========")
@@ -403,7 +493,10 @@ def generate_physical_forms(test_id):
             test_id=test_id,
             city_id=city_id,
             force_regenerate=force_regenerate,
-            blocks_config=blocks_config
+            blocks_config=blocks_config,
+            school_ids=school_ids,
+            grade_ids=grade_ids,
+            class_ids=class_ids
         )
         
         print(f"[ROTA] ✅ Task disparada: task_id={task.id}")

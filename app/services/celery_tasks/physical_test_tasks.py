@@ -105,7 +105,10 @@ def generate_physical_forms_async(
     test_id: str,
     city_id: str,
     force_regenerate: bool = False,
-    blocks_config: Dict = None
+    blocks_config: Dict = None,
+    school_ids: List = None,
+    grade_ids: List = None,
+    class_ids: List = None
 ) -> Dict[str, Any]:
     """
     Task Celery para geração ASSÍNCRONA de formulários físicos.
@@ -124,6 +127,10 @@ def generate_physical_forms_async(
                 'questions_per_block': int,
                 'separate_by_subject': bool
             }
+        school_ids: (opcional) Lista de IDs de escolas para gerar apenas para essas escolas
+        grade_ids: (opcional) Lista de IDs de séries para gerar apenas para essas séries
+        class_ids: (opcional) Lista de IDs de turmas para gerar apenas para essas turmas
+        Filtros em cascata: só turmas que pertencem às escolas/séries/turmas informadas.
     
     Returns:
         Dict com resultado da geração:
@@ -170,6 +177,7 @@ def generate_physical_forms_async(
         from app.models.question import Question
         from app.models.testQuestion import TestQuestion
         from app.models.answerSheetGabarito import AnswerSheetGabarito
+        from app.models.studentClass import Class
         from app.services.physical_test_form_service import PhysicalTestFormService
         from app.models.city import City
         from sqlalchemy import text
@@ -211,8 +219,34 @@ def generate_physical_forms_async(
             }
         
         logger.info(f"[CELERY] 📊 Prova aplicada em {len(class_tests)} turma(s)")
-        
-        # Coletar todos os alunos de todas as turmas
+
+        # Aplicar filtros de escopo (escola / série / turma) em cascata
+        if school_ids or grade_ids or class_ids:
+            class_ids_raw = [ct.class_id for ct in class_tests]
+            classes = Class.query.filter(Class.id.in_(class_ids_raw)).all()
+            allowed_class_ids = set()
+            for c in classes:
+                if school_ids and (c.school_id is None or str(c.school_id) not in [str(x) for x in school_ids]):
+                    continue
+                if grade_ids and (c.grade_id is None or str(c.grade_id) not in [str(x) for x in grade_ids]):
+                    continue
+                if class_ids and str(c.id) not in [str(x) for x in class_ids]:
+                    continue
+                allowed_class_ids.add(c.id)
+            class_tests = [ct for ct in class_tests if ct.class_id in allowed_class_ids]
+            if not class_tests:
+                error_msg = "Nenhuma turma encontrada para os filtros de escola/série/turma informados"
+                logger.warning(f"[CELERY] ⚠️ {error_msg}")
+                return {
+                    'success': False,
+                    'error': error_msg,
+                    'test_id': test_id,
+                    'test_title': test.title,
+                    'generated_forms': 0
+                }
+            logger.info(f"[CELERY] 📊 Após filtros: {len(class_tests)} turma(s)")
+
+        # Coletar todos os alunos das turmas (já filtradas se escopo foi informado)
         all_students = []
         class_ids = [ct.class_id for ct in class_tests]
         
@@ -354,7 +388,13 @@ def generate_physical_forms_async(
             'num_questions': num_questions,
             # ✅ NOVO: Passar dados de correção para salvar no PhysicalTestForm
             # IMPORTANTE: blocks_config aqui já deve ter a topology completa
-            'correction_data': correction_data_to_pass
+            'correction_data': correction_data_to_pass,
+            # Filtros de escopo para o serviço aplicar (cascata escola -> série -> turma)
+            'scope_filter': {
+                'school_ids': school_ids or None,
+                'grade_ids': grade_ids or None,
+                'class_ids': class_ids or None
+            }
         }
         
         print(f"[CELERY] test_data['correction_data'] existe: {'correction_data' in test_data}")

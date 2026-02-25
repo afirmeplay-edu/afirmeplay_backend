@@ -219,11 +219,12 @@ def generate_answer_sheets():
     """
     Gera cartões resposta de forma INTELIGENTE e HIERÁRQUICA
     
-    A rota detecta automaticamente o escopo baseado nos parâmetros fornecidos:
-    - Se fornecido APENAS class_id → gera para 1 turma
-    - Se fornecido grade_id (sem class_id) → gera para TODAS as turmas da série
-    - Se fornecido school_id (sem grade_id) → gera para TODAS as turmas da escola
-    - Se nenhum dos três → gera para TODAS as turmas do município (via contexto do tenant)
+    Escopo em cascata (município vem do tenant). Filtros opcionais restringem o conjunto:
+    - Nenhum filtro → todas as escolas, séries e turmas do município.
+    - school_ids → todas as séries e turmas dessas escolas.
+    - school_ids + grade_ids → turmas dessas séries nessas escolas.
+    - school_ids + grade_ids + class_ids → apenas essas turmas (ou só class_ids = essas turmas no município).
+    Aceita também no singular (retrocompat): class_id, grade_id, school_id.
     
     Body:
         {
@@ -236,10 +237,10 @@ def generate_answer_sheets():
             "test_data": {...},
             "test_id": "uuid" (opcional),
             
-            // ESCOPO (preencher APENAS o que for necessário):
-            "class_id": "uuid-turma",      // ← Turma específica
-            "grade_id": "uuid-série",      // ← Série inteira (sem class_id)
-            "school_id": "uuid-escola"     // ← Escola inteira (sem grade_id)
+            "school_ids": ["uuid-escola1", "uuid-escola2"],  // opcional; vazio = todas do município
+            "grade_ids": ["uuid-serie1", "uuid-serie2"],     // opcional; vazio = todas as séries
+            "class_ids": ["uuid-turma1", "uuid-turma2"]     // opcional; vazio = todas as turmas
+            // Retrocompat: class_id, grade_id, school_id (singular) também aceitos
         }
     
     Returns (202 Accepted):
@@ -277,80 +278,79 @@ def generate_answer_sheets():
         if not correct_answers:
             return jsonify({"error": "correct_answers é obrigatório"}), 400
         
-        # ✅ 2. DETERMINAR ESCOPO (inteligente!)
-        class_id = data.get('class_id', '').strip() or None
-        grade_id = data.get('grade_id', '').strip() or None
-        school_id = data.get('school_id', '').strip() or None
-        
-        # Lógica de precedência
-        scope_type = 'class'  # padrão
-        classes_to_generate = []
-        
-        if class_id:
-            # Apenas 1 turma
-            scope_type = 'class'
-            class_obj = Class.query.get(class_id)
-            if not class_obj:
-                return jsonify({"error": "Turma não encontrada"}), 404
-            classes_to_generate = [class_obj]
-            
-            # Validar permissões do professor
-            if user['role'] == 'professor':
-                from app.models.teacher import Teacher
-                from app.models.teacherClass import TeacherClass
-                
-                teacher = Teacher.query.filter_by(user_id=user['id']).first()
-                if teacher:
-                    teacher_class = TeacherClass.query.filter_by(
-                        teacher_id=teacher.id,
-                        class_id=class_id
-                    ).first()
-                    if not teacher_class:
-                        return jsonify({"error": "Você não tem acesso a esta turma"}), 403
-        
-        elif grade_id:
-            # Série inteira
-            scope_type = 'grade'
-            grade_obj = Grade.query.get(grade_id)
-            if not grade_obj:
-                return jsonify({"error": "Série não encontrada"}), 404
-            
-            # Buscar todas as turmas da série
-            classes_to_generate = Class.query.filter_by(grade_id=grade_id).all()
-            if not classes_to_generate:
-                return jsonify({"error": "Nenhuma turma encontrada para esta série"}), 400
-        
-        elif school_id:
-            # Escola inteira
-            scope_type = 'school'
-            school_obj = School.query.get(school_id)
-            if not school_obj:
-                return jsonify({"error": "Escola não encontrada"}), 404
-            
-            # Buscar todas as turmas da escola
-            classes_to_generate = Class.query.filter_by(school_id=school_id).all()
-            if not classes_to_generate:
-                return jsonify({"error": "Nenhuma turma encontrada para esta escola"}), 400
-        
-        else:
-            # Município inteiro: buscar todas as turmas via contexto do tenant
-            from app.decorators.tenant_required import get_current_tenant_context
-            context_scope = get_current_tenant_context()
-            city_id_scope = context_scope.city_id if context_scope else None
+        # ✅ 2. DETERMINAR ESCOPO (cascata: município → escolas → séries → turmas)
+        from app.decorators.tenant_required import get_current_tenant_context
+        context_scope = get_current_tenant_context()
+        city_id_scope = context_scope.city_id if context_scope else None
+        if not city_id_scope:
+            return jsonify({"error": "Contexto de município não encontrado"}), 400
 
-            if not city_id_scope:
-                return jsonify({"error": "Forneça class_id, grade_id ou school_id"}), 400
+        # Normalizar parâmetros: aceitar listas e também singular (retrocompat)
+        def _norm_list(key_plural, key_singular):
+            raw = data.get(key_plural)
+            if raw is not None and isinstance(raw, list):
+                return [str(x).strip() for x in raw if x]
+            single = (data.get(key_singular) or '').strip() or None
+            return [single] if single else []
 
-            scope_type = 'city'
-            school_ids_city = db.session.query(School.id).filter(
+        school_ids = _norm_list('school_ids', 'school_id')
+        grade_ids = _norm_list('grade_ids', 'grade_id')
+        class_ids = _norm_list('class_ids', 'class_id')
+
+        # Base: turmas do município (escolas da cidade)
+        school_ids_city_subq = db.session.query(School.id).filter(
+            School.city_id == city_id_scope
+        ).subquery()
+        q = Class.query.filter(Class.school_id.in_(school_ids_city_subq))
+
+        # Filtro por escolas: só turmas dessas escolas (e validar que escolas são do município)
+        if school_ids:
+            schools_in_city = db.session.query(School.id).filter(
+                School.id.in_(school_ids),
                 School.city_id == city_id_scope
-            ).subquery()
-            classes_to_generate = Class.query.filter(
-                Class.school_id.in_(school_ids_city)
             ).all()
+            valid_school_ids = [s[0] for s in schools_in_city]
+            if len(valid_school_ids) != len(school_ids):
+                return jsonify({"error": "Uma ou mais escolas não pertencem ao município ou não existem"}), 400
+            q = q.filter(Class.school_id.in_(valid_school_ids))
 
-            if not classes_to_generate:
-                return jsonify({"error": "Nenhuma turma encontrada no município"}), 400
+        # Filtro por séries
+        if grade_ids:
+            q = q.filter(Class.grade_id.in_(grade_ids))
+
+        # Filtro por turmas (restringe às turmas enviadas)
+        if class_ids:
+            q = q.filter(Class.id.in_(class_ids))
+
+        classes_to_generate = q.all()
+
+        if not classes_to_generate:
+            return jsonify({"error": "Nenhuma turma encontrada com os filtros informados"}), 400
+
+        # Derivar scope_type para resposta/listagem
+        if len(classes_to_generate) == 1 and class_ids:
+            scope_type = 'class'
+        elif grade_ids and not class_ids and len(school_ids) <= 1:
+            scope_type = 'grade'
+        elif school_ids and len(school_ids) == 1 and not grade_ids and not class_ids:
+            scope_type = 'school'
+        else:
+            scope_type = 'city'
+
+        # Permissão professor: deve ter acesso a todas as turmas selecionadas
+        if user['role'] == 'professor':
+            from app.models.teacher import Teacher
+            from app.models.teacherClass import TeacherClass
+            teacher = Teacher.query.filter_by(user_id=user['id']).first()
+            if teacher:
+                allowed = set(
+                    tc.class_id for tc in
+                    TeacherClass.query.filter_by(teacher_id=teacher.id).filter(
+                        TeacherClass.class_id.in_([c.id for c in classes_to_generate])
+                    ).all()
+                )
+                if len(allowed) != len(classes_to_generate):
+                    return jsonify({"error": "Você não tem acesso a uma ou mais turmas selecionadas"}), 403
 
         logging.info(f"[ROTA] ✅ Escopo determinado: {scope_type}, {len(classes_to_generate)} turma(s)")
         
@@ -409,9 +409,22 @@ def generate_answer_sheets():
         grade_id_for_gabarito = None
         grade_name_for_gabarito = test_data.get('grade_name', '')  # ✅ Pegar do payload primeiro
 
+        municipality_for_gabarito = test_data.get('municipality', '') or ''
+        state_for_gabarito = test_data.get('state', '') or ''
+
         if scope_type == 'city':
             # Município inteiro: sem escola/série específica no gabarito
-            pass
+            # Preencher municipality/state a partir do tenant se não vierem no payload
+            if not municipality_for_gabarito or not state_for_gabarito:
+                from app.decorators.tenant_required import get_current_tenant_context
+                ctx = get_current_tenant_context()
+                if ctx and ctx.city_id:
+                    city_obj = City.query.get(ctx.city_id)
+                    if city_obj:
+                        if not municipality_for_gabarito:
+                            municipality_for_gabarito = city_obj.name or ''
+                        if not state_for_gabarito:
+                            state_for_gabarito = city_obj.state or ''
         elif classes_to_generate:
             first_class = classes_to_generate[0]
             if first_class.school_id:
@@ -426,8 +439,7 @@ def generate_answer_sheets():
         
         gabarito = AnswerSheetGabarito(
             test_id=str(data.get('test_id')) if data.get('test_id') else None,
-            # class_id será None para geração hierárquica
-            class_id=class_id if scope_type == 'class' else None,
+            class_id=str(classes_to_generate[0].id) if scope_type == 'class' and len(classes_to_generate) == 1 else None,
             grade_id=grade_id_for_gabarito,
             num_questions=num_questions,
             use_blocks=use_blocks,
@@ -438,8 +450,8 @@ def generate_answer_sheets():
             scope_type=scope_type,  # ✅ NOVO CAMPO
             school_id=str(school_id_for_gabarito) if school_id_for_gabarito else None,
             school_name=school_name,
-            municipality=test_data.get('municipality', ''),
-            state=test_data.get('state', ''),
+            municipality=municipality_for_gabarito,
+            state=state_for_gabarito,
             grade_name=grade_name_for_gabarito,  # ✅ Usar variável que busca do banco se necessário
             institution=test_data.get('institution', '')
         )
@@ -898,16 +910,31 @@ def list_gabaritos():
                     for cls in classes_in_school
                 )
 
-            # Buscar informações do município se necessário
+            # Buscar informações do município se necessário (e resumo por escola)
             total_classes_in_city = 0
             total_students_in_city = 0
-            if gabarito.scope_type == "city" and gabarito.municipality:
-                city_obj_list = City.query.filter(
-                    City.name.ilike(f"%{gabarito.municipality}%")
-                ).first()
-                if city_obj_list:
+            schools_summary = []  # [{ school_id, school_name, classes_count, students_count }]
+            response_municipality = gabarito.municipality or ''
+            response_state = gabarito.state or ''
+
+            if gabarito.scope_type == "city":
+                city_obj_resolved = None
+                if gabarito.municipality:
+                    city_obj_resolved = City.query.filter(
+                        City.name.ilike(f"%{gabarito.municipality}%")
+                    ).first()
+                if not city_obj_resolved:
+                    from app.decorators.tenant_required import get_current_tenant_context
+                    ctx = get_current_tenant_context()
+                    if ctx and ctx.city_id:
+                        city_obj_resolved = City.query.get(ctx.city_id)
+                        if city_obj_resolved:
+                            response_municipality = city_obj_resolved.name or ''
+                            response_state = city_obj_resolved.state or ''
+
+                if city_obj_resolved:
                     school_ids_city = db.session.query(School.id).filter(
-                        School.city_id == city_obj_list.id
+                        School.city_id == city_obj_resolved.id
                     ).subquery()
                     classes_in_city = Class.query.filter(
                         Class.school_id.in_(school_ids_city)
@@ -917,6 +944,21 @@ def list_gabaritos():
                         len(cls.students) if cls.students else 0
                         for cls in classes_in_city
                     )
+                    # Resumo por escola: escolas x quantidades
+                    schools_in_city = School.query.filter(
+                        School.city_id == city_obj_resolved.id
+                    ).all()
+                    for school in schools_in_city:
+                        classes_school = [c for c in classes_in_city if c.school_id == school.id]
+                        students_school = sum(
+                            len(c.students) if c.students else 0 for c in classes_school
+                        )
+                        schools_summary.append({
+                            "school_id": str(school.id),
+                            "school_name": school.name or "",
+                            "classes_count": len(classes_school),
+                            "students_count": students_school,
+                        })
 
             # Determinar contagem baseada no scope_type correto
             final_students_count = 0
@@ -951,31 +993,34 @@ def list_gabaritos():
             if gabarito.minio_url or gabarito.minio_object_name:
                 generation_status = "completed"
             
-            gabaritos.append({
+            item = {
                 "id": str(gabarito.id),
                 "test_id": str(gabarito.test_id) if gabarito.test_id else None,
                 "class_id": str(gabarito.class_id) if gabarito.class_id else None,
                 "class_name": class_name,
                 "grade_id": str(gabarito.grade_id) if gabarito.grade_id else None,
-                "grade_name": grade_name or gabarito.grade_name,
+                "grade_name": grade_name or gabarito.grade_name or "",
                 "num_questions": gabarito.num_questions,
                 "use_blocks": gabarito.use_blocks,
                 "title": gabarito.title,
-                "school_name": gabarito.school_name,
-                "municipality": gabarito.municipality,
-                "state": gabarito.state,
-                "institution": gabarito.institution,
-                # ✅ CONTAGEM CORRIGIDA PARA TODOS OS SCOPE TYPES
-                "scope_type": gabarito.scope_type or "class",  # class | grade | school | city
-                "generation_status": generation_status,  # pending | completed
+                "school_id": str(gabarito.school_id) if gabarito.school_id else None,
+                "school_name": gabarito.school_name or "",
+                "municipality": response_municipality if gabarito.scope_type == "city" else (gabarito.municipality or ""),
+                "state": response_state if gabarito.scope_type == "city" else (gabarito.state or ""),
+                "institution": gabarito.institution or "",
+                "scope_type": gabarito.scope_type or "class",
+                "generation_status": generation_status,
                 "students_count": final_students_count,
                 "classes_count": final_classes_count,
                 "minio_url": gabarito.minio_url,
                 "can_download": bool(gabarito.minio_url or gabarito.minio_object_name),
                 "created_at": gabarito.created_at.isoformat() if gabarito.created_at else None,
                 "created_by": str(gabarito.created_by) if gabarito.created_by else None,
-                "creator_name": creator_name
-            })
+                "creator_name": creator_name,
+            }
+            if gabarito.scope_type == "city":
+                item["schools_summary"] = schools_summary
+            gabaritos.append(item)
         
         return jsonify({
             "gabaritos": gabaritos,

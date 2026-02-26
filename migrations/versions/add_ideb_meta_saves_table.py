@@ -27,7 +27,12 @@ def upgrade():
         sa.Column('payload', postgresql.JSON(astext_type=sa.Text()), nullable=False),
         sa.Column('updated_at', sa.TIMESTAMP(), server_default=sa.text('CURRENT_TIMESTAMP'), nullable=False),
         sa.PrimaryKeyConstraint('id'),
-        sa.ForeignKeyConstraint(['city_id'], ['city.id'], ondelete='CASCADE'),
+        sa.ForeignKeyConstraint(
+            ['city_id'],
+            ['city.id'],
+            ondelete='CASCADE',
+            refschema='public',
+        ),
         sa.UniqueConstraint('city_id', 'level', name='uq_ideb_meta_saves_context'),
         schema='public',
     )

@@ -99,6 +99,31 @@ class PhysicalTestFormService:
             # Para formulários físicos, consideramos aplicada se existe class_test
             # O status 'agendada' indica que a prova foi aplicada e está disponível
             applied_tests = class_tests
+
+            # Aplicar filtro de escopo (escola / série / turma) em cascata, se informado
+            scope_filter = (test_data or {}).get('scope_filter') or {}
+            school_ids = scope_filter.get('school_ids')
+            grade_ids = scope_filter.get('grade_ids')
+            class_ids_filter = scope_filter.get('class_ids')
+            if school_ids or grade_ids or class_ids_filter:
+                class_ids_raw = [ct.class_id for ct in applied_tests]
+                classes = Class.query.filter(Class.id.in_(class_ids_raw)).all()
+                allowed_class_ids = set()
+                for c in classes:
+                    if school_ids and (c.school_id is None or str(c.school_id) not in [str(x) for x in school_ids]):
+                        continue
+                    if grade_ids and (c.grade_id is None or str(c.grade_id) not in [str(x) for x in grade_ids]):
+                        continue
+                    if class_ids_filter and str(c.id) not in [str(x) for x in class_ids_filter]:
+                        continue
+                    allowed_class_ids.add(c.id)
+                applied_tests = [ct for ct in applied_tests if ct.class_id in allowed_class_ids]
+                if not applied_tests:
+                    return {
+                        'success': False,
+                        'error': 'Nenhuma turma encontrada para os filtros de escola/série/turma informados',
+                        'generated_forms': 0
+                    }
             
             # Buscar questões da prova ordenadas
             questions = self._get_test_questions(test_id)

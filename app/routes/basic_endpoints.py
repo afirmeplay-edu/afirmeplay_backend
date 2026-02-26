@@ -561,13 +561,14 @@ def evaluations_stats():
             
             if school_ids:
                 # Filtrar testes que têm turmas das escolas da cidade
+                # class.school_id é VARCHAR → comparar com strings (evitar character varying = uuid)
                 class_tests = ClassTest.query.filter(
                     ClassTest.class_id.in_(
-                        Class.query.filter(Class.school_id.in_(ensure_uuid_list(school_ids))).with_entities(Class.id)
+                        Class.query.filter(cast(Class.school_id, String).in_(school_ids)).with_entities(Class.id)
                     )
                 ).with_entities(ClassTest.test_id).all()
                 test_ids = [ct.test_id for ct in class_tests]
-                
+
                 if test_ids:
                     test_query = test_query.filter(Test.id.in_(test_ids))
                 else:
@@ -584,7 +585,7 @@ def evaluations_stats():
                         "by_status": {},
                         "last_sync": datetime.now().isoformat()
                     }), 200
-                
+
                 # Filtrar questões por cidade (se tiver city_id)
                 if hasattr(Question, 'city_id'):
                     question_query = question_query.filter_by(city_id=city_id)
@@ -620,13 +621,14 @@ def evaluations_stats():
                 return jsonify({"erro": "Escola não encontrada"}), 400
             
             # Filtrar testes que têm turmas da escola
+            # class.school_id é VARCHAR; School.id é VARCHAR → comparar como string
             class_tests = ClassTest.query.filter(
                 ClassTest.class_id.in_(
-                    Class.query.filter_by(school_id=ensure_uuid(school.id)).with_entities(Class.id)
+                    Class.query.filter_by(school_id=school.id).with_entities(Class.id)
                 )
             ).with_entities(ClassTest.test_id).all()
             test_ids = [ct.test_id for ct in class_tests]
-            
+
             if test_ids:
                 test_query = test_query.filter(Test.id.in_(test_ids))
             else:
@@ -643,7 +645,7 @@ def evaluations_stats():
                     "by_status": {},
                     "last_sync": datetime.now().isoformat()
                 }), 200
-            
+
             # Filtrar questões por cidade da escola (se tiver city_id)
             if hasattr(Question, 'city_id'):
                 question_query = question_query.filter_by(city_id=school.city_id)
@@ -659,13 +661,14 @@ def evaluations_stats():
             
             if school_ids:
                 # Filtrar testes que têm turmas das escolas da cidade
+                # class.school_id é VARCHAR → comparar com strings (evitar character varying = uuid)
                 class_tests = ClassTest.query.filter(
                     ClassTest.class_id.in_(
-                        Class.query.filter(Class.school_id.in_(ensure_uuid_list(school_ids))).with_entities(Class.id)
+                        Class.query.filter(cast(Class.school_id, String).in_(school_ids)).with_entities(Class.id)
                     )
                 ).with_entities(ClassTest.test_id).all()
                 test_ids = [ct.test_id for ct in class_tests]
-                
+
                 if test_ids:
                     test_query = test_query.filter(Test.id.in_(test_ids))
                 else:
@@ -682,7 +685,7 @@ def evaluations_stats():
                         "by_status": {},
                         "last_sync": datetime.now().isoformat()
                     }), 200
-                
+
                 # Filtrar questões por cidade (se tiver city_id)
                 if hasattr(Question, 'city_id'):
                     question_query = question_query.filter_by(city_id=city_id)
@@ -700,7 +703,7 @@ def evaluations_stats():
                     "by_status": {},
                     "last_sync": datetime.now().isoformat()
                 }), 200
-        
+
         # Estatísticas básicas - versão mais segura
         logging.info("🔢 Contando total de avaliações...")
         total_evaluations = test_query.count()

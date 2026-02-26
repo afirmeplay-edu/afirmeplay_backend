@@ -122,6 +122,18 @@ Nestes pontos, o código foi ajustado para **eliminar erros de `UUID` x `VARCHAR
                 - **`Class.query.filter(cast(Class.school_id, String).in_(school_ids))`** dentro da subquery de `ClassTest`.
         - Objetivo: garantir que as comparações sejam sempre `VARCHAR` x `VARCHAR` enquanto o schema não for migrado para `UUID` real.
 
+    - **Estatísticas de avaliações `GET /evaluations/stats`**:
+        - **Erro**: `operator does not exist: character varying = uuid` ao acessar com roles tecadm, diretor/coordenador ou professor. SQL: `WHERE class.school_id IN (%(school_id_1_1)s::UUID)` (parâmetro passado como UUID; coluna `class.school_id` é `VARCHAR`).
+        - **Ajustes**:
+            - **TecAdm e Professor** (filtro por escolas da cidade): em vez de `Class.school_id.in_(ensure_uuid_list(school_ids))`, usar **`cast(Class.school_id, String).in_(school_ids)`** (os `school_ids` vêm de `School.id` e já são strings).
+            - **Diretor/Coordenador** (filtro por escola do manager): em vez de `Class.query.filter_by(school_id=ensure_uuid(school.id))`, usar **`Class.query.filter_by(school_id=school.id)`** (comparar VARCHAR com string).
+        - Objetivo: alinhar com o padrão `class.school_id` VARCHAR; após migração do schema para UUID, remover os casts e usar comparação direta.
+
+    - **Play TV – listagem de vídeos `GET /play-tv/videos`**:
+        - **Erro**: `operator does not exist: character varying = uuid` ao listar vídeos (filtro por cidade/município etc.). SQL: `LEFT OUTER JOIN class ON class.school_id = CAST(school.id AS UUID) AND class.grade_id = public.grade.id`.
+        - **Ajuste**: no `outerjoin` com `Class`, em vez de `Class.school_id == cast(School.id, PostgresUUID)`, usar **`School.id == cast(Class.school_id, String)`** (comparar texto com texto).
+        - Objetivo: alinhar com o padrão `class.school_id` VARCHAR; após migração para UUID, remover o cast.
+
 - **Arquivo**: `app/socioeconomic_forms/services/form_service.py`
     - **Erro**: `operator does not exist: character varying = uuid` em `POST /forms` ao resolver escopo (só escolas / só séries / turmas). Query: `WHERE class.school_id = :school_id::UUID` (coluna `class.school_id` é `VARCHAR`).
     - **Ajustes**:

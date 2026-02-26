@@ -49,3 +49,6 @@ from app.balance.models import StudentCoins, CoinTransaction
 
 # Competições
 from app.competitions.models import CompetitionTemplate, Competition
+
+# Calculadora de Metas IDEB
+from app.ideb_meta.models import IdebMetaSave

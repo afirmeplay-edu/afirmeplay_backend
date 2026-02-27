@@ -48,4 +48,7 @@ from app.certification.models import CertificateTemplate, Certificate
 from app.balance.models import StudentCoins, CoinTransaction
 
 # Competições
-from app.competitions.models import CompetitionTemplate, Competition
+from app.competitions.models import Competition
+
+# Calculadora de Metas IDEB
+from app.ideb_meta.models import IdebMetaSave

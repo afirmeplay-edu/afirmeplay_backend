@@ -309,21 +309,18 @@ def listar_alunos():
             else:
                 return jsonify({"message": "Professor não está alocado em nenhuma escola"}), 400
         elif user['role'] in ["diretor", "coordenador"]:
-            # Diretor e coordenador veem alunos apenas de sua escola
-            # Precisamos buscar a escola do usuário
-            from app.models.teacher import Teacher
-            from app.models.schoolTeacher import SchoolTeacher
-            
-            teacher = Teacher.query.filter_by(user_id=user['id']).first()
-            if not teacher:
-                return jsonify({"message": "Usuário não encontrado como professor/diretor/coordenador"}), 404
-            
-            # Buscar a escola do diretor/coordenador
-            teacher_school = SchoolTeacher.query.filter_by(teacher_id=teacher.id).first()
-            if not teacher_school:
+            # Diretor e coordenador veem alunos apenas de sua escola (via Manager, não Teacher)
+            from app.models.manager import Manager
+            from app.utils.uuid_helpers import uuid_to_str
+
+            manager = Manager.query.filter_by(user_id=user['id']).first()
+            if not manager:
+                return jsonify({"message": "Diretor/Coordenador não encontrado na tabela manager"}), 404
+            school_id_str = uuid_to_str(manager.school_id) if manager.school_id else None
+            if not school_id_str:
                 return jsonify({"message": "Diretor/Coordenador não está vinculado a nenhuma escola"}), 400
-            
-            students = query.filter(Student.school_id == teacher_school.school_id).all()
+
+            students = query.filter(Student.school_id == school_id_str).all()
         else:
             # TecAdmin vê alunos de todas as escolas do município + alunos sem escola mas com city_id
             city_id = user.get('tenant_id') or user.get('city_id')
@@ -419,16 +416,15 @@ def obter_aluno_completo(student_id):
             if not school_ids or (student_obj.school_id and student_obj.school_id not in school_ids):
                 return jsonify({"message": "Você não tem permissão para visualizar este aluno"}), 403
         elif user['role'] in ["diretor", "coordenador"]:
-            # Diretor e coordenador só podem ver alunos de sua escola
-            from app.models.teacher import Teacher
-            from app.models.schoolTeacher import SchoolTeacher
-            
-            teacher = Teacher.query.filter_by(user_id=user['id']).first()
-            if not teacher:
-                return jsonify({"message": "Usuário não encontrado como diretor/coordenador"}), 404
-            
-            teacher_school = SchoolTeacher.query.filter_by(teacher_id=teacher.id).first()
-            if not teacher_school or student_obj.school_id != teacher_school.school_id:
+            # Diretor e coordenador só podem ver alunos de sua escola (via Manager)
+            from app.models.manager import Manager
+            from app.utils.uuid_helpers import uuid_to_str
+
+            manager = Manager.query.filter_by(user_id=user['id']).first()
+            if not manager:
+                return jsonify({"message": "Diretor/Coordenador não encontrado"}), 404
+            manager_school_id_str = uuid_to_str(manager.school_id) if manager.school_id else None
+            if not manager_school_id_str or student_obj.school_id != manager_school_id_str:
                 return jsonify({"message": "Você não tem permissão para visualizar este aluno"}), 403
         elif user['role'] == "tecadm":
             # TecAdmin só pode ver alunos do seu município

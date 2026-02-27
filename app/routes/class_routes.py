@@ -595,9 +595,11 @@ def update_class(class_id):
 
 @bp.route('/<string:class_id>', methods=['DELETE'])
 @jwt_required()
+@role_required("admin", "tecadm", "diretor", "coordenador")
 def delete_class(class_id):
     """
     Rota DELETE para excluir uma turma.
+    Apenas admin, tecadm, diretor e coordenador podem excluir; professor não pode.
     Inclui logging detalhado e captura de contexto completo.
     """
     # Obter informações do usuário autenticado para logging

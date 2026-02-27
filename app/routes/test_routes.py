@@ -3501,35 +3501,69 @@ def comparar_avaliacoes():
         # Verificar permissões do usuário para todas as avaliações
         perm_start = time.time()
         if user['role'] == 'professor':
-            # Professor pode comparar avaliações aplicadas nas suas turmas específicas
-            from app.routes.evaluation_results_routes import professor_pode_ver_avaliacao_turmas
-            
+            # Professor pode comparar avaliações aplicadas em alguma escola onde está vinculado (SchoolTeacher)
+            from app.models.teacher import Teacher
+            from app.models.schoolTeacher import SchoolTeacher
+            from app.utils.uuid_helpers import uuid_to_str
+
+            teacher = Teacher.query.filter_by(user_id=user['id']).first()
+            if not teacher:
+                return jsonify({"error": "Professor não encontrado"}), 404
+            school_teachers = SchoolTeacher.query.filter_by(teacher_id=teacher.id).all()
+            professor_school_ids = [uuid_to_str(st.school_id) for st in school_teachers if st.school_id]
+            professor_school_ids = [s for s in professor_school_ids if s]
+            if not professor_school_ids:
+                return jsonify({"error": "Professor não está vinculado a nenhuma escola"}), 400
+
             unauthorized_tests = []
             for test in tests:
-                if not professor_pode_ver_avaliacao_turmas(user['id'], test.id):
+                class_tests = ClassTest.query.filter_by(test_id=str(test.id)).all()
+                class_ids = [ct.class_id for ct in class_tests]
+                if not class_ids:
                     unauthorized_tests.append(test)
-            
+                    continue
+                turma_da_sua_escola = Class.query.filter(
+                    Class.id.in_(class_ids),
+                    Class.school_id.in_(professor_school_ids)
+                ).first()
+                if not turma_da_sua_escola:
+                    unauthorized_tests.append(test)
+
             if unauthorized_tests:
-                unauthorized_ids = [test.id for test in unauthorized_tests]
-                return jsonify({"error": f"Você só pode comparar avaliações aplicadas nas suas turmas. IDs não autorizados: {unauthorized_ids}"}), 403
-        
+                unauthorized_ids = [str(t.id) for t in unauthorized_tests]
+                return jsonify({"error": f"Você só pode comparar avaliações aplicadas nas suas escolas. IDs não autorizados: {unauthorized_ids}"}), 403
+
         elif user['role'] in ['diretor', 'coordenador']:
-            # Diretor e coordenador podem comparar avaliações aplicadas na sua escola
+            # Diretor e coordenador podem comparar avaliações aplicadas na sua escola (via Manager, não Professor)
             from app.models.manager import Manager
-            from app.routes.evaluation_results_routes import professor_pode_ver_avaliacao
-            
+            from app.utils.uuid_helpers import uuid_to_str
+
             manager = Manager.query.filter_by(user_id=user['id']).first()
             if not manager or not manager.school_id:
                 return jsonify({"error": "Diretor/Coordenador não encontrado ou não vinculado a uma escola"}), 404
-            
-            # Verificar se as avaliações foram aplicadas na escola do diretor/coordenador
+
+            manager_school_id_str = uuid_to_str(manager.school_id)
+            if not manager_school_id_str:
+                return jsonify({"error": "Diretor/Coordenador não vinculado a uma escola"}), 400
+
+            # Verificar se cada avaliação foi aplicada em alguma turma da escola do diretor/coordenador
             unauthorized_tests = []
             for test in tests:
-                if not professor_pode_ver_avaliacao(user['id'], test.id):
+                class_tests = ClassTest.query.filter_by(test_id=str(test.id)).all()
+                class_ids = [ct.class_id for ct in class_tests]
+                if not class_ids:
                     unauthorized_tests.append(test)
-            
+                    continue
+                # Há alguma turma dessa avaliação que pertence à escola do manager?
+                turma_da_escola = Class.query.filter(
+                    Class.id.in_(class_ids),
+                    Class.school_id == manager_school_id_str
+                ).first()
+                if not turma_da_escola:
+                    unauthorized_tests.append(test)
+
             if unauthorized_tests:
-                unauthorized_ids = [test.id for test in unauthorized_tests]
+                unauthorized_ids = [str(t.id) for t in unauthorized_tests]
                 return jsonify({"error": f"Você só pode comparar avaliações aplicadas na sua escola. IDs não autorizados: {unauthorized_ids}"}), 403
         
         perm_time = time.time() - perm_start

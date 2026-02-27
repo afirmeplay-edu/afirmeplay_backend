@@ -315,6 +315,160 @@ def serialize_user(user):
     }
 
 
+def _user_needs_onboarding(user):
+    """Considera que o usuário precisa de onboarding se não tiver onboarding_completed em avatar_config."""
+    if not user:
+        return True
+    ac = user.avatar_config
+    if not ac or not isinstance(ac, dict):
+        return True
+    return ac.get("onboarding_completed") is not True
+
+
+@bp.route('/me/onboarding-status', methods=['GET'])
+@jwt_required()
+def get_onboarding_status():
+    """
+    Retorna se o usuário atual precisa preencher o modal de primeiro acesso (onboarding).
+    Usado pelo frontend para exibir o modal e pré-preencher os campos.
+    Sem migration: usa avatar_config.onboarding_completed (JSON existente).
+    """
+    try:
+        current_user = get_current_user_from_token()
+        if not current_user:
+            return jsonify({"erro": "Usuário não encontrado"}), 401
+
+        user = User.query.get(current_user["id"])
+        if not user:
+            return jsonify({"erro": "Usuário não encontrado"}), 404
+
+        needs_onboarding = _user_needs_onboarding(user)
+        profile = {
+            "name": user.name,
+            "birth_date": user.birth_date.isoformat() if user.birth_date else None,
+            "phone": user.phone,
+            "gender": user.gender,
+            "nationality": user.nationality,
+            "address": user.address,
+            "traits": user.traits,
+            "avatar_config": user.avatar_config,
+        }
+        return jsonify({
+            "needs_onboarding": needs_onboarding,
+            "profile": profile,
+        }), 200
+    except Exception as e:
+        logging.error(f"Erro ao obter status de onboarding: {str(e)}", exc_info=True)
+        return jsonify({"erro": "Erro ao obter status de onboarding", "detalhes": str(e)}), 500
+
+
+@bp.route('/me/onboarding', methods=['POST'])
+@jwt_required()
+def submit_onboarding():
+    """
+    Envio do formulário do modal de primeiro acesso.
+    Atualiza: name, birth_date, phone, gender, nationality, address, traits, avatar_config
+    e marca onboarding_completed em avatar_config (sem migration).
+    """
+    try:
+        current_user = get_current_user_from_token()
+        if not current_user:
+            return jsonify({"erro": "Usuário não encontrado"}), 401
+
+        user = User.query.get(current_user["id"])
+        if not user:
+            return jsonify({"erro": "Usuário não encontrado"}), 404
+
+        data = request.get_json() or {}
+
+        # name (opcional no onboarding)
+        name = data.get("name")
+        if name is not None and isinstance(name, str) and name.strip():
+            user.name = name.strip()
+
+        # birth_date
+        birth_date_value = data.get("birth_date")
+        if birth_date_value:
+            try:
+                if isinstance(birth_date_value, str):
+                    user.birth_date = datetime.strptime(birth_date_value, "%Y-%m-%d").date()
+                elif isinstance(birth_date_value, date):
+                    user.birth_date = birth_date_value
+                else:
+                    return jsonify({"erro": "birth_date deve estar no formato YYYY-MM-DD"}), 400
+            except ValueError:
+                return jsonify({"erro": "birth_date inválido"}), 400
+
+        # nationality
+        nationality = data.get("nationality")
+        if nationality is not None:
+            user.nationality = nationality.strip() if isinstance(nationality, str) and nationality.strip() else None
+
+        # phone
+        phone = data.get("phone")
+        if phone is not None:
+            if phone:
+                phone_digits = re.sub(r"\D", "", str(phone))
+                user.phone = phone_digits if phone_digits and phone_digits.isdigit() else None
+            else:
+                user.phone = None
+
+        # gender
+        gender = data.get("gender")
+        allowed_genders = {"masculino", "feminino", "outro", "prefiro_nao_informar"}
+        if gender is not None:
+            if gender:
+                g = gender.strip().lower()
+                if g not in allowed_genders:
+                    return jsonify({"erro": "gender inválido"}), 400
+                user.gender = g
+            else:
+                user.gender = None
+
+        # traits (características - lista de strings)
+        traits = data.get("traits")
+        if traits is not None:
+            if traits in ("", [], None):
+                user.traits = None
+            elif isinstance(traits, list) and all(isinstance(t, str) for t in traits):
+                user.traits = traits
+            else:
+                return jsonify({"erro": "traits deve ser uma lista de strings ou null"}), 400
+
+        # address
+        address = data.get("address")
+        if address is not None:
+            user.address = address.strip() if isinstance(address, str) and address.strip() else None
+
+        # avatar_config: theme (modo escuro), font, icon + marcar onboarding_completed
+        avatar_config = dict(user.avatar_config) if user.avatar_config and isinstance(user.avatar_config, dict) else {}
+        if "theme" in data:
+            v = data["theme"]
+            if v in ("light", "dark", "system"):
+                avatar_config["theme"] = v
+        if "font" in data and data["font"]:
+            avatar_config["font"] = str(data["font"]).strip()
+        if "icon" in data:
+            avatar_config["icon"] = data["icon"]  # string ou número do ícone
+        avatar_config["onboarding_completed"] = True
+        user.avatar_config = avatar_config
+
+        db.session.commit()
+
+        return jsonify({
+            "message": "Configuração concluída. Você já pode acessar o sistema.",
+            "user": serialize_user(user),
+        }), 200
+    except SQLAlchemyError as e:
+        db.session.rollback()
+        logging.error(f"Erro ao salvar onboarding: {str(e)}")
+        return jsonify({"erro": "Erro ao salvar configuração", "detalhes": str(e)}), 500
+    except Exception as e:
+        db.session.rollback()
+        logging.error(f"Erro inesperado no onboarding: {str(e)}", exc_info=True)
+        return jsonify({"erro": "Erro ao salvar configuração"}), 500
+
+
 @bp.route('/<string:user_id>', methods=['GET'])
 @jwt_required()
 @role_required("admin", "tecadm", "diretor", "coordenador", "professor", "aluno")

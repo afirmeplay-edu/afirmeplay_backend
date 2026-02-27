@@ -63,6 +63,7 @@ from app.models.skill import Skill
 from app import db
 import logging
 from typing import Dict, Any, List, Optional
+from collections import defaultdict
 from sqlalchemy import func, case
 from datetime import datetime
 from sqlalchemy.orm import joinedload
@@ -2700,8 +2701,7 @@ def listar_alunos():
         if user['role'] == 'professor' and not professor_pode_ver_avaliacao(user['id'], test.id):
             return jsonify({"error": "Acesso negado"}), 403
         
-        # Buscar TODOS os alunos das turmas onde a avaliação foi aplicada
-        # Primeiro, buscar as turmas onde a avaliação foi aplicada
+        # Buscar as turmas onde a avaliação foi aplicada
         # ✅ CORRIGIDO: ClassTest.test_id é VARCHAR, converter avaliacao_id para string
         class_tests = ClassTest.query.filter_by(test_id=str(avaliacao_id)).all()
         class_ids = [ct.class_id for ct in class_tests]
@@ -2711,11 +2711,47 @@ def listar_alunos():
                 "data": [],
                 "message": "Avaliação não foi aplicada em nenhuma turma"
             }), 200
+
+        # Filtrar turmas pelo escopo do usuário (para mostrar todos os alunos/faltosos que ele pode ver)
+        from app.permissions.utils import get_manager_school, get_teacher_classes
+        from app.utils.uuid_helpers import uuid_to_str
+
+        role = (user.get("role") or "").lower()
+        if role == "admin":
+            allowed_class_ids = class_ids
+        elif role == "tecadm":
+            city_id = user.get("tenant_id") or user.get("city_id")
+            if not city_id:
+                return jsonify({"error": "Tecadm sem município vinculado"}), 400
+            schools_in_city = School.query.filter_by(city_id=city_id).with_entities(School.id).all()
+            school_ids_city = [str(s[0]) for s in schools_in_city]
+            classes_in_city = Class.query.filter(Class.school_id.in_(school_ids_city)).with_entities(Class.id).all()
+            allowed_class_ids = [c.id for c in classes_in_city if c.id in class_ids]
+        elif role in ("diretor", "coordenador"):
+            manager_school_id = get_manager_school(user["id"])
+            if not manager_school_id:
+                return jsonify({"error": "Diretor/Coordenador não vinculado a uma escola"}), 400
+            manager_school_str = uuid_to_str(manager_school_id)
+            classes_escola = Class.query.filter(Class.school_id == manager_school_str).with_entities(Class.id).all()
+            allowed_class_ids = [c.id for c in classes_escola if c.id in class_ids]
+        elif role == "professor":
+            teacher_class_ids = get_teacher_classes(user["id"])
+            if not teacher_class_ids:
+                return jsonify({"data": [], "message": "Professor não está vinculado a nenhuma turma"}), 200
+            allowed_class_ids = [cid for cid in class_ids if cid in teacher_class_ids]
+        else:
+            allowed_class_ids = []
+
+        if not allowed_class_ids:
+            return jsonify({
+                "data": [],
+                "message": "Nenhuma turma da avaliação está no seu escopo de acesso"
+            }), 200
         
-        # Buscar todos os alunos dessas turmas com relacionamentos carregados
+        # Buscar todos os alunos dessas turmas (incluindo faltosos) com relacionamentos carregados
         all_students = Student.query.options(
             joinedload(Student.class_).joinedload(Class.grade)
-        ).filter(Student.class_id.in_(class_ids)).all()
+        ).filter(Student.class_id.in_(allowed_class_ids)).all()
         
         # ✅ NOVO: Buscar resultados pré-calculados da tabela evaluation_results
         from app.models.evaluationResult import EvaluationResult
@@ -4601,7 +4637,7 @@ def get_student_answers(test_id, student_id):
 
 @bp.route('/relatorio-detalhado-filtrado/<string:evaluation_id>', methods=['GET'])
 @jwt_required()
-@role_required("admin", "professor", "coordenador", "diretor")
+@role_required("admin", "professor", "coordenador", "diretor", "tecadm")
 def relatorio_detalhado_filtrado(evaluation_id: str):
     """
     Retorna relatório detalhado de uma avaliação com filtros e ordenação
@@ -4713,11 +4749,47 @@ def relatorio_detalhado_filtrado(evaluation_id: str):
                 "questoes": questoes_data,
                 "alunos": []
             }), 200
+
+        # Filtrar turmas pelo escopo do usuário (diretor/coordenador/professor veem só seu escopo)
+        from app.permissions.utils import get_manager_school, get_teacher_classes
+        from app.utils.uuid_helpers import uuid_to_str
+
+        role = (user.get("role") or "").lower()
+        if role == "admin":
+            allowed_class_ids = class_ids
+        elif role == "tecadm":
+            city_id = user.get("tenant_id") or user.get("city_id")
+            if not city_id:
+                return jsonify({"error": "Tecadm sem município vinculado"}), 400
+            schools_in_city = School.query.filter_by(city_id=city_id).with_entities(School.id).all()
+            school_ids_city = [str(s[0]) for s in schools_in_city]
+            classes_in_city = Class.query.filter(Class.school_id.in_(school_ids_city)).with_entities(Class.id).all()
+            allowed_class_ids = [c.id for c in classes_in_city if c.id in class_ids]
+        elif role in ("diretor", "coordenador"):
+            manager_school_id = get_manager_school(user["id"])
+            if not manager_school_id:
+                return jsonify({"error": "Diretor/Coordenador não vinculado a uma escola"}), 400
+            manager_school_str = uuid_to_str(manager_school_id)
+            classes_escola = Class.query.filter(Class.school_id == manager_school_str).with_entities(Class.id).all()
+            allowed_class_ids = [c.id for c in classes_escola if c.id in class_ids]
+        elif role == "professor":
+            teacher_class_ids = get_teacher_classes(user["id"])
+            allowed_class_ids = [cid for cid in class_ids if cid in (teacher_class_ids or [])]
+        else:
+            allowed_class_ids = []
+
+        if not allowed_class_ids:
+            return jsonify({
+                "avaliacao": avaliacao_data,
+                "questoes": questoes_data,
+                "alunos": []
+            }), 200
         
-        # Buscar todos os alunos dessas turmas
+        # Buscar todos os alunos dessas turmas (incluindo faltosos), com user para evitar N+1
         all_students = Student.query.options(
-            joinedload(Student.class_).joinedload(Class.grade)
-        ).filter(Student.class_id.in_(class_ids)).all()
+            joinedload(Student.class_).joinedload(Class.grade),
+            joinedload(Student.user)
+        ).filter(Student.class_id.in_(allowed_class_ids)).all()
         
         # Filtrar por nível se especificado
         if student_level:
@@ -4730,6 +4802,21 @@ def relatorio_detalhado_filtrado(evaluation_id: str):
         # Buscar resultados pré-calculados
         evaluation_results = EvaluationResult.query.filter_by(test_id=evaluation_id).all()
         results_dict = {er.student_id: er for er in evaluation_results}
+
+        # Carregar respostas e questões em lote (evita N+1 e acelera relatório)
+        answers_by_student = defaultdict(list)
+        questions_map = {}
+        if ('questoes' in fields or not fields) and all_students:
+            student_ids = [s.id for s in all_students]
+            all_answers = StudentAnswer.query.filter(
+                StudentAnswer.test_id == evaluation_id,
+                StudentAnswer.student_id.in_(student_ids)
+            ).all()
+            for a in all_answers:
+                answers_by_student[a.student_id].append(a)
+            qids = set(a.question_id for a in all_answers)
+            if qids:
+                questions_map = {q.id: q for q in Question.query.filter(Question.id.in_(qids)).all()}
         
         alunos_data = []
         for student in all_students:
@@ -4757,16 +4844,11 @@ def relatorio_detalhado_filtrado(evaluation_id: str):
             if student.class_:
                 turma_nome = student.class_.name
             
-            # Buscar respostas detalhadas do aluno
+            # Respostas já carregadas em lote
             respostas = []
             if 'questoes' in fields or not fields:
-                student_answers = StudentAnswer.query.filter_by(
-                    test_id=evaluation_id,
-                    student_id=student.id
-                ).all()
-                
-                for answer in student_answers:
-                    question = Question.query.get(answer.question_id)
+                for answer in answers_by_student.get(student.id, []):
+                    question = questions_map.get(answer.question_id)
                     if question:
                         # Filtrar por disciplina se especificado
                         if subject_id and question.subject_id != subject_id:

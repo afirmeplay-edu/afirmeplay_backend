@@ -28,6 +28,23 @@ def _user_can_access_city(city_id):
     return user_city_id == city_id
 
 
+def _user_can_delete_for_city(city_id):
+    """
+    Verifica se o usuário pode deletar (escola do payload) para o município.
+    Apenas admin (qualquer município) ou tecadm (apenas o próprio município).
+    """
+    user = get_current_user_from_token()
+    if not user:
+        return False
+    role = (user.get('role') or '').lower()
+    if role == 'admin':
+        return True
+    if role == 'tecadm':
+        user_city_id = user.get('tenant_id') or user.get('city_id')
+        return user_city_id == city_id
+    return False
+
+
 @bp.errorhandler(SQLAlchemyError)
 def handle_db_error(error):
     db.session.rollback()
@@ -229,6 +246,7 @@ def remove_school_from_calculator(school_id):
     """
     Remove uma escola do payload da calculadora (municipalityData.escolas).
     Não remove da tabela School; só altera o JSON salvo.
+    Apenas admin (qualquer município) ou tecadm (apenas o próprio município) podem deletar.
     Query: city_id, level.
     """
     city_id = request.args.get('city_id')
@@ -242,8 +260,10 @@ def remove_school_from_calculator(school_id):
     city = City.query.get(city_id)
     if not city:
         return jsonify({"erro": "Município não encontrado"}), 404
-    if not _user_can_access_city(city_id):
-        return jsonify({"erro": "Você não tem permissão para acessar este município"}), 403
+    if not _user_can_delete_for_city(city_id):
+        return jsonify({
+            "erro": "Apenas admin ou tec adm do município podem remover escola. Demais perfis não têm permissão.",
+        }), 403
 
     record = IdebMetaSave.query.filter_by(city_id=city_id, level=level).first()
     if not record or not record.payload:

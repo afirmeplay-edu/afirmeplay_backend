@@ -497,7 +497,7 @@ CREATE TABLE IF NOT EXISTS "{schema}".competitions (
     ranking_visibility VARCHAR DEFAULT 'final',
     max_participants INTEGER,
     recurrence VARCHAR DEFAULT 'manual',
-    template_id VARCHAR REFERENCES public.competition_templates(id),
+    template_id VARCHAR,
     status VARCHAR DEFAULT 'rascunho',
     created_by VARCHAR REFERENCES public.users(id),
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,

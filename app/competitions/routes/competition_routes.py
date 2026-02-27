@@ -130,7 +130,6 @@ def _competition_to_dict(c):
         'ranking_visibility': c.ranking_visibility,
         'max_participants': c.max_participants,
         'recurrence': c.recurrence,
-        'template_id': c.template_id,
         'status': c.status,
         'created_by': c.created_by,
         'created_at': c.created_at.isoformat() if c.created_at else None,
@@ -915,8 +914,7 @@ def update_competition(competition_id):
         return jsonify({"error": "Body JSON obrigatório"}), 400
     editable = ('name', 'description', 'level', 'scope', 'scope_filter', 'enrollment_start', 'enrollment_end',
                 'application', 'expiration', 'timezone', 'question_mode', 'question_rules', 'reward_config',
-                'ranking_criteria', 'ranking_tiebreaker', 'ranking_visibility', 'max_participants', 'recurrence',
-                'template_id')
+                'ranking_criteria', 'ranking_tiebreaker', 'ranking_visibility', 'max_participants', 'recurrence')
     
     # Parse todas as datas primeiro
     parsed_dates = {}

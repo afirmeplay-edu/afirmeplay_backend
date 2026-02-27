@@ -192,7 +192,7 @@ def create_app():
     from .plantao_online import routes as plantao_online_routes
     from app.certification.routes import certificate_routes
     from app.balance.routes import bp as balance_bp
-    from app.competitions.routes import competitions_bp, competition_templates_bp
+    from app.competitions.routes import competitions_bp
     from app.ideb_meta.routes import bp as ideb_meta_bp
     # Importar rotas de report_analysis (processamento assíncrono)
     from app.report_analysis import routes as report_analysis_routes
@@ -243,7 +243,6 @@ def create_app():
     app.register_blueprint(certificate_routes.bp)
     app.register_blueprint(balance_bp)
     app.register_blueprint(competitions_bp)
-    app.register_blueprint(competition_templates_bp)
     app.register_blueprint(ideb_meta_bp)
 
     # Thread em background: finaliza competições expiradas a cada 15 min (sem depender de Celery Beat)

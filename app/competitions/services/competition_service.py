@@ -91,7 +91,6 @@ class CompetitionService:
             ranking_visibility=data.get('ranking_visibility', 'final'),
             max_participants=data.get('max_participants'),
             recurrence=data.get('recurrence', 'manual'),
-            template_id=data.get('template_id'),
             created_by=created_by_user_id,
             status='rascunho',
         )

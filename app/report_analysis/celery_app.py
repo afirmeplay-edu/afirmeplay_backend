@@ -115,11 +115,6 @@ celery_app.conf.beat_schedule = {
         "task": "competition_tasks.process_finished_competitions",
         "schedule": crontab(minute=0, hour="*"),  # a cada hora
     },
-    # Criação automática de competições recorrentes a partir de templates
-    "create-competitions-from-templates": {
-        "task": "competition_tasks.create_competitions_from_templates",
-        "schedule": crontab(minute=0, hour=0),  # todo dia à meia-noite
-    },
 }
 
 # 🔥 CRÍTICO: Criar app Flask automaticamente quando o módulo é importado pelo worker

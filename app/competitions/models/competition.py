@@ -68,7 +68,6 @@ class Competition(db.Model):
     ranking_visibility = db.Column(db.String, default='final')
     max_participants = db.Column(db.Integer, nullable=True)
     recurrence = db.Column(db.String, default='manual')
-    template_id = db.Column(db.String, db.ForeignKey('competition_templates.id'), nullable=True)
     # Campos auxiliares para torneios recorrentes (edições)
     edition_number = db.Column(db.Integer, nullable=True)
     edition_series = db.Column(db.String, nullable=True)
@@ -87,7 +86,6 @@ class Competition(db.Model):
     # Removido backref para evitar erro ao deletar usuário (tabela competitions 
     # incompleta - migration pendente). Quando a migration for executada, pode reativar.
     creator = db.relationship('User', foreign_keys=[created_by])
-    template = db.relationship('CompetitionTemplate', backref='competitions')
 
     @property
     def is_enrollment_open(self) -> bool:

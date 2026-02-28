@@ -3,11 +3,14 @@ from app.models.skill import Skill
 from app.models.grades import Grade
 from app.models.question import Question
 from app.models.test import Test
+from app.models.classTest import ClassTest
 from app import db
 from flask_jwt_extended import jwt_required
 from app.decorators.role_required import role_required, get_current_user_from_token
+from app.permissions.utils import get_teacher_classes
 from app.utils.question_helpers import get_questions_from_test
-from app.utils.uuid_helpers import ensure_uuid
+from app.utils.uuid_helpers import ensure_uuid, ensure_uuid_list
+from app.utils.tenant_middleware import set_search_path, city_id_to_schema_name
 from app.utils.eja_grade_mapping import get_effective_grade_id_for_skills
 
 import logging
@@ -336,14 +339,32 @@ def get_skills_by_evaluation(test_id):
         if not user:
             return jsonify({"error": "Usuário não encontrado"}), 401
 
+        # Professor: garantir schema do município para encontrar Test e ClassTest (multi-tenant)
+        if user['role'] == 'professor' and user.get('city_id'):
+            schema = city_id_to_schema_name(user['city_id'])
+            if schema and schema != 'public':
+                set_search_path(schema)
+
         # Verificar se a avaliação existe
         test = Test.query.get(test_id)
         if not test:
             return jsonify({"error": "Avaliação não encontrada"}), 404
-        
-        # Verificar permissões
-        if user['role'] == 'professor' and test.created_by != user['id']:
-            return jsonify({"error": "Acesso negado"}), 403
+
+        # Professor: pode ver se criou a avaliação OU se ela foi aplicada em alguma de suas turmas
+        if user['role'] == 'professor':
+            criou_avaliacao = str(test.created_by or '') == str(user.get('id') or '')
+            if not criou_avaliacao:
+                teacher_class_ids = get_teacher_classes(user['id'])
+                if not teacher_class_ids:
+                    return jsonify({"error": "Acesso negado"}), 403
+                # ClassTest.class_id é UUID; teacher_class_ids pode ser UUID ou str
+                class_ids_norm = ensure_uuid_list(teacher_class_ids)
+                aplicada_na_turma = ClassTest.query.filter(
+                    ClassTest.test_id == str(test_id),
+                    ClassTest.class_id.in_(class_ids_norm)
+                ).first()
+                if not aplicada_na_turma:
+                    return jsonify({"error": "Acesso negado"}), 403
 
         # Buscar questões da avaliação usando helper multitenant
         questions = get_questions_from_test(test_id, order_by_test_question=True)

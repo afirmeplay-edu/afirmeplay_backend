@@ -209,22 +209,21 @@ def level_options():
 @jwt_required()
 @role_required(*ROLES_EDIT)
 def list_competitions():
-    """Lista competições com filtros opcionais (status, level, subject_id)."""
-    query = Competition.query
-    if request.args.get('status'):
-        query = query.filter(Competition.status == request.args.get('status'))
+    """Lista competições com filtros opcionais (status, level, subject_id, scope). União de public + tenant."""
+    status = request.args.get('status')
+    level = None
     if request.args.get('level') is not None:
         try:
             level_val = int(request.args.get('level'))
             if is_valid_level(level_val):
-                query = query.filter(Competition.level == level_val)
+                level = level_val
         except (TypeError, ValueError):
             pass
-    if request.args.get('subject_id'):
-        query = query.filter(Competition.subject_id == request.args.get('subject_id'))
-    if request.args.get('scope'):
-        query = query.filter(Competition.scope == request.args.get('scope'))
-    items = query.order_by(Competition.created_at.desc()).all()
+    subject_id = request.args.get('subject_id')
+    scope = request.args.get('scope')
+    items = CompetitionService.list_competitions_merged(
+        status=status, level=level, subject_id=subject_id, scope=scope
+    )
     return jsonify([_competition_to_dict(c) for c in items]), 200
 
 
@@ -276,7 +275,7 @@ def get_competition_details_for_student(competition_id):
     student_id, err = _resolve_student_id()
     if err:
         return err[0], err[1]
-    c = Competition.query.get_or_404(competition_id)
+    c = CompetitionService.get_competition_or_404(competition_id)
     out = _competition_to_dict_with_enrolled(c, student_id)
     return jsonify(out), 200
 
@@ -289,6 +288,7 @@ def enroll_in_competition(competition_id):
     student_id, err = _resolve_student_id()
     if err:
         return err[0], err[1]
+    CompetitionService.get_competition_or_404(competition_id)
     try:
         enrollment = CompetitionService.enroll_student(competition_id, student_id)
     except ValidationError as e:
@@ -312,6 +312,7 @@ def unenroll_from_competition(competition_id):
     student_id, err = _resolve_student_id()
     if err:
         return err[0], err[1]
+    CompetitionService.get_competition_or_404(competition_id)
     try:
         CompetitionService.unenroll_student(competition_id, student_id)
     except ValidationError as e:
@@ -327,7 +328,7 @@ def list_enrolled_students(competition_id):
     Lista alunos inscritos na competição (status=inscrito).
     Filtros: ?limit=... (default 500), ?offset=... (default 0).
     """
-    competition = Competition.query.get_or_404(competition_id)
+    competition = CompetitionService.get_competition_or_404(competition_id)
     try:
         limit = int(request.args.get('limit', 500))
         offset = int(request.args.get('offset', 0))
@@ -392,7 +393,7 @@ def get_my_competition_session(competition_id):
     student_id, err = _resolve_student_id()
     if err:
         return err[0], err[1]
-    c = Competition.query.get_or_404(competition_id)
+    c = CompetitionService.get_competition_or_404(competition_id)
     if not c.test_id:
         return jsonify({"test_session": None}), 200
     session = (
@@ -415,7 +416,7 @@ def start_competition_test(competition_id):
     student_id, err = _resolve_student_id()
     if err:
         return err[0], err[1]
-    c = Competition.query.get_or_404(competition_id)
+    c = CompetitionService.get_competition_or_404(competition_id)
     if not c.test_id:
         return jsonify({"error": "Competição sem prova vinculada"}), 400
 
@@ -503,7 +504,7 @@ def get_competition_ranking(competition_id):
     ranking_visibility = 'realtime' → retorna sempre (se houver sessões finalizadas).
     ranking_visibility = 'final' → só retorna se competition.status = 'encerrada'.
     """
-    c = Competition.query.get_or_404(competition_id)
+    c = CompetitionService.get_competition_or_404(competition_id)
     visibility = (c.ranking_visibility or 'final').strip().lower()
     if visibility == 'final' and c.status != 'encerrada':
         return jsonify({"error": "Ranking só é exibido após o encerramento da competição"}), 403
@@ -529,6 +530,7 @@ def get_competition_ranking_by_scope(competition_id):
 
     Usa o mesmo cálculo de ranking, apenas filtrando os itens pelo escopo solicitado.
     """
+    CompetitionService.get_competition_or_404(competition_id)
     scope = (request.args.get('scope') or 'global').strip().lower()
     try:
         limit = request.args.get('limit', type=int) or 100
@@ -578,6 +580,7 @@ def get_competition_analytics(competition_id):
     Retorna analytics completos da competição (apenas admin/coordenador).
     Inclui: taxa de inscrição, taxa de participação, médias, distribuição de notas, top 10, comparação com anteriores.
     """
+    CompetitionService.get_competition_or_404(competition_id)
     try:
         from app.services.competition_analytics_service import CompetitionAnalyticsService
         analytics = CompetitionAnalyticsService.get_analytics(competition_id)
@@ -600,7 +603,7 @@ def get_my_competition_ranking(competition_id):
     student_id, err = _resolve_student_id()
     if err:
         return err[0], err[1]
-    c = Competition.query.get_or_404(competition_id)
+    c = CompetitionService.get_competition_or_404(competition_id)
     visibility = (c.ranking_visibility or 'final').strip().lower()
     if visibility == 'final' and c.status != 'encerrada':
         return jsonify({"error": "Ranking só é exibido após o encerramento da competição"}), 403
@@ -656,7 +659,7 @@ def finalize_competition(competition_id):
     paga moedas de ranking e define status='encerrada'.
     Só permite se expiration já passou e status é aberta/em_andamento.
     """
-    c = Competition.query.get_or_404(competition_id)
+    c = CompetitionService.get_competition_or_404(competition_id)
     if c.status not in ('aberta', 'em_andamento'):
         return jsonify({
             "error": "Competição já encerrada ou não está aberta.",
@@ -708,7 +711,7 @@ def list_eligible_students(competition_id):
     - ?offset=...    → deslocamento para paginação (default: 0)
     - ?include_meta=1 → inclui meta com diagnóstico (students_checked, excluded_*)
     """
-    competition = Competition.query.get_or_404(competition_id)
+    competition = CompetitionService.get_competition_or_404(competition_id)
     include_meta = request.args.get('include_meta', '').lower() in ('1', 'true', 'yes')
 
     # Verificações globais da competição
@@ -810,7 +813,7 @@ def list_eligible_students(competition_id):
 @role_required(*ROLES_EDIT)
 def get_competition(competition_id):
     """Detalhe de uma competição."""
-    c = Competition.query.get_or_404(competition_id)
+    c = CompetitionService.get_competition_or_404(competition_id)
     return jsonify(_competition_to_dict(c)), 200
 
 
@@ -906,7 +909,7 @@ def create_competition():
 @role_required(*ROLES_EDIT)
 def update_competition(competition_id):
     """Atualiza competição (apenas rascunho)."""
-    c = Competition.query.get_or_404(competition_id)
+    c = CompetitionService.get_competition_or_404(competition_id)
     if c.status != 'rascunho':
         return jsonify({"error": "Só é possível editar competição em rascunho"}), 400
     data = request.get_json()
@@ -992,6 +995,7 @@ def update_competition(competition_id):
 @role_required(*ROLES_EDIT)
 def delete_competition(competition_id):
     """Remove competição (apenas rascunho ou cancelada). Remove inscrições e dados relacionados."""
+    CompetitionService.get_competition_or_404(competition_id)
     try:
         CompetitionService.delete_competition(competition_id)
     except ValidationError as e:
@@ -1004,6 +1008,7 @@ def delete_competition(competition_id):
 @role_required(*ROLES_EDIT)
 def publish_competition(competition_id):
     """Publica competição (rascunho → aberta)."""
+    CompetitionService.get_competition_or_404(competition_id)
     competition = CompetitionService.publish_competition(competition_id)
     return jsonify(_competition_to_dict(competition)), 200
 
@@ -1013,6 +1018,7 @@ def publish_competition(competition_id):
 @role_required(*ROLES_EDIT)
 def cancel_competition(competition_id):
     """Cancela competição."""
+    CompetitionService.get_competition_or_404(competition_id)
     data = request.get_json() or {}
     reason = data.get('reason')
     competition = CompetitionService.cancel_competition(competition_id, reason=reason)
@@ -1027,6 +1033,7 @@ def add_questions(competition_id):
     data = request.get_json()
     if not data or 'question_ids' not in data:
         return jsonify({"error": "question_ids obrigatório"}), 400
+    CompetitionService.get_competition_or_404(competition_id)
     CompetitionService.add_questions_manually(competition_id, data['question_ids'])
-    c = Competition.query.get_or_404(competition_id)
+    c = CompetitionService.get_competition_or_404(competition_id)
     return jsonify(_competition_to_dict(c)), 200

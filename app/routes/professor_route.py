@@ -273,14 +273,12 @@ def listar_professores_por_escola(school_id):
 
 @bp.route('', methods=['GET'])
 @jwt_required()
-@role_required("admin", "diretor", "coordenador", "tecadm")
+@role_required("admin", "diretor", "coordenador", "tecadm", "professor")
 def listar_professores():
     try:
         user = get_current_user_from_token()
         if not user:
             return jsonify({"erro": "Usuário não encontrado"}), 404
-
-
 
         # Base query com joins
         query = db.session.query(
@@ -290,16 +288,17 @@ def listar_professores():
             User, Teacher.user_id == User.id
         )
 
-        # Filtrar por município baseado na role
+        # Filtrar por role: professor vê apenas a si mesmo (para relatórios/filtros da sua turma)
         if user['role'] == "admin":
             # Admin vê todos os professores
             pass
+        elif user['role'] == "professor":
+            # Professor vê apenas seu próprio registro (série, escola, município, estado da sua turma)
+            query = query.filter(Teacher.user_id == user['id'])
         elif user['role'] in ["diretor", "coordenador", "tecadm"]:
             # Diretor, coordenador e tecadmin veem apenas professores do mesmo município
             if not user.get('city_id'):
                 return jsonify({"erro": "Usuário não tem city_id atribuído"}), 400
-            
-            # Filtrar professores pelo city_id do usuário
             query = query.filter(User.city_id == user['city_id'])
 
         # Executar query

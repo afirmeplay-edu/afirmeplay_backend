@@ -14,6 +14,9 @@ from app.competitions.models import (
 )
 from app.competitions.constants import is_valid_level, student_grade_matches_level, validate_scope_and_filter
 from app.competitions.exceptions import ValidationError
+from app.competitions.schema_resolution import get_competition_target_schema, get_competition_schema
+from app.utils.tenant_middleware import set_search_path, get_current_tenant_context
+from sqlalchemy import text
 from app.models.test import Test
 from app.models.testQuestion import TestQuestion
 from app.models.question import Question
@@ -71,37 +74,51 @@ class CompetitionService:
         except ValueError as e:
             raise ValidationError(str(e))
 
-        competition = Competition(
-            name=data['name'],
-            description=data.get('description'),
-            subject_id=data['subject_id'],
-            level=data['level'],
-            scope=data.get('scope', 'individual'),
-            scope_filter=data.get('scope_filter'),
-            enrollment_start=enrollment_start,
-            enrollment_end=enrollment_end,
-            application=application,
-            expiration=expiration,
-            timezone=data.get('timezone', 'America/Sao_Paulo'),
-            question_mode=data.get('question_mode', 'auto_random'),
-            question_rules=data.get('question_rules'),
-            reward_config=data['reward_config'],
-            ranking_criteria=data.get('ranking_criteria', 'nota'),
-            ranking_tiebreaker=data.get('ranking_tiebreaker', 'tempo_entrega'),
-            ranking_visibility=data.get('ranking_visibility', 'final'),
-            max_participants=data.get('max_participants'),
-            recurrence=data.get('recurrence', 'manual'),
-            created_by=created_by_user_id,
-            status='rascunho',
+        scope = data.get('scope', 'individual')
+        scope_filter = data.get('scope_filter')
+        ctx = get_current_tenant_context()
+        tenant_schema = ctx.schema if (ctx and ctx.has_tenant_context) else None
+        tenant_city_id = getattr(ctx, 'city_id', None) if ctx else None
+        target_schema = get_competition_target_schema(
+            scope, scope_filter, tenant_schema=tenant_schema, tenant_city_id=tenant_city_id
         )
-        db.session.add(competition)
-        db.session.flush()
+        previous_schema = (ctx.schema if ctx else 'public') or 'public'
 
-        if competition.question_mode == 'auto_random':
-            CompetitionService._create_test_with_random_questions(competition)
+        set_search_path(target_schema)
+        try:
+            competition = Competition(
+                name=data['name'],
+                description=data.get('description'),
+                subject_id=data['subject_id'],
+                level=data['level'],
+                scope=scope,
+                scope_filter=scope_filter,
+                enrollment_start=enrollment_start,
+                enrollment_end=enrollment_end,
+                application=application,
+                expiration=expiration,
+                timezone=data.get('timezone', 'America/Sao_Paulo'),
+                question_mode=data.get('question_mode', 'auto_random'),
+                question_rules=data.get('question_rules'),
+                reward_config=data['reward_config'],
+                ranking_criteria=data.get('ranking_criteria', 'nota'),
+                ranking_tiebreaker=data.get('ranking_tiebreaker', 'tempo_entrega'),
+                ranking_visibility=data.get('ranking_visibility', 'final'),
+                max_participants=data.get('max_participants'),
+                recurrence=data.get('recurrence', 'manual'),
+                created_by=created_by_user_id,
+                status='rascunho',
+            )
+            db.session.add(competition)
+            db.session.flush()
 
-        db.session.commit()
-        return competition
+            if competition.question_mode == 'auto_random':
+                CompetitionService._create_test_with_random_questions(competition)
+
+            db.session.commit()
+            return competition
+        finally:
+            set_search_path(previous_schema)
 
     @staticmethod
     def _create_test_with_random_questions(
@@ -313,16 +330,87 @@ class CompetitionService:
         db.session.delete(c)
         db.session.commit()
 
+    # ---------- Resolução de competição por ID (schema) ----------
+
+    @staticmethod
+    def get_competition_or_404(competition_id: str):
+        """
+        Localiza a competição em public ou no schema do tenant, define o search_path
+        para o schema onde ela está e retorna a competição. Deve ser usado antes de
+        qualquer operação que grava em competition_enrollments, results, etc.
+        Levanta 404 se não encontrada.
+        """
+        ctx = get_current_tenant_context()
+        tenant_schema = (ctx.schema if (ctx and ctx.has_tenant_context) else None) or None
+        schema = get_competition_schema(competition_id, tenant_schema=tenant_schema)
+        if not schema:
+            from flask import abort
+            abort(404)
+        set_search_path(schema)
+        return Competition.query.get_or_404(competition_id)
+
+    # ---------- Listagem unificada (public + tenant) ----------
+
+    @staticmethod
+    def list_competitions_merged(status=None, level=None, subject_id=None, scope=None):
+        """
+        Lista competições dos schemas public e do tenant (quando houver), mescladas e deduplicadas por id.
+        Ordenação: created_at desc.
+        """
+        ctx = get_current_tenant_context()
+        tenant_schema = (ctx.schema if (ctx and ctx.has_tenant_context) else None) or None
+        previous_schema = (ctx.schema if ctx else 'public') or 'public'
+
+        by_id = {}
+
+        def _query_and_merge():
+            q = Competition.query
+            if status is not None:
+                q = q.filter(Competition.status == status)
+            if level is not None:
+                q = q.filter(Competition.level == level)
+            if subject_id is not None:
+                q = q.filter(Competition.subject_id == subject_id)
+            if scope is not None:
+                q = q.filter(Competition.scope == scope)
+            for c in q.order_by(Competition.created_at.desc()).all():
+                by_id[c.id] = c
+
+        try:
+            set_search_path('public')
+            _query_and_merge()
+            if tenant_schema and tenant_schema != 'public':
+                set_search_path(tenant_schema)
+                _query_and_merge()
+        finally:
+            set_search_path(previous_schema)
+
+        out = list(by_id.values())
+        out.sort(key=lambda c: c.created_at or datetime(1970, 1, 1), reverse=True)
+        return out
+
     # ---------- Etapa 3: Inscrição e listagem para aluno ----------
 
     @staticmethod
-    def is_student_enrolled(competition_id: str, student_id: str) -> bool:
+    def is_student_enrolled(competition_id: str, student_id: str, schema=None) -> bool:
         """Retorna True se o aluno está inscrito (status='inscrito') na competição."""
-        return CompetitionEnrollment.query.filter_by(
-            competition_id=competition_id,
-            student_id=student_id,
-            status='inscrito',
-        ).first() is not None
+        if schema is None:
+            ctx = get_current_tenant_context()
+            tenant_schema = (ctx.schema if (ctx and ctx.has_tenant_context) else None) or None
+            schema = get_competition_schema(competition_id, tenant_schema=tenant_schema)
+            if not schema:
+                return False
+        ctx = get_current_tenant_context()
+        previous = (ctx.schema if ctx else 'public') or 'public'
+        set_search_path(schema)
+        try:
+            return CompetitionEnrollment.query.filter_by(
+                competition_id=competition_id,
+                student_id=student_id,
+                status='inscrito',
+            ).first() is not None
+        finally:
+            set_search_path(previous)
 
     @staticmethod
     def get_available_competitions_for_student(student_id: str, subject_id: str = None):
@@ -330,22 +418,18 @@ class CompetitionService:
         Lista competições disponíveis para o aluno: status aberta, dentro do período
         geral da competição (da abertura das inscrições até o fim da prova),
         nível e escopo compatíveis, com vagas (se houver limite).
+        Considera competições de public e do schema do tenant.
         """
         student = Student.query.get(student_id)
         if not student:
             return []
 
-        # Buscar todas as competições abertas com test_id
-        query = (
-            Competition.query.filter(
-                Competition.status == 'aberta',
-                Competition.test_id.isnot(None),
-            )
+        # Buscar competições abertas em public + tenant
+        all_competitions = CompetitionService.list_competitions_merged(
+            status='aberta', subject_id=subject_id
         )
-        if subject_id:
-            query = query.filter(Competition.subject_id == subject_id)
-        all_competitions = query.all()
-        
+        all_competitions = [c for c in all_competitions if c.test_id is not None]
+
         # Filtrar usando as properties que já consideram timezone correto
         # A competição é considerada "disponível" se: inscrições abertas OU aplicação aberta (mas não finalizada)
         candidates = [
@@ -372,6 +456,7 @@ class CompetitionService:
     def get_student_competitions(student_id: str, status: str | None = None):
         """
         Lista competições relacionadas ao aluno (histórico).
+        Considera public e schema do tenant para inscrições; olympics no tenant.
 
         Inclui competições onde:
         - o aluno está/esteve inscrito (CompetitionEnrollment)
@@ -387,34 +472,87 @@ class CompetitionService:
         if not student:
             return []
 
-        # Competitions via inscrições
-        enrolled_competitions = (
-            Competition.query.join(
-                CompetitionEnrollment,
-                Competition.id == CompetitionEnrollment.competition_id,
-            )
-            .filter(
-                CompetitionEnrollment.student_id == student_id,
-            )
-            .all()
-        )
+        ctx = get_current_tenant_context()
+        tenant_schema = (ctx.schema if (ctx and ctx.has_tenant_context) else None) or None
+        previous_schema = (ctx.schema if ctx else 'public') or 'public'
 
-        # Competitions via StudentTestOlimpics (provas de competição feitas pelo aluno)
-        olympics_competitions = (
-            Competition.query.join(
-                StudentTestOlimpics,
-                Competition.test_id == StudentTestOlimpics.test_id,
-            )
-            .filter(
-                StudentTestOlimpics.student_id == student_id,
-            )
-            .all()
-        )
+        competition_ids = set()
 
-        # Unir as duas fontes (inscrições + provas realizadas) em memória, evitando UNION no banco
+        # Inscrições em public
+        try:
+            set_search_path('public')
+            rows = db.session.execute(
+                text(
+                    "SELECT competition_id FROM public.competition_enrollments WHERE student_id = :sid"
+                ),
+                {"sid": student_id},
+            ).fetchall()
+            competition_ids.update(r[0] for r in rows)
+        except Exception:
+            pass
+
+        # Inscrições no tenant
+        if tenant_schema and tenant_schema != 'public':
+            try:
+                set_search_path(tenant_schema)
+                rows = db.session.execute(
+                    text(
+                        'SELECT competition_id FROM "{}".competition_enrollments WHERE student_id = :sid'.format(
+                            tenant_schema
+                        )
+                    ),
+                    {"sid": student_id},
+                ).fetchall()
+                competition_ids.update(r[0] for r in rows)
+            except Exception:
+                pass
+
+        # Olympics (provas realizadas) no tenant
+        if tenant_schema and tenant_schema != 'public':
+            try:
+                set_search_path(tenant_schema)
+                olympics = StudentTestOlimpics.query.filter_by(
+                    student_id=student_id
+                ).with_entities(StudentTestOlimpics.test_id).all()
+                test_ids = [t[0] for t in olympics if t[0]]
+                if test_ids:
+                    comps = Competition.query.filter(
+                        Competition.test_id.in_(test_ids)
+                    ).with_entities(Competition.id).all()
+                    competition_ids.update(c[0] for c in comps)
+            except Exception:
+                pass
+        else:
+            try:
+                set_search_path('public')
+                olympics = StudentTestOlimpics.query.filter_by(
+                    student_id=student_id
+                ).with_entities(StudentTestOlimpics.test_id).all()
+                test_ids = [t[0] for t in olympics if t[0]]
+                if test_ids:
+                    comps = Competition.query.filter(
+                        Competition.test_id.in_(test_ids)
+                    ).with_entities(Competition.id).all()
+                    competition_ids.update(c[0] for c in comps)
+            except Exception:
+                pass
+
+        set_search_path(previous_schema)
+
+        # Particionar ids por schema e carregar competições
+        ids_by_schema = {}
+        for cid in competition_ids:
+            sch = get_competition_schema(cid, tenant_schema=tenant_schema)
+            if sch:
+                ids_by_schema.setdefault(sch, []).append(cid)
+
         all_competitions_dict = {}
-        for c in enrolled_competitions + olympics_competitions:
-            all_competitions_dict[c.id] = c
+        for sch, ids in ids_by_schema.items():
+            set_search_path(sch)
+            for c in Competition.query.filter(Competition.id.in_(ids)).all():
+                all_competitions_dict[c.id] = c
+        set_search_path(previous_schema)
+
         all_competitions = list(all_competitions_dict.values())
 
         def _match_status(c: Competition) -> bool:

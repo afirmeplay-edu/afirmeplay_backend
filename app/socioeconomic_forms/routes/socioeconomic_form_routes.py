@@ -467,9 +467,9 @@ def get_my_forms():
         for recipient in recipients:
             form = recipient.form
             
-            # Verificar se passou do deadline
-            if form.deadline and form.deadline < now:
-                continue  # Pular formulários com deadline expirado
+            # Pular formulários com deadline expirado, exceto os já concluídos
+            if form.deadline and form.deadline < now and recipient.status != 'completed':
+                continue
             
             # Buscar resposta atual (se existir)
             response = FormResponse.query.filter_by(

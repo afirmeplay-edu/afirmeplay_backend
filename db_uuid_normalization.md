@@ -157,6 +157,13 @@ Nestes pontos, o código foi ajustado para **eliminar erros de `UUID` x `VARCHAR
         - Filtro por escolas do professor: **`School.id.in_([str(sid) for sid in school_ids_uuids])`** (em vez de `cast(School.id, PostgresUUID).in_(school_ids_uuids)`).
     - Objetivo: comparar sempre VARCHAR com string, alinhado ao padrão do documento.
 
+- **Arquivo**: `app/routes/professor_route.py`
+    - **Erro**: `operator does not exist: character varying = uuid` ao acessar perfil do professor (role professor). Rota: **`GET /teacher/<teacher_id>`** (ex.: `GET /teacher/a447dcd5-0b22-40eb-99bc-6ff2c02bd2e8`). SQL gerado: `JOIN school ON class.school_id = CAST(school.id AS UUID)` na query que busca turmas do professor (`TeacherClass` + `Class` + `School` + `Grade`). A coluna `class.school_id` é VARCHAR e a comparação com `CAST(school.id AS UUID)` gera o erro.
+    - **Ajustes**:
+        - Import: adicionar **`String`** em `from sqlalchemy import cast, String`.
+        - Join **Class ↔ School** na query de turmas do professor: antes `Class.school_id == cast(School.id, PostgresUUID)`; agora **`School.id == cast(Class.school_id, String)`**.
+    - Objetivo: comparar sempre VARCHAR com string, alinhado ao padrão do documento.
+
 ---
 
 ### 3. Plano sugerido de migração futura

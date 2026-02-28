@@ -48,6 +48,24 @@ Este bloco consolida as decisões de tabelas, reuso de cálculos e comportamento
 
 - **competition_questions**: as questões da prova ficam em `test` + `test_questions` (prova é um `Test` normal). Não existe tabela própria de “questões da competição”.
 
+### Competições por schema (public vs município)
+
+O sistema é multi-tenant por município: existem o schema **public** e schemas **city_&lt;city_id&gt;** (um por município). Cada competição é gravada em **um único** schema (não há réplica em "ambos").
+
+| Escopo | Onde a competição é gravada |
+|--------|-----------------------------|
+| `individual`, `estado`, `global` | **public** |
+| `municipio` (um único city_id em scope_filter) | Schema **city_&lt;id&gt;** desse município |
+| `municipio` (vários city_ids) | **public** (visibilidade por scope na leitura) |
+| `escola` (escolas de uma única cidade) | Schema **city_&lt;id&gt;** da cidade das escolas |
+| `escola` (escolas de cidades diferentes) | **public** |
+| `turma` (turmas de uma única cidade) | Schema **city_&lt;id&gt;** da cidade das turmas |
+| `turma` (turmas de cidades diferentes) | **public** |
+
+- **Listagem**: as APIs de listagem unem competições de **public** e do schema do tenant (quando o request tem contexto de cidade), para que o usuário veja tanto competições globais quanto do seu município.
+- **Criação**: ao criar competição, o backend determina o schema alvo com base em `scope` e `scope_filter` e grava nesse schema.
+- **Re-upload / import**: ao subir competições novamente (ex.: após apagar do banco), usar a mesma regra: competições individual/estado/global em **public**; municipio (1 cidade)/escola/turma no schema do município correspondente.
+
 ### Reuso dos resultados da avaliação
 
 - **Cálculos de nota, proficiência, média, etc.** continuam sendo feitos **somente** nas tabelas e serviços já existentes de resultado da avaliação (ex.: sessões de prova, tabelas de resultado por questão/habilidade).

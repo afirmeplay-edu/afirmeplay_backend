@@ -3,21 +3,36 @@
 
 Usa city_id (município do sistema) + level para contexto.
 Revision ID: add_ideb_meta_saves
-Revises: add_competition_templates
+Revises: skill_grade_n_n
 Create Date: 2026-02-26
 
+Idempotente: cria tabela apenas se não existir.
 """
 from alembic import op
 import sqlalchemy as sa
 from sqlalchemy.dialects import postgresql
 
 revision = 'add_ideb_meta_saves'
-down_revision = 'skill_grade_n_n'  # após add_skill_grade_many_to_many (evita múltiplas heads)
+down_revision = 'skill_grade_n_n'
 branch_labels = None
 depends_on = None
 
 
+def _table_exists(connection, schema, table_name):
+    r = connection.execute(
+        sa.text(
+            "SELECT 1 FROM information_schema.tables "
+            "WHERE table_schema = :schema AND table_name = :name"
+        ),
+        {"schema": schema, "name": table_name},
+    )
+    return r.scalar() is not None
+
+
 def upgrade():
+    conn = op.get_bind()
+    if _table_exists(conn, 'public', 'ideb_meta_saves'):
+        return
     # Tabela no schema public (compartilhada; city_id referencia public.city)
     op.create_table(
         'ideb_meta_saves',
@@ -31,7 +46,6 @@ def upgrade():
             ['city_id'],
             ['city.id'],
             ondelete='CASCADE',
-            refschema='public',
         ),
         sa.UniqueConstraint('city_id', 'level', name='uq_ideb_meta_saves_context'),
         schema='public',
@@ -40,5 +54,8 @@ def upgrade():
 
 
 def downgrade():
+    conn = op.get_bind()
+    if not _table_exists(conn, 'public', 'ideb_meta_saves'):
+        return
     op.drop_index('idx_ideb_meta_saves_context', table_name='ideb_meta_saves', schema='public')
     op.drop_table('ideb_meta_saves', schema='public')

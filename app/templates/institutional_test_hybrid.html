@@ -1028,7 +1028,7 @@
 
 			<div class="time-text">
 				<strong
-					>Você terá 25 minutos para responder a este bloco.</strong
+					>Você terá {{ blocks_config.minutes_per_block | default(25) }} minutos para responder a este bloco.</strong
 				>
 			</div>
 		</div>
@@ -1088,7 +1088,7 @@
 
 			<div class="time-text">
 				<strong
-					>Você terá 25 minutos para responder a este bloco.</strong
+					>Você terá {{ blocks_config.minutes_per_block | default(25) }} minutos para responder a este bloco.</strong
 				>
 			</div>
 		</div>

@@ -13,6 +13,8 @@ from app.socioeconomic_forms.services.response_service import ResponseService
 from app.socioeconomic_forms.services.report_service import ReportService
 from app.socioeconomic_forms.services.template_service import TemplateService
 from app.socioeconomic_forms.models import Form, FormRecipient, FormResponse
+from app.models.student import Student
+from app.models.grades import Grade
 from app import db
 from app.utils.tenant_middleware import get_current_tenant_context
 from sqlalchemy.exc import SQLAlchemyError
@@ -635,6 +637,82 @@ def get_my_response(form_id):
     except Exception as e:
         logging.error(f"Erro ao buscar resposta: {str(e)}", exc_info=True)
         return jsonify({"error": "Erro ao buscar resposta", "details": str(e)}), 500
+
+
+@bp.route('/<form_id>/responses/user/<user_id>', methods=['GET'])
+@jwt_required()
+@role_required("admin", "tecadm", "diretor", "coordenador", "professor")
+def get_user_form_answers(form_id, user_id):
+    """
+    Obtém todas as perguntas de um formulário e as respostas de um usuário específico.
+    
+    Retorna a lista de questões (incluindo subperguntas) com o que o aluno respondeu.
+    """
+    try:
+        form = Form.query.get(form_id)
+        if not form:
+            return jsonify({"error": "Formulário não encontrado"}), 404
+        
+        response = ResponseService.get_user_response(form_id, user_id)
+        if not response:
+            return jsonify({"error": "Resposta não encontrada"}), 404
+        
+        responses_data = response.responses or {}
+        questions_payload = []
+        
+        for question in form.questions:
+            q_payload = {
+                'questionId': question.question_id,
+                'textoPergunta': question.text,
+                'tipo': question.type,
+            }
+            
+            # Incluir opções configuradas (para o frontend exibir texto das alternativas)
+            if question.options:
+                q_payload['options'] = question.options
+            
+            if question.sub_questions:
+                sub_list = []
+                for sub_q in question.sub_questions:
+                    sub_id = sub_q.get('id')
+                    if not sub_id:
+                        continue
+                    sub_list.append({
+                        'subQuestionId': sub_id,
+                        'textoSubpergunta': sub_q.get('text', ''),
+                        'resposta': responses_data.get(sub_id)
+                    })
+                q_payload['subRespostas'] = sub_list
+            else:
+                q_payload['resposta'] = responses_data.get(question.question_id)
+            
+            questions_payload.append(q_payload)
+        
+        # Série do aluno (ex.: "5º ano") — buscar Student/Grade por user_id
+        serie = None
+        student = Student.query.filter_by(user_id=response.user_id).first()
+        if student and student.grade_id:
+            grade = Grade.query.get(student.grade_id)
+            if grade:
+                serie = grade.name
+        
+        result = {
+            'formId': form.id,
+            'formTitle': form.title,
+            'userId': response.user_id,
+            'userName': response.user.name if response.user else None,
+            'serie': serie,
+            'status': response.status,
+            'startedAt': response.started_at.isoformat() if response.started_at else None,
+            'completedAt': response.completed_at.isoformat() if response.completed_at else None,
+            'questions': questions_payload
+        }
+        
+        return jsonify(result), 200
+    
+    except Exception as e:
+        logging.error(f"Erro ao obter respostas do usuário: {str(e)}", exc_info=True)
+        return jsonify({"error": "Erro ao obter respostas do usuário", "details": str(e)}), 500
 
 
 @bp.route('/<form_id>/responses', methods=['GET'])

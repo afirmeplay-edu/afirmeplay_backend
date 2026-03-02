@@ -175,6 +175,72 @@ def generate_profiles_report(
         raise self.retry(exc=e)
 
 
+@celery_app.task(bind=True, max_retries=3, default_retry_delay=60)
+def generate_responses_report(
+    self: Task,
+    form_id: str,
+    filters: Dict[str, Any],
+    page: int = 1,
+    limit: int = 20,
+    schema: Optional[str] = None
+) -> Dict[str, Any]:
+    """
+    Task Celery para gerar relatório "Respostas do socioeconômico".
+    
+    Args:
+        form_id: ID do formulário
+        filters: Filtros aplicados
+        page: Página para listas de alunos
+        limit: Limite de alunos por página
+        schema: Nome do schema PostgreSQL do tenant (multi-tenant).
+    
+    Returns:
+        Dict com resultado do processamento
+    """
+    try:
+        _set_tenant_schema(schema)
+        logger.info(f"[RESPOSTAS] Iniciando geração de relatório: form_id={form_id}, filters={filters}")
+        
+        form = Form.query.get(form_id)
+        if not form:
+            logger.error(f"[RESPOSTAS] Formulário {form_id} não encontrado")
+            raise ValueError(f"Formulário {form_id} não encontrado")
+        
+        cached = ResultsCacheService.get_result(form_id, 'respostas', filters)
+        if cached:
+            logger.info(f"[RESPOSTAS] Usando resultado do cache para form_id={form_id}")
+            return {
+                'success': True,
+                'cached': True,
+                'result': cached
+            }
+        
+        logger.info(f"[RESPOSTAS] Calculando resultado para form_id={form_id}")
+        result = ResultsService.calculate_responses_report(form_id, filters, page, limit)
+        student_count = result.get('totalRespostas', 0)
+        
+        ResultsCacheService.save(
+            form_id=form_id,
+            report_type='respostas',
+            filters=filters,
+            result=result,
+            student_count=student_count,
+            commit=True
+        )
+        
+        logger.info(f"[RESPOSTAS] Relatório gerado com sucesso: form_id={form_id}")
+        return {
+            'success': True,
+            'cached': False,
+            'result': result,
+            'student_count': student_count
+        }
+        
+    except Exception as e:
+        logger.error(f"[RESPOSTAS] Erro ao gerar relatório: {str(e)}", exc_info=True)
+        raise self.retry(exc=e)
+
+
 @celery_app.task(bind=True, max_retries=2, default_retry_delay=30)
 def rebuild_results_for_form(self: Task, form_id: str, schema: Optional[str] = None) -> Dict[str, Any]:
     """
@@ -215,6 +281,8 @@ def rebuild_results_for_form(self: Task, form_id: str, schema: Optional[str] = N
                 task = generate_indices_report.delay(form_id, cache.filters, 1, 20, schema)
             elif cache.report_type == 'profiles':
                 task = generate_profiles_report.delay(form_id, cache.filters, schema)
+            elif cache.report_type == 'respostas':
+                task = generate_responses_report.delay(form_id, cache.filters, 1, 20, schema)
             else:
                 continue
             

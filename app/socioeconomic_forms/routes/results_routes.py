@@ -7,7 +7,7 @@ from flask import Blueprint, request, jsonify, g
 from flask_jwt_extended import jwt_required
 from app.decorators.role_required import role_required
 from app.socioeconomic_forms.services.results_cache_service import ResultsCacheService
-from app.socioeconomic_forms.services.results_tasks import generate_indices_report, generate_profiles_report
+from app.socioeconomic_forms.services.results_tasks import generate_indices_report, generate_profiles_report, generate_responses_report
 from app.socioeconomic_forms.services.results_migration_tasks import populate_initial_cache_for_form, populate_all_forms_cache
 from celery.result import AsyncResult
 from app.report_analysis.celery_app import celery_app
@@ -133,6 +133,56 @@ def get_profiles_report(form_id):
         return jsonify({"error": str(e)}), 400
     except Exception as e:
         logger.error(f"Erro ao obter relatório de perfis: {str(e)}", exc_info=True)
+        return jsonify({"error": "Erro ao processar solicitação", "details": str(e)}), 500
+
+
+@bp.route('/<form_id>/results/respostas', methods=['GET'])
+@jwt_required()
+@role_required("admin", "tecadm", "diretor", "coordenador")
+def get_respostas_report(form_id):
+    """
+    Obtém relatório "Respostas do socioeconômico": por questão, quantidade de respostas,
+    porcentagem sobre o total, contagem por opção e quem respondeu / o que respondeu.
+    
+    Query params:
+    - state, municipio, escola, serie, turma: Filtros
+    - page: Página para listas de alunos (default: 1)
+    - limit: Limite de alunos por página (default: 20)
+    """
+    try:
+        filters = {
+            'state': request.args.get('state'),
+            'municipio': request.args.get('municipio'),
+            'escola': request.args.get('escola'),
+            'serie': request.args.get('serie'),
+            'turma': request.args.get('turma')
+        }
+        filters = {k: v for k, v in filters.items() if v}
+        page = int(request.args.get('page', 1))
+        limit = int(request.args.get('limit', 20))
+        
+        status = ResultsCacheService.get_status(form_id, 'respostas', filters)
+        
+        if status['status'] == 'ready':
+            result = ResultsCacheService.get_result(form_id, 'respostas', filters)
+            return jsonify(result), 200
+        
+        schema = _get_tenant_schema()
+        generate_responses_report.apply_async(
+            (form_id, filters, page, limit, schema),
+            ignore_result=True
+        )
+        return jsonify({
+            'status': 'processing',
+            'message': 'Relatório sendo gerado em background. Faça polling neste mesmo endpoint (GET respostas) até receber 200 com os dados.',
+            'pollSameUrl': True,
+            'cacheStatus': status
+        }), 202  # HTTP 202 Accepted
+        
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        logger.error(f"Erro ao obter relatório de respostas: {str(e)}", exc_info=True)
         return jsonify({"error": "Erro ao processar solicitação", "details": str(e)}), 500
 
 

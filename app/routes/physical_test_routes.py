@@ -1084,7 +1084,7 @@ def process_batch_in_background(job_id: str, test_id: str, images: list):
 
 @bp.route('/test/<string:test_id>/process-correction', methods=['POST'])
 @jwt_required()
-@role_required("admin", "professor", "coordenador", "diretor")
+@role_required("admin", "professor", "coordenador", "diretor", "tecadm")
 def process_physical_correction(test_id):
     """
     Processa correção de formulário(s) físico(s) usando CorrecaoHybrid

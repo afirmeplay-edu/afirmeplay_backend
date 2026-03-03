@@ -226,10 +226,11 @@ def format_question_response(q, exclude_fields=None):
     return response
 
 
-def format_test_response(test):
+def format_test_response(test, questions=None):
     """
     Formata a resposta de um teste com todas as informações relacionadas.
     Inclui tratamento de erros com rollback para evitar transações abortadas.
+    Se questions for passado, usa essa lista em vez de test.questions (evita N+1).
     """
     from app import db
     
@@ -475,7 +476,7 @@ def format_test_response(test):
         'applied_classes': applied_classes_info,
         'applied_classes_count': len(applied_classes_info),
         'total_students': total_students,
-        'questions': [format_question_response(q, exclude_fields=exclude_from_question) for q in test.questions]
+        'questions': [format_question_response(q, exclude_fields=exclude_from_question) for q in (questions if questions is not None else test.questions)]
     }
     except SQLAlchemyError as e:
         db.session.rollback()

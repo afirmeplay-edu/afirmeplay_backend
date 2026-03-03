@@ -902,10 +902,12 @@ def obter_avaliacao(test_id):
         
         # Restaurar search_path
         db.session.execute(text(f"SET search_path TO {current_search_path}"))
-        
-        print("="*80 + "\n")
-        
-        return jsonify(format_test_response(test)), 200
+
+        # Ordenar questões na mesma ordem de test_questions para evitar chamar test.questions (2 queries)
+        questions_dict = {q.id: q for q in questions_loaded}
+        ordered_questions = [questions_dict[tq.question_id] for tq in test_questions_list if tq.question_id in questions_dict]
+
+        return jsonify(format_test_response(test, questions=ordered_questions)), 200
 
     except Exception as e:
         logging.error(f"Error getting test: {str(e)}", exc_info=True)

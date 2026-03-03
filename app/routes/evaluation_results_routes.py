@@ -2654,15 +2654,13 @@ def listar_alunos():
         if not avaliacao_id:
             return jsonify({"error": "avaliacao_id é obrigatório"}), 400
         
-        # Verificar se avaliação existe
-        test = Test.query.get(avaliacao_id)
+        test = Test.query.options(joinedload(Test.subject_rel)).get(avaliacao_id)
         if not test:
             return jsonify({"error": "Avaliação não encontrada"}), 404
-        
-        # Verificar permissões
+
         if user['role'] == 'professor' and not professor_pode_ver_avaliacao(user['id'], test.id):
             return jsonify({"error": "Acesso negado"}), 403
-        
+
         # Buscar as turmas onde a avaliação foi aplicada
         # ✅ CORRIGIDO: ClassTest.test_id é VARCHAR, converter avaliacao_id para string
         class_tests = ClassTest.query.filter_by(test_id=str(avaliacao_id)).all()
@@ -2715,58 +2713,63 @@ def listar_alunos():
             joinedload(Student.class_).joinedload(Class.grade)
         ).filter(Student.class_id.in_(allowed_class_ids)).all()
         
-        # ✅ NOVO: Buscar resultados pré-calculados da tabela evaluation_results
         from app.models.evaluationResult import EvaluationResult
-        
-        evaluation_results = EvaluationResult.query.filter_by(test_id=avaliacao_id).all()
-        results_dict = {er.student_id: er for er in evaluation_results}
-        
-        total_questions = len(test.questions) if test.questions else 0
+        from app.models.testQuestion import TestQuestion
+
+        evaluation_results = EvaluationResult.query.filter_by(test_id=avaliacao_id).with_entities(
+            EvaluationResult.student_id,
+            EvaluationResult.correct_answers,
+            EvaluationResult.proficiency,
+            EvaluationResult.classification,
+            EvaluationResult.grade
+        ).all()
+        results_dict = {
+            row[0]: {
+                "correct_answers": row[1],
+                "proficiency": row[2],
+                "classification": row[3],
+                "grade": row[4] if row[4] is not None else 0.0
+            }
+            for row in evaluation_results
+        }
+
+        total_questions = TestQuestion.query.filter_by(test_id=avaliacao_id).count()
         
         results = []
         for student in all_students:
-            # Verificar se o aluno tem resultado calculado
-            evaluation_result = results_dict.get(student.id)
-            
-            if evaluation_result:
-                # Aluno respondeu - usar resultados pré-calculados
-                total_answered = evaluation_result.correct_answers  # Simplificado
-                correct_answers = evaluation_result.correct_answers
-                
-                # CORREÇÃO: Usar valores originais da proficiência
-                proficiency_original = evaluation_result.proficiency
-                classification_original = evaluation_result.classification
-                
+            er = results_dict.get(student.id)
+            if er:
+                total_answered = er["correct_answers"]
+                correct_answers = er["correct_answers"]
+                proficiency_original = er["proficiency"]
+                classification_original = er["classification"]
                 status = "concluida"
             else:
-                # Aluno NÃO respondeu - retornar zeros
                 total_answered = 0
                 correct_answers = 0
                 proficiency_original = 0.0
-                classification_original = None  # Não classificar se não fez
+                classification_original = None
                 status = "pendente"
-            
-            # Buscar informações da turma e grade
+
             turma_nome = "N/A"
             grade_nome = "N/A"
             if student.class_:
                 turma_nome = student.class_.name
                 if student.class_.grade:
                     grade_nome = student.class_.grade.name
-            
             student_result = {
                 "id": student.id,
                 "nome": student.name,
                 "turma": turma_nome,
                 "grade": grade_nome,
-                "nota": evaluation_result.grade if evaluation_result else 0.0,
+                "nota": er["grade"] if er else 0.0,
                 "proficiencia": format_decimal_two_places(proficiency_original),
                 "classificacao": classification_original,
                 "questoes_respondidas": total_answered,
                 "acertos": correct_answers,
                 "erros": total_answered - correct_answers,
                 "em_branco": total_questions - total_answered,
-                "tempo_gasto": 3600,  # Placeholder - pode ser implementado
+                "tempo_gasto": 3600,
                 "status": status
             }
             results.append(student_result)
@@ -4045,43 +4048,28 @@ def get_student_test_results(test_id, student_id):
         if not user:
             return jsonify({"error": "Usuário não encontrado"}), 401
 
-        # Verificar permissões
+        from app.models.evaluationResult import EvaluationResult
+        from app.models.testQuestion import TestQuestion
+
+        test = Test.query.options(joinedload(Test.subject_rel)).get(test_id)
+        if not test:
+            return jsonify({"error": "Avaliação não encontrada"}), 404
+
         if user['role'] == 'aluno':
-            # Aluno só pode ver seus próprios resultados
-            # O student_id enviado é o user_id, não o id da tabela Student
             if user['id'] != student_id:
                 return jsonify({"error": "Você só pode ver seus próprios resultados"}), 403
         elif user['role'] == 'professor':
-            # Professor só pode ver resultados de testes que criou
-            test = Test.query.get(test_id)
-            if not test or not professor_pode_ver_avaliacao(user['id'], test.id):
+            if not professor_pode_ver_avaliacao(user['id'], test.id):
                 return jsonify({"error": "Você só pode ver resultados de testes que criou"}), 403
-        
-        # ✅ NOVO: Buscar resultado pré-calculado da tabela evaluation_results
-        from app.models.evaluationResult import EvaluationResult
-        
-        # O student_id na URL pode ser user_id ou student_id real
-        # Primeiro, tentar buscar como user_id
+
         student = Student.query.filter_by(user_id=student_id).first()
         if student:
-            # É um user_id, usar o student.id
             actual_student_id = student.id
         else:
-            # Pode ser um student_id real, verificar se existe
             student = Student.query.get(student_id)
             if not student:
                 return jsonify({"error": "Aluno não encontrado"}), 404
             actual_student_id = student_id
-        
-        # Buscar o teste primeiro para usar em caso de erro
-        test = Test.query.get(test_id)
-        if not test:
-            return jsonify({"error": "Avaliação não encontrada"}), 404
-        
-        # Buscar o teste primeiro para usar em caso de erro
-        test = Test.query.get(test_id)
-        if not test:
-            return jsonify({"error": "Avaliação não encontrada"}), 404
         
         # Buscar resultado pré-calculado
         evaluation_result = EvaluationResult.query.filter_by(
@@ -4090,13 +4078,14 @@ def get_student_test_results(test_id, student_id):
         ).first()
         
         if not evaluation_result:
+            total_questions = TestQuestion.query.filter_by(test_id=test_id).count()
             return jsonify({
                 "error": "Aluno não respondeu esta avaliação",
                 "message": "O aluno não possui resultados calculados para esta avaliação",
                 "test_id": test_id,
                 "student_id": student_id,
                 "student_db_id": student.id,
-                "total_questions": len(test.questions) if test.questions else 0,
+                "total_questions": total_questions,
                 "answered_questions": 0,
                 "correct_answers": 0,
                 "score_percentage": 0.0,
@@ -4105,11 +4094,11 @@ def get_student_test_results(test_id, student_id):
                 "status": "nao_respondida"
             }), 200
         
-        # ✅ NOVO: Usar dados pré-calculados da tabela evaluation_results
-        # Buscar questões do teste através da tabela de associação
-        from app.models.testQuestion import TestQuestion
-        test_question_ids = [tq.question_id for tq in TestQuestion.query.filter_by(test_id=test_id).order_by(TestQuestion.order).all()]
-        questions = Question.query.filter(Question.id.in_(test_question_ids)).all() if test_question_ids else []
+        # Uma query para questões (TestQuestion + Question com joinedload)
+        tq_list = TestQuestion.query.filter_by(test_id=test_id).order_by(TestQuestion.order).options(
+            joinedload(TestQuestion.question)
+        ).all()
+        questions = [tq.question for tq in tq_list if tq.question]
         
         # Usar dados pré-calculados
         total_questions = evaluation_result.total_questions

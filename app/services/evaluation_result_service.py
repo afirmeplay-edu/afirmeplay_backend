@@ -358,11 +358,15 @@ class EvaluationResultService:
             
             db.session.commit()
             
-            # NOVO: Disparar task Celery para rebuild (com debounce)
+            # Disparar task Celery para rebuild (com debounce). Passar city_id para a task
+            # setar o schema do tenant (multi-tenant: Celery não tem JWT/request).
             try:
-                from app.report_analysis.tasks import rebuild_reports_for_test
-                rebuild_reports_for_test.delay(test_id)
-                logging.info(f"Task de rebuild agendada para test_id={test_id}")
+                if scope_city_id:
+                    from app.report_analysis.tasks import rebuild_reports_for_test
+                    rebuild_reports_for_test.delay(test_id, str(scope_city_id))
+                    logging.info(f"Task de rebuild agendada para test_id={test_id}, city_id={scope_city_id}")
+                else:
+                    logging.debug("Rebuild não agendado: scope_city_id ausente (sem tenant para report_aggregates)")
             except Exception as e:
                 logging.warning(f"Erro ao agendar task de rebuild: {str(e)}. Continuando sem rebuild automático.")
                 # Não falhar se Celery não estiver disponível

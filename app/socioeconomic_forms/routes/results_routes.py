@@ -9,6 +9,7 @@ from app.decorators.role_required import role_required
 from app.socioeconomic_forms.services.results_cache_service import ResultsCacheService
 from app.socioeconomic_forms.services.results_tasks import generate_indices_report, generate_profiles_report, generate_responses_report
 from app.socioeconomic_forms.services.results_migration_tasks import populate_initial_cache_for_form, populate_all_forms_cache
+from app.socioeconomic_forms.services.inse_saeb_service import InseSaebService
 from celery.result import AsyncResult
 from app.report_analysis.celery_app import celery_app
 import logging
@@ -133,6 +134,54 @@ def get_profiles_report(form_id):
         return jsonify({"error": str(e)}), 400
     except Exception as e:
         logger.error(f"Erro ao obter relatório de perfis: {str(e)}", exc_info=True)
+        return jsonify({"error": "Erro ao processar solicitação", "details": str(e)}), 500
+
+
+@bp.route('/<form_id>/results/inse-saeb', methods=['GET'])
+@jwt_required()
+@role_required("admin", "tecadm", "diretor", "coordenador")
+def get_inse_saeb_report(form_id):
+    """
+    Relatório INSE x SAEB: cruza respostas do formulário socioeconômico com resultados
+    da avaliação (proficiência por disciplina, INSE por aluno).
+
+    Query params:
+    - state: Estado (ex: "SP")
+    - municipio: ID do município (UUID)
+    - escola: ID da escola
+    - serie: ID da série (UUID)
+    - turma: ID da turma (UUID)
+    - avaliacao: ID da avaliação (test_id) — obrigatório
+    - page: Página da lista de alunos (default: 1)
+    - limit: Limite por página (default: 50)
+    """
+    try:
+        filters = {
+            'state': request.args.get('state'),
+            'municipio': request.args.get('municipio'),
+            'escola': request.args.get('escola'),
+            'serie': request.args.get('serie'),
+            'turma': request.args.get('turma'),
+        }
+        filters = {k: v for k, v in filters.items() if v}
+        avaliacao_id = request.args.get('avaliacao')
+        if not avaliacao_id:
+            return jsonify({"error": "Parâmetro 'avaliacao' é obrigatório"}), 400
+        page = int(request.args.get('page', 1))
+        limit = int(request.args.get('limit', 50))
+
+        result = InseSaebService.gerar_relatorio(
+            form_id=form_id,
+            filters=filters,
+            avaliacao_id=avaliacao_id,
+            page=page,
+            limit=limit,
+        )
+        return jsonify(result), 200
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        logger.error(f"Erro ao obter relatório INSE x SAEB: {str(e)}", exc_info=True)
         return jsonify({"error": "Erro ao processar solicitação", "details": str(e)}), 500
 
 

@@ -368,60 +368,71 @@ def get_skills_by_evaluation(test_id):
 
         # Buscar questões da avaliação usando helper multitenant
         questions = get_questions_from_test(test_id, order_by_test_question=True)
-        
+
         if not questions:
             return jsonify({"message": "Avaliação não possui questões."}), 404
 
-        # Extrair skills únicas das questões
+        # Extrair todos os códigos/ids de skill únicos (uma passagem)
         skills_set = set()
-        skills_data = []
-        
+        skill_to_subject = {}
         for question in questions:
             if question.skill:
-                # O campo skill pode conter múltiplas skills separadas por vírgula
-                question_skills = [s.strip() for s in question.skill.split(',') if s.strip()]
-                
-                for skill_code in question_skills:
-                    if skill_code not in skills_set:
-                        skills_set.add(skill_code)
-                        
-                        # Buscar informações da skill no banco
-                        # Primeiro tentar buscar por ID (UUID)
-                        skill_obj = None
-                        try:
-                            import uuid
-                            # Remover chaves se existirem
-                            skill_id_clean = skill_code.strip('{}')
-                            uuid_obj = uuid.UUID(skill_id_clean)
-                            skill_obj = Skill.query.filter_by(id=str(uuid_obj)).first()
-                        except (ValueError, AttributeError):
-                            pass
-                        
-                        # Se não encontrou por ID, tentar por código
-                        if not skill_obj:
-                            skill_obj = Skill.query.filter_by(code=skill_code).first()
-                        
-                        if skill_obj:
-                            grade_ids = [str(g.id) for g in (skill_obj.grades or [])]
-                            skills_data.append({
-                                "id": skill_obj.id,
-                                "code": skill_obj.code,
-                                "description": skill_obj.description,
-                                "subject_id": skill_obj.subject_id,
-                                "grade_ids": grade_ids,
-                                "grade_id": grade_ids[0] if grade_ids else None,
-                                "source": "database"
-                            })
-                        else:
-                            # Skill não encontrada no banco, criar entrada básica
-                            skills_data.append({
-                                "id": None,
-                                "code": skill_code,
-                                "description": f"Skill {skill_code} (não cadastrada)",
-                                "subject_id": question.subject_id,
-                                "grade_id": question.grade_level,
-                                "source": "question"
-                            })
+                for s in question.skill.split(','):
+                    code = s.strip()
+                    if code:
+                        skills_set.add(code)
+                        if code not in skill_to_subject:
+                            skill_to_subject[code] = (question.subject_id, question.grade_level)
+
+        # Buscar todas as skills em 2 queries (por ID e por code) em vez de N
+        import uuid as _uuid
+        skill_ids_to_try = []
+        skill_codes_to_try = []
+        for skill_code in skills_set:
+            try:
+                clean = skill_code.strip('{}')
+                _uuid.UUID(clean)
+                skill_ids_to_try.append(clean)
+            except (ValueError, AttributeError):
+                skill_codes_to_try.append(skill_code)
+
+        skills_by_id = {}
+        skills_by_code = {}
+        if skill_ids_to_try:
+            for sk in Skill.query.filter(Skill.id.in_(skill_ids_to_try)).all():
+                skills_by_id[str(sk.id)] = sk
+                skills_by_code[sk.code] = sk
+        if skill_codes_to_try:
+            for sk in Skill.query.filter(Skill.code.in_(skill_codes_to_try)).all():
+                if sk.code not in skills_by_code:
+                    skills_by_code[sk.code] = sk
+                if str(sk.id) not in skills_by_id:
+                    skills_by_id[str(sk.id)] = sk
+
+        skills_data = []
+        for skill_code in skills_set:
+            skill_obj = skills_by_id.get(skill_code.strip('{}')) or skills_by_code.get(skill_code)
+            subject_id, grade_id = skill_to_subject.get(skill_code, (None, None))
+            if skill_obj:
+                grade_ids = [str(g.id) for g in (skill_obj.grades or [])]
+                skills_data.append({
+                    "id": skill_obj.id,
+                    "code": skill_obj.code,
+                    "description": skill_obj.description,
+                    "subject_id": skill_obj.subject_id,
+                    "grade_ids": grade_ids,
+                    "grade_id": grade_ids[0] if grade_ids else None,
+                    "source": "database"
+                })
+            else:
+                skills_data.append({
+                    "id": None,
+                    "code": skill_code,
+                    "description": f"Skill {skill_code} (não cadastrada)",
+                    "subject_id": subject_id,
+                    "grade_id": grade_id,
+                    "source": "question"
+                })
 
         if not skills_data:
             return jsonify({"message": "Nenhuma skill encontrada na avaliação."}), 404

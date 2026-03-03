@@ -28,20 +28,13 @@ class EvaluationResultService:
         if not correct_answer or not student_answer:
             logging.warning(f"Alternativa correta ou resposta do aluno vazias: correct_answer={correct_answer}, student_answer={student_answer}")
             return False
-            
+
         student_answer = str(student_answer).strip()
         correct_answer = str(correct_answer).strip()
-        
-        logging.info(f"Verificando resposta: '{student_answer}' contra alternativa correta: '{correct_answer}'")
-        
+
         # Comparação direta (case-insensitive para maior flexibilidade)
         is_correct = student_answer.lower() == correct_answer.lower()
-        
-        if is_correct:
-            logging.info(f"Resposta correta! student_answer='{student_answer}' == correct_answer='{correct_answer}'")
-        else:
-            logging.info(f"Resposta incorreta: student_answer='{student_answer}' != correct_answer='{correct_answer}'")
-            
+        logging.debug("Verificando resposta: '%s' vs '%s' => %s", student_answer, correct_answer, is_correct)
         return is_correct
     
     @staticmethod

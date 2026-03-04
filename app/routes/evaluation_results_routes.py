@@ -4166,7 +4166,11 @@ def get_student_test_results(test_id, student_id):
                 
                 detailed_answers.append(answer_detail)
         
-        rankings = StudentRankingService.get_rankings(actual_student_id, test_id)
+        try:
+            rankings = StudentRankingService.get_rankings(actual_student_id, test_id)
+        except Exception as rank_err:
+            logging.warning("Erro ao buscar rankings do aluno (retornando vazio): %s", rank_err, exc_info=True)
+            rankings = []
 
         result = {
             "test_id": test_id,

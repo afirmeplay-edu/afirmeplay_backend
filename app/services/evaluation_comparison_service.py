@@ -584,12 +584,17 @@ class EvaluationComparisonService:
             return []
     
     @staticmethod
-    def _get_skills_by_subject_and_test(test_id: str, subject_id: str) -> Dict[str, Dict[str, str]]:
-        """Busca habilidades de um teste por disciplina. Retorna dict com skill_code -> {code, description}"""
+    def _get_skills_by_subject_and_test(
+        test_id: str, subject_id: str, cache: Optional[Dict[str, Any]] = None
+    ) -> Dict[str, Dict[str, str]]:
+        """Busca habilidades de um teste por disciplina (usa cache se fornecido)."""
+        key = (str(test_id), str(subject_id))
+        if cache and cache.get("skills_by_test_subject") is not None and key in cache["skills_by_test_subject"]:
+            return cache["skills_by_test_subject"][key]
         skills = {}
-        
-        # Buscar questões da disciplina
-        questions = EvaluationComparisonService._get_questions_by_subject(test_id, subject_id)
+        questions = (cache.get("questions") or {}).get(key) if cache else None
+        if questions is None:
+            questions = EvaluationComparisonService._get_questions_by_subject(test_id, subject_id)
         
         for question in questions:
             if question.skill:
@@ -629,7 +634,8 @@ class EvaluationComparisonService:
                                 'code': skill_code_clean,
                                 'description': f"Skill {skill_code_clean}"
                             }
-        
+        if cache is not None:
+            cache.setdefault("skills_by_test_subject", {})[key] = skills
         return skills
     
     @staticmethod
@@ -779,24 +785,27 @@ class EvaluationComparisonService:
                 logging.error(f"Avaliações não encontradas: {missing_ids}")
                 return None
             
-            # Verificar se todas as avaliações foram aplicadas à classe do aluno
-            class_tests = ClassTest.query.filter_by(class_id=student_obj.class_id).all()
+            # Verificar se todas as avaliações foram aplicadas à classe (uma query, só test_ids pedidos)
+            class_tests = ClassTest.query.filter(
+                ClassTest.class_id == student_obj.class_id,
+                ClassTest.test_id.in_(test_ids)
+            ).all()
             applied_test_ids = {ct.test_id for ct in class_tests}
-            
             not_applied_tests = set(test_ids) - applied_test_ids
             if not_applied_tests:
                 logging.error(f"Avaliações não aplicadas à classe do aluno: {not_applied_tests}")
                 return None
             
-            # Buscar datas de aplicação e ordenar cronologicamente
+            # Buscar datas de aplicação (uma query; agrupar por test_id e pegar menor application)
+            class_tests_by_test = {}
+            for ct in class_tests:
+                if ct.test_id not in class_tests_by_test:
+                    class_tests_by_test[ct.test_id] = []
+                class_tests_by_test[ct.test_id].append(ct)
             tests_with_dates = []
-            
             for test in tests:
-                # Buscar data de aplicação mais antiga (primeira aplicação)
-                test_class_tests = ClassTest.query.filter_by(test_id=test.id).all()
                 application_date = None
-                
-                for ct in test_class_tests:
+                for ct in class_tests_by_test.get(test.id) or []:
                     if ct.application:
                         try:
                             parsed_date = dateutil.parser.parse(ct.application)
@@ -804,33 +813,22 @@ class EvaluationComparisonService:
                                 application_date = parsed_date
                         except Exception as e:
                             logging.warning(f"Erro ao parsear data de aplicação para teste {test.id}: {e}")
-                
-                # Se não encontrar data de aplicação, usar created_at como fallback
                 if application_date is None:
                     application_date = test.created_at or datetime.min
-                
-                tests_with_dates.append({
-                    'test': test,
-                    'application_date': application_date
-                })
-            
-            # Ordenar por data de aplicação (primeira aplicada primeiro)
+                tests_with_dates.append({'test': test, 'application_date': application_date})
             tests_with_dates.sort(key=lambda x: x['application_date'])
             ordered_tests = [item['test'] for item in tests_with_dates]
             
-            # Verificar se o aluno completou todas as avaliações
-            all_results = {}
-            for test in ordered_tests:
-                result = EvaluationResult.query.filter_by(
-                    test_id=test.id, 
-                    student_id=actual_student_id
-                ).first()
-                
-                if not result:
-                    logging.warning(f"Aluno {actual_student_id} não completou avaliação {test.id}")
-                    return None
-                
-                all_results[test.id] = result
+            # Buscar todos os resultados do aluno nessas avaliações (uma query)
+            results_list = EvaluationResult.query.filter(
+                EvaluationResult.student_id == actual_student_id,
+                EvaluationResult.test_id.in_(test_ids)
+            ).all()
+            all_results = {r.test_id: r for r in results_list}
+            if len(all_results) != len(test_ids):
+                missing = set(test_ids) - set(all_results.keys())
+                logging.warning(f"Aluno {actual_student_id} não completou avaliações: {missing}")
+                return None
             
             # Preparar dados básicos das avaliações ordenadas
             evaluations_data = []
@@ -844,38 +842,62 @@ class EvaluationComparisonService:
                     "application_date": item['application_date'].isoformat() if item['application_date'] else None
                 })
             
-            # Fazer comparações sequenciais (1→2, 2→3, 3→4, etc.)
+            # Cache em lote para evitar N queries (questões, respostas, disciplinas); se falhar, segue sem cache
+            comparison_cache = None
+            try:
+                comparison_cache = EvaluationComparisonService._build_student_comparison_cache(
+                    ordered_tests, actual_student_id
+                )
+            except Exception as cache_err:
+                logging.warning(
+                    "Cache de comparação ignorado (comparação segue sem cache): %s",
+                    cache_err,
+                    exc_info=True,
+                )
+            
+            # Fazer comparações sequenciais (1→2, 2→3, 3→4, etc.) usando cache se houver
             comparisons = []
             for i in range(len(ordered_tests) - 1):
-                test_from = ordered_tests[i]
-                test_to = ordered_tests[i + 1]
-                result_from = all_results[test_from.id]
-                result_to = all_results[test_to.id]
-                
-                # Comparação geral
-                general_comparison = EvaluationComparisonService._get_student_general_comparison(result_from, result_to)
-                
-                # Comparação por disciplina
-                subject_comparison = EvaluationComparisonService._get_student_subject_comparison(actual_student_id, test_from, test_to)
-                
-                # Comparação por habilidade
-                skills_comparison = EvaluationComparisonService._get_student_skills_comparison(actual_student_id, test_from, test_to)
-                
-                comparisons.append({
-                    "from_evaluation": {
-                        "id": test_from.id,
-                        "title": test_from.title,
-                        "order": i + 1
-                    },
-                    "to_evaluation": {
-                        "id": test_to.id,
-                        "title": test_to.title,
-                        "order": i + 2
-                    },
-                    "general_comparison": general_comparison,
-                    "subject_comparison": subject_comparison,
-                    "skills_comparison": skills_comparison
-                })
+                try:
+                    test_from = ordered_tests[i]
+                    test_to = ordered_tests[i + 1]
+                    result_from = all_results.get(test_from.id)
+                    result_to = all_results.get(test_to.id)
+                    if not result_from or not result_to:
+                        continue
+                    general_comparison = EvaluationComparisonService._get_student_general_comparison(
+                        result_from, result_to
+                    )
+                    subject_comparison = EvaluationComparisonService._get_student_subject_comparison(
+                        actual_student_id, test_from, test_to, cache=comparison_cache
+                    )
+                    skills_comparison = EvaluationComparisonService._get_student_skills_comparison(
+                        actual_student_id, test_from, test_to, cache=comparison_cache
+                    )
+                    comparisons.append({
+                        "from_evaluation": {
+                            "id": test_from.id,
+                            "title": test_from.title,
+                            "order": i + 1
+                        },
+                        "to_evaluation": {
+                            "id": test_to.id,
+                            "title": test_to.title,
+                            "order": i + 2
+                        },
+                        "general_comparison": general_comparison,
+                        "subject_comparison": subject_comparison or {},
+                        "skills_comparison": skills_comparison or {}
+                    })
+                except Exception as pair_err:
+                    logging.warning(
+                        "Comparação par %s->%s ignorada: %s",
+                        getattr(ordered_tests[i], "id", i),
+                        getattr(ordered_tests[i + 1], "id", i + 1),
+                        pair_err,
+                        exc_info=True,
+                    )
+                    continue
             
             return {
                 "student": {
@@ -995,6 +1017,73 @@ class EvaluationComparisonService:
             return None
     
     @staticmethod
+    def _build_student_comparison_cache(ordered_tests: List[Test], student_id: str) -> Dict[str, Any]:
+        """Carrega em lote questões, respostas e disciplinas para todas as avaliações (evita N+1)."""
+        from collections import defaultdict
+        test_ids = [t.id for t in ordered_tests]
+        # Disciplinas por teste
+        subject_ids = set()
+        for test in ordered_tests:
+            for sid in EvaluationComparisonService._extract_subjects_from_test(test).keys():
+                subject_ids.add(sid)
+        # Uma query: TestQuestion para todos os testes
+        test_questions = TestQuestion.query.filter(TestQuestion.test_id.in_(test_ids)).order_by(
+            TestQuestion.test_id, TestQuestion.order
+        ).all()
+        if not test_questions:
+            return {
+                "questions": {},
+                "student_answers_by_test": {},
+                "subjects": {},
+                "tests": {t.id: t for t in ordered_tests},
+                "subject_results": {},
+                "skill_results": {},
+                "skills_by_test_subject": {},
+            }
+        question_ids = list({tq.question_id for tq in test_questions})
+        questions_list = Question.query.filter(Question.id.in_(question_ids)).all()
+        questions_by_id = {q.id: q for q in questions_list}
+        # Agrupar (test_id, order) -> question_id e montar (test_id, subject_id) -> [Question] em ordem
+        tq_by_test = defaultdict(list)
+        for tq in test_questions:
+            tq_by_test[str(tq.test_id)].append((tq.order, tq.question_id))
+        questions_by_key = {}
+        for test in ordered_tests:
+            tid = str(test.id)
+            order_qids = sorted(tq_by_test.get(tid, []), key=lambda x: (x[0] is None, x[0]))
+            subjects_in_test = EvaluationComparisonService._extract_subjects_from_test(test)
+            for subject_id in subjects_in_test:
+                sid = str(subject_id)
+                qs = []
+                for _order, qid in order_qids:
+                    q = questions_by_id.get(qid)
+                    if q and str(getattr(q, "subject_id", None) or "") == sid:
+                        qs.append(q)
+                if qs:
+                    questions_by_key[(tid, sid)] = qs
+        # Uma query: todas as respostas do aluno nesses testes
+        student_answers = StudentAnswer.query.filter(
+            StudentAnswer.student_id == student_id,
+            StudentAnswer.test_id.in_(test_ids),
+        ).all()
+        student_answers_by_test = defaultdict(list)
+        for sa in student_answers:
+            student_answers_by_test[str(sa.test_id)].append(sa)
+        # Uma query: disciplinas
+        subjects_list = Subject.query.filter(Subject.id.in_(subject_ids)).all() if subject_ids else []
+        subjects = {str(s.id): s for s in subjects_list}
+        tests = {str(t.id): t for t in ordered_tests}
+        return {
+            "questions": questions_by_key,
+            "student_answers_by_test": dict(student_answers_by_test),
+            "subjects": subjects,
+            "tests": tests,
+            "subject_results": {},
+            "skill_results": {},
+            "skills_by_test_subject": {},
+        }
+
+    @staticmethod
     def _get_student_general_comparison(result_1: EvaluationResult, result_2: EvaluationResult) -> Dict[str, Any]:
         """Calcula comparação geral entre as duas avaliações para um aluno específico"""
         try:
@@ -1033,30 +1122,27 @@ class EvaluationComparisonService:
             return {}
     
     @staticmethod
-    def _get_student_subject_comparison(student_id: str, test_1: Test, test_2: Test) -> Dict[str, Any]:
-        """Calcula comparação por disciplina para um aluno específico"""
+    def _get_student_subject_comparison(
+        student_id: str, test_1: Test, test_2: Test, cache: Optional[Dict[str, Any]] = None
+    ) -> Dict[str, Any]:
+        """Calcula comparação por disciplina para um aluno específico (usa cache se fornecido)."""
         try:
             subject_comparison = {}
-            
-            # Extrair disciplinas de ambas avaliações
             subjects_1 = EvaluationComparisonService._extract_subjects_from_test(test_1)
             subjects_2 = EvaluationComparisonService._extract_subjects_from_test(test_2)
-            
-            # Criar set de IDs de disciplinas comuns
             subject_ids_1 = set(subjects_1.keys())
             subject_ids_2 = set(subjects_2.keys())
             common_subjects = subject_ids_1.intersection(subject_ids_2)
-            
             if not common_subjects:
-                logging.warning(f"Nenhuma disciplina comum encontrada entre as avaliações")
                 return {}
-            
             for subject_id in common_subjects:
                 subject_name = subjects_1[subject_id]
-                
-                # Buscar resultados específicos desta disciplina para o aluno
-                subject_result_1 = EvaluationComparisonService._get_student_subject_results(student_id, test_1.id, subject_id)
-                subject_result_2 = EvaluationComparisonService._get_student_subject_results(student_id, test_2.id, subject_id)
+                subject_result_1 = EvaluationComparisonService._get_student_subject_results(
+                    student_id, test_1.id, subject_id, cache=cache
+                )
+                subject_result_2 = EvaluationComparisonService._get_student_subject_results(
+                    student_id, test_2.id, subject_id, cache=cache
+                )
                 
                 if not subject_result_1 or not subject_result_2:
                     continue
@@ -1095,43 +1181,34 @@ class EvaluationComparisonService:
             return {}
     
     @staticmethod
-    def _get_student_skills_comparison(student_id: str, test_1: Test, test_2: Test) -> Dict[str, Any]:
-        """Calcula comparação por habilidade para um aluno específico"""
+    def _get_student_skills_comparison(
+        student_id: str, test_1: Test, test_2: Test, cache: Optional[Dict[str, Any]] = None
+    ) -> Dict[str, Any]:
+        """Calcula comparação por habilidade para um aluno específico (usa cache se fornecido)."""
         try:
             skills_comparison = {}
-            
-            # Extrair disciplinas de ambas avaliações
             subjects_1 = EvaluationComparisonService._extract_subjects_from_test(test_1)
             subjects_2 = EvaluationComparisonService._extract_subjects_from_test(test_2)
-            
-            # Criar set de IDs de disciplinas comuns
             subject_ids_1 = set(subjects_1.keys())
             subject_ids_2 = set(subjects_2.keys())
             common_subjects = subject_ids_1.intersection(subject_ids_2)
-            
             if not common_subjects:
                 return {}
-            
             for subject_id in common_subjects:
                 subject_name = subjects_1[subject_id]
-                
-                # Buscar habilidades de ambas avaliações para esta disciplina
-                skills_1 = EvaluationComparisonService._get_skills_by_subject_and_test(test_1.id, subject_id)
-                skills_2 = EvaluationComparisonService._get_skills_by_subject_and_test(test_2.id, subject_id)
-                
-                # Encontrar habilidades comuns
+                skills_1 = EvaluationComparisonService._get_skills_by_subject_and_test(
+                    test_1.id, subject_id, cache=cache
+                )
+                skills_2 = EvaluationComparisonService._get_skills_by_subject_and_test(
+                    test_2.id, subject_id, cache=cache
+                )
                 skill_codes_1 = set(skills_1.keys())
                 skill_codes_2 = set(skills_2.keys())
                 common_skills = skill_codes_1.intersection(skill_codes_2)
-                
                 subject_skills_comparison = {}
-                
                 for skill_code in common_skills:
-                    # Obter informações da skill
                     skill_info_1 = skills_1.get(skill_code, {})
                     skill_info_2 = skills_2.get(skill_code, {})
-                    
-                    # Usar informações preferencialmente do primeiro teste
                     if isinstance(skill_info_1, dict):
                         actual_code = skill_info_1.get('code', skill_code.strip('{}'))
                         skill_description = skill_info_1.get('description', f"Skill {actual_code}")
@@ -1141,10 +1218,12 @@ class EvaluationComparisonService:
                     else:
                         actual_code = skill_code.strip('{}')
                         skill_description = f"Skill {actual_code}"
-                    
-                    # Calcular acertos por habilidade para o aluno
-                    skill_result_1 = EvaluationComparisonService._get_student_skill_results(student_id, test_1.id, subject_id, skill_code)
-                    skill_result_2 = EvaluationComparisonService._get_student_skill_results(student_id, test_2.id, subject_id, skill_code)
+                    skill_result_1 = EvaluationComparisonService._get_student_skill_results(
+                        student_id, test_1.id, subject_id, skill_code, cache=cache
+                    )
+                    skill_result_2 = EvaluationComparisonService._get_student_skill_results(
+                        student_id, test_2.id, subject_id, skill_code, cache=cache
+                    )
                     
                     if not skill_result_1 or not skill_result_2:
                         continue
@@ -1182,49 +1261,55 @@ class EvaluationComparisonService:
             return {}
     
     @staticmethod
-    def _get_student_subject_results(student_id: str, test_id: str, subject_id: str) -> Optional[Dict[str, Any]]:
-        """Busca resultados específicos de uma disciplina para um aluno específico"""
+    def _get_student_subject_results(
+        student_id: str, test_id: str, subject_id: str, cache: Optional[Dict[str, Any]] = None
+    ) -> Optional[Dict[str, Any]]:
+        """Busca resultados específicos de uma disciplina para um aluno (usa cache para evitar N queries)."""
         try:
-            # Buscar questões da disciplina
-            questions = EvaluationComparisonService._get_questions_by_subject(test_id, subject_id)
+            tkey = (str(test_id), str(subject_id))
+            if cache is not None:
+                if tkey in cache.get("subject_results", {}):
+                    return cache["subject_results"][tkey]
+            questions = (
+                (cache.get("questions") or {}).get(tkey)
+                if cache else None
+            )
+            if questions is None:
+                questions = EvaluationComparisonService._get_questions_by_subject(test_id, subject_id)
             question_ids = [q.id for q in questions]
-            
             if not question_ids:
                 return None
-            
-            # Buscar respostas do aluno para questões desta disciplina
-            student_answers = StudentAnswer.query.filter(
-                StudentAnswer.test_id == test_id,
-                StudentAnswer.student_id == student_id,
-                StudentAnswer.question_id.in_(question_ids)
-            ).all()
-            
+            if cache and cache.get("student_answers_by_test"):
+                all_answers = cache["student_answers_by_test"].get(str(test_id), [])
+                student_answers = [a for a in all_answers if a.question_id in question_ids]
+            else:
+                student_answers = StudentAnswer.query.filter(
+                    StudentAnswer.test_id == test_id,
+                    StudentAnswer.student_id == student_id,
+                    StudentAnswer.question_id.in_(question_ids),
+                ).all()
             if not student_answers:
                 return None
-            
-            # Calcular acertos para esta disciplina
+            questions_by_id = {q.id: q for q in questions}
             correct_answers = 0
             for answer in student_answers:
-                question = next((q for q in questions if q.id == answer.question_id), None)
+                question = questions_by_id.get(answer.question_id)
                 if question:
-                    # Verificar se é questão de múltipla escolha
                     if question.question_type in ['multiple_choice', 'multipleChoice']:
                         from app.services.evaluation_result_service import EvaluationResultService
-                        is_correct = EvaluationResultService.check_multiple_choice_answer(answer.answer, question.correct_answer)
-                        if is_correct:
+                        if EvaluationResultService.check_multiple_choice_answer(answer.answer, question.correct_answer):
                             correct_answers += 1
-                    elif question.correct_answer:
-                        if str(answer.answer).strip().lower() == str(question.correct_answer).strip().lower():
-                            correct_answers += 1
-            
+                    elif question.correct_answer and str(answer.answer).strip().lower() == str(question.correct_answer).strip().lower():
+                        correct_answers += 1
             total_questions = len(student_answers)
             if total_questions == 0:
                 return None
-            
-            # Buscar curso do teste
-            test = Test.query.get(test_id)
-            course_name = "Anos Iniciais"  # Padrão
-            if test and test.course:
+            course_name = "Anos Iniciais"
+            if cache and cache.get("tests"):
+                test = cache["tests"].get(str(test_id))
+            else:
+                test = Test.query.get(test_id)
+            if test and getattr(test, "course", None):
                 try:
                     from app.models.educationStage import EducationStage
                     course_obj = EducationStage.query.get(test.course)
@@ -1232,64 +1317,71 @@ class EvaluationComparisonService:
                         course_name = course_obj.name
                 except Exception:
                     pass
-            
-            # Buscar nome da disciplina
-            subject_obj = Subject.query.get(subject_id)
+            subject_obj = (cache.get("subjects") or {}).get(str(subject_id)) if cache else None
+            if subject_obj is None:
+                subject_obj = Subject.query.get(subject_id)
             subject_name = subject_obj.name if subject_obj else "Outras"
-            
-            # Calcular usando EvaluationCalculator
             result = EvaluationCalculator.calculate_complete_evaluation(
                 correct_answers=correct_answers,
                 total_questions=total_questions,
                 course_name=course_name,
-                subject_name=subject_name
+                subject_name=subject_name,
             )
-            
-            return {
-                'grade': result['grade'],
-                'proficiency': result['proficiency'],
-                'classification': result['classification'],
-                'correct_answers': correct_answers,
-                'total_questions': total_questions
+            out = {
+                "grade": result["grade"],
+                "proficiency": result["proficiency"],
+                "classification": result["classification"],
+                "correct_answers": correct_answers,
+                "total_questions": total_questions,
             }
-            
+            if cache is not None:
+                cache.setdefault("subject_results", {})[tkey] = out
+            return out
         except Exception as e:
             logging.error(f"Erro ao buscar resultados da disciplina {subject_id} para aluno {student_id}: {str(e)}")
             return None
     
     @staticmethod
-    def _get_student_skill_results(student_id: str, test_id: str, subject_id: str, skill_code: str) -> Optional[Dict[str, Any]]:
-        """Busca resultados de uma habilidade específica para um aluno específico"""
+    def _get_student_skill_results(
+        student_id: str, test_id: str, subject_id: str, skill_code: str,
+        cache: Optional[Dict[str, Any]] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """Busca resultados de uma habilidade para um aluno (usa cache para evitar N queries)."""
         try:
-            # Buscar questões que têm esta habilidade
-            questions = EvaluationComparisonService._get_questions_by_subject(test_id, subject_id)
+            skey = (str(test_id), str(subject_id), str(skill_code))
+            if cache and cache.get("skill_results") and skey in cache["skill_results"]:
+                return cache["skill_results"][skey]
+            qkey = (str(test_id), str(subject_id))
+            questions = (
+                (cache.get("questions") or {}).get(qkey)
+                if cache else None
+            )
+            if questions is None:
+                questions = EvaluationComparisonService._get_questions_by_subject(test_id, subject_id)
             skill_questions = []
-            
             for question in questions:
                 if question.skill:
                     question_skills = [s.strip() for s in question.skill.split(',') if s.strip()]
                     if skill_code in question_skills:
                         skill_questions.append(question)
-            
             if not skill_questions:
                 return None
-            
             question_ids = [q.id for q in skill_questions]
-            
-            # Buscar respostas do aluno para essas questões específicas
-            student_answers = StudentAnswer.query.filter(
-                StudentAnswer.test_id == test_id,
-                StudentAnswer.student_id == student_id,
-                StudentAnswer.question_id.in_(question_ids)
-            ).all()
-            
+            if cache and cache.get("student_answers_by_test"):
+                all_answers = cache["student_answers_by_test"].get(str(test_id), [])
+                student_answers = [a for a in all_answers if a.question_id in question_ids]
+            else:
+                student_answers = StudentAnswer.query.filter(
+                    StudentAnswer.test_id == test_id,
+                    StudentAnswer.student_id == student_id,
+                    StudentAnswer.question_id.in_(question_ids),
+                ).all()
             if not student_answers:
                 return None
-            
-            # Calcular acertos
+            skill_questions_by_id = {q.id: q for q in skill_questions}
             correct_answers = 0
             for answer in student_answers:
-                question = next((q for q in skill_questions if q.id == answer.question_id), None)
+                question = skill_questions_by_id.get(answer.question_id)
                 if question:
                     # Verificar se é questão de múltipla escolha
                     if question.question_type in ['multiple_choice', 'multipleChoice']:
@@ -1303,13 +1395,14 @@ class EvaluationComparisonService:
             
             total_questions = len(student_answers)
             percentage = (correct_answers / total_questions * 100) if total_questions > 0 else 0
-            
-            return {
+            out = {
                 'correct_answers': correct_answers,
                 'total_questions': total_questions,
                 'percentage': percentage
             }
-            
+            if cache is not None:
+                cache.setdefault("skill_results", {})[skey] = out
+            return out
         except Exception as e:
             logging.error(f"Erro ao buscar resultados da habilidade {skill_code} para aluno {student_id}: {str(e)}")
             return None

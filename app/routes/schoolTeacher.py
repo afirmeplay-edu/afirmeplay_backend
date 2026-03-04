@@ -146,12 +146,12 @@ def get_school_teachers():
         
         resultado = []
         for vinculo in vinculos:
-            # Buscar dados do professor
-            teacher = Teacher.query.get(vinculo.teacher_id)
+            # Evitar query.get(None) — chave primária NULL gera SAWarning
+            teacher = Teacher.query.get(vinculo.teacher_id) if vinculo.teacher_id else None
             user = User.query.get(teacher.user_id) if teacher else None
-            
-            # Buscar dados da escola
-            school = School.query.get(vinculo.school_id)
+
+            # Buscar dados da escola (evitar query.get(None) se school_id for NULL)
+            school = School.query.get(vinculo.school_id) if vinculo.school_id else None
             
             resultado.append({
                 'id': vinculo.id,

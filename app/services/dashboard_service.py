@@ -36,6 +36,15 @@ from app.permissions.utils import (
 from app.certification.services.certificate_service import CertificateService
 
 
+def _safe_build(build_fn, scope: Dict[str, Any], default: Any) -> Any:
+    """Executa build_fn(scope) e, em caso de exceção, retorna default (evita ERR_EMPTY_RESPONSE)."""
+    try:
+        return build_fn(scope)
+    except Exception:
+        db.session.rollback()
+        return default
+
+
 class DashboardService:
     """
     Serviço responsável por montar os payloads dos dashboards do frontend.
@@ -50,14 +59,14 @@ class DashboardService:
     @classmethod
     def get_admin_dashboard(cls, user: Dict[str, Any]) -> Dict[str, Any]:
         scope = cls._resolve_scope(user)
-        summary = cls._build_summary(scope)
-        kpis = cls._build_main_kpis(scope)
-        secondary_cards = cls._build_secondary_cards(scope)
-        rankings = cls._build_rankings(scope)
-        recent_evaluations = cls._build_recent_evaluations(scope)
-        recent_students = cls._build_recent_students(scope)
-        engagement = cls._build_engagement(scope)
-        filters_available = cls._build_filters(scope)
+        summary = _safe_build(cls._build_summary, scope, {})
+        kpis = _safe_build(cls._build_main_kpis, scope, {})
+        secondary_cards = _safe_build(cls._build_secondary_cards, scope, [])
+        rankings = _safe_build(cls._build_rankings, scope, {"classes": [], "students": [], "teacher_rankings": []})
+        recent_evaluations = _safe_build(cls._build_recent_evaluations, scope, [])
+        recent_students = _safe_build(cls._build_recent_students, scope, [])
+        engagement = _safe_build(cls._build_engagement, scope, {})
+        filters_available = _safe_build(cls._build_filters, scope, [])
 
         return {
             "summary": summary,
@@ -162,6 +171,111 @@ class DashboardService:
         school_ids_str = uuid_list_to_str(school_ids) if school_ids else []
         classes = Class.query.filter(Class.school_id.in_(school_ids_str)).with_entities(Class.id).all() if school_ids_str else []
         return [row.id for row in classes]
+
+    @staticmethod
+    def _resolve_explicit_ranking_scope(
+        user: Dict[str, Any],
+        scope_type: str,
+        scope_id: str
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Monta escopo para ranking de alunos a partir de parâmetros explícitos (turma, escola, município).
+        Retorna None se o usuário não tiver permissão para aquele escopo.
+        """
+        if not scope_id or scope_type not in ("turma", "escola", "municipio"):
+            return None
+
+        user_scope = get_user_scope(user)
+        role_scope = user_scope.get("scope")
+
+        # Admin pode ver qualquer escopo
+        if role_scope == "all":
+            if scope_type == "turma":
+                clazz = Class.query.get(scope_id)
+                if not clazz:
+                    return None
+                return {
+                    "scope": "turma",
+                    "class_id": scope_id,
+                    "user": user,
+                    "school_ids": None,
+                    "city_id": None,
+                }
+            if scope_type == "escola":
+                school_ids_str = uuid_list_to_str([scope_id]) if scope_id else []
+                return {
+                    "scope": "escola",
+                    "user": user,
+                    "school_ids": school_ids_str,
+                    "city_id": None,
+                }
+            if scope_type == "municipio":
+                return {
+                    "scope": "municipio",
+                    "city_id": scope_id,
+                    "user": user,
+                    "school_ids": None,
+                }
+            return None
+
+        # Tecadm: apenas município dele (city_id) ou escola/turma dentro do município
+        if role_scope == "municipio":
+            user_city_id = user_scope.get("city_id") or user.get("city_id") or user.get("tenant_id")
+            if scope_type == "municipio":
+                if scope_id != user_city_id:
+                    return None
+                return {"scope": "municipio", "city_id": scope_id, "user": user, "school_ids": None}
+            if scope_type == "escola":
+                school = School.query.get(scope_id) if scope_id else None
+                if not school or str(school.city_id) != str(user_city_id):
+                    return None
+                school_ids_str = uuid_list_to_str([scope_id])
+                return {"scope": "escola", "user": user, "school_ids": school_ids_str, "city_id": user_city_id}
+            if scope_type == "turma":
+                clazz = Class.query.get(scope_id)
+                if not clazz:
+                    return None
+                school = School.query.get(clazz.school_id) if getattr(clazz, "school_id", None) else None
+                if not school or str(school.city_id) != str(user_city_id):
+                    return None
+                return {"scope": "turma", "class_id": scope_id, "user": user, "school_ids": None, "city_id": user_city_id}
+            return None
+
+        # Diretor, coordenador, professor: escopo escola (school_ids)
+        if role_scope == "escola":
+            allowed_school_ids = user_scope.get("school_ids") or []
+            allowed_school_ids_str = [str(s) for s in allowed_school_ids] if allowed_school_ids else []
+
+            if scope_type == "municipio":
+                # Só pode ver município da sua escola
+                if not allowed_school_ids_str:
+                    return None
+                first_school = School.query.get(allowed_school_ids_str[0])
+                city_id = first_school.city_id if first_school else None
+                if not city_id or str(scope_id) != str(city_id):
+                    return None
+                return {"scope": "municipio", "city_id": scope_id, "user": user, "school_ids": None}
+
+            if scope_type == "escola":
+                if str(scope_id) not in allowed_school_ids_str:
+                    return None
+                return {"scope": "escola", "user": user, "school_ids": [str(scope_id)], "city_id": user_scope.get("city_id")}
+
+            if scope_type == "turma":
+                clazz = Class.query.get(scope_id)
+                if not clazz:
+                    return None
+                if str(clazz.school_id) not in allowed_school_ids_str:
+                    return None
+                # Professor: restringir a turmas que leciona
+                if user.get("role") == "professor":
+                    teacher_class_ids = get_teacher_classes(user["id"]) or []
+                    if scope_id not in teacher_class_ids:
+                        return None
+                return {"scope": "turma", "class_id": scope_id, "user": user, "school_ids": allowed_school_ids_str, "city_id": user_scope.get("city_id")}
+            return None
+
+        return None
 
     # ------------------------------------------------------------------ #
     # Blocos comuns (Admin / TecAdm)
@@ -1459,14 +1573,22 @@ class DashboardService:
         """
         Retorna o top de alunos (ranking) para o dashboard, respeitando o escopo
         do usuário (município, escola ou global para admin).
-        Inclui série e média (nota 0-10, 2 decimais).
+        Usa média de proficiência (mesma lógica do ranking de turmas do admin).
+        Inclui série, media (média de proficiência, 2 decimais), profile_picture e avatar_config.
         """
+        import json
         from sqlalchemy import cast
         from sqlalchemy.dialects.postgresql import VARCHAR
 
         school_alias = aliased(School)
         class_alias = aliased(Class)
         limit = min(max(1, limit), 50)
+        # Cast avatar_config (JSON) para Text no GROUP BY: PostgreSQL não tem operador de igualdade para json
+        avatar_config_expr = cast(User.avatar_config, db.Text)
+
+        # Média de proficiência (escala de pontos), alinhado ao ranking de turmas do dashboard admin.
+        # outerjoin em EvaluationResult: inclui todos os alunos do escopo, mesmo sem avaliações (média 0).
+        avg_proficiency = func.coalesce(func.avg(EvaluationResult.proficiency), 0)
 
         query = (
             db.session.query(
@@ -1475,38 +1597,68 @@ class DashboardService:
                 school_alias.name.label("school_name"),
                 class_alias.name.label("class_name"),
                 Grade.name.label("serie"),
-                func.coalesce(func.avg(EvaluationResult.grade), 0).label("average_grade"),
+                avg_proficiency.label("average_proficiency"),
                 func.count(distinct(EvaluationResult.test_id)).label("completed_evaluations"),
+                Student.profile_picture.label("profile_picture"),
+                avatar_config_expr.label("avatar_config"),
             )
-            .join(EvaluationResult, EvaluationResult.student_id == Student.id)
+            .outerjoin(EvaluationResult, EvaluationResult.student_id == Student.id)
+            .outerjoin(User, User.id == Student.user_id)
             .outerjoin(school_alias, cast(school_alias.id, VARCHAR) == cast(Student.school_id, VARCHAR))
             .outerjoin(class_alias, class_alias.id == Student.class_id)
             .outerjoin(Grade, Grade.id == Student.grade_id)
-            .group_by(Student.id, Student.name, school_alias.name, class_alias.name, Grade.name)
-            .order_by(func.coalesce(func.avg(EvaluationResult.grade), 0).desc())
+            .group_by(Student.id, Student.name, school_alias.name, class_alias.name, Grade.name, Student.profile_picture, avatar_config_expr)
+            .order_by(avg_proficiency.desc())
         )
 
-        if scope["scope"] == "municipio" and scope.get("city_id"):
+        if scope["scope"] == "turma" and scope.get("class_id"):
+            query = query.filter(Student.class_id == scope["class_id"])
+        elif scope["scope"] == "municipio" and scope.get("city_id"):
             query = query.filter(school_alias.city_id == scope["city_id"])
         elif scope["scope"] == "escola":
             school_ids = scope.get("school_ids") or []
             school_ids_str = uuid_list_to_str(school_ids) if school_ids else []
             query = query.filter(Student.school_id.in_(school_ids_str)) if school_ids_str else query.filter(False)
 
+        # Classificação da medalha por posição: 1º platina, 2º ouro, 3º prata, 4º bronze
+        MEDALHA_POR_POSICAO = {1: "platina", 2: "ouro", 3: "prata", 4: "bronze"}
+
         rows = query.limit(limit).all()
-        ranking = [
-            {
+        ranking = []
+        for idx, row in enumerate(rows):
+            position = idx + 1
+            # Média de proficiência (pontos), arredondada a 2 decimais para evitar floats esquisitos
+            media_proficiencia = round(float(row.average_proficiency or 0), 2)
+            item = {
                 "student_id": row.student_id,
                 "name": row.student_name,
                 "school_name": row.school_name,
                 "class_name": row.class_name,
                 "serie": row.serie or "",
-                "media": float(row.average_grade or 0),
+                "media": media_proficiencia,
+                "media_proficiencia": media_proficiencia,
                 "completed_evaluations": int(row.completed_evaluations or 0),
-                "position": idx + 1,
+                "position": position,
+                "medalha": MEDALHA_POR_POSICAO.get(position),
             }
-            for idx, row in enumerate(rows)
-        ]
+            # Ícone/foto do perfil: foto (URL) ou avatar_config (ícone escolhido no app)
+            item["profile_picture"] = getattr(row, "profile_picture", None) or None
+            raw_avatar = getattr(row, "avatar_config", None)
+            # avatar_config vem como string (cast JSON->Text); devolver objeto se for JSON válido
+            if isinstance(raw_avatar, str) and raw_avatar.strip().startswith("{"):
+                try:
+                    item["avatar_config"] = json.loads(raw_avatar)
+                except Exception:
+                    item["avatar_config"] = raw_avatar
+            else:
+                item["avatar_config"] = raw_avatar
+            ranking.append(item)
+
+        # Diferença para o 1º lugar (calculada e arredondada no backend para evitar 11.150000000000006 no front)
+        primeiro_media = ranking[0]["media"] if ranking else 0
+        for item in ranking:
+            item["pontos_para_primeiro"] = round(primeiro_media - item["media"], 2)
+
         return {"ranking": ranking, "total": len(ranking)}
 
     # ------------------------------------------------------------------ #

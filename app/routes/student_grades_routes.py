@@ -485,10 +485,14 @@ def resgatar_conquista():
         db.session.commit()
 
         novo_saldo = CoinService.get_balance(student.id)
+        # Resposta enriquecida para o front exibir recompensa (ex.: "Conquista X (Ouro) resgatada! +50 moedas")
+        conquista_nome = _get_achievement_name(achievement_id)
         return jsonify({
             "message": "Moedas resgatadas com sucesso",
             "moedas_creditadas": valor,
             "novo_saldo": novo_saldo,
+            "conquista_nome": conquista_nome,
+            "medalha": medalha,
         }), 200
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
@@ -496,3 +500,104 @@ def resgatar_conquista():
         logging.error(f"Erro ao resgatar conquista: {str(e)}", exc_info=True)
         db.session.rollback()
         return jsonify({"error": "Erro ao resgatar conquista", "details": str(e)}), 500
+
+
+def _get_achievement_name(achievement_id: str) -> Optional[str]:
+    """Retorna o nome de exibição da conquista pelo id."""
+    from app.services.achievement_service import (
+        ACHIEVEMENTS_CONFIG,
+        PERFEccionISTA_CONFIG,
+    )
+    if achievement_id == "perfeccionista":
+        return (PERFEccionISTA_CONFIG or {}).get("nome") or "Perfeccionista"
+    for cfg in (ACHIEVEMENTS_CONFIG or []):
+        if cfg.get("id") == achievement_id:
+            return cfg.get("nome") or achievement_id
+    return achievement_id
+
+
+@bp.route('/me/conquistas/resgatar-todas', methods=['POST'])
+@jwt_required()
+@role_required("aluno")
+def resgatar_todas_conquistas():
+    """
+    Resgata em uma única ação todas as conquistas desbloqueadas cujas moedas
+    ainda não foram resgatadas. O aluno pode usar um botão "Resgatar recompensas"
+    para ganhar todas as moedas pendentes e aumentar a sensação de recompensa.
+    Body: opcional {}.
+    Retorna: moedas_creditadas_total, itens_resgatados, novo_saldo.
+    """
+    try:
+        user = get_current_user_from_token()
+        if not user:
+            return jsonify({"error": "Usuário não encontrado"}), 401
+
+        student = Student.query.filter_by(user_id=user["id"]).first()
+        if not student:
+            return jsonify({"error": "Aluno não encontrado"}), 404
+
+        user_model = User.query.get(student.user_id) if student.user_id else None
+        if not user_model:
+            return jsonify({"error": "Usuário do aluno não encontrado"}), 404
+
+        traits = dict(user_model.traits) if user_model.traits and isinstance(user_model.traits, dict) else {}
+        redeemed_list = list(traits.get("achievements_redeemed") or [])
+
+        data = get_conquistas(student.id, redeemed_keys=redeemed_list)
+        conquistas = data.get("conquistas") or []
+
+        itens_resgatados: List[Dict[str, Any]] = []
+        total_moedas = 0
+
+        for c in conquistas:
+            achievement_id = c.get("id")
+            medalha = c.get("medalha_atual")
+            if not medalha or c.get("resgatado"):
+                continue
+            valor = c.get("moedas_valor") or 0
+            if valor <= 0:
+                continue
+            chave = f"{achievement_id}_{medalha}"
+            if chave in redeemed_list:
+                continue
+
+            CoinService.credit_coins(
+                student.id,
+                valor,
+                reason="achievement_redeem",
+                description=chave,
+            )
+            redeemed_list.append(chave)
+            total_moedas += valor
+            itens_resgatados.append({
+                "achievement_id": achievement_id,
+                "nome": c.get("nome") or _get_achievement_name(achievement_id),
+                "medalha": medalha,
+                "moedas": valor,
+            })
+
+        if itens_resgatados:
+            traits["achievements_redeemed"] = redeemed_list
+            user_model.traits = traits
+            db.session.commit()
+
+        novo_saldo = CoinService.get_balance(student.id)
+
+        if not itens_resgatados:
+            return jsonify({
+                "message": "Nenhuma conquista pendente para resgatar",
+                "moedas_creditadas_total": 0,
+                "itens_resgatados": [],
+                "novo_saldo": novo_saldo,
+            }), 200
+
+        return jsonify({
+            "message": f"Você resgatou {len(itens_resgatados)} conquista(s) e ganhou {total_moedas} moedas!",
+            "moedas_creditadas_total": total_moedas,
+            "itens_resgatados": itens_resgatados,
+            "novo_saldo": novo_saldo,
+        }), 200
+    except Exception as e:
+        logging.error(f"Erro ao resgatar todas as conquistas: {str(e)}", exc_info=True)
+        db.session.rollback()
+        return jsonify({"error": "Erro ao resgatar conquistas", "details": str(e)}), 500

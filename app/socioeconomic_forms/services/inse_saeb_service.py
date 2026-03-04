@@ -7,14 +7,10 @@ com resultados da avaliação (proficiência por disciplina e média).
 from app import db
 from app.socioeconomic_forms.models import Form
 from app.socioeconomic_forms.services.results_service import ResultsService
+from app.socioeconomic_forms.constants.inse_normalizer import normalizar_respostas
 from app.socioeconomic_forms.constants.inse_scoring import (
-    ESCOLARIDADE_PONTOS,
-    Q13_PONTOS,
-    Q14_PONTOS,
-    INSE_QUESTIONS_ESCOLARIDADE,
-    INSE_QUESTIONS_BENS,
-    INSE_QUESTIONS_SIM_NAO,
-    INSE_FAIXAS,
+    calcular_pontos_inse_canonico,
+    pontuacao_para_nivel_inse,
     NIVEIS_INSE_LABELS,
 )
 from app.models.evaluationResult import EvaluationResult
@@ -26,40 +22,16 @@ from typing import Dict, Any, List, Optional, Tuple
 logger = logging.getLogger(__name__)
 
 
-def _calcular_pontos_inse(responses: Dict[str, Any]) -> Tuple[int, bool]:
+def _calcular_inse_de_respostas(responses: Dict[str, Any]) -> Tuple[int, bool, Optional[int], str]:
     """
-    Calcula pontuação INSE a partir do dict de respostas (template aluno-velho).
-    Retorna (pontos_total, sucesso). Se faltar dado crítico, sucesso=False.
+    Normaliza respostas e calcula INSE (pontos e nível).
+    Retorna (pontos, ok, nivel_num, nivel_label).
+    nivel_num pode ser None quando pontos < 10 (não calculado).
     """
-    if not responses:
-        return 0, False
-    total = 0
-    for key in INSE_QUESTIONS_ESCOLARIDADE:
-        val = (responses.get(key) or "").strip()
-        if val in ESCOLARIDADE_PONTOS:
-            total += ESCOLARIDADE_PONTOS[val]
-        else:
-            if val:
-                total += 0  # "Não sei" ou outro não mapeado
-    for key in INSE_QUESTIONS_BENS:
-        val = (responses.get(key) or "").strip()
-        opts = Q13_PONTOS.get(key, {})
-        if val in opts:
-            total += opts[val]
-    for key in INSE_QUESTIONS_SIM_NAO:
-        val = (responses.get(key) or "").strip()
-        opts = Q14_PONTOS.get(key, {})
-        if val in opts:
-            total += opts[val]
-    return total, True
-
-
-def _pontuacao_para_nivel_inse(pontos: int) -> Tuple[int, str]:
-    """Retorna (número do nível 1-6, label)."""
-    for min_p, max_p, nivel, label in INSE_FAIXAS:
-        if min_p <= pontos <= max_p:
-            return nivel, label
-    return 1, NIVEIS_INSE_LABELS.get(1, "Muito Baixo")
+    normalized = normalizar_respostas(responses or {})
+    pontos, ok = calcular_pontos_inse_canonico(normalized)
+    nivel_num, nivel_label = pontuacao_para_nivel_inse(pontos)
+    return pontos, ok, nivel_num, nivel_label
 
 
 def _format_decimal(val: Optional[float]) -> float:
@@ -119,15 +91,15 @@ class InseSaebService:
             response, user, student, school, grade, class_, city = row
             student_ids.append(student.id)
             responses_data = (response.responses or {})
-            pontos, ok = _calcular_pontos_inse(responses_data)
-            nivel_num, nivel_label = _pontuacao_para_nivel_inse(pontos)
+            pontos, ok, nivel_num, nivel_label = _calcular_inse_de_respostas(responses_data)
             inse_por_aluno[student.id] = {
                 "pontos": pontos,
                 "nivel": nivel_num,
                 "nivel_label": nivel_label,
             }
-            distribuicao_inse[nivel_num]["quantidade"] += 1
-            if ok:
+            if nivel_num is not None:
+                distribuicao_inse[nivel_num]["quantidade"] += 1
+            if ok and nivel_num is not None:
                 soma_inse += pontos
                 count_inse_valido += 1
 

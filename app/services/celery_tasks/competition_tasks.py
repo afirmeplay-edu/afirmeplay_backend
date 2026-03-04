@@ -4,6 +4,12 @@ Tasks Celery para competições.
 
 - process_finished_competitions → finaliza competições expiradas, grava snapshot em
   competition_results e paga moedas de ranking.
+
+MULTITENANT: Esta task não chama set_search_path; assume tabelas em public
+(Competition, CompetitionResult, etc.). Se em produção surgirem erros de schema
+ou dados de outro tenant, considerar: (1) passar schema/city_id na task e
+(2) executar SET search_path TO {schema}, public no início da task.
+Código anterior (sem hook global) pode ser restaurado se necessário.
 """
 
 import logging

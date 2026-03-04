@@ -3937,6 +3937,44 @@ def listar_avaliacoes_completadas_aluno():
         return jsonify({"error": "Erro ao listar suas avaliações completadas", "details": str(e)}), 500
 
 
+@bp.route('/student/result/<string:test_id>', methods=['GET'])
+@jwt_required()
+@role_required("aluno")
+@requires_city_context
+def resultado_aluno_acertos_por_disciplina(test_id: str):
+    """
+    Retorna acertos por disciplina do aluno logado em uma avaliação específica.
+    Usado pelo gráfico "Acertos por disciplina" no painel de desempenho do aluno.
+
+    Endpoint: GET /test/student/result/<test_id>
+
+    Returns:
+        - test_id, test_title
+        - acertos_por_disciplina: [{ subject_id, subject_name, correct_answers, total_questions }]
+        - geral: { correct_answers, total_questions }
+    """
+    try:
+        from app.services.evaluation_comparison_service import EvaluationComparisonService
+
+        user = get_current_user_from_token()
+        if not user:
+            return jsonify({"error": "Usuário não encontrado"}), 401
+
+        student = Student.query.filter_by(user_id=user["id"]).first()
+        if not student:
+            return jsonify({"error": "Aluno não encontrado"}), 404
+
+        test_id = test_id.strip()
+        data = EvaluationComparisonService.get_student_acertos_por_disciplina(test_id, student.id)
+        if not data:
+            return jsonify({"error": "Avaliação não encontrada ou você ainda não tem resultado nesta avaliação"}), 404
+
+        return jsonify(data), 200
+    except Exception as e:
+        logging.error(f"Erro ao obter acertos por disciplina para avaliação {test_id}: {str(e)}", exc_info=True)
+        return jsonify({"error": "Erro ao obter resultado", "details": str(e)}), 500
+
+
 @bp.route('/debug/comparison/<string:test_id_1>/vs/<string:test_id_2>', methods=['GET'])
 @jwt_required()
 @role_required("admin", "professor", "coordenador", "diretor", "tecadm")

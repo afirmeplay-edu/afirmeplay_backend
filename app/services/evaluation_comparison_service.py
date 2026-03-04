@@ -1340,7 +1340,68 @@ class EvaluationComparisonService:
         except Exception as e:
             logging.error(f"Erro ao buscar resultados da disciplina {subject_id} para aluno {student_id}: {str(e)}")
             return None
-    
+
+    @staticmethod
+    def get_student_acertos_por_disciplina(test_id: str, student_id: str) -> Optional[Dict[str, Any]]:
+        """
+        Retorna acertos por disciplina para um aluno em uma única avaliação.
+        Usado pelo gráfico "Acertos por disciplina" no painel do aluno.
+
+        Args:
+            test_id: ID da avaliação
+            student_id: ID do aluno (student.id)
+
+        Returns:
+            Dict com test_id, test_title, acertos_por_disciplina (lista com subject_name, correct_answers, total_questions)
+            e geral (correct_answers, total_questions). None se teste/aluno não encontrado ou sem resultado.
+        """
+        try:
+            test = Test.query.get(test_id)
+            if not test:
+                return None
+            from app.models.evaluationResult import EvaluationResult
+            result = EvaluationResult.query.filter_by(test_id=test_id, student_id=student_id).first()
+            if not result:
+                return None
+            subjects = EvaluationComparisonService._extract_subjects_from_test(test)
+            if not subjects:
+                return {
+                    "test_id": test_id,
+                    "test_title": test.title or "",
+                    "acertos_por_disciplina": [],
+                    "geral": {
+                        "correct_answers": result.correct_answers,
+                        "total_questions": result.total_questions,
+                    },
+                }
+            cache = EvaluationComparisonService._build_student_comparison_cache(
+                [test], student_id
+            )
+            items = []
+            for subject_id, subject_name in subjects.items():
+                sub = EvaluationComparisonService._get_student_subject_results(
+                    student_id, test_id, subject_id, cache=cache
+                )
+                if sub:
+                    items.append({
+                        "subject_id": subject_id,
+                        "subject_name": subject_name,
+                        "correct_answers": sub["correct_answers"],
+                        "total_questions": sub["total_questions"],
+                    })
+            return {
+                "test_id": test_id,
+                "test_title": test.title or "",
+                "acertos_por_disciplina": items,
+                "geral": {
+                    "correct_answers": result.correct_answers,
+                    "total_questions": result.total_questions,
+                },
+            }
+        except Exception as e:
+            logging.error(f"Erro ao obter acertos por disciplina para aluno {student_id} teste {test_id}: {str(e)}", exc_info=True)
+            return None
+
     @staticmethod
     def _get_student_skill_results(
         student_id: str, test_id: str, subject_id: str, skill_code: str,

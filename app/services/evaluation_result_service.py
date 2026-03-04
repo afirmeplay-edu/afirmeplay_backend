@@ -28,20 +28,13 @@ class EvaluationResultService:
         if not correct_answer or not student_answer:
             logging.warning(f"Alternativa correta ou resposta do aluno vazias: correct_answer={correct_answer}, student_answer={student_answer}")
             return False
-            
+
         student_answer = str(student_answer).strip()
         correct_answer = str(correct_answer).strip()
-        
-        logging.info(f"Verificando resposta: '{student_answer}' contra alternativa correta: '{correct_answer}'")
-        
+
         # Comparação direta (case-insensitive para maior flexibilidade)
         is_correct = student_answer.lower() == correct_answer.lower()
-        
-        if is_correct:
-            logging.info(f"Resposta correta! student_answer='{student_answer}' == correct_answer='{correct_answer}'")
-        else:
-            logging.info(f"Resposta incorreta: student_answer='{student_answer}' != correct_answer='{correct_answer}'")
-            
+        logging.debug("Verificando resposta: '%s' vs '%s' => %s", student_answer, correct_answer, is_correct)
         return is_correct
     
     @staticmethod
@@ -358,11 +351,15 @@ class EvaluationResultService:
             
             db.session.commit()
             
-            # NOVO: Disparar task Celery para rebuild (com debounce)
+            # Disparar task Celery para rebuild (com debounce). Passar city_id para a task
+            # setar o schema do tenant (multi-tenant: Celery não tem JWT/request).
             try:
-                from app.report_analysis.tasks import rebuild_reports_for_test
-                rebuild_reports_for_test.delay(test_id)
-                logging.info(f"Task de rebuild agendada para test_id={test_id}")
+                if scope_city_id:
+                    from app.report_analysis.tasks import rebuild_reports_for_test
+                    rebuild_reports_for_test.delay(test_id, str(scope_city_id))
+                    logging.info(f"Task de rebuild agendada para test_id={test_id}, city_id={scope_city_id}")
+                else:
+                    logging.debug("Rebuild não agendado: scope_city_id ausente (sem tenant para report_aggregates)")
             except Exception as e:
                 logging.warning(f"Erro ao agendar task de rebuild: {str(e)}. Continuando sem rebuild automático.")
                 # Não falhar se Celery não estiver disponível

@@ -63,8 +63,9 @@ Tasks que executam processamento pesado em background:
 - Salva no cache
 - Retry automático em caso de falha
 
-**`rebuild_reports_for_test(test_id)`**
+**`rebuild_reports_for_test(test_id, city_id)`**
 - Agenda rebuild para todos os escopos de uma avaliação
+- Requer `city_id` (tenant) para setar o schema antes das queries (multi-tenant)
 - Usa debounce para evitar múltiplas execuções
 
 **`trigger_rebuild_if_needed(test_id, scope_type, scope_id)`**
@@ -94,7 +95,7 @@ Aluno submete resposta
 EvaluationResultService.calculate_and_save()
   ├─ Calcula nota/proficiência
   ├─ Marca ReportAggregate como dirty (todos os escopos)
-  └─ Dispara task: rebuild_reports_for_test.delay(test_id)
+  └─ Dispara task: rebuild_reports_for_test.delay(test_id, scope_city_id)
       ↓
 Task Celery (background)
   ├─ Verifica debounce

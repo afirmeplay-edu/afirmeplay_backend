@@ -20,12 +20,162 @@ from app.socioeconomic_forms.models import Form
 from app.socioeconomic_forms.models.form_recipient import FormRecipient
 from app.socioeconomic_forms.services.aggregated_results_service import AggregatedResultsService
 from sqlalchemy.exc import SQLAlchemyError
-from sqlalchemy import cast
+from sqlalchemy import cast, String
 from sqlalchemy.dialects.postgresql import UUID as PostgresUUID
 import logging
 from typing import List, Dict, Any
 
 bp = Blueprint('form_filters', __name__, url_prefix='/forms')
+
+
+# ---------- Helpers para INSE x SAEB (avaliação no filtro) ----------
+def _obter_avaliacoes_por_municipio_inse_saeb(
+    municipio_id: str, user: dict, permissao: dict
+) -> List[Dict[str, Any]]:
+    """Retorna avaliações aplicadas no município (para filtro INSE x SAEB)."""
+    try:
+        from app.models.test import Test
+        from app.models.classTest import ClassTest
+
+        city = City.query.get(municipio_id)
+        if not city:
+            return []
+        if permissao['scope'] != 'all' and user.get('city_id') != city.id:
+            return []
+
+        if permissao['scope'] == 'escola':
+            from app.permissions.query_filters import filter_tests_by_user
+            test_query = Test.query.with_entities(Test.id, Test.title)
+            test_query = filter_tests_by_user(test_query, user, 'all', require_school=False)
+            test_query = test_query.join(ClassTest, Test.id == ClassTest.test_id)
+            test_query = test_query.join(Class, ClassTest.class_id == Class.id)
+            test_query = test_query.join(School, School.id == cast(Class.school_id, String))
+            test_query = test_query.join(City, School.city_id == City.id)
+            test_query = test_query.filter(City.id == city.id)
+            avaliacoes = test_query.distinct().all()
+        else:
+            query_avaliacoes = Test.query.with_entities(Test.id, Test.title).join(
+                ClassTest, Test.id == ClassTest.test_id
+            ).join(Class, ClassTest.class_id == Class.id).join(
+                School, School.id == cast(Class.school_id, String)
+            ).join(City, School.city_id == City.id).filter(City.id == city.id)
+            avaliacoes = query_avaliacoes.distinct().all()
+
+        return [{"id": str(a[0]), "titulo": a[1], "nome": a[1]} for a in avaliacoes]
+    except Exception as e:
+        logging.error("Erro ao obter avaliações por município (INSE-Saeb): %s", str(e))
+        return []
+
+
+def _obter_escolas_por_avaliacao_inse_saeb(
+    avaliacao_id: str, municipio_id: str, user: dict, permissao: dict
+) -> List[Dict[str, Any]]:
+    """Retorna escolas onde a avaliação foi aplicada no município."""
+    try:
+        from app.models.test import Test
+        from app.models.classTest import ClassTest
+
+        city = City.query.get(municipio_id)
+        if not city:
+            return []
+        if permissao['scope'] != 'all' and user.get('city_id') != city.id:
+            return []
+
+        query_escolas = School.query.with_entities(School.id, School.name).join(
+            Class, School.id == cast(Class.school_id, String)
+        ).join(ClassTest, Class.id == ClassTest.class_id).join(
+            Test, ClassTest.test_id == Test.id
+        ).join(City, School.city_id == City.id).filter(
+            Test.id == avaliacao_id, City.id == city.id
+        )
+        if permissao['scope'] == 'escola':
+            if user.get('role') in ['diretor', 'coordenador']:
+                manager = Manager.query.filter_by(user_id=user['id']).first()
+                if manager and manager.school_id:
+                    query_escolas = query_escolas.filter(School.id == manager.school_id)
+                else:
+                    return []
+            elif user.get('role') == 'professor':
+                teacher = Teacher.query.filter_by(user_id=user['id']).first()
+                if teacher:
+                    from app.models.teacherClass import TeacherClass
+                    teacher_classes = TeacherClass.query.filter_by(teacher_id=teacher.id).all()
+                    teacher_class_ids = [tc.class_id for tc in teacher_classes]
+                    if teacher_class_ids:
+                        query_escolas = query_escolas.filter(Class.id.in_(teacher_class_ids))
+                    else:
+                        return []
+                else:
+                    return []
+        escolas = query_escolas.distinct().all()
+        return [{"id": str(e[0]), "nome": e[1], "name": e[1]} for e in escolas]
+    except Exception as e:
+        logging.error("Erro ao obter escolas por avaliação (INSE-Saeb): %s", str(e))
+        return []
+
+
+def _obter_series_por_escola_avaliacao_inse_saeb(
+    avaliacao_id: str, escola_id: str, municipio_id: str, user: dict, permissao: dict
+) -> List[Dict[str, Any]]:
+    """Retorna séries onde a avaliação foi aplicada na escola."""
+    try:
+        from app.models.test import Test
+        from app.models.classTest import ClassTest
+
+        city = City.query.get(municipio_id)
+        if not city:
+            return []
+        if permissao['scope'] != 'all' and user.get('city_id') != city.id:
+            return []
+        query_series = Grade.query.with_entities(Grade.id, Grade.name).join(
+            Class, Grade.id == Class.grade_id
+        ).join(ClassTest, Class.id == ClassTest.class_id).join(
+            Test, ClassTest.test_id == Test.id
+        ).join(School, School.id == cast(Class.school_id, String)).join(
+            City, School.city_id == City.id
+        ).filter(Test.id == avaliacao_id, School.id == escola_id, City.id == city.id)
+        series = query_series.distinct().all()
+        return [{"id": str(s[0]), "nome": s[1], "name": s[1]} for s in series]
+    except Exception as e:
+        logging.error("Erro ao obter séries por escola/avaliação (INSE-Saeb): %s", str(e))
+        return []
+
+
+def _obter_turmas_por_serie_avaliacao_inse_saeb(
+    avaliacao_id: str, escola_id: str, serie_id: str, municipio_id: str, user: dict, permissao: dict
+) -> List[Dict[str, Any]]:
+    """Retorna turmas onde a avaliação foi aplicada na escola/série."""
+    try:
+        from app.models.test import Test
+        from app.models.classTest import ClassTest
+
+        city = City.query.get(municipio_id)
+        if not city:
+            return []
+        if permissao['scope'] != 'all' and user.get('city_id') != city.id:
+            return []
+        query_turmas = Class.query.with_entities(Class.id, Class.name).join(
+            ClassTest, Class.id == ClassTest.class_id
+        ).join(Test, ClassTest.test_id == Test.id).join(
+            School, School.id == cast(Class.school_id, String)
+        ).join(City, School.city_id == City.id).join(Grade, Class.grade_id == Grade.id).filter(
+            Test.id == avaliacao_id, School.id == escola_id, Grade.id == serie_id, City.id == city.id
+        )
+        if permissao['scope'] == 'escola' and user.get('role') == 'professor':
+            teacher = Teacher.query.filter_by(user_id=user['id']).first()
+            if teacher:
+                from app.models.teacherClass import TeacherClass
+                teacher_classes = TeacherClass.query.filter_by(teacher_id=teacher.id).all()
+                teacher_class_ids = [tc.class_id for tc in teacher_classes]
+                if teacher_class_ids:
+                    query_turmas = query_turmas.filter(Class.id.in_(teacher_class_ids))
+                else:
+                    return []
+        turmas = query_turmas.distinct().all()
+        return [{"id": str(t[0]), "nome": t[1] or f"Turma {t[0]}", "name": t[1] or f"Turma {t[0]}"} for t in turmas]
+    except Exception as e:
+        logging.error("Erro ao obter turmas por série/avaliação (INSE-Saeb): %s", str(e))
+        return []
 
 
 def _verificar_permissao_filtros(user: dict) -> Dict[str, Any]:
@@ -531,13 +681,95 @@ def obter_opcoes_filtros_resultados():
                     if escola:
                         response["series"] = _obter_series_por_escola(escola, user, permissao)
 
-                        if serie:
-                            response["turmas"] = _obter_turmas_por_serie(serie, escola, user, permissao)
+                    if serie:
+                        response["turmas"] = _obter_turmas_por_serie(serie, escola, user, permissao)
 
         return jsonify(response), 200
 
     except Exception as e:
         logging.error("Erro ao obter opções de filtros (resultados): %s", str(e), exc_info=True)
+        return jsonify({"error": "Erro ao obter opções de filtros", "details": str(e)}), 500
+
+
+# ==================== FILTROS INSE x SAEB (FORMULÁRIO + AVALIAÇÃO) ====================
+
+@bp.route('/results/inse-saeb/filter-options', methods=['GET'])
+@jwt_required()
+@role_required("admin", "tecadm", "diretor", "coordenador", "professor")
+def obter_opcoes_filtros_inse_saeb():
+    """
+    Retorna opções hierárquicas de filtros para o relatório INSE x SAEB.
+    Hierarquia: Estado → Município → Formulário → Avaliação → Escola → Série → Turma.
+
+    Query Parameters (cascata):
+    - estado, municipio: obrigatórios para formulários e avaliações
+    - formulario: ID do formulário (requer estado + municipio)
+    - avaliacao: ID da avaliação (requer estado + municipio)
+    - escola: ID da escola (requer avaliacao)
+    - serie: ID da série (requer escola)
+    - turma: ID da turma (requer serie)
+    """
+    try:
+        user = get_current_user_from_token()
+        if not user:
+            return jsonify({"error": "Usuário não encontrado"}), 401
+
+        permissao = _verificar_permissao_filtros(user)
+        if not permissao['permitted']:
+            return jsonify({"error": permissao.get('error', 'Acesso negado')}), 403
+
+        estado = request.args.get('estado')
+        municipio = request.args.get('municipio')
+        formulario = request.args.get('formulario')
+        avaliacao = request.args.get('avaliacao')
+        escola = request.args.get('escola')
+        serie = request.args.get('serie')
+
+        response = {}
+
+        response["estados"] = _obter_estados_disponiveis(user, permissao)
+
+        if estado:
+            response["municipios"] = _obter_municipios_por_estado(estado, user, permissao)
+
+            if municipio:
+                response["formularios"] = _obter_formularios_por_municipio(estado, municipio, user, permissao)
+                response["avaliacoes"] = _obter_avaliacoes_por_municipio_inse_saeb(municipio, user, permissao)
+
+                if formulario or avaliacao:
+                    escolas_form = (
+                        _obter_escolas_por_formulario_municipio(
+                            formulario, municipio, user, permissao
+                        )
+                        if formulario
+                        else []
+                    )
+                    escolas_avaliacao = (
+                        _obter_escolas_por_avaliacao_inse_saeb(
+                            avaliacao, municipio, user, permissao
+                        )
+                        if avaliacao
+                        else []
+                    )
+                    if formulario and avaliacao and escolas_form and escolas_avaliacao:
+                        ids_av = {e["id"] for e in escolas_avaliacao}
+                        response["escolas"] = [e for e in escolas_form if e["id"] in ids_av]
+                    else:
+                        response["escolas"] = escolas_avaliacao if avaliacao else escolas_form
+
+                if avaliacao and escola:
+                    response["series"] = _obter_series_por_escola_avaliacao_inse_saeb(
+                        avaliacao, escola, municipio, user, permissao
+                    )
+                    if serie:
+                        response["turmas"] = _obter_turmas_por_serie_avaliacao_inse_saeb(
+                            avaliacao, escola, serie, municipio, user, permissao
+                        )
+
+        return jsonify(response), 200
+
+    except Exception as e:
+        logging.error("Erro ao obter opções de filtros INSE-Saeb: %s", str(e), exc_info=True)
         return jsonify({"error": "Erro ao obter opções de filtros", "details": str(e)}), 500
 
 

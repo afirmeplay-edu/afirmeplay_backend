@@ -279,20 +279,29 @@ def rebuild_report_for_scope(
 
 
 @celery_app.task(bind=True, max_retries=2, default_retry_delay=30)
-def rebuild_reports_for_test(self: Task, test_id: str) -> Dict[str, Any]:
+def rebuild_reports_for_test(
+    self: Task, test_id: str, city_id: Optional[str] = None
+) -> Dict[str, Any]:
     """
     Task Celery para rebuild de todos os escopos de uma avaliação.
     
     Busca todos os escopos existentes (overall, city, school, teacher) e agenda
-    tasks individuais para cada um.
+    tasks individuais para cada um. Requer city_id para definir o schema do tenant
+    (multi-tenant: search_path deve ser setado antes de qualquer query).
     
     Args:
         test_id: ID da avaliação
+        city_id: ID do município (tenant). Obrigatório para acessar report_aggregates
+                 no schema correto. Schema derivado: city_id_to_schema_name(city_id).
     
     Returns:
         Dict com resultado do processamento
     """
     try:
+        # Multi-tenant: setar schema no início (conexão não herda contexto HTTP/JWT)
+        schema = city_id_to_schema_name(city_id) if city_id else None
+        _set_tenant_schema(schema)
+        
         logger.info(f"Iniciando rebuild de todos os escopos para test_id={test_id}")
         
         # Buscar todos os aggregates existentes para esta avaliação
@@ -321,10 +330,10 @@ def rebuild_reports_for_test(self: Task, test_id: str) -> Dict[str, Any]:
                 'scopes_processed': 0
             }
         
-        # Agendar tasks individuais para cada escopo
+        # Agendar tasks individuais para cada escopo (repassar city_id para schema)
         task_ids = []
         for scope_type, scope_id in scopes_to_rebuild:
-            task = rebuild_report_for_scope.delay(test_id, scope_type, scope_id)
+            task = rebuild_report_for_scope.delay(test_id, scope_type, scope_id, city_id)
             task_ids.append({
                 'scope_type': scope_type,
                 'scope_id': scope_id,

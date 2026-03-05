@@ -245,106 +245,107 @@ def create_app():
     app.register_blueprint(competitions_bp)
     app.register_blueprint(ideb_meta_bp)
 
-    # Thread em background: finaliza competições expiradas a cada 15 min (sem depender de Celery Beat)
-    def _run_finalize_competitions_loop(app_ref):
-        import time
-        from sqlalchemy.exc import OperationalError, ProgrammingError
-        interval_seconds = 15 * 60  # 15 minutos
-        while True:
-            time.sleep(interval_seconds)
-            try:
-                with app_ref.app_context():
-                    from app.services.competition_ranking_service import CompetitionRankingService
-                    result = CompetitionRankingService.finalize_all_expired_competitions()
-                    if result.get("processed"):
-                        app_ref.logger.info(
-                            "Competições finalizadas em background: %s",
-                            result,
-                        )
-            except ProgrammingError as e:
-                # Coluna/tabela não existem (migration pendente); não logar como erro
-                err = str(getattr(e, "orig", e))
-                if "does not exist" in err or "UndefinedColumn" in err:
-                    if app_ref:
-                        app_ref.logger.debug(
-                            "Loop de competições: schema ainda não atualizado, omitindo."
-                        )
-                    if app_ref:
-                        with app_ref.app_context():
-                            try:
-                                db.session.rollback()
-                            except Exception:
-                                pass
-                            db.session.remove()
-                else:
-                    if app_ref:
-                        app_ref.logger.warning("Erro de SQL no loop de competições: %s", str(e))
-                        with app_ref.app_context():
-                            try:
-                                db.session.rollback()
-                            except Exception:
-                                pass
-                            db.session.remove()
-            except OperationalError as e:
-                # Conexão fechada pelo servidor/pool (idle timeout etc.): descartar sessão para próxima rodada usar conexão nova
-                if app_ref:
-                    with app_ref.app_context():
-                        try:
-                            db.session.rollback()
-                        except Exception:
-                            pass
-                        db.session.remove()
-                    if app_ref:
-                        app_ref.logger.warning(
-                            "Conexão com o banco fechada no loop de competições (será retentado em 15 min): %s",
-                            str(e),
-                        )
-            except Exception as e:
-                if app_ref:
-                    with app_ref.app_context():
-                        try:
-                            db.session.rollback()
-                        except Exception:
-                            pass
-                        db.session.remove()
-                    if app_ref:
-                        app_ref.logger.exception(
-                            "Erro no loop de finalização de competições: %s",
-                            str(e),
-                        )
-
-    try:
-        import threading
-        from sqlalchemy.exc import ProgrammingError
-        # Uma vez na subida: finalizar competições já expiradas
-        with app.app_context():
-            try:
-                from app.services.competition_ranking_service import CompetitionRankingService
-                r = CompetitionRankingService.finalize_all_expired_competitions()
-                if r.get("processed"):
-                    app.logger.info("Competições expiradas finalizadas na subida: %s", r)
-            except ProgrammingError as e:
-                # Coluna ou tabela ainda não existem (migration não rodou); ignorar na subida
-                err = str(e.orig) if getattr(e, "orig", None) else str(e)
-                if "does not exist" in err or "UndefinedColumn" in err:
-                    app.logger.debug(
-                        "Finalização na subida omitida (schema de competições ainda não atualizado): %s",
-                        err[:200],
-                    )
-                else:
-                    app.logger.warning("Finalização na subida falhou: %s", str(e))
-            except Exception as e:
-                app.logger.warning("Finalização na subida falhou: %s", str(e))
-        _competition_finalize_thread = threading.Thread(
-            target=_run_finalize_competitions_loop,
-            args=(app,),
-            daemon=True,
-            name="competition_finalize",
-        )
-        _competition_finalize_thread.start()
-        app.logger.info("Thread de finalização de competições iniciada (intervalo 15 min)")
-    except Exception as e:
-        app.logger.warning("Não foi possível iniciar thread de finalização de competições: %s", str(e))
+    # ========================================================================
+    # THREAD DE FINALIZAÇÃO DE COMPETIÇÕES REMOVIDA (multitenant + Gunicorn)
+    # Thread interna + Gunicorn = arquitetura inválida: SIGKILL/timeout não
+    # chama teardown; conexão com search_path sujo volta ao pool.
+    # Finalização de competições expiradas é feita via Celery Beat:
+    # competition_tasks.process_finished_competitions (a cada hora).
+    # Código comentado abaixo para restauração em caso de necessidade.
+    # ========================================================================
+    # def _run_finalize_competitions_loop(app_ref):
+    #     import time
+    #     from sqlalchemy.exc import OperationalError, ProgrammingError
+    #     interval_seconds = 15 * 60  # 15 minutos
+    #     while True:
+    #         time.sleep(interval_seconds)
+    #         try:
+    #             with app_ref.app_context():
+    #                 from app.services.competition_ranking_service import CompetitionRankingService
+    #                 result = CompetitionRankingService.finalize_all_expired_competitions()
+    #                 if result.get("processed"):
+    #                     app_ref.logger.info(
+    #                         "Competições finalizadas em background: %s",
+    #                         result,
+    #                     )
+    #         except ProgrammingError as e:
+    #             err = str(getattr(e, "orig", e))
+    #             if "does not exist" in err or "UndefinedColumn" in err:
+    #                 if app_ref:
+    #                     app_ref.logger.debug(
+    #                         "Loop de competições: schema ainda não atualizado, omitindo."
+    #                     )
+    #                 if app_ref:
+    #                     with app_ref.app_context():
+    #                         try:
+    #                             db.session.rollback()
+    #                         except Exception:
+    #                             pass
+    #                         db.session.remove()
+    #             else:
+    #                 if app_ref:
+    #                     app_ref.logger.warning("Erro de SQL no loop de competições: %s", str(e))
+    #                     with app_ref.app_context():
+    #                         try:
+    #                             db.session.rollback()
+    #                         except Exception:
+    #                             pass
+    #                         db.session.remove()
+    #         except OperationalError as e:
+    #             if app_ref:
+    #                 with app_ref.app_context():
+    #                     try:
+    #                         db.session.rollback()
+    #                     except Exception:
+    #                         pass
+    #                     db.session.remove()
+    #                 app_ref.logger.warning(
+    #                     "Conexão com o banco fechada no loop de competições (será retentado em 15 min): %s",
+    #                     str(e),
+    #                 )
+    #         except Exception as e:
+    #             if app_ref:
+    #                 with app_ref.app_context():
+    #                     try:
+    #                         db.session.rollback()
+    #                     except Exception:
+    #                         pass
+    #                     db.session.remove()
+    #                 app_ref.logger.exception(
+    #                     "Erro no loop de finalização de competições: %s",
+    #                     str(e),
+    #                 )
+    #
+    # try:
+    #     import threading
+    #     from sqlalchemy.exc import ProgrammingError
+    #     with app.app_context():
+    #         try:
+    #             from app.services.competition_ranking_service import CompetitionRankingService
+    #             r = CompetitionRankingService.finalize_all_expired_competitions()
+    #             if r.get("processed"):
+    #                 app.logger.info("Competições expiradas finalizadas na subida: %s", r)
+    #         except ProgrammingError as e:
+    #             err = str(e.orig) if getattr(e, "orig", None) else str(e)
+    #             if "does not exist" in err or "UndefinedColumn" in err:
+    #                 app.logger.debug(
+    #                     "Finalização na subida omitida (schema de competições ainda não atualizado): %s",
+    #                     err[:200],
+    #                 )
+    #             else:
+    #                 app.logger.warning("Finalização na subida falhou: %s", str(e))
+    #         except Exception as e:
+    #             app.logger.warning("Finalização na subida falhou: %s", str(e))
+    #     _competition_finalize_thread = threading.Thread(
+    #         target=_run_finalize_competitions_loop,
+    #         args=(app,),
+    #         daemon=True,
+    #         name="competition_finalize",
+    #     )
+    #     _competition_finalize_thread.start()
+    #     app.logger.info("Thread de finalização de competições iniciada (intervalo 15 min)")
+    # except Exception as e:
+    #     app.logger.warning("Não foi possível iniciar thread de finalização de competições: %s", str(e))
 
     # Importar modelos para garantir que as tabelas sejam criadas
     from .models import City, School, SchoolTeacher, Teacher, Student, Subject, Class, ClassSubject, ClassTest, Test, EducationStage, Grade, Skill, Question, StudentAnswer, UserQuickLinks, TeacherClass, User, Manager

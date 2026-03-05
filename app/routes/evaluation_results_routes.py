@@ -2636,7 +2636,7 @@ def _gerar_opcoes_proximos_filtros(scope_info, nivel_granularidade, user=None):
 
 @bp.route('/alunos', methods=['GET'])
 @jwt_required()
-@role_required("admin", "professor", "coordenador", "diretor", "tecadm")
+@role_required("admin", "professor", "coordenador", "diretor", "tecadm", "aluno")
 def listar_alunos():
     """
     Lista alunos com resultados de uma avaliação específica
@@ -2700,6 +2700,14 @@ def listar_alunos():
             if not teacher_class_ids:
                 return jsonify({"data": [], "message": "Professor não está vinculado a nenhuma turma"}), 200
             allowed_class_ids = [cid for cid in class_ids if cid in teacher_class_ids]
+        elif role == "aluno":
+            # Aluno vê apenas a própria turma (lista de colegas + ele na avaliação)
+            current_student = Student.query.filter_by(user_id=user["id"]).first()
+            if not current_student or not current_student.class_id:
+                return jsonify({"data": [], "message": "Aluno não vinculado a uma turma"}), 200
+            if current_student.class_id not in class_ids:
+                return jsonify({"data": [], "message": "Avaliação não aplicada na sua turma"}), 200
+            allowed_class_ids = [current_student.class_id]
         else:
             allowed_class_ids = []
 

@@ -17,7 +17,10 @@ class TestSession(db.Model):
     actual_start_time = db.Column(db.TIMESTAMP, nullable=True)  # Tempo real de início
     submitted_at = db.Column(db.TIMESTAMP, nullable=True)  # Quando o aluno finalizou
     time_limit_minutes = db.Column(db.Integer, nullable=True)  # Tempo limite em minutos
-    
+    # Pausa do timer: descomente após rodar a migration/SQL que adiciona as colunas em TODOS os schemas (public + city_xxx)
+    # paused_at = db.Column(db.TIMESTAMP, nullable=True)
+    # total_paused_seconds = db.Column(db.Integer, default=0, nullable=False)
+
     # Status da sessão
     status = db.Column(db.String(20), default='em_andamento')  # em_andamento, finalizada, expirada, corrigida, revisada
     

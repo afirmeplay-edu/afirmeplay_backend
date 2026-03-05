@@ -33,6 +33,7 @@ import re
 
 bp = Blueprint('users', __name__, url_prefix='/users')
 
+
 def normalizar_nome_para_busca(nome):
     """
     Normaliza um nome para busca, removendo espaços extras e convertendo para minúsculas.

@@ -1297,20 +1297,34 @@ def get_student_sessions():
         
         sessions_data = []
         for session in sessions:
-            # Calcular tempo decorrido e restante
             elapsed_minutes = 0
             remaining_minutes = session.time_limit_minutes
             is_expired = False
-            
             if session.started_at and session.time_limit_minutes:
-
-                elapsed_minutes = int((datetime.utcnow() - session.started_at).total_seconds() / 60)
-                remaining_minutes = max(0, session.time_limit_minutes - elapsed_minutes)
+                try:
+                    now = datetime.utcnow()
+                    if session.started_at.tzinfo and not now.tzinfo:
+                        from datetime import timezone
+                        now = now.replace(tzinfo=timezone.utc)
+                    elapsed_minutes = int((now - session.started_at).total_seconds() / 60)
+                except (TypeError, AttributeError):
+                    elapsed_minutes = 0
+                remaining_minutes = max(0, (session.time_limit_minutes or 0) - elapsed_minutes)
                 is_expired = remaining_minutes <= 0
             elif session.time_limit_minutes is None:
-                # Se não há limite de tempo, não está expirada
                 is_expired = False
-            
+
+            try:
+                dur_mins = session.duration_minutes
+            except Exception:
+                dur_mins = None
+            grade_val = session.grade
+            if grade_val is not None and hasattr(grade_val, '__float__'):
+                try:
+                    grade_val = float(grade_val)
+                except (TypeError, ValueError):
+                    pass
+
             sessions_data.append({
                 'session_id': session.id,
                 'test_id': session.test_id,
@@ -1321,11 +1335,11 @@ def get_student_sessions():
                 'elapsed_minutes': elapsed_minutes,
                 'remaining_minutes': remaining_minutes,
                 'is_expired': is_expired,
-                'duration_minutes': session.duration_minutes,
+                'duration_minutes': dur_mins,
                 'total_questions': session.total_questions,
                 'correct_answers': session.correct_answers,
-                'score': session.score,
-                'grade': session.grade
+                'score': float(session.score) if session.score is not None and hasattr(session.score, '__float__') else session.score,
+                'grade': grade_val
             })
         
         return jsonify({
@@ -1404,13 +1418,20 @@ def can_student_start_test(test_id):
         # Ambos funcionam simultaneamente - não há exclusão mútua
         app_record = olympics if olympics else class_test
         if not app_record:
+            duration_min = getattr(test, 'duration', None)
+            if duration_min is not None:
+                duration_min = int(duration_min)
             return jsonify({
                 'can_start': False,
                 'reason': 'Avaliação não está aplicada na sua classe',
                 'test_info': {
                     'id': test_id,
                     'title': test.title,
-                    'status': test.status
+                    'status': test.status,
+                    'duration': duration_min,
+                    'duration_minutes': duration_min,
+                    'application': None,
+                    'expiration': None
                 },
                 'student_info': {
                     'id': student.id,
@@ -1511,7 +1532,9 @@ def can_student_start_test(test_id):
                 can_start = False
                 reason = f"Status da avaliação não permite início: {test.status}"
 
-        logging.info(f"DEBUG CAN-START FINAL - Test: {test_id}, Can Start: {can_start}, Reason: {reason}")
+        duration_min = getattr(test, 'duration', None)
+        if duration_min is not None:
+            duration_min = int(duration_min)
 
         return jsonify({
             'can_start': can_start,
@@ -1520,8 +1543,10 @@ def can_student_start_test(test_id):
                 'id': test_id,
                 'title': test.title,
                 'status': test.status,
-                'application': app_record.application if app_record.application else None,
-                'expiration': app_record.expiration if app_record.expiration else None
+                'duration': duration_min,
+                'duration_minutes': duration_min,
+                'application': app_record.application if app_record and app_record.application else None,
+                'expiration': app_record.expiration if app_record and app_record.expiration else None
             },
             'student_info': {
                 'id': student.id,

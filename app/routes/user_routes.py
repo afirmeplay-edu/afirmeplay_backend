@@ -297,12 +297,17 @@ def create_user():
         return jsonify({"error": "Error creating user", "details": str(e)}), 500
 
 def serialize_user(user):
+    role_val = None
+    if getattr(user, 'role', None) is not None:
+        role_val = getattr(user.role, 'value', user.role)
+        if callable(role_val):
+            role_val = None
     return {
         "id": user.id,
         "name": user.name,
         "email": user.email,
         "registration": user.registration,
-        "role": user.role.value if user.role else None,
+        "role": role_val,
         "city_id": user.city_id,
         "birth_date": user.birth_date.isoformat() if user.birth_date else None,
         "nationality": user.nationality,
@@ -485,7 +490,7 @@ def get_user_by_id(user_id):
 
         user_data = serialize_user(user)
 
-        if user.role == RoleEnum.ALUNO:
+        if getattr(user, 'role', None) == RoleEnum.ALUNO:
             student = Student.query.options(
                 joinedload(Student.school),
                 joinedload(Student.class_),
@@ -493,8 +498,12 @@ def get_user_by_id(user_id):
             ).filter_by(user_id=user.id).first()
 
             if student:
-                student_details = format_student_details(student)
-                user_data['student_details'] = student_details
+                try:
+                    student_details = format_student_details(student)
+                    user_data['student_details'] = student_details
+                except Exception as fmt_err:
+                    logging.warning(f"Erro ao formatar student_details para user {user_id}: {fmt_err}", exc_info=True)
+                    user_data['student_details'] = None
 
         return jsonify(user_data), 200
 

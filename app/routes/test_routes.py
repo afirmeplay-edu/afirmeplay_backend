@@ -530,6 +530,18 @@ def listar_avaliacoes():
         if grade_filter:
             query = query.filter(Test.grade_id == grade_filter)
 
+        # Filtro por criador (ex: created_by=uuid)
+        created_by_filter = request.args.get('created_by')
+        if created_by_filter:
+            query = query.filter(Test.created_by == created_by_filter)
+
+        # Filtro por tipos (ex: types=AVALIACAO,SIMULADO)
+        types_param = request.args.get('types')
+        if types_param:
+            types_list = [t.strip() for t in types_param.split(',') if t.strip()]
+            if types_list:
+                query = query.filter(Test.type.in_(types_list))
+
         # Se é apenas contagem, retornar rapidamente
         if only_count:
             total = query.count()
@@ -567,10 +579,10 @@ def listar_avaliacoes():
         )
         
         avaliacoes = paginated_query.items
-        
-        # Resposta com metadados de paginação
+
+        # Listagem leve: não carregar questões (questions=[] evita N+1 e carga pesada)
         response_data = {
-            "data": [format_test_response(a) for a in avaliacoes],
+            "data": [format_test_response(a, questions=[]) for a in avaliacoes],
             "pagination": {
                 "page": page,
                 "per_page": per_page,
@@ -2593,6 +2605,9 @@ def listar_avaliacoes_minha_classe():
             # Preparar subjects usando a função auxiliar
             subjects = process_subjects_for_test(test)
             
+            duration_min = getattr(test, 'duration', None)
+            if duration_min is not None:
+                duration_min = int(duration_min)
             test_info = {
                 "test_id": test.id,
                 "title": test.title,
@@ -2607,7 +2622,8 @@ def listar_avaliacoes_minha_classe():
                 "intructions": test.intructions,
                 "max_score": test.max_score,
                 "time_limit": test.time_limit.isoformat() if test.time_limit else None,
-                "duration": test.duration,  # Duração em minutos
+                "duration": duration_min,  # Duração da prova em minutos (usar para o timer)
+                "duration_minutes": duration_min,  # Explícito para o front usar no cronômetro
                 "course": test.course,
                 "model": test.model,
                 "subjects_info": subjects,  # Retornar a lista de subjects com nomes

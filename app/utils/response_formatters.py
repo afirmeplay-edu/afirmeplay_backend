@@ -426,16 +426,20 @@ def format_test_response(test, questions=None):
                 logging.warning(f"Erro ao buscar turmas das escolas: {str(e)}")
                 applied_classes_info = []
 
-        # Usar duração do modelo ou calcular dinamicamente como fallback
-        duration = test.duration if test.duration is not None else 90  # Duração padrão em minutos
+        # Duração da prova em MINUTOS (tempo que o aluno tem para fazer a prova).
+        # Sempre preferir test.duration. Não usar (end_time - time_limit) como duração da prova:
+        # essa diferença pode ser a janela de aplicação (várias horas), não o tempo da prova.
+        duration = None
+        if getattr(test, 'duration', None) is not None and test.duration > 0:
+            duration = int(test.duration)
         if duration is None:
             try:
                 if test.time_limit and test.end_time:
-                    # Calcular duração real baseada no end_time - time_limit
-                    duration_delta = test.end_time - test.time_limit
-                    duration = int(duration_delta.total_seconds() / 60)  # Converter para minutos
-                elif test.time_limit:
-                    # Se não tiver end_time, usar duração padrão de 90 minutos
+                    delta_seconds = (test.end_time - test.time_limit).total_seconds()
+                    computed = int(delta_seconds / 60)
+                    # Só usar se parecer duração de prova (≤ 3h). Senão é provavelmente janela de aplicação.
+                    duration = min(computed, 180) if 0 < computed <= 180 else 90
+                else:
                     duration = 90
             except Exception as e:
                 logging.warning(f"Erro ao calcular duração: {str(e)}")
@@ -456,7 +460,8 @@ def format_test_response(test, questions=None):
         'max_score': test.max_score,
         'time_limit': test.time_limit.isoformat() if test.time_limit else None,
         'end_time': test.end_time.isoformat() if test.end_time else None,
-        'duration': duration,
+        'duration': duration,  # Sempre em minutos (tempo da prova)
+        'duration_minutes': duration,  # Explícito para o front usar no timer
         'createdBy': {'id': test.creator.id, 'name': test.creator.name} if test.creator else None,
         'createdAt': test.created_at.isoformat() if test.created_at else None,
         'updatedAt': test.updated_at.isoformat() if test.updated_at else None,

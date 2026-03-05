@@ -5,6 +5,7 @@ Rotas para API de Coins (moedas do aluno).
 from flask import Blueprint, request, jsonify
 from flask_jwt_extended import jwt_required, get_jwt_identity
 from app import db
+from app.decorators import requires_city_context
 from app.permissions import role_required, get_current_user_from_token
 from app.models import CoinTransaction
 from app.models.student import Student
@@ -58,6 +59,7 @@ def _resolve_student_id():
 
 @bp.route('/balance', methods=['GET'])
 @jwt_required()
+@requires_city_context
 def get_balance():
     """
     Retorna saldo do aluno (ou do student_id em query se perfil permitir).
@@ -74,6 +76,7 @@ def get_balance():
 
 @bp.route('/transactions', methods=['GET'])
 @jwt_required()
+@requires_city_context
 def get_transactions():
     """
     Lista histórico de transações com paginação (limit/offset).
@@ -106,6 +109,7 @@ def get_transactions():
 
 @bp.route('/transactions/<string:transaction_id>', methods=['GET'])
 @jwt_required()
+@requires_city_context
 def get_transaction(transaction_id):
     """
     Detalhe de uma transação. Aluno só acessa suas próprias transações.

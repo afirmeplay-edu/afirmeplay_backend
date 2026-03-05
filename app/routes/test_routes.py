@@ -3697,6 +3697,7 @@ def export_evolution_excel():
 @bp.route('/student/compare', methods=['POST'])
 @jwt_required()
 @role_required("aluno")
+@requires_city_context
 def comparar_avaliacoes_aluno_proprio():
     """
     Compara múltiplas avaliações de um aluno específico e mostra a evolução sequencial entre elas.
@@ -3750,33 +3751,34 @@ def comparar_avaliacoes_aluno_proprio():
         if not student:
             return jsonify({"error": "Aluno não encontrado"}), 404
         
-        # Buscar todas as avaliações para verificar se existem
+        # Buscar todas as avaliações (uma query)
         tests = Test.query.filter(Test.id.in_(test_ids)).all()
         found_test_ids = {test.id for test in tests}
         missing_test_ids = set(test_ids) - found_test_ids
-        
         if missing_test_ids:
             return jsonify({"error": f"Avaliações não encontradas: {list(missing_test_ids)}"}), 404
         
-        # Verificar se as avaliações foram aplicadas na turma do aluno
+        # Verificar se as avaliações foram aplicadas na turma (só as test_ids pedidas)
         from app.models.classTest import ClassTest
-        class_tests = ClassTest.query.filter_by(class_id=student.class_id).all()
+        class_tests = ClassTest.query.filter(
+            ClassTest.class_id == student.class_id,
+            ClassTest.test_id.in_(test_ids)
+        ).all()
         applied_test_ids = {ct.test_id for ct in class_tests}
-        
         not_applied_tests = set(test_ids) - applied_test_ids
         if not_applied_tests:
             return jsonify({"error": f"Avaliações não foram aplicadas na sua turma: {list(not_applied_tests)}"}), 403
         
-        # Verificar se o aluno completou todas as avaliações
+        # Verificar se o aluno completou todas (uma query em vez de N)
         from app.models.evaluationResult import EvaluationResult
-        for test_id in test_ids:
-            result = EvaluationResult.query.filter_by(
-                test_id=test_id, 
-                student_id=student.id
-            ).first()
-            
-            if not result:
-                return jsonify({"error": f"Você não completou a avaliação {test_id}"}), 400
+        results_exist = EvaluationResult.query.filter(
+            EvaluationResult.student_id == student.id,
+            EvaluationResult.test_id.in_(test_ids)
+        ).with_entities(EvaluationResult.test_id).all()
+        completed_test_ids = {r.test_id for r in results_exist}
+        missing_completed = set(test_ids) - completed_test_ids
+        if missing_completed:
+            return jsonify({"error": f"Você não completou a avaliação {next(iter(missing_completed))}"}), 400
         
         # Executar comparação usando o método específico para alunos
         comparison_result = EvaluationComparisonService.compare_student_evaluations_multiple(student_id, test_ids)
@@ -3796,6 +3798,7 @@ def comparar_avaliacoes_aluno_proprio():
 @bp.route('/student/completed', methods=['GET'])
 @jwt_required()
 @role_required("aluno")
+@requires_city_context
 def listar_avaliacoes_completadas_aluno():
     """
     Lista todas as avaliações que o aluno completou e tem resultados.
@@ -3830,47 +3833,44 @@ def listar_avaliacoes_completadas_aluno():
         
         # Aplicar filtro por disciplina se fornecido
         if subject_filter and subject_filter != 'all':
-            # Buscar testes que têm a disciplina especificada
+            # Buscar apenas IDs de testes com a disciplina (evita carregar objetos completos)
             tests_with_subject = Test.query.filter(
                 Test.subjects_info.contains([{"id": subject_filter}])
-            ).all()
-            test_ids = [test.id for test in tests_with_subject]
-            if test_ids:
-                query = query.filter(EvaluationResult.test_id.in_(test_ids))
+            ).with_entities(Test.id).all()
+            test_ids_filter = [r.id for r in tests_with_subject]
+            if test_ids_filter:
+                query = query.filter(EvaluationResult.test_id.in_(test_ids_filter))
             else:
-                # Se não encontrou testes com essa disciplina, retornar lista vazia
                 return jsonify({
-                    "student": {
-                        "id": student.id,
-                        "name": student.name,
-                        "user_id": student.user_id
-                    },
+                    "student": {"id": student.id, "name": student.name, "user_id": student.user_id},
                     "total_completed": 0,
                     "evaluations": []
                 }), 200
         
-        # Ordenar por data de cálculo (mais recente primeiro)
+        # Ordenar por data de cálculo (mais recente primeiro) — uma query paginada
         results = query.order_by(EvaluationResult.calculated_at.desc()).limit(limit).offset(offset).all()
         
         if not results:
             return jsonify({
-                "student": {
-                    "id": student.id,
-                    "name": student.name,
-                    "user_id": student.user_id
-                },
+                "student": {"id": student.id, "name": student.name, "user_id": student.user_id},
                 "total_completed": 0,
                 "evaluations": []
             }), 200
         
-        # Buscar informações dos testes
         test_ids = [result.test_id for result in results]
-        tests = Test.query.filter(Test.id.in_(test_ids)).all()
+        # Uma query com eager load para evitar N+1 ao acessar subject_rel e grade
+        tests = Test.query.options(
+            joinedload(Test.subject_rel),
+            joinedload(Test.grade)
+        ).filter(Test.id.in_(test_ids)).all()
         tests_dict = {test.id: test for test in tests}
         
-        # Buscar informações das turmas para obter datas de aplicação
+        # Só ClassTests dos testes retornados (evita carregar toda a turma)
         from app.models.classTest import ClassTest
-        class_tests = ClassTest.query.filter_by(class_id=student.class_id).all()
+        class_tests = ClassTest.query.filter(
+            ClassTest.class_id == student.class_id,
+            ClassTest.test_id.in_(test_ids)
+        ).all()
         class_test_dict = {ct.test_id: ct for ct in class_tests}
         
         # Preparar lista de avaliações completadas
@@ -3935,6 +3935,44 @@ def listar_avaliacoes_completadas_aluno():
     except Exception as e:
         logging.error(f"Erro ao listar avaliações completadas do aluno {user['id'] if 'user' in locals() else 'N/A'}: {str(e)}", exc_info=True)
         return jsonify({"error": "Erro ao listar suas avaliações completadas", "details": str(e)}), 500
+
+
+@bp.route('/student/result/<string:test_id>', methods=['GET'])
+@jwt_required()
+@role_required("aluno")
+@requires_city_context
+def resultado_aluno_acertos_por_disciplina(test_id: str):
+    """
+    Retorna acertos por disciplina do aluno logado em uma avaliação específica.
+    Usado pelo gráfico "Acertos por disciplina" no painel de desempenho do aluno.
+
+    Endpoint: GET /test/student/result/<test_id>
+
+    Returns:
+        - test_id, test_title
+        - acertos_por_disciplina: [{ subject_id, subject_name, correct_answers, total_questions }]
+        - geral: { correct_answers, total_questions }
+    """
+    try:
+        from app.services.evaluation_comparison_service import EvaluationComparisonService
+
+        user = get_current_user_from_token()
+        if not user:
+            return jsonify({"error": "Usuário não encontrado"}), 401
+
+        student = Student.query.filter_by(user_id=user["id"]).first()
+        if not student:
+            return jsonify({"error": "Aluno não encontrado"}), 404
+
+        test_id = test_id.strip()
+        data = EvaluationComparisonService.get_student_acertos_por_disciplina(test_id, student.id)
+        if not data:
+            return jsonify({"error": "Avaliação não encontrada ou você ainda não tem resultado nesta avaliação"}), 404
+
+        return jsonify(data), 200
+    except Exception as e:
+        logging.error(f"Erro ao obter acertos por disciplina para avaliação {test_id}: {str(e)}", exc_info=True)
+        return jsonify({"error": "Erro ao obter resultado", "details": str(e)}), 500
 
 
 @bp.route('/debug/comparison/<string:test_id_1>/vs/<string:test_id_2>', methods=['GET'])

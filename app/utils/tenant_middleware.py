@@ -269,19 +269,23 @@ def resolve_tenant_context():
         context.user_role = user_info['role']
         context.is_admin = (user_info['role'] == 'admin')
         
-        # 2. Resolver para usuário comum (inclui TecAdm)
-        if not context.is_admin and user_info['tenant_id']:
-            context.city_id = user_info['tenant_id']
-            context.has_tenant_context = True
-            
-            # Buscar informações da cidade (obrigatório: evita search_path = public)
-            city = resolve_city_from_id(context.city_id)
-            if not city:
-                raise Exception("Município não encontrado para o tenant_id do usuário. Verifique se a cidade existe em public.city.")
-            context.city_slug = city.slug
-            context.schema = city_id_to_schema_name(context.city_id)
-            
-            return context
+        # 2. Resolver para usuário comum (inclui TecAdm, aluno, professor, etc.)
+        if not context.is_admin:
+            city_id = user_info.get('tenant_id') or user_info.get('city_id')
+            # Se o token não trouxe tenant_id/city_id, buscar na tabela User (public.users)
+            if not city_id:
+                user_obj = User.query.get(user_info['user_id'])
+                if user_obj and getattr(user_obj, 'city_id', None):
+                    city_id = str(user_obj.city_id)
+            if city_id:
+                context.city_id = city_id
+                context.has_tenant_context = True
+                city = resolve_city_from_id(context.city_id)
+                if not city:
+                    raise Exception("Município não encontrado para o tenant_id do usuário. Verifique se a cidade existe em public.city.")
+                context.city_slug = city.slug
+                context.schema = city_id_to_schema_name(context.city_id)
+                return context
         
         # 3. Resolver para Admin
         if context.is_admin:

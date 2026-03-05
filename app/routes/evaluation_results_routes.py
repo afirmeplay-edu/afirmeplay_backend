@@ -60,6 +60,7 @@ from app.models.classTest import ClassTest
 from app.models.studentTestOlimpics import StudentTestOlimpics
 from app.models.schoolTeacher import SchoolTeacher
 from app.models.skill import Skill
+from app.utils.tenant_middleware import city_id_to_schema_name, set_search_path
 from app import db
 import logging
 from typing import Dict, Any, List, Optional
@@ -4166,7 +4167,11 @@ def get_student_test_results(test_id, student_id):
                 
                 detailed_answers.append(answer_detail)
         
-        rankings = StudentRankingService.get_rankings(actual_student_id, test_id)
+        try:
+            rankings = StudentRankingService.get_rankings(actual_student_id, test_id)
+        except Exception as rank_err:
+            logging.warning("Erro ao buscar rankings do aluno (retornando vazio): %s", rank_err, exc_info=True)
+            rankings = []
 
         result = {
             "test_id": test_id,
@@ -5106,16 +5111,23 @@ def _obter_turmas_por_serie(avaliacao_id: str, escola_id: str, serie_id: str, mu
 
 # ==================== OPÇÕES DE FILTRO PARA EVOLUÇÃO (Estado → Município → Escola → Série → Turma) ====================
 
+def _user_city_id(user: dict) -> str:
+    """Retorna o city_id do usuário (tenant_id ou city_id) para restrição de escopo."""
+    return str((user.get("city_id") or user.get("tenant_id")) or "").strip()
+
+
 def _obter_escolas_por_municipio_evolucao(municipio_id: str, user: dict, permissao: dict) -> List[Dict[str, Any]]:
     """
     Retorna escolas do município que possuem pelo menos uma avaliação aplicada (ClassTest).
     Usado na tela de Evolução: hierarquia é Estado → Município → Escola (sem exigir avaliação).
     Respeita permissões: só escolas que têm aplicações de avaliações que o usuário pode ver.
+    Requer que o schema do tenant do município já esteja definido (set_search_path) pelo chamador.
     """
     city = City.query.get(municipio_id)
     if not city:
         return []
-    if permissao["scope"] != "all" and user.get("city_id") != city.id:
+    city_id_str = str(city.id) if city.id else ""
+    if permissao["scope"] != "all" and _user_city_id(user) != city_id_str:
         return []
 
     # Query de testes que o usuário pode ver (no município)
@@ -5183,7 +5195,8 @@ def _obter_series_por_escola_evolucao(municipio_id: str, escola_id: str, user: d
     city = City.query.get(municipio_id)
     if not city:
         return []
-    if permissao["scope"] != "all" and user.get("city_id") != city.id:
+    city_id_str = str(city.id) if city.id else ""
+    if permissao["scope"] != "all" and _user_city_id(user) != city_id_str:
         return []
 
     escola_id_str = str(escola_id).strip()
@@ -5220,7 +5233,8 @@ def _obter_turmas_por_serie_evolucao(municipio_id: str, escola_id: str, serie_id
     city = City.query.get(municipio_id)
     if not city:
         return []
-    if permissao["scope"] != "all" and user.get("city_id") != city.id:
+    city_id_str = str(city.id) if city.id else ""
+    if permissao["scope"] != "all" and _user_city_id(user) != city_id_str:
         return []
 
     escola_id_str = str(escola_id).strip()
@@ -5323,8 +5337,7 @@ def _obter_avaliacoes_evolucao(
 
     city_id_str = str(city.id) if city.id else ""
     if permissao["scope"] != "all":
-        user_city = str(user.get("city_id") or "").strip()
-        if user_city != city_id_str:
+        if _user_city_id(user) != city_id_str:
             return []
 
     escola_param = (escola_id or "all").strip() if escola_id else "all"
@@ -5969,17 +5982,26 @@ def obter_opcoes_filtros_evolucao():
         escola = request.args.get("escola")
         serie = request.args.get("serie")
 
+        user_city = _user_city_id(user)
+        if permissao["scope"] != "all" and municipio and str(municipio).strip() != user_city:
+            return jsonify({
+                "error": "Você só pode visualizar dados de evolução do seu município."
+            }), 403
+
         response = {}
         response["estados"] = _obter_estados_disponiveis(user, permissao)
 
         if estado:
             response["municipios"] = _obter_municipios_por_estado(estado, user, permissao)
             if municipio:
-                response["escolas"] = _obter_escolas_por_municipio_evolucao(municipio, user, permissao)
+                municipio_str = str(municipio).strip()
+                schema = city_id_to_schema_name(municipio_str)
+                set_search_path(schema)
+                response["escolas"] = _obter_escolas_por_municipio_evolucao(municipio_str, user, permissao)
                 if escola and str(escola).strip().lower() != "all":
-                    response["series"] = _obter_series_por_escola_evolucao(municipio, escola, user, permissao)
+                    response["series"] = _obter_series_por_escola_evolucao(municipio_str, escola, user, permissao)
                     if serie and str(serie).strip().lower() != "all":
-                        response["turmas"] = _obter_turmas_por_serie_evolucao(municipio, escola, serie, user, permissao)
+                        response["turmas"] = _obter_turmas_por_serie_evolucao(municipio_str, escola, serie, user, permissao)
 
         return jsonify(response), 200
     except Exception as e:
@@ -6037,13 +6059,21 @@ def listar_avaliacoes_evolucao():
                 "error": "Os parâmetros 'estado' e 'municipio' são obrigatórios para Evolução."
             }), 400
 
-        # Validar município no estado (consistência); usar str para garantir match com PK
         municipio_id = str(municipio).strip()
+        user_city = _user_city_id(user)
+        if permissao["scope"] != "all" and user_city != municipio_id:
+            return jsonify({
+                "error": "Você só pode listar avaliações de evolução do seu município."
+            }), 403
+
         city = City.query.get(municipio_id)
         if not city:
             return jsonify({"error": "Município não encontrado"}), 404
         if estado and city.state and str(city.state).strip().upper() != str(estado).strip().upper():
             return jsonify({"error": "Município não pertence ao estado informado"}), 400
+
+        schema = city_id_to_schema_name(municipio_id)
+        set_search_path(schema)
 
         avaliacoes = _obter_avaliacoes_evolucao(
             municipio_id=municipio_id,

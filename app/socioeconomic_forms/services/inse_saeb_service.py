@@ -230,13 +230,30 @@ class InseSaebService:
         if not test:
             raise ValueError("Avaliação não encontrada")
 
+        # 0) Total que receberam o formulário no escopo (form_recipients + mesmo escopo dos filtros)
+        total_receberam_formulario = ResultsService.count_recipients_in_scope(form_id, filters)
+
         # 1) Alunos do escopo (responderam ao formulário e passaram nos filtros)
         query = ResultsService._build_base_query(form_id, filters)
         results = query.all()
         total_alunos_questionario = len(results)
 
+        total_nao_responderam = max(0, total_receberam_formulario - total_alunos_questionario)
+        porcentagem_participacao = round(
+            (total_alunos_questionario / total_receberam_formulario * 100), 2
+        ) if total_receberam_formulario else 0
+        porcentagem_nao_responderam = round(
+            (total_nao_responderam / total_receberam_formulario * 100), 2
+        ) if total_receberam_formulario else 0
+
         if total_alunos_questionario == 0:
-            return InseSaebService._empty_report(form, test, avaliacao_id, filters)
+            return InseSaebService._empty_report(
+                form, test, avaliacao_id, filters,
+                total_receberam_formulario=total_receberam_formulario,
+                total_nao_responderam=total_nao_responderam,
+                porcentagem_participacao=porcentagem_participacao,
+                porcentagem_nao_responderam=porcentagem_nao_responderam,
+            )
 
         # 2) Calcular INSE por aluno e agregados
         student_ids = []
@@ -358,6 +375,7 @@ class InseSaebService:
                 classificacao_principal = None
 
             alunos_lista.append({
+                "id": str(user.id),
                 "nome_completo": (user.name or student.name or "").strip() or "—",
                 "disciplinas": disciplinas_aluno,
                 "proficiencia_media": _format_decimal(proficiencia_media_aluno),
@@ -375,7 +393,11 @@ class InseSaebService:
             "avaliacaoTitulo": test.title,
             "filtros": filters,
             "resumo": {
+                "total_receberam_formulario": total_receberam_formulario,
                 "total_alunos_questionario": total_alunos_questionario,
+                "total_nao_responderam": total_nao_responderam,
+                "porcentagem_participacao": porcentagem_participacao,
+                "porcentagem_nao_responderam": porcentagem_nao_responderam,
                 "media_proficiencia_escopo": _format_decimal(media_proficiencia_escopo),
                 "inse_medio": _format_decimal(inse_medio),
             },
@@ -402,7 +424,16 @@ class InseSaebService:
         }
 
     @staticmethod
-    def _empty_report(form: Form, test: Test, avaliacao_id: str, filters: Dict[str, Any]) -> Dict[str, Any]:
+    def _empty_report(
+        form: Form,
+        test: Test,
+        avaliacao_id: str,
+        filters: Dict[str, Any],
+        total_receberam_formulario: int = 0,
+        total_nao_responderam: int = 0,
+        porcentagem_participacao: float = 0.0,
+        porcentagem_nao_responderam: float = 0.0,
+    ) -> Dict[str, Any]:
         disciplinas_info, _ = _disciplinas_e_proficiencia_por_aluno(avaliacao_id, test, [])
         return {
             "formId": form.id,
@@ -411,7 +442,11 @@ class InseSaebService:
             "avaliacaoTitulo": test.title,
             "filtros": filters,
             "resumo": {
+                "total_receberam_formulario": total_receberam_formulario,
                 "total_alunos_questionario": 0,
+                "total_nao_responderam": total_nao_responderam,
+                "porcentagem_participacao": porcentagem_participacao,
+                "porcentagem_nao_responderam": porcentagem_nao_responderam,
                 "media_proficiencia_escopo": 0.0,
                 "inse_medio": 0.0,
             },

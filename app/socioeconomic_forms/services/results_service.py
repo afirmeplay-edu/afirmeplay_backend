@@ -5,7 +5,7 @@ Contém a lógica de negócio para gerar relatórios de índices e perfis.
 """
 
 from app import db
-from app.socioeconomic_forms.models import Form, FormResponse, FormQuestion
+from app.socioeconomic_forms.models import Form, FormResponse, FormQuestion, FormRecipient
 from app.models import User, Student, School, Grade, Class, City
 from sqlalchemy.exc import SQLAlchemyError
 from collections import defaultdict
@@ -325,6 +325,35 @@ class ResultsService:
                 query = query.filter(Student.class_id == filters['turma'])
         
         return query
+
+    @staticmethod
+    def count_recipients_in_scope(form_id: str, filters: dict = None) -> int:
+        """
+        Conta quantos destinatários do formulário (form_recipients) estão no escopo
+        definido pelos filtros (state, municipio, escola, serie, turma).
+        Usa User -> Student -> School -> City para aplicar os mesmos filtros de _build_base_query.
+        """
+        query = db.session.query(FormRecipient.id).join(
+            User, FormRecipient.user_id == User.id
+        ).join(
+            Student, User.id == Student.user_id
+        ).join(
+            School, Student.school_id == School.id
+        ).join(
+            City, School.city_id == City.id
+        ).filter(FormRecipient.form_id == form_id)
+        if filters:
+            if filters.get('state'):
+                query = query.filter(City.state == filters['state'])
+            if filters.get('municipio'):
+                query = query.filter(City.id == filters['municipio'])
+            if filters.get('escola'):
+                query = query.filter(School.id == filters['escola'])
+            if filters.get('serie'):
+                query = query.filter(Student.grade_id == filters['serie'])
+            if filters.get('turma'):
+                query = query.filter(Student.class_id == filters['turma'])
+        return query.distinct().count()
     
     @staticmethod
     def _calculate_distorcao_idade_serie(results, page, limit):

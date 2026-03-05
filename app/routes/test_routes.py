@@ -2750,11 +2750,15 @@ def start_test_session(test_id):
                 status='em_andamento',
             ).first()
             if existing_for_test:
+                dur = getattr(test, 'duration', None)
+                dur = int(dur) if dur is not None else existing_for_test.time_limit_minutes
                 return jsonify({
                     "message": "Sessão já iniciada",
                     "session_id": existing_for_test.id,
                     "started_at": existing_for_test.started_at.isoformat() if existing_for_test.started_at else None,
                     "time_limit_minutes": existing_for_test.time_limit_minutes,
+                    "duration_minutes": dur,
+                    "duration": dur,
                 }), 200
 
         # ✅ REGRA 4: Verificar se a avaliação está disponível (data de aplicação) e não expirou (data de expiração)
@@ -2807,11 +2811,15 @@ def start_test_session(test_id):
         ).first()
         
         if existing_session:
+            dur = getattr(test, 'duration', None)
+            dur = int(dur) if dur is not None else existing_session.time_limit_minutes
             return jsonify({
                 "message": "Sessão já iniciada",
                 "session_id": existing_session.id,
                 "started_at": existing_session.started_at.isoformat() if existing_session.started_at else None,
-                "time_limit_minutes": existing_session.time_limit_minutes
+                "time_limit_minutes": existing_session.time_limit_minutes,
+                "duration_minutes": dur,
+                "duration": dur,
             }), 200
         
         # Verificar se há sessão ativa em qualquer teste para este aluno
@@ -2821,12 +2829,17 @@ def start_test_session(test_id):
         ).first()
         
         if active_session_any_test:
+            test_other = Test.query.get(active_session_any_test.test_id)
+            dur = getattr(test_other, 'duration', None) if test_other else None
+            dur = int(dur) if dur is not None else active_session_any_test.time_limit_minutes
             return jsonify({
                 "message": "Sessão já iniciada",
                 "session_id": active_session_any_test.id,
                 "test_id": active_session_any_test.test_id,
                 "started_at": active_session_any_test.started_at.isoformat() if active_session_any_test.started_at else None,
-                "time_limit_minutes": active_session_any_test.time_limit_minutes
+                "time_limit_minutes": active_session_any_test.time_limit_minutes,
+                "duration_minutes": dur,
+                "duration": dur,
             }), 200
         
         # Duração da prova em minutos (test.duration = tempo que o aluno tem para responder, ex.: 20 min).
@@ -2863,7 +2876,9 @@ def start_test_session(test_id):
             "message": "Sessão iniciada com sucesso",
             "session_id": session.id,
             "started_at": session.started_at.isoformat() if session.started_at else None,
-            "time_limit_minutes": session.time_limit_minutes
+            "time_limit_minutes": session.time_limit_minutes,
+            "duration_minutes": duration_minutes,
+            "duration": duration_minutes,
         }), 201
         
     except Exception as e:
@@ -2957,11 +2972,20 @@ def get_session_info(test_id):
         is_expired = False
         if time_limit_minutes is not None and remaining_minutes is not None:
             is_expired = remaining_minutes <= 0
-        
+
+        # Duração total da prova em minutos (mesmo valor do time_limit; front usa para exibir "X min")
+        duration_min = time_limit_minutes
+        if duration_min is None and session:
+            test = Test.query.get(session.test_id)
+            if test and getattr(test, 'duration', None) is not None:
+                duration_min = int(test.duration)
+
         return jsonify({
             "session_id": session.id,
             "started_at": session.started_at.isoformat() if session.started_at else None,
             "time_limit_minutes": time_limit_minutes,
+            "duration_minutes": duration_min,
+            "duration": duration_min,
             "elapsed_minutes": elapsed_minutes,
             "remaining_minutes": remaining_minutes,
             "is_expired": is_expired,

@@ -22,6 +22,7 @@ from datetime import datetime, timedelta
 import logging
 from app.models.question import Question
 from app.models.classTest import ClassTest
+from app.models.testQuestion import TestQuestion
 from app.models.schoolTeacher import SchoolTeacher
 from app.decorators.role_required import get_current_tenant_id
 from app.decorators.role_required import get_current_user_from_token
@@ -534,17 +535,21 @@ def evaluations_stats():
         }
     """
     try:
-        logging.info("📊 Iniciando cálculo de estatísticas de avaliações")
-        
         # Obter usuário atual para filtragem
         current_user = get_current_user_from_token()
         if not current_user:
             return jsonify({"erro": "Usuário não encontrado"}), 404
-        
+
         # Base queries
         test_query = Test.query
         question_query = Question.query
-        
+        # Filtro por tipos (ex: types=AVALIACAO,SIMULADO)
+        types_param = request.args.get('types')
+        if types_param:
+            types_list = [t.strip() for t in types_param.split(',') if t.strip()]
+            if types_list:
+                test_query = test_query.filter(Test.type.in_(types_list))
+
         # Filtragem baseada no papel do usuário
         if current_user['role'] == "admin":
             # Admin vê todas as estatísticas do sistema
@@ -704,110 +709,67 @@ def evaluations_stats():
                     "last_sync": datetime.now().isoformat()
                 }), 200
 
-        # Estatísticas básicas - versão mais segura
-        logging.info("🔢 Contando total de avaliações...")
+        # Estatísticas básicas (sem carregar todos os testes em memória)
+        test_ids_subq = test_query.with_entities(Test.id)
         total_evaluations = test_query.count()
-        logging.info(f"✅ Total de avaliações: {total_evaluations}")
-        
-        # Avaliações deste mês
-        logging.info("📅 Contando avaliações deste mês...")
-        this_month_evaluations = 0
-        try:
-            current_month = datetime.now().month
-            current_year = datetime.now().year
-            
-            # Versão mais compatível sem extract
-            from sqlalchemy import and_
-            this_month_evaluations = test_query.filter(
-                and_(
-                    Test.created_at >= datetime(current_year, current_month, 1),
-                    Test.created_at < datetime(current_year, current_month + 1, 1) if current_month < 12 else datetime(current_year + 1, 1, 1)
-                )
-            ).count()
-            logging.info(f"✅ Avaliações deste mês: {this_month_evaluations}")
-        except Exception as e:
-            logging.error(f"❌ Erro ao contar avaliações deste mês: {e}")
-            this_month_evaluations = 0
-        
-        # Total de questões 
-        logging.info("❓ Contando total de questões...")
-        total_questions_result = 0
-        try:
-            total_questions_result = question_query.count()
-            logging.info(f"✅ Total de questões: {total_questions_result}")
-        except Exception as e:
-            logging.error(f"❌ Erro ao contar questões: {e}")
-            total_questions_result = 0
-        
-        # Média de questões por avaliação - versão simples
-        logging.info("📊 Calculando média de questões por avaliação...")
+
+        from sqlalchemy import and_
+        current_month = datetime.now().month
+        current_year = datetime.now().year
+        this_month_evaluations = test_query.filter(
+            and_(
+                Test.created_at >= datetime(current_year, current_month, 1),
+                Test.created_at < datetime(current_year, current_month + 1, 1) if current_month < 12 else datetime(current_year + 1, 1, 1)
+            )
+        ).count()
+
+        total_questions_result = question_query.count() if question_query is not None else 0
+
+        # Média de questões por avaliação via TestQuestion (1 query, sem .all())
         questions_per_evaluation = 0
         try:
-            # Buscar todas as avaliações e contar questões
-            evaluations = test_query.all()
-            if evaluations:
-                total_questions_in_evaluations = 0
-                evaluations_with_questions = 0
-                
-                for evaluation in evaluations:
-                    if hasattr(evaluation, 'questions') and evaluation.questions:
-                        if isinstance(evaluation.questions, list):
-                            total_questions_in_evaluations += len(evaluation.questions)
-                            evaluations_with_questions += 1
-                
-                questions_per_evaluation = total_questions_in_evaluations / evaluations_with_questions if evaluations_with_questions > 0 else 0
-            
-            logging.info(f"✅ Média de questões por avaliação: {questions_per_evaluation}")
+            total_questions_in_tests = db.session.query(db.func.count(TestQuestion.id)).filter(
+                TestQuestion.test_id.in_(test_ids_subq)
+            ).scalar() or 0
+            questions_per_evaluation = total_questions_in_tests / total_evaluations if total_evaluations else 0
         except Exception as e:
-            logging.error(f"❌ Erro ao calcular média de questões: {e}")
-            questions_per_evaluation = 0
-        
-        # Estatísticas por tipo de avaliação
-        logging.info("📊 Calculando estatísticas por tipo...")
+            logging.debug("Média de questões: %s", e)
+
         by_type = {}
         try:
-            evaluations_by_type = db.session.query(Test.type, db.func.count(Test.id)).filter(Test.id.in_(test_query.with_entities(Test.id))).group_by(Test.type).all()
+            evaluations_by_type = db.session.query(Test.type, db.func.count(Test.id)).filter(
+                Test.id.in_(test_ids_subq)
+            ).group_by(Test.type).all()
             by_type = {item[0]: item[1] for item in evaluations_by_type if item[0]}
-            logging.info(f"✅ Estatísticas por tipo: {by_type}")
         except Exception as e:
-            logging.error(f"❌ Erro ao calcular estatísticas por tipo: {e}")
-            by_type = {}
-        
-        # Estatísticas por modelo
-        logging.info("📊 Calculando estatísticas por modelo...")
+            logging.debug("by_type: %s", e)
+
         by_model = {}
         try:
-            evaluations_by_model = db.session.query(Test.model, db.func.count(Test.id)).filter(Test.id.in_(test_query.with_entities(Test.id))).group_by(Test.model).all()
-            by_model = {item[0]: item[1] for item in evaluations_by_type if item[0]}
-            logging.info(f"✅ Estatísticas por modelo: {by_model}")
+            evaluations_by_model = db.session.query(Test.model, db.func.count(Test.id)).filter(
+                Test.id.in_(test_ids_subq)
+            ).group_by(Test.model).all()
+            by_model = {item[0]: item[1] for item in evaluations_by_model if item[0]}
         except Exception as e:
-            logging.error(f"❌ Erro ao calcular estatísticas por modelo: {e}")
-            by_model = {}
-        
-        # Estatísticas por status
-        logging.info("📊 Calculando estatísticas por status...")
+            logging.debug("by_model: %s", e)
+
         by_status = {}
         try:
-            evaluations_by_status = db.session.query(Test.status, db.func.count(Test.id)).filter(Test.id.in_(test_query.with_entities(Test.id))).group_by(Test.status).all()
+            evaluations_by_status = db.session.query(Test.status, db.func.count(Test.id)).filter(
+                Test.id.in_(test_ids_subq)
+            ).group_by(Test.status).all()
             by_status = {item[0]: item[1] for item in evaluations_by_status if item[0]}
-            logging.info(f"✅ Estatísticas por status: {by_status}")
         except Exception as e:
-            logging.error(f"❌ Erro ao calcular estatísticas por status: {e}")
-            by_status = {}
-        
-        # Estatísticas por modo de avaliação
-        logging.info("📊 Calculando estatísticas por modo...")
+            logging.debug("by_status: %s", e)
+
         virtual_evaluations = 0
         physical_evaluations = 0
         try:
             virtual_evaluations = test_query.filter(Test.evaluation_mode == 'virtual').count()
             physical_evaluations = test_query.filter(Test.evaluation_mode == 'physical').count()
-            logging.info(f"✅ Virtuais: {virtual_evaluations}, Físicas: {physical_evaluations}")
         except Exception as e:
-            logging.error(f"❌ Erro ao calcular estatísticas por modo: {e}")
-            virtual_evaluations = 0
-            physical_evaluations = 0
-        
+            logging.debug("modo: %s", e)
+
         result = {
             "total": total_evaluations,
             "this_month": this_month_evaluations,
@@ -820,8 +782,6 @@ def evaluations_stats():
             "by_status": by_status,
             "last_sync": datetime.now().isoformat()
         }
-        
-        logging.info(f"🎉 Estatísticas calculadas com sucesso!")
         return jsonify(result), 200
         
     except Exception as e:

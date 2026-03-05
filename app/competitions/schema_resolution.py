@@ -10,7 +10,12 @@ Regra:
 """
 from sqlalchemy import text
 from app import db
-from app.utils.tenant_middleware import city_id_to_schema_name, get_current_tenant_context
+
+
+def _city_id_to_schema_name(city_id):
+    """Import tardio para evitar ciclo: tenant_middleware -> models -> competitions -> tenant_middleware."""
+    from app.utils.tenant_middleware import city_id_to_schema_name
+    return city_id_to_schema_name(city_id)
 
 
 def _schema_for_school_id(school_id):
@@ -38,7 +43,7 @@ def _schema_for_school_id(school_id):
                 )
                 row2 = r.fetchone()
                 if row2 and row2[0]:
-                    return city_id_to_schema_name(str(row2[0]))
+                    return _city_id_to_schema_name(str(row2[0]))
             except Exception:
                 continue
         return None
@@ -77,7 +82,7 @@ def _schema_for_class_id(class_id):
                 )
                 row2 = r.fetchone()
                 if row2 and row2[0]:
-                    return city_id_to_schema_name(str(row2[0]))
+                    return _city_id_to_schema_name(str(row2[0]))
             except Exception:
                 continue
         return None
@@ -115,7 +120,7 @@ def get_competition_target_schema(scope, scope_filter, tenant_schema=None, tenan
         if len(ids) == 0:
             return 'public'
         if len(ids) == 1:
-            return city_id_to_schema_name(ids[0])
+            return _city_id_to_schema_name(ids[0])
         return 'public'
 
     if scope == 'escola':

@@ -530,6 +530,18 @@ def listar_avaliacoes():
         if grade_filter:
             query = query.filter(Test.grade_id == grade_filter)
 
+        # Filtro por criador (ex: created_by=uuid)
+        created_by_filter = request.args.get('created_by')
+        if created_by_filter:
+            query = query.filter(Test.created_by == created_by_filter)
+
+        # Filtro por tipos (ex: types=AVALIACAO,SIMULADO)
+        types_param = request.args.get('types')
+        if types_param:
+            types_list = [t.strip() for t in types_param.split(',') if t.strip()]
+            if types_list:
+                query = query.filter(Test.type.in_(types_list))
+
         # Se é apenas contagem, retornar rapidamente
         if only_count:
             total = query.count()
@@ -567,10 +579,10 @@ def listar_avaliacoes():
         )
         
         avaliacoes = paginated_query.items
-        
-        # Resposta com metadados de paginação
+
+        # Listagem leve: não carregar questões (questions=[] evita N+1 e carga pesada)
         response_data = {
-            "data": [format_test_response(a) for a in avaliacoes],
+            "data": [format_test_response(a, questions=[]) for a in avaliacoes],
             "pagination": {
                 "page": page,
                 "per_page": per_page,
@@ -847,45 +859,27 @@ def atualizar_status_avaliacao(test_id):
 @role_required("admin", "professor", "coordenador", "diretor", "aluno","tecadm")
 def obter_avaliacao(test_id):
     try:
-        print("\n" + "="*80)
-        print(f"🔍 DEBUG GET /test/{test_id}")
-        print("="*80)
-        
-        # Verificar search_path
         from sqlalchemy import text
         search_path_result = db.session.execute(text("SHOW search_path")).fetchone()
-        print(f"📍 PostgreSQL search_path: {search_path_result[0]}")
-        
-        # MULTITENANT FIX: Buscar test em city_xxx e questões em public
-        # Salvar search_path atual
         current_search_path = search_path_result[0]
-        
-        # Buscar test no schema city_xxx (padrão)
+
         test = Test.query.options(
             joinedload(Test.creator),
             joinedload(Test.subject_rel),
             joinedload(Test.grade)
         ).get(test_id)
-        
+
         if not test:
-            print(f"❌ Test {test_id} não encontrado!")
-            print("="*80 + "\n")
             return jsonify({"error": "Test not found"}), 404
-        
-        print(f"✅ Test encontrado: {test.title}")
-        
-        # Carregar test_questions manualmente
+
         from app.models.testQuestion import TestQuestion
         test_questions_list = TestQuestion.query.filter_by(test_id=test.id).order_by(TestQuestion.order).all()
-        print(f"📋 test_questions carregados: {len(test_questions_list)}")
-        
-        # Mudar para public para carregar as questões
+
         db.session.execute(text("SET search_path TO public"))
-        
-        # Carregar questões com seus relacionamentos
+
         from app.models.question import Question
         from sqlalchemy.orm import joinedload as jl
-        
+
         question_ids = [tq.question_id for tq in test_questions_list]
         if question_ids:
             questions_loaded = Question.query.filter(Question.id.in_(question_ids)).options(
@@ -895,12 +889,9 @@ def obter_avaliacao(test_id):
                 jl(Question.creator),
                 jl(Question.last_modifier)
             ).all()
-            print(f"📊 Questões carregadas de public.question: {len(questions_loaded)}")
         else:
             questions_loaded = []
-            print(f"⚠️ NENHUMA questão para carregar")
-        
-        # Restaurar search_path
+
         db.session.execute(text(f"SET search_path TO {current_search_path}"))
 
         # Ordenar questões na mesma ordem de test_questions para evitar chamar test.questions (2 queries)
@@ -2427,8 +2418,9 @@ def listar_avaliacoes_por_classe(class_id):
 @bp.route('/my-class/tests', methods=['GET'])
 @jwt_required()
 @role_required("aluno")
+@requires_city_context
 def listar_avaliacoes_minha_classe():
-    """Lista todas as avaliações aplicadas na classe do aluno autenticado."""
+    """Lista todas as avaliações aplicadas na classe do aluno autenticado. Requer contexto de tenant (schema) para acessar Student."""
     try:
         user = get_current_user_from_token()
         if not user:
@@ -2485,11 +2477,12 @@ def listar_avaliacoes_minha_classe():
         # Combinar IDs de ambos os tipos (união de sets - ambos são incluídos)
         all_test_ids = list(set(class_test_map.keys()) | set(olympics_map.keys()))
 
+        # Lista leve: não carregar questões (Question), só test_questions para contar total
         tests = Test.query.options(
             joinedload(Test.creator),
             joinedload(Test.subject_rel),
             joinedload(Test.grade),
-            subqueryload(Test.test_questions).subqueryload(TestQuestion.question)
+            subqueryload(Test.test_questions)
         ).filter(Test.id.in_(all_test_ids)).all()
 
         def app_record_for(test_id):
@@ -2517,6 +2510,23 @@ def listar_avaliacoes_minha_classe():
         ).all()
         sessions_dict = {session.test_id: session for session in sessions}
 
+        # Cache de current_time por timezone (evita pytz/timezone por teste)
+        _current_time_cache = {}
+        def _current_time_for_tz(tz_str):
+            if tz_str not in _current_time_cache:
+                if tz_str:
+                    try:
+                        import pytz
+                        target_tz = pytz.timezone(tz_str)
+                        _current_time_cache[tz_str] = datetime.now(target_tz)
+                    except Exception:
+                        from app.utils.timezone_utils import get_local_time
+                        _current_time_cache[tz_str] = get_local_time()
+                else:
+                    from app.utils.timezone_utils import get_local_time
+                    _current_time_cache[tz_str] = get_local_time()
+            return _current_time_cache[tz_str]
+
         for test in tests:
             app_record, app_source = app_record_for(test.id)
             session = sessions_dict.get(test.id)
@@ -2540,27 +2550,11 @@ def listar_avaliacoes_minha_classe():
                 score = session.score
                 grade = session.grade
                 
-                # Verificar se há respostas salvas
-                has_answers = StudentAnswer.query.filter_by(
-                    student_id=student.id,
-                    test_id=test.id
-                ).first() is not None
-                
-                can_start = session.status == 'nao_iniciada' or (session.status == 'em_andamento' and not has_answers)
+                # Pode iniciar (nao_iniciada) ou continuar (em_andamento) a prova
+                can_start = session.status == 'nao_iniciada' or session.status == 'em_andamento'
             
-            # ✅ REGRA 4: Obter tempo atual no timezone da aplicação (sempre definir)
-            current_time = None
-            if app_record.timezone:
-                import pytz
-                try:
-                    target_tz = pytz.timezone(app_record.timezone)
-                    current_time = datetime.now(target_tz)
-                except pytz.exceptions.UnknownTimeZoneError:
-                    from app.utils.timezone_utils import get_local_time
-                    current_time = get_local_time()
-            else:
-                from app.utils.timezone_utils import get_local_time
-                current_time = get_local_time()
+            # ✅ Tempo atual no timezone da aplicação (com cache por timezone)
+            current_time = _current_time_for_tz(app_record.timezone if app_record else None)
 
             # ✅ REGRA 4: Verificar disponibilidade considerando status global, se já completou, data de aplicação E data de expiração
             if test.status == 'agendada' or test.status == 'em_andamento':
@@ -2570,48 +2564,22 @@ def listar_avaliacoes_minha_classe():
                     is_available_now = False
                     if app_record.application and app_record.application is not None:
                         try:
-                            if app_record.timezone:
-                                import pytz
-                                try:
-                                    target_tz = pytz.timezone(app_record.timezone)
-                                    application_dt = dateutil.parser.parse(app_record.application)
-                                    if application_dt.tzinfo is None:
-                                        application_dt = application_dt.replace(tzinfo=target_tz)
-                                    is_available_now = current_time >= application_dt
-                                except pytz.exceptions.UnknownTimeZoneError:
-                                    logging.warning(f"Timezone inválido: {app_record.timezone}, usando fallback")
-                                    raise Exception(f"Timezone inválido: {app_record.timezone}")
-                            else:
-                                application_dt = dateutil.parser.parse(app_record.application)
-                                if application_dt.tzinfo is None:
-                                    application_dt = application_dt.replace(tzinfo=current_time.tzinfo)
-                                is_available_now = current_time >= application_dt
+                            application_dt = dateutil.parser.parse(app_record.application)
+                            if application_dt.tzinfo is None and getattr(current_time, 'tzinfo', None):
+                                application_dt = application_dt.replace(tzinfo=current_time.tzinfo)
+                            is_available_now = current_time >= application_dt
                         except Exception as e:
                             logging.error(f"Erro ao converter data de aplicação para teste {test.id}: {str(e)}")
                             is_available_now = False
-                    else:
-                        is_available_now = False
 
                     # Verificar se a avaliação não expirou (data de expiração)
                     is_expired = False
                     if app_record.expiration and app_record.expiration is not None:
                         try:
-                            if app_record.timezone:
-                                import pytz
-                                try:
-                                    target_tz = pytz.timezone(app_record.timezone)
-                                    expiration_dt = dateutil.parser.parse(app_record.expiration)
-                                    if expiration_dt.tzinfo is None:
-                                        expiration_dt = expiration_dt.replace(tzinfo=target_tz)
-                                    is_expired = current_time > expiration_dt
-                                except pytz.exceptions.UnknownTimeZoneError:
-                                    logging.warning(f"Timezone inválido: {app_record.timezone}, usando fallback")
-                                    raise Exception(f"Timezone inválido: {app_record.timezone}")
-                            else:
-                                expiration_dt = dateutil.parser.parse(app_record.expiration)
-                                if expiration_dt.tzinfo is None:
-                                    expiration_dt = expiration_dt.replace(tzinfo=current_time.tzinfo)
-                                is_expired = current_time > expiration_dt
+                            expiration_dt = dateutil.parser.parse(app_record.expiration)
+                            if expiration_dt.tzinfo is None and getattr(current_time, 'tzinfo', None):
+                                expiration_dt = expiration_dt.replace(tzinfo=current_time.tzinfo)
+                            is_expired = current_time > expiration_dt
                         except Exception as e:
                             logging.error(f"Erro ao converter data de expiração para teste {test.id}: {str(e)}")
                             is_expired = False
@@ -2637,6 +2605,9 @@ def listar_avaliacoes_minha_classe():
             # Preparar subjects usando a função auxiliar
             subjects = process_subjects_for_test(test)
             
+            duration_min = getattr(test, 'duration', None)
+            if duration_min is not None:
+                duration_min = int(duration_min)
             test_info = {
                 "test_id": test.id,
                 "title": test.title,
@@ -2651,7 +2622,8 @@ def listar_avaliacoes_minha_classe():
                 "intructions": test.intructions,
                 "max_score": test.max_score,
                 "time_limit": test.time_limit.isoformat() if test.time_limit else None,
-                "duration": test.duration,  # Duração em minutos
+                "duration": duration_min,  # Duração da prova em minutos (usar para o timer)
+                "duration_minutes": duration_min,  # Explícito para o front usar no cronômetro
                 "course": test.course,
                 "model": test.model,
                 "subjects_info": subjects,  # Retornar a lista de subjects com nomes
@@ -2660,7 +2632,7 @@ def listar_avaliacoes_minha_classe():
                     "id": test.creator.id,
                     "name": test.creator.name
                 } if test.creator else None,
-                "total_questions": len(test.questions),
+                "total_questions": len(test.test_questions),
                 "application_info": {
                     "class_test_id": app_record.id if app_source == "class" else None,
                     "student_test_olimpics_id": app_record.id if app_source == "olympics" else None,
@@ -2778,11 +2750,15 @@ def start_test_session(test_id):
                 status='em_andamento',
             ).first()
             if existing_for_test:
+                dur = getattr(test, 'duration', None)
+                dur = int(dur) if dur is not None else existing_for_test.time_limit_minutes
                 return jsonify({
                     "message": "Sessão já iniciada",
                     "session_id": existing_for_test.id,
                     "started_at": existing_for_test.started_at.isoformat() if existing_for_test.started_at else None,
                     "time_limit_minutes": existing_for_test.time_limit_minutes,
+                    "duration_minutes": dur,
+                    "duration": dur,
                 }), 200
 
         # ✅ REGRA 4: Verificar se a avaliação está disponível (data de aplicação) e não expirou (data de expiração)
@@ -2835,11 +2811,15 @@ def start_test_session(test_id):
         ).first()
         
         if existing_session:
+            dur = getattr(test, 'duration', None)
+            dur = int(dur) if dur is not None else existing_session.time_limit_minutes
             return jsonify({
                 "message": "Sessão já iniciada",
                 "session_id": existing_session.id,
                 "started_at": existing_session.started_at.isoformat() if existing_session.started_at else None,
-                "time_limit_minutes": existing_session.time_limit_minutes
+                "time_limit_minutes": existing_session.time_limit_minutes,
+                "duration_minutes": dur,
+                "duration": dur,
             }), 200
         
         # Verificar se há sessão ativa em qualquer teste para este aluno
@@ -2849,19 +2829,30 @@ def start_test_session(test_id):
         ).first()
         
         if active_session_any_test:
+            test_other = Test.query.get(active_session_any_test.test_id)
+            dur = getattr(test_other, 'duration', None) if test_other else None
+            dur = int(dur) if dur is not None else active_session_any_test.time_limit_minutes
             return jsonify({
                 "message": "Sessão já iniciada",
                 "session_id": active_session_any_test.id,
                 "test_id": active_session_any_test.test_id,
                 "started_at": active_session_any_test.started_at.isoformat() if active_session_any_test.started_at else None,
-                "time_limit_minutes": active_session_any_test.time_limit_minutes
+                "time_limit_minutes": active_session_any_test.time_limit_minutes,
+                "duration_minutes": dur,
+                "duration": dur,
             }), 200
         
-        # Criar nova sessão (sem calcular time_limit automaticamente)
+        # Duração da prova em minutos (test.duration = tempo que o aluno tem para responder, ex.: 20 min).
+        # Não usar a janela application/expiration (ex.: 12h–13h = 1h); usar só test.duration.
+        duration_minutes = getattr(test, 'duration', None)
+        if duration_minutes is not None:
+            duration_minutes = int(duration_minutes) if duration_minutes else None
+
+        # Criar nova sessão com o tempo limite = duração configurada na avaliação
         session = TestSession(
             student_id=student.id,
             test_id=test_id,
-            time_limit_minutes=None,  # Frontend gerencia o timer
+            time_limit_minutes=duration_minutes,
             ip_address=request.remote_addr,
             user_agent=request.headers.get('User-Agent')
         )
@@ -2885,7 +2876,9 @@ def start_test_session(test_id):
             "message": "Sessão iniciada com sucesso",
             "session_id": session.id,
             "started_at": session.started_at.isoformat() if session.started_at else None,
-            "time_limit_minutes": session.time_limit_minutes
+            "time_limit_minutes": session.time_limit_minutes,
+            "duration_minutes": duration_minutes,
+            "duration": duration_minutes,
         }), 201
         
     except Exception as e:
@@ -2896,6 +2889,7 @@ def start_test_session(test_id):
 @bp.route('/<string:test_id>/session-info', methods=['GET'])
 @jwt_required()
 @role_required("aluno")
+@requires_city_context
 def get_session_info(test_id):
     """
     Retorna informações da sessão para o frontend calcular o tempo
@@ -2925,18 +2919,25 @@ def get_session_info(test_id):
                 "message": "Nenhuma sessão ativa encontrada",
                 "session_exists": False
             }), 404
+
+        # Usar duração da prova (test.duration) se a sessão não tiver time_limit_minutes (ex.: sessões antigas)
+        time_limit_minutes = session.time_limit_minutes
+        if time_limit_minutes is None:
+            test = Test.query.get(session.test_id)
+            if test and getattr(test, 'duration', None) is not None:
+                time_limit_minutes = int(test.duration)
         
         # Calcular tempo decorrido e restante
         elapsed_minutes = 0
-        remaining_minutes = session.time_limit_minutes
+        remaining_minutes = time_limit_minutes
         
         if session.started_at:
             # ✅ REGRA 4: Obter tempo atual no timezone da aplicação (se disponível)
             current_time = None
-            # Tentar obter timezone da aplicação se disponível
+            # Usar student já carregado (evita lazy load session.student)
             from app.models.classTest import ClassTest
             class_test = ClassTest.query.filter_by(
-                class_id=session.student.class_id,
+                class_id=student.class_id,
                 test_id=session.test_id
             ).first()
             
@@ -2964,18 +2965,27 @@ def get_session_info(test_id):
             
             # ✅ REGRA 4: Comparar diretamente no mesmo timezone
             elapsed_minutes = int((current_time - started_at_dt).total_seconds() / 60)
-            if session.time_limit_minutes:
-                remaining_minutes = max(0, session.time_limit_minutes - elapsed_minutes)
+            if time_limit_minutes is not None:
+                remaining_minutes = max(0, time_limit_minutes - elapsed_minutes)
         
         # Verificar se expirou (apenas se time_limit_minutes não for None)
         is_expired = False
-        if session.time_limit_minutes is not None and remaining_minutes is not None:
+        if time_limit_minutes is not None and remaining_minutes is not None:
             is_expired = remaining_minutes <= 0
-        
+
+        # Duração total da prova em minutos (mesmo valor do time_limit; front usa para exibir "X min")
+        duration_min = time_limit_minutes
+        if duration_min is None and session:
+            test = Test.query.get(session.test_id)
+            if test and getattr(test, 'duration', None) is not None:
+                duration_min = int(test.duration)
+
         return jsonify({
             "session_id": session.id,
             "started_at": session.started_at.isoformat() if session.started_at else None,
-            "time_limit_minutes": session.time_limit_minutes,
+            "time_limit_minutes": time_limit_minutes,
+            "duration_minutes": duration_min,
+            "duration": duration_min,
             "elapsed_minutes": elapsed_minutes,
             "remaining_minutes": remaining_minutes,
             "is_expired": is_expired,

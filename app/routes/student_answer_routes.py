@@ -16,6 +16,7 @@ from app.models.question import Question
 from app.models.student import Student
 from app.models.testQuestion import TestQuestion
 from app.decorators.role_required import role_required
+from app.decorators import requires_city_context
 from datetime import datetime, timedelta
 import logging
 import dateutil.parser
@@ -23,6 +24,62 @@ import dateutil.parser
 bp = Blueprint('student_answer', __name__, url_prefix='/student-answers')
 
 
+def _expired_session_response(session, test_id):
+    """Monta o corpo da resposta 410 (sessão expirada) incluindo sempre as respostas salvas."""
+    sid = getattr(session, 'student_id', None) or session.student_id
+    tid = getattr(session, 'test_id', None) or session.test_id
+    answers_exp = StudentAnswer.query.filter_by(student_id=sid, test_id=tid).all()
+    answers_data = [
+        {
+            'question_id': a.question_id,
+            'answer': a.answer,
+            'answered_at': a.answered_at.isoformat() if a.answered_at else None,
+            'is_correct': a.is_correct,
+            'manual_points': getattr(a, 'manual_score', None),
+            'feedback': a.feedback
+        }
+        for a in answers_exp
+    ]
+    return {
+        'message': 'Sessão expirada',
+        'test_id': test_id,
+        'session_id': session.id,
+        'status': getattr(session, 'status', 'expirada'),
+        'is_expired': True,
+        'total_answers': len(answers_data),
+        'answers': answers_data
+    }
+
+
+def _effective_time_limit_minutes(session):
+    """Retorna time_limit_minutes da sessão ou, se None, a duração da prova (test.duration)."""
+    if getattr(session, 'time_limit_minutes', None) is not None:
+        return int(session.time_limit_minutes)
+    test = Test.query.get(session.test_id)
+    if test and getattr(test, 'duration', None) is not None:
+        return int(test.duration)
+    return None
+
+
+def _effective_elapsed_seconds(session, now=None):
+    """
+    Tempo efetivo de prova em segundos (desconsidera tempo com aba fechada / pausado).
+    Usa started_at, paused_at e total_paused_seconds do TestSession.
+    """
+    if not session or not getattr(session, 'started_at', None):
+        return 0
+    now = now or datetime.utcnow()
+    if session.started_at.tzinfo:
+        from datetime import timezone
+        if now.tzinfo is None:
+            now = now.replace(tzinfo=timezone.utc)
+    raw = (now - session.started_at).total_seconds()
+    total_paused = getattr(session, 'total_paused_seconds', 0) or 0
+    paused_at = getattr(session, 'paused_at', None)
+    if paused_at:
+        current_pause = (now - paused_at).total_seconds()
+        return max(0, int(raw - total_paused - current_pause))
+    return max(0, int(raw - total_paused))
 
 
 @bp.errorhandler(Exception)
@@ -49,26 +106,21 @@ def get_session_status(session_id):
         if not session:
             return jsonify({'error': 'Sessão não encontrada'}), 404
         
-        # Calcular tempo decorrido e restante
-        elapsed_minutes = 0
-        remaining_minutes = session.time_limit_minutes
+        time_limit_minutes = _effective_time_limit_minutes(session)
+        elapsed_seconds = _effective_elapsed_seconds(session)
+        elapsed_minutes = elapsed_seconds // 60
+        remaining_minutes = time_limit_minutes
         is_expired = False
-        
-        if session.started_at and session.time_limit_minutes:
-
-            elapsed_minutes = int((datetime.utcnow() - session.started_at).total_seconds() / 60)
-            remaining_minutes = max(0, session.time_limit_minutes - elapsed_minutes)
+        if time_limit_minutes is not None:
+            remaining_minutes = max(0, time_limit_minutes - elapsed_minutes)
             is_expired = remaining_minutes <= 0
-        elif session.time_limit_minutes is None:
-            # Se não há limite de tempo, não está expirada
-            is_expired = False
         
         return jsonify({
             'session_id': session.id,
             'status': session.status,
             'started_at': session.started_at.isoformat() if session.started_at else None,
             'submitted_at': session.submitted_at.isoformat() if session.submitted_at else None,
-            'time_limit_minutes': session.time_limit_minutes,
+            'time_limit_minutes': time_limit_minutes,
             'elapsed_minutes': elapsed_minutes,
             'remaining_minutes': remaining_minutes,
             'is_expired': is_expired,
@@ -308,10 +360,29 @@ def submit_answers():
 
         # Validar se sessão ainda está ativa
         if session.status != 'em_andamento':
-            return jsonify({
-                'error': f'Sessão não está ativa. Status atual: {session.status}'
-            }), 400
-        
+            # Sessão expirada/finalizada: retornar 410 com respostas salvas para o front exibir
+            body = {
+                'error': f'Sessão não está ativa. Status atual: {session.status}',
+                'session_id': str(session.id),
+                'test_id': str(session.test_id),
+                'status': session.status,
+                'is_expired': session.status == 'expirada'
+            }
+            answers_saved = StudentAnswer.query.filter_by(
+                student_id=session.student_id,
+                test_id=session.test_id
+            ).all()
+            body['answers'] = [
+                {
+                    'question_id': str(a.question_id),
+                    'answer': a.answer,
+                    'answered_at': a.answered_at.isoformat() if a.answered_at else None,
+                }
+                for a in answers_saved
+            ]
+            body['total_answers'] = len(body['answers'])
+            return jsonify(body), 410
+
         # Validar tempo limite (cálculo no frontend, mas validação adicional aqui)
         if session.started_at and session.time_limit_minutes:
             from app.utils.timezone_utils import get_local_time
@@ -509,6 +580,12 @@ def save_partial_answers():
         session = TestSession.query.get(session_id)
         if not session:
             return jsonify({'error': 'Sessão não encontrada'}), 404
+
+        # Validar que o aluno autenticado é o dono da sessão (evita salvar em sessão de outro)
+        current_user_id = get_jwt_identity()
+        current_student = Student.query.filter_by(user_id=current_user_id).first()
+        if not current_student or str(current_student.id) != str(session.student_id):
+            return jsonify({'error': 'Você não tem permissão para salvar respostas nesta sessão'}), 403
         
         # Verificar se a avaliação não expirou (turma e/ou olimpíada)
         # Ambos funcionam simultaneamente - não há exclusão mútua
@@ -559,9 +636,23 @@ def save_partial_answers():
 
         # Validar se sessão ainda está ativa
         if session.status != 'em_andamento':
-            return jsonify({
-                'error': f'Sessão não está ativa. Status atual: {session.status}'
-            }), 400
+            body = {
+                'error': f'Sessão não está ativa. Status atual: {session.status}',
+                'session_id': str(session.id),
+                'test_id': str(session.test_id),
+                'status': session.status,
+                'is_expired': session.status == 'expirada',
+            }
+            answers_saved = StudentAnswer.query.filter_by(
+                student_id=session.student_id,
+                test_id=session.test_id
+            ).all()
+            body['answers'] = [
+                {'question_id': str(a.question_id), 'answer': a.answer, 'answered_at': a.answered_at.isoformat() if a.answered_at else None}
+                for a in answers_saved
+            ]
+            body['total_answers'] = len(body['answers'])
+            return jsonify(body), 410
 
         # Validar tempo limite (cálculo no frontend, mas validação adicional aqui)
         if session.started_at and session.time_limit_minutes:
@@ -652,6 +743,7 @@ def save_partial_answers():
 @bp.route('/active-session/<string:test_id>', methods=['GET'])
 @jwt_required()
 @role_required("student", "admin", "professor", "aluno")
+@requires_city_context
 def get_active_session(test_id):
     """
     Retorna a sessão ativa para um teste específico
@@ -682,32 +774,25 @@ def get_active_session(test_id):
                 'session_exists': False
             }), 404
         
-        # Calcular tempo decorrido e restante
-        elapsed_minutes = 0
-        remaining_minutes = session.time_limit_minutes
+        # Tempo limite = duração da prova (não a janela application/expiration)
+        time_limit_minutes = _effective_time_limit_minutes(session)
+        # Calcular tempo decorrido e restante (considera pausa quando aba fechada)
+        elapsed_seconds = _effective_elapsed_seconds(session)
+        elapsed_minutes = elapsed_seconds // 60
+        remaining_minutes = time_limit_minutes
         is_expired = False
-        
-        if session.started_at and session.time_limit_minutes:
-
-            elapsed_minutes = int((datetime.utcnow() - session.started_at).total_seconds() / 60)
-            remaining_minutes = max(0, session.time_limit_minutes - elapsed_minutes)
+        if time_limit_minutes is not None:
+            remaining_minutes = max(0, time_limit_minutes - elapsed_minutes)
             is_expired = remaining_minutes <= 0
-        elif session.time_limit_minutes is None:
-            # Se não há limite de tempo, não está expirada
+        elif time_limit_minutes is None:
             is_expired = False
         
         # Se expirou, atualizar status
         if is_expired and session.status == 'em_andamento':
             session.status = 'expirada'
             db.session.commit()
-            return jsonify({
-                'message': 'Sessão expirada',
-                'test_id': test_id,
-                'session_id': session.id,
-                'status': session.status,
-                'is_expired': True
-            }), 410
-        
+            return jsonify(_expired_session_response(session, test_id)), 410
+
         return jsonify({
             'session_id': session.id,
             'test_id': session.test_id,
@@ -715,7 +800,7 @@ def get_active_session(test_id):
             'status': session.status,
             'started_at': session.started_at.isoformat() if session.started_at else None,
             'submitted_at': session.submitted_at.isoformat() if session.submitted_at else None,
-            'time_limit_minutes': session.time_limit_minutes,
+            'time_limit_minutes': time_limit_minutes,
             'elapsed_minutes': elapsed_minutes,
             'remaining_minutes': remaining_minutes,
             'is_expired': is_expired,
@@ -729,6 +814,202 @@ def get_active_session(test_id):
     except Exception as e:
         logging.error(f"Erro ao buscar sessão ativa: {str(e)}", exc_info=True)
         return jsonify({"error": "Erro ao buscar sessão ativa", "details": str(e)}), 500
+
+
+@bp.route('/active-session/<string:test_id>/with-answers', methods=['GET'])
+@jwt_required()
+@role_required("student", "admin", "professor", "aluno")
+@requires_city_context
+def get_active_session_with_answers(test_id):
+    """
+    Retorna a sessão ativa + respostas já salvas em uma única chamada.
+    Use este endpoint ao retomar uma prova para evitar 2 round-trips (active-session + session/answers).
+    """
+    try:
+        current_user_id = get_jwt_identity()
+        student = Student.query.filter_by(user_id=current_user_id).first()
+        if not student:
+            return jsonify({'error': 'Estudante não encontrado para este usuário'}), 404
+
+        session = TestSession.query.filter_by(
+            student_id=student.id,
+            test_id=test_id,
+            status='em_andamento'
+        ).first()
+
+        if not session:
+            # Pode ser que a sessão já tenha sido marcada como expirada (ex.: em outra aba).
+            # Devolver última sessão (expirada/finalizada) + respostas para o front exibir o que foi salvo.
+            last_session = (
+                TestSession.query.filter_by(student_id=student.id, test_id=test_id)
+                .filter(TestSession.status.in_(['expirada', 'finalizada']))
+                .order_by(TestSession.started_at.desc())
+                .first()
+            )
+            if last_session:
+                answers_last = StudentAnswer.query.filter_by(
+                    student_id=student.id,
+                    test_id=test_id
+                ).all()
+                answers_data_last = [
+                    {
+                        'question_id': a.question_id,
+                        'answer': a.answer,
+                        'answered_at': a.answered_at.isoformat() if a.answered_at else None,
+                        'is_correct': a.is_correct,
+                        'manual_points': getattr(a, 'manual_score', None),
+                        'feedback': a.feedback
+                    }
+                    for a in answers_last
+                ]
+                return jsonify({
+                    'message': 'Nenhuma sessão ativa; exibindo respostas da última sessão.',
+                    'test_id': test_id,
+                    'session_id': last_session.id,
+                    'status': last_session.status,
+                    'session_exists': False,
+                    'is_expired': last_session.status == 'expirada',
+                    'total_answers': len(answers_data_last),
+                    'answers': answers_data_last,
+                    'started_at': last_session.started_at.isoformat() if last_session.started_at else None,
+                    'submitted_at': last_session.submitted_at.isoformat() if last_session.submitted_at else None,
+                }), 200
+            return jsonify({
+                'message': 'Nenhuma sessão ativa encontrada para este teste',
+                'test_id': test_id,
+                'session_exists': False
+            }), 404
+
+        time_limit_minutes = _effective_time_limit_minutes(session)
+        elapsed_seconds = _effective_elapsed_seconds(session)
+        elapsed_minutes = elapsed_seconds // 60
+        remaining_minutes = time_limit_minutes
+        is_expired = False
+        if time_limit_minutes is not None:
+            remaining_minutes = max(0, time_limit_minutes - elapsed_minutes)
+            is_expired = remaining_minutes <= 0
+        elif time_limit_minutes is None:
+            is_expired = False
+
+        if is_expired and session.status == 'em_andamento':
+            session.status = 'expirada'
+            db.session.commit()
+            return jsonify(_expired_session_response(session, test_id)), 410
+
+        answers = StudentAnswer.query.filter_by(
+            student_id=session.student_id,
+            test_id=session.test_id
+        ).all()
+        answers_data = [
+            {
+                'question_id': a.question_id,
+                'answer': a.answer,
+                'answered_at': a.answered_at.isoformat() if a.answered_at else None,
+                'is_correct': a.is_correct,
+                'manual_points': getattr(a, 'manual_score', None),  # modelo usa manual_score
+                'feedback': a.feedback
+            }
+            for a in answers
+        ]
+
+        return jsonify({
+            'session_id': session.id,
+            'test_id': session.test_id,
+            'student_id': session.student_id,
+            'status': session.status,
+            'started_at': session.started_at.isoformat() if session.started_at else None,
+            'submitted_at': session.submitted_at.isoformat() if session.submitted_at else None,
+            'time_limit_minutes': time_limit_minutes,
+            'elapsed_minutes': elapsed_minutes,
+            'remaining_minutes': remaining_minutes,
+            'is_expired': is_expired,
+            'total_questions': session.total_questions,
+            'correct_answers': session.correct_answers,
+            'score': session.score,
+            'grade': session.grade,
+            'session_exists': True,
+            'total_answers': len(answers_data),
+            'answers': answers_data
+        }), 200
+
+    except Exception as e:
+        logging.error(f"Erro ao buscar sessão ativa com respostas: {str(e)}", exc_info=True)
+        return jsonify({"error": "Erro ao buscar sessão com respostas", "details": str(e)}), 500
+
+
+@bp.route('/active-session/<string:test_id>/pause', methods=['POST'])
+@jwt_required()
+@role_required("student", "admin", "professor", "aluno")
+@requires_city_context
+def pause_session(test_id):
+    """
+    Pausa o timer da prova (ex.: aluno fechou a aba).
+    O tempo enquanto pausado não conta para o limite. Chamar ao detectar visibility hidden.
+    """
+    try:
+        current_user_id = get_jwt_identity()
+        student = Student.query.filter_by(user_id=current_user_id).first()
+        if not student:
+            return jsonify({'error': 'Estudante não encontrado'}), 404
+        session = TestSession.query.filter_by(
+            student_id=student.id,
+            test_id=test_id,
+            status='em_andamento'
+        ).first()
+        if not session:
+            return jsonify({'error': 'Nenhuma sessão ativa para este teste'}), 404
+        if getattr(session, 'paused_at', None):
+            return jsonify({'message': 'Sessão já está pausada', 'session_id': session.id}), 200
+        session.paused_at = datetime.utcnow()
+        db.session.commit()
+        return jsonify({
+            'message': 'Timer pausado',
+            'session_id': session.id,
+            'paused_at': session.paused_at.isoformat() if session.paused_at else None
+        }), 200
+    except Exception as e:
+        logging.error(f"Erro ao pausar sessão: {str(e)}", exc_info=True)
+        return jsonify({"error": "Erro ao pausar sessão", "details": str(e)}), 500
+
+
+@bp.route('/active-session/<string:test_id>/resume', methods=['POST'])
+@jwt_required()
+@role_required("student", "admin", "professor", "aluno")
+@requires_city_context
+def resume_session(test_id):
+    """
+    Retoma o timer da prova (ex.: aluno reabriu a aba).
+    Acumula o tempo que ficou pausado em total_paused_seconds.
+    """
+    try:
+        current_user_id = get_jwt_identity()
+        student = Student.query.filter_by(user_id=current_user_id).first()
+        if not student:
+            return jsonify({'error': 'Estudante não encontrado'}), 404
+        session = TestSession.query.filter_by(
+            student_id=student.id,
+            test_id=test_id,
+            status='em_andamento'
+        ).first()
+        if not session:
+            return jsonify({'error': 'Nenhuma sessão ativa para este teste'}), 404
+        paused_at = getattr(session, 'paused_at', None)
+        if not paused_at:
+            return jsonify({'message': 'Sessão não estava pausada', 'session_id': session.id}), 200
+        now = datetime.utcnow()
+        extra_paused = int((now - paused_at).total_seconds())
+        total_paused = getattr(session, 'total_paused_seconds', 0) or 0
+        session.total_paused_seconds = total_paused + extra_paused
+        session.paused_at = None
+        db.session.commit()
+        return jsonify({
+            'message': 'Timer retomado',
+            'session_id': session.id,
+            'total_paused_seconds': session.total_paused_seconds
+        }), 200
+    except Exception as e:
+        logging.error(f"Erro ao retomar sessão: {str(e)}", exc_info=True)
+        return jsonify({"error": "Erro ao retomar sessão", "details": str(e)}), 500
 
 
 # ==================== VERIFICAÇÃO DE STATUS POR ALUNO ====================
@@ -945,15 +1226,24 @@ def get_student_all_tests_status():
 @bp.route('/session/<session_id>/answers', methods=['GET'])
 @jwt_required()
 @role_required("student", "admin", "professor", "aluno")
+@requires_city_context
 def get_session_answers(session_id):
     """
-    Retorna todas as respostas de uma sessão específica
+    Retorna todas as respostas de uma sessão específica.
+    Apenas o dono da sessão (aluno) pode consultar.
+    Para retomar prova, prefira GET /active-session/<test_id>/with-answers (1 chamada em vez de 2).
     """
     try:
         # Buscar sessão
         session = TestSession.query.get(session_id)
         if not session:
             return jsonify({'error': 'Sessão não encontrada'}), 404
+
+        # Validar que o aluno autenticado é o dono da sessão
+        current_user_id = get_jwt_identity()
+        current_student = Student.query.filter_by(user_id=current_user_id).first()
+        if not current_student or str(current_student.id) != str(session.student_id):
+            return jsonify({'error': 'Você não tem permissão para acessar as respostas desta sessão'}), 403
         
         # Buscar respostas
         answers = StudentAnswer.query.filter_by(
@@ -968,7 +1258,7 @@ def get_session_answers(session_id):
                 'answer': answer.answer,
                 'answered_at': answer.answered_at.isoformat() if answer.answered_at else None,
                 'is_correct': answer.is_correct,
-                'manual_points': answer.manual_points,
+                'manual_points': getattr(answer, 'manual_score', None),  # modelo usa manual_score
                 'feedback': answer.feedback
             })
         
@@ -986,9 +1276,10 @@ def get_session_answers(session_id):
 @bp.route('/student/sessions', methods=['GET'])
 @jwt_required()
 @role_required("student", "admin", "professor", "aluno")
+@requires_city_context
 def get_student_sessions():
     """
-    Retorna todas as sessões do aluno logado
+    Retorna todas as sessões do aluno logado. Requer contexto de tenant (schema) para acessar Student.
     """
     try:
         from app.models.student import Student
@@ -1006,20 +1297,34 @@ def get_student_sessions():
         
         sessions_data = []
         for session in sessions:
-            # Calcular tempo decorrido e restante
             elapsed_minutes = 0
             remaining_minutes = session.time_limit_minutes
             is_expired = False
-            
             if session.started_at and session.time_limit_minutes:
-
-                elapsed_minutes = int((datetime.utcnow() - session.started_at).total_seconds() / 60)
-                remaining_minutes = max(0, session.time_limit_minutes - elapsed_minutes)
+                try:
+                    now = datetime.utcnow()
+                    if session.started_at.tzinfo and not now.tzinfo:
+                        from datetime import timezone
+                        now = now.replace(tzinfo=timezone.utc)
+                    elapsed_minutes = int((now - session.started_at).total_seconds() / 60)
+                except (TypeError, AttributeError):
+                    elapsed_minutes = 0
+                remaining_minutes = max(0, (session.time_limit_minutes or 0) - elapsed_minutes)
                 is_expired = remaining_minutes <= 0
             elif session.time_limit_minutes is None:
-                # Se não há limite de tempo, não está expirada
                 is_expired = False
-            
+
+            try:
+                dur_mins = session.duration_minutes
+            except Exception:
+                dur_mins = None
+            grade_val = session.grade
+            if grade_val is not None and hasattr(grade_val, '__float__'):
+                try:
+                    grade_val = float(grade_val)
+                except (TypeError, ValueError):
+                    pass
+
             sessions_data.append({
                 'session_id': session.id,
                 'test_id': session.test_id,
@@ -1030,11 +1335,11 @@ def get_student_sessions():
                 'elapsed_minutes': elapsed_minutes,
                 'remaining_minutes': remaining_minutes,
                 'is_expired': is_expired,
-                'duration_minutes': session.duration_minutes,
+                'duration_minutes': dur_mins,
                 'total_questions': session.total_questions,
                 'correct_answers': session.correct_answers,
-                'score': session.score,
-                'grade': session.grade
+                'score': float(session.score) if session.score is not None and hasattr(session.score, '__float__') else session.score,
+                'grade': grade_val
             })
         
         return jsonify({
@@ -1113,13 +1418,20 @@ def can_student_start_test(test_id):
         # Ambos funcionam simultaneamente - não há exclusão mútua
         app_record = olympics if olympics else class_test
         if not app_record:
+            duration_min = getattr(test, 'duration', None)
+            if duration_min is not None:
+                duration_min = int(duration_min)
             return jsonify({
                 'can_start': False,
                 'reason': 'Avaliação não está aplicada na sua classe',
                 'test_info': {
                     'id': test_id,
                     'title': test.title,
-                    'status': test.status
+                    'status': test.status,
+                    'duration': duration_min,
+                    'duration_minutes': duration_min,
+                    'application': None,
+                    'expiration': None
                 },
                 'student_info': {
                     'id': student.id,
@@ -1220,7 +1532,9 @@ def can_student_start_test(test_id):
                 can_start = False
                 reason = f"Status da avaliação não permite início: {test.status}"
 
-        logging.info(f"DEBUG CAN-START FINAL - Test: {test_id}, Can Start: {can_start}, Reason: {reason}")
+        duration_min = getattr(test, 'duration', None)
+        if duration_min is not None:
+            duration_min = int(duration_min)
 
         return jsonify({
             'can_start': can_start,
@@ -1229,8 +1543,10 @@ def can_student_start_test(test_id):
                 'id': test_id,
                 'title': test.title,
                 'status': test.status,
-                'application': app_record.application if app_record.application else None,
-                'expiration': app_record.expiration if app_record.expiration else None
+                'duration': duration_min,
+                'duration_minutes': duration_min,
+                'application': app_record.application if app_record and app_record.application else None,
+                'expiration': app_record.expiration if app_record and app_record.expiration else None
             },
             'student_info': {
                 'id': student.id,

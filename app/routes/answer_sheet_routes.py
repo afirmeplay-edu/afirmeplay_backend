@@ -23,8 +23,11 @@ from app.services.progress_store import (
 from app.models.school import School
 from app.models.grades import Grade
 from app.models.city import City
+from app.models.skill import Skill
 from typing import Dict, Optional, List, Any
+from sqlalchemy import cast, String
 import logging
+import re
 import base64
 import io
 import os
@@ -97,18 +100,59 @@ def _validate_blocks_config(blocks: List, total_questions: int) -> Optional[str]
     return None
 
 
-def _generate_complete_structure(num_questions: int, use_blocks: bool,
-                                 blocks_config: Dict, questions_options: Dict = None) -> Dict:
+def _resolve_question_skills_to_ids(question_skills_raw: Dict) -> Dict[int, List[str]]:
     """
-    Gera estrutura completa de questões e alternativas por bloco
+    Converte question_skills do payload (códigos ou IDs em string) para um mapa
+    número da questão -> lista de IDs (UUID string) de Skill.
+    Aceita no payload: {"1": ["EF01LP01", "uuid-aqui"], "2": ["code2"]}.
+    """
+    if not question_skills_raw or not isinstance(question_skills_raw, dict):
+        return {}
+    uuid_pattern = re.compile(
+        r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+    )
+    result = {}
+    for q_key, values in question_skills_raw.items():
+        try:
+            q_num = int(q_key)
+        except (ValueError, TypeError):
+            continue
+        if not isinstance(values, list):
+            values = [values] if values is not None else []
+        resolved_ids = []
+        for v in values:
+            if not v or not isinstance(v, str):
+                continue
+            v = v.strip()
+            if not v:
+                continue
+            if uuid_pattern.match(v):
+                skill = Skill.query.filter(Skill.id == v).first()
+                if skill:
+                    resolved_ids.append(str(skill.id))
+            else:
+                skill = Skill.query.filter(Skill.code == v).first()
+                if skill:
+                    resolved_ids.append(str(skill.id))
+        if resolved_ids:
+            result[q_num] = resolved_ids
+    return result
+
+
+def _generate_complete_structure(num_questions: int, use_blocks: bool,
+                                 blocks_config: Dict, questions_options: Dict = None,
+                                 question_skills: Optional[Dict[int, List[str]]] = None) -> Dict:
+    """
+    Gera estrutura completa de questões e alternativas por bloco.
+    question_skills: opcional, mapa número da questão -> lista de IDs (UUID) de Skill;
+    cada questão na topology recebe a chave "skills" com essa lista.
     Formato (será salvo em blocks_config['topology']):
     {
         "blocks": [
             {
                 "block_id": 1,
                 "questions": [
-                    {"q": 1, "alternatives": ["A", "B"]},
-                    {"q": 2, "alternatives": ["A", "B", "C", "D"]},
+                    {"q": 1, "alternatives": ["A", "B"], "skills": ["uuid1", "uuid2"]},
                     ...
                 ]
             },
@@ -157,10 +201,10 @@ def _generate_complete_structure(num_questions: int, use_blocks: bool,
             questions = []
             for q_num in range(start_q, end_q + 1):
                 alternatives = questions_map.get(q_num, ['A', 'B', 'C', 'D'])
-                questions.append({
-                    "q": q_num,
-                    "alternatives": alternatives
-                })
+                q_dict = {"q": q_num, "alternatives": alternatives}
+                if question_skills is not None:
+                    q_dict["skills"] = list(question_skills.get(q_num, []))
+                questions.append(q_dict)
             
             blocks.append({
                 "block_id": block_id,
@@ -182,10 +226,10 @@ def _generate_complete_structure(num_questions: int, use_blocks: bool,
             questions = []
             for q_num in range(start_question, end_question + 1):
                 alternatives = questions_map.get(q_num, ['A', 'B', 'C', 'D'])
-                questions.append({
-                    "q": q_num,
-                    "alternatives": alternatives
-                })
+                q_dict = {"q": q_num, "alternatives": alternatives}
+                if question_skills is not None:
+                    q_dict["skills"] = list(question_skills.get(q_num, []))
+                questions.append(q_dict)
             
             blocks.append({
                 "block_id": block_num,
@@ -198,10 +242,10 @@ def _generate_complete_structure(num_questions: int, use_blocks: bool,
         questions = []
         for q_num in range(1, num_questions + 1):
             alternatives = questions_map.get(q_num, ['A', 'B', 'C', 'D'])
-            questions.append({
-                "q": q_num,
-                "alternatives": alternatives
-            })
+            q_dict = {"q": q_num, "alternatives": alternatives}
+            if question_skills is not None:
+                q_dict["skills"] = list(question_skills.get(q_num, []))
+            questions.append(q_dict)
         
         topology["blocks"] = [{
             "block_id": 1,
@@ -234,6 +278,7 @@ def generate_answer_sheets():
             "blocks_config": {...},
             "correct_answers": {...},
             "questions_options": {...},
+            "question_skills": {"1": ["EF01LP01", "uuid-opcional"], "2": ["code2"]},  // opcional; códigos ou IDs de Skill por questão
             "test_data": {...},
             "test_id": "uuid" (opcional),
             
@@ -391,13 +436,16 @@ def generate_answer_sheets():
             blocks_config['questions_per_block'] = num_questions
             blocks_config['separate_by_subject'] = False
         
-        # ✅ 4. GERAR ESTRUTURA COMPLETA (topology)
+        # ✅ 4. GERAR ESTRUTURA COMPLETA (topology) + skills por questão
         questions_options = data.get('questions_options', {})
+        question_skills_raw = data.get('question_skills', {})
+        question_skills_ids = _resolve_question_skills_to_ids(question_skills_raw)
         complete_structure = _generate_complete_structure(
             num_questions=num_questions,
             use_blocks=use_blocks,
             blocks_config=blocks_config,
-            questions_options=questions_options
+            questions_options=questions_options,
+            question_skills=question_skills_ids if question_skills_ids else None
         )
         blocks_config['topology'] = complete_structure
         
@@ -1540,13 +1588,24 @@ def get_answer_sheet_result(result_id):
         topology = blocks_config.get('topology', {}) if isinstance(blocks_config, dict) else {}
         blocks = topology.get('blocks', [])
         
-        # Mapear quantas alternativas cada questão tem
+        # Mapear alternativas e skills por questão (topology em blocks_config)
         alternatives_map = {}
+        skills_map = {}
         for block in blocks:
             for question in block.get('questions', []):
                 q_num = question.get('q')
                 alternatives = question.get('alternatives', [])
                 alternatives_map[q_num] = alternatives
+                skills_map[q_num] = question.get('skills', [])
+        
+        # Carregar Skills para enriquecer detailed_questions
+        all_skill_ids = set()
+        for ids in skills_map.values():
+            all_skill_ids.update(str(sid) for sid in ids if sid)
+        skills_by_id = {}
+        if all_skill_ids:
+            skills_list = Skill.query.filter(Skill.id.in_(all_skill_ids)).all()
+            skills_by_id = {str(s.id): s for s in skills_list}
         
         # Construir lista detalhada de questões ordenada
         detailed_questions = []
@@ -1576,6 +1635,14 @@ def get_answer_sheet_result(result_id):
                 status = "incorrect"
                 is_correct = False
             
+            # Skills da questão (da topology)
+            skill_ids = skills_map.get(q_num, [])
+            skills_payload = [
+                {"id": str(skills_by_id[sid].id), "code": skills_by_id[sid].code, "description": skills_by_id[sid].description}
+                for sid in skill_ids
+                if sid and str(sid) in skills_by_id
+            ]
+            
             detailed_questions.append({
                 "question": q_num,
                 "alternatives": alternatives,
@@ -1583,7 +1650,8 @@ def get_answer_sheet_result(result_id):
                 "student_answer": student_answer,
                 "correct_answer": correct_answer,
                 "is_correct": is_correct,
-                "status": status
+                "status": status,
+                "skills": skills_payload
             })
         
         return jsonify({
@@ -1615,6 +1683,839 @@ def get_answer_sheet_result(result_id):
     except Exception as e:
         logging.error(f"❌ Erro ao buscar resultado: {str(e)}", exc_info=True)
         return jsonify({"error": "Erro interno do servidor"}), 500
+
+
+# ============================================================================
+# RESULTADOS AGREGADOS (cartões resposta) — semelhante a evaluation_results
+# ============================================================================
+
+def _is_valid_filter(value):
+    return value and str(value).strip().lower() != 'all'
+
+
+def _determinar_escopo_busca_cartao(estado, municipio, escola, serie, turma, gabarito, user=None):
+    """
+    Determina o escopo de busca para resultados agregados de cartões resposta.
+    Escolas = escolas do município que têm pelo menos um resultado do gabarito (quando gabarito selecionado).
+    """
+    try:
+        from app.permissions import get_user_permission_scope
+        permissao = get_user_permission_scope(user) if user else {'permitted': True, 'scope': 'all'}
+        if not permissao.get('permitted'):
+            return None
+
+        municipio_id = None
+        city_data = None
+        if _is_valid_filter(municipio):
+            city = City.query.get(municipio) or City.query.filter(City.name.ilike(f"%{municipio}%")).first()
+            if city:
+                municipio_id = city.id
+                city_data = city
+        elif _is_valid_filter(estado):
+            city = City.query.filter(City.state.ilike(f"%{estado}%")).first()
+            if city:
+                municipio_id = city.id
+                city_data = city
+        if not municipio_id:
+            return None
+
+        if user and permissao.get('scope') == 'municipio' and str(user.get('city_id')) != str(municipio_id):
+            return None
+
+        escolas = []
+        gabarito_id = str(gabarito).strip() if _is_valid_filter(gabarito) else None
+
+        if gabarito_id:
+            # Professor só vê seus gabaritos
+            if user and user.get('role') == 'professor':
+                g = AnswerSheetGabarito.query.filter_by(id=gabarito_id, created_by=str(user['id'])).first()
+                if not g:
+                    return None
+            else:
+                g = AnswerSheetGabarito.query.get(gabarito_id)
+                if not g:
+                    return None
+            # Turmas que têm pelo menos um resultado deste gabarito
+            results = AnswerSheetResult.query.filter_by(gabarito_id=gabarito_id).all()
+            student_ids = list({r.student_id for r in results})
+            if not student_ids:
+                return {'municipio_id': municipio_id, 'city_data': city_data, 'escolas': [], 'estado': estado, 'municipio': municipio, 'escola': escola, 'serie': serie, 'turma': turma, 'gabarito': gabarito}
+            students = Student.query.filter(Student.id.in_(student_ids)).filter(Student.class_id.isnot(None)).all()
+            class_ids = list({s.class_id for s in students})
+            if not class_ids:
+                return {'municipio_id': municipio_id, 'city_data': city_data, 'escolas': [], 'estado': estado, 'municipio': municipio, 'escola': escola, 'serie': serie, 'turma': turma, 'gabarito': gabarito}
+            classes = Class.query.filter(Class.id.in_(class_ids)).all()
+            school_ids = list({c.school_id for c in classes if c.school_id})
+            if not school_ids:
+                return {'municipio_id': municipio_id, 'city_data': city_data, 'escolas': [], 'estado': estado, 'municipio': municipio, 'escola': escola, 'serie': serie, 'turma': turma, 'gabarito': gabarito}
+            escolas = School.query.filter(School.id.in_(school_ids), School.city_id == municipio_id).all()
+            if _is_valid_filter(escola):
+                escolas = [e for e in escolas if str(e.id) == str(escola)]
+        else:
+            if _is_valid_filter(escola):
+                school = School.query.filter(School.id == escola).first() or School.query.filter(School.name.ilike(f"%{escola}%")).first()
+                if school and (not municipio_id or school.city_id == municipio_id):
+                    escolas = [school]
+            else:
+                escolas = School.query.filter_by(city_id=municipio_id).all()
+
+        if user and permissao.get('scope') == 'escola':
+            if user.get('role') in ['diretor', 'coordenador']:
+                from app.models.manager import Manager
+                manager = Manager.query.filter_by(user_id=user['id']).first()
+                escolas = [e for e in escolas if manager and str(e.id) == str(manager.school_id)] if manager else []
+            elif user.get('role') == 'professor':
+                from app.models.teacher import Teacher
+                from app.models.teacherClass import TeacherClass
+                teacher = Teacher.query.filter_by(user_id=user['id']).first()
+                if teacher:
+                    tc = TeacherClass.query.filter_by(teacher_id=teacher.id).all()
+                    teacher_class_ids = [t.class_id for t in tc]
+                    if teacher_class_ids:
+                        teacher_school_ids = list({c.school_id for c in Class.query.filter(Class.id.in_(teacher_class_ids)).all() if c.school_id})
+                        escolas = [e for e in escolas if e.id in teacher_school_ids]
+                    else:
+                        escolas = []
+
+        return {
+            'municipio_id': municipio_id,
+            'city_data': city_data,
+            'escolas': escolas,
+            'estado': estado,
+            'municipio': municipio,
+            'escola': escola,
+            'serie': serie,
+            'turma': turma,
+            'gabarito': gabarito,
+        }
+    except Exception as e:
+        logging.error(f"Erro ao determinar escopo cartão: {str(e)}", exc_info=True)
+        return None
+
+
+def _determinar_nivel_granularidade_cartao(estado, municipio, escola, serie, turma, gabarito):
+    if not _is_valid_filter(gabarito):
+        return "municipio" if _is_valid_filter(municipio) else "estado"
+    if _is_valid_filter(turma):
+        return "turma"
+    if _is_valid_filter(serie):
+        return "serie"
+    if _is_valid_filter(escola):
+        return "escola"
+    return "municipio"
+
+
+def _get_nome_granularidade_cartao(nivel, scope_info, escola_nome, serie_nome):
+    if nivel == "turma":
+        return f"Turma - {serie_nome}" if serie_nome else "Turma"
+    if nivel == "serie":
+        return serie_nome or "Série"
+    if nivel == "escola":
+        return escola_nome or "Escola"
+    if nivel == "municipio":
+        city = scope_info.get('city_data')
+        return city.name if city else "Município"
+    return "Geral"
+
+
+def _get_empty_statistics_gerais_cartao(scope_info, nivel_granularidade):
+    city_data = scope_info.get('city_data')
+    return {
+        "tipo": nivel_granularidade,
+        "nome": _get_nome_granularidade_cartao(nivel_granularidade, scope_info, None, None),
+        "estado": scope_info.get('estado', 'Todos os estados'),
+        "municipio": city_data.name if city_data else "Todos os municípios",
+        "escola": None,
+        "serie": None,
+        "total_escolas": 0,
+        "total_series": 0,
+        "total_turmas": 0,
+        "total_gabaritos": 0,
+        "total_alunos": 0,
+        "alunos_participantes": 0,
+        "alunos_pendentes": 0,
+        "alunos_ausentes": 0,
+        "media_nota_geral": 0.0,
+        "media_proficiencia_geral": 0.0,
+        "distribuicao_classificacao_geral": {
+            "abaixo_do_basico": 0,
+            "basico": 0,
+            "adequado": 0,
+            "avancado": 0
+        }
+    }
+
+
+def _determinar_escopo_calculo_cartao(scope_info, nivel_granularidade):
+    escopo = {}
+    if nivel_granularidade == "municipio":
+        escopo['tipo'] = "municipio"
+        escopo['municipio_id'] = scope_info.get('municipio_id')
+        escopo['gabarito_id'] = scope_info.get('gabarito')
+    elif nivel_granularidade == "escola":
+        escopo['tipo'] = "escola"
+        escopo['escola_id'] = scope_info.get('escola')
+        escopo['gabarito_id'] = scope_info.get('gabarito')
+        escopo['municipio_id'] = scope_info.get('municipio_id')
+    elif nivel_granularidade == "serie":
+        escopo['tipo'] = "serie"
+        escopo['serie_id'] = scope_info.get('serie')
+        escopo['escola_id'] = scope_info.get('escola')
+        escopo['gabarito_id'] = scope_info.get('gabarito')
+        escopo['municipio_id'] = scope_info.get('municipio_id')
+    elif nivel_granularidade == "turma":
+        escopo['tipo'] = "turma"
+        escopo['turma_id'] = scope_info.get('turma')
+        escopo['serie_id'] = scope_info.get('serie')
+        escopo['escola_id'] = scope_info.get('escola')
+        escopo['gabarito_id'] = scope_info.get('gabarito')
+        escopo['municipio_id'] = scope_info.get('municipio_id')
+    return escopo
+
+
+def _obter_class_ids_com_resultado_cartao(gabarito_id, escopo):
+    """Retorna class_ids no escopo que têm pelo menos um resultado do gabarito."""
+    if not gabarito_id:
+        return []
+    results = AnswerSheetResult.query.filter_by(gabarito_id=gabarito_id).all()
+    student_ids = list({r.student_id for r in results})
+    if not student_ids:
+        return []
+    students = Student.query.filter(Student.id.in_(student_ids)).filter(Student.class_id.isnot(None)).all()
+    class_ids = list({s.class_id for s in students})
+    if not class_ids:
+        return []
+    q = Class.query.filter(Class.id.in_(class_ids))
+    if escopo.get('tipo') == 'municipio' and escopo.get('municipio_id'):
+        q = q.join(School, School.id == cast(Class.school_id, String)).filter(School.city_id == escopo['municipio_id'])
+    elif escopo.get('tipo') == 'escola' and escopo.get('escola_id'):
+        q = q.filter(Class.school_id == escopo['escola_id'])
+    elif escopo.get('tipo') == 'serie':
+        q = q.filter(Class.grade_id == escopo.get('serie_id'))
+        if escopo.get('escola_id'):
+            q = q.filter(Class.school_id == escopo['escola_id'])
+    elif escopo.get('tipo') == 'turma' and escopo.get('turma_id'):
+        q = q.filter(Class.id == escopo['turma_id'])
+    return [c.id for c in q.all()]
+
+
+def _calcular_estatisticas_consolidadas_cartao(scope_info, nivel_granularidade, gabarito_id, user):
+    try:
+        escopo = _determinar_escopo_calculo_cartao(scope_info, nivel_granularidade)
+        class_ids = _obter_class_ids_com_resultado_cartao(gabarito_id, escopo)
+        if not class_ids:
+            return _get_empty_statistics_gerais_cartao(scope_info, nivel_granularidade)
+
+        todos_alunos = Student.query.filter(Student.class_id.in_(class_ids)).all()
+        total_alunos = len(todos_alunos)
+        student_ids = [a.id for a in todos_alunos]
+        if not gabarito_id:
+            resultados = []
+        else:
+            resultados = AnswerSheetResult.query.filter(
+                AnswerSheetResult.gabarito_id == gabarito_id,
+                AnswerSheetResult.student_id.in_(student_ids)
+            ).all()
+        alunos_participantes = len(resultados)
+        media_nota = sum(r.grade for r in resultados) / len(resultados) if resultados else 0.0
+        media_prof = sum(r.proficiency or 0 for r in resultados) / len(resultados) if resultados else 0.0
+        dist = {'abaixo_do_basico': 0, 'basico': 0, 'adequado': 0, 'avancado': 0}
+        for r in resultados:
+            if not r.classification:
+                continue
+            c = (r.classification or '').lower()
+            if 'abaixo' in c or 'básico' in c:
+                dist['abaixo_do_basico'] += 1
+            elif 'básico' in c or 'basico' in c:
+                dist['basico'] += 1
+            elif 'adequado' in c:
+                dist['adequado'] += 1
+            elif 'avançado' in c or 'avancado' in c:
+                dist['avancado'] += 1
+
+        escolas_unicas = set()
+        series_unicas = set()
+        turmas_unicas = set(class_ids)
+        for c in Class.query.filter(Class.id.in_(class_ids)).all():
+            if c.school_id:
+                escolas_unicas.add(c.school_id)
+            if c.grade_id:
+                series_unicas.add(c.grade_id)
+
+        escola_nome = None
+        serie_nome = None
+        if scope_info.get('escola') and _is_valid_filter(scope_info.get('escola')):
+            s = School.query.get(scope_info['escola'])
+            escola_nome = s.name if s else None
+        if scope_info.get('serie') and _is_valid_filter(scope_info.get('serie')):
+            g = Grade.query.get(scope_info['serie'])
+            serie_nome = g.name if g else None
+
+        return {
+            "tipo": nivel_granularidade,
+            "nome": _get_nome_granularidade_cartao(nivel_granularidade, scope_info, escola_nome, serie_nome),
+            "estado": scope_info.get('estado', 'Todos os estados'),
+            "municipio": scope_info.get('city_data').name if scope_info.get('city_data') else "Todos os municípios",
+            "escola": escola_nome,
+            "serie": serie_nome,
+            "total_escolas": len(escolas_unicas),
+            "total_series": len(series_unicas),
+            "total_turmas": len(turmas_unicas),
+            "total_gabaritos": 1 if gabarito_id else 0,
+            "total_alunos": total_alunos,
+            "alunos_participantes": alunos_participantes,
+            "alunos_pendentes": total_alunos - alunos_participantes,
+            "alunos_ausentes": 0,
+            "media_nota_geral": round(media_nota, 2),
+            "media_proficiencia_geral": round(media_prof, 2),
+            "distribuicao_classificacao_geral": dist
+        }
+    except Exception as e:
+        logging.error(f"Erro ao calcular estatísticas consolidadas cartão: {str(e)}", exc_info=True)
+        return _get_empty_statistics_gerais_cartao(scope_info, nivel_granularidade)
+
+
+def _calcular_estatisticas_grupo_cartao(class_ids, gabarito_id):
+    """Estatísticas para um grupo de turmas (usado em resultados_detalhados)."""
+    if not class_ids or not gabarito_id:
+        return {'total_alunos': 0, 'alunos_participantes': 0, 'alunos_pendentes': 0, 'media_nota': 0.0, 'media_proficiencia': 0.0, 'distribuicao_classificacao': {'abaixo_do_basico': 0, 'basico': 0, 'adequado': 0, 'avancado': 0}}
+    alunos = Student.query.filter(Student.class_id.in_(class_ids)).all()
+    total_alunos = len(alunos)
+    sid_list = [a.id for a in alunos]
+    resultados = AnswerSheetResult.query.filter(AnswerSheetResult.gabarito_id == gabarito_id, AnswerSheetResult.student_id.in_(sid_list)).all()
+    participantes = len(resultados)
+    media_nota = sum(r.grade for r in resultados) / len(resultados) if resultados else 0.0
+    media_prof = sum(r.proficiency or 0 for r in resultados) / len(resultados) if resultados else 0.0
+    dist = {'abaixo_do_basico': 0, 'basico': 0, 'adequado': 0, 'avancado': 0}
+    for r in resultados:
+        c = (r.classification or '').lower()
+        if 'abaixo' in c or 'básico' in c:
+            dist['abaixo_do_basico'] += 1
+        elif 'básico' in c or 'basico' in c:
+            dist['basico'] += 1
+        elif 'adequado' in c:
+            dist['adequado'] += 1
+        elif 'avançado' in c or 'avancado' in c:
+            dist['avancado'] += 1
+    return {'total_alunos': total_alunos, 'alunos_participantes': participantes, 'alunos_pendentes': total_alunos - participantes, 'media_nota': round(media_nota, 2), 'media_proficiencia': round(media_prof, 2), 'distribuicao_classificacao': dist}
+
+
+def _gerar_resultados_detalhados_por_granularidade_cartao(scope_info, nivel_granularidade, gabarito_id):
+    """Gera lista agregada por escola / série / turma."""
+    gabarito_id = str(gabarito_id).strip() if gabarito_id else None
+    if not gabarito_id:
+        return []
+    escopo_base = _determinar_escopo_calculo_cartao(scope_info, nivel_granularidade)
+    class_ids = _obter_class_ids_com_resultado_cartao(gabarito_id, escopo_base)
+    if not class_ids:
+        return []
+    classes = Class.query.filter(Class.id.in_(class_ids)).all()
+    gabarito = AnswerSheetGabarito.query.get(gabarito_id)
+    titulo_gabarito = gabarito.title if gabarito else "Gabarito"
+    city_data = scope_info.get('city_data')
+    municipio_nome = city_data.name if city_data else "N/A"
+    estado_nome = scope_info.get('estado', 'N/A')
+    resultados_detalhados = []
+
+    if nivel_granularidade == "municipio":
+        by_school = {}
+        for c in classes:
+            sid = c.school_id
+            if sid not in by_school:
+                by_school[sid] = []
+            by_school[sid].append(c.id)
+        for sid, cids in by_school.items():
+            school = School.query.get(sid)
+            stats = _calcular_estatisticas_grupo_cartao(cids, gabarito_id)
+            resultados_detalhados.append({
+                "id": f"escola_{sid}",
+                "titulo": f"{titulo_gabarito} - {school.name if school else sid}",
+                "serie": "Todas as séries",
+                "turma": "Todas as turmas",
+                "escola": school.name if school else "N/A",
+                "municipio": municipio_nome,
+                "estado": estado_nome,
+                "total_alunos": stats['total_alunos'],
+                "alunos_participantes": stats['alunos_participantes'],
+                "alunos_pendentes": stats['alunos_pendentes'],
+                "media_nota": stats['media_nota'],
+                "media_proficiencia": stats['media_proficiencia'],
+                "distribuicao_classificacao": stats['distribuicao_classificacao']
+            })
+
+    elif nivel_granularidade == "escola":
+        by_grade = {}
+        for c in classes:
+            gid = c.grade_id
+            if gid not in by_grade:
+                by_grade[gid] = []
+            by_grade[gid].append(c.id)
+        school = School.query.get(scope_info.get('escola')) if scope_info.get('escola') else None
+        escola_nome = school.name if school else "N/A"
+        for gid, cids in by_grade.items():
+            grade = Grade.query.get(gid)
+            stats = _calcular_estatisticas_grupo_cartao(cids, gabarito_id)
+            resultados_detalhados.append({
+                "id": f"serie_{gid}",
+                "titulo": f"{titulo_gabarito} - {grade.name if grade else gid}",
+                "serie": grade.name if grade else "N/A",
+                "turma": "Todas as turmas",
+                "escola": escola_nome,
+                "municipio": municipio_nome,
+                "estado": estado_nome,
+                "total_alunos": stats['total_alunos'],
+                "alunos_participantes": stats['alunos_participantes'],
+                "alunos_pendentes": stats['alunos_pendentes'],
+                "media_nota": stats['media_nota'],
+                "media_proficiencia": stats['media_proficiencia'],
+                "distribuicao_classificacao": stats['distribuicao_classificacao']
+            })
+
+    else:
+        for c in classes:
+            grade = Grade.query.get(c.grade_id) if c.grade_id else None
+            school = School.query.get(c.school_id) if c.school_id else None
+            stats = _calcular_estatisticas_grupo_cartao([c.id], gabarito_id)
+            resultados_detalhados.append({
+                "id": f"turma_{c.id}",
+                "titulo": f"{titulo_gabarito} - {c.name or f'Turma {c.id}'}",
+                "serie": grade.name if grade else "N/A",
+                "turma": c.name or f"Turma {c.id}",
+                "escola": school.name if school else "N/A",
+                "municipio": municipio_nome,
+                "estado": estado_nome,
+                "total_alunos": stats['total_alunos'],
+                "alunos_participantes": stats['alunos_participantes'],
+                "alunos_pendentes": stats['alunos_pendentes'],
+                "media_nota": stats['media_nota'],
+                "media_proficiencia": stats['media_proficiencia'],
+                "distribuicao_classificacao": stats['distribuicao_classificacao']
+            })
+
+    return resultados_detalhados
+
+
+def _gerar_tabela_detalhada_cartao(scope_info, nivel_granularidade, gabarito_id, user):
+    """Lista de alunos do escopo com seus resultados no gabarito."""
+    escopo = _determinar_escopo_calculo_cartao(scope_info, nivel_granularidade)
+    class_ids = _obter_class_ids_com_resultado_cartao(gabarito_id, escopo)
+    if not class_ids:
+        return {"alunos": []}
+    student_ids = [s.id for s in Student.query.filter(Student.class_id.in_(class_ids)).all()]
+    if not gabarito_id:
+        return {"alunos": []}
+    results = AnswerSheetResult.query.filter(AnswerSheetResult.gabarito_id == gabarito_id, AnswerSheetResult.student_id.in_(student_ids)).all()
+    result_by_student = {r.student_id: r for r in results}
+    classes_by_id = {c.id: c for c in Class.query.filter(Class.id.in_(class_ids)).all()}
+    students = Student.query.filter(Student.id.in_(student_ids)).all()
+    alunos = []
+    for s in students:
+        r = result_by_student.get(s.id)
+        class_obj = classes_by_id.get(s.class_id) if s.class_id else None
+        grade_name = None
+        if class_obj and class_obj.grade_id:
+            g = Grade.query.get(class_obj.grade_id)
+            grade_name = g.name if g else None
+        alunos.append({
+            "student_id": str(s.id),
+            "nome": s.name or "N/A",
+            "turma": class_obj.name if class_obj else "N/A",
+            "serie": grade_name,
+            "grade": r.grade if r else None,
+            "proficiency": r.proficiency if r else None,
+            "classification": r.classification if r else None,
+            "score_percentage": r.score_percentage if r else None,
+            "correct_answers": r.correct_answers if r else None,
+            "total_questions": r.total_questions if r else None,
+        })
+    return {"alunos": alunos}
+
+
+def _calcular_ranking_cartao(scope_info, nivel_granularidade, gabarito_id, user):
+    """Ranking de alunos por nota no gabarito."""
+    escopo = _determinar_escopo_calculo_cartao(scope_info, nivel_granularidade)
+    class_ids = _obter_class_ids_com_resultado_cartao(gabarito_id, escopo)
+    if not class_ids or not gabarito_id:
+        return []
+    student_ids = [s.id for s in Student.query.filter(Student.class_id.in_(class_ids)).all()]
+    results = AnswerSheetResult.query.filter(AnswerSheetResult.gabarito_id == gabarito_id, AnswerSheetResult.student_id.in_(student_ids)).all()
+    sorted_results = sorted(results, key=lambda x: (x.grade or 0, x.proficiency or 0), reverse=True)
+    ranking = []
+    for pos, r in enumerate(sorted_results, 1):
+        student = Student.query.get(r.student_id)
+        ranking.append({
+            "posicao": pos,
+            "student_id": str(r.student_id),
+            "nome": student.name if student else "N/A",
+            "grade": r.grade,
+            "proficiency": r.proficiency,
+            "classification": r.classification,
+            "score_percentage": r.score_percentage
+        })
+    return ranking
+
+
+def _gerar_opcoes_proximos_filtros_cartao(scope_info, nivel_granularidade, user):
+    """Opções para próximos filtros (gabaritos, escolas, séries, turmas)."""
+    from app.permissions import get_user_permission_scope
+    opcoes = {"gabaritos": [], "escolas": [], "series": [], "turmas": []}
+    municipio_id = scope_info.get('municipio_id')
+    gabarito_id = scope_info.get('gabarito') if _is_valid_filter(scope_info.get('gabarito')) else None
+    permissao = get_user_permission_scope(user) if user else {'scope': 'all'}
+
+    if nivel_granularidade in ["estado", "municipio", "escola"] and municipio_id:
+        q = AnswerSheetGabarito.query.with_entities(AnswerSheetGabarito.id, AnswerSheetGabarito.title).filter(AnswerSheetGabarito.created_by == str(user['id'])) if user and user.get('role') == 'professor' else AnswerSheetGabarito.query.with_entities(AnswerSheetGabarito.id, AnswerSheetGabarito.title)
+        gabaritos = q.distinct().all()
+        results_for_city = AnswerSheetResult.query.join(Student).join(Class).join(School, School.id == cast(Class.school_id, String)).filter(School.city_id == municipio_id).with_entities(AnswerSheetResult.gabarito_id).distinct().all()
+        gabarito_ids_city = list({r[0] for r in results_for_city})
+        opcoes["gabaritos"] = [{"id": str(g[0]), "titulo": g[1]} for g in gabaritos if g[0] in gabarito_ids_city or not gabarito_ids_city]
+
+    if gabarito_id and municipio_id and nivel_granularidade in ["estado", "municipio", "escola"]:
+        results = AnswerSheetResult.query.filter_by(gabarito_id=gabarito_id).all()
+        student_ids = list({r.student_id for r in results})
+        students = Student.query.filter(Student.id.in_(student_ids)).filter(Student.class_id.isnot(None)).all()
+        class_ids = list({s.class_id for s in students})
+        classes = Class.query.filter(Class.id.in_(class_ids)).all()
+        school_ids = list({c.school_id for c in classes if c.school_id})
+        schools = School.query.filter(School.id.in_(school_ids), School.city_id == municipio_id)
+        if permissao.get('scope') == 'escola' and user:
+            if user.get('role') in ['diretor', 'coordenador']:
+                from app.models.manager import Manager
+                manager = Manager.query.filter_by(user_id=user['id']).first()
+                if manager and manager.school_id:
+                    schools = schools.filter(School.id == manager.school_id)
+            elif user.get('role') == 'professor':
+                from app.models.teacher import Teacher
+                from app.models.teacherClass import TeacherClass
+                teacher = Teacher.query.filter_by(user_id=user['id']).first()
+                if teacher:
+                    tc = TeacherClass.query.filter_by(teacher_id=teacher.id).all()
+                    teacher_cids = [t.class_id for t in tc]
+                    if teacher_cids:
+                        teacher_sids = list({c.school_id for c in Class.query.filter(Class.id.in_(teacher_cids)).all() if c.school_id})
+                        schools = schools.filter(School.id.in_(teacher_sids))
+                    else:
+                        schools = schools.filter(False)
+        for s in schools.distinct().all():
+            opcoes["escolas"].append({"id": str(s.id), "name": s.name})
+    if gabarito_id and scope_info.get('escola') and _is_valid_filter(scope_info.get('escola')):
+        results = AnswerSheetResult.query.filter_by(gabarito_id=gabarito_id).all()
+        student_ids = list({r.student_id for r in results})
+        students = Student.query.filter(Student.id.in_(student_ids)).filter(Student.class_id.isnot(None)).all()
+        class_ids = list({s.class_id for s in students})
+        grades = Grade.query.join(Class, Class.grade_id == Grade.id).filter(Class.id.in_(class_ids), Class.school_id == scope_info['escola']).with_entities(Grade.id, Grade.name).distinct().all()
+        opcoes["series"] = [{"id": str(g[0]), "name": g[1]} for g in grades]
+    if gabarito_id and scope_info.get('serie') and _is_valid_filter(scope_info.get('serie')):
+        results = AnswerSheetResult.query.filter_by(gabarito_id=gabarito_id).all()
+        student_ids = list({r.student_id for r in results})
+        students = Student.query.filter(Student.id.in_(student_ids)).filter(Student.class_id.isnot(None)).all()
+        class_ids = list({s.class_id for s in students})
+        turmas = Class.query.filter(Class.id.in_(class_ids), Class.grade_id == scope_info['serie']).with_entities(Class.id, Class.name).all()
+        opcoes["turmas"] = [{"id": str(t[0]), "name": t[1] or f"Turma {t[0]}"} for t in turmas]
+    return opcoes
+
+
+# ==================== OPÇÕES DE FILTROS HIERÁRQUICOS (para GET /opcoes-filtros) ====================
+
+def _obter_estados_disponiveis_cartao(user: dict, permissao: dict) -> List[Dict[str, Any]]:
+    """Estados disponíveis conforme permissão (admin = todos; tecadm = só seu município)."""
+    if permissao.get('scope') == 'all':
+        estados = db.session.query(City.state).distinct().filter(City.state.isnot(None)).all()
+    else:
+        estados = db.session.query(City.state).distinct().filter(
+            City.state.isnot(None),
+            City.id == user.get('city_id')
+        ).all()
+    return [{"id": e[0], "nome": e[0]} for e in estados]
+
+
+def _obter_municipios_por_estado_cartao(estado: str, user: dict, permissao: dict) -> List[Dict[str, Any]]:
+    """Municípios do estado conforme permissão."""
+    if permissao.get('scope') == 'all':
+        municipios = City.query.filter(City.state.ilike(f"%{estado}%")).all()
+    else:
+        municipios = City.query.filter(
+            City.state.ilike(f"%{estado}%"),
+            City.id == user.get('city_id')
+        ).all()
+    return [{"id": str(m.id), "nome": m.name} for m in municipios]
+
+
+def _obter_gabaritos_por_municipio_cartao(municipio_id: str, user: dict, permissao: dict) -> List[Dict[str, Any]]:
+    """Gabaritos criados para o município (por school_id, class_id ou municipality/state), mesmo sem correções."""
+    from sqlalchemy import or_, and_
+    city = City.query.get(municipio_id)
+    if not city:
+        return []
+    if permissao.get('scope') != 'all' and str(user.get('city_id')) != str(city.id):
+        return []
+    school_ids_city = [s.id for s in School.query.filter(School.city_id == municipio_id).all()]
+    class_ids_city = [c.id for c in Class.query.filter(Class.school_id.in_(school_ids_city)).all()] if school_ids_city else []
+    city_name = (city.name or "").strip()
+    city_state = (city.state or "").strip()
+    q = AnswerSheetGabarito.query.with_entities(AnswerSheetGabarito.id, AnswerSheetGabarito.title)
+    conditions = []
+    if school_ids_city:
+        conditions.append(AnswerSheetGabarito.school_id.in_(school_ids_city))
+    if class_ids_city:
+        conditions.append(AnswerSheetGabarito.class_id.in_(class_ids_city))
+    if city_name or city_state:
+        if city_name and city_state:
+            conditions.append(
+                and_(
+                    AnswerSheetGabarito.municipality.ilike(f"%{city_name}%"),
+                    AnswerSheetGabarito.state.ilike(f"%{city_state}%")
+                )
+            )
+        elif city_name:
+            conditions.append(AnswerSheetGabarito.municipality.ilike(f"%{city_name}%"))
+        elif city_state:
+            conditions.append(AnswerSheetGabarito.state.ilike(f"%{city_state}%"))
+    if not conditions:
+        return []
+    q = q.filter(or_(*conditions))
+    if user.get('role') == 'professor':
+        q = q.filter(AnswerSheetGabarito.created_by == str(user['id']))
+    elif permissao.get('scope') == 'escola' and user.get('role') in ['diretor', 'coordenador']:
+        from app.models.manager import Manager
+        manager = Manager.query.filter_by(user_id=user['id']).first()
+        if manager and manager.school_id:
+            q = q.filter(AnswerSheetGabarito.school_id == manager.school_id)
+        else:
+            return []
+    elif permissao.get('scope') == 'escola' and user.get('role') == 'professor':
+        from app.models.teacher import Teacher
+        from app.models.teacherClass import TeacherClass
+        teacher = Teacher.query.filter_by(user_id=user['id']).first()
+        if not teacher:
+            return []
+        tc = TeacherClass.query.filter_by(teacher_id=teacher.id).all()
+        teacher_class_ids = [t.class_id for t in tc]
+        if not teacher_class_ids:
+            return []
+        teacher_school_ids = list({c.school_id for c in Class.query.filter(Class.id.in_(teacher_class_ids)).all() if c.school_id})
+        if teacher_school_ids:
+            q = q.filter(AnswerSheetGabarito.school_id.in_(teacher_school_ids))
+        else:
+            return []
+    gabaritos = q.order_by(AnswerSheetGabarito.created_at.desc()).all()
+    seen = set()
+    out = []
+    for g in gabaritos:
+        if g[0] not in seen:
+            seen.add(g[0])
+            out.append({"id": str(g[0]), "titulo": g[1] or "Gabarito"})
+    return out
+
+
+def _obter_escolas_por_gabarito_cartao(gabarito_id: str, municipio_id: str, user: dict, permissao: dict) -> List[Dict[str, Any]]:
+    """Escolas onde o gabarito foi gerado (pelo school_id do gabarito ou todas do município se escopo city)."""
+    city = City.query.get(municipio_id)
+    if not city:
+        return []
+    if permissao.get('scope') != 'all' and str(user.get('city_id')) != str(city.id):
+        return []
+    gabarito = AnswerSheetGabarito.query.get(gabarito_id)
+    if not gabarito:
+        return []
+    school_ids = []
+    if gabarito.school_id and str(gabarito.school_id).strip():
+        school = School.query.filter(School.id == gabarito.school_id, School.city_id == municipio_id).first()
+        if school:
+            school_ids.append(school.id)
+    if not school_ids:
+        schools_in_city = School.query.filter(School.city_id == municipio_id).with_entities(School.id, School.name).all()
+        school_ids = [s[0] for s in schools_in_city]
+    if not school_ids:
+        return []
+    query = School.query.with_entities(School.id, School.name).filter(School.id.in_(school_ids))
+    if permissao.get('scope') == 'escola':
+        if user.get('role') in ['diretor', 'coordenador']:
+            from app.models.manager import Manager
+            manager = Manager.query.filter_by(user_id=user['id']).first()
+            if manager and manager.school_id:
+                query = query.filter(School.id == manager.school_id)
+            else:
+                return []
+        elif user.get('role') == 'professor':
+            from app.models.teacher import Teacher
+            from app.models.teacherClass import TeacherClass
+            teacher = Teacher.query.filter_by(user_id=user['id']).first()
+            if teacher:
+                tc = TeacherClass.query.filter_by(teacher_id=teacher.id).all()
+                teacher_class_ids = [t.class_id for t in tc]
+                if teacher_class_ids:
+                    teacher_school_ids = list({c.school_id for c in Class.query.filter(Class.id.in_(teacher_class_ids)).all() if c.school_id})
+                    query = query.filter(School.id.in_(teacher_school_ids))
+                else:
+                    return []
+            else:
+                return []
+    escolas = query.order_by(School.name).all()
+    return [{"id": str(e[0]), "nome": e[1]} for e in escolas]
+
+
+def _obter_series_por_escola_cartao(gabarito_id: str, escola_id: str, municipio_id: str, user: dict, permissao: dict) -> List[Dict[str, Any]]:
+    """Séries (grades) que existem na escola selecionada (onde o gabarito pode ter sido gerado)."""
+    city = City.query.get(municipio_id)
+    if not city:
+        return []
+    if permissao.get('scope') != 'all' and str(user.get('city_id')) != str(city.id):
+        return []
+    query = Grade.query.with_entities(Grade.id, Grade.name).join(
+        Class, Grade.id == Class.grade_id
+    ).filter(Class.school_id == escola_id)
+    if permissao.get('scope') == 'escola' and user.get('role') == 'professor':
+        from app.models.teacher import Teacher
+        from app.models.teacherClass import TeacherClass
+        teacher = Teacher.query.filter_by(user_id=user['id']).first()
+        if teacher:
+            tc = TeacherClass.query.filter_by(teacher_id=teacher.id).all()
+            teacher_class_ids = [t.class_id for t in tc]
+            if teacher_class_ids:
+                query = query.filter(Class.id.in_(teacher_class_ids))
+            else:
+                return []
+        else:
+            return []
+    series = query.distinct().order_by(Grade.name).all()
+    return [{"id": str(s[0]), "nome": s[1]} for s in series]
+
+
+def _obter_turmas_por_serie_cartao(gabarito_id: str, escola_id: str, serie_id: str, municipio_id: str, user: dict, permissao: dict) -> List[Dict[str, Any]]:
+    """Turmas (classes) da escola e série selecionadas (onde o gabarito pode ter sido gerado)."""
+    city = City.query.get(municipio_id)
+    if not city:
+        return []
+    if permissao.get('scope') != 'all' and str(user.get('city_id')) != str(city.id):
+        return []
+    query = Class.query.with_entities(Class.id, Class.name).filter(
+        Class.school_id == escola_id, Class.grade_id == serie_id
+    )
+    if permissao.get('scope') == 'escola' and user.get('role') == 'professor':
+        from app.models.teacher import Teacher
+        from app.models.teacherClass import TeacherClass
+        teacher = Teacher.query.filter_by(user_id=user['id']).first()
+        if teacher:
+            tc = TeacherClass.query.filter_by(teacher_id=teacher.id).all()
+            teacher_class_ids = [t.class_id for t in tc]
+            if teacher_class_ids:
+                query = query.filter(Class.id.in_(teacher_class_ids))
+            else:
+                return []
+        else:
+            return []
+    turmas = query.order_by(Class.name).all()
+    return [{"id": str(t[0]), "nome": t[1] or f"Turma {t[0]}"} for t in turmas]
+
+
+@bp.route('/opcoes-filtros', methods=['GET'])
+@jwt_required()
+@role_required("admin", "professor", "coordenador", "diretor", "tecadm")
+def obter_opcoes_filtros_cartao():
+    """
+    Retorna opções hierárquicas de filtros para resultados de cartões resposta.
+    Mesmo padrão de GET /evaluation-results/opcoes-filtros.
+    Hierarquia: Estado → Município → Cartão resposta (gabarito) → Escola → Série → Turma.
+    Query params (todos opcionais): estado, municipio, gabarito, escola, serie, turma.
+    Ex.: GET /opcoes-filtros → estados; ?estado=SP → estados + municipios; ?estado=SP&municipio=id → + gabaritos; etc.
+    """
+    try:
+        from app.permissions import get_user_permission_scope
+        user = get_current_user_from_token()
+        if not user:
+            return jsonify({"error": "Usuário não encontrado"}), 401
+        permissao = get_user_permission_scope(user)
+        if not permissao.get('permitted'):
+            return jsonify({"error": permissao.get('error', 'Acesso negado')}), 403
+
+        estado = request.args.get('estado')
+        municipio = request.args.get('municipio')
+        gabarito = request.args.get('gabarito')
+        escola = request.args.get('escola')
+        serie = request.args.get('serie')
+        turma = request.args.get('turma')
+
+        response = {}
+        response["estados"] = _obter_estados_disponiveis_cartao(user, permissao)
+
+        if estado:
+            response["municipios"] = _obter_municipios_por_estado_cartao(estado, user, permissao)
+            if municipio:
+                response["gabaritos"] = _obter_gabaritos_por_municipio_cartao(municipio, user, permissao)
+                if gabarito:
+                    response["escolas"] = _obter_escolas_por_gabarito_cartao(gabarito, municipio, user, permissao)
+                    if escola:
+                        response["series"] = _obter_series_por_escola_cartao(gabarito, escola, municipio, user, permissao)
+                        if serie:
+                            response["turmas"] = _obter_turmas_por_serie_cartao(gabarito, escola, serie, municipio, user, permissao)
+
+        return jsonify(response), 200
+    except Exception as e:
+        logging.error(f"Erro ao obter opções de filtros (cartão resposta): {str(e)}", exc_info=True)
+        return jsonify({"error": "Erro ao obter opções de filtros", "details": str(e)}), 500
+
+
+@bp.route('/resultados-agregados', methods=['GET'])
+@jwt_required()
+@role_required("admin", "professor", "coordenador", "diretor", "tecadm")
+def get_resultados_agregados():
+    """
+    Resultados agregados de cartões resposta (semelhante a GET /evaluation-results/avaliacoes).
+    Filtros hierárquicos: estado, municipio, escola, serie, turma, gabarito.
+    Retorna estatísticas gerais, resultados por escola/série/turma, tabela de alunos e ranking.
+    """
+    try:
+        user = get_current_user_from_token()
+        if not user:
+            return jsonify({"error": "Usuário não encontrado"}), 401
+        estado = request.args.get('estado')
+        municipio = request.args.get('municipio')
+        escola = request.args.get('escola')
+        serie = request.args.get('serie')
+        turma = request.args.get('turma')
+        gabarito = request.args.get('gabarito')
+
+        if not _is_valid_filter(estado):
+            return jsonify({"error": "Estado é obrigatório e não pode ser 'all'"}), 400
+        if not _is_valid_filter(municipio):
+            return jsonify({"error": "Município é obrigatório"}), 400
+
+        scope_info = _determinar_escopo_busca_cartao(estado, municipio, escola, serie, turma, gabarito, user)
+        if not scope_info:
+            return jsonify({"error": "Não foi possível determinar o escopo de busca"}), 400
+
+        nivel_granularidade = _determinar_nivel_granularidade_cartao(estado, municipio, escola, serie, turma, gabarito)
+        gabarito_id = str(gabarito).strip() if _is_valid_filter(gabarito) else None
+
+        estatisticas_gerais = _calcular_estatisticas_consolidadas_cartao(scope_info, nivel_granularidade, gabarito_id, user)
+        resultados_detalhados = _gerar_resultados_detalhados_por_granularidade_cartao(scope_info, nivel_granularidade, gabarito_id) if gabarito_id else []
+        tabela_detalhada = _gerar_tabela_detalhada_cartao(scope_info, nivel_granularidade, gabarito_id, user) if gabarito_id else {"alunos": []}
+        ranking = _calcular_ranking_cartao(scope_info, nivel_granularidade, gabarito_id, user) if gabarito_id else []
+        opcoes_proximos_filtros = _gerar_opcoes_proximos_filtros_cartao(scope_info, nivel_granularidade, user)
+
+        return jsonify({
+            "nivel_granularidade": nivel_granularidade,
+            "filtros_aplicados": {
+                "estado": estado,
+                "municipio": municipio,
+                "escola": escola,
+                "serie": serie,
+                "turma": turma,
+                "gabarito": gabarito
+            },
+            "estatisticas_gerais": estatisticas_gerais,
+            "resultados_detalhados": {
+                "gabaritos": resultados_detalhados,
+                "paginacao": {"page": 1, "per_page": len(resultados_detalhados), "total": len(resultados_detalhados), "total_pages": 1}
+            },
+            "tabela_detalhada": tabela_detalhada,
+            "ranking": ranking,
+            "opcoes_proximos_filtros": opcoes_proximos_filtros
+        }), 200
+    except Exception as e:
+        logging.error(f"Erro ao obter resultados agregados: {str(e)}", exc_info=True)
+        return jsonify({"error": "Erro ao obter resultados agregados", "details": str(e)}), 500
 
 
 # ============================================================================

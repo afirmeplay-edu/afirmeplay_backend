@@ -723,6 +723,19 @@ CREATE TABLE IF NOT EXISTS "{schema}".coin_transactions (
 );
 COMMENT ON TABLE "{schema}".coin_transactions IS 'Transações de moedas dos alunos';
 
+-- Compras da loja: por tenant (student_id do schema). Catálogo store_items fica em public.
+CREATE TABLE IF NOT EXISTS "{schema}".student_purchases (
+    id VARCHAR PRIMARY KEY,
+    student_id VARCHAR REFERENCES "{schema}".student(id) ON DELETE CASCADE NOT NULL,
+    store_item_id VARCHAR REFERENCES public.store_items(id) ON DELETE CASCADE NOT NULL,
+    price_paid INTEGER NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+COMMENT ON TABLE "{schema}".student_purchases IS 'Compras da loja por aluno';
+CREATE INDEX IF NOT EXISTS idx_student_purchases_student_id ON "{schema}".student_purchases(student_id);
+CREATE INDEX IF NOT EXISTS idx_student_purchases_store_item_id ON "{schema}".student_purchases(store_item_id);
+CREATE INDEX IF NOT EXISTS idx_student_purchases_created_at ON "{schema}".student_purchases(created_at);
+
 CREATE TABLE IF NOT EXISTS "{schema}".student_password_log (
     id VARCHAR PRIMARY KEY,
     student_name VARCHAR(100) NOT NULL,

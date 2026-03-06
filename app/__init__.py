@@ -194,6 +194,7 @@ def create_app():
     from app.balance.routes import bp as balance_bp
     from app.competitions.routes import competitions_bp
     from app.ideb_meta.routes import bp as ideb_meta_bp
+    from app.store.routes import bp as store_bp
     # Importar rotas de report_analysis (processamento assíncrono)
     from app.report_analysis import routes as report_analysis_routes
     
@@ -244,6 +245,7 @@ def create_app():
     app.register_blueprint(balance_bp)
     app.register_blueprint(competitions_bp)
     app.register_blueprint(ideb_meta_bp)
+    app.register_blueprint(store_bp)
 
     # ========================================================================
     # THREAD DE FINALIZAÇÃO DE COMPETIÇÕES REMOVIDA (multitenant + Gunicorn)

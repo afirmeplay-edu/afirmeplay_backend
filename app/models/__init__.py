@@ -52,3 +52,6 @@ from app.competitions.models import Competition
 
 # Calculadora de Metas IDEB
 from app.ideb_meta.models import IdebMetaSave
+
+# Loja (itens compráveis com afirmecoins)
+from app.store.models import StoreItem, StudentPurchase

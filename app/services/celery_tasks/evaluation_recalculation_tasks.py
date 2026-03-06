@@ -2,6 +2,13 @@
 """
 Tasks Celery para recálculo de resultados de avaliações
 Processa recálculo quando gabaritos são corrigidos
+
+MULTITENANT: Esta task não seta schema (search_path); acessa Question, TestQuestion,
+StudentAnswer, EvaluationResult. Se alguma dessas tabelas for por-tenant (schema
+city_xxx), podem ocorrer erros ou dados de tenant errado. Se em produção surgirem
+falhas, considerar: (1) receber schema/city_id ao disparar a task e
+(2) executar SET search_path TO {schema}, public no início da task.
+Código anterior pode ser restaurado se necessário.
 """
 
 import logging

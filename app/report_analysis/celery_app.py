@@ -64,6 +64,7 @@ celery_app = Celery(
     broker=CELERY_BROKER_URL,
     backend=CELERY_RESULT_BACKEND,
     include=[
+        'app.celery_hooks',  # Hooks globais: task_prerun/task_postrun (search_path + session.remove)
         'app.report_analysis.tasks',
         'app.services.celery_tasks.physical_test_tasks',  # Tasks de geração de formulários físicos
         'app.services.celery_tasks.answer_sheet_tasks',  # Tasks de geração de cartões de resposta

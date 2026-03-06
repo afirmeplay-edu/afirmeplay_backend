@@ -49,4 +49,4 @@ COPY . .
 EXPOSE 5000
 
 # Rodar Flask com Gunicorn
-CMD ["gunicorn", "--bind", "0.0.0.0:5000", "run:app"]
+CMD ["gunicorn","--bind", "0.0.0.0:5000","--workers", "2","--threads", "2","--timeout", "120","--graceful-timeout", "30","--max-requests", "500","--max-requests-jitter", "50","--preload","run:app"]

@@ -456,13 +456,19 @@ class DashboardService:
             else:
                 end_date = None
 
+            # Status exibido: "concluida" quando todas as sessões foram finalizadas
+            if sessions and sessions.total and (sessions.completed or 0) >= sessions.total:
+                display_status = "concluida"
+            else:
+                display_status = test.status or "pendente"
+
             results.append(
                 {
                     "evaluation_id": test.id,
                     "title": test.title,
                     "subject": test.subject_rel.name if test.subject_rel else None,
                     "school": school_name,
-                    "status": test.status,
+                    "status": display_status,
                     "progress_percentage": progress_percentage,
                     "total_students": student_count,
                     "completed_students": int(sessions.completed or 0) if sessions else 0,
@@ -575,6 +581,12 @@ class DashboardService:
                         escolas_nomes.append(nome)
             escola = ", ".join(escolas_nomes) if escolas_nomes else None
 
+            # Status exibido: "concluida" quando todos os alunos que iam fazer já fizeram
+            if alunos_que_vao_fazer and alunos_que_fizeram >= alunos_que_vao_fazer:
+                display_status = "concluida"
+            else:
+                display_status = test.status or "pendente"
+
             results.append({
                 "avaliacao_id": test.id,
                 "titulo": test.title,
@@ -582,7 +594,7 @@ class DashboardService:
                 "quantidade_alunos_vao_fazer": alunos_que_vao_fazer,
                 "prazo": prazo,
                 "progresso": progresso,
-                "status": test.status or "pendente",
+                "status": display_status,
                 "disciplina": disciplina,
                 "escola": escola,
                 "escolas": escolas_nomes,
@@ -939,6 +951,46 @@ class DashboardService:
                 query = query.filter(False)
         return query
 
+    @staticmethod
+    def _dificuldade_para_classificacao(difficulty_level: Optional[str]) -> str:
+        """
+        Mapeia difficulty_level da questão para uma das classificações exibidas no dashboard:
+        Abaixo do Básico, Básico, Adequado, Avançado.
+        """
+        if not difficulty_level or not str(difficulty_level).strip():
+            return "Adequado"
+        v = str(difficulty_level).strip()
+        # Já está no formato de classificação (comparação normalizada)
+        v_norm = v.lower().replace("_", " ").replace("-", " ")
+        for label in ("Abaixo do Básico", "Básico", "Adequado", "Avançado"):
+            if v_norm == label.lower() or v_norm == label.lower().replace("á", "a"):
+                return label
+        # Mapear níveis de dificuldade comuns
+        if v_norm in ("fácil", "facil", "1", "easy", "baixo"):
+            return "Básico"
+        if v_norm in ("médio", "medio", "2", "medium", "média", "media"):
+            return "Adequado"
+        if v_norm in ("difícil", "dificil", "3", "hard", "alto"):
+            return "Avançado"
+        return "Adequado"
+
+    @staticmethod
+    def _classificacao_por_taxa_acerto(taxa_acerto: Optional[float]) -> Optional[str]:
+        """
+        Infere classificação (Abaixo do Básico, Básico, Adequado, Avançado) a partir
+        da taxa de acerto da questão, alinhado à lógica de porcentagem usada no sistema.
+        Retorna None se taxa_acerto for None (sem dados para inferir).
+        """
+        if taxa_acerto is None:
+            return None
+        if taxa_acerto >= 80:
+            return "Avançado"
+        if taxa_acerto >= 65:
+            return "Adequado"
+        if taxa_acerto >= 50:
+            return "Básico"
+        return "Abaixo do Básico"
+
     @classmethod
     def get_questoes_dashboard(
         cls, scope: Dict[str, Any], limit: int = 20, offset: int = 0
@@ -1032,6 +1084,14 @@ class DashboardService:
                 stats = answers_map.get(q.id, {"quantidade_respostas": 0, "taxa_acerto": None, "ultima_utilizacao": None})
                 skill_raw = q.skill.strip("{}").strip() if q.skill and str(q.skill).strip() and str(q.skill).strip() != "{}" else None
                 habilidade_codigo = skill_code_map.get(skill_raw, skill_raw) if skill_raw else None
+                # Dificuldade/classificação: se o banco está vazio ou sempre "Abaixo do Básico", inferir pela taxa de acerto
+                from_db = cls._dificuldade_para_classificacao(q.difficulty_level)
+                raw_val = (q.difficulty_level or "").strip().lower().replace("_", " ").replace("á", "a")
+                is_abaixo_basico_or_empty = not q.difficulty_level or not str(q.difficulty_level).strip() or "abaixo" in raw_val and "basico" in raw_val
+                if is_abaixo_basico_or_empty and stats["taxa_acerto"] is not None:
+                    dificuldade = cls._classificacao_por_taxa_acerto(stats["taxa_acerto"]) or from_db
+                else:
+                    dificuldade = from_db
                 listagem.append({
                     "id": q.id,
                     "titulo": (q.title or (q.text[:80] + "..." if (q.text and len(q.text) > 80) else (q.text or ""))),
@@ -1039,7 +1099,8 @@ class DashboardService:
                     "ano_serie": q.grade.name if q.grade else None,
                     "autor": q.creator.name if q.creator else None,
                     "data_criacao": q.created_at.isoformat() if q.created_at and hasattr(q.created_at, "isoformat") else str(q.created_at) if q.created_at else None,
-                    "dificuldade": q.difficulty_level or "Médio",
+                    "dificuldade": dificuldade,
+                    "classification": dificuldade,
                     "tipo_questao": q.question_type or "multipleChoice",
                     "quantidade_respostas": stats["quantidade_respostas"],
                     "taxa_acerto": stats["taxa_acerto"],

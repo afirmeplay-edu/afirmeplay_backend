@@ -8,8 +8,11 @@ Regra:
 - escola (escolas de 1 cidade) -> schema da cidade; várias cidades -> public
 - turma (turmas de 1 cidade) -> schema da cidade; várias cidades -> public
 """
+import logging
 from sqlalchemy import text
 from app import db
+
+logger = logging.getLogger(__name__)
 
 
 def _city_id_to_schema_name(city_id):
@@ -173,27 +176,64 @@ def get_competition_schema(competition_id, tenant_schema=None):
     Returns:
         str: 'public', nome do schema city_xxx, ou None se não encontrada.
     """
+    cid = str(competition_id).strip() if competition_id else ""
+    if not cid:
+        return None
+
+    # Garantir transação limpa (evitar "current transaction is aborted" em conexão do pool)
+    try:
+        db.session.rollback()
+    except Exception:
+        pass
+
     # Buscar em public
     try:
         r = db.session.execute(
             text("SELECT 1 FROM public.competitions WHERE id = :id"),
-            {"id": str(competition_id)},
+            {"id": cid},
         )
         if r.fetchone():
-            return 'public'
-    except Exception:
-        pass
+            return "public"
+    except Exception as e:
+        logger.debug("get_competition_schema: public lookup failed for %s: %s", cid[:8], e)
 
-    # Buscar no schema do tenant
+
+    # Buscar no schema do tenant (se houver contexto de cidade no request)
     if tenant_schema:
         try:
             r = db.session.execute(
                 text('SELECT 1 FROM "{}".competitions WHERE id = :id'.format(tenant_schema)),
-                {"id": str(competition_id)},
+                {"id": cid},
             )
             if r.fetchone():
                 return tenant_schema
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("get_competition_schema: tenant %s lookup failed: %s", tenant_schema, e)
 
+    # Fallback: buscar em todos os schemas city_* (admin sem X-City-ID ainda deve encontrar)
+    try:
+        rp = db.session.execute(
+            text("""
+                SELECT n.nspname
+                FROM pg_namespace n
+                JOIN pg_class c ON c.relnamespace = n.oid AND c.relname = 'competitions'
+                WHERE n.nspname LIKE 'city_%'
+                ORDER BY n.nspname
+            """)
+        )
+        for row in rp.fetchall():
+            schema = row[0]
+            try:
+                r = db.session.execute(
+                    text('SELECT 1 FROM "{}".competitions WHERE id = :id'.format(schema)),
+                    {"id": cid},
+                )
+                if r.fetchone():
+                    return schema
+            except Exception:
+                continue
+    except Exception as e:
+        logger.debug("get_competition_schema: city_* fallback failed: %s", e)
+
+    logger.warning("get_competition_schema: competition %s not found in public nor in any city schema", cid[:8])
     return None

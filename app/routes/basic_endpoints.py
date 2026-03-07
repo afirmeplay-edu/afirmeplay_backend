@@ -889,33 +889,43 @@ def get_submitted_evaluations():
         
         print("Query base criada com sucesso")
         
-        # Aplicar filtros
+        # Aplicar filtros (modelo usa finalizada/corrigida/revisada; aceitar também equivalentes em inglês)
         if status_filter and status_filter != 'all':
             if status_filter == 'pending':
                 query = query.filter(TestSession.status.in_(['finalizada', 'completed', 'submitted']))
             elif status_filter == 'correcting':
-                query = query.filter(TestSession.status == 'correcting')
+                query = query.filter(TestSession.status.in_(['correcting', 'em_correcao']))
             elif status_filter == 'corrected':
-                query = query.filter(TestSession.status == 'corrected')
+                query = query.filter(TestSession.status.in_(['corrected', 'corrigida']))
             elif status_filter == 'reviewed':
-                query = query.filter(TestSession.status.in_(['reviewed', 'finalized']))
+                query = query.filter(TestSession.status.in_(['reviewed', 'finalized', 'revisada']))
         
-        # Filtro por disciplina
+        # Filtro por disciplina (Test já foi unido acima)
         if subject_filter and subject_filter != 'all':
-            query = query.join(Test).filter(Test.subject == subject_filter)
+            query = query.filter(Test.subject == subject_filter)
         
-        # Filtro por série
+        # Filtro por série (Test já foi unido acima)
         if grade_filter and grade_filter != 'all':
-            query = query.join(Test).filter(Test.grade_id == grade_filter)
+            query = query.filter(Test.grade_id == grade_filter)
         
         # Filtro de busca por nome do aluno ou título da avaliação
         if search_filter:
-            query = query.join(Student).join(Test).filter(
-                db.or_(
-                    Student.name.ilike(f'%{search_filter}%'),
-                    Test.title.ilike(f'%{search_filter}%')
+            if user and user.get('role') == 'tecadm':
+                # tecadm já tem Student no join; só aplicar o filtro
+                query = query.filter(
+                    db.or_(
+                        Student.name.ilike(f'%{search_filter}%'),
+                        Test.title.ilike(f'%{search_filter}%')
+                    )
                 )
-            )
+            else:
+                # admin/outros: incluir join de Student só para a busca
+                query = query.join(Student).filter(
+                    db.or_(
+                        Student.name.ilike(f'%{search_filter}%'),
+                        Test.title.ilike(f'%{search_filter}%')
+                    )
+                )
         
         # Ordenar por data de envio (mais recentes primeiro)
         query = query.order_by(TestSession.submitted_at.desc())
@@ -965,7 +975,7 @@ def get_submitted_evaluations():
                 "submitted_at": session.submitted_at.isoformat() if session.submitted_at else None,
                 "time_spent": time_spent,
                 "status": session.status,
-                "total_questions": len(session.test.questions) if session.test and session.test.questions else 0,
+                "total_questions": session.total_questions or (len(answers) if answers else 0),
                 "blank_answers": len([a for a in answers if not a.answer]),
                 "auto_score": auto_score,
                 "manual_score": manual_score,
@@ -991,7 +1001,14 @@ def get_submitted_evaluations():
             }
             result.append(session_data)
         
-        return jsonify(result), 200
+        # Formato consistente com o retorno vazio (tecadm sem escolas): items + paginação
+        return jsonify({
+            "items": result,
+            "total": paginated_sessions.total,
+            "pages": paginated_sessions.pages,
+            "current_page": page,
+            "per_page": per_page,
+        }), 200
         
     except Exception as e:
         print(f"ERRO DETALHADO: {str(e)}")

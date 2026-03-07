@@ -7,7 +7,7 @@ from flask import Blueprint, request, jsonify
 from flask_jwt_extended import jwt_required
 from app import db
 from app.permissions import role_required, get_current_user_from_token
-from app.competitions.models import Competition, CompetitionEnrollment
+from app.competitions.models import Competition, CompetitionEnrollment, CompetitionResult
 from app.competitions.services import CompetitionService, ValidationError, validate_reward_config
 from app.services.competition_student_ranking_service import (
     CompetitionStudentRankingService,
@@ -32,6 +32,31 @@ bp = Blueprint('competitions', __name__, url_prefix='/competitions')
 ROLES_EDIT = ("admin", "coordenador", "diretor", "tecadm", "professor")
 # Rotas de listagem disponível / inscrição: roles acima + aluno
 ROLES_STUDENT_OR_EDIT = ("admin", "coordenador", "diretor", "tecadm", "professor", "aluno")
+
+
+def _filter_ranking_by_student_grade(ranking: list, user: dict) -> list:
+    """
+    Quando o usuário é aluno, filtra o ranking para mostrar apenas alunos da mesma série (grade).
+    Reatribui as posições após o filtro.
+    """
+    if not user or (user.get("role") or "").strip().lower() != "aluno":
+        return ranking
+    student = Student.query.filter_by(user_id=user["id"]).first()
+    if not student:
+        return ranking
+    viewer_grade_id = str(student.grade_id) if getattr(student, "grade_id", None) else None
+    filtered = []
+    for r in ranking:
+        row_grade_id = r.get("grade_id")
+        if row_grade_id is None and viewer_grade_id is None:
+            filtered.append(r)
+        elif row_grade_id is not None and viewer_grade_id is not None:
+            if str(row_grade_id).strip().lower() == str(viewer_grade_id).strip().lower():
+                filtered.append(r)
+        # else: grade diferente, não incluir
+    for idx, r in enumerate(filtered, start=1):
+        r["position"] = idx
+    return filtered
 
 
 def _resolve_student_id():
@@ -166,7 +191,7 @@ def _parse_dt(val):
         if dt.tzinfo is not None:
             dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
         return dt
-    return val
+    raise ValueError("Data deve ser string ISO ou datetime")
 
 
 @bp.errorhandler(SQLAlchemyError)
@@ -224,7 +249,7 @@ def list_competitions():
     items = CompetitionService.list_competitions_merged(
         status=status, level=level, subject_id=subject_id, scope=scope
     )
-    return jsonify([_competition_to_dict(c) for c in items]), 200
+    return jsonify(items), 200
 
 
 # ---------- Etapa 3: rotas para aluno (disponíveis, detalhes, inscrição, cancelar) ----------
@@ -239,7 +264,16 @@ def list_available_competitions():
         return err[0], err[1]
     subject_id = request.args.get('subject_id')
     competitions = CompetitionService.get_available_competitions_for_student(student_id, subject_id=subject_id)
-    return jsonify([_competition_to_dict_with_enrolled(c, student_id) for c in competitions]), 200
+    # competitions já é lista de dicts; adicionar is_enrolled e can_start_test
+    out = []
+    for c in competitions:
+        d = dict(c)
+        d["is_enrolled"] = CompetitionService.is_student_enrolled(c["id"], student_id)
+        d["can_start_test"] = bool(
+            d.get("test_id") and d["is_enrolled"] and d.get("is_application_open") and not d.get("is_finished")
+        )
+        out.append(d)
+    return jsonify(out), 200
 
 
 @bp.route('/my', methods=['GET'])
@@ -514,7 +548,9 @@ def get_competition_ranking(competition_id):
     except (TypeError, ValueError):
         limit = 100
     ranking = CompetitionRankingService.get_ranking(competition_id, limit=limit, enriquecer=True)
-    return jsonify({"ranking": [_serialize_ranking_item(r) for r in ranking]}), 200
+    user = get_current_user_from_token()
+    ranking = _filter_ranking_by_student_grade(ranking, user or {})
+    return jsonify({"ranking": [_serialize_ranking_item(r) for r in ranking[:limit]]}), 200
 
 
 @bp.route('/<competition_id>/ranking-by-scope', methods=['GET'])
@@ -568,6 +604,9 @@ def get_competition_ranking_by_scope(competition_id):
     # Reatribuir posições dentro do escopo
     for idx, r in enumerate(filtered, start=1):
         r['position'] = idx
+    # Aluno vê apenas ranking da mesma série (grade)
+    user = get_current_user_from_token()
+    filtered = _filter_ranking_by_student_grade(filtered, user or {})
 
     return jsonify({"ranking": [_serialize_ranking_item(r) for r in filtered[:limit]]}), 200
 
@@ -923,7 +962,10 @@ def update_competition(competition_id):
     parsed_dates = {}
     for key in ('enrollment_start', 'enrollment_end', 'application', 'expiration'):
         if key in data:
-            parsed_dates[key] = _parse_dt(data[key])
+            try:
+                parsed_dates[key] = _parse_dt(data[key])
+            except (ValueError, TypeError) as e:
+                return jsonify({"error": f"Data inválida em '{key}': {str(e)}"}), 400
     
     # Validar ordem das datas se todas foram fornecidas
     enrollment_start = parsed_dates.get('enrollment_start') or c.enrollment_start

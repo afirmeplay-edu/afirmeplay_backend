@@ -21,6 +21,7 @@ from app.models.test import Test
 from app.models.testQuestion import TestQuestion
 from app.models.question import Question
 from app.models.student import Student
+from app.models.subject import Subject
 from app.models.studentTestOlimpics import StudentTestOlimpics
 from app.utils.timezone_utils import get_local_time
 
@@ -352,9 +353,88 @@ class CompetitionService:
     # ---------- Listagem unificada (public + tenant) ----------
 
     @staticmethod
+    def _serialize_competition_for_list(c):
+        """
+        Serializa Competition para dict. Deve ser chamado no contexto do schema
+        onde c foi carregado, para evitar 'Instance has been deleted' ao acessar
+        relações/properties após troca de schema.
+        """
+        try:
+            enrolled = c.enrolled_count
+        except Exception:
+            enrolled = 0
+        try:
+            slots = c.available_slots
+        except Exception:
+            slots = None
+        try:
+            rows = (
+                TestQuestion.query.filter_by(test_id=c.test_id)
+                .order_by(TestQuestion.order)
+                .with_entities(TestQuestion.question_id)
+                .all()
+            )
+            selected_ids = [r[0] for r in rows]
+        except Exception:
+            selected_ids = []
+        subject_name = None
+        try:
+            if c.subject:
+                subject_name = c.subject.name
+        except Exception:
+            pass
+        # subject está só em public; no schema tenant c.subject pode vir None
+        if subject_name is None and c.subject_id:
+            try:
+                row = db.session.execute(
+                    text("SELECT name FROM public.subject WHERE id = :sid"),
+                    {"sid": c.subject_id},
+                ).fetchone()
+                if row:
+                    subject_name = row[0]
+            except Exception:
+                pass
+        return {
+            'id': c.id,
+            'name': c.name,
+            'description': c.description,
+            'test_id': c.test_id,
+            'subject_id': c.subject_id,
+            'level': c.level,
+            'scope': c.scope,
+            'scope_filter': c.scope_filter,
+            'enrollment_start': c.enrollment_start.isoformat() if c.enrollment_start else None,
+            'enrollment_end': c.enrollment_end.isoformat() if c.enrollment_end else None,
+            'application': c.application.isoformat() if c.application else None,
+            'expiration': c.expiration.isoformat() if c.expiration else None,
+            'timezone': c.timezone,
+            'question_mode': c.question_mode,
+            'question_rules': c.question_rules,
+            'reward_config': c.reward_config if c.reward_config is not None else {},
+            'ranking_criteria': c.ranking_criteria,
+            'ranking_tiebreaker': c.ranking_tiebreaker,
+            'ranking_visibility': c.ranking_visibility,
+            'max_participants': c.max_participants,
+            'recurrence': c.recurrence,
+            'status': c.status,
+            'created_by': c.created_by,
+            'created_at': c.created_at.isoformat() if c.created_at else None,
+            'updated_at': c.updated_at.isoformat() if c.updated_at else None,
+            'is_enrollment_open': c.is_enrollment_open,
+            'is_application_open': c.is_application_open,
+            'is_finished': c.is_finished,
+            'enrolled_count': enrolled,
+            'available_slots': slots,
+            'selected_question_ids': selected_ids,
+            'subject_name': subject_name,
+        }
+
+    @staticmethod
     def list_competitions_merged(status=None, level=None, subject_id=None, scope=None):
         """
         Lista competições dos schemas public e do tenant (quando houver), mescladas e deduplicadas por id.
+        Retorna lista de dicts (serializados no contexto de cada schema) para evitar erro
+        "Instance has been deleted" ao acessar atributos após troca de schema.
         Ordenação: created_at desc.
         """
         ctx = get_current_tenant_context()
@@ -374,7 +454,7 @@ class CompetitionService:
             if scope is not None:
                 q = q.filter(Competition.scope == scope)
             for c in q.order_by(Competition.created_at.desc()).all():
-                by_id[c.id] = c
+                by_id[c.id] = CompetitionService._serialize_competition_for_list(c)
 
         try:
             set_search_path('public')
@@ -386,7 +466,7 @@ class CompetitionService:
             set_search_path(previous_schema)
 
         out = list(by_id.values())
-        out.sort(key=lambda c: c.created_at or datetime(1970, 1, 1), reverse=True)
+        out.sort(key=lambda d: d.get('created_at') or '', reverse=True)
         return out
 
     # ---------- Etapa 3: Inscrição e listagem para aluno ----------
@@ -424,30 +504,26 @@ class CompetitionService:
         if not student:
             return []
 
-        # Buscar competições abertas em public + tenant
+        # Buscar competições abertas em public + tenant (list_competitions_merged retorna list de dicts)
         all_competitions = CompetitionService.list_competitions_merged(
             status='aberta', subject_id=subject_id
         )
-        all_competitions = [c for c in all_competitions if c.test_id is not None]
+        all_competitions = [c for c in all_competitions if c.get('test_id') is not None]
 
         # Filtrar usando as properties que já consideram timezone correto
-        # A competição é considerada "disponível" se: inscrições abertas OU aplicação aberta (mas não finalizada)
         candidates = [
-            c for c in all_competitions 
-            if (c.is_enrollment_open or c.is_application_open) and not c.is_finished
+            c for c in all_competitions
+            if (c.get('is_enrollment_open') or c.get('is_application_open')) and not c.get('is_finished')
         ]
 
         result = []
         for c in candidates:
-            if not _student_level_matches(student, c.level):
+            if not _student_level_matches(student, c.get('level')):
                 continue
             if not _student_in_scope(student, c):
                 continue
-            if c.max_participants is not None:
-                try:
-                    if c.enrolled_count >= c.max_participants:
-                        continue
-                except Exception:
+            if c.get('max_participants') is not None:
+                if (c.get('enrolled_count') or 0) >= c.get('max_participants'):
                     continue
             result.append(c)
         return result
@@ -869,9 +945,13 @@ def _student_level_matches(student, competition_level):
 
 
 def _student_in_scope(student, competition):
-    """True se o aluno está no escopo da competição (scope + scope_filter)."""
-    scope = (competition.scope or 'individual').strip().lower()
-    scope_filter = competition.scope_filter or {}
+    """True se o aluno está no escopo da competição (scope + scope_filter). Aceita Competition ou dict."""
+    scope = (
+        (competition.scope if hasattr(competition, 'scope') else competition.get('scope')) or 'individual'
+    ).strip().lower()
+    scope_filter = (
+        competition.scope_filter if hasattr(competition, 'scope_filter') else competition.get('scope_filter')
+    ) or {}
 
     if scope == 'individual':
         return True

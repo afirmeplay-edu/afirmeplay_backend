@@ -2215,7 +2215,7 @@ def _gerar_opcoes_proximos_filtros_cartao(scope_info, nivel_granularidade, user)
     return opcoes
 
 
-# ==================== OPÇÕES DE FILTROS HIERÁRQUICOS (para GET /opcoes-filtros) ====================
+# ==================== OPÇÕES DE FILTROS HIERÁRQUICOS (para GET /opcoes-filtros-results) ====================
 
 def _obter_estados_disponiveis_cartao(user: dict, permissao: dict) -> List[Dict[str, Any]]:
     """Estados disponíveis conforme permissão (admin = todos; tecadm = só seu município)."""
@@ -2409,7 +2409,7 @@ def _obter_turmas_por_serie_cartao(gabarito_id: str, escola_id: str, serie_id: s
     return [{"id": str(t[0]), "nome": t[1] or f"Turma {t[0]}"} for t in turmas]
 
 
-@bp.route('/opcoes-filtros', methods=['GET'])
+@bp.route('/opcoes-filtros-results', methods=['GET'])
 @jwt_required()
 @role_required("admin", "professor", "coordenador", "diretor", "tecadm")
 def obter_opcoes_filtros_cartao():
@@ -2418,7 +2418,7 @@ def obter_opcoes_filtros_cartao():
     Mesmo padrão de GET /evaluation-results/opcoes-filtros.
     Hierarquia: Estado → Município → Cartão resposta (gabarito) → Escola → Série → Turma.
     Query params (todos opcionais): estado, municipio, gabarito, escola, serie, turma.
-    Ex.: GET /opcoes-filtros → estados; ?estado=SP → estados + municipios; ?estado=SP&municipio=id → + gabaritos; etc.
+    Ex.: GET /opcoes-filtros-results → estados; ?estado=SP → estados + municipios; ?estado=SP&municipio=id → + gabaritos; etc.
     """
     try:
         from app.permissions import get_user_permission_scope

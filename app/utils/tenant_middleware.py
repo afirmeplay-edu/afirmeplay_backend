@@ -371,6 +371,7 @@ def set_search_path(schema):
         - O search_path é definido por sessão/conexão
         - Deve ser chamado no início de cada request
         - Compatível com pool de conexões do SQLAlchemy
+        - Se a transação estiver abortada (erro anterior), faz rollback e tenta novamente.
         
     Examples:
         >>> set_search_path('city_123')
@@ -379,19 +380,28 @@ def set_search_path(schema):
         >>> set_search_path('public')
         # Define: SET search_path TO public
     """
+    if schema != 'public':
+        search_path = f'"{schema}", public'
+    else:
+        search_path = "public"
+    sql = text(f"SET search_path TO {search_path}")
+
     try:
-        if schema != 'public':
-            # Para tenants, incluir public no search_path
-            # Usar aspas duplas para schemas com caracteres especiais (UUID com hífens)
-            search_path = f'"{schema}", public'
-        else:
-            search_path = "public"
-        
-        # Executar SET search_path
-        db.session.execute(text(f"SET search_path TO {search_path}"))
+        db.session.execute(sql)
         db.session.commit()
-        
     except Exception as e:
+        # Transação pode estar abortada por um erro anterior; rollback e tentar de novo
+        err_msg = str(e).lower()
+        if "aborted" in err_msg or "infailedsqltransaction" in err_msg or "current transaction" in err_msg:
+            try:
+                db.session.rollback()
+                db.session.execute(sql)
+                db.session.commit()
+                return
+            except Exception as retry_e:
+                print(f"Erro ao definir search_path (após rollback): {retry_e}")
+                db.session.rollback()
+                raise retry_e
         print(f"Erro ao definir search_path: {e}")
         db.session.rollback()
         raise

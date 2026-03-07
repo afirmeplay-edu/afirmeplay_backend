@@ -349,14 +349,16 @@ class CompetitionRankingService:
 
     @staticmethod
     def _enrich_result_row(row: Dict[str, Any]) -> None:
-        """Adiciona student_name, class_name, school_id, school_name e state/city ao item do ranking."""
+        """Adiciona student_name, class_name, school_id, school_name, grade_id e state/city ao item do ranking."""
         student = Student.query.get(row.get('student_id'))
         if not student:
             row['student_name'] = None
             row['student_class'] = None
             row['school_name'] = None
+            row['grade_id'] = None
             return
         row['student_name'] = student.name
+        row['grade_id'] = str(student.grade_id) if getattr(student, 'grade_id', None) else None
         row['student_class'] = getattr(student, 'class_id', None)
         if student.class_id:
             try:

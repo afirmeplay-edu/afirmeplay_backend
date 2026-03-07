@@ -37,11 +37,14 @@ class StudentRankingService:
 
         rankings: Dict[str, Any] = {}
 
-        # Ranking por escola
+        # Escopo do ranking: apenas a mesma série (grade) do aluno. Não mostrar alunos de outras séries.
+
+        # Ranking por escola (mesma escola e mesma série)
         if student.school_id:
-            school_student_ids = [
-                s.id for s in Student.query.filter_by(school_id=student.school_id).all()
-            ]
+            school_query = Student.query.filter_by(school_id=student.school_id)
+            if student.grade_id is not None:
+                school_query = school_query.filter(Student.grade_id == student.grade_id)
+            school_student_ids = [s.id for s in school_query.all()]
             rankings["school"] = cls._build_ranking_for_scope(
                 student_id=student_id,
                 scope_student_ids=school_student_ids,
@@ -49,11 +52,12 @@ class StudentRankingService:
                 limit=limit
             )
 
-        # Ranking por turma
+        # Ranking por turma (mesma turma e mesma série)
         if student.class_id:
-            class_student_ids = [
-                s.id for s in Student.query.filter_by(class_id=student.class_id).all()
-            ]
+            class_query = Student.query.filter_by(class_id=student.class_id)
+            if student.grade_id is not None:
+                class_query = class_query.filter(Student.grade_id == student.grade_id)
+            class_student_ids = [s.id for s in class_query.all()]
             rankings["class"] = cls._build_ranking_for_scope(
                 student_id=student_id,
                 scope_student_ids=class_student_ids,
@@ -61,17 +65,18 @@ class StudentRankingService:
                 limit=limit
             )
 
-        # Ranking por município
+        # Ranking por município (mesmo município e mesma série apenas)
         school = School.query.get(student.school_id) if student.school_id else None
         if school and school.city_id:
             municipality_school_ids = [
                 s.id for s in School.query.filter_by(city_id=school.city_id).all()
             ]
-            municipality_student_ids = [
-                s.id for s in Student.query.filter(
-                    Student.school_id.in_(municipality_school_ids)
-                ).all()
-            ]
+            municipality_query = Student.query.filter(
+                Student.school_id.in_(municipality_school_ids)
+            )
+            if student.grade_id is not None:
+                municipality_query = municipality_query.filter(Student.grade_id == student.grade_id)
+            municipality_student_ids = [s.id for s in municipality_query.all()]
             rankings["municipality"] = cls._build_ranking_for_scope(
                 student_id=student_id,
                 scope_student_ids=municipality_student_ids,

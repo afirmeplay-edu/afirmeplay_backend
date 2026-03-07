@@ -85,6 +85,7 @@ def create_app():
         """
         Reseta o search_path do PostgreSQL após cada request.
         Garante isolamento entre requests e compatibilidade com pool de conexões.
+        Se a transação estiver abortada, faz rollback antes de SET search_path.
         """
         try:
             if exception:
@@ -95,14 +96,19 @@ def create_app():
                 except Exception as commit_error:
                     app.logger.warning(f"Erro ao fazer commit no teardown: {commit_error}")
                     db.session.rollback()
-            
-            # Resetar search_path para public (estado limpo)
+
             db.session.execute(text("SET search_path TO public"))
-            
         except Exception as e:
-            app.logger.error(f"Erro ao resetar search_path: {e}")
+            err_msg = str(e).lower()
+            if "aborted" in err_msg or "current transaction" in err_msg:
+                try:
+                    db.session.rollback()
+                    db.session.execute(text("SET search_path TO public"))
+                except Exception as e2:
+                    app.logger.error(f"Erro ao resetar search_path (após rollback): {e2}")
+            else:
+                app.logger.error(f"Erro ao resetar search_path: {e}")
         finally:
-            # Remover sessão do pool (importante para pool de conexões)
             db.session.remove()
     
     # ========================================

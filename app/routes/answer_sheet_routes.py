@@ -479,6 +479,12 @@ def generate_answer_sheets():
                 school_id_for_gabarito = first_class.school_id
                 if first_class.school:
                     school_name = first_class.school.name or ''
+                    # Preencher município/estado a partir da escola se não vierem no payload
+                    if (not municipality_for_gabarito or not state_for_gabarito) and first_class.school.city:
+                        if not municipality_for_gabarito:
+                            municipality_for_gabarito = first_class.school.city.name or ''
+                        if not state_for_gabarito:
+                            state_for_gabarito = first_class.school.city.state or ''
             if first_class.grade_id:
                 grade_id_for_gabarito = first_class.grade_id
                 # ✅ Se não veio no payload, buscar do banco
@@ -527,12 +533,12 @@ def generate_answer_sheets():
         except Exception as e:
             logging.error(f"[ROTA] ⚠️ Erro ao gerar coordenadas (não crítico): {str(e)}")
         
-        # ✅ 7. PREPARAR test_data
+        # ✅ 7. PREPARAR test_data (usar município/estado já preenchidos do contexto para o PDF)
         test_data_complete = {
             'id': data.get('test_id'),
             'title': title,
-            'municipality': test_data.get('municipality', ''),
-            'state': test_data.get('state', ''),
+            'municipality': municipality_for_gabarito,
+            'state': state_for_gabarito,
             'grade_name': grade_name_for_gabarito,  # ✅ Adicionar grade_name
             'department': test_data.get('department', ''),
             'municipality_logo': test_data.get('municipality_logo'),
@@ -2684,8 +2690,8 @@ def get_job_status(job_id):
                     })
                     logging.error(f"❌ Task batch {task_id} FAILURE: {error_msg}")
                     
-                elif task_result.state in ['PENDING', 'RETRY']:
-                    # Task ainda processando
+                elif task_result.state in ['PENDING', 'STARTED', 'RETRY']:
+                    # Task ainda processando — progresso progressivo vem do job
                     pass
                     
             except Exception as e:
@@ -2701,12 +2707,22 @@ def get_job_status(job_id):
         if gabarito_id:
             gabarito = AnswerSheetGabarito.query.get(gabarito_id)
         
-        # ✅ PREPARAR RESPOSTA COM NÚMEROS REAIS
-        progress = {
-            'current': completed,
-            'total': len(task_ids),
-            'percentage': int((completed / len(task_ids) * 100) if task_ids else 0)
-        }
+        # ✅ PREPARAR PROGRESSO: progressivo durante execução, 100% ao concluir
+        total_classes = job.get('total', 1)
+        if job_status == "processing" and total_classes > 0:
+            progress_current = job.get('progress_current', 0)
+            progress_pct = job.get('progress_percentage', 0)
+            progress = {
+                'current': progress_current,
+                'total': total_classes,
+                'percentage': min(100, progress_pct)
+            }
+        else:
+            progress = {
+                'current': total_classes if job_status == "completed" else 0,
+                'total': total_classes,
+                'percentage': 100 if job_status == "completed" else 0
+            }
         
         result_data = {
             'classes_generated': classes_generated,

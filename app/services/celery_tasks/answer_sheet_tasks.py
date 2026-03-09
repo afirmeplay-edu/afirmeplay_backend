@@ -407,6 +407,11 @@ def generate_answer_sheets_batch_async(
                 except Exception as e:
                     logger.error(f"[CELERY-BATCH] ❌ Erro ao gerar PDF para turma {class_obj.id}: {str(e)}", exc_info=True)
                     continue
+                finally:
+                    # Progresso progressivo: atualizar job a cada turma processada
+                    if batch_id and len(classes) > 0:
+                        pct = min(100, int(round((idx / len(classes)) * 100)))
+                        update_job(batch_id, {'progress_current': idx, 'progress_percentage': pct})
         else:
             # Fluxo antigo: 1 gabarito por turma
             for idx, gabarito in enumerate(gabaritos, 1):
@@ -468,6 +473,11 @@ def generate_answer_sheets_batch_async(
                 except Exception as e:
                     logger.error(f"[CELERY-BATCH] ❌ Erro ao gerar PDF para gabarito {gabarito.id}: {str(e)}", exc_info=True)
                     continue
+                finally:
+                    # Progresso progressivo: atualizar job a cada turma processada
+                    if batch_id and len(gabaritos) > 0:
+                        pct = min(100, int(round((idx / len(gabaritos)) * 100)))
+                        update_job(batch_id, {'progress_current': idx, 'progress_percentage': pct})
         
         if not generated_pdfs:
             raise ValueError("Nenhum PDF foi gerado")

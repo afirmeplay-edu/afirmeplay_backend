@@ -9,6 +9,8 @@ from typing import List, Dict, Any, Optional
 
 from app import db
 from app.competitions.models import Competition, CompetitionResult, CompetitionRankingPayout
+from app.competitions.schema_resolution import get_competition_schema
+from app.utils.tenant_middleware import set_search_path, get_current_tenant_context
 from app.models.testSession import TestSession
 from app.models.evaluationResult import EvaluationResult
 from app.models.student import Student
@@ -69,10 +71,22 @@ class CompetitionRankingService:
         Usado para exibir ranking ao vivo e no passo de finalização.
         Retorna lista ordenada de {student_id, session_id, position, grade, proficiency, ...}.
         Filtra por escopo da competição (turma/escola/município).
+        Competition pode estar em public; TestSession/Student no tenant.
         """
-        competition = Competition.query.get(competition_id)
-        if not competition or not competition.test_id:
+        ctx = get_current_tenant_context()
+        tenant_schema = (ctx.schema if (ctx and getattr(ctx, "has_tenant_context", False)) else None) or None
+        if not tenant_schema or tenant_schema == "public":
             return []
+        competition_schema = get_competition_schema(competition_id, tenant_schema=tenant_schema)
+        if not competition_schema:
+            return []
+        set_search_path(competition_schema)
+        try:
+            competition = Competition.query.get(competition_id)
+            if not competition or not competition.test_id:
+                return []
+        finally:
+            set_search_path(tenant_schema)
 
         sessions = TestSession.query.filter(
             TestSession.test_id == competition.test_id,
@@ -134,8 +148,24 @@ class CompetitionRankingService:
         2) Grava snapshot em competition_results.
         3) Paga moedas de ranking e registra em competition_ranking_payouts.
         4) Atualiza moedas_ganhas em competition_results.
+        Requer tenant no contexto; Competition pode estar em public.
         """
-        competition = Competition.query.get_or_404(competition_id)
+        ctx = get_current_tenant_context()
+        tenant_schema = (ctx.schema if (ctx and getattr(ctx, "has_tenant_context", False)) else None) or None
+        if not tenant_schema or tenant_schema == "public":
+            logger.warning("finalize_competition_and_save_results: sem tenant no contexto; ignorando.")
+            return
+        competition_schema = get_competition_schema(competition_id, tenant_schema=tenant_schema)
+        if not competition_schema:
+            logger.warning("finalize_competition_and_save_results: competição %s não encontrada.", competition_id)
+            return
+        set_search_path(competition_schema)
+        try:
+            competition = Competition.query.get(competition_id)
+            if not competition:
+                return
+        finally:
+            set_search_path(tenant_schema)
         ranking = CompetitionRankingService.calculate_ranking(competition_id)
         now = datetime.utcnow()
 
@@ -296,10 +326,22 @@ class CompetitionRankingService:
         Se competição encerrada: lê de competition_results (ranking oficial).
         Se competição em andamento: calcula em tempo real (calculate_ranking).
         Se enriquecer=True, adiciona student_name, student_class, etc.
+        Competition pode estar em public; Student/TestSession/CompetitionResult no tenant.
         """
-        competition = Competition.query.get(competition_id)
-        if not competition:
+        ctx = get_current_tenant_context()
+        tenant_schema = (ctx.schema if (ctx and getattr(ctx, "has_tenant_context", False)) else None) or None
+        if not tenant_schema or tenant_schema == "public":
             return []
+        competition_schema = get_competition_schema(competition_id, tenant_schema=tenant_schema)
+        if not competition_schema:
+            return []
+        set_search_path(competition_schema)
+        try:
+            competition = Competition.query.get(competition_id)
+            if not competition:
+                return []
+        finally:
+            set_search_path(tenant_schema)
 
         if competition.status == 'encerrada':
             # Para competições encerradas, preferimos ler o snapshot oficial em competition_results.
@@ -392,10 +434,22 @@ class CompetitionRankingService:
         """
         Retorna a posição do aluno no ranking e dados resumidos.
         Retorna None se o aluno não tiver resultado na competição.
+        Competition pode estar em public; CompetitionResult/Student no tenant.
         """
-        competition = Competition.query.get(competition_id)
-        if not competition:
+        ctx = get_current_tenant_context()
+        tenant_schema = (ctx.schema if (ctx and getattr(ctx, "has_tenant_context", False)) else None) or None
+        if not tenant_schema or tenant_schema == "public":
             return None
+        competition_schema = get_competition_schema(competition_id, tenant_schema=tenant_schema)
+        if not competition_schema:
+            return None
+        set_search_path(competition_schema)
+        try:
+            competition = Competition.query.get(competition_id)
+            if not competition:
+                return None
+        finally:
+            set_search_path(tenant_schema)
 
         if competition.status == 'encerrada':
             result = CompetitionResult.query.filter_by(

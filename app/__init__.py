@@ -189,7 +189,7 @@ def create_app():
         app.logger.warning(f"Celery não pôde ser inicializado: {str(e)}. Processamento assíncrono desabilitado.")
     
     # Importar rotas
-    from .routes import school_routes, test_routes, question_routes, login, logout, admin_route, educationStage_routes, grades_routes, persistUser_routes, city_routes, student_routes, user_routes, class_routes, schoolTeacher, teacherClass, professor_route, subject_routes, skill_routes, student_answer_routes, userQuickLinks_routes, evaluation_results_routes, basic_endpoints, evaluation_routes, game_routes, manager_routes, report_routes, physical_test_routes, student_grades_routes, calendar_routes, dashboard_routes, answer_sheet_routes, subdomain_routes, lista_frequencia_routes
+    from .routes import school_routes, test_routes, question_routes, login, logout, admin_route, educationStage_routes, grades_routes, persistUser_routes, city_routes, student_routes, student_preferences_routes, user_routes, class_routes, schoolTeacher, teacherClass, professor_route, subject_routes, skill_routes, student_answer_routes, userQuickLinks_routes, evaluation_results_routes, basic_endpoints, evaluation_routes, game_routes, manager_routes, report_routes, physical_test_routes, student_grades_routes, calendar_routes, dashboard_routes, answer_sheet_routes, subdomain_routes, lista_frequencia_routes
     from app.socioeconomic_forms.routes import socioeconomic_form_routes
     from app.socioeconomic_forms.routes import filter_routes
     from app.socioeconomic_forms.routes import results_routes
@@ -216,6 +216,7 @@ def create_app():
     app.register_blueprint(persistUser_routes.bp)
     app.register_blueprint(city_routes.bp)
     app.register_blueprint(student_routes.bp)
+    app.register_blueprint(student_preferences_routes.bp)
     app.register_blueprint(user_routes.bp)
     app.register_blueprint(class_routes.bp)
     app.register_blueprint(schoolTeacher.school_teacher_bp)

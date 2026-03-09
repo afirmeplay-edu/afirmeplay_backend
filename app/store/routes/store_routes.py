@@ -7,6 +7,7 @@ from flask import Blueprint, request, jsonify, g
 from flask_jwt_extended import jwt_required, get_jwt_identity
 from app import db
 from app.permissions import get_current_user_from_token, role_required
+from app.utils.tenant_middleware import ensure_tenant_schema_for_user, set_search_path
 from app.models.student import Student
 from app.store.services.store_service import (
     StoreService,
@@ -58,6 +59,8 @@ def _current_student_id():
     user = get_current_user_from_token()
     if not user:
         return None, (jsonify({"erro": "Usuário não autenticado"}), 401)
+    if not ensure_tenant_schema_for_user(user_id):
+        return None, (jsonify({"erro": "Contexto do município não disponível. Acesse pelo subdomínio da cidade."}), 400)
     student = Student.query.filter_by(user_id=user_id).first()
     if not student:
         return None, (jsonify({"erro": "Estudante não encontrado para este usuário"}), 404)
@@ -97,11 +100,16 @@ def list_items():
         if query_student_id and role in ('admin', 'coordenador', 'professor', 'tecadm', 'diretor'):
             student_id = query_student_id
         else:
-            student = Student.query.filter_by(user_id=user_id).first()
-            student_id = student.id if student else None
+            if ensure_tenant_schema_for_user(user_id):
+                student = Student.query.filter_by(user_id=user_id).first()
+                student_id = student.id if student else None
+            else:
+                student_id = None
         if student_id:
             scope_city_id, scope_school_id, scope_class_id = _scope_context_for_student(student_id)
 
+    # Tabelas da loja (store_items, student_purchases) estão em public
+    set_search_path("public")
     items = StoreService.list_items(
         active_only=active_only,
         category=category,
@@ -141,6 +149,8 @@ def purchase():
         return jsonify({"erro": "store_item_id é obrigatório"}), 400
 
     scope_city_id, scope_school_id, scope_class_id = _scope_context_for_student(student_id)
+    # Tabelas da loja e de coins (store_items, student_purchases, etc.) estão em public
+    set_search_path("public")
     try:
         purchase_record, coin_transaction = StoreService.purchase(
             student_id,
@@ -172,6 +182,8 @@ def my_purchases():
     if err is not None:
         return err
 
+    # Tabelas da loja (student_purchases, store_items) estão em public
+    set_search_path("public")
     limit = int(request.args.get('limit', 50))
     offset = int(request.args.get('offset', 0))
     purchases = StoreService.get_student_purchases(student_id, limit=limit, offset=offset)

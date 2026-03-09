@@ -1380,9 +1380,12 @@ def can_student_start_test(test_id):
         from app.models.student import Student
         from app.models.classTest import ClassTest
         from app.models.studentTestOlimpics import StudentTestOlimpics
+        from app.utils.tenant_middleware import ensure_tenant_schema_for_user
 
         current_user_id = get_jwt_identity()
 
+        if not ensure_tenant_schema_for_user(current_user_id):
+            return jsonify({"error": "Contexto do município não disponível. Acesse pelo subdomínio da cidade."}), 400
         student = Student.query.filter_by(user_id=current_user_id).first()
         if not student:
             return jsonify({'error': 'Estudante não encontrado para este usuário'}), 404

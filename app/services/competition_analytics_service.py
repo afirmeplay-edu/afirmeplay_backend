@@ -2,12 +2,15 @@
 """
 Serviço de Analytics de Competições (Etapa 7).
 Calcula métricas estatísticas para relatórios administrativos.
+Student, TestSession, CompetitionEnrollment ficam no tenant; Competition pode estar em public.
 """
 from typing import Dict, Any, List
 from sqlalchemy import func
 
 from app import db
 from app.competitions.models import Competition, CompetitionEnrollment, CompetitionResult
+from app.competitions.schema_resolution import get_competition_schema
+from app.utils.tenant_middleware import set_search_path, get_current_tenant_context
 from app.models.testSession import TestSession
 from app.models.student import Student
 from app.services.competition_ranking_service import CompetitionRankingService
@@ -28,9 +31,22 @@ class CompetitionAnalyticsService:
         - Top 10 alunos
         - Comparação com competições anteriores (opcional)
         """
-        competition = Competition.query.get(competition_id)
-        if not competition:
+        ctx = get_current_tenant_context()
+        tenant_schema = (ctx.schema if (ctx and getattr(ctx, "has_tenant_context", False)) else None) or None
+        if not tenant_schema or tenant_schema == "public":
+            raise ValueError(
+                "É necessário informar o município (header X-City-ID ou usuário vinculado à cidade) para calcular analytics."
+            )
+        competition_schema = get_competition_schema(competition_id, tenant_schema=tenant_schema)
+        if not competition_schema:
             raise ValueError(f"Competição {competition_id} não encontrada")
+        set_search_path(competition_schema)
+        try:
+            competition = Competition.query.get(competition_id)
+            if not competition:
+                raise ValueError(f"Competição {competition_id} não encontrada")
+        finally:
+            set_search_path(tenant_schema)
 
         eligible_count = CompetitionAnalyticsService._get_eligible_students_count(competition)
         enrolled_count = CompetitionAnalyticsService._get_enrolled_count(competition_id)

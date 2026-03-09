@@ -129,10 +129,22 @@ def format_student_details(student):
 
 
 def format_user_settings(settings_instance):
+    if not settings_instance:
+        return {
+            "theme": None,
+            "fontFamily": None,
+            "fontSize": None,
+            "sidebar_theme_id": None,
+            "frame_id": None,
+            "stamp_id": None,
+        }
     return {
-        "theme": settings_instance.theme if settings_instance else None,
-        "fontFamily": settings_instance.font_family if settings_instance else None,
-        "fontSize": settings_instance.font_size if settings_instance else None
+        "theme": settings_instance.theme,
+        "fontFamily": settings_instance.font_family,
+        "fontSize": settings_instance.font_size,
+        "sidebar_theme_id": settings_instance.sidebar_theme_id,
+        "frame_id": settings_instance.frame_id,
+        "stamp_id": settings_instance.stamp_id,
     }
 
 @bp.route('/list', methods=['GET'])
@@ -491,12 +503,17 @@ def get_user_by_id(user_id):
         user_data = serialize_user(user)
 
         if getattr(user, 'role', None) == RoleEnum.ALUNO:
-            student = Student.query.options(
-                joinedload(Student.school),
-                joinedload(Student.class_),
-                joinedload(Student.grade)
-            ).filter_by(user_id=user.id).first()
-
+            student = None
+            try:
+                from app.utils.tenant_middleware import ensure_tenant_schema_for_user
+                if ensure_tenant_schema_for_user(user.id):
+                    student = Student.query.options(
+                        joinedload(Student.school),
+                        joinedload(Student.class_),
+                        joinedload(Student.grade)
+                    ).filter_by(user_id=user.id).first()
+            except Exception as student_err:
+                logging.warning(f"Erro ao buscar student_details para user {user_id}: {student_err}")
             if student:
                 try:
                     student_details = format_student_details(student)
@@ -1062,6 +1079,18 @@ def delete_user(user_id):
         db.session.rollback()
         return jsonify({"erro": "Erro interno do servidor"}), 500
 
+def _user_settings_in_public(fn):
+    """Executa uma função com search_path em public para garantir leitura/escrita em public.user_settings (evita divergência multi-tenant)."""
+    try:
+        db.session.execute(text("SET search_path TO public"))
+        return fn()
+    finally:
+        try:
+            db.session.execute(text("SET search_path TO public"))
+        except Exception:
+            pass
+
+
 @bp.route('/user-settings/<string:user_id>', methods=['POST'])
 @jwt_required()
 @role_required("admin", "tecadm", "diretor", "coordenador", "professor", "aluno")
@@ -1086,28 +1115,49 @@ def save_user_settings(user_id):
         if not isinstance(settings_data, dict):
             return jsonify({"erro": "Objeto settings deve ser um dicionário"}), 400
 
-        theme = settings_data.get('theme')
-        font_family = settings_data.get('fontFamily')
-        font_size = settings_data.get('fontSize')
-
-        if font_size is not None:
+        def _parse_font_size(val):
+            """Aceita int, '110' ou '110%' e retorna int (110) ou None."""
+            if val is None:
+                return None
+            if isinstance(val, int):
+                return val
+            s = str(val).strip().rstrip('%')
+            if not s:
+                return None
             try:
-                font_size = int(font_size)
-            except (ValueError, TypeError):
-                return jsonify({"erro": "fontSize deve ser um número inteiro"}), 400
+                return int(s)
+            except ValueError:
+                return None
 
-        user_settings = UserSettings.query.filter_by(user_id=user_id).first()
-        if not user_settings:
-            user_settings = UserSettings(user_id=user_id)
-            db.session.add(user_settings)
+        if 'fontSize' in settings_data and settings_data['fontSize'] is not None:
+            parsed = _parse_font_size(settings_data['fontSize'])
+            if parsed is None:
+                return jsonify({"erro": "fontSize deve ser um número inteiro ou percentual (ex: 110 ou 110%)"}), 400
 
-        user_settings.theme = theme
-        user_settings.font_family = font_family
-        user_settings.font_size = font_size
+        def _save():
+            user_settings = UserSettings.query.filter_by(user_id=user_id).first()
+            if not user_settings:
+                user_settings = UserSettings(user_id=user_id)
+                db.session.add(user_settings)
 
-        db.session.commit()
+            # Atualização parcial: só altera os campos que vieram no body (evita apagar tema/fonte quando só envia sidebar_theme_id)
+            if 'theme' in settings_data:
+                user_settings.theme = settings_data.get('theme')
+            if 'fontFamily' in settings_data:
+                user_settings.font_family = settings_data.get('fontFamily')
+            if 'fontSize' in settings_data:
+                user_settings.font_size = _parse_font_size(settings_data['fontSize'])
+            if 'sidebar_theme_id' in settings_data:
+                user_settings.sidebar_theme_id = settings_data.get('sidebar_theme_id')
+            if 'frame_id' in settings_data:
+                user_settings.frame_id = settings_data.get('frame_id')
+            if 'stamp_id' in settings_data:
+                user_settings.stamp_id = settings_data.get('stamp_id')
 
-        return jsonify({"settings": format_user_settings(user_settings)}), 200
+            db.session.commit()
+            return jsonify({"settings": format_user_settings(user_settings)}), 200
+
+        return _user_settings_in_public(_save)
 
     except SQLAlchemyError as e:
         db.session.rollback()
@@ -1135,9 +1185,11 @@ def get_user_settings(user_id):
         if not user:
             return jsonify({"erro": "Usuário não encontrado"}), 404
 
-        user_settings = UserSettings.query.filter_by(user_id=user_id).first()
+        def _get():
+            user_settings = UserSettings.query.filter_by(user_id=user_id).first()
+            return jsonify({"settings": format_user_settings(user_settings)}), 200
 
-        return jsonify({"settings": format_user_settings(user_settings)}), 200
+        return _user_settings_in_public(_get)
 
     except SQLAlchemyError as e:
         logging.error(f"Erro no banco de dados ao buscar preferências do usuário {user_id}: {str(e)}")

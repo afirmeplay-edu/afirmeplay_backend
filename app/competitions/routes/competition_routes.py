@@ -15,6 +15,7 @@ from app.services.competition_student_ranking_service import (
 from app.services.competition_ranking_service import CompetitionRankingService
 from app.models.student import Student
 from app.models.studentTestOlimpics import StudentTestOlimpics
+from app.models.test import Test
 from app.models.testQuestion import TestQuestion
 from app.models.testSession import TestSession
 from app.competitions.constants import is_valid_level, LEVEL_OPTIONS, validate_scope_and_filter
@@ -22,11 +23,22 @@ from app.competitions.scope_permissions import (
     get_allowed_competition_scopes,
     validate_scope_and_filter_for_user,
 )
+from app.competitions.schema_resolution import get_competition_schema
+from app.utils.tenant_middleware import set_search_path, get_current_tenant_context, ensure_tenant_schema_for_user
 from app.utils.timezone_utils import get_local_time
+from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError, IntegrityError
+from sqlalchemy.orm import joinedload
+import jwt
+from jwt import ExpiredSignatureError, InvalidTokenError
 import logging
 
 bp = Blueprint('competitions', __name__, url_prefix='/competitions')
+
+# Mensagem padrão quando operação exige tenant (município)
+MSG_TENANT_REQUIRED = (
+    "É necessário informar o município (header X-City-ID ou usuário vinculado à cidade) para esta operação."
+)
 
 # Página de gerenciamento de competições: admin, coordenador, diretor, tecadm, professor
 ROLES_EDIT = ("admin", "coordenador", "diretor", "tecadm", "professor")
@@ -115,9 +127,10 @@ def _safe_available_slots(c):
 
 
 def _get_selected_question_ids(test_id):
-    """Retorna lista de question_id na ordem do teste (para competição com auto_random)."""
+    """Retorna lista de question_id na ordem do teste. test_questions existe só no tenant; em public usa schema do tenant."""
     if not test_id:
         return []
+    rows = []
     try:
         rows = (
             TestQuestion.query.filter_by(test_id=test_id)
@@ -125,14 +138,71 @@ def _get_selected_question_ids(test_id):
             .with_entities(TestQuestion.question_id)
             .all()
         )
-        return [r[0] for r in rows]
     except Exception as e:
-        logging.warning("selected_question_ids falhou para test_id %s: %s", test_id, e)
+        err_msg = str(e).lower()
+        if "test_questions" not in err_msg or ("does not exist" not in err_msg and "undefinedtable" not in err_msg):
+            logging.warning("selected_question_ids falhou para test_id %s: %s", test_id, e)
+            return []
+    if rows:
+        return [r[0] for r in rows]
+    # Primeira query retornou vazio (ex.: path em public e prova está no tenant) ou deu erro de tabela
+    ctx = get_current_tenant_context()
+    tenant_schema = (ctx.schema if (ctx and ctx.has_tenant_context) else None) or None
+    if not tenant_schema or tenant_schema == "public":
+        user = get_current_user_from_token()
+        if user:
+            ensure_tenant_schema_for_user(user["id"])
+        ctx = get_current_tenant_context()
+        tenant_schema = (ctx.schema if (ctx and ctx.has_tenant_context) else None) or None
+    if not tenant_schema or tenant_schema == "public":
         return []
+    prev = "public"
+    try:
+        prev = db.session.execute(text("SELECT current_schema()")).scalar() or "public"
+        set_search_path(tenant_schema)
+        rows = (
+            TestQuestion.query.filter_by(test_id=test_id)
+            .order_by(TestQuestion.order)
+            .with_entities(TestQuestion.question_id)
+            .all()
+        )
+        return [r[0] for r in rows]
+    except Exception as e2:
+        logging.debug("selected_question_ids (tenant) falhou para test_id %s: %s", test_id, e2)
+        return []
+    finally:
+        set_search_path(prev)
 
 
-def _competition_to_dict(c):
-    """Serializa Competition para dict. Datas/horas no mesmo padrão de tests (isoformat ou None)."""
+def _get_subject_name_from_public(subject_id):
+    """Busca nome da disciplina em public.subject (tabela qualificada; não altera search_path)."""
+    if not subject_id:
+        return None
+    try:
+        sid = str(subject_id)
+        row = db.session.execute(
+            text("SELECT name FROM public.subject WHERE id = :sid"),
+            {"sid": sid},
+        ).fetchone()
+        return row[0] if row else None
+    except Exception as e:
+        logging.debug("_get_subject_name_from_public(%s): %s", subject_id, e)
+        return None
+
+
+def _competition_to_dict(c, subject_name_override=None):
+    """Serializa Competition para dict. subject_name_override evita lazy load de c.subject no schema tenant."""
+    # Buscar subject_name logo no início (public.subject), antes de qualquer query que possa abortar a transação
+    subject_name = subject_name_override
+    if subject_name is None and getattr(c, 'subject_id', None):
+        subject_name = _get_subject_name_from_public(c.subject_id)
+    if subject_name is None:
+        try:
+            if c.subject:
+                subject_name = c.subject.name
+        except Exception:
+            pass
+
     d = {
         'id': c.id,
         'name': c.name,
@@ -165,9 +235,8 @@ def _competition_to_dict(c):
         'enrolled_count': _safe_enrolled_count(c),
         'available_slots': _safe_available_slots(c),
         'selected_question_ids': _get_selected_question_ids(c.test_id),
+        'subject_name': subject_name,
     }
-    if c.subject:
-        d['subject_name'] = c.subject.name
     return d
 
 
@@ -211,11 +280,24 @@ def handle_integrity_error(error):
 
 @bp.errorhandler(ValidationError)
 def handle_validation_error(error):
+    db.session.rollback()
     return jsonify({"error": str(error)}), 400
+
+
+@bp.errorhandler(ExpiredSignatureError)
+def handle_jwt_expired(error):
+    return jsonify({"error": "Token expirado", "details": "Faça login novamente."}), 401
+
+
+@bp.errorhandler(InvalidTokenError)
+def handle_jwt_invalid(error):
+    return jsonify({"error": "Token inválido", "details": str(error)}), 401
 
 
 @bp.errorhandler(Exception)
 def handle_any_error(error):
+    if isinstance(error, (ExpiredSignatureError, InvalidTokenError)):
+        return jsonify({"error": "Token expirado" if isinstance(error, ExpiredSignatureError) else "Token inválido", "details": "Faça login novamente." if isinstance(error, ExpiredSignatureError) else str(error)}), 401
     import traceback
     db.session.rollback()
     logging.error("Competitions error: %s\n%s", str(error), traceback.format_exc())
@@ -259,6 +341,11 @@ def list_competitions():
 @role_required(*ROLES_STUDENT_OR_EDIT)
 def list_available_competitions():
     """Lista competições disponíveis para o aluno (nível, escopo, período, vagas)."""
+    user = get_current_user_from_token()
+    if not user:
+        return jsonify({"error": "Usuário não autenticado"}), 401
+    if not ensure_tenant_schema_for_user(user["id"]):
+        return jsonify({"error": "Contexto do município não disponível. Acesse pelo subdomínio da cidade ou informe X-City-ID."}), 400
     student_id, err = _resolve_student_id()
     if err:
         return err[0], err[1]
@@ -293,6 +380,9 @@ def list_my_competitions():
     - status=upcoming  → competições futuras (ainda não iniciadas)
     - status=qualquer/coisa ou ausente → todas
     """
+    user = get_current_user_from_token()
+    if not user or not ensure_tenant_schema_for_user(user["id"]):
+        return jsonify({"error": MSG_TENANT_REQUIRED}), 400
     student_id, err = _resolve_student_id()
     if err:
         return err[0], err[1]
@@ -306,6 +396,9 @@ def list_my_competitions():
 @role_required(*ROLES_STUDENT_OR_EDIT)
 def get_competition_details_for_student(competition_id):
     """Detalhes da competição para o aluno (inclui is_enrolled, available_slots)."""
+    user = get_current_user_from_token()
+    if not user or not ensure_tenant_schema_for_user(user["id"]):
+        return jsonify({"error": MSG_TENANT_REQUIRED}), 400
     student_id, err = _resolve_student_id()
     if err:
         return err[0], err[1]
@@ -363,6 +456,9 @@ def list_enrolled_students(competition_id):
     Filtros: ?limit=... (default 500), ?offset=... (default 0).
     """
     competition = CompetitionService.get_competition_or_404(competition_id)
+    user = get_current_user_from_token()
+    if not user or not ensure_tenant_schema_for_user(user["id"]):
+        return jsonify({"error": MSG_TENANT_REQUIRED}), 400
     try:
         limit = int(request.args.get('limit', 500))
         offset = int(request.args.get('offset', 0))
@@ -428,6 +524,9 @@ def get_my_competition_session(competition_id):
     if err:
         return err[0], err[1]
     c = CompetitionService.get_competition_or_404(competition_id)
+    user = get_current_user_from_token()
+    if not user or not ensure_tenant_schema_for_user(user["id"]):
+        return jsonify({"error": MSG_TENANT_REQUIRED}), 400
     if not c.test_id:
         return jsonify({"test_session": None}), 200
     session = (
@@ -453,6 +552,9 @@ def start_competition_test(competition_id):
     c = CompetitionService.get_competition_or_404(competition_id)
     if not c.test_id:
         return jsonify({"error": "Competição sem prova vinculada"}), 400
+    user = get_current_user_from_token()
+    if not user or not ensure_tenant_schema_for_user(user["id"]):
+        return jsonify({"error": MSG_TENANT_REQUIRED}), 400
 
     # Aluno deve estar inscrito
     enrollment = CompetitionEnrollment.query.filter_by(
@@ -539,6 +641,9 @@ def get_competition_ranking(competition_id):
     ranking_visibility = 'final' → só retorna se competition.status = 'encerrada'.
     """
     c = CompetitionService.get_competition_or_404(competition_id)
+    user = get_current_user_from_token()
+    if not user or not ensure_tenant_schema_for_user(user["id"]):
+        return jsonify({"error": MSG_TENANT_REQUIRED}), 400
     visibility = (c.ranking_visibility or 'final').strip().lower()
     if visibility == 'final' and c.status != 'encerrada':
         return jsonify({"error": "Ranking só é exibido após o encerramento da competição"}), 403
@@ -548,8 +653,8 @@ def get_competition_ranking(competition_id):
     except (TypeError, ValueError):
         limit = 100
     ranking = CompetitionRankingService.get_ranking(competition_id, limit=limit, enriquecer=True)
-    user = get_current_user_from_token()
-    ranking = _filter_ranking_by_student_grade(ranking, user or {})
+    if user and ensure_tenant_schema_for_user(user["id"]):
+        ranking = _filter_ranking_by_student_grade(ranking, user or {})
     return jsonify({"ranking": [_serialize_ranking_item(r) for r in ranking[:limit]]}), 200
 
 
@@ -567,6 +672,9 @@ def get_competition_ranking_by_scope(competition_id):
     Usa o mesmo cálculo de ranking, apenas filtrando os itens pelo escopo solicitado.
     """
     CompetitionService.get_competition_or_404(competition_id)
+    user = get_current_user_from_token()
+    if not user or not ensure_tenant_schema_for_user(user["id"]):
+        return jsonify({"error": MSG_TENANT_REQUIRED}), 400
     scope = (request.args.get('scope') or 'global').strip().lower()
     try:
         limit = request.args.get('limit', type=int) or 100
@@ -606,7 +714,8 @@ def get_competition_ranking_by_scope(competition_id):
         r['position'] = idx
     # Aluno vê apenas ranking da mesma série (grade)
     user = get_current_user_from_token()
-    filtered = _filter_ranking_by_student_grade(filtered, user or {})
+    if user and ensure_tenant_schema_for_user(user["id"]):
+        filtered = _filter_ranking_by_student_grade(filtered, user or {})
 
     return jsonify({"ranking": [_serialize_ranking_item(r) for r in filtered[:limit]]}), 200
 
@@ -620,6 +729,9 @@ def get_competition_analytics(competition_id):
     Inclui: taxa de inscrição, taxa de participação, médias, distribuição de notas, top 10, comparação com anteriores.
     """
     CompetitionService.get_competition_or_404(competition_id)
+    user = get_current_user_from_token()
+    if not user or not ensure_tenant_schema_for_user(user["id"]):
+        return jsonify({"error": MSG_TENANT_REQUIRED}), 400
     try:
         from app.services.competition_analytics_service import CompetitionAnalyticsService
         analytics = CompetitionAnalyticsService.get_analytics(competition_id)
@@ -639,6 +751,9 @@ def get_my_competition_ranking(competition_id):
     Retorna a posição do aluno logado no ranking.
     Retorna: position, total_participants, value, grade, coins_earned (se premiado), etc.
     """
+    user = get_current_user_from_token()
+    if not user or not ensure_tenant_schema_for_user(user["id"]):
+        return jsonify({"error": MSG_TENANT_REQUIRED}), 400
     student_id, err = _resolve_student_id()
     if err:
         return err[0], err[1]
@@ -753,15 +868,20 @@ def list_eligible_students(competition_id):
     competition = CompetitionService.get_competition_or_404(competition_id)
     include_meta = request.args.get('include_meta', '').lower() in ('1', 'true', 'yes')
 
+    # Capturar valores da competição antes de trocar o schema (evita "Instance has been deleted")
+    comp_id = competition.id
+    comp_test_id = competition.test_id
+    comp_subject_id = competition.subject_id
+
     # Verificações globais da competição
-    if competition.status != 'aberta' or not competition.test_id:
+    if competition.status != 'aberta' or not comp_test_id:
         if include_meta:
             return jsonify({
                 "eligible": [],
                 "meta": {
                     "reason": "competition_not_open_or_no_test",
                     "status": competition.status,
-                    "has_test_id": bool(competition.test_id),
+                    "has_test_id": bool(comp_test_id),
                 },
             }), 200
         return jsonify([]), 200
@@ -789,6 +909,13 @@ def list_eligible_students(competition_id):
             }), 200
         return jsonify([]), 200
 
+    # student, class, school etc. existem apenas no schema do tenant
+    user = get_current_user_from_token()
+    if not user or not ensure_tenant_schema_for_user(user["id"]):
+        return jsonify({
+            "error": MSG_TENANT_REQUIRED,
+        }), 400
+
     class_id = request.args.get('class_id')
     school_id = request.args.get('school_id')
     try:
@@ -811,20 +938,20 @@ def list_eligible_students(competition_id):
     excluded_level_scope = 0
 
     for student in students:
-        if CompetitionService.is_student_enrolled(competition.id, student.id):
+        if CompetitionService.is_student_enrolled(comp_id, student.id):
             excluded_enrolled += 1
             continue
         if StudentTestOlimpics.query.filter_by(
             student_id=student.id,
-            test_id=competition.test_id,
+            test_id=comp_test_id,
         ).first():
             excluded_olympics += 1
             continue
         available = CompetitionService.get_available_competitions_for_student(
             student.id,
-            subject_id=competition.subject_id,
+            subject_id=comp_subject_id,
         )
-        if not any(c.id == competition.id for c in available):
+        if not any(c.get('id') == comp_id for c in available):
             excluded_level_scope += 1
             continue
         eligible.append({
@@ -851,8 +978,21 @@ def list_eligible_students(competition_id):
 @jwt_required()
 @role_required(*ROLES_EDIT)
 def get_competition(competition_id):
-    """Detalhe de uma competição."""
-    c = CompetitionService.get_competition_or_404(competition_id)
+    """Detalhe de uma competição. subject_name vem de public.subject (multi-tenant)."""
+    db.session.rollback()
+    ctx = get_current_tenant_context()
+    tenant_schema = (ctx.schema if (ctx and ctx.has_tenant_context) else None) or None
+    schema = get_competition_schema(competition_id, tenant_schema=tenant_schema)
+    if not schema:
+        from flask import abort
+        abort(404)
+    set_search_path(schema)
+    db.session.expire_all()
+    c = Competition.query.filter_by(id=competition_id).first_or_404()
+    if c.test_id and schema == 'public':
+        user = get_current_user_from_token()
+        if user:
+            ensure_tenant_schema_for_user(user["id"])
     return jsonify(_competition_to_dict(c)), 200
 
 
@@ -896,6 +1036,10 @@ def get_eligible_classes():
     if not stage_names:
         return jsonify([]), 200
 
+    user = get_current_user_from_token()
+    if not user or not ensure_tenant_schema_for_user(user["id"]):
+        return jsonify({"error": MSG_TENANT_REQUIRED}), 400
+
     classes = (
         Class.query.join(Grade, Class.grade_id == Grade.id)
         .join(EducationStage, Grade.education_stage_id == EducationStage.id)
@@ -921,6 +1065,7 @@ def get_eligible_classes():
 @role_required(*ROLES_EDIT)
 def create_competition():
     """Cria competição."""
+    db.session.rollback()  # Limpar transação abortada (ex.: conexão reutilizada do pool)
     user = get_current_user_from_token()
     if not user:
         return jsonify({"error": "Usuário não autenticado"}), 401
@@ -931,15 +1076,37 @@ def create_competition():
     for field in required:
         if field not in data:
             return jsonify({"error": f"Campo obrigatório ausente: {field}"}), 400
+    scope = (data.get('scope') or 'individual').strip().lower()
+    question_mode = (data.get('question_mode') or 'auto_random').strip().lower()
+    if scope != 'individual' and (not ensure_tenant_schema_for_user(user["id"])):
+        return jsonify({"error": MSG_TENANT_REQUIRED}), 400
+    if question_mode == 'auto_random' and not ensure_tenant_schema_for_user(user["id"]):
+        return jsonify({
+            "error": "Para competição com questões automáticas é necessário informar o município (header X-City-ID ou usuário vinculado à cidade)."
+        }), 400
     try:
         validate_scope_and_filter_for_user(
-            data.get('scope', 'individual'),
+            scope,
             data.get('scope_filter'),
             user,
         )
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
-    competition = CompetitionService.create_competition(data, user['id'])
+    competition_id, schema = CompetitionService.create_competition(data, user['id'])
+    if data.get('publish'):
+        try:
+            CompetitionService.publish_competition(competition_id)
+        except ValidationError as e:
+            return jsonify({"error": str(e)}), 400
+    db.session.rollback()
+    ctx = get_current_tenant_context()
+    tenant_schema = (ctx.schema if (ctx and ctx.has_tenant_context) else None) or None
+    schema = get_competition_schema(competition_id, tenant_schema=tenant_schema)
+    if not schema:
+        return jsonify({"error": "Competição não encontrada"}), 404
+    set_search_path(schema)
+    db.session.expire_all()
+    competition = Competition.query.filter_by(id=competition_id).first_or_404()
     return jsonify(_competition_to_dict(competition)), 201
 
 
@@ -1012,6 +1179,8 @@ def update_competition(competition_id):
                 except ValueError as e:
                     return jsonify({"error": str(e)}), 400
                 user = get_current_user_from_token()
+                if user and scope_val != 'individual' and not ensure_tenant_schema_for_user(user["id"]):
+                    return jsonify({"error": MSG_TENANT_REQUIRED}), 400
                 if user:
                     try:
                         validate_scope_and_filter_for_user(
@@ -1021,14 +1190,44 @@ def update_competition(competition_id):
                         return jsonify({"error": str(e)}), 400
             setattr(c, key, val)
 
-    # Se passou para auto_random com question_rules e ainda não tem prova, sorteia questões e cria o Test
-    if c.question_mode == 'auto_random' and c.question_rules and not c.test_id:
+    # auto_random + question_rules: criar ou recriar prova (sorteio de questões)
+    if c.question_mode == 'auto_random' and c.question_rules:
+        user = get_current_user_from_token()
+        if not user or not ensure_tenant_schema_for_user(user["id"]):
+            return jsonify({"error": MSG_TENANT_REQUIRED}), 400
         try:
-            CompetitionService._create_test_with_random_questions(c)
+            old_test_id = c.test_id
+            if old_test_id:
+                TestQuestion.query.filter_by(test_id=old_test_id).delete()
+                Test.query.filter_by(id=old_test_id).delete()
+            test_id = CompetitionService._create_test_with_random_questions(c)
+            _ctx = get_current_tenant_context()
+            _tenant = (_ctx.schema if (_ctx and getattr(_ctx, "has_tenant_context", False)) else None) or None
+            comp_schema = get_competition_schema(competition_id, tenant_schema=_tenant)
+            db.session.commit()
+            if comp_schema == 'public':
+                set_search_path('public')
+                comp = Competition.query.filter_by(id=competition_id).first_or_404()
+                comp.test_id = test_id
+                db.session.commit()
+            else:
+                set_search_path(_tenant)
+                comp = Competition.query.filter_by(id=competition_id).first_or_404()
+                comp.test_id = test_id
+                db.session.commit()
         except ValidationError as e:
             return jsonify({"error": str(e)}), 400
-
-    db.session.commit()
+    else:
+        db.session.commit()
+    ctx = get_current_tenant_context()
+    tenant_schema = (ctx.schema if (ctx and ctx.has_tenant_context) else None) or None
+    schema = get_competition_schema(competition_id, tenant_schema=tenant_schema)
+    if not schema:
+        from flask import abort
+        abort(404)
+    set_search_path(schema)
+    db.session.expire_all()
+    c = Competition.query.filter_by(id=competition_id).first_or_404()
     return jsonify(_competition_to_dict(c)), 200
 
 
@@ -1051,8 +1250,18 @@ def delete_competition(competition_id):
 def publish_competition(competition_id):
     """Publica competição (rascunho → aberta)."""
     CompetitionService.get_competition_or_404(competition_id)
-    competition = CompetitionService.publish_competition(competition_id)
-    return jsonify(_competition_to_dict(competition)), 200
+    CompetitionService.publish_competition(competition_id)
+    # Recarregar no schema correto: limpar cache da sessão e refazer SELECT
+    ctx = get_current_tenant_context()
+    tenant_schema = (ctx.schema if (ctx and ctx.has_tenant_context) else None) or None
+    schema = get_competition_schema(competition_id, tenant_schema=tenant_schema)
+    if not schema:
+        from flask import abort
+        abort(404)
+    set_search_path(schema)
+    db.session.expire_all()  # forçar SELECT novo (evitar instância de outro schema)
+    c = Competition.query.filter_by(id=competition_id).first_or_404()
+    return jsonify(_competition_to_dict(c)), 200
 
 
 @bp.route('/<competition_id>/cancel', methods=['POST'])
@@ -1063,8 +1272,17 @@ def cancel_competition(competition_id):
     CompetitionService.get_competition_or_404(competition_id)
     data = request.get_json() or {}
     reason = data.get('reason')
-    competition = CompetitionService.cancel_competition(competition_id, reason=reason)
-    return jsonify(_competition_to_dict(competition)), 200
+    CompetitionService.cancel_competition(competition_id, reason=reason)
+    ctx = get_current_tenant_context()
+    tenant_schema = (ctx.schema if (ctx and ctx.has_tenant_context) else None) or None
+    schema = get_competition_schema(competition_id, tenant_schema=tenant_schema)
+    if not schema:
+        from flask import abort
+        abort(404)
+    set_search_path(schema)
+    db.session.expire_all()
+    c = Competition.query.filter_by(id=competition_id).first_or_404()
+    return jsonify(_competition_to_dict(c)), 200
 
 
 @bp.route('/<competition_id>/questions', methods=['POST'])

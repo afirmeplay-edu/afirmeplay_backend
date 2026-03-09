@@ -34,11 +34,12 @@ REWARD_CONFIG_RANKING_KEY = "ranking_rewards"
 
 class CompetitionService:
     @staticmethod
-    def create_competition(data: dict, created_by_user_id: str) -> Competition:
+    def create_competition(data: dict, created_by_user_id: str) -> tuple:
         """
         Cria competição.
         Se question_mode = 'auto_random': sorteia questões e cria Test.
         Se question_mode = 'manual': deixa test_id = None (adicionar depois).
+        Retorna (competition_id, target_schema) para a rota recarregar no schema correto.
         """
         # Parse e validar todas as datas
         enrollment_start = _parse_dt(data.get('enrollment_start'))
@@ -114,10 +115,23 @@ class CompetitionService:
             db.session.flush()
 
             if competition.question_mode == 'auto_random':
-                CompetitionService._create_test_with_random_questions(competition)
-
+                # A tabela test existe apenas no schema do tenant (city_xxx).
+                # Com scope individual/estado/global target_schema é 'public'; criar Test no tenant.
+                if target_schema == 'public':
+                    if not tenant_schema or tenant_schema == 'public':
+                        raise ValidationError(
+                            "Para criar competição com questões automáticas é necessário informar o município (header X-City-ID ou contexto de cidade)."
+                        )
+                    set_search_path(tenant_schema)
+                test_id = CompetitionService._create_test_with_random_questions(competition)
+                if target_schema == 'public':
+                    # Persistir Test e TestQuestion no tenant antes de trocar o path
+                    db.session.commit()
+                    set_search_path(target_schema)
+                competition.test_id = test_id
+            competition_id = competition.id  # guardar antes do commit (objeto pode ficar expirado após commit)
             db.session.commit()
-            return competition
+            return (competition_id, target_schema)
         finally:
             set_search_path(previous_schema)
 
@@ -125,11 +139,12 @@ class CompetitionService:
     def _create_test_with_random_questions(
         competition: Competition,
         selected_questions: list[Question] | None = None,
-    ) -> None:
+    ) -> str:
         """
         Sorteia questões aleatórias baseado em question_rules,
         delegando a lógica de filtros e aleatorização para QuestionSelectionService.
         Preenche todos os campos do Test necessários para reutilizar componente de avaliações.
+        Retorna test.id para o chamador atribuir competition.test_id no schema correto (public).
         """
         if selected_questions is None:
             rules = competition.question_rules or {}
@@ -191,8 +206,8 @@ class CompetitionService:
         # Calcular e atualizar max_score após adicionar as questões
         max_score = _calculate_test_max_score(test.id)
         test.max_score = max_score
-        
-        competition.test_id = test.id
+        db.session.flush()  # Persistir test no schema atual (tenant) antes de o chamador voltar para public
+        return str(test.id)
 
     @staticmethod
     def add_questions_manually(competition_id: str, question_ids: list) -> None:
@@ -201,7 +216,14 @@ class CompetitionService:
         if competition.question_mode != 'manual':
             raise ValidationError("Competição não está em modo manual")
 
+        ctx = get_current_tenant_context()
+        tenant_schema = (ctx.schema if (ctx and ctx.has_tenant_context) else None) or None
+        competition_schema = get_competition_schema(competition_id, tenant_schema=tenant_schema)
+
         if competition.test_id:
+            # Test existe apenas no tenant; quando competition está em public, usar tenant para Test/TestQuestion
+            if competition_schema == 'public' and tenant_schema and tenant_schema != 'public':
+                set_search_path(tenant_schema)
             test = Test.query.get(competition.test_id)
             if not test:
                 raise ValidationError("Test da competição não encontrado")
@@ -227,6 +249,16 @@ class CompetitionService:
                 "question_count": total_questions
             }]
         else:
+            # A tabela test existe apenas no schema do tenant. Se a competição está em public, usar tenant_schema.
+            schema_for_test = competition_schema
+            if competition_schema == 'public':
+                if not tenant_schema or tenant_schema == 'public':
+                    raise ValidationError(
+                        "Para adicionar questões é necessário informar o município (header X-City-ID ou contexto de cidade)."
+                    )
+                schema_for_test = tenant_schema
+                set_search_path(tenant_schema)
+
             # Calcular duration em minutos
             duration_minutes = None
             if competition.application and competition.expiration:
@@ -279,6 +311,8 @@ class CompetitionService:
             test.max_score = max_score
             
             competition.test_id = test.id
+            if schema_for_test != competition_schema:
+                set_search_path(competition_schema)
         db.session.commit()
 
     @staticmethod
@@ -291,17 +325,33 @@ class CompetitionService:
             raise ValidationError("Datas inválidas: fim da inscrição deve ser antes da aplicação")
         if not competition.reward_config:
             raise ValidationError("Configuração de recompensas ausente")
-        
-        # Atualizar status da competição
+
+        # Guardar test_id antes de trocar o schema
+        test_id = competition.test_id
+
+        # Atualizar status da competição no schema atual (ex.: public) e persistir de imediato,
+        # para não depender do search_path no commit que virá depois (tenant).
         competition.status = 'aberta'
-        
-        # Atualizar status do Test para 'agendada' (similar ao que é feito em test_routes.py)
-        test = Test.query.get(competition.test_id)
-        if test:
-            test.status = 'agendada'
-        
         db.session.commit()
-        return competition
+
+        # A tabela test existe apenas no schema do tenant; trocar path e atualizar Test
+        ctx = get_current_tenant_context()
+        tenant_schema = (ctx.schema if (ctx and ctx.has_tenant_context) else None) or None
+        if not tenant_schema or tenant_schema == 'public':
+            raise ValidationError(
+                "Para publicar competição é necessário informar o município (header X-City-ID ou contexto de cidade)."
+            )
+        prev_schema = get_competition_schema(competition_id, tenant_schema=tenant_schema) or 'public'
+        set_search_path(tenant_schema)
+        try:
+            test = Test.query.get(test_id)
+            if test:
+                test.status = 'agendada'
+                db.session.commit()
+            db.session.expire(competition)  # forçar re-load no schema correto na rota
+            return competition
+        finally:
+            set_search_path(prev_schema)
 
     @staticmethod
     def cancel_competition(competition_id: str, reason: str = None) -> Competition:
@@ -309,27 +359,51 @@ class CompetitionService:
         competition = Competition.query.get_or_404(competition_id)
         competition.status = 'cancelada'
         db.session.commit()
+        db.session.expire(competition)
         return competition
 
     @staticmethod
     def delete_competition(competition_id: str) -> None:
         """
         Remove competição (apenas status rascunho ou cancelada).
-        Remove inscrições, recompensas, resultados e payouts de ranking antes de excluir.
+        Remove inscrições, recompensas, resultados e payouts no schema correto (tenant quando competition em public).
         """
+        ctx = get_current_tenant_context()
+        tenant_schema = (ctx.schema if (ctx and ctx.has_tenant_context) else None) or None
+        competition_schema = get_competition_schema(competition_id, tenant_schema=tenant_schema)
+        if not competition_schema:
+            from flask import abort
+            abort(404)
+        set_search_path(competition_schema)
         c = Competition.query.get_or_404(competition_id)
         if c.status not in ('rascunho', 'cancelada'):
             raise ValidationError(
                 "Só é possível excluir competição em rascunho ou cancelada. Cancele a competição antes de excluir."
             )
+        cid = c.id
+        prev = (ctx.schema if ctx else 'public') or 'public'
 
-        CompetitionRankingPayout.query.filter_by(competition_id=c.id).delete()
-        CompetitionResult.query.filter_by(competition_id=c.id).delete()
-        CompetitionReward.query.filter_by(competition_id=c.id).delete()
-        CompetitionEnrollment.query.filter_by(competition_id=c.id).delete()
+        # Enrollment, reward, result, payout ficam no tenant quando a competição está em public
+        if competition_schema == 'public' and tenant_schema and tenant_schema != 'public':
+            set_search_path(tenant_schema)
+            try:
+                CompetitionRankingPayout.query.filter_by(competition_id=cid).delete()
+                CompetitionResult.query.filter_by(competition_id=cid).delete()
+                CompetitionReward.query.filter_by(competition_id=cid).delete()
+                CompetitionEnrollment.query.filter_by(competition_id=cid).delete()
+                db.session.commit()
+            finally:
+                set_search_path(prev)
+            set_search_path(competition_schema)
+        else:
+            CompetitionRankingPayout.query.filter_by(competition_id=cid).delete()
+            CompetitionResult.query.filter_by(competition_id=cid).delete()
+            CompetitionReward.query.filter_by(competition_id=cid).delete()
+            CompetitionEnrollment.query.filter_by(competition_id=cid).delete()
 
         db.session.delete(c)
         db.session.commit()
+        set_search_path(prev)
 
     # ---------- Resolução de competição por ID (schema) ----------
 
@@ -358,7 +432,25 @@ class CompetitionService:
         Serializa Competition para dict. Deve ser chamado no contexto do schema
         onde c foi carregado, para evitar 'Instance has been deleted' ao acessar
         relações/properties após troca de schema.
+        subject_name é buscado em public.subject logo no início (antes de queries que possam abortar a transação).
         """
+        subject_name = None
+        if c.subject_id:
+            try:
+                row = db.session.execute(
+                    text("SELECT name FROM public.subject WHERE id = :sid"),
+                    {"sid": str(c.subject_id)},
+                ).fetchone()
+                if row:
+                    subject_name = row[0]
+            except Exception:
+                pass
+        if subject_name is None:
+            try:
+                if c.subject:
+                    subject_name = c.subject.name
+            except Exception:
+                pass
         try:
             enrolled = c.enrolled_count
         except Exception:
@@ -377,23 +469,6 @@ class CompetitionService:
             selected_ids = [r[0] for r in rows]
         except Exception:
             selected_ids = []
-        subject_name = None
-        try:
-            if c.subject:
-                subject_name = c.subject.name
-        except Exception:
-            pass
-        # subject está só em public; no schema tenant c.subject pode vir None
-        if subject_name is None and c.subject_id:
-            try:
-                row = db.session.execute(
-                    text("SELECT name FROM public.subject WHERE id = :sid"),
-                    {"sid": c.subject_id},
-                ).fetchone()
-                if row:
-                    subject_name = row[0]
-            except Exception:
-                pass
         return {
             'id': c.id,
             'name': c.name,
@@ -473,16 +548,13 @@ class CompetitionService:
 
     @staticmethod
     def is_student_enrolled(competition_id: str, student_id: str, schema=None) -> bool:
-        """Retorna True se o aluno está inscrito (status='inscrito') na competição."""
-        if schema is None:
-            ctx = get_current_tenant_context()
-            tenant_schema = (ctx.schema if (ctx and ctx.has_tenant_context) else None) or None
-            schema = get_competition_schema(competition_id, tenant_schema=tenant_schema)
-            if not schema:
-                return False
+        """Retorna True se o aluno está inscrito (status='inscrito'). Enrollment fica no tenant."""
         ctx = get_current_tenant_context()
+        tenant_schema = (ctx.schema if (ctx and ctx.has_tenant_context) else None) or None
+        if not tenant_schema or tenant_schema == 'public':
+            return False
         previous = (ctx.schema if ctx else 'public') or 'public'
-        set_search_path(schema)
+        set_search_path(tenant_schema)
         try:
             return CompetitionEnrollment.query.filter_by(
                 competition_id=competition_id,
@@ -515,6 +587,12 @@ class CompetitionService:
             c for c in all_competitions
             if (c.get('is_enrollment_open') or c.get('is_application_open')) and not c.get('is_finished')
         ]
+
+        # Garantir path tenant, public para _student_level_matches carregar student.grade (Grade em public)
+        ctx = get_current_tenant_context()
+        tenant_schema = (ctx.schema if (ctx and ctx.has_tenant_context) else None) or None
+        if tenant_schema:
+            set_search_path(tenant_schema)
 
         result = []
         for c in candidates:
@@ -661,102 +739,139 @@ class CompetitionService:
         """
         Inscreve o aluno na competição: cria CompetitionEnrollment e StudentTestOlimpics.
         Levanta ValidationError se não elegível ou já inscrito.
+        Competição pode estar em public; enrollment/student/test_olympics ficam no tenant.
         """
-        competition = Competition.query.get(competition_id)
-        if not competition:
+        ctx = get_current_tenant_context()
+        tenant_schema = (ctx.schema if (ctx and ctx.has_tenant_context) else None) or None
+        if not tenant_schema or tenant_schema == 'public':
+            raise ValidationError(
+                "É necessário informar o município (header X-City-ID ou usuário vinculado à cidade) para esta operação."
+            )
+        competition_schema = get_competition_schema(competition_id, tenant_schema=tenant_schema)
+        if not competition_schema:
             raise ValidationError("Competição não encontrada")
+        previous = (ctx.schema if ctx else 'public') or 'public'
+        set_search_path(competition_schema)
+        try:
+            competition = Competition.query.get(competition_id)
+            if not competition:
+                raise ValidationError("Competição não encontrada")
+            if competition.status != 'aberta':
+                raise ValidationError("Competição não está aberta para inscrição")
+            if not competition.is_enrollment_open:
+                raise ValidationError("Fora do período de inscrição")
+            if not competition.test_id:
+                raise ValidationError("Competição sem prova vinculada")
+            test_id = competition.test_id
+            application = competition.application
+            expiration = competition.expiration
+            timezone = competition.timezone or 'America/Sao_Paulo'
+            max_participants = competition.max_participants
+        finally:
+            set_search_path(previous)
 
-        if competition.status != 'aberta':
-            raise ValidationError("Competição não está aberta para inscrição")
+        set_search_path(tenant_schema)
+        try:
+            student = Student.query.get(student_id)
+            if not student:
+                raise ValidationError("Aluno não encontrado")
 
-        # Usar property is_enrollment_open que já considera o timezone correto
-        if not competition.is_enrollment_open:
-            raise ValidationError("Fora do período de inscrição")
+            available = CompetitionService.get_available_competitions_for_student(student_id)
+            if not any(c.get('id') == competition_id for c in available):
+                raise ValidationError("Aluno não é elegível para esta competição (nível ou escopo)")
 
-        if not competition.test_id:
-            raise ValidationError("Competição sem prova vinculada")
-
-        student = Student.query.get(student_id)
-        if not student:
-            raise ValidationError("Aluno não encontrado")
-
-        available = CompetitionService.get_available_competitions_for_student(student_id)
-        if not any(c.id == competition_id for c in available):
-            raise ValidationError("Aluno não é elegível para esta competição (nível ou escopo)")
-
-        if competition.max_participants is not None:
-            try:
-                if competition.enrolled_count >= competition.max_participants:
+            if max_participants is not None:
+                enrolled = CompetitionEnrollment.query.filter_by(
+                    competition_id=competition_id, status='inscrito'
+                ).count()
+                if enrolled >= max_participants:
                     raise ValidationError("Vagas esgotadas")
-            except Exception:
-                pass
 
-        existing = CompetitionEnrollment.query.filter_by(
-            competition_id=competition_id,
-            student_id=student_id,
-            status='inscrito',
-        ).first()
-        if existing:
-            raise ValidationError("Aluno já está inscrito nesta competição")
+            existing = CompetitionEnrollment.query.filter_by(
+                competition_id=competition_id,
+                student_id=student_id,
+                status='inscrito',
+            ).first()
+            if existing:
+                raise ValidationError("Aluno já está inscrito nesta competição")
 
-        if StudentTestOlimpics.query.filter_by(
-            student_id=student_id,
-            test_id=competition.test_id,
-        ).first():
-            raise ValidationError("Aluno já possui inscrição para a prova desta competição")
+            if StudentTestOlimpics.query.filter_by(
+                student_id=student_id,
+                test_id=test_id,
+            ).first():
+                raise ValidationError("Aluno já possui inscrição para a prova desta competição")
 
-        enrollment = CompetitionEnrollment(
-            competition_id=competition_id,
-            student_id=student_id,
-            status='inscrito',
-        )
-        db.session.add(enrollment)
-        db.session.flush()
+            enrollment = CompetitionEnrollment(
+                competition_id=competition_id,
+                student_id=student_id,
+                status='inscrito',
+            )
+            db.session.add(enrollment)
+            db.session.flush()
 
-        app_str = competition.application.isoformat() if competition.application else ''
-        exp_str = competition.expiration.isoformat() if competition.expiration else ''
-        st_o = StudentTestOlimpics(
-            student_id=student_id,
-            test_id=competition.test_id,
-            application=app_str,
-            expiration=exp_str,
-            timezone=competition.timezone or 'America/Sao_Paulo',
-            status='agendada',
-        )
-        db.session.add(st_o)
-        db.session.commit()
-        return enrollment
+            app_str = application.isoformat() if application else ''
+            exp_str = expiration.isoformat() if expiration else ''
+            st_o = StudentTestOlimpics(
+                student_id=student_id,
+                test_id=test_id,
+                application=app_str,
+                expiration=exp_str,
+                timezone=timezone,
+                status='agendada',
+            )
+            db.session.add(st_o)
+            db.session.commit()
+            return enrollment
+        finally:
+            set_search_path(previous)
 
     @staticmethod
     def unenroll_student(competition_id: str, student_id: str):
         """
         Cancela inscrição do aluno: marca enrollment como cancelado e remove StudentTestOlimpics.
-        Só permitido antes do período de aplicação.
+        Só permitido antes do período de aplicação. Enrollment/STO ficam no tenant.
         """
-        competition = Competition.query.get(competition_id)
-        if not competition:
+        ctx = get_current_tenant_context()
+        tenant_schema = (ctx.schema if (ctx and ctx.has_tenant_context) else None) or None
+        if not tenant_schema or tenant_schema == 'public':
+            raise ValidationError(
+                "É necessário informar o município (header X-City-ID ou usuário vinculado à cidade) para esta operação."
+            )
+        competition_schema = get_competition_schema(competition_id, tenant_schema=tenant_schema)
+        if not competition_schema:
             raise ValidationError("Competição não encontrada")
+        previous = (ctx.schema if ctx else 'public') or 'public'
+        set_search_path(competition_schema)
+        try:
+            competition = Competition.query.get(competition_id)
+            if not competition:
+                raise ValidationError("Competição não encontrada")
+            if competition.is_application_open or competition.is_finished:
+                raise ValidationError("Não é possível cancelar inscrição após o início do período de aplicação")
+            test_id = competition.test_id
+        finally:
+            set_search_path(previous)
 
-        # Usar property is_application_open que já considera o timezone correto
-        if competition.is_application_open or competition.is_finished:
-            raise ValidationError("Não é possível cancelar inscrição após o início do período de aplicação")
+        set_search_path(tenant_schema)
+        try:
+            enrollment = CompetitionEnrollment.query.filter_by(
+                competition_id=competition_id,
+                student_id=student_id,
+                status='inscrito',
+            ).first()
+            if not enrollment:
+                raise ValidationError("Aluno não está inscrito nesta competição")
 
-        enrollment = CompetitionEnrollment.query.filter_by(
-            competition_id=competition_id,
-            student_id=student_id,
-            status='inscrito',
-        ).first()
-        if not enrollment:
-            raise ValidationError("Aluno não está inscrito nesta competição")
-
-        enrollment.status = 'cancelado'
-        st_o = StudentTestOlimpics.query.filter_by(
-            student_id=student_id,
-            test_id=competition.test_id,
-        ).first()
-        if st_o:
-            db.session.delete(st_o)
-        db.session.commit()
+            enrollment.status = 'cancelado'
+            st_o = StudentTestOlimpics.query.filter_by(
+                student_id=student_id,
+                test_id=test_id,
+            ).first()
+            if st_o:
+                db.session.delete(st_o)
+            db.session.commit()
+        finally:
+            set_search_path(previous)
 
     @staticmethod
     def credit_participation_coins(competition_id: str, student_id: str, test_session_id: str = None) -> int:
@@ -935,11 +1050,13 @@ def _extract_scope_arrays(competition: Competition) -> dict:
 
 def _student_level_matches(student, competition_level):
     """True se a etapa de ensino do aluno corresponde ao nível da competição (1 ou 2)."""
+    if competition_level is None:
+        return True
     if student.grade_id is None or student.grade is None:
-        return False
+        return True  # sem série vinculada: não excluir (grade pode estar em public e não carregar no tenant)
     stage = getattr(student.grade, 'education_stage', None)
     if stage is None:
-        return False
+        return True
     name = getattr(stage, 'name', None)
     return student_grade_matches_level(name, competition_level)
 

@@ -568,7 +568,25 @@ def generate_answer_sheets_batch_async(
                 
                 logger.info(f"[CELERY-BATCH] ✅ Upload concluído: {minio_url}")
                 
-                # ✅ ATUALIZAR TODOS os gabaritos com a mesma URL do ZIP
+                # ✅ ATUALIZAR TODOS os gabaritos com a mesma URL do ZIP + escopo e totais da geração
+                _scope = scope
+                _municipality = (city.name or '') if city else ''
+                _state = (city.state or '') if city else ''
+                _school_id = None
+                _school_name = ''
+                _grade_id = None
+                _grade_name = ''
+                _class_id = None
+                if generated_pdfs and scope != 'city':
+                    first_class = Class.query.get(generated_pdfs[0]['class_id'])
+                    if first_class:
+                        if first_class.school_id:
+                            _school_id = str(first_class.school_id)
+                            _school_name = (first_class.school.name or '') if first_class.school else ''
+                        if first_class.grade_id:
+                            _grade_id = first_class.grade_id
+                            _grade_name = (first_class.grade.name or '') if first_class.grade else generated_pdfs[0].get('grade_name', '')
+                        _class_id = first_class.id
                 for gabarito_id in gabarito_ids:
                     gabarito = AnswerSheetGabarito.query.get(gabarito_id)
                     if gabarito:
@@ -576,7 +594,16 @@ def generate_answer_sheets_batch_async(
                         gabarito.minio_object_name = minio_object_name
                         gabarito.minio_bucket = minio_bucket
                         gabarito.zip_generated_at = datetime.utcnow()
-                
+                        gabarito.scope_type = _scope
+                        gabarito.municipality = _municipality
+                        gabarito.state = _state
+                        gabarito.school_id = _school_id
+                        gabarito.school_name = _school_name
+                        gabarito.grade_id = _grade_id
+                        gabarito.grade_name = _grade_name
+                        gabarito.class_id = _class_id
+                        gabarito.last_generation_classes_count = len(generated_pdfs)
+                        gabarito.last_generation_students_count = total_students
                 db.session.commit()
                 logger.info(f"[CELERY-BATCH] ✅ {len(gabarito_ids)} gabarito(s) atualizado(s) com URL do MinIO")
             else:

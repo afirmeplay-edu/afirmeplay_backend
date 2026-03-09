@@ -1,7 +1,8 @@
 # -*- coding: utf-8 -*-
 """
-Store de progresso para correção em lote de provas físicas
-Pode ser migrado para Redis posteriormente para escalabilidade
+Store de progresso para correção em lote de provas físicas.
+Progresso de jobs de geração de cartões resposta (answer_sheet) é espelhado em Redis
+para que Flask e Celery worker vejam o mesmo estado (progresso gradual no GET /jobs/.../status).
 
 Formato do progress:
 {
@@ -28,12 +29,90 @@ Formato do progress:
 from threading import Lock
 from datetime import datetime
 import logging
+import os
+from typing import Optional
 
-# Dicionário global de progresso
+# Dicionário global de progresso (memória; progresso de answer_sheet também vai para Redis)
 progress = {}
 lock = Lock()
 
 logger = logging.getLogger(__name__)
+
+# Prefixo e TTL para chaves de progresso no Redis (compartilhado entre Flask e Celery)
+REDIS_PROGRESS_KEY_PREFIX = "as_job_progress:"
+REDIS_PROGRESS_TTL_SEC = 24 * 3600  # 24 horas
+
+
+_redis_client = None
+
+
+def _get_redis_client():
+    """Cliente Redis singleton (mesma URL/senha que Celery). Retorna None se Redis indisponível."""
+    global _redis_client
+    try:
+        import redis
+    except ImportError:
+        return None
+    if _redis_client is not None:
+        return _redis_client
+    try:
+        redis_url = os.getenv("REDIS_URL") or os.getenv("CELERY_BROKER_URL", "redis://localhost:6379/0")
+        redis_password = os.getenv("REDIS_PASSWORD")
+        if redis_password and "@" not in redis_url and redis_url.startswith("redis://"):
+            parts = redis_url.replace("redis://", "").split("/")
+            host_port = parts[0]
+            db = parts[1] if len(parts) > 1 else "0"
+            redis_url = f"redis://:{redis_password}@{host_port}/{db}"
+        _redis_client = redis.from_url(redis_url, decode_responses=True)
+        _redis_client.ping()
+        logger.debug("Redis conectado para progress_store (answer_sheet job progress)")
+    except Exception as e:
+        logger.warning("Redis indisponível para progresso de job: %s", e)
+        _redis_client = None
+    return _redis_client
+
+
+def update_job_progress_redis(job_id: str, updates: dict) -> None:
+    """Grava progress_current e progress_percentage no Redis (para GET status ver progresso gradual)."""
+    r = _get_redis_client()
+    if not r:
+        return
+    key = REDIS_PROGRESS_KEY_PREFIX + job_id
+    try:
+        if "progress_current" in updates:
+            r.hset(key, "progress_current", str(int(updates["progress_current"])))
+        if "progress_percentage" in updates:
+            r.hset(key, "progress_percentage", str(int(updates["progress_percentage"])))
+        r.expire(key, REDIS_PROGRESS_TTL_SEC)
+    except Exception as e:
+        logger.debug("Falha ao escrever progresso no Redis: %s", e)
+
+
+def get_job_progress_redis(job_id: str) -> Optional[dict]:
+    """Lê progress_current e progress_percentage do Redis. Retorna None se não houver ou Redis indisponível."""
+    r = _get_redis_client()
+    if not r:
+        return None
+    key = REDIS_PROGRESS_KEY_PREFIX + job_id
+    try:
+        raw = r.hgetall(key)
+        if not raw:
+            return None
+        out = {}
+        if "progress_current" in raw:
+            try:
+                out["progress_current"] = int(raw["progress_current"])
+            except (ValueError, TypeError):
+                pass
+        if "progress_percentage" in raw:
+            try:
+                out["progress_percentage"] = int(raw["progress_percentage"])
+            except (ValueError, TypeError):
+                pass
+        return out if out else None
+    except Exception as e:
+        logger.debug("Falha ao ler progresso do Redis: %s", e)
+        return None
 
 
 def create_job(job_id: str, total: int, test_id: str = None, gabarito_id: str = None, user_id: str = None, task_ids: list = None) -> dict:
@@ -147,37 +226,43 @@ def complete_job(job_id: str):
             logger.info(f"🏁 Job {job_id} concluído: {progress[job_id]['successful']} sucesso, {progress[job_id]['failed']} falhas")
 
 
-def get_job(job_id: str) -> dict:
+def get_job(job_id: str) -> Optional[dict]:
     """
-    Retorna dados do job
-    
-    Args:
-        job_id: ID do job
-    
-    Returns:
-        dict: Dados do job ou None se não encontrado
+    Retorna dados do job. Para jobs de answer_sheet, mescla progress_current e progress_percentage
+    vindos do Redis (atualizados pelo Celery) para que o progresso seja gradual no status.
     """
     with lock:
-        return progress.get(job_id)
+        job = progress.get(job_id)
+    if job is None:
+        return None
+    redis_progress = get_job_progress_redis(job_id)
+    if redis_progress:
+        job = dict(job)
+        if "progress_current" in redis_progress:
+            job["progress_current"] = redis_progress["progress_current"]
+        if "progress_percentage" in redis_progress:
+            job["progress_percentage"] = redis_progress["progress_percentage"]
+    return job
 
 
 def update_job(job_id: str, updates: dict) -> dict:
     """
-    Atualiza campos específicos de um job
-    
-    Args:
-        job_id: ID do job
-        updates: Dicionário com campos a atualizar
-    
-    Returns:
-        dict: Job atualizado ou None se não encontrado
+    Atualiza campos específicos de um job.
+    Se updates contiver progress_current ou progress_percentage, também grava no Redis
+    para que o Flask (GET /jobs/.../status) veja o progresso gradual atualizado pelo Celery.
     """
     with lock:
         if job_id in progress:
             progress[job_id].update(updates)
             logger.debug(f"📝 Job {job_id} atualizado: {list(updates.keys())}")
-            return progress[job_id]
-        return None
+            result = progress[job_id]
+        else:
+            result = None
+    if result and ("progress_current" in updates or "progress_percentage" in updates):
+        progress_updates = {k: updates[k] for k in ("progress_current", "progress_percentage") if k in updates}
+        if progress_updates:
+            update_job_progress_redis(job_id, progress_updates)
+    return result
 
 
 def get_all_active_jobs() -> list:

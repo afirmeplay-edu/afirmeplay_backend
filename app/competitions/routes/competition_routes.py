@@ -18,7 +18,7 @@ from app.models.studentTestOlimpics import StudentTestOlimpics
 from app.models.test import Test
 from app.models.testQuestion import TestQuestion
 from app.models.testSession import TestSession
-from app.competitions.constants import is_valid_level, LEVEL_OPTIONS, validate_scope_and_filter
+from app.competitions.constants import is_valid_level, LEVEL_OPTIONS, validate_scope_and_filter, get_competition_status_display
 from app.competitions.scope_permissions import (
     get_allowed_competition_scopes,
     validate_scope_and_filter_for_user,
@@ -126,9 +126,11 @@ def _safe_available_slots(c):
         return None
 
 
-def _get_selected_question_ids(test_id):
-    """Retorna lista de question_id na ordem do teste. test_questions existe só no tenant; em public usa schema do tenant."""
+def _get_selected_question_ids(test_id, question_rules_fallback=None):
+    """Retorna lista de question_id na ordem do teste. Se test_questions não existir, usa question_rules.selected_question_ids (primeira aleatorização só com tabela question)."""
     if not test_id:
+        if question_rules_fallback and isinstance(question_rules_fallback, dict):
+            return list(question_rules_fallback.get("selected_question_ids") or [])
         return []
     rows = []
     try:
@@ -142,10 +144,14 @@ def _get_selected_question_ids(test_id):
         err_msg = str(e).lower()
         if "test_questions" not in err_msg or ("does not exist" not in err_msg and "undefinedtable" not in err_msg):
             logging.warning("selected_question_ids falhou para test_id %s: %s", test_id, e)
-            return []
+        if question_rules_fallback and isinstance(question_rules_fallback, dict):
+            ids = question_rules_fallback.get("selected_question_ids")
+            if ids:
+                return list(ids)
+        return []
     if rows:
         return [r[0] for r in rows]
-    # Primeira query retornou vazio (ex.: path em public e prova está no tenant) ou deu erro de tabela
+    # Primeira query retornou vazio: prova pode estar no tenant ou em public (fallback de criação)
     ctx = get_current_tenant_context()
     tenant_schema = (ctx.schema if (ctx and ctx.has_tenant_context) else None) or None
     if not tenant_schema or tenant_schema == "public":
@@ -154,21 +160,34 @@ def _get_selected_question_ids(test_id):
             ensure_tenant_schema_for_user(user["id"])
         ctx = get_current_tenant_context()
         tenant_schema = (ctx.schema if (ctx and ctx.has_tenant_context) else None) or None
-    if not tenant_schema or tenant_schema == "public":
-        return []
     prev = "public"
     try:
         prev = db.session.execute(text("SELECT current_schema()")).scalar() or "public"
-        set_search_path(tenant_schema)
+        if tenant_schema and tenant_schema != "public":
+            set_search_path(tenant_schema)
+            rows = (
+                TestQuestion.query.filter_by(test_id=test_id)
+                .order_by(TestQuestion.order)
+                .with_entities(TestQuestion.question_id)
+                .all()
+            )
+            if rows:
+                return [r[0] for r in rows]
+        set_search_path("public")
         rows = (
             TestQuestion.query.filter_by(test_id=test_id)
             .order_by(TestQuestion.order)
             .with_entities(TestQuestion.question_id)
             .all()
         )
-        return [r[0] for r in rows]
+        result = [r[0] for r in rows]
+        if not result and question_rules_fallback and isinstance(question_rules_fallback, dict):
+            result = list(question_rules_fallback.get("selected_question_ids") or [])
+        return result
     except Exception as e2:
-        logging.debug("selected_question_ids (tenant) falhou para test_id %s: %s", test_id, e2)
+        logging.debug("selected_question_ids (tenant/public) falhou para test_id %s: %s", test_id, e2)
+        if question_rules_fallback and isinstance(question_rules_fallback, dict):
+            return list(question_rules_fallback.get("selected_question_ids") or [])
         return []
     finally:
         set_search_path(prev)
@@ -190,9 +209,28 @@ def _get_subject_name_from_public(subject_id):
         return None
 
 
+def _get_subject_name_from_current_schema(subject_id):
+    """Busca nome da disciplina no schema atual (ex.: tenant). Usar quando public.subject não tiver o id."""
+    if not subject_id:
+        return None
+    try:
+        current = db.session.execute(text("SELECT current_schema()")).scalar() or "public"
+        if not current or current == "public":
+            return None
+        safe_schema = current.replace('"', '""')
+        row = db.session.execute(
+            text(f'SELECT name FROM "{safe_schema}".subject WHERE id = :sid'),
+            {"sid": str(subject_id)},
+        ).fetchone()
+        return row[0] if row else None
+    except Exception as e:
+        logging.debug("_get_subject_name_from_current_schema(%s): %s", subject_id, e)
+        return None
+
+
 def _competition_to_dict(c, subject_name_override=None):
     """Serializa Competition para dict. subject_name_override evita lazy load de c.subject no schema tenant."""
-    # Buscar subject_name logo no início (public.subject), antes de qualquer query que possa abortar a transação
+    # Buscar subject_name: public.subject, depois relação c.subject, depois subject do schema atual (tenant)
     subject_name = subject_name_override
     if subject_name is None and getattr(c, 'subject_id', None):
         subject_name = _get_subject_name_from_public(c.subject_id)
@@ -202,6 +240,8 @@ def _competition_to_dict(c, subject_name_override=None):
                 subject_name = c.subject.name
         except Exception:
             pass
+    if subject_name is None and getattr(c, 'subject_id', None):
+        subject_name = _get_subject_name_from_current_schema(c.subject_id)
 
     d = {
         'id': c.id,
@@ -225,7 +265,8 @@ def _competition_to_dict(c, subject_name_override=None):
         'ranking_visibility': c.ranking_visibility,
         'max_participants': c.max_participants,
         'recurrence': c.recurrence,
-        'status': c.status,
+        'status': ('encerrada' if getattr(c, 'is_finished', False) else c.status) or '',
+        'status_display': get_competition_status_display('encerrada' if getattr(c, 'is_finished', False) else c.status),
         'created_by': c.created_by,
         'created_at': c.created_at.isoformat() if c.created_at else None,
         'updated_at': c.updated_at.isoformat() if c.updated_at else None,
@@ -234,7 +275,7 @@ def _competition_to_dict(c, subject_name_override=None):
         'is_finished': c.is_finished,
         'enrolled_count': _safe_enrolled_count(c),
         'available_slots': _safe_available_slots(c),
-        'selected_question_ids': _get_selected_question_ids(c.test_id),
+        'selected_question_ids': _get_selected_question_ids(c.test_id, getattr(c, 'question_rules', None)),
         'subject_name': subject_name,
     }
     return d
@@ -388,7 +429,16 @@ def list_my_competitions():
         return err[0], err[1]
     status = request.args.get('status')
     competitions = CompetitionService.get_student_competitions(student_id, status=status)
-    return jsonify([_competition_to_dict_with_enrolled(c, student_id) for c in competitions]), 200
+    # get_student_competitions retorna lista de dicts; adicionar is_enrolled e can_start_test
+    out = []
+    for d in competitions:
+        d = dict(d)
+        d["is_enrolled"] = CompetitionService.is_student_enrolled(d["id"], student_id)
+        d["can_start_test"] = bool(
+            d.get("test_id") and d["is_enrolled"] and d.get("is_application_open") and not d.get("is_finished")
+        )
+        out.append(d)
+    return jsonify(out), 200
 
 
 @bp.route('/<competition_id>/details', methods=['GET'])
@@ -494,22 +544,27 @@ def list_enrolled_students(competition_id):
 # ---------- Etapa 4: aplicação e entrega (sessão de prova pela competição) ----------
 
 def _session_to_dict(session):
-    """Serializa TestSession para resposta da API."""
+    """Serializa TestSession para resposta da API. Evita acessar objeto após commit (Instance has been deleted)."""
     if not session:
         return None
-    return {
-        'id': session.id,
-        'student_id': session.student_id,
-        'test_id': session.test_id,
-        'status': session.status,
-        'started_at': session.started_at.isoformat() if session.started_at else None,
-        'submitted_at': session.submitted_at.isoformat() if session.submitted_at else None,
-        'time_limit_minutes': session.time_limit_minutes,
-        'total_questions': session.total_questions,
-        'correct_answers': session.correct_answers,
-        'score': session.score,
-        'grade': session.grade,
-    }
+    try:
+        return {
+            'id': session.id,
+            'student_id': session.student_id,
+            'test_id': session.test_id,
+            'status': session.status,
+            'started_at': session.started_at.isoformat() if session.started_at else None,
+            'submitted_at': session.submitted_at.isoformat() if session.submitted_at else None,
+            'time_limit_minutes': session.time_limit_minutes,
+            'total_questions': session.total_questions,
+            'correct_answers': session.correct_answers,
+            'score': session.score,
+            'grade': session.grade,
+        }
+    except Exception as e:
+        if 'deleted' in str(e).lower() or 'detached' in str(e).lower():
+            return {'id': getattr(session, 'id', None), 'status': getattr(session, 'status', None)}
+        raise
 
 
 @bp.route('/<competition_id>/my-session', methods=['GET'])
@@ -519,22 +574,43 @@ def get_my_competition_session(competition_id):
     """
     Retorna a sessão de prova do aluno nesta competição (se existir).
     Usado para saber se o aluno já iniciou/finalizou a prova.
+    Consulta TestSession no mesmo schema do teste (comp_schema); se não achar, tenta no schema do tenant (evita polling infinito).
     """
-    student_id, err = _resolve_student_id()
-    if err:
-        return err[0], err[1]
-    c = CompetitionService.get_competition_or_404(competition_id)
-    user = get_current_user_from_token()
-    if not user or not ensure_tenant_schema_for_user(user["id"]):
-        return jsonify({"error": MSG_TENANT_REQUIRED}), 400
-    if not c.test_id:
-        return jsonify({"test_session": None}), 200
-    session = (
-        TestSession.query.filter_by(student_id=student_id, test_id=c.test_id)
-        .order_by(TestSession.created_at.desc())
-        .first()
-    )
-    return jsonify({"test_session": _session_to_dict(session)}), 200
+    try:
+        student_id, err = _resolve_student_id()
+        if err:
+            return err[0], err[1]
+        # Obter tenant_schema antes de qualquer troca de schema (middleware já definiu o contexto)
+        ctx = get_current_tenant_context()
+        tenant_schema = (ctx.schema if (ctx and ctx.has_tenant_context) else None) or None
+        c = CompetitionService.get_competition_or_404(competition_id)
+        test_id = getattr(c, 'test_id', None)
+        user = get_current_user_from_token()
+        if not user or not ensure_tenant_schema_for_user(user["id"]):
+            return jsonify({"error": MSG_TENANT_REQUIRED}), 400
+        if not test_id:
+            return jsonify({"test_session": None}), 200
+        comp_schema = get_competition_schema(competition_id, tenant_schema=tenant_schema)
+        session = None
+        if comp_schema:
+            set_search_path(comp_schema)
+            session = (
+                TestSession.query.filter_by(student_id=student_id, test_id=test_id)
+                .order_by(TestSession.created_at.desc())
+                .first()
+            )
+        if not session and tenant_schema and tenant_schema != comp_schema:
+            set_search_path(tenant_schema)
+            session = (
+                TestSession.query.filter_by(student_id=student_id, test_id=test_id)
+                .order_by(TestSession.created_at.desc())
+                .first()
+            )
+        return jsonify({"test_session": _session_to_dict(session)}), 200
+    except Exception as e:
+        logging.exception("get_my_competition_session: %s", e)
+        db.session.rollback()
+        return jsonify({"error": "Erro ao buscar sessão da competição", "details": str(e)}), 500
 
 
 @bp.route('/<competition_id>/start', methods=['POST'])
@@ -572,6 +648,13 @@ def start_competition_test(competition_id):
         else:
             return jsonify({"error": "Fora do período de aplicação da competição"}), 410
 
+    # TestSession deve ficar no mesmo schema do teste (competition_schema)
+    ctx = get_current_tenant_context()
+    tenant_schema = (ctx.schema if (ctx and ctx.has_tenant_context) else None) or None
+    comp_schema = get_competition_schema(competition_id, tenant_schema=tenant_schema)
+    if comp_schema:
+        set_search_path(comp_schema)
+
     # Sessão existente: em_andamento → retornar (mesmo formato de sucesso para o front abrir a prova); finalizada/expirada → não permitir nova
     existing = (
         TestSession.query.filter_by(student_id=student_id, test_id=c.test_id)
@@ -584,11 +667,12 @@ def start_competition_test(competition_id):
                 "error": "Prova já foi realizada",
                 "test_session": _session_to_dict(existing),
             }), 400
-        # em_andamento: retornar mesmo formato de sucesso para o front poder abrir a prova
+        # em_andamento: serializar antes de qualquer outro acesso (evita Instance has been deleted)
+        existing_dict = _session_to_dict(existing)
         payload = {
             "message": "Sessão já iniciada",
-            "session_id": existing.id,
-            "test_session": _session_to_dict(existing),
+            "session_id": (existing_dict or {}).get("id"),
+            "test_session": existing_dict,
             "already_started": True,
         }
         return jsonify(payload), 200
@@ -603,11 +687,14 @@ def start_competition_test(competition_id):
     )
     session.start_session()
     db.session.add(session)
+    db.session.flush()
+    # Montar payload antes do commit para evitar "Instance has been deleted" após teardown/expire
+    test_session_dict = _session_to_dict(session)
     db.session.commit()
     payload = {
         "message": "Sessão iniciada com sucesso",
-        "session_id": session.id,
-        "test_session": _session_to_dict(session),
+        "session_id": (test_session_dict or {}).get("id"),
+        "test_session": test_session_dict,
         "already_started": False,
     }
     return jsonify(payload), 201
@@ -645,7 +732,8 @@ def get_competition_ranking(competition_id):
     if not user or not ensure_tenant_schema_for_user(user["id"]):
         return jsonify({"error": MSG_TENANT_REQUIRED}), 400
     visibility = (c.ranking_visibility or 'final').strip().lower()
-    if visibility == 'final' and c.status != 'encerrada':
+    effective_encerrada = (c.status or '').strip().lower() == 'encerrada' or getattr(c, 'is_finished', False)
+    if visibility == 'final' and not effective_encerrada:
         return jsonify({"error": "Ranking só é exibido após o encerramento da competição"}), 403
     try:
         limit = request.args.get('limit', type=int) or 100
@@ -759,7 +847,8 @@ def get_my_competition_ranking(competition_id):
         return err[0], err[1]
     c = CompetitionService.get_competition_or_404(competition_id)
     visibility = (c.ranking_visibility or 'final').strip().lower()
-    if visibility == 'final' and c.status != 'encerrada':
+    effective_encerrada = (c.status or '').strip().lower() == 'encerrada' or getattr(c, 'is_finished', False)
+    if visibility == 'final' and not effective_encerrada:
         return jsonify({"error": "Ranking só é exibido após o encerramento da competição"}), 403
     result = CompetitionRankingService.get_my_ranking(competition_id, student_id)
     if result is None:
@@ -844,6 +933,73 @@ def finalize_competition(competition_id):
         return jsonify({"error": "Erro ao finalizar competição", "details": str(e)}), 500
 
 
+@bp.route('/<competition_id>/stop', methods=['POST'])
+@jwt_required()
+@role_required(*ROLES_EDIT)
+def stop_competition(competition_id):
+    """
+    Para (encerra) a competição em andamento imediatamente. Apenas admin.
+    Gera ranking e paga recompensas, então define status='encerrada'.
+    Diferente de /finalize: não exige que a data de expiração já tenha passado.
+    """
+    c = CompetitionService.get_competition_or_404(competition_id)
+    if c.status not in ('aberta', 'em_andamento'):
+        return jsonify({
+            "error": "Só é possível parar competição em aberta ou em andamento.",
+            "status": c.status,
+        }), 400
+    user = get_current_user_from_token()
+    if (user.get('role') or '').strip().lower() != 'admin':
+        return jsonify({"error": "Apenas o administrador pode parar competições em andamento"}), 403
+    cid = c.id
+    if CompetitionResult.query.filter_by(competition_id=cid).count() > 0:
+        c.status = 'encerrada'
+        db.session.commit()
+        return jsonify({
+            "message": "Competição encerrada. Ranking já existia.",
+            "status": "encerrada",
+        }), 200
+    try:
+        CompetitionRankingService.finalize_competition_and_save_results(cid)
+        # Re-carregar a competição no schema correto (finalize faz commit e pode trocar schema)
+        ctx = get_current_tenant_context()
+        tenant_schema = (ctx.schema if (ctx and ctx.has_tenant_context) else None) or None
+        schema = get_competition_schema(cid, tenant_schema=tenant_schema)
+        if schema:
+            set_search_path(schema)
+            comp = Competition.query.get(cid)
+            if comp:
+                comp.status = 'encerrada'
+                db.session.commit()
+        return jsonify({
+            "message": "Competição parada com sucesso. Ranking gerado e recompensas pagas.",
+            "status": "encerrada",
+        }), 200
+    except Exception as e:
+        logging.exception("Erro ao parar competição %s: %s", competition_id, str(e))
+        db.session.rollback()
+        return jsonify({"error": "Erro ao parar competição", "details": str(e)}), 500
+
+
+@bp.route('/<competition_id>/randomize-questions', methods=['POST'])
+@jwt_required()
+@role_required(*ROLES_EDIT)
+def randomize_competition_questions(competition_id):
+    """
+    Re-sorteia as questões da prova de uma competição aberta ou em andamento (question_mode=auto_random).
+    Acionável por botão na tela de competição.
+    """
+    try:
+        result = CompetitionService.randomize_competition_questions(competition_id)
+        return jsonify({
+            "message": "Questões aleatorizadas com sucesso.",
+            "test_id": result["test_id"],
+            "num_questions": result["num_questions"],
+        }), 200
+    except ValidationError as e:
+        return jsonify({"error": str(e)}), 400
+
+
 @bp.route('/<competition_id>/eligible-students', methods=['GET'])
 @jwt_required()
 @role_required(*ROLES_EDIT)
@@ -865,7 +1021,12 @@ def list_eligible_students(competition_id):
     - ?offset=...    → deslocamento para paginação (default: 0)
     - ?include_meta=1 → inclui meta com diagnóstico (students_checked, excluded_*)
     """
-    competition = CompetitionService.get_competition_or_404(competition_id)
+    try:
+        competition = CompetitionService.get_competition_or_404(competition_id)
+    except Exception as e:
+        logging.exception("eligible-students: get_competition_or_404 failed for %s", competition_id)
+        return jsonify({"error": "Erro ao carregar competição", "details": str(e)}), 500
+
     include_meta = request.args.get('include_meta', '').lower() in ('1', 'true', 'yes')
 
     # Capturar valores da competição antes de trocar o schema (evita "Instance has been deleted")
@@ -1114,17 +1275,25 @@ def create_competition():
 @jwt_required()
 @role_required(*ROLES_EDIT)
 def update_competition(competition_id):
-    """Atualiza competição (apenas rascunho)."""
+    """
+    Atualiza competição.
+    - Rascunho: edição completa (nome, descrição, datas, nível, escopo, prova, etc.).
+    - Aberta ou em andamento: apenas datas (fim da inscrição, início da aplicação, fim da competição) e timezone.
+    """
     c = CompetitionService.get_competition_or_404(competition_id)
-    if c.status != 'rascunho':
-        return jsonify({"error": "Só é possível editar competição em rascunho"}), 400
+    if c.status not in ('rascunho', 'aberta', 'em_andamento'):
+        return jsonify({"error": "Só é possível editar competição em rascunho, aberta ou em andamento"}), 400
     data = request.get_json()
     if not data:
         return jsonify({"error": "Body JSON obrigatório"}), 400
-    editable = ('name', 'description', 'level', 'scope', 'scope_filter', 'enrollment_start', 'enrollment_end',
-                'application', 'expiration', 'timezone', 'question_mode', 'question_rules', 'reward_config',
-                'ranking_criteria', 'ranking_tiebreaker', 'ranking_visibility', 'max_participants', 'recurrence')
-    
+
+    if c.status in ('aberta', 'em_andamento'):
+        editable = ('enrollment_end', 'application', 'expiration', 'timezone')
+    else:
+        editable = ('name', 'description', 'level', 'scope', 'scope_filter', 'enrollment_start', 'enrollment_end',
+                    'application', 'expiration', 'timezone', 'question_mode', 'question_rules', 'reward_config',
+                    'ranking_criteria', 'ranking_tiebreaker', 'ranking_visibility', 'max_participants', 'recurrence')
+
     # Parse todas as datas primeiro
     parsed_dates = {}
     for key in ('enrollment_start', 'enrollment_end', 'application', 'expiration'):
@@ -1190,8 +1359,8 @@ def update_competition(competition_id):
                         return jsonify({"error": str(e)}), 400
             setattr(c, key, val)
 
-    # auto_random + question_rules: criar ou recriar prova (sorteio de questões)
-    if c.question_mode == 'auto_random' and c.question_rules:
+    # auto_random + question_rules: criar ou recriar prova (sorteio de questões) — apenas em rascunho
+    if c.status == 'rascunho' and c.question_mode == 'auto_random' and c.question_rules:
         user = get_current_user_from_token()
         if not user or not ensure_tenant_schema_for_user(user["id"]):
             return jsonify({"error": MSG_TENANT_REQUIRED}), 400
@@ -1200,9 +1369,21 @@ def update_competition(competition_id):
             if old_test_id:
                 TestQuestion.query.filter_by(test_id=old_test_id).delete()
                 Test.query.filter_by(id=old_test_id).delete()
-            test_id = CompetitionService._create_test_with_random_questions(c)
             _ctx = get_current_tenant_context()
             _tenant = (_ctx.schema if (_ctx and getattr(_ctx, "has_tenant_context", False)) else None) or None
+            try:
+                test_id = CompetitionService._create_test_with_random_questions(c)
+            except ValidationError as e:
+                err_lower = str(e).lower()
+                if 'insuficientes' not in err_lower and 'questões' not in err_lower:
+                    raise
+                current_sch = db.session.execute(text("SELECT current_schema()")).scalar() or "public"
+                other_sch = ('public' if current_sch != 'public' else (_tenant if _tenant and _tenant != 'public' else None))
+                if other_sch:
+                    set_search_path(other_sch)
+                    test_id = CompetitionService._create_test_with_random_questions(c)
+                else:
+                    raise
             comp_schema = get_competition_schema(competition_id, tenant_schema=_tenant)
             db.session.commit()
             if comp_schema == 'public':
@@ -1235,8 +1416,12 @@ def update_competition(competition_id):
 @jwt_required()
 @role_required(*ROLES_EDIT)
 def delete_competition(competition_id):
-    """Remove competição (apenas rascunho ou cancelada). Remove inscrições e dados relacionados."""
-    CompetitionService.get_competition_or_404(competition_id)
+    """Remove competição (rascunho, cancelada, aberta ou em andamento). Apenas admin pode excluir em andamento."""
+    c = CompetitionService.get_competition_or_404(competition_id)
+    if c.status in ('aberta', 'em_andamento'):
+        user = get_current_user_from_token()
+        if (user.get('role') or '').strip().lower() != 'admin':
+            return jsonify({"error": "Apenas o administrador pode excluir competições em andamento"}), 403
     try:
         CompetitionService.delete_competition(competition_id)
     except ValidationError as e:

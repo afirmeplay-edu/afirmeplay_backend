@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 """Serviço de Competições (Etapa 2 e 3)."""
+import logging
 from datetime import datetime, timezone
 
 from sqlalchemy import func
@@ -12,7 +13,7 @@ from app.competitions.models import (
     CompetitionResult,
     CompetitionReward,
 )
-from app.competitions.constants import is_valid_level, student_grade_matches_level, validate_scope_and_filter
+from app.competitions.constants import is_valid_level, student_grade_matches_level, validate_scope_and_filter, get_competition_status_display
 from app.competitions.exceptions import ValidationError
 from app.competitions.schema_resolution import get_competition_target_schema, get_competition_schema
 from app.utils.tenant_middleware import set_search_path, get_current_tenant_context
@@ -115,17 +116,32 @@ class CompetitionService:
             db.session.flush()
 
             if competition.question_mode == 'auto_random':
-                # A tabela test existe apenas no schema do tenant (city_xxx).
-                # Com scope individual/estado/global target_schema é 'public'; criar Test no tenant.
+                # A tabela test existe no tenant ou em public. Criar Test no schema que tiver questões.
+                test_id = None
                 if target_schema == 'public':
                     if not tenant_schema or tenant_schema == 'public':
                         raise ValidationError(
                             "Para criar competição com questões automáticas é necessário informar o município (header X-City-ID ou contexto de cidade)."
                         )
                     set_search_path(tenant_schema)
-                test_id = CompetitionService._create_test_with_random_questions(competition)
-                if target_schema == 'public':
-                    # Persistir Test e TestQuestion no tenant antes de trocar o path
+                try:
+                    test_id = CompetitionService._create_test_with_random_questions(competition)
+                except ValidationError as e:
+                    # Se não tem questões suficientes no schema atual, tentar o outro (public ↔ tenant)
+                    err_lower = str(e).lower()
+                    if 'insuficientes' not in err_lower and 'questões' not in err_lower:
+                        raise
+                    current_sch = db.session.execute(text("SELECT current_schema()")).scalar() or "public"
+                    other_schema = (tenant_schema if current_sch == "public" and tenant_schema and tenant_schema != "public" else ("public" if current_sch != "public" else None))
+                    if other_schema:
+                        set_search_path(other_schema)
+                        try:
+                            test_id = CompetitionService._create_test_with_random_questions(competition)
+                        except ValidationError:
+                            raise e
+                # Persistir Test no schema onde foi criado e voltar ao schema da competição
+                current_after = db.session.execute(text("SELECT current_schema()")).scalar() or "public"
+                if current_after != target_schema:
                     db.session.commit()
                     set_search_path(target_schema)
                 competition.test_id = test_id
@@ -199,13 +215,37 @@ class CompetitionService:
         db.session.add(test)
         db.session.flush()
 
-        # Adicionar questões ao teste
-        for idx, question in enumerate(selected_questions, start=1):
-            db.session.add(TestQuestion(test_id=test.id, question_id=question.id, order=idx))
-        
-        # Calcular e atualizar max_score após adicionar as questões
-        max_score = _calculate_test_max_score(test.id)
+        # Na primeira aleatorização: max_score só a partir da tabela question (selected_questions),
+        # sem usar test_questions.
+        max_score = sum(
+            (getattr(q, 'value', None) or 1.0) for q in selected_questions
+        )
         test.max_score = max_score
+
+        # Usar apenas a tabela question na primeira aleatorização; não depender de test_questions.
+        # Se a tabela test_questions existir, preenchemos; senão guardamos os IDs em question_rules.
+        _table_exists = False
+        try:
+            current_schema = db.session.execute(text("SELECT current_schema()")).scalar() or "public"
+            r = db.session.execute(
+                text(
+                    "SELECT 1 FROM information_schema.tables "
+                    "WHERE table_schema = :schema AND table_name = 'test_questions'"
+                ),
+                {"schema": current_schema},
+            ).fetchone()
+            _table_exists = r is not None
+        except Exception:
+            pass
+
+        if _table_exists:
+            for idx, question in enumerate(selected_questions, start=1):
+                db.session.add(TestQuestion(test_id=test.id, question_id=question.id, order=idx))
+        else:
+            rules = dict(competition.question_rules or {})
+            rules['selected_question_ids'] = [str(q.id) for q in selected_questions]
+            competition.question_rules = rules
+
         db.session.flush()  # Persistir test no schema atual (tenant) antes de o chamador voltar para public
         return str(test.id)
 
@@ -334,7 +374,7 @@ class CompetitionService:
         competition.status = 'aberta'
         db.session.commit()
 
-        # A tabela test existe apenas no schema do tenant; trocar path e atualizar Test
+        # Test pode estar no tenant ou em public (quando criado com fallback de questões em public)
         ctx = get_current_tenant_context()
         tenant_schema = (ctx.schema if (ctx and ctx.has_tenant_context) else None) or None
         if not tenant_schema or tenant_schema == 'public':
@@ -342,16 +382,19 @@ class CompetitionService:
                 "Para publicar competição é necessário informar o município (header X-City-ID ou contexto de cidade)."
             )
         prev_schema = get_competition_schema(competition_id, tenant_schema=tenant_schema) or 'public'
-        set_search_path(tenant_schema)
-        try:
-            test = Test.query.get(test_id)
-            if test:
-                test.status = 'agendada'
-                db.session.commit()
-            db.session.expire(competition)  # forçar re-load no schema correto na rota
-            return competition
-        finally:
-            set_search_path(prev_schema)
+        for schema in (tenant_schema, 'public'):
+            set_search_path(schema)
+            try:
+                test = Test.query.get(test_id)
+                if test:
+                    test.status = 'agendada'
+                    db.session.commit()
+                    break
+            except Exception:
+                pass
+        set_search_path(prev_schema)
+        db.session.expire(competition)  # forçar re-load no schema correto na rota
+        return competition
 
     @staticmethod
     def cancel_competition(competition_id: str, reason: str = None) -> Competition:
@@ -363,10 +406,148 @@ class CompetitionService:
         return competition
 
     @staticmethod
+    def randomize_competition_questions(competition_id: str) -> dict:
+        """
+        Re-sorteia as questões da prova de uma competição aberta (auto_random).
+        Só permite para status 'aberta' ou 'em_andamento'. Substitui as questões atuais
+        por um novo sorteio conforme question_rules. Retorna dict com num_questions e test_id.
+        """
+        ctx = get_current_tenant_context()
+        tenant_schema = (ctx.schema if (ctx and ctx.has_tenant_context) else None) or None
+        comp_schema = get_competition_schema(competition_id, tenant_schema=tenant_schema)
+        if not comp_schema:
+            from flask import abort
+            abort(404)
+        set_search_path(comp_schema)
+        competition = Competition.query.get_or_404(competition_id)
+        if competition.status not in ('aberta', 'em_andamento'):
+            raise ValidationError(
+                "Só é possível aleatorizar questões em competição aberta ou em andamento."
+            )
+        if competition.question_mode != 'auto_random':
+            raise ValidationError("Competição não está em modo de questões automáticas.")
+        if not competition.test_id:
+            raise ValidationError("Competição sem prova vinculada.")
+        if not (competition.question_rules or competition.question_rules.get("num_questions")):
+            raise ValidationError("question_rules com num_questions é obrigatório para aleatorizar.")
+
+        test_id = competition.test_id
+        prev_schema = comp_schema
+
+        def _test_exists_in_schema(schema_name: str, tid: str) -> bool:
+            """Verifica se o test existe no schema sem alterar search_path (evita UndefinedTable)."""
+            try:
+                safe = (schema_name or "").replace('"', '""')
+                row = db.session.execute(
+                    text('SELECT 1 FROM "{}".test WHERE id = :tid'.format(safe)),
+                    {"tid": tid},
+                ).fetchone()
+                return row is not None
+            except Exception:
+                return False
+
+        # Ordem preferencial: public primeiro (prova de competição costuma estar em public), depois schema da competição e tenant
+        schema_with_test = None
+        for sch in ("public", comp_schema, tenant_schema):
+            if not sch:
+                continue
+            if _test_exists_in_schema(sch, test_id):
+                schema_with_test = sch
+                break
+        # Fallback 1: information_schema
+        if not schema_with_test:
+            try:
+                rows = db.session.execute(
+                    text("""
+                        SELECT table_schema FROM information_schema.tables
+                        WHERE table_schema NOT LIKE 'pg_%' AND table_schema != 'information_schema'
+                        AND table_name = 'test'
+                        ORDER BY table_schema
+                    """)
+                ).fetchall()
+                for (schema_name,) in rows:
+                    if schema_name and _test_exists_in_schema(schema_name, test_id):
+                        schema_with_test = schema_name
+                        break
+            except Exception:
+                pass
+        # Fallback 2: pg_tables (às vezes mais confiável)
+        if not schema_with_test:
+            try:
+                rows = db.session.execute(
+                    text("SELECT schemaname FROM pg_tables WHERE tablename = 'test' ORDER BY schemaname")
+                ).fetchall()
+                for (schema_name,) in rows:
+                    if schema_name and _test_exists_in_schema(schema_name, test_id):
+                        schema_with_test = schema_name
+                        break
+            except Exception:
+                pass
+        # Último recurso: buscar no public (prova de competição costuma estar em public, não no schema da cidade)
+        if not schema_with_test:
+            schema_with_test = "public"
+
+        # Buscar questões no banco de questões (tabela question): tentar tenant (cidade) primeiro, depois public
+        schema_question_bank = tenant_schema or "public"
+        set_search_path(schema_question_bank)
+        try:
+            rules = competition.question_rules or {}
+            selected = QuestionSelectionService.select_questions(
+                subject_id=competition.subject_id,
+                level=competition.level,
+                rules=rules,
+            )
+            selected_ids = [q.id for q in selected]
+        finally:
+            set_search_path(prev_schema)
+        if not selected_ids:
+            raise ValidationError("Nenhuma questão encontrada no banco de questões para os critérios da competição.")
+
+        set_search_path(schema_with_test)
+        try:
+            test = Test.query.get(test_id)
+            if test is None and schema_with_test == "public":
+                # Prova estava em outro schema; criar registro em public para as novas questões
+                test = Test(
+                    id=test_id,
+                    title=competition.name or "Prova competição",
+                    subject=competition.subject_id,
+                    status="agendada",
+                    evaluation_mode="virtual",
+                )
+                db.session.add(test)
+                db.session.flush()
+            TestQuestion.query.filter_by(test_id=test_id).delete()
+            for idx, q_id in enumerate(selected_ids, start=1):
+                db.session.add(TestQuestion(test_id=test_id, question_id=q_id, order=idx))
+            test = Test.query.get(test_id)
+            if test:
+                test.max_score = _calculate_test_max_score(test_id)
+                subj = Subject.query.get(competition.subject_id)
+                test.subjects_info = [{
+                    "subject_id": competition.subject_id,
+                    "name": subj.name if subj else None,
+                    "question_count": len(selected_ids),
+                }]
+            db.session.commit()
+            return {"test_id": test_id, "num_questions": len(selected_ids)}
+        except Exception as e:
+            from sqlalchemy.exc import ProgrammingError
+            if isinstance(e, ProgrammingError) and "does not exist" in (str(e.orig) if getattr(e, "orig", None) else str(e)):
+                raise ValidationError(
+                    "A tabela de provas (test/test_questions) não existe no schema desta competição. Execute as migrations no schema correto."
+                ) from e
+            raise
+        finally:
+            set_search_path(prev_schema)
+
+    @staticmethod
     def delete_competition(competition_id: str) -> None:
         """
-        Remove competição (apenas status rascunho ou cancelada).
-        Remove inscrições, recompensas, resultados e payouts no schema correto (tenant quando competition em public).
+        Remove competição (rascunho, cancelada, aberta ou em_andamento).
+        Remove inscrições, recompensas, resultados, payouts e StudentTestOlimpics
+        no schema correto (tenant quando competition em public).
+        Não permite excluir competição já encerrada.
         """
         ctx = get_current_tenant_context()
         tenant_schema = (ctx.schema if (ctx and ctx.has_tenant_context) else None) or None
@@ -376,14 +557,16 @@ class CompetitionService:
             abort(404)
         set_search_path(competition_schema)
         c = Competition.query.get_or_404(competition_id)
-        if c.status not in ('rascunho', 'cancelada'):
+        if c.status not in ('rascunho', 'cancelada', 'aberta', 'em_andamento'):
             raise ValidationError(
-                "Só é possível excluir competição em rascunho ou cancelada. Cancele a competição antes de excluir."
+                "Só é possível excluir competição em rascunho, cancelada, aberta ou em andamento. "
+                "Competições encerradas não podem ser excluídas."
             )
         cid = c.id
+        test_id = c.test_id  # para limpar StudentTestOlimpics
         prev = (ctx.schema if ctx else 'public') or 'public'
 
-        # Enrollment, reward, result, payout ficam no tenant quando a competição está em public
+        # Enrollment, reward, result, payout (e StudentTestOlimpics) ficam no tenant quando a competição está em public
         if competition_schema == 'public' and tenant_schema and tenant_schema != 'public':
             set_search_path(tenant_schema)
             try:
@@ -391,6 +574,8 @@ class CompetitionService:
                 CompetitionResult.query.filter_by(competition_id=cid).delete()
                 CompetitionReward.query.filter_by(competition_id=cid).delete()
                 CompetitionEnrollment.query.filter_by(competition_id=cid).delete()
+                if test_id:
+                    StudentTestOlimpics.query.filter_by(test_id=test_id).delete()
                 db.session.commit()
             finally:
                 set_search_path(prev)
@@ -400,6 +585,8 @@ class CompetitionService:
             CompetitionResult.query.filter_by(competition_id=cid).delete()
             CompetitionReward.query.filter_by(competition_id=cid).delete()
             CompetitionEnrollment.query.filter_by(competition_id=cid).delete()
+            if test_id:
+                StudentTestOlimpics.query.filter_by(test_id=test_id).delete()
 
         db.session.delete(c)
         db.session.commit()
@@ -432,7 +619,8 @@ class CompetitionService:
         Serializa Competition para dict. Deve ser chamado no contexto do schema
         onde c foi carregado, para evitar 'Instance has been deleted' ao acessar
         relações/properties após troca de schema.
-        subject_name é buscado em public.subject logo no início (antes de queries que possam abortar a transação).
+        subject_name: tenta public.subject, depois relação c.subject (schema atual) e,
+        se ainda faltar, subject do schema atual via SQL (tenant pode ter disciplinas só no schema).
         """
         subject_name = None
         if c.subject_id:
@@ -449,6 +637,33 @@ class CompetitionService:
             try:
                 if c.subject:
                     subject_name = c.subject.name
+            except Exception:
+                pass
+        # Fallback: disciplina pode existir só no schema atual (tenant) ou no outro (public ↔ tenant)
+        if subject_name is None and c.subject_id:
+            try:
+                current = db.session.execute(text("SELECT current_schema()")).scalar() or "public"
+                # Tentar schema atual (se for tenant)
+                if current and current != "public":
+                    safe_schema = current.replace('"', '""')
+                    row = db.session.execute(
+                        text(f'SELECT name FROM "{safe_schema}".subject WHERE id = :sid'),
+                        {"sid": str(c.subject_id)},
+                    ).fetchone()
+                    if row:
+                        subject_name = row[0]
+                # Se ainda null e estamos em public, disciplina pode estar só no tenant
+                if subject_name is None and current == "public":
+                    ctx = get_current_tenant_context()
+                    tenant_schema = (ctx.schema if (ctx and ctx.has_tenant_context) else None) or None
+                    if tenant_schema and tenant_schema != "public":
+                        safe_schema = tenant_schema.replace('"', '""')
+                        row = db.session.execute(
+                            text(f'SELECT name FROM "{safe_schema}".subject WHERE id = :sid'),
+                            {"sid": str(c.subject_id)},
+                        ).fetchone()
+                        if row:
+                            subject_name = row[0]
             except Exception:
                 pass
         try:
@@ -469,6 +684,9 @@ class CompetitionService:
             selected_ids = [r[0] for r in rows]
         except Exception:
             selected_ids = []
+        # Quando test_questions não existe, IDs vêm da primeira aleatorização (só tabela question) em question_rules
+        if not selected_ids and c.question_rules and isinstance(c.question_rules, dict):
+            selected_ids = list(c.question_rules.get('selected_question_ids') or [])
         return {
             'id': c.id,
             'name': c.name,
@@ -491,7 +709,8 @@ class CompetitionService:
             'ranking_visibility': c.ranking_visibility,
             'max_participants': c.max_participants,
             'recurrence': c.recurrence,
-            'status': c.status,
+            'status': ('encerrada' if getattr(c, 'is_finished', False) else c.status) or '',
+            'status_display': get_competition_status_display('encerrada' if getattr(c, 'is_finished', False) else c.status),
             'created_by': c.created_by,
             'created_at': c.created_at.isoformat() if c.created_at else None,
             'updated_at': c.updated_at.isoformat() if c.updated_at else None,
@@ -521,7 +740,10 @@ class CompetitionService:
         def _query_and_merge():
             q = Competition.query
             if status is not None:
-                q = q.filter(Competition.status == status)
+                if isinstance(status, (list, tuple)):
+                    q = q.filter(Competition.status.in_(status))
+                else:
+                    q = q.filter(Competition.status == status)
             if level is not None:
                 q = q.filter(Competition.level == level)
             if subject_id is not None:
@@ -576,9 +798,9 @@ class CompetitionService:
         if not student:
             return []
 
-        # Buscar competições abertas em public + tenant (list_competitions_merged retorna list de dicts)
+        # Buscar competições abertas ou em andamento em public + tenant
         all_competitions = CompetitionService.list_competitions_merged(
-            status='aberta', subject_id=subject_id
+            status=['aberta', 'em_andamento'], subject_id=subject_id
         )
         all_competitions = [c for c in all_competitions if c.get('test_id') is not None]
 
@@ -610,6 +832,7 @@ class CompetitionService:
     def get_student_competitions(student_id: str, status: str | None = None):
         """
         Lista competições relacionadas ao aluno (histórico).
+        Retorna lista de dicts (serializados no schema correto) para evitar "Instance has been deleted".
         Considera public e schema do tenant para inscrições; olympics no tenant.
 
         Inclui competições onde:
@@ -693,46 +916,37 @@ class CompetitionService:
 
         set_search_path(previous_schema)
 
-        # Particionar ids por schema e carregar competições
+        def _match_status_obj(c):
+            if status is None:
+                return True
+            s = (status or "").strip().lower()
+            if s == "finished":
+                return c.is_finished or (c.status or "").strip().lower() == "encerrada"
+            if s == "active":
+                return (c.is_enrollment_open or c.is_application_open or (c.status or "").strip().lower() == "em_andamento") and not c.is_finished
+            if s == "upcoming":
+                return (not c.is_enrollment_open and not c.is_application_open) and not c.is_finished
+            return True
+
+        # Particionar ids por schema, carregar e serializar no próprio schema (evitar "Instance has been deleted")
         ids_by_schema = {}
         for cid in competition_ids:
             sch = get_competition_schema(cid, tenant_schema=tenant_schema)
             if sch:
                 ids_by_schema.setdefault(sch, []).append(cid)
 
-        all_competitions_dict = {}
+        result = []
         for sch, ids in ids_by_schema.items():
             set_search_path(sch)
             for c in Competition.query.filter(Competition.id.in_(ids)).all():
-                all_competitions_dict[c.id] = c
+                if not _match_status_obj(c):
+                    continue
+                result.append(CompetitionService._serialize_competition_for_list(c))
         set_search_path(previous_schema)
 
-        all_competitions = list(all_competitions_dict.values())
-
-        def _match_status(c: Competition) -> bool:
-            # Usar as properties que já consideram timezone corretamente
-            if status is None:
-                return True
-
-            s = (status or "").strip().lower()
-            if s == "finished":
-                return c.is_finished or (c.status or "").strip().lower() == "encerrada"
-            if s == "active":
-                # Competição em andamento (inscrição ou aplicação aberta) e não finalizada
-                return (c.is_enrollment_open or c.is_application_open or (c.status or "").strip().lower() == "em_andamento") and not c.is_finished
-            if s == "upcoming":
-                # Ainda não começou (sem inscrição/aplicação aberta e não finalizada)
-                return (not c.is_enrollment_open and not c.is_application_open) and not c.is_finished
-
-            # Qualquer outro valor: não filtra por status
-            return True
-
-        # Aplicar filtro de status em Python (já temos as properties prontas)
-        competitions = [c for c in all_competitions if _match_status(c)]
-
         # Ordenar por data de criação (mais recentes primeiro)
-        competitions.sort(key=lambda c: c.created_at or datetime.min, reverse=True)
-        return competitions
+        result.sort(key=lambda d: d.get('created_at') or '', reverse=True)
+        return result
 
     @staticmethod
     def enroll_student(competition_id: str, student_id: str):
@@ -800,6 +1014,22 @@ class CompetitionService:
                 test_id=test_id,
             ).first():
                 raise ValidationError("Aluno já possui inscrição para a prova desta competição")
+
+            # Competição em public: tenant.competition_enrollments pode ter FK para tenant.competitions,
+            # o que impede inserir competition_id de public. Remover a FK se existir (cross-schema).
+            if competition_schema != tenant_schema:
+                try:
+                    safe_schema = tenant_schema.replace('"', '""')
+                    db.session.execute(text(
+                        f'ALTER TABLE "{safe_schema}".competition_enrollments '
+                        'DROP CONSTRAINT IF EXISTS competition_enrollments_competition_id_fkey'
+                    ))
+                except Exception as e:
+                    logging.debug(
+                        "drop_competition_id_fkey em %s (pode já estar sem FK): %s",
+                        tenant_schema, e,
+                    )
+                    db.session.rollback()
 
             enrollment = CompetitionEnrollment(
                 competition_id=competition_id,
@@ -1088,17 +1318,23 @@ def _student_in_scope(student, competition):
         state_names = [state_names] if state_names else []
     state_set = {str(s).strip().lower() for s in (state_names or [])}
 
-    if scope in ('turma', 'class') and class_ids:
+    if scope in ('turma', 'class'):
+        if not class_ids:
+            return True  # sem filtro = todas as turmas no contexto
         if student.class_id is None:
             return False
         return str(student.class_id).lower() in class_ids
 
-    if scope in ('escola', 'school') and school_ids:
+    if scope in ('escola', 'school'):
+        if not school_ids:
+            return True
         if student.school_id is None:
             return False
         return str(student.school_id).lower() in school_ids
 
-    if scope in ('municipio', 'city', 'município') and city_ids:
+    if scope in ('municipio', 'city', 'município'):
+        if not city_ids:
+            return True  # sem filtro = todo o município (tenant)
         if student.school_id is None or student.school is None:
             return False
         city_id = getattr(student.school, 'city_id', None)
@@ -1106,7 +1342,9 @@ def _student_in_scope(student, competition):
             return False
         return str(city_id).lower() in city_ids
 
-    if scope in ('estado', 'state') and state_set:
+    if scope in ('estado', 'state'):
+        if not state_set:
+            return True
         if student.school_id is None or student.school is None:
             return False
         city = getattr(student.school, 'city', None)
@@ -1117,4 +1355,4 @@ def _student_in_scope(student, competition):
             return False
         return str(state).strip().lower() in state_set
 
-    return False
+    return True  # scope desconhecido ou global: incluir

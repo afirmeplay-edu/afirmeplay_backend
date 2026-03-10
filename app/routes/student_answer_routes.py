@@ -9,6 +9,7 @@ Sistema completo de submissão de respostas de alunos
 from flask import Blueprint, request, jsonify
 from flask_jwt_extended import jwt_required, get_jwt_identity
 from app import db
+from sqlalchemy import text
 from app.models.studentAnswer import StudentAnswer
 from app.models.testSession import TestSession
 from app.models.test import Test
@@ -17,6 +18,7 @@ from app.models.student import Student
 from app.models.testQuestion import TestQuestion
 from app.decorators.role_required import role_required
 from app.decorators import requires_city_context
+from app.utils.tenant_middleware import set_search_path, get_current_tenant_context
 from datetime import datetime, timedelta
 import logging
 import dateutil.parser
@@ -575,16 +577,35 @@ def save_partial_answers():
         
         if not session_id:
             return jsonify({'error': 'session_id é obrigatório'}), 400
-        
-        # Buscar sessão
-        session = TestSession.query.get(session_id)
-        if not session:
-            return jsonify({'error': 'Sessão não encontrada'}), 404
 
-        # Validar que o aluno autenticado é o dono da sessão (evita salvar em sessão de outro)
         current_user_id = get_jwt_identity()
         current_student = Student.query.filter_by(user_id=current_user_id).first()
-        if not current_student or str(current_student.id) != str(session.student_id):
+        if not current_student:
+            return jsonify({'error': 'Estudante não encontrado para este usuário'}), 404
+
+        # Buscar sessão: no schema atual (tenant) e, se não achar, em public (competição)
+        session = TestSession.query.get(session_id)
+        session_schema = None
+        if not session:
+            try:
+                set_search_path('public')
+                session = TestSession.query.get(session_id)
+                if session:
+                    session_schema = 'public'
+            except Exception:
+                pass
+        else:
+            try:
+                session_schema = db.session.execute(text("SELECT current_schema()")).scalar() or 'public'
+            except Exception:
+                session_schema = None
+        if not session:
+            return jsonify({'error': 'Sessão não encontrada'}), 404
+        if session_schema:
+            set_search_path(session_schema)
+
+        # Validar que o aluno autenticado é o dono da sessão (evita salvar em sessão de outro)
+        if str(current_student.id) != str(session.student_id):
             return jsonify({'error': 'Você não tem permissão para salvar respostas nesta sessão'}), 403
         
         # Verificar se a avaliação não expirou (turma e/ou olimpíada)
@@ -634,25 +655,25 @@ def save_partial_answers():
                     'error': 'Avaliação expirada. Não é possível salvar respostas.'
                 }), 410
 
-        # Validar se sessão ainda está ativa
+        # Se sessão já finalizada/expirada/corrigida: retornar 200 (no-op) para o front não tratar como erro
         if session.status != 'em_andamento':
-            body = {
-                'error': f'Sessão não está ativa. Status atual: {session.status}',
-                'session_id': str(session.id),
-                'test_id': str(session.test_id),
-                'status': session.status,
-                'is_expired': session.status == 'expirada',
-            }
             answers_saved = StudentAnswer.query.filter_by(
                 student_id=session.student_id,
                 test_id=session.test_id
             ).all()
-            body['answers'] = [
-                {'question_id': str(a.question_id), 'answer': a.answer, 'answered_at': a.answered_at.isoformat() if a.answered_at else None}
-                for a in answers_saved
-            ]
-            body['total_answers'] = len(body['answers'])
-            return jsonify(body), 410
+            body = {
+                'session_id': str(session.id),
+                'test_id': str(session.test_id),
+                'status': session.status,
+                'is_expired': session.status == 'expirada',
+                'message': f'Sessão já encerrada (status: {session.status}). Respostas não alteradas.',
+                'answers': [
+                    {'question_id': str(a.question_id), 'answer': a.answer, 'answered_at': a.answered_at.isoformat() if a.answered_at else None}
+                    for a in answers_saved
+                ],
+                'total_answers': len(answers_saved),
+            }
+            return jsonify(body), 200
 
         # Validar tempo limite (cálculo no frontend, mas validação adicional aqui)
         if session.started_at and session.time_limit_minutes:
@@ -677,16 +698,74 @@ def save_partial_answers():
                     'error': 'Tempo limite excedido. Sessão expirada.'
                 }), 410  # 410 Gone
         
-        # Buscar questões do teste através da tabela de associação
-        test_question_ids = [tq.question_id for tq in TestQuestion.query.filter_by(test_id=session.test_id).order_by(TestQuestion.order).all()]
+        # Buscar questões do teste: TestQuestion no schema da sessão ou question_rules (competição sem tabela test_questions)
+        try:
+            tq_rows = TestQuestion.query.filter_by(test_id=session.test_id).order_by(TestQuestion.order).all()
+            test_question_ids = [str(tq.question_id) for tq in tq_rows]
+        except Exception as e:
+            if 'test_questions' in str(e).lower() or 'does not exist' in str(e).lower():
+                test_question_ids = []
+            else:
+                raise
+        if not test_question_ids:
+            try:
+                from app.competitions.models import Competition
+                comp = Competition.query.filter_by(test_id=session.test_id).first()
+                if comp and getattr(comp, 'question_rules', None) and isinstance(comp.question_rules, dict):
+                    raw = comp.question_rules.get('selected_question_ids') or []
+                    test_question_ids = [str(x) for x in raw]
+                if not test_question_ids:
+                    # Competição pode estar no outro schema (ex.: sessão em public, competição em tenant)
+                    ctx = get_current_tenant_context()
+                    other_schema = (ctx.schema if (ctx and ctx.has_tenant_context) else None) or None
+                    if other_schema and other_schema != session_schema:
+                        prev_path = db.session.execute(text("SELECT current_schema()")).scalar() or "public"
+                        set_search_path(other_schema)
+                        try:
+                            comp = Competition.query.filter_by(test_id=session.test_id).first()
+                            if comp and getattr(comp, 'question_rules', None) and isinstance(comp.question_rules, dict):
+                                raw = comp.question_rules.get('selected_question_ids') or []
+                                test_question_ids = [str(x) for x in raw]
+                        finally:
+                            set_search_path(prev_path)
+                    elif session_schema != "public":
+                        set_search_path("public")
+                        try:
+                            comp = Competition.query.filter_by(test_id=session.test_id).first()
+                            if comp and getattr(comp, 'question_rules', None) and isinstance(comp.question_rules, dict):
+                                raw = comp.question_rules.get('selected_question_ids') or []
+                                test_question_ids = [str(x) for x in raw]
+                        finally:
+                            set_search_path(session_schema or "public")
+            except Exception:
+                pass
         test_questions = Question.query.filter(Question.id.in_(test_question_ids)).all() if test_question_ids else []
-        questions_dict = {q.id: q for q in test_questions}
+        if test_question_ids and not test_questions:
+            # Questões podem estar no outro schema (ex.: prova em public, tabela question no tenant)
+            ctx = get_current_tenant_context()
+            other_schema = (ctx.schema if (ctx and ctx.has_tenant_context) else None) or None
+            if other_schema and other_schema != (session_schema or ""):
+                prev_path = db.session.execute(text("SELECT current_schema()")).scalar() or "public"
+                set_search_path(other_schema)
+                try:
+                    test_questions = Question.query.filter(Question.id.in_(test_question_ids)).all()
+                finally:
+                    set_search_path(prev_path)
+            elif (session_schema or "") != "public":
+                set_search_path("public")
+                try:
+                    test_questions = Question.query.filter(Question.id.in_(test_question_ids)).all()
+                finally:
+                    set_search_path(session_schema or "public")
+        questions_dict = {str(q.id): q for q in test_questions}
         
         saved_answers = []
         
         # Processar cada resposta
         for ans_data in answers:
             question_id = ans_data.get('question_id')
+            if question_id is not None:
+                question_id = str(question_id)
             answer = ans_data.get('answer')
             
             if not question_id or answer is None:
@@ -759,13 +838,35 @@ def get_active_session(test_id):
         if not student:
             return jsonify({'error': 'Estudante não encontrado para este usuário'}), 404
         
-        # Buscar sessão ativa para este aluno/teste
+        # Buscar sessão ativa: schema atual, depois public, depois tenant (prova de competição pode estar em qualquer um)
         session = TestSession.query.filter_by(
             student_id=student.id,
             test_id=test_id,
             status='em_andamento'
         ).first()
-        
+        if not session:
+            try:
+                set_search_path("public")
+                session = TestSession.query.filter_by(
+                    student_id=student.id,
+                    test_id=test_id,
+                    status='em_andamento'
+                ).first()
+            except Exception:
+                pass
+        if not session:
+            ctx = get_current_tenant_context()
+            tenant_schema = (ctx.schema if (ctx and ctx.has_tenant_context) else None) or None
+            if tenant_schema and tenant_schema != "public":
+                try:
+                    set_search_path(tenant_schema)
+                    session = TestSession.query.filter_by(
+                        student_id=student.id,
+                        test_id=test_id,
+                        status='em_andamento'
+                    ).first()
+                except Exception:
+                    pass
         if not session:
             return jsonify({
                 'message': 'Nenhuma sessão ativa encontrada para este teste',
@@ -836,6 +937,29 @@ def get_active_session_with_answers(test_id):
             test_id=test_id,
             status='em_andamento'
         ).first()
+        if not session:
+            try:
+                set_search_path("public")
+                session = TestSession.query.filter_by(
+                    student_id=student.id,
+                    test_id=test_id,
+                    status='em_andamento'
+                ).first()
+            except Exception:
+                pass
+        if not session:
+            ctx = get_current_tenant_context()
+            tenant_schema = (ctx.schema if (ctx and ctx.has_tenant_context) else None) or None
+            if tenant_schema and tenant_schema != "public":
+                try:
+                    set_search_path(tenant_schema)
+                    session = TestSession.query.filter_by(
+                        student_id=student.id,
+                        test_id=test_id,
+                        status='em_andamento'
+                    ).first()
+                except Exception:
+                    pass
 
         if not session:
             # Pode ser que a sessão já tenha sido marcada como expirada (ex.: em outra aba).
@@ -846,6 +970,28 @@ def get_active_session_with_answers(test_id):
                 .order_by(TestSession.started_at.desc())
                 .first()
             )
+            if not last_session:
+                try:
+                    set_search_path("public")
+                    last_session = (
+                        TestSession.query.filter_by(student_id=student.id, test_id=test_id)
+                        .filter(TestSession.status.in_(['expirada', 'finalizada']))
+                        .order_by(TestSession.started_at.desc())
+                        .first()
+                    )
+                except Exception:
+                    pass
+            if not last_session and tenant_schema and tenant_schema != "public":
+                try:
+                    set_search_path(tenant_schema)
+                    last_session = (
+                        TestSession.query.filter_by(student_id=student.id, test_id=test_id)
+                        .filter(TestSession.status.in_(['expirada', 'finalizada']))
+                        .order_by(TestSession.started_at.desc())
+                        .first()
+                    )
+                except Exception:
+                    pass
             if last_session:
                 answers_last = StudentAnswer.query.filter_by(
                     student_id=student.id,

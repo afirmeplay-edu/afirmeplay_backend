@@ -444,19 +444,28 @@ def format_test_response(test, questions=None):
         # Determinar se a avaliação foi aplicada baseado na existência de class_tests
         is_applied = len(class_tests_list) > 0 if class_tests_list else False
 
+        # Lista de questões para resposta e contagem (evita acessar test.questions duas vezes)
+        questions_list = (questions if questions is not None else getattr(test, 'questions', None)) or []
+        questions_formatted = [format_question_response(q, exclude_fields=exclude_from_question) for q in questions_list]
+        total_questions = len(questions_formatted)
+        # type: frontend espera string; se null no banco, enviar padrão
+        test_type = getattr(test, 'type', None)
+        if test_type is None or (isinstance(test_type, str) and not test_type.strip()):
+            test_type = 'avaliacao'
+
         return {
         'id': test.id,
         'title': test.title,
         'description': test.description,
-        'type': test.type,
-        'subject': all_subjects[0] if all_subjects else None,  # Primeira disciplina para compatibilidade
-        'subjects': all_subjects,  # TODAS as disciplinas selecionadas
-        'subjects_count': len(all_subjects),  # Quantidade de disciplinas
+        'type': test_type,
+        'subject': all_subjects[0] if all_subjects else None,
+        'subjects': all_subjects,
+        'subjects_count': len(all_subjects),
         'grade': {'id': test.grade.id, 'name': test.grade.name} if test.grade else None,
         'max_score': test.max_score,
         'time_limit': test.time_limit.isoformat() if test.time_limit else None,
         'end_time': test.end_time.isoformat() if test.end_time else None,
-        'duration': duration,
+        'duration': int(duration) if duration is not None else 90,
         'createdBy': {'id': test.creator.id, 'name': test.creator.name} if test.creator else None,
         'createdAt': test.created_at.isoformat() if test.created_at else None,
         'updatedAt': test.updated_at.isoformat() if test.updated_at else None,
@@ -465,18 +474,18 @@ def format_test_response(test, questions=None):
         'municipalities_count': len(municipalities_list),
         'schools': schools_list,
         'schools_count': len(schools_list),
-        # Para compatibilidade com o front-end, adicionar também school como primeiro da lista
         'school': schools_list[0] if schools_list else None,
-        'classes': classes_info,  # Array com informações completas das classes específicas
-        'classes_count': len(classes_info),  # Contagem de classes
+        'classes': classes_info,
+        'classes_count': len(classes_info),
         'model': test.model,
-        'subjects_info': test.subjects_info,  # Manter o campo original para compatibilidade
+        'subjects_info': test.subjects_info,
         'status': test.status,
-        'is_applied': is_applied,  # Campo explícito indicando se a avaliação foi aplicada
+        'is_applied': is_applied,
         'applied_classes': applied_classes_info,
         'applied_classes_count': len(applied_classes_info),
         'total_students': total_students,
-        'questions': [format_question_response(q, exclude_fields=exclude_from_question) for q in (questions if questions is not None else test.questions)]
+        'total_questions': total_questions,
+        'questions': questions_formatted
     }
     except SQLAlchemyError as e:
         db.session.rollback()

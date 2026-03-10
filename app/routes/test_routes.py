@@ -2763,26 +2763,53 @@ def start_test_session(test_id):
             set_search_path(test_schema)
         
         # Verificar se o teste está aplicado: turma (ClassTest) e/ou olimpíada (StudentTestOlimpics)
-        # Ambos funcionam simultaneamente - não há exclusão mútua
-        class_test = ClassTest.query.filter_by(
-            class_id=student.class_id,
-            test_id=test_id
-        ).first()
+        # Em public essas tabelas podem não existir; consultar no tenant nesse caso
+        class_test = None
         olympics = None
+        try:
+            class_test = ClassTest.query.filter_by(
+                class_id=student.class_id,
+                test_id=test_id
+            ).first()
+        except (SQLAlchemyError, Exception) as e:
+            err_lower = str(e).lower()
+            if 'class_test' in err_lower and ('does not exist' in err_lower or 'undefinedtable' in err_lower):
+                if test_schema == "public":
+                    ctx = get_current_tenant_context()
+                    tenant_schema = (ctx.schema if (ctx and ctx.has_tenant_context) else None) or None
+                    if tenant_schema and tenant_schema != "public":
+                        try:
+                            set_search_path(tenant_schema)
+                            class_test = ClassTest.query.filter_by(
+                                class_id=student.class_id,
+                                test_id=test_id
+                            ).first()
+                        finally:
+                            set_search_path(test_schema or "public")
+            else:
+                logging.warning(f"ClassTest query failed: {e}")
         try:
             olympics = StudentTestOlimpics.query.filter_by(
                 student_id=student.id,
                 test_id=str(test_id)
             ).first()
         except (SQLAlchemyError, Exception) as e:
-            # Se a tabela não existir, continuar apenas com ClassTest
             error_str = str(e).lower()
             if 'student_test_olimpics' in error_str or 'does not exist' in error_str or 'undefinedtable' in error_str:
-                logging.warning(f"Tabela student_test_olimpics não encontrada, continuando apenas com ClassTest: {str(e)}")
-                olympics = None
+                if test_schema == "public":
+                    ctx = get_current_tenant_context()
+                    tenant_schema = (ctx.schema if (ctx and ctx.has_tenant_context) else None) or None
+                    if tenant_schema and tenant_schema != "public":
+                        try:
+                            set_search_path(tenant_schema)
+                            olympics = StudentTestOlimpics.query.filter_by(
+                                student_id=student.id,
+                                test_id=str(test_id)
+                            ).first()
+                        finally:
+                            set_search_path(test_schema or "public")
             else:
-                logging.warning(f"Erro ao buscar StudentTestOlimpics, continuando apenas com ClassTest: {str(e)}")
-                olympics = None
+                logging.warning(f"StudentTestOlimpics query failed: {e}")
 
         # Priorizar StudentTestOlimpics se ambos existirem (mais específico para o aluno)
         # Ambos funcionam simultaneamente - não há exclusão mútua
@@ -3024,12 +3051,16 @@ def get_session_info(test_id):
         if session.started_at:
             # ✅ REGRA 4: Obter tempo atual no timezone da aplicação (se disponível)
             current_time = None
-            # Usar student já carregado (evita lazy load session.student)
-            from app.models.classTest import ClassTest
-            class_test = ClassTest.query.filter_by(
-                class_id=student.class_id,
-                test_id=session.test_id
-            ).first()
+            class_test = None
+            try:
+                from app.models.classTest import ClassTest
+                class_test = ClassTest.query.filter_by(
+                    class_id=student.class_id,
+                    test_id=session.test_id
+                ).first()
+            except Exception as e:
+                if 'class_test' not in str(e).lower() or ('does not exist' not in str(e).lower() and 'undefinedtable' not in str(e).lower()):
+                    logging.warning("ClassTest em get_session_info: %s", e)
             
             if class_test and class_test.timezone:
                 import pytz

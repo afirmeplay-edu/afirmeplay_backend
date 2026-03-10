@@ -82,6 +82,10 @@ class AnswerSheetGabarito(db.Model):
     minio_bucket = db.Column(db.String(100), nullable=True)  # Nome do bucket
     zip_generated_at = db.Column(db.DateTime, nullable=True)  # Timestamp de geração do ZIP
     
+    # Totais da última geração (para listagem quando escopo veio de POST /generate)
+    last_generation_classes_count = db.Column(db.Integer, nullable=True)
+    last_generation_students_count = db.Column(db.Integer, nullable=True)
+    
     # =========================================================================
     # ✅ Campo para agrupar gabaritos gerados em batch (múltiplas turmas)
     # =========================================================================

@@ -17,7 +17,7 @@ from app.services.cartao_resposta.answer_sheet_generator import AnswerSheetGener
 from app.services.cartao_resposta.answer_sheet_correction_service import AnswerSheetCorrectionService
 from app.services.cartao_resposta.correction_new_grid import AnswerSheetCorrectionNewGrid
 from app.services.progress_store import (
-    create_job, update_item_processing, update_item_done,
+    create_job, update_job, update_item_processing, update_item_done,
     update_item_error, complete_job, get_job
 )
 from app.models.school import School
@@ -255,14 +255,140 @@ def _generate_complete_structure(num_questions: int, use_blocks: bool,
     return topology
 
 
+@bp.route('/create-gabaritos', methods=['POST'])
+@jwt_required()
+@role_required("admin", "professor", "coordenador", "diretor", "tecadm")
+@requires_city_context
+def create_gabarito_only():
+    """
+    Cria e salva apenas a definição do cartão resposta (template) na tabela answer_sheet_gabaritos.
+    Não gera PDFs; o escopo (estado, município, escolas, séries, turmas) é definido na hora de gerar (POST /generate).
+
+    Body:
+        title, num_questions, correct_answers, use_blocks, blocks_config,
+        questions_options (opcional), question_skills (opcional), test_id (opcional), test_data (opcional, ex: institution).
+
+    O registro é salvo no schema da cidade do tenant (city_xxx.answer_sheet_gabaritos).
+    Campos MinIO (minio_url, etc.) permanecem NULL até uma geração via POST /generate.
+
+    Returns:
+        201: { "gabarito_id": "uuid", "title": "...", "num_questions": N }
+    """
+    try:
+        user = get_current_user_from_token()
+        if not user:
+            return jsonify({"error": "Usuário não encontrado"}), 401
+
+        data = request.get_json()
+        if not data:
+            return jsonify({"error": "Dados não fornecidos"}), 400
+
+        num_questions = data.get('num_questions')
+        correct_answers = data.get('correct_answers')
+        test_data = data.get('test_data', {})
+        title = data.get('title', test_data.get('title', 'Cartão Resposta'))
+
+        if not num_questions or num_questions <= 0:
+            return jsonify({"error": "num_questions deve ser maior que 0"}), 400
+        if not correct_answers:
+            return jsonify({"error": "correct_answers é obrigatório"}), 400
+
+        use_blocks = data.get('use_blocks', False)
+        blocks_config = data.get('blocks_config', {}).copy() if data.get('blocks_config') else {}
+
+        custom_blocks = blocks_config.get('blocks', [])
+        if custom_blocks:
+            validation_error = _validate_blocks_config(custom_blocks, num_questions)
+            if validation_error:
+                return jsonify({"error": validation_error}), 400
+            blocks_config['num_blocks'] = len(custom_blocks)
+            blocks_config['questions_per_block'] = custom_blocks[0].get('questions_count', 12) if custom_blocks else 12
+            blocks_config['use_blocks'] = use_blocks
+            blocks_config['separate_by_subject'] = not use_blocks
+        elif use_blocks:
+            blocks_config.setdefault('num_blocks', 1)
+            blocks_config.setdefault('questions_per_block', 12)
+            blocks_config['use_blocks'] = True
+            blocks_config['separate_by_subject'] = False
+        else:
+            blocks_config['use_blocks'] = False
+            blocks_config['num_blocks'] = 1
+            blocks_config['questions_per_block'] = num_questions
+            blocks_config['separate_by_subject'] = False
+
+        questions_options = data.get('questions_options', {})
+        question_skills_raw = data.get('question_skills', {})
+        question_skills_ids = _resolve_question_skills_to_ids(question_skills_raw)
+        complete_structure = _generate_complete_structure(
+            num_questions=num_questions,
+            use_blocks=use_blocks,
+            blocks_config=blocks_config,
+            questions_options=questions_options,
+            question_skills=question_skills_ids if question_skills_ids else None
+        )
+        blocks_config['topology'] = complete_structure
+
+        gabarito = AnswerSheetGabarito(
+            test_id=str(data.get('test_id')) if data.get('test_id') else None,
+            class_id=None,
+            grade_id=None,
+            num_questions=num_questions,
+            use_blocks=use_blocks,
+            blocks_config=blocks_config,
+            correct_answers=correct_answers,
+            title=title,
+            created_by=str(user['id']) if user.get('id') else None,
+            scope_type=None,
+            school_id=None,
+            school_name=None,
+            municipality=None,
+            state=None,
+            grade_name=None,
+            institution=test_data.get('institution', '') or ''
+        )
+        db.session.add(gabarito)
+        db.session.commit()
+        gabarito_id = str(gabarito.id)
+
+        try:
+            from app.services.cartao_resposta.coordinate_generator import CoordinateGenerator
+            coord_generator = CoordinateGenerator()
+            coordinates = coord_generator.generate_coordinates(
+                num_questions=num_questions,
+                use_blocks=use_blocks,
+                blocks_config=blocks_config,
+                questions_options=questions_options
+            )
+            gabarito.coordinates = coordinates
+            db.session.commit()
+        except Exception as e:
+            logging.warning(f"[create-gabaritos] Erro ao gerar coordenadas: {str(e)}")
+
+        return jsonify({
+            'gabarito_id': gabarito_id,
+            'title': title,
+            'num_questions': num_questions,
+        }), 201
+
+    except Exception as e:
+        db.session.rollback()
+        logging.error(f"[create-gabaritos] Erro: {str(e)}", exc_info=True)
+        return jsonify({"error": str(e)}), 500
+
+
 @bp.route('/generate', methods=['POST'])
 @jwt_required()
 @role_required("admin", "professor", "coordenador", "diretor", "tecadm")
 @requires_city_context
 def generate_answer_sheets():
     """
-    Gera cartões resposta de forma INTELIGENTE e HIERÁRQUICA
-    
+    Gera cartões resposta de forma INTELIGENTE e HIERÁRQUICA.
+
+    Dois modos:
+    - Com gabarito_id: gera PDFs a partir de um cartão já criado (POST /create-gabaritos).
+      Body deve ter gabarito_id + filtros de escopo (school_ids, grade_ids, class_ids). Permite regerar (sobrescreve MinIO).
+    - Sem gabarito_id: cria um novo gabarito e gera PDFs (fluxo legado). Body completo como abaixo.
+
     Escopo em cascata (município vem do tenant). Filtros opcionais restringem o conjunto:
     - Nenhum filtro → todas as escolas, séries e turmas do município.
     - school_ids → todas as séries e turmas dessas escolas.
@@ -270,7 +396,7 @@ def generate_answer_sheets():
     - school_ids + grade_ids + class_ids → apenas essas turmas (ou só class_ids = essas turmas no município).
     Aceita também no singular (retrocompat): class_id, grade_id, school_id.
     
-    Body:
+    Body (sem gabarito_id):
         {
             "title": "Avaliação de Português",
             "num_questions": 48,
@@ -311,26 +437,13 @@ def generate_answer_sheets():
         data = request.get_json()
         if not data:
             return jsonify({"error": "Dados não fornecidos"}), 400
-        
-        # ✅ 1. VALIDAR CAMPOS OBRIGATÓRIOS
-        num_questions = data.get('num_questions')
-        correct_answers = data.get('correct_answers')
-        test_data = data.get('test_data', {})
-        title = data.get('title', test_data.get('title', 'Cartão Resposta'))
-        
-        if not num_questions or num_questions <= 0:
-            return jsonify({"error": "num_questions deve ser maior que 0"}), 400
-        if not correct_answers:
-            return jsonify({"error": "correct_answers é obrigatório"}), 400
-        
-        # ✅ 2. DETERMINAR ESCOPO (cascata: município → escolas → séries → turmas)
+
         from app.decorators.tenant_required import get_current_tenant_context
         context_scope = get_current_tenant_context()
         city_id_scope = context_scope.city_id if context_scope else None
         if not city_id_scope:
             return jsonify({"error": "Contexto de município não encontrado"}), 400
 
-        # Normalizar parâmetros: aceitar listas e também singular (retrocompat)
         def _norm_list(key_plural, key_singular):
             raw = data.get(key_plural)
             if raw is not None and isinstance(raw, list):
@@ -340,7 +453,155 @@ def generate_answer_sheets():
 
         school_ids = _norm_list('school_ids', 'school_id')
         grade_ids = _norm_list('grade_ids', 'grade_id')
-        class_ids = _norm_list('class_ids', 'class_id')
+        class_ids_param = _norm_list('class_ids', 'class_id')
+
+        # ========== MODO: Gerar a partir de gabarito já criado (POST /create-gabaritos) ==========
+        existing_gabarito_id = (data.get('gabarito_id') or '').strip() or None
+        if existing_gabarito_id:
+            gabarito = AnswerSheetGabarito.query.get(existing_gabarito_id)
+            if not gabarito:
+                return jsonify({"error": "Gabarito não encontrado"}), 404
+            if gabarito.created_by and str(gabarito.created_by) != str(user.get('id')):
+                return jsonify({"error": "Você não tem permissão para usar este gabarito"}), 403
+
+            school_ids_scope = school_ids
+            grade_ids_scope = grade_ids
+            class_ids_scope = class_ids_param
+
+            school_ids_city_subq = db.session.query(School.id).filter(
+                School.city_id == city_id_scope
+            ).subquery()
+            q = Class.query.filter(Class.school_id.in_(school_ids_city_subq))
+            if school_ids_scope:
+                schools_in_city = db.session.query(School.id).filter(
+                    School.id.in_(school_ids_scope),
+                    School.city_id == city_id_scope
+                ).all()
+                valid_school_ids = [s[0] for s in schools_in_city]
+                if len(valid_school_ids) != len(school_ids_scope):
+                    return jsonify({"error": "Uma ou mais escolas não pertencem ao município ou não existem"}), 400
+                q = q.filter(Class.school_id.in_(valid_school_ids))
+            if grade_ids_scope:
+                q = q.filter(Class.grade_id.in_(grade_ids_scope))
+            if class_ids_scope:
+                q = q.filter(Class.id.in_(class_ids_scope))
+            classes_to_generate = q.all()
+            if not classes_to_generate:
+                return jsonify({"error": "Nenhuma turma encontrada com os filtros informados"}), 400
+
+            if len(classes_to_generate) == 1 and class_ids_scope:
+                scope_type = 'class'
+            elif grade_ids_scope and not class_ids_scope and len(school_ids_scope) <= 1:
+                scope_type = 'grade'
+            elif school_ids_scope and len(school_ids_scope) == 1 and not grade_ids_scope and not class_ids_scope:
+                scope_type = 'school'
+            else:
+                scope_type = 'city'
+
+            if user['role'] == 'professor':
+                from app.models.teacher import Teacher
+                from app.models.teacherClass import TeacherClass
+                teacher = Teacher.query.filter_by(user_id=user['id']).first()
+                if teacher:
+                    allowed = set(
+                        tc.class_id for tc in
+                        TeacherClass.query.filter_by(teacher_id=teacher.id).filter(
+                            TeacherClass.class_id.in_([c.id for c in classes_to_generate])
+                        ).all()
+                    )
+                    if len(allowed) != len(classes_to_generate):
+                        return jsonify({"error": "Você não tem acesso a uma ou mais turmas selecionadas"}), 403
+
+            municipality_for_pdf = gabarito.municipality or ''
+            state_for_pdf = gabarito.state or ''
+            grade_name_for_pdf = gabarito.grade_name or ''
+            if not municipality_for_pdf or not state_for_pdf:
+                city_obj = City.query.get(city_id_scope)
+                if city_obj:
+                    if not municipality_for_pdf:
+                        municipality_for_pdf = city_obj.name or ''
+                    if not state_for_pdf:
+                        state_for_pdf = city_obj.state or ''
+            if not grade_name_for_pdf and classes_to_generate and classes_to_generate[0].grade_id:
+                grade_obj = Grade.query.get(classes_to_generate[0].grade_id)
+                if grade_obj:
+                    grade_name_for_pdf = grade_obj.name or ''
+
+            test_data_complete = {
+                'id': gabarito.test_id,
+                'title': gabarito.title or 'Cartão Resposta',
+                'municipality': municipality_for_pdf,
+                'state': state_for_pdf,
+                'grade_name': grade_name_for_pdf,
+                'department': data.get('test_data', {}).get('department', ''),
+                'municipality_logo': data.get('test_data', {}).get('municipality_logo'),
+                'institution': gabarito.institution or '',
+            }
+            # Extrair questions_options do blocks_config do gabarito (topology.blocks[].questions[].q + alternatives)
+            questions_options_from_gabarito = {}
+            for b in (gabarito.blocks_config or {}).get('topology', {}).get('blocks', []):
+                for qq in b.get('questions', []):
+                    q = qq.get('q')
+                    a = qq.get('alternatives', ['A', 'B', 'C', 'D'])
+                    if q is not None:
+                        questions_options_from_gabarito[q] = a
+            class_ids = [str(c.id) for c in classes_to_generate]
+            job_id = str(uuid.uuid4())
+            from app.services.celery_tasks.answer_sheet_tasks import generate_answer_sheets_batch_async
+            celery_task = generate_answer_sheets_batch_async.delay(
+                gabarito_ids=[existing_gabarito_id],
+                city_id=city_id_scope,
+                num_questions=gabarito.num_questions,
+                correct_answers=gabarito.correct_answers,
+                test_data=test_data_complete,
+                use_blocks=gabarito.use_blocks,
+                blocks_config=gabarito.blocks_config or {},
+                questions_options=questions_options_from_gabarito,
+                batch_id=job_id,
+                scope=scope_type,
+                class_ids=class_ids
+            )
+            task_id = celery_task.id
+            create_job(
+                job_id=job_id,
+                total=len(classes_to_generate),
+                gabarito_id=existing_gabarito_id,
+                user_id=str(user['id']),
+                task_ids=[task_id]
+            )
+            update_job(job_id, {'scope_type': scope_type})
+
+            total_students = 0
+            for cls in classes_to_generate:
+                db.session.refresh(cls)
+                total_students += len(cls.students) if cls.students else 0
+
+            return jsonify({
+                'status': 'processing',
+                'job_id': job_id,
+                'gabarito_id': existing_gabarito_id,
+                'scope_type': scope_type,
+                'total_classes': len(classes_to_generate),
+                'total_students': total_students,
+                'note': 'Números de alunos e turmas são estimativas. Valores reais estão no status do job.',
+                'tasks': [{'class_id': str(c.id), 'class_name': c.name, 'status': 'pending'} for c in classes_to_generate],
+                'polling_url': f"/answer-sheets/jobs/{job_id}/status"
+            }), 202
+        # ========== FIM MODO gabarito_id ==========
+
+        # ✅ 1. VALIDAR CAMPOS OBRIGATÓRIOS (fluxo: criar novo gabarito + gerar)
+        num_questions = data.get('num_questions')
+        correct_answers = data.get('correct_answers')
+        test_data = data.get('test_data', {})
+        title = data.get('title', test_data.get('title', 'Cartão Resposta'))
+
+        if not num_questions or num_questions <= 0:
+            return jsonify({"error": "num_questions deve ser maior que 0"}), 400
+        if not correct_answers:
+            return jsonify({"error": "correct_answers é obrigatório"}), 400
+
+        # ✅ 2. DETERMINAR ESCOPO (cascata: município → escolas → séries → turmas)
+        class_ids = class_ids_param
 
         # Base: turmas do município (escolas da cidade)
         school_ids_city_subq = db.session.query(School.id).filter(
@@ -479,6 +740,12 @@ def generate_answer_sheets():
                 school_id_for_gabarito = first_class.school_id
                 if first_class.school:
                     school_name = first_class.school.name or ''
+                    # Preencher município/estado a partir da escola se não vierem no payload
+                    if (not municipality_for_gabarito or not state_for_gabarito) and first_class.school.city:
+                        if not municipality_for_gabarito:
+                            municipality_for_gabarito = first_class.school.city.name or ''
+                        if not state_for_gabarito:
+                            state_for_gabarito = first_class.school.city.state or ''
             if first_class.grade_id:
                 grade_id_for_gabarito = first_class.grade_id
                 # ✅ Se não veio no payload, buscar do banco
@@ -527,12 +794,12 @@ def generate_answer_sheets():
         except Exception as e:
             logging.error(f"[ROTA] ⚠️ Erro ao gerar coordenadas (não crítico): {str(e)}")
         
-        # ✅ 7. PREPARAR test_data
+        # ✅ 7. PREPARAR test_data (usar município/estado já preenchidos do contexto para o PDF)
         test_data_complete = {
             'id': data.get('test_id'),
             'title': title,
-            'municipality': test_data.get('municipality', ''),
-            'state': test_data.get('state', ''),
+            'municipality': municipality_for_gabarito,
+            'state': state_for_gabarito,
             'grade_name': grade_name_for_gabarito,  # ✅ Adicionar grade_name
             'department': test_data.get('department', ''),
             'municipality_logo': test_data.get('municipality_logo'),
@@ -542,7 +809,6 @@ def generate_answer_sheets():
         
         # ✅ 8. DISPARAR TASK CELERY BATCH (1 única task para todas as turmas)
         from app.services.celery_tasks.answer_sheet_tasks import generate_answer_sheets_batch_async
-        from app.services.progress_store import create_job
         from app.decorators.tenant_required import get_current_tenant_context
         
         # Obter contexto da cidade
@@ -607,10 +873,7 @@ def generate_answer_sheets():
             task_ids=task_ids  # Lista com ID da task batch
         )
         
-        # ✅ Atualizar job com scope_type e vincular ao gabarito
-        gabarito.job_id = job_id
-        db.session.commit()
-        from app.services.progress_store import update_job
+        # ✅ Atualizar job com scope_type (job é rastreado apenas no progress_store; não há coluna job_id no gabarito)
         update_job(job_id, {'scope_type': scope_type})
         
         # ⚠️ Contar total de alunos (pode mudar até task executar)
@@ -1008,11 +1271,13 @@ def list_gabaritos():
                             "students_count": students_school,
                         })
 
-            # Determinar contagem baseada no scope_type correto
+            # Determinar contagem baseada no scope_type correto (ou totais da última geração se persistidos)
             final_students_count = 0
             final_classes_count = 0
-            
-            if gabarito.scope_type == "class":
+            if getattr(gabarito, 'last_generation_classes_count', None) is not None or getattr(gabarito, 'last_generation_students_count', None) is not None:
+                final_classes_count = getattr(gabarito, 'last_generation_classes_count', None) or 0
+                final_students_count = getattr(gabarito, 'last_generation_students_count', None) or 0
+            elif gabarito.scope_type == "class":
                 final_students_count = class_students_count
                 final_classes_count = 1
             elif gabarito.scope_type == "grade":
@@ -2215,7 +2480,7 @@ def _gerar_opcoes_proximos_filtros_cartao(scope_info, nivel_granularidade, user)
     return opcoes
 
 
-# ==================== OPÇÕES DE FILTROS HIERÁRQUICOS (para GET /opcoes-filtros) ====================
+# ==================== OPÇÕES DE FILTROS HIERÁRQUICOS (para GET /opcoes-filtros-results) ====================
 
 def _obter_estados_disponiveis_cartao(user: dict, permissao: dict) -> List[Dict[str, Any]]:
     """Estados disponíveis conforme permissão (admin = todos; tecadm = só seu município)."""
@@ -2409,7 +2674,7 @@ def _obter_turmas_por_serie_cartao(gabarito_id: str, escola_id: str, serie_id: s
     return [{"id": str(t[0]), "nome": t[1] or f"Turma {t[0]}"} for t in turmas]
 
 
-@bp.route('/opcoes-filtros', methods=['GET'])
+@bp.route('/opcoes-filtros-results', methods=['GET'])
 @jwt_required()
 @role_required("admin", "professor", "coordenador", "diretor", "tecadm")
 def obter_opcoes_filtros_cartao():
@@ -2418,7 +2683,7 @@ def obter_opcoes_filtros_cartao():
     Mesmo padrão de GET /evaluation-results/opcoes-filtros.
     Hierarquia: Estado → Município → Cartão resposta (gabarito) → Escola → Série → Turma.
     Query params (todos opcionais): estado, municipio, gabarito, escola, serie, turma.
-    Ex.: GET /opcoes-filtros → estados; ?estado=SP → estados + municipios; ?estado=SP&municipio=id → + gabaritos; etc.
+    Ex.: GET /opcoes-filtros-results → estados; ?estado=SP → estados + municipios; ?estado=SP&municipio=id → + gabaritos; etc.
     """
     try:
         from app.permissions import get_user_permission_scope
@@ -2593,35 +2858,9 @@ def get_job_status(job_id):
         current_user_id = get_jwt_identity()
         job = get_job(job_id)
         
-        # ✅ Se job não existe na memória, buscar pelo gabarito no banco
+        # Job é rastreado apenas no progress_store (não há coluna job_id no gabarito)
         if not job:
-            gabarito_from_db = AnswerSheetGabarito.query.filter_by(job_id=job_id).first()
-            
-            if not gabarito_from_db:
-                return jsonify({"error": "Job não encontrado"}), 404
-            
-            # Validar que o gabarito pertence ao usuário
-            if gabarito_from_db.user_id != str(current_user_id):
-                return jsonify({"error": "Acesso negado"}), 403
-            
-            # ✅ Job completado, retornar resultado direto do banco
-            return jsonify({
-                'job_id': job_id,
-                'gabarito_id': str(gabarito_from_db.id),
-                'status': 'completed',
-                'progress': {
-                    'current': 1,
-                    'total': 1,
-                    'percentage': 100
-                },
-                'result': {
-                    'scope_type': gabarito_from_db.scope_type,
-                    'minio_url': gabarito_from_db.minio_url,
-                    'download_url': gabarito_from_db.minio_url,
-                    'can_download': bool(gabarito_from_db.minio_url),
-                    'zip_generated_at': gabarito_from_db.zip_generated_at.isoformat() if gabarito_from_db.zip_generated_at else None
-                }
-            }), 200
+            return jsonify({"error": "Job não encontrado"}), 404
 
         # Validar que o job pertence ao usuário
         if job.get('user_id') != str(current_user_id):
@@ -2684,8 +2923,8 @@ def get_job_status(job_id):
                     })
                     logging.error(f"❌ Task batch {task_id} FAILURE: {error_msg}")
                     
-                elif task_result.state in ['PENDING', 'RETRY']:
-                    # Task ainda processando
+                elif task_result.state in ['PENDING', 'STARTED', 'RETRY']:
+                    # Task ainda processando — progresso progressivo vem do job
                     pass
                     
             except Exception as e:
@@ -2701,12 +2940,22 @@ def get_job_status(job_id):
         if gabarito_id:
             gabarito = AnswerSheetGabarito.query.get(gabarito_id)
         
-        # ✅ PREPARAR RESPOSTA COM NÚMEROS REAIS
-        progress = {
-            'current': completed,
-            'total': len(task_ids),
-            'percentage': int((completed / len(task_ids) * 100) if task_ids else 0)
-        }
+        # ✅ PREPARAR PROGRESSO: progressivo durante execução, 100% ao concluir
+        total_classes = job.get('total', 1)
+        if job_status == "processing" and total_classes > 0:
+            progress_current = job.get('progress_current', 0)
+            progress_pct = job.get('progress_percentage', 0)
+            progress = {
+                'current': progress_current,
+                'total': total_classes,
+                'percentage': min(100, progress_pct)
+            }
+        else:
+            progress = {
+                'current': total_classes if job_status == "completed" else 0,
+                'total': total_classes,
+                'percentage': 100 if job_status == "completed" else 0
+            }
         
         result_data = {
             'classes_generated': classes_generated,

@@ -175,13 +175,20 @@ class CompetitionRankingService:
         finally:
             set_search_path(tenant_schema or competition_schema)
 
-        # Filtrar sessões por escopo da competição (Student está no tenant)
+        # Filtrar sessões por escopo da competição (Student está no tenant).
+        # Se competição em public, Student não existe em public; carregar no tenant_schema.
         from app.competitions.services.competition_service import _student_in_scope
         filtered_sessions = []
-        for session in sessions:
-            student = Student.query.get(session.student_id)
-            if student and _student_in_scope(student, competition):
-                filtered_sessions.append(session)
+        _path_before_filter = tenant_schema or competition_schema
+        if competition_schema == 'public' and tenant_schema:
+            set_search_path(tenant_schema)
+        try:
+            for session in sessions:
+                student = Student.query.get(session.student_id)
+                if student and _student_in_scope(student, competition):
+                    filtered_sessions.append(session)
+        finally:
+            set_search_path(_path_before_filter)
 
         rows = [enriched_by_session[s.id] for s in filtered_sessions if s.id in enriched_by_session]
         if not rows:

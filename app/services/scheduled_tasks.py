@@ -41,93 +41,114 @@ def check_expired_evaluations(app=None):
             from app import create_app
             app = create_app()
     
+    from app.models.city import City
+    from sqlalchemy import text
+
     # Garantir que estamos dentro do contexto da aplicação
     with app.app_context():
         try:
             logging.info("Iniciando verificação de avaliações expiradas...")
-            
-            # Verificar se a tabela class_test existe
+            # class_test existe nos schemas city_xxx; iterar por cidade
             try:
-                # Buscar todas as avaliações aplicadas que ainda não estão concluídas
-                class_tests = ClassTest.query.filter(
-                    ClassTest.status.in_(['agendada', 'em_andamento']),
-                    ClassTest.expiration.isnot(None)
-                ).all()
+                cities = City.query.with_entities(City.id).all()
             except ProgrammingError as e:
-                if 'class_test' in str(e) and 'does not exist' in str(e):
-                    logging.warning("⚠️  Tabela 'class_test' não existe no banco de dados. Tarefa de verificação de expiração desabilitada temporariamente.")
-                    logging.warning("   Execute as migrations para criar a tabela: flask db upgrade")
-                    return
-                else:
-                    raise
-            
+                logging.warning("Não foi possível listar cidades para verificação de expiração: %s", e)
+                return
+            if not cities:
+                logging.info("✅ Verificação concluída: Nenhuma cidade cadastrada")
+                return
+
             updated_count = 0
             expired_sessions_count = 0
             current_utc = datetime.utcnow()
-            
-            for class_test in class_tests:
+
+            for (city_id,) in cities:
+                city_updated = 0
+                city_sessions_expired = 0
                 try:
-                    # Obter timezone da aplicação ou usar UTC como padrão
-                    if class_test.timezone:
-                        try:
-                            target_tz = pytz.timezone(class_test.timezone)
-                            current_time = datetime.now(target_tz)
-                        except pytz.exceptions.UnknownTimeZoneError:
-                            logging.warning(f"Timezone inválido: {class_test.timezone}, usando UTC")
-                            current_time = current_utc
-                    else:
-                        current_time = current_utc
-                    
-                    # Converter expiration para datetime
-                    expiration_dt = dateutil.parser.parse(class_test.expiration)
-                    if expiration_dt.tzinfo is None:
+                    schema = f"city_{str(city_id).replace('-', '_')}"
+                    db.session.execute(text(f'SET search_path TO "{schema}", public'))
+                except Exception as e:
+                    logging.warning("Schema %s: %s", city_id, e)
+                    continue
+                try:
+                    class_tests = ClassTest.query.filter(
+                        ClassTest.status.in_(['agendada', 'em_andamento']),
+                        ClassTest.expiration.isnot(None)
+                    ).all()
+                except ProgrammingError as e:
+                    if 'class_test' in str(e).lower() and 'does not exist' in str(e).lower():
+                        continue
+                    raise
+
+                for class_test in class_tests:
+                    try:
+                        # Obter timezone da aplicação ou usar UTC como padrão
                         if class_test.timezone:
                             try:
                                 target_tz = pytz.timezone(class_test.timezone)
-                                expiration_dt = expiration_dt.replace(tzinfo=target_tz)
+                                current_time = datetime.now(target_tz)
                             except pytz.exceptions.UnknownTimeZoneError:
-                                expiration_dt = expiration_dt.replace(tzinfo=current_time.tzinfo)
+                                logging.warning(f"Timezone inválido: {class_test.timezone}, usando UTC")
+                                current_time = current_utc
                         else:
-                            expiration_dt = expiration_dt.replace(tzinfo=current_time.tzinfo)
-                    
-                    # Verificar se expirou
-                    if current_time > expiration_dt:
-                        # Atualizar status do ClassTest
-                        if class_test.status != 'concluida':
-                            class_test.status = 'concluida'
-                            class_test.updated_at = datetime.utcnow()
-                            updated_count += 1
-                            
-                            logging.info(
-                                f"Avaliação {class_test.test_id} (ClassTest {class_test.id}) expirada. "
-                                f"Data expiração: {expiration_dt}, Data atual: {current_time}"
-                            )
-                            
-                            # Expirar todas as sessões ativas desta avaliação
-                            active_sessions = TestSession.query.filter_by(
-                                test_id=class_test.test_id,
-                                status='em_andamento'
-                            ).all()
-                            
-                            for session in active_sessions:
-                                session.status = 'expirada'
-                                session.submitted_at = datetime.utcnow()
-                                expired_sessions_count += 1
-                            
-                            if active_sessions:
+                            current_time = current_utc
+
+                        # Converter expiration para datetime
+                        expiration_dt = dateutil.parser.parse(class_test.expiration)
+                        if expiration_dt.tzinfo is None:
+                            if class_test.timezone:
+                                try:
+                                    target_tz = pytz.timezone(class_test.timezone)
+                                    expiration_dt = expiration_dt.replace(tzinfo=target_tz)
+                                except pytz.exceptions.UnknownTimeZoneError:
+                                    expiration_dt = expiration_dt.replace(tzinfo=current_time.tzinfo)
+                            else:
+                                expiration_dt = expiration_dt.replace(tzinfo=current_time.tzinfo)
+
+                        # Verificar se expirou
+                        if current_time > expiration_dt:
+                            # Atualizar status do ClassTest
+                            if class_test.status != 'concluida':
+                                class_test.status = 'concluida'
+                                class_test.updated_at = datetime.utcnow()
+                                updated_count += 1
+                                city_updated += 1
+
                                 logging.info(
-                                    f"Expiradas {len(active_sessions)} sessões ativas da avaliação {class_test.test_id}"
+                                    f"Avaliação {class_test.test_id} (ClassTest {class_test.id}) expirada. "
+                                    f"Data expiração: {expiration_dt}, Data atual: {current_time}"
                                 )
-                
-                except Exception as e:
-                    logging.error(
-                        f"Erro ao processar ClassTest {class_test.id} (test_id: {class_test.test_id}): {str(e)}",
-                        exc_info=True
-                    )
-                    continue
-            
-            if updated_count > 0:
-                db.session.commit()
+
+                                # Expirar todas as sessões ativas desta avaliação
+                                active_sessions = TestSession.query.filter_by(
+                                    test_id=class_test.test_id,
+                                    status='em_andamento'
+                                ).all()
+
+                                for session in active_sessions:
+                                    session.status = 'expirada'
+                                    session.submitted_at = datetime.utcnow()
+                                    expired_sessions_count += 1
+                                    city_sessions_expired += 1
+
+                                if active_sessions:
+                                    logging.info(
+                                        f"Expiradas {len(active_sessions)} sessões ativas da avaliação {class_test.test_id}"
+                                    )
+                    except Exception as e:
+                        logging.error(
+                            f"Erro ao processar ClassTest {class_test.id} (test_id: {class_test.test_id}): {str(e)}",
+                            exc_info=True
+                        )
+                        continue
+
+                if city_updated > 0 or city_sessions_expired > 0:
+                    try:
+                        db.session.commit()
+                    except Exception as commit_err:
+                        logging.warning("Commit em %s: %s", schema, commit_err)
+                        db.session.rollback()
                 logging.info(
                     f"✅ Verificação concluída: {updated_count} avaliações expiradas atualizadas, "
                     f"{expired_sessions_count} sessões expiradas"

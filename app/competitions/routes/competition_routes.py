@@ -248,6 +248,7 @@ def _competition_to_dict(c, subject_name_override=None):
         'name': c.name,
         'description': c.description,
         'test_id': c.test_id,
+        'test_type': 'COMPETICAO',  # Fix: frontend precisa saber que é prova de competição
         'subject_id': c.subject_id,
         'level': c.level,
         'scope': c.scope,
@@ -279,6 +280,7 @@ def _competition_to_dict(c, subject_name_override=None):
         'subject_name': subject_name,
     }
     return d
+
 
 
 def _parse_dt(val):
@@ -1366,36 +1368,60 @@ def update_competition(competition_id):
             return jsonify({"error": MSG_TENANT_REQUIRED}), 400
         try:
             old_test_id = c.test_id
-            if old_test_id:
-                TestQuestion.query.filter_by(test_id=old_test_id).delete()
-                Test.query.filter_by(id=old_test_id).delete()
             _ctx = get_current_tenant_context()
             _tenant = (_ctx.schema if (_ctx and getattr(_ctx, "has_tenant_context", False)) else None) or None
-            try:
-                test_id = CompetitionService._create_test_with_random_questions(c)
-            except ValidationError as e:
-                err_lower = str(e).lower()
-                if 'insuficientes' not in err_lower and 'questões' not in err_lower:
-                    raise
-                current_sch = db.session.execute(text("SELECT current_schema()")).scalar() or "public"
-                other_sch = ('public' if current_sch != 'public' else (_tenant if _tenant and _tenant != 'public' else None))
-                if other_sch:
-                    set_search_path(other_sch)
-                    test_id = CompetitionService._create_test_with_random_questions(c)
-                else:
-                    raise
             comp_schema = get_competition_schema(competition_id, tenant_schema=_tenant)
-            db.session.commit()
+
+            # Deletar Test/TestQuestion existentes no schema correto da competição
+            if old_test_id:
+                if comp_schema:
+                    set_search_path(comp_schema)
+                TestQuestion.query.filter_by(test_id=old_test_id).delete()
+                Test.query.filter_by(id=old_test_id).delete()
+
+            # FIX MULTI-TENANT BUG #1 (update_competition):
+            # Selecionar questões no tenant/public, criar Test SEMPRE no comp_schema
             if comp_schema == 'public':
+                # Selecionar questões no tenant (que tem o banco)
+                rules = c.question_rules or {}
+                if _tenant and _tenant != 'public':
+                    set_search_path(_tenant)
+                selected_questions = None
+                try:
+                    from app.competitions.services import QuestionSelectionService
+                    selected_questions = QuestionSelectionService.select_questions(
+                        subject_id=c.subject_id,
+                        level=c.level,
+                        rules=rules,
+                    )
+                except Exception:
+                    # Tentar em public se falhar no tenant
+                    set_search_path('public')
+                    from app.competitions.services import QuestionSelectionService
+                    selected_questions = QuestionSelectionService.select_questions(
+                        subject_id=c.subject_id,
+                        level=c.level,
+                        rules=rules,
+                    )
+                # Criar Test e TestQuestion no schema da competição (public)
                 set_search_path('public')
-                comp = Competition.query.filter_by(id=competition_id).first_or_404()
-                comp.test_id = test_id
-                db.session.commit()
+                test_id = CompetitionService._create_test_with_random_questions(c, selected_questions=selected_questions)
             else:
-                set_search_path(_tenant)
-                comp = Competition.query.filter_by(id=competition_id).first_or_404()
-                comp.test_id = test_id
-                db.session.commit()
+                # comp_schema é do tenant: criar Test diretamente no tenant
+                set_search_path(comp_schema)
+                try:
+                    test_id = CompetitionService._create_test_with_random_questions(c)
+                except ValidationError as e:
+                    err_lower = str(e).lower()
+                    if 'insuficientes' not in err_lower and 'questões' not in err_lower:
+                        raise
+                    set_search_path('public')
+                    test_id = CompetitionService._create_test_with_random_questions(c)
+            db.session.commit()
+            set_search_path(comp_schema)
+            comp = Competition.query.filter_by(id=competition_id).first_or_404()
+            comp.test_id = test_id
+            db.session.commit()
         except ValidationError as e:
             return jsonify({"error": str(e)}), 400
     else:

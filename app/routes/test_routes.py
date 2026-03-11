@@ -14,7 +14,7 @@ from app.models.teacher import Teacher
 from app import db
 from app.decorators.role_required import get_current_tenant_id
 from app.decorators import requires_city_context
-from app.utils.tenant_middleware import set_search_path, get_current_tenant_context
+from app.utils.tenant_middleware import set_search_path, get_current_tenant_context, city_id_to_schema_name
 from app.utils.uuid_helpers import ensure_uuid, ensure_uuid_list
 from flask_jwt_extended import jwt_required
 from app.decorators.role_required import role_required, get_current_user_from_token
@@ -359,6 +359,7 @@ def criar_avaliacao():
 @bp.route('/', methods=['GET'])
 @jwt_required()
 @role_required("admin", "professor", "coordenador", "diretor", "tecadm")
+@requires_city_context
 def listar_avaliacoes():
     try:
         user = get_current_user_from_token()
@@ -378,14 +379,12 @@ def listar_avaliacoes():
             # Para contagem, não carregar relacionamentos
             query = Test.query
         else:
-            # Para dados completos, carregar apenas relacionamentos essenciais
-            # Não carregar class_tests aqui para evitar problemas de transação
+            # Para dados completos, carregar relacionamentos essenciais + test_questions (só para contagem em format_test_response)
             query = Test.query.options(
                 joinedload(Test.creator),
                 joinedload(Test.subject_rel),
-                joinedload(Test.grade)
-                # Remover subqueryload de questions para melhor performance
-                # Não carregar class_tests aqui - será carregado sob demanda em format_test_response
+                joinedload(Test.grade),
+                subqueryload(Test.test_questions)
             )
 
         # Filtrar por município se for tecadm
@@ -887,22 +886,45 @@ def obter_avaliacao(test_id):
             return jsonify({"error": "Test not found"}), 404
 
         from app.models.testQuestion import TestQuestion
-        test_questions_list = TestQuestion.query.filter_by(test_id=test.id).order_by(TestQuestion.order).all()
-
-        # Se não achou questões e estamos em tenant, prova pode estar em public
-        if not test_questions_list and current_search_path and current_search_path != "public":
-            db.session.execute(text("SET search_path TO public"))
-            test_questions_list = TestQuestion.query.filter_by(test_id=test.id).order_by(TestQuestion.order).all()
-            if test_questions_list:
-                current_search_path = "public"
-
-        db.session.execute(text("SET search_path TO public"))
-
         from app.models.question import Question
         from sqlalchemy.orm import joinedload as jl
 
-        question_ids = [tq.question_id for tq in test_questions_list]
-        if question_ids:
+        test_questions_list = []
+        try:
+            test_questions_list = TestQuestion.query.filter_by(test_id=test.id).order_by(TestQuestion.order).all()
+        except Exception:
+            pass
+        if not test_questions_list and current_search_path and current_search_path != "public":
+            try:
+                db.session.execute(text("SET search_path TO public"))
+                test_questions_list = TestQuestion.query.filter_by(test_id=test.id).order_by(TestQuestion.order).all()
+                if test_questions_list:
+                    current_search_path = "public"
+            except Exception:
+                pass
+
+        # Se não há test_questions (ex.: prova de competição), usar question_rules.selected_question_ids
+        if not test_questions_list and getattr(test, "question_rules", None) and isinstance(test.question_rules, dict):
+            question_ids = list(test.question_rules.get("selected_question_ids") or [])
+        else:
+            question_ids = [tq.question_id for tq in test_questions_list]
+
+        # Carregar Question: competição (test em public) tem questões no tenant; senão usar schema atual
+        schema_for_questions = search_path_result[0]
+        if question_ids and current_search_path == "public" and schema_for_questions == "public":
+            user = get_current_user_from_token()
+            if user:
+                user_obj = User.query.get(user.get("id") or user.get("user_id"))
+                if user_obj and getattr(user_obj, "city_id", None):
+                    schema_for_questions = city_id_to_schema_name(str(user_obj.city_id))
+                else:
+                    ctx = get_current_tenant_context()
+                    if ctx and getattr(ctx, "has_tenant_context", False) and ctx.schema:
+                        schema_for_questions = ctx.schema
+        if not question_ids:
+            ordered_questions = []
+        else:
+            db.session.execute(text(f"SET search_path TO {schema_for_questions}"))
             questions_loaded = Question.query.filter(Question.id.in_(question_ids)).options(
                 jl(Question.subject),
                 jl(Question.grade),
@@ -910,14 +932,13 @@ def obter_avaliacao(test_id):
                 jl(Question.creator),
                 jl(Question.last_modifier)
             ).all()
-        else:
-            questions_loaded = []
+            questions_dict = {str(q.id): q for q in questions_loaded}
+            if test_questions_list:
+                ordered_questions = [questions_dict[str(tq.question_id)] for tq in test_questions_list if str(tq.question_id) in questions_dict]
+            else:
+                ordered_questions = [questions_dict[str(qid)] for qid in question_ids if str(qid) in questions_dict]
 
         db.session.execute(text(f"SET search_path TO {search_path_result[0]}"))
-
-        # Ordenar questões na mesma ordem de test_questions para evitar chamar test.questions (2 queries)
-        questions_dict = {q.id: q for q in questions_loaded}
-        ordered_questions = [questions_dict[tq.question_id] for tq in test_questions_list if tq.question_id in questions_dict]
 
         return jsonify(format_test_response(test, questions=ordered_questions)), 200
 

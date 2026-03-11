@@ -116,34 +116,61 @@ class CompetitionService:
             db.session.flush()
 
             if competition.question_mode == 'auto_random':
-                # A tabela test existe no tenant ou em public. Criar Test no schema que tiver questões.
+                # FIX MULTI-TENANT BUG #1:
+                # Separar busca de questões (tenant schema) da criação de Test/TestQuestion (target_schema).
+                # Antes: o código trocava para tenant_schema antes de _create_test_with_random_questions,
+                # fazendo o Test ser criado no tenant mesmo quando competition está em public.
+                # Agora: selecionamos questões no tenant e criamos Test/TestQuestion no target_schema.
                 test_id = None
+                selected_questions = None
+
                 if target_schema == 'public':
                     if not tenant_schema or tenant_schema == 'public':
                         raise ValidationError(
                             "Para criar competição com questões automáticas é necessário informar o município (header X-City-ID ou contexto de cidade)."
                         )
+                    # Etapa 1: selecionar questões no schema que tiver o banco (tenant ou public)
+                    rules = competition.question_rules or {}
                     set_search_path(tenant_schema)
-                try:
-                    test_id = CompetitionService._create_test_with_random_questions(competition)
-                except ValidationError as e:
-                    # Se não tem questões suficientes no schema atual, tentar o outro (public ↔ tenant)
-                    err_lower = str(e).lower()
-                    if 'insuficientes' not in err_lower and 'questões' not in err_lower:
-                        raise
-                    current_sch = db.session.execute(text("SELECT current_schema()")).scalar() or "public"
-                    other_schema = (tenant_schema if current_sch == "public" and tenant_schema and tenant_schema != "public" else ("public" if current_sch != "public" else None))
-                    if other_schema:
-                        set_search_path(other_schema)
+                    try:
+                        selected_questions = QuestionSelectionService.select_questions(
+                            subject_id=competition.subject_id,
+                            level=competition.level,
+                            rules=rules,
+                        )
+                    except ValidationError:
+                        # Sem questões suficientes no tenant, tentar em public
+                        set_search_path('public')
+                        selected_questions = QuestionSelectionService.select_questions(
+                            subject_id=competition.subject_id,
+                            level=competition.level,
+                            rules=rules,
+                        )
+                    # Etapa 2: criar Test e TestQuestion sempre no target_schema (public)
+                    set_search_path(target_schema)
+                    test_id = CompetitionService._create_test_with_random_questions(
+                        competition, selected_questions=selected_questions
+                    )
+                else:
+                    # target_schema é o próprio tenant: criar Test no tenant normalmente
+                    try:
+                        test_id = CompetitionService._create_test_with_random_questions(competition)
+                    except ValidationError as e:
+                        # Sem questões no tenant, tentar em public
+                        err_lower = str(e).lower()
+                        if 'insuficientes' not in err_lower and 'questões' not in err_lower:
+                            raise
+                        set_search_path('public')
                         try:
                             test_id = CompetitionService._create_test_with_random_questions(competition)
                         except ValidationError:
                             raise e
-                # Persistir Test no schema onde foi criado e voltar ao schema da competição
-                current_after = db.session.execute(text("SELECT current_schema()")).scalar() or "public"
-                if current_after != target_schema:
-                    db.session.commit()
-                    set_search_path(target_schema)
+                    # Garantir que voltamos ao target_schema após eventuais trocas
+                    current_after = db.session.execute(text("SELECT current_schema()")).scalar() or "public"
+                    if current_after != target_schema:
+                        db.session.commit()
+                        set_search_path(target_schema)
+
                 competition.test_id = test_id
             competition_id = competition.id  # guardar antes do commit (objeto pode ficar expirado após commit)
             db.session.commit()
@@ -183,16 +210,14 @@ class CompetitionService:
         subject = Subject.query.get(competition.subject_id)
         subject_name = subject.name if subject else None
         
-        # Criar subjects_info
-        subjects_info = [{
-            "subject_id": competition.subject_id,
-            "name": subject_name,
-            "question_count": len(selected_questions)
-        }]
+        # Criar subjects_info: apenas id(s) do subject (competição = um subject)
+        subjects_info = [competition.subject_id]
         
         # Buscar course (EducationStage) a partir do level
         course_id = _get_course_from_level(competition.level)
         
+        # Test de competição: grade_id e scope (municipalities/schools/classes) podem ser null para scope=individual.
+        # Para scope municipio/escola/turma, o front deve enviar scope_filter com municipality_ids/school_ids/class_ids (validado em validate_scope_and_filter).
         test = Test(
             title=f"Prova - {competition.name}",
             description=competition.description,
@@ -222,8 +247,8 @@ class CompetitionService:
         )
         test.max_score = max_score
 
-        # Usar apenas a tabela question na primeira aleatorização; não depender de test_questions.
-        # Se a tabela test_questions existir, preenchemos; senão guardamos os IDs em question_rules.
+        # Questões do teste: se test_questions existir no schema, preenchemos; senão usamos question_rules.
+        # Fallback: quando test_questions não existir, submit/ranking usam question_rules['selected_question_ids'] + tabela questions.
         _table_exists = False
         try:
             current_schema = db.session.execute(text("SELECT current_schema()")).scalar() or "public"
@@ -283,11 +308,7 @@ class CompetitionService:
             subject = Subject.query.get(competition.subject_id)
             subject_name = subject.name if subject else None
             total_questions = TestQuestion.query.filter_by(test_id=test.id).count()
-            test.subjects_info = [{
-                "subject_id": competition.subject_id,
-                "name": subject_name,
-                "question_count": total_questions
-            }]
+            test.subjects_info = [competition.subject_id]
         else:
             # A tabela test existe apenas no schema do tenant. Se a competição está em public, usar tenant_schema.
             schema_for_test = competition_schema
@@ -313,11 +334,7 @@ class CompetitionService:
             subject_name = subject.name if subject else None
             
             # Criar subjects_info
-            subjects_info = [{
-                "subject_id": competition.subject_id,
-                "name": subject_name,
-                "question_count": len(question_ids)
-            }]
+            subjects_info = [competition.subject_id]
             
             # Buscar course (EducationStage) a partir do level
             course_id = _get_course_from_level(competition.level)
@@ -524,11 +541,7 @@ class CompetitionService:
             if test:
                 test.max_score = _calculate_test_max_score(test_id)
                 subj = Subject.query.get(competition.subject_id)
-                test.subjects_info = [{
-                    "subject_id": competition.subject_id,
-                    "name": subj.name if subj else None,
-                    "question_count": len(selected_ids),
-                }]
+                test.subjects_info = [competition.subject_id]
             db.session.commit()
             return {"test_id": test_id, "num_questions": len(selected_ids)}
         except Exception as e:
@@ -1259,7 +1272,11 @@ def _get_course_from_level(level: int) -> str:
 
 
 def _extract_scope_arrays(competition: Competition) -> dict:
-    """Extrai arrays de IDs de municipalities, schools, classes do scope_filter."""
+    """
+    Extrai arrays de IDs de municipalities, schools, classes do scope_filter.
+    Para scope=individual retorna None em todos; para municipio/escola/turma usa
+    scope_filter (municipality_ids, school_ids, class_ids) já validado em validate_scope_and_filter.
+    """
     scope_filter = competition.scope_filter or {}
     result = {
         'municipalities': None,

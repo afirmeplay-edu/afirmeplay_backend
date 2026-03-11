@@ -13,7 +13,8 @@ from typing import Dict, Any, List
 from celery import Task
 
 from app.report_analysis.celery_app import celery_app
-from app.services.progress_store import update_job, get_job
+from app.services.progress_store import get_job
+from app.services.answer_sheet_job_store import update_answer_sheet_job
 from app import db
 
 logger = logging.getLogger(__name__)
@@ -408,10 +409,10 @@ def generate_answer_sheets_batch_async(
                     logger.error(f"[CELERY-BATCH] ❌ Erro ao gerar PDF para turma {class_obj.id}: {str(e)}", exc_info=True)
                     continue
                 finally:
-                    # Progresso progressivo: atualizar job a cada turma processada
+                    # Progresso progressivo: atualizar job (DB) a cada turma processada
                     if batch_id and len(classes) > 0:
                         pct = min(100, int(round((idx / len(classes)) * 100)))
-                        update_job(batch_id, {'progress_current': idx, 'progress_percentage': pct})
+                        update_answer_sheet_job(batch_id, {'progress_current': idx, 'progress_percentage': pct})
         else:
             # Fluxo antigo: 1 gabarito por turma
             for idx, gabarito in enumerate(gabaritos, 1):
@@ -474,10 +475,10 @@ def generate_answer_sheets_batch_async(
                     logger.error(f"[CELERY-BATCH] ❌ Erro ao gerar PDF para gabarito {gabarito.id}: {str(e)}", exc_info=True)
                     continue
                 finally:
-                    # Progresso progressivo: atualizar job a cada turma processada
+                    # Progresso progressivo: atualizar job (DB) a cada turma processada
                     if batch_id and len(gabaritos) > 0:
                         pct = min(100, int(round((idx / len(gabaritos)) * 100)))
-                        update_job(batch_id, {'progress_current': idx, 'progress_percentage': pct})
+                        update_answer_sheet_job(batch_id, {'progress_current': idx, 'progress_percentage': pct})
         
         if not generated_pdfs:
             raise ValueError("Nenhum PDF foi gerado")
@@ -587,25 +588,36 @@ def generate_answer_sheets_batch_async(
                             _grade_id = first_class.grade_id
                             _grade_name = (first_class.grade.name or '') if first_class.grade else generated_pdfs[0].get('grade_name', '')
                         _class_id = first_class.id
+                updated = 0
                 for gabarito_id in gabarito_ids:
-                    gabarito = AnswerSheetGabarito.query.get(gabarito_id)
-                    if gabarito:
-                        gabarito.minio_url = minio_url
-                        gabarito.minio_object_name = minio_object_name
-                        gabarito.minio_bucket = minio_bucket
-                        gabarito.zip_generated_at = datetime.utcnow()
-                        gabarito.scope_type = _scope
-                        gabarito.municipality = _municipality
-                        gabarito.state = _state
-                        gabarito.school_id = _school_id
-                        gabarito.school_name = _school_name
-                        gabarito.grade_id = _grade_id
-                        gabarito.grade_name = _grade_name
-                        gabarito.class_id = _class_id
-                        gabarito.last_generation_classes_count = len(generated_pdfs)
-                        gabarito.last_generation_students_count = total_students
-                db.session.commit()
-                logger.info(f"[CELERY-BATCH] ✅ {len(gabarito_ids)} gabarito(s) atualizado(s) com URL do MinIO")
+                    gabarito = db.session.query(AnswerSheetGabarito).filter_by(id=gabarito_id).first()
+                    if not gabarito:
+                        continue
+                    gabarito.minio_url = minio_url
+                    gabarito.minio_object_name = minio_object_name
+                    gabarito.minio_bucket = minio_bucket
+                    gabarito.zip_generated_at = datetime.utcnow()
+                    gabarito.scope_type = _scope
+                    gabarito.municipality = _municipality
+                    gabarito.state = _state
+                    gabarito.school_id = _school_id
+                    gabarito.school_name = _school_name
+                    gabarito.grade_id = _grade_id
+                    gabarito.grade_name = _grade_name
+                    gabarito.class_id = _class_id
+                    gabarito.last_generation_classes_count = len(generated_pdfs)
+                    gabarito.last_generation_students_count = total_students
+                    updated += 1
+                try:
+                    db.session.commit()
+                    logger.info(f"[CELERY-BATCH] ✅ {updated} gabarito(s) atualizado(s) com URL do MinIO")
+                except Exception as e:
+                    from sqlalchemy.orm.exc import StaleDataError
+                    db.session.rollback()
+                    if isinstance(e, StaleDataError):
+                        logger.warning("[CELERY-BATCH] ⚠️ Gabarito(s) foi(ram) excluído(s) durante a geração; atualização de URL ignorada.")
+                    else:
+                        logger.error(f"[CELERY-BATCH] ⚠️ Erro ao atualizar gabarito(s) (não crítico): {e}", exc_info=True)
             else:
                 logger.warning(f"[CELERY-BATCH] ⚠️ Upload para MinIO falhou, mas PDFs foram gerados com sucesso")
                 

@@ -90,7 +90,10 @@ class AnswerSheetGabarito(db.Model):
     # ✅ Campo para agrupar gabaritos gerados em batch (múltiplas turmas)
     # =========================================================================
     batch_id = db.Column(db.String(36), nullable=True)  # UUID comum para gabaritos do mesmo batch
-    
+
+    # Último job de geração (preenchido apenas quando a rota generate é chamada; null em create-gabaritos)
+    last_generation_job_id = db.Column(db.String(36), nullable=True)
+
     # Relacionamentos
     test = db.relationship('Test', foreign_keys=[test_id])
     class_ = db.relationship('Class', foreign_keys=[class_id])

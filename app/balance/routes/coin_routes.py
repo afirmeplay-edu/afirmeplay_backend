@@ -6,6 +6,7 @@ from flask import Blueprint, request, jsonify
 from flask_jwt_extended import jwt_required, get_jwt_identity
 from app import db
 from app.permissions import role_required, get_current_user_from_token
+from app.utils.tenant_middleware import ensure_tenant_schema_for_user
 from app.balance.models import CoinTransaction
 from app.balance.services.coin_service import CoinService, InsufficientBalanceError
 from app.models.student import Student
@@ -48,6 +49,8 @@ def _resolve_student_id():
     if query_student_id and role in ('admin', 'coordenador', 'professor', 'tecadm', 'diretor'):
         target_student_id = query_student_id
     else:
+        if not ensure_tenant_schema_for_user(user_id):
+            return None, (jsonify({"erro": "Contexto do município não disponível. Acesse pelo subdomínio da cidade."}), 400)
         student = Student.query.filter_by(user_id=user_id).first()
         if not student:
             return None, (jsonify({"erro": "Estudante não encontrado para este usuário"}), 404)
@@ -106,6 +109,8 @@ def get_transaction(transaction_id):
         return jsonify({"erro": "Usuário não autenticado"}), 401
     role = user.get('role', '')
     if role not in ('admin', 'coordenador', 'professor', 'tecadm', 'diretor'):
+        if not ensure_tenant_schema_for_user(user_id):
+            return jsonify({"erro": "Contexto do município não disponível. Acesse pelo subdomínio da cidade."}), 400
         student = Student.query.filter_by(user_id=user_id).first()
         if not student or transaction.student_id != student.id:
             return jsonify({"erro": "Acesso negado a esta transação"}), 403

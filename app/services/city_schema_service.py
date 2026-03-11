@@ -342,7 +342,8 @@ CREATE TABLE IF NOT EXISTS "{schema}".answer_sheet_gabaritos (
     minio_object_name VARCHAR(200),
     minio_bucket VARCHAR(100),
     zip_generated_at TIMESTAMP,
-    batch_id VARCHAR(36)
+    batch_id VARCHAR(36),
+    last_generation_job_id VARCHAR(36)
 );
 COMMENT ON TABLE "{schema}".answer_sheet_gabaritos IS 'Gabaritos de cartões resposta';
 

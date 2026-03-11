@@ -7,6 +7,7 @@ from flask_jwt_extended import jwt_required, get_jwt_identity
 from app import db
 from app.decorators import requires_city_context
 from app.permissions import role_required, get_current_user_from_token
+from app.utils.tenant_middleware import ensure_tenant_schema_for_user
 from app.models import CoinTransaction
 from app.models.student import Student
 from app.services.coin_service import CoinService, InsufficientBalanceError
@@ -50,6 +51,8 @@ def _resolve_student_id():
     if query_student_id and role in ('admin', 'coordenador', 'professor', 'tecadm', 'diretor'):
         target_student_id = query_student_id
     else:
+        if not ensure_tenant_schema_for_user(user_id):
+            return None, (jsonify({"erro": "Contexto do município não disponível. Acesse pelo subdomínio da cidade."}), 400)
         student = Student.query.filter_by(user_id=user_id).first()
         if not student:
             return None, (jsonify({"erro": "Estudante não encontrado para este usuário"}), 404)
@@ -118,6 +121,8 @@ def get_transaction(transaction_id):
     if not transaction:
         return jsonify({"erro": "Transação não encontrada"}), 404
     user_id = get_jwt_identity()
+    if not ensure_tenant_schema_for_user(user_id):
+        return jsonify({"erro": "Contexto do município não disponível. Acesse pelo subdomínio da cidade."}), 400
     student = Student.query.filter_by(user_id=user_id).first()
     if not student:
         return jsonify({"erro": "Estudante não encontrado"}), 404

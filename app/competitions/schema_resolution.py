@@ -163,6 +163,13 @@ def get_competition_target_schema(scope, scope_filter, tenant_schema=None, tenan
     return 'public'
 
 
+def _safe_schema_name(schema_name):
+    """Escapa nome de schema para uso em SQL (evita quebra com aspas)."""
+    if not schema_name:
+        return ""
+    return (str(schema_name)).replace('"', '""')
+
+
 def get_competition_schema(competition_id, tenant_schema=None):
     """
     Localiza em qual schema a competição está (public ou city_xxx).
@@ -186,31 +193,34 @@ def get_competition_schema(competition_id, tenant_schema=None):
     except Exception:
         pass
 
-    # Buscar em public
-    try:
-        r = db.session.execute(
-            text("SELECT 1 FROM public.competitions WHERE id = :id"),
-            {"id": cid},
-        )
-        if r.fetchone():
-            return "public"
-    except Exception as e:
-        logger.debug("get_competition_schema: public lookup failed for %s: %s", cid[:8], e)
-
-
-    # Buscar no schema do tenant (se houver contexto de cidade no request)
-    if tenant_schema:
+    def _exists_in_schema(schema_name):
         try:
-            r = db.session.execute(
-                text('SELECT 1 FROM "{}".competitions WHERE id = :id'.format(tenant_schema)),
-                {"id": cid},
-            )
-            if r.fetchone():
-                return tenant_schema
+            if schema_name == "public":
+                r = db.session.execute(
+                    text("SELECT 1 FROM public.competitions WHERE id = :id"),
+                    {"id": cid},
+                )
+            else:
+                safe = _safe_schema_name(schema_name)
+                r = db.session.execute(
+                    text('SELECT 1 FROM "{}".competitions WHERE id = :id'.format(safe)),
+                    {"id": cid},
+                )
+            return r.fetchone() is not None
         except Exception as e:
-            logger.debug("get_competition_schema: tenant %s lookup failed: %s", tenant_schema, e)
+            logger.debug("get_competition_schema: lookup %s failed: %s", schema_name, e)
+            return False
 
-    # Fallback: buscar em todos os schemas city_* (admin sem X-City-ID ainda deve encontrar)
+    # 1) Buscar em public (competições com scope individual/global ficam aqui)
+    if _exists_in_schema("public"):
+        return "public"
+
+    # 2) Schema do tenant (request com X-City-ID)
+    if tenant_schema and tenant_schema != "public":
+        if _exists_in_schema(tenant_schema):
+            return tenant_schema
+
+    # 3) Todos os schemas city_* (admin sem cidade ainda deve encontrar)
     try:
         rp = db.session.execute(
             text("""
@@ -223,17 +233,27 @@ def get_competition_schema(competition_id, tenant_schema=None):
         )
         for row in rp.fetchall():
             schema = row[0]
-            try:
-                r = db.session.execute(
-                    text('SELECT 1 FROM "{}".competitions WHERE id = :id'.format(schema)),
-                    {"id": cid},
-                )
-                if r.fetchone():
-                    return schema
-            except Exception:
-                continue
+            if schema and _exists_in_schema(schema):
+                return schema
     except Exception as e:
         logger.debug("get_competition_schema: city_* fallback failed: %s", e)
 
-    logger.warning("get_competition_schema: competition %s not found in public nor in any city schema", cid[:8])
+    # 4) Fallback: information_schema (qualquer schema com tabela competitions)
+    try:
+        rp = db.session.execute(
+            text("""
+                SELECT table_schema FROM information_schema.tables
+                WHERE table_schema NOT LIKE 'pg_%' AND table_schema != 'information_schema'
+                AND table_name = 'competitions'
+                ORDER BY CASE WHEN table_schema = 'public' THEN 0 ELSE 1 END, table_schema
+            """)
+        )
+        for row in rp.fetchall():
+            schema = row[0]
+            if schema and _exists_in_schema(schema):
+                return schema
+    except Exception as e:
+        logger.debug("get_competition_schema: information_schema fallback failed: %s", e)
+
+    logger.warning("get_competition_schema: competition %s not found in public nor in any schema", cid[:8])
     return None

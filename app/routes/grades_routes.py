@@ -10,6 +10,8 @@ from app.utils.uuid_helpers import ensure_uuid, ensure_uuid_list
 from app import db
 from flask_jwt_extended import jwt_required
 from app.decorators.role_required import role_required, get_current_user_from_token
+from app.utils.tenant_middleware import ensure_tenant_schema_for_user, set_search_path, city_id_to_schema_name
+from app.models.user import User
 from sqlalchemy import cast, String
 import logging
 
@@ -76,6 +78,19 @@ def getGradesByEducationStage(education_stage_id):
         
         if not user:
             return jsonify({"error": "Usuário não encontrado"}), 404
+
+        # Class e School estão no schema do tenant (city_xxx); Grade está em public
+        user_id = user.get("id") or user.get("user_id")
+        if not user_id:
+            return jsonify({"error": "Usuário não identificado"}), 400
+        if not ensure_tenant_schema_for_user(user_id):
+            return jsonify({
+                "error": "Contexto do município não disponível. Informe o município (subdomínio ou header X-City-ID) para listar séries."
+            }), 400
+        # Forçar schema de novo imediatamente antes da query (evita path em public após outro middleware)
+        user_obj = User.query.get(user_id)
+        if user_obj and getattr(user_obj, "city_id", None):
+            set_search_path(city_id_to_schema_name(str(user_obj.city_id)))
         
         # Verifica se a etapa de ensino existe
         education_stage = EducationStage.query.get(education_stage_id)

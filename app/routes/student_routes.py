@@ -1123,9 +1123,23 @@ def get_current_student():
     Inclui: nome completo, escola, estado, município, turma, série e professores
     """
     try:
+        from app.utils.tenant_middleware import get_current_tenant_context, set_search_path, city_id_to_schema_name
+
         user = get_current_user_from_token()
         if not user:
             return jsonify({"error": "Usuário não encontrado"}), 404
+
+        # Garantir schema do tenant: Student está em city_xxx, não em public
+        tenant_ctx = get_current_tenant_context()
+        if not tenant_ctx or not getattr(tenant_ctx, "has_tenant_context", False) or tenant_ctx.schema == "public":
+            user_obj = User.query.get(user["id"])
+            if user_obj and getattr(user_obj, "city_id", None):
+                schema = city_id_to_schema_name(str(user_obj.city_id))
+                set_search_path(schema)
+            else:
+                return jsonify({
+                    "error": "Contexto do município não disponível. Acesse pelo subdomínio da cidade (ex: cidade.afirmeplay.com.br) ou verifique se o usuário está vinculado a um município."
+                }), 400
 
         # Buscar aluno pelo user_id com todas as relações
         student = db.session.query(

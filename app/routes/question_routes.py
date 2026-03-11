@@ -382,6 +382,46 @@ def list_questions():
         logging.error(f"Error listing questions: {str(e)}", exc_info=True)
         return jsonify({"error": "Error listing questions", "details": str(e)}), 500
 
+
+@bp.route('/batch', methods=['GET'])
+@jwt_required()
+@role_required("admin", "professor", "coordenador", "diretor", "tecadm")
+def get_questions_batch():
+    """
+    Retorna várias questões em uma única requisição.
+    Query: ids=uuid1,uuid2,uuid3 (máx. 100 IDs).
+    Evita ERR_EMPTY_RESPONSE ao carregar muitas questões em paralelo (ex.: detalhes de competição).
+    """
+    try:
+        ids_param = request.args.get('ids', '')
+        if not ids_param or not ids_param.strip():
+            return jsonify({"error": "Parâmetro ids é obrigatório (ex.: ?ids=uuid1,uuid2)"}), 400
+        raw_ids = [x.strip() for x in ids_param.split(',') if x.strip()]
+        if len(raw_ids) > 100:
+            return jsonify({"error": "Máximo de 100 questões por requisição"}), 400
+        if not raw_ids:
+            return jsonify([]), 200
+
+        questions = (
+            Question.query.options(
+                joinedload(Question.subject),
+                joinedload(Question.grade),
+                joinedload(Question.education_stage),
+                joinedload(Question.creator),
+                joinedload(Question.last_modifier),
+            )
+            .filter(Question.id.in_(raw_ids))
+            .all()
+        )
+        # Manter ordem dos IDs solicitados
+        by_id = {str(q.id): q for q in questions}
+        ordered = [format_question_response(by_id[qid]) for qid in raw_ids if qid in by_id]
+        return jsonify(ordered), 200
+    except Exception as e:
+        logging.error(f"Error in get_questions_batch: {str(e)}", exc_info=True)
+        return jsonify({"error": "Erro ao buscar questões em lote", "details": str(e)}), 500
+
+
 @bp.route('/<string:question_id>', methods=['GET'])
 @jwt_required()
 @role_required("admin", "professor", "coordenador", "diretor","tecadm")
@@ -401,7 +441,7 @@ def get_question(question_id):
         return jsonify(format_question_response(question)), 200
 
     except Exception as e:
-        logging.error(f"Error getting question: {str(e)}", exc_info=True)
+        logging.error(f"Error getting question {question_id}: {str(e)}", exc_info=True)
         return jsonify({"error": "Error getting question", "details": str(e)}), 500
 
 

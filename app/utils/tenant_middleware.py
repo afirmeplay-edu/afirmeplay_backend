@@ -360,6 +360,31 @@ def resolve_tenant_context():
     return context
 
 
+def ensure_tenant_schema_for_user(user_id):
+    """
+    Garante que o search_path está no schema do tenant (city_xxx) quando for
+    necessário consultar tabelas por-tenant (ex.: student). Use antes de
+    Student.query quando o path atual pode ser public (ex.: após get_competition_or_404).
+
+    Returns:
+        True se o schema foi definido ou já era tenant; False se não foi possível
+        (ex.: User sem city_id) - a rota deve retornar 400.
+    """
+    from flask import g
+    ctx = getattr(g, "tenant_context", None)
+    if ctx and getattr(ctx, "has_tenant_context", False):
+        schema = getattr(ctx, "schema", "public")
+        if schema and schema != "public":
+            set_search_path(schema)  # garantir path mesmo quando contexto já existe (path pode ter sido trocado)
+            return True
+    user_obj = User.query.get(user_id)
+    if user_obj and getattr(user_obj, "city_id", None):
+        schema = city_id_to_schema_name(str(user_obj.city_id))
+        set_search_path(schema)
+        return True
+    return False
+
+
 def set_search_path(schema):
     """
     Define o search_path do PostgreSQL para o request atual.
@@ -368,9 +393,10 @@ def set_search_path(schema):
         schema: String com o schema ou lista de schemas
         
     Note:
-        - O search_path é definido por sessão/conexão
-        - Deve ser chamado no início de cada request
-        - Compatível com pool de conexões do SQLAlchemy
+        - O search_path é definido por sessão/conexão e vale imediatamente.
+        - NÃO fazemos commit() aqui para que a mesma conexão (com o path setado)
+          seja usada nas próximas queries do mesmo request; commit() devolveria
+          a conexão ao pool e a próxima query poderia usar outra (com path em public).
         - Se a transação estiver abortada (erro anterior), faz rollback e tenta novamente.
         
     Examples:
@@ -388,15 +414,12 @@ def set_search_path(schema):
 
     try:
         db.session.execute(sql)
-        db.session.commit()
     except Exception as e:
-        # Transação pode estar abortada por um erro anterior; rollback e tentar de novo
         err_msg = str(e).lower()
         if "aborted" in err_msg or "infailedsqltransaction" in err_msg or "current transaction" in err_msg:
             try:
                 db.session.rollback()
                 db.session.execute(sql)
-                db.session.commit()
                 return
             except Exception as retry_e:
                 print(f"Erro ao definir search_path (após rollback): {retry_e}")

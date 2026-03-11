@@ -14,6 +14,7 @@ from app.models.teacher import Teacher
 from app import db
 from app.decorators.role_required import get_current_tenant_id
 from app.decorators import requires_city_context
+from app.utils.tenant_middleware import set_search_path, get_current_tenant_context
 from app.utils.uuid_helpers import ensure_uuid, ensure_uuid_list
 from flask_jwt_extended import jwt_required
 from app.decorators.role_required import role_required, get_current_user_from_token
@@ -869,11 +870,31 @@ def obter_avaliacao(test_id):
             joinedload(Test.grade)
         ).get(test_id)
 
+        # Prova de competição pode ter sido criada em public (fallback); tentar public se não achar no schema atual
+        if not test and current_search_path and current_search_path != "public":
+            db.session.execute(text("SET search_path TO public"))
+            test = Test.query.options(
+                joinedload(Test.creator),
+                joinedload(Test.subject_rel),
+                joinedload(Test.grade)
+            ).get(test_id)
+            if test:
+                current_search_path = "public"
+
         if not test:
+            if current_search_path != search_path_result[0]:
+                db.session.execute(text(f"SET search_path TO {search_path_result[0]}"))
             return jsonify({"error": "Test not found"}), 404
 
         from app.models.testQuestion import TestQuestion
         test_questions_list = TestQuestion.query.filter_by(test_id=test.id).order_by(TestQuestion.order).all()
+
+        # Se não achou questões e estamos em tenant, prova pode estar em public
+        if not test_questions_list and current_search_path and current_search_path != "public":
+            db.session.execute(text("SET search_path TO public"))
+            test_questions_list = TestQuestion.query.filter_by(test_id=test.id).order_by(TestQuestion.order).all()
+            if test_questions_list:
+                current_search_path = "public"
 
         db.session.execute(text("SET search_path TO public"))
 
@@ -892,7 +913,7 @@ def obter_avaliacao(test_id):
         else:
             questions_loaded = []
 
-        db.session.execute(text(f"SET search_path TO {current_search_path}"))
+        db.session.execute(text(f"SET search_path TO {search_path_result[0]}"))
 
         # Ordenar questões na mesma ordem de test_questions para evitar chamar test.questions (2 queries)
         questions_dict = {q.id: q for q in questions_loaded}
@@ -2708,37 +2729,111 @@ def start_test_session(test_id):
         if not student:
             return jsonify({"error": "Dados do aluno não encontrados"}), 404
         
-        # Verificar se o teste existe
+        # Verificar se o teste existe: schema atual, depois public, depois tenant (prova pode estar em qualquer um)
         test = Test.query.get(test_id)
+        test_schema = None
+        try:
+            current_schema = db.session.execute(text("SELECT current_schema()")).scalar() or "public"
+            if test:
+                test_schema = current_schema
+        except Exception:
+            current_schema = "public"
+        if not test:
+            try:
+                set_search_path("public")
+                test = Test.query.get(test_id)
+                if test:
+                    test_schema = "public"
+            except Exception:
+                pass
+        if not test:
+            ctx = get_current_tenant_context()
+            tenant_schema = (ctx.schema if (ctx and ctx.has_tenant_context) else None) or None
+            if tenant_schema and tenant_schema != current_schema and tenant_schema != "public":
+                try:
+                    set_search_path(tenant_schema)
+                    test = Test.query.get(test_id)
+                    if test:
+                        test_schema = tenant_schema
+                except Exception:
+                    pass
         if not test:
             return jsonify({"error": "Teste não encontrado"}), 404
+        if test_schema:
+            set_search_path(test_schema)
         
         # Verificar se o teste está aplicado: turma (ClassTest) e/ou olimpíada (StudentTestOlimpics)
-        # Ambos funcionam simultaneamente - não há exclusão mútua
-        class_test = ClassTest.query.filter_by(
-            class_id=student.class_id,
-            test_id=test_id
-        ).first()
+        # Em public essas tabelas podem não existir; consultar no tenant nesse caso
+        class_test = None
         olympics = None
+        try:
+            class_test = ClassTest.query.filter_by(
+                class_id=student.class_id,
+                test_id=test_id
+            ).first()
+        except (SQLAlchemyError, Exception) as e:
+            err_lower = str(e).lower()
+            if 'class_test' in err_lower and ('does not exist' in err_lower or 'undefinedtable' in err_lower):
+                if test_schema == "public":
+                    ctx = get_current_tenant_context()
+                    tenant_schema = (ctx.schema if (ctx and ctx.has_tenant_context) else None) or None
+                    if tenant_schema and tenant_schema != "public":
+                        try:
+                            set_search_path(tenant_schema)
+                            class_test = ClassTest.query.filter_by(
+                                class_id=student.class_id,
+                                test_id=test_id
+                            ).first()
+                        finally:
+                            set_search_path(test_schema or "public")
+            else:
+                logging.warning(f"ClassTest query failed: {e}")
         try:
             olympics = StudentTestOlimpics.query.filter_by(
                 student_id=student.id,
                 test_id=str(test_id)
             ).first()
         except (SQLAlchemyError, Exception) as e:
-            # Se a tabela não existir, continuar apenas com ClassTest
             error_str = str(e).lower()
             if 'student_test_olimpics' in error_str or 'does not exist' in error_str or 'undefinedtable' in error_str:
-                logging.warning(f"Tabela student_test_olimpics não encontrada, continuando apenas com ClassTest: {str(e)}")
-                olympics = None
+                if test_schema == "public":
+                    ctx = get_current_tenant_context()
+                    tenant_schema = (ctx.schema if (ctx and ctx.has_tenant_context) else None) or None
+                    if tenant_schema and tenant_schema != "public":
+                        try:
+                            set_search_path(tenant_schema)
+                            olympics = StudentTestOlimpics.query.filter_by(
+                                student_id=student.id,
+                                test_id=str(test_id)
+                            ).first()
+                        finally:
+                            set_search_path(test_schema or "public")
             else:
-                logging.warning(f"Erro ao buscar StudentTestOlimpics, continuando apenas com ClassTest: {str(e)}")
-                olympics = None
+                logging.warning(f"StudentTestOlimpics query failed: {e}")
 
         # Priorizar StudentTestOlimpics se ambos existirem (mais específico para o aluno)
         # Ambos funcionam simultaneamente - não há exclusão mútua
         app_record = olympics if olympics else class_test
-        if not app_record:
+        if not app_record and test_schema != "public":
+            return jsonify({"error": "Avaliação não está aplicada na sua classe"}), 404
+        # Prova de competição (test em public): pode não ter ClassTest/StudentTestOlimpics no tenant; permitir se já existir sessão
+        if not app_record and test_schema == "public":
+            existing_for_test = TestSession.query.filter_by(
+                student_id=student.id,
+                test_id=test_id,
+                status='em_andamento',
+            ).first()
+            if existing_for_test:
+                dur = getattr(test, 'duration', None)
+                dur = int(dur) if dur is not None else existing_for_test.time_limit_minutes
+                return jsonify({
+                    "message": "Sessão já iniciada",
+                    "session_id": existing_for_test.id,
+                    "started_at": existing_for_test.started_at.isoformat() if existing_for_test.started_at else None,
+                    "time_limit_minutes": existing_for_test.time_limit_minutes,
+                    "duration_minutes": dur,
+                    "duration": dur,
+                }), 200
             return jsonify({"error": "Avaliação não está aplicada na sua classe"}), 404
 
         # Se for prova de competição (StudentTestOlimpics) e já existir sessão em andamento,
@@ -2907,13 +3002,35 @@ def get_session_info(test_id):
         if not student:
             return jsonify({"error": "Dados do aluno não encontrados"}), 404
         
-        # Buscar sessão ativa
+        # Buscar sessão ativa: schema atual, depois public, depois tenant (prova de competição pode estar em qualquer um)
         session = TestSession.query.filter_by(
             student_id=student.id,
             test_id=test_id,
             status='em_andamento'
         ).first()
-        
+        if not session:
+            try:
+                set_search_path("public")
+                session = TestSession.query.filter_by(
+                    student_id=student.id,
+                    test_id=test_id,
+                    status='em_andamento'
+                ).first()
+            except Exception:
+                pass
+        if not session:
+            ctx = get_current_tenant_context()
+            tenant_schema = (ctx.schema if (ctx and ctx.has_tenant_context) else None) or None
+            if tenant_schema and tenant_schema != "public":
+                try:
+                    set_search_path(tenant_schema)
+                    session = TestSession.query.filter_by(
+                        student_id=student.id,
+                        test_id=test_id,
+                        status='em_andamento'
+                    ).first()
+                except Exception:
+                    pass
         if not session:
             return jsonify({
                 "message": "Nenhuma sessão ativa encontrada",
@@ -2934,12 +3051,16 @@ def get_session_info(test_id):
         if session.started_at:
             # ✅ REGRA 4: Obter tempo atual no timezone da aplicação (se disponível)
             current_time = None
-            # Usar student já carregado (evita lazy load session.student)
-            from app.models.classTest import ClassTest
-            class_test = ClassTest.query.filter_by(
-                class_id=student.class_id,
-                test_id=session.test_id
-            ).first()
+            class_test = None
+            try:
+                from app.models.classTest import ClassTest
+                class_test = ClassTest.query.filter_by(
+                    class_id=student.class_id,
+                    test_id=session.test_id
+                ).first()
+            except Exception as e:
+                if 'class_test' not in str(e).lower() or ('does not exist' not in str(e).lower() and 'undefinedtable' not in str(e).lower()):
+                    logging.warning("ClassTest em get_session_info: %s", e)
             
             if class_test and class_test.timezone:
                 import pytz

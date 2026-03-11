@@ -8,11 +8,8 @@ class CompetitionResult(db.Model):
     __tablename__ = 'competition_results'
 
     id = db.Column(db.String, primary_key=True, default=lambda: str(uuid.uuid4()))
-    competition_id = db.Column(
-        db.String,
-        db.ForeignKey('competitions.id', ondelete='CASCADE'),
-        nullable=False,
-    )
+    # Sem FK: competição pode estar em public; results ficam no tenant (cross-schema).
+    competition_id = db.Column(db.String, nullable=False)
     student_id = db.Column(
         db.String,
         db.ForeignKey('student.id', ondelete='CASCADE'),
@@ -41,7 +38,12 @@ class CompetitionResult(db.Model):
         db.UniqueConstraint('competition_id', 'student_id', name='uq_competition_results_competition_student'),
     )
 
-    # Relacionamentos
-    competition = db.relationship('Competition', backref=db.backref('results', lazy='dynamic', passive_deletes=True))
+    # Relacionamentos (competition_id sem FK no banco; primaryjoin/foreign_keys para o ORM)
+    competition = db.relationship(
+        'Competition',
+        primaryjoin='CompetitionResult.competition_id == Competition.id',
+        foreign_keys=[competition_id],
+        backref=db.backref('results', lazy='dynamic', passive_deletes=True),
+    )
     student = db.relationship('Student', backref=db.backref('competition_results', lazy='dynamic', passive_deletes=True))
     test_session = db.relationship('TestSession', backref=db.backref('competition_results', lazy='dynamic', passive_deletes=True))

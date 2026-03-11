@@ -136,6 +136,15 @@ class QuestionSelectionService:
         query = QuestionSelectionService.build_query(subject_id, level, rules)
         available_questions: List[Question] = query.all()
 
+        # Fallback: outras disciplinas podem usar valores de dificuldade diferentes; tentar sem filtro de dificuldade
+        if len(available_questions) < num_questions and (rules.get("difficulty_filter") or rules.get("difficulty_level")):
+            rules_without_difficulty = {k: v for k, v in rules.items() if k not in ("difficulty_filter", "difficulty_level")}
+            query_fallback = QuestionSelectionService.build_query(subject_id, level, rules_without_difficulty)
+            fallback_questions = query_fallback.all()
+            if len(fallback_questions) >= num_questions:
+                available_questions = fallback_questions
+            del rules_without_difficulty, query_fallback, fallback_questions
+
         if len(available_questions) < num_questions:
             raise ValidationError(
                 f"Questões insuficientes para o nível e disciplina. "
@@ -146,8 +155,10 @@ class QuestionSelectionService:
         random_seed = rules.get("random_seed")
         rng = random.Random(random_seed) if random_seed is not None else random
 
-        # allow_repeated_questions = False => sample sem repetição (padrão)
-        allow_repeated = bool(rules.get("allow_repeated_questions", False))
+        # allow_repeated_questions = False => sample sem repetição (padrão). Aceita alias allow_repeat.
+        allow_repeated = bool(
+            rules.get("allow_repeated_questions", rules.get("allow_repeat", False))
+        )
         if allow_repeated:
             # Amostragem com reposição
             return [rng.choice(available_questions) for _ in range(num_questions)]

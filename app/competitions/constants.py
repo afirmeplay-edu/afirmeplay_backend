@@ -41,6 +41,22 @@ STAGE_NAMES_BY_LEVEL = {
     2: LEVEL_2_STAGE_NAMES,
 }
 
+# Rótulos de exibição do status da competição (evita "desconhecido" no front)
+COMPETITION_STATUS_DISPLAY = {
+    'rascunho': 'Rascunho',
+    'aberta': 'Aberta',
+    'em_andamento': 'Em andamento',
+    'encerrada': 'Finalizada',
+    'cancelada': 'Cancelada',
+}
+
+
+def get_competition_status_display(status):
+    """Retorna o rótulo de exibição do status (ex.: encerrada → Finalizada)."""
+    if not status:
+        return 'Desconhecido'
+    return COMPETITION_STATUS_DISPLAY.get((status or '').strip().lower(), status)
+
 
 def is_valid_level(level):
     """Retorna True se level for 1 ou 2."""

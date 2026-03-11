@@ -30,6 +30,7 @@ from .studentPasswordLog import StudentPasswordLog
 from .user_settings import UserSettings
 from .reportAggregate import ReportAggregate
 from .answerSheetGabarito import AnswerSheetGabarito
+from .answerSheetGenerationJob import AnswerSheetGenerationJob
 from .answerSheetResult import AnswerSheetResult
 
 from .calendar_event import CalendarEvent, CalendarVisibilityScope

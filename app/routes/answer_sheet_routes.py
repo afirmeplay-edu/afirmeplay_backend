@@ -17,8 +17,13 @@ from app.services.cartao_resposta.answer_sheet_generator import AnswerSheetGener
 from app.services.cartao_resposta.answer_sheet_correction_service import AnswerSheetCorrectionService
 from app.services.cartao_resposta.correction_new_grid import AnswerSheetCorrectionNewGrid
 from app.services.progress_store import (
-    create_job, update_job, update_item_processing, update_item_done,
+    update_item_processing, update_item_done,
     update_item_error, complete_job, get_job
+)
+from app.services.answer_sheet_job_store import (
+    create_answer_sheet_job,
+    get_answer_sheet_job,
+    update_answer_sheet_job,
 )
 from app.models.school import School
 from app.models.grades import Grade
@@ -562,14 +567,17 @@ def generate_answer_sheets():
                 class_ids=class_ids
             )
             task_id = celery_task.id
-            create_job(
+            create_answer_sheet_job(
                 job_id=job_id,
                 total=len(classes_to_generate),
                 gabarito_id=existing_gabarito_id,
                 user_id=str(user['id']),
-                task_ids=[task_id]
+                task_ids=[task_id],
+                city_id=city_id_scope,
+                scope_type=scope_type,
             )
-            update_job(job_id, {'scope_type': scope_type})
+            gabarito.last_generation_job_id = job_id
+            db.session.commit()
 
             total_students = 0
             for cls in classes_to_generate:
@@ -864,17 +872,18 @@ def generate_answer_sheets():
         
         task_ids = [task_id]
         
-        # ✅ 9. CRIAR JOB PARA RASTREAMENTO
-        job = create_job(
+        # ✅ 9. CRIAR JOB PARA RASTREAMENTO (persistido em public.answer_sheet_generation_jobs)
+        create_answer_sheet_job(
             job_id=job_id,
             total=len(classes_to_generate),
             gabarito_id=gabarito_id,
             user_id=str(user['id']),
-            task_ids=task_ids  # Lista com ID da task batch
+            task_ids=task_ids,
+            city_id=city_id,
+            scope_type=scope_type,
         )
-        
-        # ✅ Atualizar job com scope_type (job é rastreado apenas no progress_store; não há coluna job_id no gabarito)
-        update_job(job_id, {'scope_type': scope_type})
+        gabarito.last_generation_job_id = job_id
+        db.session.commit()
         
         # ⚠️ Contar total de alunos (pode mudar até task executar)
         print(f"\n=== DEBUG CONTAGEM INICIAL ===")
@@ -2853,12 +2862,11 @@ def get_job_status(job_id):
     try:
         from celery.result import AsyncResult
         from app.services.celery_tasks.answer_sheet_tasks import generate_answer_sheets_async
-        from app.services.progress_store import update_job
-        
+
         current_user_id = get_jwt_identity()
-        job = get_job(job_id)
+        job_from_db = get_answer_sheet_job(job_id)
+        job = job_from_db or get_job(job_id)
         
-        # Job é rastreado apenas no progress_store (não há coluna job_id no gabarito)
         if not job:
             return jsonify({"error": "Job não encontrado"}), 404
 
@@ -2992,7 +3000,11 @@ def get_job_status(job_id):
             from datetime import datetime
             updates['completed_at'] = datetime.utcnow().isoformat()
         
-        update_job(job_id, updates)
+        if job_from_db is not None:
+            update_answer_sheet_job(job_id, updates)
+        else:
+            from app.services.progress_store import update_job
+            update_job(job_id, updates)
         
         logging.info(f"📊 Job {job_id}: {completed}/{len(task_ids)} tasks, "
                     f"{classes_generated} turmas, {total_students_generated} alunos")
@@ -3017,7 +3029,7 @@ def download_job_zip(job_id):
     """
     try:
         current_user_id = get_jwt_identity()
-        job = get_job(job_id)
+        job = get_answer_sheet_job(job_id) or get_job(job_id)
         
         if not job:
             return jsonify({"error": "Job não encontrado"}), 404

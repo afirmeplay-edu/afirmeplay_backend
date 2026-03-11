@@ -3,7 +3,7 @@
 Rotas para geração e correção de cartões resposta
 """
 
-from flask import Blueprint, request, jsonify, send_file
+from flask import Blueprint, request, jsonify, send_file, redirect, url_for
 from flask_jwt_extended import jwt_required, get_jwt_identity
 from app.decorators.role_required import role_required, get_current_user_from_token
 from app.decorators import requires_city_context
@@ -1374,6 +1374,10 @@ def list_gabaritos():
                 "classes_count": final_classes_count,
                 "minio_url": gabarito.minio_url,
                 "can_download": bool(gabarito.minio_url or gabarito.minio_object_name),
+                "download_url": (
+                    request.url_root.rstrip("/") + url_for("answer_sheets.download_gabarito", gabarito_id=gabarito.id) + "?redirect=1"
+                    if gabarito.minio_object_name else None
+                ),
                 "created_at": gabarito.created_at.isoformat() if gabarito.created_at else None,
                 "created_by": str(gabarito.created_by) if gabarito.created_by else None,
                 "creator_name": creator_name,
@@ -1434,7 +1438,7 @@ def download_gabarito(gabarito_id):
                 "status": "not_generated"
             }), 400
         
-        # Gerar URL pré-assinada (válida por 1 hora)
+        # Gerar URL pré-assinada (válida por 1 hora) — host público: files.afirmeplay.com.br
         minio = MinIOService()
         
         try:
@@ -1443,6 +1447,10 @@ def download_gabarito(gabarito_id):
                 object_name=gabarito.minio_object_name,
                 expires=timedelta(hours=1)
             )
+            
+            # Se vier com ?redirect=1 (ex.: link da listagem), redirecionar para a URL pré-assinada
+            if request.args.get("redirect") == "1":
+                return redirect(presigned_url, code=302)
             
             # Buscar turma para informações adicionais
             class_obj = Class.query.get(gabarito.class_id) if gabarito.class_id else None
@@ -2586,9 +2594,10 @@ def _obter_gabaritos_por_municipio_cartao(municipio_id: str, user: dict, permiss
     if not conditions:
         return []
     q = q.filter(or_(*conditions))
-    if user.get('role') == 'professor':
+    # Admin (scope 'all') vê todos os gabaritos do município; demais usuários só os que criaram
+    if permissao.get('scope') != 'all':
         q = q.filter(AnswerSheetGabarito.created_by == str(user['id']))
-    elif permissao.get('scope') == 'escola' and user.get('role') in ['diretor', 'coordenador']:
+    if permissao.get('scope') == 'escola' and user.get('role') in ['diretor', 'coordenador']:
         from app.models.manager import Manager
         manager = Manager.query.filter_by(user_id=user['id']).first()
         if manager and manager.school_id:

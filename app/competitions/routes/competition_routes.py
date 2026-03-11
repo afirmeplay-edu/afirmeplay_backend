@@ -93,9 +93,9 @@ def _resolve_student_id():
     return sid, None
 
 
-def _competition_to_dict_with_enrolled(c, student_id):
+def _competition_to_dict_with_enrolled(c, student_id, comp_schema=None, tenant_schema=None):
     """Como _competition_to_dict mas adiciona is_enrolled e can_start_test (fluxo de aplicação implementado)."""
-    d = _competition_to_dict(c)
+    d = _competition_to_dict(c, comp_schema=comp_schema, tenant_schema=tenant_schema)
     is_enrolled = CompetitionService.is_student_enrolled(c.id, student_id) if student_id else False
     d["is_enrolled"] = is_enrolled
     # Frontend: true = pode chamar POST /competitions/:id/start para abrir a prova
@@ -108,8 +108,29 @@ def _competition_to_dict_with_enrolled(c, student_id):
     return d
 
 
-def _safe_enrolled_count(c):
-    """Retorna enrolled_count sem lançar (ex.: se student_test_olimpics não existir)."""
+def _safe_enrolled_count(c, tenant_schema=None, comp_schema=None):
+    """
+    Retorna enrolled_count sem lançar.
+    Quando competição está em public, enrollment/StudentTestOlimpics ficam no tenant.
+    Se comp_schema for passado, não chama get_competition_schema (evita rollback que invalida c).
+    """
+    ctx = get_current_tenant_context()
+    _tenant = (ctx.schema if (ctx and ctx.has_tenant_context) else None) or None
+    tenant_schema = tenant_schema or _tenant
+    if comp_schema is None:
+        comp_schema = get_competition_schema(c.id, tenant_schema=tenant_schema)
+    if comp_schema == 'public' and tenant_schema:
+        try:
+            set_search_path(tenant_schema)
+            count = CompetitionEnrollment.query.filter_by(
+                competition_id=c.id, status='inscrito'
+            ).count()
+            return count
+        except Exception as e:
+            logging.warning("enrolled_count (tenant) falhou para competition %s: %s", c.id, e)
+            return 0
+        finally:
+            set_search_path(comp_schema or 'public')
     try:
         return c.enrolled_count
     except Exception as e:
@@ -117,8 +138,11 @@ def _safe_enrolled_count(c):
         return 0
 
 
-def _safe_available_slots(c):
-    """Retorna available_slots sem lançar."""
+def _safe_available_slots(c, tenant_schema=None, comp_schema=None):
+    """Retorna available_slots sem lançar. Usa enrolled_count corrigido por schema quando competição em public."""
+    if c.max_participants is not None:
+        enrolled = _safe_enrolled_count(c, tenant_schema=tenant_schema, comp_schema=comp_schema)
+        return max(0, c.max_participants - enrolled)
     try:
         return c.available_slots
     except Exception as e:
@@ -228,8 +252,10 @@ def _get_subject_name_from_current_schema(subject_id):
         return None
 
 
-def _competition_to_dict(c, subject_name_override=None):
-    """Serializa Competition para dict. subject_name_override evita lazy load de c.subject no schema tenant."""
+def _competition_to_dict(c, subject_name_override=None, comp_schema=None, tenant_schema=None):
+    """Serializa Competition para dict. subject_name_override evita lazy load de c.subject no schema tenant.
+    comp_schema/tenant_schema opcionais: quando passados, _safe_enrolled_count não chama get_competition_schema
+    (evita rollback que invalida a instância c após criar/editar com escopo não-individual)."""
     # Buscar subject_name: public.subject, depois relação c.subject, depois subject do schema atual (tenant)
     subject_name = subject_name_override
     if subject_name is None and getattr(c, 'subject_id', None):
@@ -274,8 +300,8 @@ def _competition_to_dict(c, subject_name_override=None):
         'is_enrollment_open': c.is_enrollment_open,
         'is_application_open': c.is_application_open,
         'is_finished': c.is_finished,
-        'enrolled_count': _safe_enrolled_count(c),
-        'available_slots': _safe_available_slots(c),
+        'enrolled_count': _safe_enrolled_count(c, tenant_schema=tenant_schema, comp_schema=comp_schema),
+        'available_slots': _safe_available_slots(c, tenant_schema=tenant_schema, comp_schema=comp_schema),
         'selected_question_ids': _get_selected_question_ids(c.test_id, getattr(c, 'question_rules', None)),
         'subject_name': subject_name,
     }
@@ -455,7 +481,11 @@ def get_competition_details_for_student(competition_id):
     if err:
         return err[0], err[1]
     c = CompetitionService.get_competition_or_404(competition_id)
-    out = _competition_to_dict_with_enrolled(c, student_id)
+    cur_schema = (db.session.execute(text("SELECT current_schema()")).scalar() or "public")
+    cur_schema = (cur_schema.strip() if isinstance(cur_schema, str) else "public") or "public"
+    ctx = get_current_tenant_context()
+    tenant_schema = (ctx.schema if (ctx and ctx.has_tenant_context) else None) or None
+    out = _competition_to_dict_with_enrolled(c, student_id, comp_schema=cur_schema, tenant_schema=tenant_schema)
     return jsonify(out), 200
 
 
@@ -1156,7 +1186,7 @@ def get_competition(competition_id):
         user = get_current_user_from_token()
         if user:
             ensure_tenant_schema_for_user(user["id"])
-    return jsonify(_competition_to_dict(c)), 200
+    return jsonify(_competition_to_dict(c, comp_schema=schema, tenant_schema=tenant_schema)), 200
 
 
 @bp.route('/allowed-scopes', methods=['GET'])
@@ -1270,7 +1300,7 @@ def create_competition():
     set_search_path(schema)
     db.session.expire_all()
     competition = Competition.query.filter_by(id=competition_id).first_or_404()
-    return jsonify(_competition_to_dict(competition)), 201
+    return jsonify(_competition_to_dict(competition, comp_schema=schema, tenant_schema=tenant_schema)), 201
 
 
 @bp.route('/<competition_id>', methods=['PUT'])
@@ -1283,6 +1313,10 @@ def update_competition(competition_id):
     - Aberta ou em andamento: apenas datas (fim da inscrição, início da aplicação, fim da competição) e timezone.
     """
     c = CompetitionService.get_competition_or_404(competition_id)
+    # Guardar schema da competição: o loop abaixo pode chamar ensure_tenant_schema_for_user e trocar search_path;
+    # o flush (ex.: em get_current_user_from_token) deve rodar no schema da competição para não dar StaleDataError.
+    comp_schema_at_start = (db.session.execute(text("SELECT current_schema()")).scalar() or "public")
+    comp_schema_at_start = (comp_schema_at_start.strip() if isinstance(comp_schema_at_start, str) else "public") or "public"
     if c.status not in ('rascunho', 'aberta', 'em_andamento'):
         return jsonify({"error": "Só é possível editar competição em rascunho, aberta ou em andamento"}), 400
     data = request.get_json()
@@ -1361,6 +1395,9 @@ def update_competition(competition_id):
                         return jsonify({"error": str(e)}), 400
             setattr(c, key, val)
 
+    # Restaurar schema da competição antes de qualquer flush (evita StaleDataError ao editar scope para turma/estado/etc.)
+    set_search_path(comp_schema_at_start)
+
     # auto_random + question_rules: criar ou recriar prova (sorteio de questões) — apenas em rascunho
     if c.status == 'rascunho' and c.question_mode == 'auto_random' and c.question_rules:
         user = get_current_user_from_token()
@@ -1372,10 +1409,15 @@ def update_competition(competition_id):
             _tenant = (_ctx.schema if (_ctx and getattr(_ctx, "has_tenant_context", False)) else None) or None
             comp_schema = get_competition_schema(competition_id, tenant_schema=_tenant)
 
-            # Deletar Test/TestQuestion existentes no schema correto da competição
+            # Deletar Test/TestQuestion existentes no schema correto da competição.
+            # Primeiro zerar competition.test_id para não violar FK ao deletar o test.
             if old_test_id:
                 if comp_schema:
                     set_search_path(comp_schema)
+                comp_ref = Competition.query.filter_by(id=competition_id).first()
+                if comp_ref:
+                    comp_ref.test_id = None
+                    db.session.flush()
                 TestQuestion.query.filter_by(test_id=old_test_id).delete()
                 Test.query.filter_by(id=old_test_id).delete()
 
@@ -1435,7 +1477,7 @@ def update_competition(competition_id):
     set_search_path(schema)
     db.session.expire_all()
     c = Competition.query.filter_by(id=competition_id).first_or_404()
-    return jsonify(_competition_to_dict(c)), 200
+    return jsonify(_competition_to_dict(c, comp_schema=schema, tenant_schema=tenant_schema)), 200
 
 
 @bp.route('/<competition_id>', methods=['DELETE'])
@@ -1472,7 +1514,7 @@ def publish_competition(competition_id):
     set_search_path(schema)
     db.session.expire_all()  # forçar SELECT novo (evitar instância de outro schema)
     c = Competition.query.filter_by(id=competition_id).first_or_404()
-    return jsonify(_competition_to_dict(c)), 200
+    return jsonify(_competition_to_dict(c, comp_schema=schema, tenant_schema=tenant_schema)), 200
 
 
 @bp.route('/<competition_id>/cancel', methods=['POST'])
@@ -1493,7 +1535,7 @@ def cancel_competition(competition_id):
     set_search_path(schema)
     db.session.expire_all()
     c = Competition.query.filter_by(id=competition_id).first_or_404()
-    return jsonify(_competition_to_dict(c)), 200
+    return jsonify(_competition_to_dict(c, comp_schema=schema, tenant_schema=tenant_schema)), 200
 
 
 @bp.route('/<competition_id>/questions', methods=['POST'])
@@ -1507,4 +1549,8 @@ def add_questions(competition_id):
     CompetitionService.get_competition_or_404(competition_id)
     CompetitionService.add_questions_manually(competition_id, data['question_ids'])
     c = CompetitionService.get_competition_or_404(competition_id)
-    return jsonify(_competition_to_dict(c)), 200
+    cur_schema = (db.session.execute(text("SELECT current_schema()")).scalar() or "public")
+    cur_schema = (cur_schema.strip() if isinstance(cur_schema, str) else "public") or "public"
+    ctx = get_current_tenant_context()
+    tenant_schema = (ctx.schema if (ctx and ctx.has_tenant_context) else None) or None
+    return jsonify(_competition_to_dict(c, comp_schema=cur_schema, tenant_schema=tenant_schema)), 200

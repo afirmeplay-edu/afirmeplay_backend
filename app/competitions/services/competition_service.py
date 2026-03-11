@@ -897,7 +897,7 @@ class CompetitionService:
             except Exception:
                 pass
 
-        # Olympics (provas realizadas) no tenant
+        # Olympics (StudentTestOlimpics) ficam apenas no tenant; em public a tabela pode não existir
         if tenant_schema and tenant_schema != 'public':
             try:
                 set_search_path(tenant_schema)
@@ -906,26 +906,14 @@ class CompetitionService:
                 ).with_entities(StudentTestOlimpics.test_id).all()
                 test_ids = [t[0] for t in olympics if t[0]]
                 if test_ids:
+                    set_search_path('public')
                     comps = Competition.query.filter(
                         Competition.test_id.in_(test_ids)
                     ).with_entities(Competition.id).all()
                     competition_ids.update(c[0] for c in comps)
             except Exception:
                 pass
-        else:
-            try:
-                set_search_path('public')
-                olympics = StudentTestOlimpics.query.filter_by(
-                    student_id=student_id
-                ).with_entities(StudentTestOlimpics.test_id).all()
-                test_ids = [t[0] for t in olympics if t[0]]
-                if test_ids:
-                    comps = Competition.query.filter(
-                        Competition.test_id.in_(test_ids)
-                    ).with_entities(Competition.id).all()
-                    competition_ids.update(c[0] for c in comps)
-            except Exception:
-                pass
+        # Quando tenant_schema é None ou public, não consultar StudentTestOlimpics em public (tabela pode não existir)
 
         set_search_path(previous_schema)
 

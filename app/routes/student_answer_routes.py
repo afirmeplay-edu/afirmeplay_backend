@@ -1083,7 +1083,7 @@ def get_active_session(test_id):
                 'test_id': test_id,
                 'student_id': student.id,
                 'session_exists': False
-            }), 404
+            }), 200
         
         # Tempo limite = duração da prova (não a janela application/expiration)
         time_limit_minutes = _effective_time_limit_minutes(session)
@@ -1248,11 +1248,12 @@ def get_active_session_with_answers(test_id):
                     'started_at': last_session.started_at.isoformat() if last_session.started_at else None,
                     'submitted_at': last_session.submitted_at.isoformat() if last_session.submitted_at else None,
                 }), 200
+            # Sem sessão ativa nem última sessão: retornar 200 para o front não tratar como erro (ex.: antes de iniciar)
             return jsonify({
                 'message': 'Nenhuma sessão ativa encontrada para este teste',
                 'test_id': test_id,
                 'session_exists': False
-            }), 404
+            }), 200
 
         time_limit_minutes = _effective_time_limit_minutes(session)
         elapsed_seconds = _effective_elapsed_seconds(session)

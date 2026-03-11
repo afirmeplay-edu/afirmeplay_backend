@@ -940,7 +940,30 @@ def obter_avaliacao(test_id):
 
         db.session.execute(text(f"SET search_path TO {search_path_result[0]}"))
 
-        return jsonify(format_test_response(test, questions=ordered_questions)), 200
+        data = format_test_response(test, questions=ordered_questions)
+        # Aluno abrindo olimpíada: garantir type OLIMPIADA quando aplicado via StudentTestOlimpics
+        user = get_current_user_from_token()
+        if user and user.get('role') == 'aluno':
+            if not data.get('type') or (isinstance(data.get('type'), str) and data.get('type', '').strip().upper() != 'OLIMPIADA'):
+                from app.models.student import Student
+                student = Student.query.filter_by(user_id=user.get('id')).first()
+                if student:
+                    try:
+                        ctx = get_current_tenant_context()
+                        tenant_schema = (ctx.schema if (ctx and getattr(ctx, 'has_tenant_context', False)) else None) or None
+                        if tenant_schema and current_search_path != tenant_schema:
+                            db.session.execute(text(f"SET search_path TO {tenant_schema}"))
+                        has_olympics = StudentTestOlimpics.query.filter_by(
+                            test_id=str(test_id),
+                            student_id=str(student.id)
+                        ).first() is not None
+                        db.session.execute(text(f"SET search_path TO {search_path_result[0]}"))
+                        if has_olympics:
+                            data['type'] = 'OLIMPIADA'
+                    except Exception:
+                        db.session.execute(text(f"SET search_path TO {search_path_result[0]}"))
+
+        return jsonify(data), 200
 
     except Exception as e:
         logging.error(f"Error getting test: {str(e)}", exc_info=True)
@@ -1645,13 +1668,22 @@ def aplicar_avaliacao_classe(test_id):
 @jwt_required()
 @role_required("admin", "professor", "coordenador", "diretor", "tecadm")
 def aplicar_avaliacao_olympics(test_id):
-    """Aplica uma avaliação a um aluno específico (olimpíadas)."""
+    """Aplica uma avaliação a um aluno específico (olimpíadas). StudentTestOlimpics fica no tenant."""
     try:
+        ctx = get_current_tenant_context()
+        tenant_schema = (ctx.schema if (ctx and getattr(ctx, 'has_tenant_context', False)) else None) or None
+        if tenant_schema:
+            set_search_path(tenant_schema)
         data = request.get_json()
         if not data:
             return jsonify({"error": "No data provided"}), 400
 
         test = Test.query.get(test_id)
+        if not test and tenant_schema and tenant_schema != 'public':
+            set_search_path('public')
+            test = Test.query.get(test_id)
+            if tenant_schema:
+                set_search_path(tenant_schema)
         if not test:
             return jsonify({"error": "Test not found"}), 404
 
@@ -1757,8 +1789,12 @@ def aplicar_avaliacao_olympics(test_id):
 @jwt_required()
 @role_required("admin", "professor", "coordenador", "diretor", "tecadm")
 def remover_aplicacao_olympics(test_id, student_id):
-    """Remove a aplicação olímpica de uma avaliação para um aluno específico."""
+    """Remove a aplicação olímpica de uma avaliação para um aluno específico. StudentTestOlimpics no tenant."""
     try:
+        ctx = get_current_tenant_context()
+        tenant_schema = (ctx.schema if (ctx and getattr(ctx, 'has_tenant_context', False)) else None) or None
+        if tenant_schema:
+            set_search_path(tenant_schema)
         olympics = StudentTestOlimpics.query.filter_by(
             test_id=str(test_id),
             student_id=str(student_id).strip()
@@ -1780,23 +1816,50 @@ def remover_aplicacao_olympics(test_id, student_id):
 
 @bp.route('/<string:test_id>/applied-students', methods=['GET'])
 @jwt_required()
-@role_required("admin", "professor", "coordenador", "diretor", "tecadm")
+@role_required("admin", "professor", "coordenador", "diretor", "tecadm", "aluno")
 def listar_alunos_aplicados_individualmente(test_id):
     """
     Retorna os IDs dos alunos que tiveram a olimpíada aplicada individualmente
     (via apply-olympics / student_test_olimpics) para o test_id informado.
 
-    Resposta aceita pelo front:
-    - Objeto com array students: { "students": ["uuid-1", "uuid-2"] }
+    - Admin/professor/coordenador/diretor/tecadm: lista todos os alunos aplicados.
+    - Aluno: retorna apenas o próprio aluno na lista se tiver aplicação, senão [].
+
+    Resposta: { "students": ["uuid-1", "uuid-2"] }
     """
     try:
+        user = get_current_user_from_token()
+        if not user:
+            return jsonify({"error": "Usuário não autenticado"}), 401
+
+        ctx = get_current_tenant_context()
+        tenant_schema = (ctx.schema if (ctx and getattr(ctx, 'has_tenant_context', False)) else None) or None
+        if tenant_schema:
+            set_search_path(tenant_schema)
         test = Test.query.get(test_id)
+        if not test and tenant_schema and tenant_schema != 'public':
+            set_search_path('public')
+            test = Test.query.get(test_id)
+            if tenant_schema:
+                set_search_path(tenant_schema)
         if not test:
             return jsonify({"error": "Avaliação não encontrada"}), 404
 
+        # Aluno: retornar apenas se o próprio aluno está aplicado (não listar outros)
+        if user.get('role') == 'aluno':
+            from app.models.student import Student
+            student = Student.query.filter_by(user_id=user.get('id')).first()
+            if not student:
+                return jsonify({"students": []}), 200
+            record = StudentTestOlimpics.query.filter_by(
+                test_id=str(test_id),
+                student_id=str(student.id)
+            ).first()
+            student_ids = [str(student.id)] if record else []
+            return jsonify({"students": student_ids}), 200
+
         records = StudentTestOlimpics.query.filter_by(test_id=str(test_id)).all()
         student_ids = [r.student_id for r in records]
-
         return jsonify({"students": student_ids}), 200
 
     except Exception as e:
@@ -2959,25 +3022,32 @@ def start_test_session(test_id):
             }), 200
         
         # Duração da prova em minutos (test.duration = tempo que o aluno tem para responder, ex.: 20 min).
-        # Não usar a janela application/expiration (ex.: 12h–13h = 1h); usar só test.duration.
         duration_minutes = getattr(test, 'duration', None)
         if duration_minutes is not None:
             duration_minutes = int(duration_minutes) if duration_minutes else None
 
-        # Criar nova sessão com o tempo limite = duração configurada na avaliação
-        session = TestSession(
-            student_id=student.id,
-            test_id=test_id,
-            time_limit_minutes=duration_minutes,
-            ip_address=request.remote_addr,
-            user_agent=request.headers.get('User-Agent')
-        )
-        
-        # Iniciar a sessão (definir started_at)
-        session.start_session()
-        
-        # Se for a primeira sessão iniciada para esta avaliação, mudar status para 'em_andamento' se estiver 'agendada'
-        if test.status == 'agendada':
+        # Atualizar status do teste no schema onde está (só em public; em tenant fazemos depois)
+        if test.status == 'agendada' and test_schema == "public":
+            active_sessions = TestSession.query.filter_by(
+                test_id=test_id,
+                status='em_andamento'
+            ).count()
+            if active_sessions == 0:
+                test.status = 'em_andamento'
+            db.session.commit()
+
+        # Olimpíada (teste em public): criar sessão no schema do tenant para GET active-session/with-answers
+        # (com city context) encontrar a sessão no primeiro lookup.
+        if test_schema == "public":
+            ctx = get_current_tenant_context()
+            tenant_schema = (ctx.schema if (ctx and getattr(ctx, 'has_tenant_context', False)) else None) or None
+            if tenant_schema and tenant_schema != "public":
+                try:
+                    set_search_path(tenant_schema)
+                    test_schema = tenant_schema
+                except Exception:
+                    pass
+        elif test.status == 'agendada':
             active_sessions = TestSession.query.filter_by(
                 test_id=test_id,
                 status='em_andamento'
@@ -2985,6 +3055,15 @@ def start_test_session(test_id):
             if active_sessions == 0:
                 test.status = 'em_andamento'
 
+        # Criar nova sessão no schema atual (tenant para olimpíada com city context, senão onde está o teste)
+        session = TestSession(
+            student_id=student.id,
+            test_id=test_id,
+            time_limit_minutes=duration_minutes,
+            ip_address=request.remote_addr,
+            user_agent=request.headers.get('User-Agent')
+        )
+        session.start_session()
         db.session.add(session)
         db.session.commit()
         
@@ -3055,8 +3134,9 @@ def get_session_info(test_id):
         if not session:
             return jsonify({
                 "message": "Nenhuma sessão ativa encontrada",
-                "session_exists": False
-            }), 404
+                "session_exists": False,
+                "test_id": test_id
+            }), 200
 
         # Usar duração da prova (test.duration) se a sessão não tiver time_limit_minutes (ex.: sessões antigas)
         time_limit_minutes = session.time_limit_minutes

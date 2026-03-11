@@ -4,7 +4,7 @@ Serviço de Analytics de Competições (Etapa 7).
 Calcula métricas estatísticas para relatórios administrativos.
 Student, TestSession, CompetitionEnrollment ficam no tenant; Competition pode estar em public.
 """
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 from sqlalchemy import func
 
 from app import db
@@ -50,7 +50,9 @@ class CompetitionAnalyticsService:
 
         eligible_count = CompetitionAnalyticsService._get_eligible_students_count(competition)
         enrolled_count = CompetitionAnalyticsService._get_enrolled_count(competition_id)
-        participated_count = CompetitionAnalyticsService._get_participated_count(competition_id)
+        participated_count = CompetitionAnalyticsService._get_participated_count(
+            competition_id, competition_schema=competition_schema, tenant_schema=tenant_schema
+        )
 
         # Estruturas detalhadas usadas internamente
         enrollment_summary = {
@@ -131,21 +133,41 @@ class CompetitionAnalyticsService:
         ).count()
 
     @staticmethod
-    def _get_participated_count(competition_id: str) -> int:
+    def _get_participated_count(
+        competition_id: str,
+        competition_schema: Optional[str] = None,
+        tenant_schema: Optional[str] = None,
+    ) -> int:
         """
         Conta alunos que entregaram a prova (TestSession finalizadas).
         Filtra por escopo da competição.
+        Em competição em public, TestSession fica em public; Student no tenant.
+        Por isso é necessário usar competition_schema para sessões e tenant_schema para alunos.
         """
-        competition = Competition.query.get(competition_id)
-        if not competition or not competition.test_id:
-            return 0
+        if competition_schema is None or tenant_schema is None:
+            ctx = get_current_tenant_context()
+            _tenant = (ctx.schema if (ctx and getattr(ctx, "has_tenant_context", False)) else None) or None
+            if tenant_schema is None:
+                tenant_schema = _tenant
+            if competition_schema is None:
+                competition_schema = get_competition_schema(competition_id, tenant_schema=tenant_schema)
+        # Buscar competição e sessões no schema da competição (public ou city)
+        if competition_schema:
+            set_search_path(competition_schema)
+        try:
+            competition = Competition.query.get(competition_id)
+            if not competition or not competition.test_id:
+                return 0
 
-        sessions = TestSession.query.filter(
-            TestSession.test_id == competition.test_id,
-            TestSession.status.in_(['finalizada', 'expirada', 'corrigida', 'revisada']),
-        ).all()
+            sessions = TestSession.query.filter(
+                TestSession.test_id == competition.test_id,
+                TestSession.status.in_(['finalizada', 'expirada', 'corrigida', 'revisada']),
+            ).all()
+        finally:
+            if tenant_schema:
+                set_search_path(tenant_schema)
 
-        # Filtrar por escopo
+        # Filtrar por escopo: Student está no tenant (path já em tenant_schema após o finally acima)
         from app.competitions.services.competition_service import _student_in_scope
         participated_student_ids = set()
         for session in sessions:

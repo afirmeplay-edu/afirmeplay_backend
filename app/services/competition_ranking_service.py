@@ -37,17 +37,13 @@ class CompetitionRankingService:
     ) -> Dict[str, Any]:
         """
         Enriquece uma TestSession com dados de EvaluationResult (proficiência, classificação).
-        Se não achar no schema atual, tenta tenant_schema (EvaluationResult pode ter sido salvo no schema do aluno).
+        Em competição (competition_schema=public), evaluation_results ficam no tenant; não consultar em public.
+        Se não achar no schema atual, tenta tenant_schema.
         Se ainda faltar nota, calcula a partir de StudentAnswer (respostas salvas).
         """
-        ev = EvaluationResult.query.filter_by(session_id=session.id).first()
-        if not ev:
-            ev = EvaluationResult.query.filter_by(
-                test_id=session.test_id,
-                student_id=session.student_id,
-            ).first()
-        # Fallback: EvaluationResult pode estar no schema do tenant (ex.: submit com schema da cidade)
-        if not ev and tenant_schema and competition_schema and tenant_schema != competition_schema:
+        ev = None
+        if competition_schema == 'public' and tenant_schema:
+            # evaluation_results em competição ficam no tenant; tabela pode não existir em public
             set_search_path(tenant_schema)
             try:
                 ev = EvaluationResult.query.filter_by(session_id=session.id).first()
@@ -56,8 +52,34 @@ class CompetitionRankingService:
                         test_id=session.test_id,
                         student_id=session.student_id,
                     ).first()
+            except Exception as e:
+                logger.debug("_enrich_session_with_evaluation (tenant): %s", e)
+                ev = None
             finally:
                 set_search_path(competition_schema)
+        else:
+            try:
+                ev = EvaluationResult.query.filter_by(session_id=session.id).first()
+                if not ev:
+                    ev = EvaluationResult.query.filter_by(
+                        test_id=session.test_id,
+                        student_id=session.student_id,
+                    ).first()
+            except Exception as e:
+                logger.debug("_enrich_session_with_evaluation (competition schema): %s", e)
+                ev = None
+            # Fallback: EvaluationResult pode estar no schema do tenant
+            if not ev and tenant_schema and competition_schema and tenant_schema != competition_schema:
+                set_search_path(tenant_schema)
+                try:
+                    ev = EvaluationResult.query.filter_by(session_id=session.id).first()
+                    if not ev:
+                        ev = EvaluationResult.query.filter_by(
+                            test_id=session.test_id,
+                            student_id=session.student_id,
+                        ).first()
+                finally:
+                    set_search_path(competition_schema)
 
         grade = session.grade if session.grade is not None else (ev.grade if ev else None)
         correct = session.correct_answers if session.correct_answers is not None else (ev.correct_answers if ev else None)

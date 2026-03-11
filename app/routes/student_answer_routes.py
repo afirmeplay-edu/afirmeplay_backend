@@ -379,7 +379,8 @@ def submit_answers():
             except Exception:
                 class_test = None
         olympics = None
-        if student:
+        # Só consultar StudentTestOlimpics no schema do tenant; em public (competição) a tabela pode não existir
+        if student and session_schema and session_schema != 'public':
             try:
                 with db.session.begin_nested():
                     olympics = StudentTestOlimpics.query.filter_by(
@@ -597,24 +598,48 @@ def submit_answers():
             total_questions=total_questions
         )
         
-        # ✅ NOVO: Calcular resultado completo e salvar
+        # Copiar atributos da sessão para uso após possível rollback no serviço de cálculo
+        _session_id = str(session.id)
+        _test_id_submit = str(session.test_id)
+        _student_id_submit = str(session.student_id)
+        
+        # Flush em session_schema para gravar test_sessions (finalize_session) no schema correto
+        # antes de trocar para answers_schema (evita StaleDataError no serviço de cálculo)
+        set_search_path(session_schema or 'public')
+        db.session.flush()
+        
+        # ✅ Calcular resultado completo e salvar
+        # Em competição: Test está em public, StudentAnswer no tenant — usar path com ambos
         from app.services.evaluation_result_service import EvaluationResultService
         
         try:
+            if answers_schema and answers_schema != (session_schema or 'public'):
+                if session_schema == 'public':
+                    # public primeiro para achar Test; tenant para StudentAnswer
+                    safe_tenant = str(answers_schema).replace('"', '""')
+                    db.session.execute(text(f'SET search_path TO public, "{safe_tenant}"'))
+                else:
+                    set_search_path(answers_schema)
             evaluation_result = EvaluationResultService.calculate_and_save_result(
-                test_id=session.test_id,
-                student_id=session.student_id,
-                session_id=session.id
+                test_id=_test_id_submit,
+                student_id=_student_id_submit,
+                session_id=_session_id
             )
         except Exception as calc_error:
             logging.error(f"Erro ao calcular resultado: {str(calc_error)}", exc_info=True)
             evaluation_result = None
+        finally:
+            set_search_path(session_schema or 'public')
         
-        # ip_address antes do commit (para persistir na test_sessions)
-        if hasattr(session, 'ip_address'):
-            session.ip_address = getattr(request, 'remote_addr', None) or (
-                request.headers.get('X-Forwarded-For', '').split(',')[0].strip() or None
-            )
+        # ip_address: re-buscar sessão para evitar ObjectDeletedError se o serviço fez rollback
+        try:
+            _sess = TestSession.query.get(_session_id)
+            if _sess and hasattr(_sess, 'ip_address'):
+                _sess.ip_address = getattr(request, 'remote_addr', None) or (
+                    request.headers.get('X-Forwarded-For', '').split(',')[0].strip() or None
+                )
+        except Exception:
+            pass
         db.session.flush()
         # Não alterar o status global da avaliação
         # Cada aluno tem seu próprio status individual
@@ -625,22 +650,31 @@ def submit_answers():
             raise
 
         # Etapa 4: recompensa de participação em competição (moedas)
+        # student_coins fica no schema do tenant; em competição (session_schema=public) usar answers_schema
         coins_earned = 0
         try:
             from app.competitions.services import CompetitionService
+            if session_schema == 'public' and answers_schema:
+                set_search_path(answers_schema)
             coins_earned = CompetitionService.process_participation_reward(
-                test_id=session.test_id,
-                student_id=session.student_id,
-                test_session_id=session.id,
+                test_id=_test_id_submit,
+                student_id=_student_id_submit,
+                test_session_id=_session_id,
             )
         except Exception as coins_err:
             logging.error(f"Erro ao processar recompensa de competição: {str(coins_err)}", exc_info=True)
+            db.session.rollback()
+        finally:
+            set_search_path(session_schema or 'public')
 
-        # ✅ NOVO: Retornar resultados completos calculados
+        # Re-buscar sessão para resposta (schema da sessão = public para competição)
+        set_search_path(session_schema or 'public')
+        _sess_for_response = TestSession.query.get(_session_id)
+        # ✅ Retornar resultados completos calculados
         if evaluation_result:
             results = {
-                'session_id': session.id,
-                'submitted_at': session.submitted_at.isoformat() if session.submitted_at else None,
+                'session_id': _session_id,
+                'submitted_at': _sess_for_response.submitted_at.isoformat() if (_sess_for_response and _sess_for_response.submitted_at) else None,
                 'status': 'finalizada',
                 'total_questions': total_questions,
                 'correct_answers': correct_count,
@@ -648,20 +682,19 @@ def submit_answers():
                 'grade': evaluation_result['grade'],
                 'proficiency': evaluation_result['proficiency'],
                 'classification': evaluation_result['classification'],
-                'duration_minutes': session.duration_minutes,
+                'duration_minutes': _sess_for_response.duration_minutes if _sess_for_response else None,
                 'message': 'Avaliação enviada com sucesso!'
             }
         else:
-            # Fallback para cálculo básico se houver erro no cálculo completo
             results = {
-                'session_id': session.id,
-                'submitted_at': session.submitted_at.isoformat() if session.submitted_at else None,
+                'session_id': _session_id,
+                'submitted_at': _sess_for_response.submitted_at.isoformat() if (_sess_for_response and _sess_for_response.submitted_at) else None,
                 'status': 'finalizada',
                 'total_questions': total_questions,
                 'correct_answers': correct_count,
                 'score_percentage': round((correct_count / total_questions) * 100, 2) if total_questions > 0 else 0,
-                'grade': session.grade,
-                'duration_minutes': session.duration_minutes,
+                'grade': _sess_for_response.grade if _sess_for_response else None,
+                'duration_minutes': _sess_for_response.duration_minutes if _sess_for_response else None,
                 'message': 'Avaliação enviada com sucesso! (Cálculo básico)'
             }
         if coins_earned > 0:
@@ -769,7 +802,8 @@ def save_partial_answers():
             else:
                 logging.warning("ClassTest em save_partial_answers: %s", e)
         olympics = None
-        if student:
+        # Só consultar StudentTestOlimpics no schema do tenant; em public (competição) a tabela pode não existir
+        if student and session_schema and session_schema != 'public':
             try:
                 with db.session.begin_nested():
                     olympics = StudentTestOlimpics.query.filter_by(

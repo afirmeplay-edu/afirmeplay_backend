@@ -552,21 +552,48 @@ def generate_answer_sheets():
                         questions_options_from_gabarito[q] = a
             class_ids = [str(c.id) for c in classes_to_generate]
             job_id = str(uuid.uuid4())
-            from app.services.celery_tasks.answer_sheet_tasks import generate_answer_sheets_batch_async
-            celery_task = generate_answer_sheets_batch_async.delay(
-                gabarito_ids=[existing_gabarito_id],
-                city_id=city_id_scope,
-                num_questions=gabarito.num_questions,
-                correct_answers=gabarito.correct_answers,
-                test_data=test_data_complete,
-                use_blocks=gabarito.use_blocks,
-                blocks_config=gabarito.blocks_config or {},
-                questions_options=questions_options_from_gabarito,
-                batch_id=job_id,
-                scope=scope_type,
-                class_ids=class_ids
+            # Diretório compartilhado entre workers: /app/tmp/answer_sheets/{job_id}
+            answer_sheets_base = os.environ.get("ANSWER_SHEETS_TMP_BASE", "/app/tmp/answer_sheets")
+            os.makedirs(answer_sheets_base, exist_ok=True)
+            base_output_dir = os.path.join(answer_sheets_base, job_id)
+            os.makedirs(base_output_dir, exist_ok=True)
+
+            from app.services.celery_tasks.answer_sheet_tasks import (
+                generate_answer_sheets_single_class_async,
+                build_zip_and_upload_answer_sheets,
             )
-            task_id = celery_task.id
+            from celery import chord, group
+
+            common_kw = {
+                "base_output_dir": base_output_dir,
+                "city_id": city_id_scope,
+                "gabarito_id": existing_gabarito_id,
+                "num_questions": gabarito.num_questions,
+                "correct_answers": gabarito.correct_answers,
+                "test_data": test_data_complete,
+                "use_blocks": gabarito.use_blocks,
+                "blocks_config": gabarito.blocks_config or {},
+                "questions_options": questions_options_from_gabarito,
+                "batch_id": job_id,
+                "total_classes": len(class_ids),
+            }
+            header = group(
+                generate_answer_sheets_single_class_async.s(class_id=cid, **common_kw)
+                for cid in class_ids
+            )
+            chord_sig = chord(header)(
+                build_zip_and_upload_answer_sheets.s(
+                    batch_id=job_id,
+                    base_output_dir=base_output_dir,
+                    city_id=city_id_scope,
+                    gabarito_ids=[existing_gabarito_id],
+                    scope=scope_type,
+                    num_questions=gabarito.num_questions,
+                )
+            )
+            # Em alguns setups (ex.: CELERY_ALWAYS_EAGER) chord() pode retornar AsyncResult em vez de Signature
+            chord_result = chord_sig.apply_async() if hasattr(chord_sig, "apply_async") else chord_sig
+            task_id = chord_result.id
             create_answer_sheet_job(
                 job_id=job_id,
                 total=len(classes_to_generate),
@@ -815,50 +842,61 @@ def generate_answer_sheets():
             'grade_name': test_data.get('grade_name', '')
         }
         
-        # ✅ 8. DISPARAR TASK CELERY BATCH (1 única task para todas as turmas)
-        from app.services.celery_tasks.answer_sheet_tasks import generate_answer_sheets_batch_async
+        # ✅ 8. DISPARAR CELERY: 1 task por turma (group) + chord para ZIP/upload
+        from app.services.celery_tasks.answer_sheet_tasks import (
+            generate_answer_sheets_single_class_async,
+            build_zip_and_upload_answer_sheets,
+        )
         from app.decorators.tenant_required import get_current_tenant_context
-        
-        # Obter contexto da cidade
+        from celery import chord, group
+
         context = get_current_tenant_context()
         city_id = context.city_id if context else None
-        
+
         if not city_id:
             logging.error("[ROTA] ❌ Contexto de cidade não encontrado")
             return jsonify({"error": "City context not found"}), 500
-        
-        # Extrair IDs das turmas
+
         class_ids = [str(cls.id) for cls in classes_to_generate]
-        
-        # Criar job_id para batch
         job_id = str(uuid.uuid4())
-        
-        print(f"\n=== CRIANDO JOB CELERY BATCH ===")
-        print(f"Job ID: {job_id}")
-        print(f"Scope: {scope_type}")
-        print(f"Total de turmas: {len(classes_to_generate)}")
-        print(f"Gabarito ID: {gabarito_id}")
-        
-        # ✅ UMA ÚNICA TASK BATCH
-        celery_task = generate_answer_sheets_batch_async.delay(
-            gabarito_ids=[gabarito_id],  # Lista com 1 gabarito compartilhado
-            city_id=city_id,
-            num_questions=num_questions,
-            correct_answers=correct_answers,
-            test_data=test_data_complete,
-            use_blocks=use_blocks,
-            blocks_config=blocks_config,
-            questions_options=questions_options,
-            batch_id=job_id,
-            scope=scope_type,
-            class_ids=class_ids
+
+        answer_sheets_base = os.environ.get("ANSWER_SHEETS_TMP_BASE", "/app/tmp/answer_sheets")
+        os.makedirs(answer_sheets_base, exist_ok=True)
+        base_output_dir = os.path.join(answer_sheets_base, job_id)
+        os.makedirs(base_output_dir, exist_ok=True)
+
+        common_kw = {
+            "base_output_dir": base_output_dir,
+            "city_id": city_id,
+            "gabarito_id": gabarito_id,
+            "num_questions": num_questions,
+            "correct_answers": correct_answers,
+            "test_data": test_data_complete,
+            "use_blocks": use_blocks,
+            "blocks_config": blocks_config,
+            "questions_options": questions_options,
+            "batch_id": job_id,
+            "total_classes": len(class_ids),
+        }
+        header = group(
+            generate_answer_sheets_single_class_async.s(class_id=cid, **common_kw)
+            for cid in class_ids
         )
-        
-        task_id = celery_task.id
-        print(f"Task batch criada com ID: {task_id}")
-        print(f"================================\n")
-        
-        logging.info(f"[ROTA] ✅ Task batch disparada: {task_id} para {len(class_ids)} turma(s), gabarito {gabarito_id}")
+        chord_sig = chord(header)(
+            build_zip_and_upload_answer_sheets.s(
+                batch_id=job_id,
+                base_output_dir=base_output_dir,
+                city_id=city_id,
+                gabarito_ids=[gabarito_id],
+                scope=scope_type,
+                num_questions=num_questions,
+            )
+        )
+        # Em alguns setups (ex.: CELERY_ALWAYS_EAGER) chord() pode retornar AsyncResult em vez de Signature
+        chord_result = chord_sig.apply_async() if hasattr(chord_sig, "apply_async") else chord_sig
+        task_id = chord_result.id
+
+        logging.info(f"[ROTA] ✅ Chord disparado: {task_id} para {len(class_ids)} turma(s), gabarito {gabarito_id}")
         
         # Preparar resposta com informações de cada turma
         response_tasks = [

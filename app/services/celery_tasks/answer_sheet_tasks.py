@@ -10,7 +10,7 @@ import os
 import gc
 from datetime import datetime
 from typing import Dict, Any, List
-from celery import Task
+from celery import Task, group, chord
 
 from app.report_analysis.celery_app import celery_app
 from app.services.progress_store import get_job
@@ -693,3 +693,234 @@ def generate_answer_sheets_batch_async(
             'scope': scope,
             'gabarito_ids': gabarito_ids
         }
+
+
+# =============================================================================
+# Novo fluxo: 1 PDF por aluno, 1 task por turma (group) + chord para ZIP/upload
+# =============================================================================
+
+@celery_app.task(
+    bind=True,
+    name='answer_sheet_tasks.generate_answer_sheets_single_class_async',
+    max_retries=2,
+    default_retry_delay=60,
+    time_limit=1800,
+    soft_time_limit=1740
+)
+def generate_answer_sheets_single_class_async(
+    self: Task,
+    class_id: str,
+    base_output_dir: str,
+    city_id: str,
+    gabarito_id: str,
+    num_questions: int,
+    correct_answers: Dict,
+    test_data: Dict,
+    use_blocks: bool,
+    blocks_config: Dict,
+    questions_options: Dict = None,
+    batch_id: str = None,
+    total_classes: int = 0,
+) -> Dict[str, Any]:
+    """
+    Gera 1 PDF por aluno da turma e salva em base_output_dir/.../turma_{nome}/.
+    Configura search_path (multitenancy). Atualiza progresso gradual (Redis + DB) quando batch_id/total_classes são passados.
+    Retorna apenas class_id e total_students (sem paths).
+    """
+    try:
+        from app.services.cartao_resposta.answer_sheet_generator import AnswerSheetGenerator
+        from app.models.city import City
+        from sqlalchemy import text
+        from app import db
+        from app.services.progress_store import increment_answer_sheet_progress
+
+        city = City.query.get(city_id)
+        if not city:
+            raise ValueError(f"Cidade {city_id} não encontrada")
+        city_schema = f"city_{city.id.replace('-', '_')}"
+        db.session.execute(text(f'SET search_path TO "{city_schema}", public'))
+
+        generator = AnswerSheetGenerator()
+        result = generator.generate_class_answer_sheets(
+            class_id=class_id,
+            base_output_dir=base_output_dir,
+            test_data=test_data,
+            num_questions=num_questions,
+            use_blocks=use_blocks,
+            blocks_config=blocks_config,
+            correct_answers=correct_answers,
+            gabarito_id=gabarito_id,
+            questions_options=questions_options,
+        )
+
+        # Progresso gradual: incrementar contador e atualizar job (Redis + DB)
+        if batch_id and total_classes > 0:
+            inc = increment_answer_sheet_progress(batch_id, total_classes)
+            if inc:
+                new_current, new_pct = inc
+                update_answer_sheet_job(batch_id, {'progress_current': new_current, 'progress_percentage': new_pct})
+
+        if result is None:
+            return {'class_id': class_id, 'total_students': 0}
+        return {'class_id': result['class_id'], 'total_students': result['total_students']}
+    except Exception as e:
+        logger.error(f"[CELERY-SINGLE] ❌ Turma {class_id}: {str(e)}", exc_info=True)
+        if batch_id and total_classes > 0:
+            try:
+                from app.services.progress_store import increment_answer_sheet_progress
+                inc = increment_answer_sheet_progress(batch_id, total_classes)
+                if inc:
+                    update_answer_sheet_job(batch_id, {'progress_current': inc[0], 'progress_percentage': inc[1]})
+            except Exception:
+                pass
+        if self.request.retries < self.max_retries:
+            raise self.retry(exc=e)
+        return {'class_id': class_id, 'total_students': 0, 'error': str(e)}
+
+
+@celery_app.task(
+    bind=True,
+    name='answer_sheet_tasks.build_zip_and_upload_answer_sheets',
+    max_retries=0,
+    time_limit=600,
+    soft_time_limit=570
+)
+def build_zip_and_upload_answer_sheets(
+    self: Task,
+    group_results: List[Dict],
+    batch_id: str,
+    base_output_dir: str,
+    city_id: str,
+    gabarito_ids: List[str],
+    scope: str,
+    num_questions: int,
+) -> Dict[str, Any]:
+    """
+    Chord callback: percorre base_output_dir, cria ZIP mantendo estrutura de pastas,
+    upload MinIO, atualiza job e gabaritos, remove base_output_dir.
+    group_results = lista de {class_id, total_students} retornada pelo group.
+    """
+    import shutil
+    try:
+        from app import db
+        from app.models.city import City
+        from app.models.answerSheetGabarito import AnswerSheetGabarito
+        from app.models.studentClass import Class
+        from app.services.storage.minio_service import MinIOService
+        from sqlalchemy import text
+
+        if not os.path.isdir(base_output_dir):
+            logger.warning(f"[CELERY-CHORD] base_output_dir não existe: {base_output_dir}")
+            return {'success': False, 'error': 'base_output_dir not found', 'batch_id': batch_id}
+
+        total_students = sum(r.get('total_students', 0) for r in group_results)
+        zip_filename = f'cartoes_{batch_id}.zip'
+        zip_path = os.path.join(os.path.dirname(base_output_dir), zip_filename)
+
+        with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zf:
+            for root, _dirs, files in os.walk(base_output_dir):
+                for f in files:
+                    if not f.endswith('.pdf'):
+                        continue
+                    full_path = os.path.join(root, f)
+                    rel = os.path.relpath(full_path, base_output_dir)
+                    zf.write(full_path, rel)
+
+        zip_size = os.path.getsize(zip_path)
+        logger.info(f"[CELERY-CHORD] ZIP criado: {zip_size} bytes, {total_students} alunos")
+
+        minio_url = None
+        city = City.query.get(city_id)
+        if city:
+            db.session.execute(text(f'SET search_path TO "city_{city.id.replace("-", "_")}", public'))
+
+        try:
+            minio = MinIOService()
+            object_name = f"gabaritos/batch/{batch_id}/cartoes.zip"
+            upload_result = minio.upload_from_path(
+                bucket_name=minio.BUCKETS['ANSWER_SHEETS'],
+                object_name=object_name,
+                file_path=zip_path
+            )
+            if upload_result:
+                minio_url = upload_result['url']
+                minio_object_name = upload_result['object_name']
+                minio_bucket = upload_result['bucket']
+                logger.info(f"[CELERY-CHORD] Upload MinIO: {minio_url}")
+
+                _scope = scope
+                _municipality = (city.name or '') if city else ''
+                _state = (city.state or '') if city else ''
+                _school_id = _school_name = _grade_id = _grade_name = _class_id = None
+                if group_results and city:
+                    first_class = Class.query.get(group_results[0].get('class_id'))
+                    if first_class:
+                        _school_id = str(first_class.school_id) if first_class.school_id else None
+                        _school_name = (first_class.school.name or '') if first_class.school else ''
+                        _grade_id = first_class.grade_id
+                        _grade_name = (first_class.grade.name or '') if first_class.grade else ''
+                        _class_id = first_class.id
+
+                    for gabarito_id in gabarito_ids:
+                        gab = db.session.query(AnswerSheetGabarito).filter_by(id=gabarito_id).first()
+                        if not gab:
+                            continue
+                        gab.minio_url = minio_url
+                        gab.minio_object_name = minio_object_name
+                        gab.minio_bucket = minio_bucket
+                        gab.zip_generated_at = datetime.utcnow()
+                        gab.scope_type = _scope
+                        gab.municipality = _municipality
+                        gab.state = _state
+                        gab.school_id = _school_id
+                        gab.school_name = _school_name
+                        gab.grade_id = _grade_id
+                        gab.grade_name = _grade_name
+                        gab.class_id = _class_id
+                        gab.last_generation_classes_count = len([r for r in group_results if r.get('total_students', 0) > 0])
+                        gab.last_generation_students_count = total_students
+                    try:
+                        db.session.commit()
+                    except Exception as e:
+                        db.session.rollback()
+                        logger.warning(f"[CELERY-CHORD] Erro ao atualizar gabaritos: {e}")
+        except Exception as minio_error:
+            logger.error(f"[CELERY-CHORD] Erro MinIO (não crítico): {minio_error}", exc_info=True)
+
+        try:
+            os.remove(zip_path)
+        except Exception:
+            pass
+        try:
+            shutil.rmtree(base_output_dir)
+            logger.info(f"[CELERY-CHORD] base_output_dir removido")
+        except Exception as e:
+            logger.warning(f"[CELERY-CHORD] Erro ao remover base_output_dir: {e}")
+
+        update_answer_sheet_job(batch_id, {
+            'progress_current': len(group_results),
+            'progress_percentage': 100,
+            'status': 'completed',
+            'minio_url': minio_url,
+            'total_students': total_students,
+            'total_classes': len([r for r in group_results if r.get('total_students', 0) > 0]),
+        })
+
+        return {
+            'success': True,
+            'batch_id': batch_id,
+            'scope': scope,
+            'total_students': total_students,
+            'total_classes': len(group_results),
+            'minio_url': minio_url,
+            'download_size_bytes': zip_size,
+        }
+    except Exception as e:
+        logger.error(f"[CELERY-CHORD] ❌ {str(e)}", exc_info=True)
+        try:
+            if os.path.isdir(base_output_dir):
+                shutil.rmtree(base_output_dir)
+        except Exception:
+            pass
+        update_answer_sheet_job(batch_id, {'status': 'failed', 'error': str(e)})
+        return {'success': False, 'error': str(e), 'batch_id': batch_id}

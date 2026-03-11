@@ -10,11 +10,28 @@ import io
 import base64
 import logging
 import json
+import re
+import unicodedata
 import qrcode
 import gc
 from datetime import datetime
 from typing import List, Dict, Any, Optional
 from io import BytesIO
+
+
+def sanitize_filename(name: str, max_length: int = 80) -> str:
+    """
+    Normaliza string para uso seguro em nome de arquivo.
+    Remove acentos, mantém apenas alfanuméricos e underscore, lowercase.
+    """
+    if not name or not isinstance(name, str):
+        return "aluno"
+    n = unicodedata.normalize('NFKD', name)
+    n = n.encode('ascii', 'ignore').decode('ascii')
+    n = re.sub(r'[^\w\s-]', '', n)
+    n = re.sub(r'[-\s]+', '_', n).strip('_')
+    n = n.lower() or "aluno"
+    return n[:max_length] if max_length else n
 
 
 class AnswerSheetGenerator:
@@ -233,6 +250,122 @@ class AnswerSheetGenerator:
 
         except Exception as e:
             logging.error(f"[GENERATOR] ❌ Erro ao gerar cartões resposta: {str(e)}", exc_info=True)
+            raise
+
+    def _build_questions_map(self, num_questions: int, questions_options: Dict = None) -> Dict[int, List[str]]:
+        """Monta questions_map (igual ao fluxo de generate_answer_sheets). Não altera lógica existente."""
+        questions_map = {}
+        if questions_options:
+            for key, value in questions_options.items():
+                try:
+                    q_num = int(key)
+                    if isinstance(value, list) and len(value) >= 2:
+                        questions_map[q_num] = value
+                    else:
+                        questions_map[q_num] = ['A', 'B', 'C', 'D']
+                except (ValueError, TypeError):
+                    continue
+        if not questions_map:
+            for q in range(1, num_questions + 1):
+                questions_map[q] = ['A', 'B', 'C', 'D']
+        else:
+            for q in range(1, num_questions + 1):
+                if q not in questions_map:
+                    questions_map[q] = ['A', 'B', 'C', 'D']
+        return questions_map
+
+    def _build_class_folder_path(self, base_output_dir: str, class_obj) -> str:
+        """
+        Cria e retorna o path da turma usando NOMES (não IDs):
+        base_output_dir/municipio_{nome}/escola_{nome}/serie_{nome}/turma_{nome}/
+        Ex.: municipio_jaru/escola_em_joao_silva/serie_5_ano/turma_a/
+        """
+        from app.models.city import City
+        city_name = 'municipio'
+        if class_obj.school and getattr(class_obj.school, 'city_id', None):
+            city_obj = City.query.get(class_obj.school.city_id)
+            if city_obj and getattr(city_obj, 'name', None):
+                city_name = city_obj.name
+        school_name = (class_obj.school.name if class_obj.school else None) or 'escola'
+        grade_name = (class_obj.grade.name if class_obj.grade else None) or 'serie'
+        class_name = (class_obj.name or 'turma').strip() or 'turma'
+        path = os.path.join(
+            base_output_dir,
+            f"municipio_{sanitize_filename(city_name, max_length=60)}",
+            f"escola_{sanitize_filename(school_name, max_length=60)}",
+            f"serie_{sanitize_filename(grade_name, max_length=40)}",
+            f"turma_{sanitize_filename(class_name, max_length=40)}",
+        )
+        os.makedirs(path, exist_ok=True)
+        return path
+
+    def generate_class_answer_sheets(
+        self,
+        class_id: str,
+        base_output_dir: str,
+        test_data: Dict,
+        num_questions: int,
+        use_blocks: bool,
+        blocks_config: Dict,
+        correct_answers: Dict,
+        gabarito_id: str = None,
+        questions_options: Dict = None,
+    ) -> Optional[Dict]:
+        """
+        Gera 1 PDF por aluno da turma usando _generate_individual_answer_sheet.
+        Salva em base_output_dir/municipio_/escola_/serie_/turma_/{nome}_{serie}_{turma}.pdf
+        Não altera template nem lógica de blocos/QR. Retorna apenas metadados (class_id, total_students).
+        """
+        try:
+            from app.models.student import Student
+            from app.models.studentClass import Class
+
+            class_obj = Class.query.get(class_id)
+            if not class_obj:
+                raise ValueError(f"Turma {class_id} não encontrada")
+            students = Student.query.filter_by(class_id=class_id).all()
+            if not students:
+                logging.warning(f"[GENERATOR] ⚠️ Turma {class_obj.name} sem alunos cadastrados")
+                return None
+
+            questions_map = self._build_questions_map(num_questions, questions_options)
+            questions_by_block = self._organize_questions_by_blocks(num_questions, blocks_config, questions_map)
+
+            grade_name = (class_obj.grade.name if class_obj.grade else '').strip() or 'serie'
+            grade_safe = sanitize_filename(grade_name, max_length=40)
+            class_name_raw = (class_obj.name or 'turma').strip()
+            class_safe = sanitize_filename(class_name_raw, max_length=40)
+
+            folder = self._build_class_folder_path(base_output_dir, class_obj)
+            generated_count = 0
+            for student in students:
+                pdf_bytes = self._generate_individual_answer_sheet(
+                    student,
+                    test_data,
+                    num_questions,
+                    use_blocks,
+                    blocks_config,
+                    questions_by_block,
+                    gabarito_id=gabarito_id,
+                    questions_map=questions_map,
+                )
+                if not pdf_bytes:
+                    continue
+                student_name = self._get_complete_student_data(student).get('name', 'aluno')
+                name_safe = sanitize_filename(student_name, max_length=60)
+                filename = f"{name_safe}_{grade_safe}_{class_safe}.pdf"
+                filepath = os.path.join(folder, filename)
+                with open(filepath, 'wb') as f:
+                    f.write(pdf_bytes)
+                generated_count += 1
+                gc.collect()
+
+            return {
+                'class_id': str(class_id),
+                'total_students': generated_count,
+            }
+        except Exception as e:
+            logging.error(f"[GENERATOR] ❌ Erro em generate_class_answer_sheets turma {class_id}: {str(e)}", exc_info=True)
             raise
 
     def _generate_individual_answer_sheet(self, student: Dict, test_data: Dict,

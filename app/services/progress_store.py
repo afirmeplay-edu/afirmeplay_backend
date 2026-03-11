@@ -88,6 +88,27 @@ def update_job_progress_redis(job_id: str, updates: dict) -> None:
         logger.debug("Falha ao escrever progresso no Redis: %s", e)
 
 
+def increment_answer_sheet_progress(job_id: str, total_classes: int) -> Optional[tuple]:
+    """
+    Incrementa progress_current em 1 no Redis (atômico) e calcula progress_percentage.
+    Retorna (new_current, new_percentage) ou None se Redis indisponível.
+    Usado pelas tasks por turma para progresso gradual no GET /jobs/.../status.
+    """
+    r = _get_redis_client()
+    if not r:
+        return None
+    key = REDIS_PROGRESS_KEY_PREFIX + job_id
+    try:
+        new_current = r.hincrby(key, "progress_current", 1)
+        pct = min(100, (100 * new_current) // total_classes) if total_classes > 0 else 0
+        r.hset(key, "progress_percentage", str(pct))
+        r.expire(key, REDIS_PROGRESS_TTL_SEC)
+        return (new_current, pct)
+    except Exception as e:
+        logger.debug("Falha ao incrementar progresso no Redis: %s", e)
+        return None
+
+
 def get_job_progress_redis(job_id: str) -> Optional[dict]:
     """Lê progress_current e progress_percentage do Redis. Retorna None se não houver ou Redis indisponível."""
     r = _get_redis_client()

@@ -305,28 +305,88 @@ def submit_answers():
         if not isinstance(answers, list):
             return jsonify({'error': 'Lista de respostas deve ser um array'}), 400
         
-        # Buscar sessão
-        session = TestSession.query.get(session_id)
+        # Buscar sessão — com resolução de schema para provas de competição
+        session = None
+        try:
+            with db.session.begin_nested():
+                session = TestSession.query.get(session_id)
+        except Exception:
+            pass
+
+        session_schema = None
+        if not session:
+            # Não encontrou no schema atual (tenant): tentar em public (prova de competição)
+            try:
+                _prev_schema = db.session.execute(text("SELECT current_schema()")).scalar() or "public"
+                set_search_path('public')
+                with db.session.begin_nested():
+                    session = TestSession.query.get(session_id)
+                if session:
+                    session_schema = 'public'
+                else:
+                    set_search_path(_prev_schema)
+            except Exception:
+                set_search_path(_prev_schema if '_prev_schema' in locals() else 'public')
+        else:
+            try:
+                session_schema = db.session.execute(text("SELECT current_schema()")).scalar() or None
+            except Exception:
+                session_schema = None
         if not session:
             return jsonify({'error': 'Sessão não encontrada'}), 404
-        
+        # Garantir search_path correto para restante do fluxo (test_questions, student_answers)
+        if session_schema:
+            set_search_path(session_schema)
+
         # Verificar se a avaliação não expirou (turma e/ou olimpíada)
         # Ambos funcionam simultaneamente - não há exclusão mútua
+
         from app.models.classTest import ClassTest
         from app.models.studentTestOlimpics import StudentTestOlimpics
         from sqlalchemy.exc import SQLAlchemyError
-        student = session.student
-        class_test = ClassTest.query.filter_by(
-            class_id=student.class_id,
-            test_id=session.test_id
-        ).first() if student and student.class_id else None
-        olympics = None
-        if student:
+        _student_id_v = session.student_id
+        _test_id_v = session.test_id
+        _tenant = None
+        # Quando session_schema='public' (competição), student e student_answers ficam no tenant.
+        # Não acessar session.student aqui: o lazy load usaria o schema atual (public) e falharia.
+        if session_schema == 'public':
+            student = None
+            ctx = get_current_tenant_context()
+            _tenant = (ctx.schema if (ctx and ctx.has_tenant_context) else None) or None
+            if _tenant and _tenant != 'public':
+                try:
+                    set_search_path(_tenant)
+                    student = Student.query.get(_student_id_v)
+                    set_search_path(session_schema)
+                except Exception:
+                    set_search_path(session_schema or 'public')
+        else:
             try:
-                olympics = StudentTestOlimpics.query.filter_by(
-                    student_id=session.student_id,
-                    test_id=session.test_id
-                ).first()
+                with db.session.begin_nested():
+                    student = session.student
+            except Exception:
+                student = None
+        # Para competição (session em public), student_answers fica no tenant; usar answers_schema nas queries.
+        answers_schema = _tenant if (session_schema == 'public' and _tenant) else session_schema
+        class_test = None
+        if student and student.class_id:
+            try:
+                with db.session.begin_nested():
+                    class_test = ClassTest.query.filter_by(
+                        class_id=student.class_id,
+                        test_id=_test_id_v
+                    ).first()
+            except Exception:
+                class_test = None
+        olympics = None
+        # Só consultar StudentTestOlimpics no schema do tenant; em public (competição) a tabela pode não existir
+        if student and session_schema and session_schema != 'public':
+            try:
+                with db.session.begin_nested():
+                    olympics = StudentTestOlimpics.query.filter_by(
+                        student_id=session.student_id,
+                        test_id=session.test_id
+                    ).first()
             except (SQLAlchemyError, Exception) as e:
                 # Se a tabela não existir, continuar apenas com ClassTest
                 error_str = str(e).lower()
@@ -370,10 +430,16 @@ def submit_answers():
                 'status': session.status,
                 'is_expired': session.status == 'expirada'
             }
-            answers_saved = StudentAnswer.query.filter_by(
-                student_id=session.student_id,
-                test_id=session.test_id
-            ).all()
+            if answers_schema != session_schema:
+                set_search_path(answers_schema)
+            try:
+                answers_saved = StudentAnswer.query.filter_by(
+                    student_id=session.student_id,
+                    test_id=session.test_id
+                ).all()
+            finally:
+                if answers_schema != session_schema:
+                    set_search_path(session_schema)
             body['answers'] = [
                 {
                     'question_id': str(a.question_id),
@@ -408,88 +474,173 @@ def submit_answers():
                     'error': 'Tempo limite excedido. Sessão expirada.'
                 }), 410  # 410 Gone
         
-        # Buscar questões do teste através da tabela de associação
-        test_question_ids = [tq.question_id for tq in TestQuestion.query.filter_by(test_id=session.test_id).order_by(TestQuestion.order).all()]
-        test_questions = Question.query.filter(Question.id.in_(test_question_ids)).all() if test_question_ids else []
-        questions_dict = {q.id: q for q in test_questions}
+        # Buscar questões do teste — FIX MULTI-TENANT BUG #2 (continuação)
+        # TestQuestion está no mesmo schema da sessão (session_schema).
+        # Question (banco de questões) pode estar em public ou no tenant.
+        test_question_ids = []
+        try:
+            with db.session.begin_nested():
+                test_question_ids = [str(tq.question_id) for tq in TestQuestion.query.filter_by(test_id=_test_id_v).order_by(TestQuestion.order).all()]
+        except Exception:
+            pass
+
+        if not test_question_ids:
+            # Tentar no schema alternativo (tenant → public ou public → tenant)
+            ctx = get_current_tenant_context()
+            _tenant = (ctx.schema if (ctx and ctx.has_tenant_context) else None) or None
+            alt_schema = (_tenant if session_schema != (_tenant or '') else 'public')
+            if alt_schema and alt_schema != session_schema:
+                try:
+                    set_search_path(alt_schema)
+                    with db.session.begin_nested():
+                        test_question_ids = [str(tq.question_id) for tq in TestQuestion.query.filter_by(test_id=_test_id_v).order_by(TestQuestion.order).all()]
+                    set_search_path(session_schema)
+                except Exception:
+                    set_search_path(session_schema or 'public')
+        
+        # Buscar Question com query qualificada em public (banco global de questões)
+        test_questions = []
+        if test_question_ids:
+            try:
+                with db.session.begin_nested():
+                    test_questions = list(Question.query.filter(Question.id.in_(test_question_ids)).all())
+            except Exception:
+                pass
+            if not test_questions:
+                # Tentar em public explicitamente
+                try:
+                    with db.session.begin_nested():
+                        rows = db.session.execute(
+                            text("SELECT id, question_type, correct_answer, value FROM public.question WHERE id = ANY(:ids)"),
+                            {"ids": test_question_ids}
+                        ).fetchall()
+                        # Converter para objetos Question do ORM via identidade
+                        if rows:
+                            set_search_path('public')
+                            test_questions = list(Question.query.filter(Question.id.in_(test_question_ids)).all())
+                            set_search_path(session_schema)
+                except Exception:
+                    pass
+        questions_dict = {str(q.id): q for q in test_questions}
         
         correct_count = 0
         saved_answers = []
         
-        # Processar cada resposta
-        for ans_data in answers:
-            question_id = ans_data.get('question_id')
-            answer = ans_data.get('answer')
-            
-            if not question_id or answer is None:
-                continue
-            
-            # Verificar se a questão existe e pertence ao teste
-            if question_id not in questions_dict:
-                logging.warning(f"Questão {question_id} não encontrada no teste {session.test_id}")
-                continue
-            
-            # Verificar se já existe resposta para esta questão nesta sessão
-            existing_answer = StudentAnswer.query.filter_by(
-                student_id=session.student_id,
-                test_id=session.test_id,
-                question_id=question_id
-            ).first()
-            
-            if existing_answer:
-                # Atualizar resposta existente
-                existing_answer.answer = str(answer)
-                existing_answer.answered_at = datetime.utcnow()
-                student_answer = existing_answer
-            else:
-                # Criar nova resposta
-                student_answer = StudentAnswer(
-                    student_id=session.student_id,
-                    test_id=session.test_id,
-                    question_id=question_id,
-                    answer=str(answer)
-                )
-                db.session.add(student_answer)
-            
-            saved_answers.append({
-                'question_id': question_id,
-                'answer': str(answer),
-                'answered_at': student_answer.answered_at.isoformat() if student_answer.answered_at else None
-            })
-            
-            # Verificar se a resposta está correta (correção automática)
-            question = questions_dict[question_id]
-            if question.question_type == 'multiple_choice':
-                # Verificar usando correct_answer para questões de múltipla escolha
-                from app.services.evaluation_result_service import EvaluationResultService
-                is_correct = EvaluationResultService.check_multiple_choice_answer(answer, question.correct_answer)
-                if is_correct:
-                    correct_count += 1
-            elif question.correct_answer:
-                # Para outros tipos de questão que usam correct_answer
-                if str(answer).strip().lower() == str(question.correct_answer).strip().lower():
-                    correct_count += 1
+        # StudentAnswer fica no tenant quando sessão é de competição (public); usar answers_schema.
+        if answers_schema != session_schema:
+            set_search_path(answers_schema)
+        try:
+            # Processar cada resposta
+            for ans_data in answers:
+                question_id = ans_data.get('question_id')
+                if question_id is not None:
+                    question_id = str(question_id)
+                answer = ans_data.get('answer')
+                
+                if not question_id or answer is None:
+                    continue
+                
+                # Verificar se a questão existe e pertence ao teste
+                if question_id not in questions_dict:
+                    logging.warning(f"Questão {question_id} não encontrada no teste {_test_id_v}")
+                    continue
+                
+                # Verificar se já existe resposta para esta questão nesta sessão
+                existing_answer = StudentAnswer.query.filter_by(
+                    student_id=_student_id_v,
+                    test_id=_test_id_v,
+                    question_id=question_id
+                ).first()
+                
+                if existing_answer:
+                    # Atualizar resposta existente
+                    existing_answer.answer = str(answer)
+                    existing_answer.answered_at = datetime.utcnow()
+                    student_answer = existing_answer
+                else:
+                    # Criar nova resposta
+                    student_answer = StudentAnswer(
+                        student_id=_student_id_v,
+                        test_id=_test_id_v,
+                        question_id=question_id,
+                        answer=str(answer)
+                    )
+                    db.session.add(student_answer)
+                
+                saved_answers.append({
+                    'question_id': question_id,
+                    'answer': str(answer),
+                    'answered_at': student_answer.answered_at.isoformat() if student_answer.answered_at else None
+                })
+                
+                # Verificar se a resposta está correta (correção automática)
+                question = questions_dict[question_id]
+                if question.question_type == 'multiple_choice':
+                    # Verificar usando correct_answer para questões de múltipla escolha
+                    from app.services.evaluation_result_service import EvaluationResultService
+                    is_correct = EvaluationResultService.check_multiple_choice_answer(answer, question.correct_answer)
+                    if is_correct:
+                        correct_count += 1
+                elif question.correct_answer:
+                    # Para outros tipos de questão que usam correct_answer
+                    if str(answer).strip().lower() == str(question.correct_answer).strip().lower():
+                        correct_count += 1
+        finally:
+            if answers_schema != session_schema:
+                db.session.flush()  # gravar student_answers no tenant antes de trocar schema
+                set_search_path(session_schema)
         
-        # Finalizar sessão e calcular nota
+        # Garantir path em session_schema para finalize_session e commit (test_sessions no schema da sessão)
+        set_search_path(session_schema or 'public')
         total_questions = len(test_questions)
         session.finalize_session(
             correct_answers=correct_count,
             total_questions=total_questions
         )
         
-        # ✅ NOVO: Calcular resultado completo e salvar
+        # Copiar atributos da sessão para uso após possível rollback no serviço de cálculo
+        _session_id = str(session.id)
+        _test_id_submit = str(session.test_id)
+        _student_id_submit = str(session.student_id)
+        
+        # Flush em session_schema para gravar test_sessions (finalize_session) no schema correto
+        # antes de trocar para answers_schema (evita StaleDataError no serviço de cálculo)
+        set_search_path(session_schema or 'public')
+        db.session.flush()
+        
+        # ✅ Calcular resultado completo e salvar
+        # Em competição: Test está em public, StudentAnswer no tenant — usar path com ambos
         from app.services.evaluation_result_service import EvaluationResultService
         
         try:
+            if answers_schema and answers_schema != (session_schema or 'public'):
+                if session_schema == 'public':
+                    # public primeiro para achar Test; tenant para StudentAnswer
+                    safe_tenant = str(answers_schema).replace('"', '""')
+                    db.session.execute(text(f'SET search_path TO public, "{safe_tenant}"'))
+                else:
+                    set_search_path(answers_schema)
             evaluation_result = EvaluationResultService.calculate_and_save_result(
-                test_id=session.test_id,
-                student_id=session.student_id,
-                session_id=session.id
+                test_id=_test_id_submit,
+                student_id=_student_id_submit,
+                session_id=_session_id
             )
         except Exception as calc_error:
             logging.error(f"Erro ao calcular resultado: {str(calc_error)}", exc_info=True)
             evaluation_result = None
+        finally:
+            set_search_path(session_schema or 'public')
         
+        # ip_address: re-buscar sessão para evitar ObjectDeletedError se o serviço fez rollback
+        try:
+            _sess = TestSession.query.get(_session_id)
+            if _sess and hasattr(_sess, 'ip_address'):
+                _sess.ip_address = getattr(request, 'remote_addr', None) or (
+                    request.headers.get('X-Forwarded-For', '').split(',')[0].strip() or None
+                )
+        except Exception:
+            pass
+        db.session.flush()
         # Não alterar o status global da avaliação
         # Cada aluno tem seu próprio status individual
         try:
@@ -499,22 +650,31 @@ def submit_answers():
             raise
 
         # Etapa 4: recompensa de participação em competição (moedas)
+        # student_coins fica no schema do tenant; em competição (session_schema=public) usar answers_schema
         coins_earned = 0
         try:
             from app.competitions.services import CompetitionService
+            if session_schema == 'public' and answers_schema:
+                set_search_path(answers_schema)
             coins_earned = CompetitionService.process_participation_reward(
-                test_id=session.test_id,
-                student_id=session.student_id,
-                test_session_id=session.id,
+                test_id=_test_id_submit,
+                student_id=_student_id_submit,
+                test_session_id=_session_id,
             )
         except Exception as coins_err:
             logging.error(f"Erro ao processar recompensa de competição: {str(coins_err)}", exc_info=True)
+            db.session.rollback()
+        finally:
+            set_search_path(session_schema or 'public')
 
-        # ✅ NOVO: Retornar resultados completos calculados
+        # Re-buscar sessão para resposta (schema da sessão = public para competição)
+        set_search_path(session_schema or 'public')
+        _sess_for_response = TestSession.query.get(_session_id)
+        # ✅ Retornar resultados completos calculados
         if evaluation_result:
             results = {
-                'session_id': session.id,
-                'submitted_at': session.submitted_at.isoformat() if session.submitted_at else None,
+                'session_id': _session_id,
+                'submitted_at': _sess_for_response.submitted_at.isoformat() if (_sess_for_response and _sess_for_response.submitted_at) else None,
                 'status': 'finalizada',
                 'total_questions': total_questions,
                 'correct_answers': correct_count,
@@ -522,20 +682,19 @@ def submit_answers():
                 'grade': evaluation_result['grade'],
                 'proficiency': evaluation_result['proficiency'],
                 'classification': evaluation_result['classification'],
-                'duration_minutes': session.duration_minutes,
+                'duration_minutes': _sess_for_response.duration_minutes if _sess_for_response else None,
                 'message': 'Avaliação enviada com sucesso!'
             }
         else:
-            # Fallback para cálculo básico se houver erro no cálculo completo
             results = {
-                'session_id': session.id,
-                'submitted_at': session.submitted_at.isoformat() if session.submitted_at else None,
+                'session_id': _session_id,
+                'submitted_at': _sess_for_response.submitted_at.isoformat() if (_sess_for_response and _sess_for_response.submitted_at) else None,
                 'status': 'finalizada',
                 'total_questions': total_questions,
                 'correct_answers': correct_count,
                 'score_percentage': round((correct_count / total_questions) * 100, 2) if total_questions > 0 else 0,
-                'grade': session.grade,
-                'duration_minutes': session.duration_minutes,
+                'grade': _sess_for_response.grade if _sess_for_response else None,
+                'duration_minutes': _sess_for_response.duration_minutes if _sess_for_response else None,
                 'message': 'Avaliação enviada com sucesso! (Cálculo básico)'
             }
         if coins_earned > 0:
@@ -584,12 +743,19 @@ def save_partial_answers():
             return jsonify({'error': 'Estudante não encontrado para este usuário'}), 404
 
         # Buscar sessão: no schema atual (tenant) e, se não achar, em public (competição)
-        session = TestSession.query.get(session_id)
+        session = None
+        try:
+            with db.session.begin_nested():
+                session = TestSession.query.get(session_id)
+        except Exception:
+            pass
+
         session_schema = None
         if not session:
             try:
                 set_search_path('public')
-                session = TestSession.query.get(session_id)
+                with db.session.begin_nested():
+                    session = TestSession.query.get(session_id)
                 if session:
                     session_schema = 'public'
             except Exception:
@@ -624,10 +790,11 @@ def save_partial_answers():
         class_test = None
         try:
             if student and student.class_id:
-                class_test = ClassTest.query.filter_by(
-                    class_id=student.class_id,
-                    test_id=_test_id
-                ).first()
+                with db.session.begin_nested():
+                    class_test = ClassTest.query.filter_by(
+                        class_id=student.class_id,
+                        test_id=_test_id
+                    ).first()
         except Exception as e:
             err = str(e).lower()
             if 'class_test' in err and ('does not exist' in err or 'undefinedtable' in err):
@@ -635,12 +802,14 @@ def save_partial_answers():
             else:
                 logging.warning("ClassTest em save_partial_answers: %s", e)
         olympics = None
-        if student:
+        # Só consultar StudentTestOlimpics no schema do tenant; em public (competição) a tabela pode não existir
+        if student and session_schema and session_schema != 'public':
             try:
-                olympics = StudentTestOlimpics.query.filter_by(
-                    student_id=_student_id,
-                    test_id=_test_id
-                ).first()
+                with db.session.begin_nested():
+                    olympics = StudentTestOlimpics.query.filter_by(
+                        student_id=_student_id,
+                        test_id=_test_id
+                    ).first()
             except (SQLAlchemyError, Exception) as e:
                 error_str = str(e).lower()
                 if 'student_test_olimpics' in error_str or 'does not exist' in error_str or 'undefinedtable' in error_str:
@@ -725,14 +894,16 @@ def save_partial_answers():
         
         # Buscar questões do teste: TestQuestion no schema da sessão ou question_rules (competição sem tabela test_questions)
         set_search_path(session_schema or "public")
+        test_question_ids = []
         try:
-            tq_rows = TestQuestion.query.filter_by(test_id=_test_id).order_by(TestQuestion.order).all()
-            test_question_ids = [str(tq.question_id) for tq in tq_rows]
+            with db.session.begin_nested():
+                tq_rows = TestQuestion.query.filter_by(test_id=_test_id).order_by(TestQuestion.order).all()
+                test_question_ids = [str(tq.question_id) for tq in tq_rows]
         except Exception as e:
-            if 'test_questions' in str(e).lower() or 'does not exist' in str(e).lower():
+            if 'test_questions' in str(e).lower() or 'does not exist' in str(e).lower() or 'undefinedtable' in str(e).lower():
                 test_question_ids = []
             else:
-                raise
+                pass
         if not test_question_ids:
             try:
                 from app.competitions.models import Competition
@@ -764,7 +935,13 @@ def save_partial_answers():
                             set_search_path(session_schema or "public")
             except Exception:
                 pass
-        test_questions = Question.query.filter(Question.id.in_(test_question_ids)).all() if test_question_ids else []
+        test_questions = []
+        try:
+            if test_question_ids:
+                with db.session.begin_nested():
+                    test_questions = Question.query.filter(Question.id.in_(test_question_ids)).all()
+        except Exception:
+            pass
         if test_question_ids and not test_questions:
             # Questões podem estar no outro schema (ex.: prova em public, tabela question no tenant)
             ctx = get_current_tenant_context()
@@ -773,13 +950,19 @@ def save_partial_answers():
                 prev_path = db.session.execute(text("SELECT current_schema()")).scalar() or "public"
                 set_search_path(other_schema)
                 try:
-                    test_questions = Question.query.filter(Question.id.in_(test_question_ids)).all()
+                    with db.session.begin_nested():
+                        test_questions = Question.query.filter(Question.id.in_(test_question_ids)).all()
+                except Exception:
+                    pass
                 finally:
                     set_search_path(prev_path)
             elif (session_schema or "") != "public":
                 set_search_path("public")
                 try:
-                    test_questions = Question.query.filter(Question.id.in_(test_question_ids)).all()
+                    with db.session.begin_nested():
+                        test_questions = Question.query.filter(Question.id.in_(test_question_ids)).all()
+                except Exception:
+                    pass
                 finally:
                     set_search_path(session_schema or "public")
         questions_dict = {str(q.id): q for q in test_questions}
@@ -900,7 +1083,7 @@ def get_active_session(test_id):
                 'test_id': test_id,
                 'student_id': student.id,
                 'session_exists': False
-            }), 404
+            }), 200
         
         # Tempo limite = duração da prova (não a janela application/expiration)
         time_limit_minutes = _effective_time_limit_minutes(session)
@@ -1065,11 +1248,12 @@ def get_active_session_with_answers(test_id):
                     'started_at': last_session.started_at.isoformat() if last_session.started_at else None,
                     'submitted_at': last_session.submitted_at.isoformat() if last_session.submitted_at else None,
                 }), 200
+            # Sem sessão ativa nem última sessão: retornar 200 para o front não tratar como erro (ex.: antes de iniciar)
             return jsonify({
                 'message': 'Nenhuma sessão ativa encontrada para este teste',
                 'test_id': test_id,
                 'session_exists': False
-            }), 404
+            }), 200
 
         time_limit_minutes = _effective_time_limit_minutes(session)
         elapsed_seconds = _effective_elapsed_seconds(session)

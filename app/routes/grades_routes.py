@@ -10,6 +10,7 @@ from app.utils.uuid_helpers import ensure_uuid, ensure_uuid_list
 from app import db
 from flask_jwt_extended import jwt_required
 from app.decorators.role_required import role_required, get_current_user_from_token
+from app.decorators import get_current_tenant_context
 from app.utils.tenant_middleware import ensure_tenant_schema_for_user, set_search_path, city_id_to_schema_name
 from app.models.user import User
 from sqlalchemy import cast, String
@@ -75,30 +76,33 @@ def getAllGradesByEducationStage(education_stage_id):
 def getGradesByEducationStage(education_stage_id):
     try:
         user = get_current_user_from_token()
-        
         if not user:
             return jsonify({"error": "Usuário não encontrado"}), 404
 
-        # Class e School estão no schema do tenant (city_xxx); Grade está em public
         user_id = user.get("id") or user.get("user_id")
         if not user_id:
             return jsonify({"error": "Usuário não identificado"}), 400
-        if not ensure_tenant_schema_for_user(user_id):
+
+        # Schema do município: priorizar contexto da requisição (X-City-ID/subdomínio), senão city_id do usuário
+        ctx = get_current_tenant_context()
+        if ctx and getattr(ctx, "has_tenant_context", False) and ctx.schema:
+            set_search_path(ctx.schema)
+        elif not ensure_tenant_schema_for_user(user_id):
             return jsonify({
                 "error": "Contexto do município não disponível. Informe o município (subdomínio ou header X-City-ID) para listar séries."
             }), 400
-        # Forçar schema de novo imediatamente antes da query (evita path em public após outro middleware)
-        user_obj = User.query.get(user_id)
-        if user_obj and getattr(user_obj, "city_id", None):
-            set_search_path(city_id_to_schema_name(str(user_obj.city_id)))
-        
+        else:
+            user_obj = User.query.get(user_id)
+            if user_obj and getattr(user_obj, "city_id", None):
+                set_search_path(city_id_to_schema_name(str(user_obj.city_id)))
+
         # Verifica se a etapa de ensino existe
         education_stage = EducationStage.query.get(education_stage_id)
         if not education_stage:
             return jsonify({"error": "Etapa de ensino não encontrada"}), 404
 
-        # Query base: buscar grades da etapa que têm classes em escolas
-        # Cast explícito: School.id e Class.school_id são VARCHAR; comparar como texto (ver db_uuid_normalization.md)
+        # Séries da etapa que tenham ao menos uma turma (Class) no município (schema atual = tenant)
+        # Cast: School.id e Class.school_id são VARCHAR (db_uuid_normalization.md)
         query = db.session.query(Grade).distinct().join(
             Class, Class.grade_id == Grade.id
         ).join(
@@ -106,10 +110,10 @@ def getGradesByEducationStage(education_stage_id):
         ).filter(
             Grade.education_stage_id == education_stage_id
         )
-        
-        # Aplicar filtros baseados na role
+
+        # Filtros por role (todas as roles já restringem ao tenant pelo search_path; restringir por escola quando aplicável)
         if user['role'] == "admin":
-            # Admin vê todas as grades que têm escolas no sistema
+            # Admin: já limitado às turmas do município (Class/School no schema do tenant)
             pass
         elif user['role'] == "tecadm":
             # Filtrar por município do tecadm

@@ -68,16 +68,15 @@ def requires_city_context(f):
         # Obter contexto do tenant armazenado pelo middleware
         context = getattr(g, 'tenant_context', None)
         
-        # Validar se contexto existe
+        # Validar se contexto existe (middleware não definiu tenant_context)
         if context is None:
-            logger.error(
-                f"Tentativa de acessar rota tenant sem contexto: {f.__name__}"
+            logger.warning(
+                f"Rota tenant acessada sem contexto (middleware não definiu tenant_context): {f.__name__}"
             )
             return jsonify({
-                "erro": "Contexto de tenant não encontrado",
-                "mensagem": "O middleware de resolução de tenant não foi executado corretamente",
-                "detalhes": "Contate o administrador do sistema"
-            }), 500
+                "erro": "Contexto de cidade necessário",
+                "mensagem": "Informe o município via header X-City-ID, X-City-Slug ou acesse pelo subdomínio da cidade."
+            }), 403
         
         # Validar se há contexto de cidade
         if not context.has_tenant_context:

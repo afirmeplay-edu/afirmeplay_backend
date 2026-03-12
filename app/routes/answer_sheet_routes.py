@@ -7,6 +7,7 @@ from flask import Blueprint, request, jsonify, send_file, redirect, url_for
 from flask_jwt_extended import jwt_required, get_jwt_identity
 from app.decorators.role_required import role_required, get_current_user_from_token
 from app.decorators import requires_city_context
+from app.utils.tenant_middleware import get_current_tenant_context, set_search_path
 from app import db
 from app.models.answerSheetGabarito import AnswerSheetGabarito
 from app.models.answerSheetResult import AnswerSheetResult
@@ -17,7 +18,7 @@ from app.services.cartao_resposta.answer_sheet_generator import AnswerSheetGener
 from app.services.cartao_resposta.answer_sheet_correction_service import AnswerSheetCorrectionService
 from app.services.cartao_resposta.correction_new_grid import AnswerSheetCorrectionNewGrid
 from app.services.progress_store import (
-    update_item_processing, update_item_done,
+    create_job, update_item_processing, update_item_done,
     update_item_error, complete_job, get_job
 )
 from app.services.answer_sheet_job_store import (
@@ -70,27 +71,31 @@ def _validate_blocks_config(blocks: List, total_questions: int) -> Optional[str]
     
     for i, block in enumerate(sorted(blocks, key=lambda x: x.get('start_question', 0)), start=1):
         block_id = block.get('block_id', i)
+        subject_id = block.get('subject_id') or ''
         subject_name = block.get('subject_name', '')
         questions_count = block.get('questions_count', 0)
         start_question = block.get('start_question', 0)
         end_question = block.get('end_question', 0)
         
-        # Validar campos obrigatórios
-        if not subject_name:
-            return f"Bloco {block_id}: 'subject_name' é obrigatório."
+        # Identificador do bloco para mensagens (nome ou id)
+        block_label = subject_name or str(subject_id) or f"bloco {block_id}"
+        
+        # Validar campos obrigatórios: subject_id é obrigatório por bloco
+        if not subject_id or not str(subject_id).strip():
+            return f"Bloco {block_id}: 'subject_id' é obrigatório (disciplina do bloco)."
         
         if questions_count < 1:
-            return f"Bloco {block_id} ({subject_name}): deve ter pelo menos 1 questão."
+            return f"Bloco {block_id} ({block_label}): deve ter pelo menos 1 questão."
         
         if questions_count > 26:
-            return f"Bloco {block_id} ({subject_name}): máximo de 26 questões por bloco. Você definiu {questions_count}."
+            return f"Bloco {block_id} ({block_label}): máximo de 26 questões por bloco. Você definiu {questions_count}."
         
         # Validar sequência
         if start_question != expected_start:
-            return f"Bloco {block_id} ({subject_name}): deveria começar na questão {expected_start}, mas começa em {start_question}."
+            return f"Bloco {block_id} ({block_label}): deveria começar na questão {expected_start}, mas começa em {start_question}."
         
         if end_question - start_question + 1 != questions_count:
-            return f"Bloco {block_id} ({subject_name}): contagem inconsistente (start={start_question}, end={end_question}, count={questions_count})."
+            return f"Bloco {block_id} ({block_label}): contagem inconsistente (start={start_question}, end={end_question}, count={questions_count})."
         
         total_from_blocks += questions_count
         expected_start = end_question + 1
@@ -195,11 +200,17 @@ def _generate_complete_structure(num_questions: int, use_blocks: bool,
     custom_blocks = blocks_config.get('blocks', [])
     
     if custom_blocks:
-        # ✅ Blocos personalizados (com disciplinas ou não)
+        # ✅ Blocos personalizados: subject_id obrigatório, subject_name opcional (resolvido do Subject se faltar)
+        from app.models.subject import Subject
         blocks = []
         for block_def in custom_blocks:
             block_id = block_def.get('block_id')
+            subject_id = block_def.get('subject_id')
             subject_name = block_def.get('subject_name')
+            if not subject_name and subject_id:
+                subject_obj = Subject.query.get(str(subject_id))
+                if subject_obj and getattr(subject_obj, 'name', None):
+                    subject_name = subject_obj.name
             start_q = block_def.get('start_question')
             end_q = block_def.get('end_question')
             
@@ -213,6 +224,7 @@ def _generate_complete_structure(num_questions: int, use_blocks: bool,
             
             blocks.append({
                 "block_id": block_id,
+                "subject_id": str(subject_id) if subject_id else None,
                 "subject_name": subject_name,
                 "questions": questions
             })
@@ -1057,22 +1069,26 @@ def get_answer_sheet_task_status(task_id):
 # FUNÇÃO DE PROCESSAMENTO EM BACKGROUND
 # ============================================================================
 
-def process_answer_sheet_batch_in_background(job_id: str, images: list = None):
+def process_answer_sheet_batch_in_background(job_id: str, images: list = None, tenant_schema: str = None):
     """
-    Processa correção em lote de cartões resposta em background thread
-    
+    Processa correção em lote de cartões resposta em background thread.
+    Multitenant: usa tenant_schema (ex: city_xxx) para SET search_path na thread.
+
     Args:
         job_id: ID do job para tracking
         images: Lista de imagens em base64
+        tenant_schema: Nome do schema PostgreSQL do tenant (ex: city_9a2f95ed_9f70_4863_a5f1_1b6c6c262b0d)
     """
     from app import create_app
-    
-    # Criar contexto da aplicação para a thread
+
     app = create_app()
-    
+
     with app.app_context():
         try:
-            # Usando novo pipeline OMR robusto
+            # Multitenant: definir schema da cidade para que AnswerSheetGabarito e demais tabelas sejam encontradas
+            if tenant_schema:
+                set_search_path(tenant_schema)
+
             correction_service = AnswerSheetCorrectionNewGrid(debug=False)
             
             for i, image_base64 in enumerate(images):
@@ -1095,12 +1111,20 @@ def process_answer_sheet_batch_in_background(job_id: str, images: list = None):
                     
                     if result.get('success'):
                         # Buscar nome do aluno se não veio no resultado
-                        if not result.get('student_name') and result.get('student_id'):
+                        student_name = result.get('student_name')
+                        if not student_name and result.get('student_id'):
                             student = Student.query.get(result['student_id'])
                             if student:
-                                result['student_name'] = student.name
-                        
-                        update_item_done(job_id, i, result)
+                                student_name = student.name
+                        # Adaptar resultado para o progress_store (correct/total/percentage)
+                        adapted = {
+                            "student_id": result.get("student_id"),
+                            "student_name": student_name,
+                            "correct": result.get("correct_answers"),
+                            "total": result.get("total_questions"),
+                            "percentage": result.get("score"),
+                        }
+                        update_item_done(job_id, i, adapted)
                         logging.info(f"✅ Job {job_id}: Cartão resposta {i+1} processado com sucesso")
                     else:
                         update_item_error(job_id, i, result.get('error', 'Erro desconhecido'))
@@ -1127,6 +1151,72 @@ def process_answer_sheet_batch_in_background(job_id: str, images: list = None):
 # @bp.route('/correct', methods=['POST'])
 # def correct_answer_sheet():
 #     ... (removida - frontend usa /correct-new)
+
+
+@bp.route('/process-correction', methods=['POST'])
+@jwt_required()
+@role_required("admin", "professor", "coordenador", "diretor", "tecadm")
+def process_answer_sheet_correction_batch():
+    """
+    Processa correção em lote de vários cartões resposta (assíncrono).
+    Cartão e aluno são identificados pelo QR code em cada imagem.
+
+    Body (JSON):
+    {
+        "images": [
+            "data:image/jpeg;base64,...",
+            "data:image/jpeg;base64,...",
+            ...
+        ]
+    }
+
+    Returns (202 Accepted):
+        {"job_id": "uuid", "message": "Processamento em lote iniciado", "total": N, "status": "processing"}
+        Use GET /answer-sheets/correction-progress/<job_id> para acompanhar o progresso.
+    """
+    try:
+        user = get_current_user_from_token()
+        if not user:
+            return jsonify({"error": "Usuário não encontrado"}), 401
+
+        data = request.get_json() or {}
+        images = data.get("images")
+        if not isinstance(images, list):
+            return jsonify({"error": "Campo 'images' (array de imagens em base64) é obrigatório"}), 400
+        if len(images) == 0:
+            return jsonify({"error": "Nenhuma imagem fornecida"}), 400
+        if len(images) > 50:
+            return jsonify({"error": "Máximo de 50 imagens por lote"}), 400
+
+        # Multitenant: correção em lote deve rodar no mesmo schema de quem chamou (cidade do usuário ou admin com contexto)
+        tenant_ctx = get_current_tenant_context()
+        if not tenant_ctx or not getattr(tenant_ctx, "has_tenant_context", False):
+            return jsonify({
+                "error": "Correção em lote requer contexto de município. Use o subdomínio da cidade (ex: jaru.afirmeplay.com.br) ou envie o header X-City-ID ou X-City-Slug."
+            }), 400
+        tenant_schema = tenant_ctx.schema
+
+        job_id = str(uuid.uuid4())
+        create_job(job_id, len(images), test_id=None, user_id=str(user.get("id")))
+
+        thread = threading.Thread(
+            target=process_answer_sheet_batch_in_background,
+            args=(job_id, images, tenant_schema),
+            daemon=True,
+        )
+        thread.start()
+
+        return jsonify({
+            "job_id": job_id,
+            "message": "Processamento em lote iniciado",
+            "total": len(images),
+            "status": "processing",
+            "polling_url": f"/answer-sheets/correction-progress/{job_id}",
+        }), 202
+    except Exception as e:
+        logging.error(f"Erro ao iniciar correção em lote: {str(e)}", exc_info=True)
+        return jsonify({"error": "Erro interno do servidor"}), 500
+
 
 @bp.route('/correction-progress/<string:job_id>', methods=['GET'])
 @jwt_required()
@@ -2415,40 +2505,282 @@ def _gerar_resultados_detalhados_por_granularidade_cartao(scope_info, nivel_gran
     return resultados_detalhados
 
 
-def _gerar_tabela_detalhada_cartao(scope_info, nivel_granularidade, gabarito_id, user):
-    """Lista de alunos do escopo com seus resultados no gabarito."""
+def _extrair_blocos_por_disciplina_cartao(blocks_config):
+    """Agrupa blocos por subject_id (uma disciplina pode ter vários blocos). Retorna list de { id, nome, question_numbers }."""
+    from app.services.cartao_resposta.proficiency_by_subject import _extract_blocks_with_questions
+    blocks = _extract_blocks_with_questions(blocks_config)
+    by_subject = {}
+    for b in blocks:
+        sid = b.get('subject_id') or f"block_{b.get('block_id', 0)}"
+        sid = str(sid)
+        name = b.get('subject_name') or 'Outras'
+        if sid not in by_subject:
+            by_subject[sid] = {'id': sid, 'nome': name, 'question_numbers': []}
+        by_subject[sid]['question_numbers'].extend(b.get('question_numbers', []))
+    return list(by_subject.values())
+
+
+def _calcular_resultados_por_disciplina_cartao(scope_info, nivel_granularidade, gabarito_id):
+    """Retorna lista no mesmo formato de evaluation_results: resultados_por_disciplina."""
+    if not gabarito_id:
+        return []
     escopo = _determinar_escopo_calculo_cartao(scope_info, nivel_granularidade)
     class_ids = _obter_class_ids_com_resultado_cartao(gabarito_id, escopo)
     if not class_ids:
-        return {"alunos": []}
+        return []
     student_ids = [s.id for s in Student.query.filter(Student.class_id.in_(class_ids)).all()]
-    if not gabarito_id:
-        return {"alunos": []}
-    results = AnswerSheetResult.query.filter(AnswerSheetResult.gabarito_id == gabarito_id, AnswerSheetResult.student_id.in_(student_ids)).all()
+    results = AnswerSheetResult.query.filter(
+        AnswerSheetResult.gabarito_id == gabarito_id,
+        AnswerSheetResult.student_id.in_(student_ids)
+    ).all()
+    if not results:
+        return []
+    gabarito = AnswerSheetGabarito.query.get(gabarito_id)
+    grade_name = (gabarito.grade_name or '') if gabarito else ''
+    from app.services.cartao_resposta.proficiency_by_subject import _get_course_name_from_grade
+    course_name = _get_course_name_from_grade(grade_name)
+    # Agregar por disciplina a partir de proficiency_by_subject
+    by_subject = {}
+    for r in results:
+        pbs = r.proficiency_by_subject or {}
+        if isinstance(pbs, str):
+            try:
+                import json
+                pbs = json.loads(pbs)
+            except Exception:
+                pbs = {}
+        for sid, data in (pbs or {}).items():
+            if sid not in by_subject:
+                by_subject[sid] = {
+                    'disciplina': data.get('subject_name', sid),
+                    'total_alunos': 0,
+                    'alunos_participantes': 0,
+                    'soma_proficiencia': 0.0,
+                    'soma_nota': 0.0,
+                    'dist': {'abaixo_do_basico': 0, 'basico': 0, 'adequado': 0, 'avancado': 0}
+                }
+            by_subject[sid]['alunos_participantes'] += 1
+            by_subject[sid]['soma_proficiencia'] += data.get('proficiency') or 0
+            nota_disc = data.get('grade')
+            if nota_disc is None and data.get('proficiency') is not None:
+                from app.services.evaluation_calculator import EvaluationCalculator
+                subject_name = data.get('subject_name') or 'Outras'
+                nota_disc = EvaluationCalculator.calculate_grade(
+                    data.get('proficiency'), course_name, subject_name
+                )
+            by_subject[sid]['soma_nota'] += float(nota_disc) if nota_disc is not None else 0.0
+            cl = (data.get('classification') or '').lower()
+            if 'abaixo' in cl or 'básico' in cl:
+                by_subject[sid]['dist']['abaixo_do_basico'] += 1
+            elif 'básico' in cl or 'basico' in cl:
+                by_subject[sid]['dist']['basico'] += 1
+            elif 'adequado' in cl:
+                by_subject[sid]['dist']['adequado'] += 1
+            elif 'avançado' in cl or 'avancado' in cl:
+                by_subject[sid]['dist']['avancado'] += 1
+    total_alunos = len(student_ids)
+    out = []
+    for sid, agg in by_subject.items():
+        n = agg['alunos_participantes']
+        out.append({
+            "disciplina": agg['disciplina'],
+            "total_avaliacoes": 1,
+            "total_alunos": total_alunos,
+            "alunos_participantes": n,
+            "alunos_pendentes": total_alunos - n,
+            "alunos_ausentes": 0,
+            "media_nota": round(agg['soma_nota'] / n, 2) if n else 0.0,
+            "media_proficiencia": round(agg['soma_proficiencia'] / n, 2) if n else 0.0,
+            "distribuicao_classificacao": agg['dist']
+        })
+    return out
+
+
+def _gerar_tabela_detalhada_cartao(scope_info, nivel_granularidade, gabarito_id, user):
+    """Tabela detalhada no mesmo formato de evaluation_results: disciplinas (com questões e alunos com respostas_por_questao) e geral (alunos com totais e proficiência geral)."""
+    import json
+    escopo = _determinar_escopo_calculo_cartao(scope_info, nivel_granularidade)
+    class_ids = _obter_class_ids_com_resultado_cartao(gabarito_id, escopo)
+    if not class_ids or not gabarito_id:
+        return {"disciplinas": [], "geral": {"alunos": []}}
+    gabarito = AnswerSheetGabarito.query.get(gabarito_id)
+    if not gabarito:
+        return {"disciplinas": [], "geral": {"alunos": []}}
+    correct_answers = gabarito.correct_answers
+    if isinstance(correct_answers, str):
+        correct_answers = json.loads(correct_answers)
+    gabarito_dict = {}
+    for k, v in (correct_answers or {}).items():
+        try:
+            gabarito_dict[int(k)] = str(v).upper() if v else ''
+        except (ValueError, TypeError):
+            pass
+    blocks_config = getattr(gabarito, 'blocks_config', None) or {}
+    disciplinas_config = _extrair_blocos_por_disciplina_cartao(blocks_config)
+    if not disciplinas_config:
+        disciplinas_config = [{'id': 'geral', 'nome': 'Geral', 'question_numbers': list(gabarito_dict.keys())}]
+    student_ids = [s.id for s in Student.query.filter(Student.class_id.in_(class_ids)).all()]
+    results = AnswerSheetResult.query.filter(
+        AnswerSheetResult.gabarito_id == gabarito_id,
+        AnswerSheetResult.student_id.in_(student_ids)
+    ).all()
     result_by_student = {r.student_id: r for r in results}
     classes_by_id = {c.id: c for c in Class.query.filter(Class.id.in_(class_ids)).all()}
+    schools_by_id = {}
+    for c in classes_by_id.values():
+        if c.school_id and c.school_id not in schools_by_id:
+            schools_by_id[c.school_id] = School.query.get(c.school_id)
     students = Student.query.filter(Student.id.in_(student_ids)).all()
-    alunos = []
-    for s in students:
-        r = result_by_student.get(s.id)
-        class_obj = classes_by_id.get(s.class_id) if s.class_id else None
-        grade_name = None
-        if class_obj and class_obj.grade_id:
-            g = Grade.query.get(class_obj.grade_id)
-            grade_name = g.name if g else None
-        alunos.append({
-            "student_id": str(s.id),
-            "nome": s.name or "N/A",
-            "turma": class_obj.name if class_obj else "N/A",
-            "serie": grade_name,
-            "grade": r.grade if r else None,
-            "proficiency": r.proficiency if r else None,
-            "classification": r.classification if r else None,
-            "score_percentage": r.score_percentage if r else None,
-            "correct_answers": r.correct_answers if r else None,
-            "total_questions": r.total_questions if r else None,
+    grade_name = gabarito.grade_name or ''
+
+    def build_respostas_por_questao(question_numbers, detected_answers):
+        respostas = []
+        for q_num in sorted(question_numbers):
+            resp = detected_answers.get(q_num) if detected_answers else None
+            correct = gabarito_dict.get(q_num)
+            acertou = (resp is not None and correct is not None and str(resp).upper().strip() == str(correct).upper().strip())
+            respostas.append({
+                "questao": q_num,
+                "acertou": acertou,
+                "respondeu": resp is not None,
+                "resposta": str(resp) if resp is not None else None
+            })
+        return respostas
+
+    disciplinas_out = []
+    for disc_cfg in disciplinas_config:
+        subject_id = disc_cfg.get('id', '')
+        subject_name = disc_cfg.get('nome', 'Outras')
+        q_numbers = disc_cfg.get('question_numbers', [])
+        questoes = [{"numero": q} for q in sorted(q_numbers)]
+        alunos_disciplina = []
+        for s in students:
+            r = result_by_student.get(s.id)
+            class_obj = classes_by_id.get(s.class_id) if s.class_id else None
+            school_obj = schools_by_id.get(class_obj.school_id) if class_obj else None
+            escola_nome = school_obj.name if school_obj else "N/A"
+            serie_nome = (Grade.query.get(class_obj.grade_id).name if (class_obj and class_obj.grade_id) else None) or "N/A"
+            turma_nome = class_obj.name if class_obj else "N/A"
+            detected = (r.detected_answers if r else None) or {}
+            if isinstance(detected, str):
+                try:
+                    detected = json.loads(detected)
+                except Exception:
+                    detected = {}
+            detected = {int(k): v for k, v in detected.items() if k is not None}
+            respostas_por_questao = build_respostas_por_questao(q_numbers, detected)
+            total_acertos = sum(1 for x in respostas_por_questao if x.get('acertou'))
+            total_erros = sum(1 for x in respostas_por_questao if x.get('respondeu') and not x.get('acertou'))
+            total_respondidas = sum(1 for x in respostas_por_questao if x.get('respondeu'))
+            pbs = (r.proficiency_by_subject or {}) if r else {}
+            if isinstance(pbs, str):
+                try:
+                    pbs = json.loads(pbs)
+                except Exception:
+                    pbs = {}
+            disc_data = (pbs or {}).get(str(subject_id), pbs.get(subject_id, {}))
+            disciplina_proficiencia = disc_data.get('proficiency') if isinstance(disc_data, dict) else (r.proficiency if r else 0)
+            disciplina_classificacao = disc_data.get('classification') if isinstance(disc_data, dict) else (r.classification if r else None)
+            disciplina_nota = (disciplina_proficiencia / 35.0) if disciplina_proficiencia else 0
+            if r and r.grade is not None:
+                disciplina_nota = r.grade
+            alunos_disciplina.append({
+                "id": str(s.id),
+                "nome": s.name or "N/A",
+                "escola": escola_nome,
+                "serie": serie_nome,
+                "turma": turma_nome,
+                "respostas_por_questao": respostas_por_questao,
+                "total_acertos": total_acertos,
+                "total_erros": total_erros,
+                "total_respondidas": total_respondidas,
+                "total_questoes_disciplina": len(q_numbers),
+                "total_em_branco": len(q_numbers) - total_respondidas,
+                "nivel_proficiencia": disciplina_classificacao,
+                "nota": round(disciplina_nota, 2),
+                "proficiencia": round(disciplina_proficiencia, 2) if disciplina_proficiencia else 0.0,
+                "status": "concluida" if total_respondidas > 0 else "pendente",
+                "percentual_acertos": round((total_acertos / total_respondidas * 100), 2) if total_respondidas > 0 else 0.0
+            })
+        disciplinas_out.append({
+            "id": subject_id,
+            "nome": subject_name,
+            "questoes": questoes,
+            "alunos": alunos_disciplina
         })
-    return {"alunos": alunos}
+
+    dados_gerais = _calcular_dados_gerais_alunos_cartao(disciplinas_out, grade_name)
+    return {"disciplinas": disciplinas_out, "geral": dados_gerais}
+
+
+def _calcular_dados_gerais_alunos_cartao(disciplinas_out, grade_name):
+    """Consolida por aluno: nota_geral, proficiencia_geral, total_acertos_geral, respostas_por_questao (todas as questões)."""
+    dados_alunos = {}
+    for disc in disciplinas_out:
+        for aluno_data in disc.get("alunos", []):
+            aluno_id = aluno_data["id"]
+            if aluno_id not in dados_alunos:
+                dados_alunos[aluno_id] = {
+                    "id": aluno_id,
+                    "nome": aluno_data["nome"],
+                    "escola": aluno_data["escola"],
+                    "serie": aluno_data["serie"],
+                    "turma": aluno_data["turma"],
+                    "notas_disciplinas": [],
+                    "proficiencias_disciplinas": [],
+                    "total_acertos_geral": 0,
+                    "total_questoes_geral": 0,
+                    "total_respondidas_geral": 0,
+                    "respostas_por_questao_geral": []
+                }
+                dados_alunos[aluno_id]["respostas_por_questao_geral"] = list(aluno_data.get("respostas_por_questao", []))
+            else:
+                dados_alunos[aluno_id]["notas_disciplinas"].append(aluno_data["nota"])
+                dados_alunos[aluno_id]["proficiencias_disciplinas"].append(aluno_data["proficiencia"])
+                dados_alunos[aluno_id]["total_acertos_geral"] += aluno_data["total_acertos"]
+                dados_alunos[aluno_id]["total_questoes_geral"] += aluno_data["total_questoes_disciplina"]
+                dados_alunos[aluno_id]["total_respondidas_geral"] += aluno_data["total_respondidas"]
+                existing = {x["questao"]: x for x in dados_alunos[aluno_id]["respostas_por_questao_geral"]}
+                for x in aluno_data.get("respostas_por_questao", []):
+                    existing[x["questao"]] = x
+                dados_alunos[aluno_id]["respostas_por_questao_geral"] = sorted(existing.values(), key=lambda t: t["questao"])
+                continue
+            dados_alunos[aluno_id]["notas_disciplinas"].append(aluno_data["nota"])
+            dados_alunos[aluno_id]["proficiencias_disciplinas"].append(aluno_data["proficiencia"])
+            dados_alunos[aluno_id]["total_acertos_geral"] += aluno_data["total_acertos"]
+            dados_alunos[aluno_id]["total_questoes_geral"] += aluno_data["total_questoes_disciplina"]
+            dados_alunos[aluno_id]["total_respondidas_geral"] += aluno_data["total_respondidas"]
+    alunos_gerais = []
+    for aluno_id, dados in dados_alunos.items():
+        nota_geral = sum(dados["notas_disciplinas"]) / len(dados["notas_disciplinas"]) if dados["notas_disciplinas"] else 0.0
+        proficiencia_geral = sum(dados["proficiencias_disciplinas"]) / len(dados["proficiencias_disciplinas"]) if dados["proficiencias_disciplinas"] else 0.0
+        percentual = (dados["total_acertos_geral"] / dados["total_questoes_geral"] * 100) if dados["total_questoes_geral"] > 0 else 0.0
+        cl = None
+        if dados["proficiencias_disciplinas"]:
+            media_prof = proficiencia_geral
+            if "finais" in (grade_name or "").lower() or "médio" in (grade_name or "").lower() or "medio" in (grade_name or "").lower():
+                cl = "Avançado" if media_prof >= 340 else "Adequado" if media_prof >= 290 else "Básico" if media_prof >= 212.50 else "Abaixo do Básico"
+            else:
+                cl = "Avançado" if media_prof >= 263 else "Adequado" if media_prof >= 213 else "Básico" if media_prof >= 163 else "Abaixo do Básico"
+        alunos_gerais.append({
+            "id": dados["id"],
+            "nome": dados["nome"],
+            "escola": dados["escola"],
+            "serie": dados["serie"],
+            "turma": dados["turma"],
+            "nota_geral": round(nota_geral, 2),
+            "proficiencia_geral": round(proficiencia_geral, 2),
+            "nivel_proficiencia_geral": cl,
+            "total_acertos_geral": dados["total_acertos_geral"],
+            "total_questoes_geral": dados["total_questoes_geral"],
+            "total_respondidas_geral": dados["total_respondidas_geral"],
+            "total_em_branco_geral": dados["total_questoes_geral"] - dados["total_respondidas_geral"],
+            "percentual_acertos_geral": round(percentual, 2),
+            "status_geral": "concluida" if dados["total_respondidas_geral"] > 0 else "pendente",
+            "respostas_por_questao": dados["respostas_por_questao_geral"]
+        })
+    alunos_gerais.sort(key=lambda x: x["nome"])
+    return {"alunos": alunos_gerais}
 
 
 def _calcular_ranking_cartao(scope_info, nivel_granularidade, gabarito_id, user):
@@ -2810,8 +3142,9 @@ def get_resultados_agregados():
         gabarito_id = str(gabarito).strip() if _is_valid_filter(gabarito) else None
 
         estatisticas_gerais = _calcular_estatisticas_consolidadas_cartao(scope_info, nivel_granularidade, gabarito_id, user)
+        resultados_por_disciplina = _calcular_resultados_por_disciplina_cartao(scope_info, nivel_granularidade, gabarito_id) if gabarito_id else []
         resultados_detalhados = _gerar_resultados_detalhados_por_granularidade_cartao(scope_info, nivel_granularidade, gabarito_id) if gabarito_id else []
-        tabela_detalhada = _gerar_tabela_detalhada_cartao(scope_info, nivel_granularidade, gabarito_id, user) if gabarito_id else {"alunos": []}
+        tabela_detalhada = _gerar_tabela_detalhada_cartao(scope_info, nivel_granularidade, gabarito_id, user) if gabarito_id else {"disciplinas": [], "geral": {"alunos": []}}
         ranking = _calcular_ranking_cartao(scope_info, nivel_granularidade, gabarito_id, user) if gabarito_id else []
         opcoes_proximos_filtros = _gerar_opcoes_proximos_filtros_cartao(scope_info, nivel_granularidade, user)
 
@@ -2826,6 +3159,7 @@ def get_resultados_agregados():
                 "gabarito": gabarito
             },
             "estatisticas_gerais": estatisticas_gerais,
+            "resultados_por_disciplina": resultados_por_disciplina,
             "resultados_detalhados": {
                 "gabaritos": resultados_detalhados,
                 "paginacao": {"page": 1, "per_page": len(resultados_detalhados), "total": len(resultados_detalhados), "total_pages": 1}

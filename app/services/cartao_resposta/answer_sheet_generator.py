@@ -450,10 +450,11 @@ class AnswerSheetGenerator:
         custom_blocks = blocks_config.get('blocks', [])
         
         if custom_blocks:
-            # ✅ Blocos personalizados com disciplinas
+            # ✅ Blocos personalizados com disciplinas (subject_id obrigatório)
             for block_def in custom_blocks:
                 block_id = block_def.get('block_id')
-                subject_name = block_def.get('subject_name')  # ✅ NOVO
+                subject_id = block_def.get('subject_id')
+                subject_name = block_def.get('subject_name')
                 start_q = block_def.get('start_question')
                 end_q = block_def.get('end_question')
                 
@@ -467,7 +468,8 @@ class AnswerSheetGenerator:
                 
                 blocks.append({
                     'block_number': block_id,
-                    'subject_name': subject_name,  # ✅ NOVO
+                    'subject_id': str(subject_id) if subject_id else None,
+                    'subject_name': subject_name,
                     'questions': questions,
                     'start_question_num': start_q,
                     'end_question_num': end_q

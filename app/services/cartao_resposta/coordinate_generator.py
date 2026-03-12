@@ -146,9 +146,10 @@ class CoordinateGenerator:
         custom_blocks = blocks_config.get('blocks', [])
         
         if custom_blocks:
-            # ✅ Blocos personalizados com disciplinas
+            # ✅ Blocos personalizados com disciplinas (subject_id por bloco)
             for block_def in custom_blocks:
                 block_id = block_def.get('block_id')
+                subject_id = block_def.get('subject_id')
                 start_q = block_def.get('start_question')
                 end_q = block_def.get('end_question')
                 
@@ -162,6 +163,7 @@ class CoordinateGenerator:
                 if questions:
                     blocks.append({
                         'block_number': block_id,
+                        'subject_id': str(subject_id) if subject_id else None,
                         'questions': questions
                     })
         else:

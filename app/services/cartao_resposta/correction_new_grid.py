@@ -2300,7 +2300,8 @@ class AnswerSheetCorrectionNewGrid:
                                       detected_answers: Dict[int, Optional[str]],
                                       correction: Dict[str, Any],
                                       grade: float, proficiency: float,
-                                      classification: str) -> Optional[Dict[str, Any]]:
+                                      classification: str,
+                                      proficiency_by_subject: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
         """Salva resultado em AnswerSheetResult (cartões resposta)"""
         try:
             from app.models.answerSheetResult import AnswerSheetResult
@@ -2323,6 +2324,7 @@ class AnswerSheetCorrectionNewGrid:
                 existing_result.grade = grade
                 existing_result.proficiency = proficiency if proficiency > 0 else None
                 existing_result.classification = classification
+                existing_result.proficiency_by_subject = proficiency_by_subject
                 existing_result.corrected_at = datetime.utcnow()
                 existing_result.detection_method = 'new_grid'
                 
@@ -2344,6 +2346,7 @@ class AnswerSheetCorrectionNewGrid:
                     grade=grade,
                     proficiency=proficiency if proficiency > 0 else None,
                     classification=classification,
+                    proficiency_by_subject=proficiency_by_subject,
                     detection_method='new_grid'
                 )
                 
@@ -2550,28 +2553,36 @@ class AnswerSheetCorrectionNewGrid:
             # Calcular grade (0-10)
             grade = correction.get('score', 0.0) / 10.0
             
-            # Calcular proficiência e classificação
+            # Calcular proficiência por disciplina e média geral (cartão resposta)
             proficiency = 0.0
             classification = "Não calculado"
+            proficiency_by_subject = None
+            gabarito_obj = None
             
             if gabarito_id:
-                # Buscar gabarito para calcular proficiência
                 gabarito_obj = AnswerSheetGabarito.query.get(gabarito_id)
-                if gabarito_obj:
-                    proficiency, classification = self._calcular_proficiencia_classificacao(
-                        correct_answers=correction.get('correct_answers', 0),
-                        total_questions=correction.get('total_questions', 0),
-                        gabarito_obj=gabarito_obj
-                    )
             elif test_id:
-                # Buscar gabarito por test_id
                 gabarito_obj = AnswerSheetGabarito.query.filter_by(test_id=test_id).first()
-                if gabarito_obj:
-                    proficiency, classification = self._calcular_proficiencia_classificacao(
-                        correct_answers=correction.get('correct_answers', 0),
-                        total_questions=correction.get('total_questions', 0),
-                        gabarito_obj=gabarito_obj
-                    )
+            
+            if gabarito_obj:
+                blocks_config = getattr(gabarito_obj, 'blocks_config', None) or {}
+                correct_answers_json = gabarito_obj.correct_answers
+                if isinstance(correct_answers_json, str):
+                    import json
+                    correct_answers_json = json.loads(correct_answers_json)
+                gabarito_dict = {}
+                for k, v in (correct_answers_json or {}).items():
+                    try:
+                        gabarito_dict[int(k)] = str(v).upper() if v else ''
+                    except (ValueError, TypeError):
+                        pass
+                from app.services.cartao_resposta.proficiency_by_subject import calcular_proficiencia_por_disciplina
+                proficiency_by_subject, proficiency, classification = calcular_proficiencia_por_disciplina(
+                    blocks_config=blocks_config,
+                    validated_answers=detected_answers,
+                    gabarito_dict=gabarito_dict,
+                    grade_name=gabarito_obj.grade_name or '',
+                )
             
             # Decidir onde salvar
             if gabarito_id and not test_id:
@@ -2584,10 +2595,11 @@ class AnswerSheetCorrectionNewGrid:
                     correction=correction,
                     grade=grade,
                     proficiency=proficiency,
-                    classification=classification
+                    classification=classification,
+                    proficiency_by_subject=proficiency_by_subject
                 )
             elif test_id:
-                # Prova física: salvar em EvaluationResult
+                # Prova física: salvar em EvaluationResult (proficiency única, sem proficiency_by_subject)
                 self.logger.info(f"💾 Salvando resultado em EvaluationResult (test_id={test_id})")
                 return self._salvar_resultado_evaluation(
                     test_id=test_id,

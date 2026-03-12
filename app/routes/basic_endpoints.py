@@ -723,17 +723,44 @@ def evaluations_stats():
             )
         ).count()
 
-        total_questions_result = question_query.count() if question_query is not None else 0
-
-        # Média de questões por avaliação via TestQuestion (1 query, sem .all())
+        # Total e média de questões: JOIN test + test_questions no schema atual (evita 0 multi-tenant)
+        total_questions_in_tests = 0
         questions_per_evaluation = 0
         try:
-            total_questions_in_tests = db.session.query(db.func.count(TestQuestion.id)).filter(
-                TestQuestion.test_id.in_(test_ids_subq)
-            ).scalar() or 0
+            # 1) Contagem por JOIN no mesmo schema (uma query só)
+            total_questions_in_tests = db.session.query(db.func.count(TestQuestion.id)).join(
+                Test, Test.id == TestQuestion.test_id
+            ).filter(Test.id.in_(test_ids_subq)).scalar() or 0
+            # 2) Fallback: materializar IDs e contar (alguns drivers falham com subquery)
+            if total_questions_in_tests == 0 and total_evaluations > 0:
+                test_ids_list = [r[0] for r in test_query.with_entities(Test.id).all()]
+                if test_ids_list:
+                    total_questions_in_tests = db.session.query(db.func.count(TestQuestion.id)).filter(
+                        TestQuestion.test_id.in_(test_ids_list)
+                    ).scalar() or 0
+            # 3) Se ainda 0, tentar schema public (testes podem estar em public para admin)
+            if total_questions_in_tests == 0 and total_evaluations > 0:
+                from sqlalchemy import text
+                from app.utils.tenant_middleware import set_search_path
+                r = db.session.execute(text("SHOW search_path")).fetchone()
+                path_before = (r[0] or "public").strip()
+                first_schema = path_before.split(",")[0].strip()
+                if first_schema != "public":
+                    try:
+                        set_search_path("public")
+                        test_ids_public = [x[0] for x in test_query.with_entities(Test.id).all()]
+                        if test_ids_public:
+                            total_questions_in_tests = db.session.query(db.func.count(TestQuestion.id)).filter(
+                                TestQuestion.test_id.in_(test_ids_public)
+                            ).scalar() or 0
+                    finally:
+                        db.session.execute(text(f"SET search_path TO {path_before}"))
             questions_per_evaluation = total_questions_in_tests / total_evaluations if total_evaluations else 0
         except Exception as e:
-            logging.debug("Média de questões: %s", e)
+            logging.debug("Total/média de questões (TestQuestion): %s", e)
+
+        # Alias para compatibilidade; resposta usa total_questions_in_tests
+        total_questions_result = total_questions_in_tests
 
         by_type = {}
         try:
@@ -773,7 +800,7 @@ def evaluations_stats():
         result = {
             "total": total_evaluations,
             "this_month": this_month_evaluations,
-            "total_questions": total_questions_result,
+            "total_questions": total_questions_in_tests,
             "average_questions": round(float(questions_per_evaluation), 2),
             "virtual_evaluations": virtual_evaluations,
             "physical_evaluations": physical_evaluations,

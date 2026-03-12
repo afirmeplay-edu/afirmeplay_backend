@@ -226,6 +226,64 @@ def format_question_response(q, exclude_fields=None):
     return response
 
 
+def _count_test_questions_for_test(db, test):
+    """
+    Conta questões do teste via SQL bruto, tentando schema atual e depois schema do tenant.
+    Retorna 0 em caso de erro. Usado quando relationship/ORM retorna 0 em multi-tenant.
+    """
+    from sqlalchemy import text
+    test_id = str(test.id) if test.id else None
+    if not test_id:
+        return 0
+    try:
+        r = db.session.execute(text("SHOW search_path")).fetchone()
+        path_before = (r[0] or "public").strip()
+        # Tentar no schema atual
+        cur = db.session.execute(
+            text("SELECT count(*) FROM test_questions WHERE test_id = :tid"),
+            {"tid": test_id}
+        )
+        n = cur.scalar()
+        if n and int(n) > 0:
+            return int(n)
+        # Inferir city_id (municipalities pode ser lista de ids ou lista de {id, name})
+        city_id = None
+        if getattr(test, "municipalities", None):
+            ids = test.municipalities if isinstance(test.municipalities, list) else [test.municipalities]
+            if ids:
+                first = ids[0]
+                city_id = str(first.get("id")) if isinstance(first, dict) else str(first)
+        if not city_id and getattr(test, "schools", None):
+            school_ids = test.schools if isinstance(test.schools, list) else [test.schools]
+            if school_ids and School is not None:
+                sid = school_ids[0]
+                sid = sid.get("id") if isinstance(sid, dict) else sid
+                s = School.query.get(str(sid))
+                if s and getattr(s, "city_id", None):
+                    city_id = str(s.city_id)
+        if not city_id and getattr(test, "created_by", None):
+            from app.models.user import User
+            u = User.query.get(test.created_by)
+            if u and getattr(u, "city_id", None):
+                city_id = str(u.city_id)
+        if not city_id:
+            return 0
+        from app.utils.tenant_middleware import city_id_to_schema_name
+        tenant_schema = city_id_to_schema_name(city_id)
+        if not tenant_schema or tenant_schema == "public":
+            return 0
+        # Contar no schema do tenant (nome qualificado; não altera search_path)
+        cur = db.session.execute(
+            text(f'SELECT count(*) FROM "{tenant_schema}".test_questions WHERE test_id = :tid'),
+            {"tid": test_id}
+        )
+        n = cur.scalar()
+        return int(n) if n is not None else 0
+    except Exception as e:
+        logging.debug("_count_test_questions_for_test: %s", e)
+        return 0
+
+
 def format_test_response(test, questions=None):
     """
     Formata a resposta de um teste com todas as informações relacionadas.
@@ -447,7 +505,28 @@ def format_test_response(test, questions=None):
         # Lista de questões para resposta e contagem (evita acessar test.questions duas vezes)
         questions_list = (questions if questions is not None else getattr(test, 'questions', None)) or []
         questions_formatted = [format_question_response(q, exclude_fields=exclude_from_question) for q in questions_list]
-        total_questions = len(questions_formatted)
+        # Quando a listagem passa questions=[] (leve), obter total de test_questions ou question_rules
+        if not questions_formatted:
+            total_questions = len(
+                (getattr(test, 'question_rules', None) or {}).get('selected_question_ids') or []
+            ) or len(getattr(test, 'test_questions', None) or [])
+            # Fallback: contagem por SQL bruto (garante schema correto; evita 0 em multi-tenant)
+            if total_questions == 0 and test.id:
+                total_questions = _count_test_questions_for_test(db, test)
+            # Fallback sessão: total_questions da primeira TestSession finalizada
+            if total_questions == 0 and test.id:
+                try:
+                    from app.models.testSession import TestSession
+                    session = TestSession.query.filter_by(test_id=test.id).filter(
+                        TestSession.total_questions.isnot(None),
+                        TestSession.total_questions > 0
+                    ).limit(1).first()
+                    if session and session.total_questions:
+                        total_questions = session.total_questions
+                except Exception:
+                    pass
+        else:
+            total_questions = len(questions_formatted)
         # type: frontend espera string; se null no banco, enviar padrão
         test_type = getattr(test, 'type', None)
         if test_type is None or (isinstance(test_type, str) and not test_type.strip()):
@@ -485,7 +564,7 @@ def format_test_response(test, questions=None):
         'applied_classes_count': len(applied_classes_info),
         'total_students': total_students,
         'total_questions': total_questions,
-        'questions': questions_formatted
+        'questions': questions_formatted if questions_formatted is not None else []
     }
     except SQLAlchemyError as e:
         db.session.rollback()

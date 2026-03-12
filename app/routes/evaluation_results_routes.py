@@ -60,7 +60,7 @@ from app.models.classTest import ClassTest
 from app.models.studentTestOlimpics import StudentTestOlimpics
 from app.models.schoolTeacher import SchoolTeacher
 from app.models.skill import Skill
-from app.utils.tenant_middleware import city_id_to_schema_name, set_search_path
+from app.utils.tenant_middleware import city_id_to_schema_name, set_search_path, get_current_tenant_context
 from app import db
 import logging
 from typing import Dict, Any, List, Optional
@@ -2955,7 +2955,15 @@ def relatorio_detalhado(evaluation_id: str):
         class_ids = [ct.class_id for ct in class_tests]
 
         if not class_ids:
-            records = StudentTestOlimpics.query.filter_by(test_id=str(evaluation_id)).all()
+            # StudentTestOlimpics fica no tenant; garantir schema antes de consultar
+            ctx = get_current_tenant_context()
+            tenant_schema = (ctx.schema if (ctx and getattr(ctx, 'has_tenant_context', False)) else None) or None
+            if tenant_schema:
+                set_search_path(tenant_schema)
+            try:
+                records = StudentTestOlimpics.query.filter_by(test_id=str(evaluation_id)).all()
+            except Exception:
+                records = []
             if not records:
                 return jsonify({"avaliacao": avaliacao_data, "questoes": questoes_data, "alunos": []}), 200
             student_ids = [r.student_id for r in records]

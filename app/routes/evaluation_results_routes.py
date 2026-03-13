@@ -2721,6 +2721,16 @@ def listar_alunos():
         all_students = Student.query.options(
             joinedload(Student.class_).joinedload(Class.grade)
         ).filter(Student.class_id.in_(allowed_class_ids)).all()
+
+        # Mapa school_id -> nome da escola para incluir escola e série por aluno (filtro "todos" / exibição de faltosos)
+        school_ids = set()
+        for s in all_students:
+            if s.class_ and getattr(s.class_, "_school_id", None):
+                school_ids.add(str(s.class_._school_id))
+        school_names = {}
+        if school_ids:
+            for sch in School.query.filter(School.id.in_(school_ids)).with_entities(School.id, School.name).all():
+                school_names[str(sch[0])] = sch[1] or "N/A"
         
         from app.models.evaluationResult import EvaluationResult
         from app.models.testQuestion import TestQuestion
@@ -2762,15 +2772,21 @@ def listar_alunos():
 
             turma_nome = "N/A"
             grade_nome = "N/A"
+            escola_nome = "N/A"
             if student.class_:
                 turma_nome = student.class_.name
                 if student.class_.grade:
                     grade_nome = student.class_.grade.name
+                sid = getattr(student.class_, "_school_id", None)
+                if sid is not None:
+                    escola_nome = school_names.get(str(sid), "N/A")
             student_result = {
                 "id": student.id,
                 "nome": student.name,
                 "turma": turma_nome,
                 "grade": grade_nome,
+                "escola": escola_nome,
+                "serie": grade_nome,
                 "nota": er["grade"] if er else 0.0,
                 "proficiencia": format_decimal_two_places(proficiency_original),
                 "classificacao": classification_original,

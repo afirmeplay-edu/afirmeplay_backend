@@ -22,8 +22,8 @@ from app.models.grades import Grade
 from app.models.testQuestion import TestQuestion
 from app.models.question import Question
 from app.models.answerSheetGabarito import AnswerSheetGabarito
-from app.services.physical_test_pdf_generator import PhysicalTestPDFGenerator
-from app.services.physical_test_form_service import PhysicalTestFormService
+from app.physical_tests.pdf_generator import PhysicalTestPDFGenerator
+from app.physical_tests.form_service import PhysicalTestFormService
 from app.services.cartao_resposta.correction_new_grid import AnswerSheetCorrectionNewGrid  # NOVO SISTEMA DE CORREÇÃO
 from app.services.progress_store import (
     create_job, update_item_processing, update_item_done,
@@ -484,7 +484,7 @@ def generate_physical_forms(test_id):
             return jsonify({"error": "City context not found"}), 500
         
         # ✅ DISPARAR TASK CELERY (assíncrono)
-        from app.services.celery_tasks.physical_test_tasks import generate_physical_forms_async
+        from app.physical_tests.tasks import generate_physical_forms_async
         
         print(f"[ROTA] 🚀 Disparando task Celery com blocks_config: {blocks_config}, city_id: {city_id}")
         logging.info(f"🚀 Disparando task Celery para geração de formulários: test_id={test_id}, city_id={city_id}, blocks_config={blocks_config}")
@@ -818,7 +818,7 @@ def get_task_status(task_id):
     """
     try:
         from celery.result import AsyncResult
-        from app.services.celery_tasks.physical_test_tasks import generate_physical_forms_async
+        from app.physical_tests.tasks import generate_physical_forms_async
 
         task = AsyncResult(task_id, app=generate_physical_forms_async.app)
         

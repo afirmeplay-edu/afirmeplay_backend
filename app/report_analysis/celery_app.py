@@ -66,7 +66,7 @@ celery_app = Celery(
     include=[
         'app.celery_hooks',  # Hooks globais: task_prerun/task_postrun (search_path + session.remove)
         'app.report_analysis.tasks',
-        'app.services.celery_tasks.physical_test_tasks',  # Tasks de geração de formulários físicos
+        'app.physical_tests.tasks',  # Tasks de geração de formulários físicos
         'app.services.celery_tasks.answer_sheet_tasks',  # Tasks de geração de cartões de resposta
         'app.services.celery_tasks.evaluation_recalculation_tasks',  # Tasks de recálculo de resultados
         'app.socioeconomic_forms.services.results_tasks',  # Tasks de resultados socioeconômicos

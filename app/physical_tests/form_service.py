@@ -24,7 +24,7 @@ from app.models.grades import Grade
 from app.models.physicalTestForm import PhysicalTestForm
 from app.models.physicalTestAnswer import PhysicalTestAnswer
 from app.models.answerSheetGabarito import AnswerSheetGabarito
-from app.services.physical_test_pdf_generator import PhysicalTestPDFGenerator
+from app.physical_tests.pdf_generator import PhysicalTestPDFGenerator
 # from app.services.physical_test_correction import PhysicalTestCorrection  # ARQUIVO DELETADO
 from app.services.evaluation_calculator import EvaluationCalculator
 from app.services.evaluation_result_service import EvaluationResultService
@@ -289,7 +289,7 @@ class PhysicalTestFormService:
         Processa correção de gabarito físico usando PhysicalTestPDFGenerator
         """
         try:
-            from app.services.physical_test_pdf_generator import PhysicalTestPDFGenerator
+            from app.physical_tests.pdf_generator import PhysicalTestPDFGenerator
             
             # Criar instância do gerador
             generator = PhysicalTestPDFGenerator()

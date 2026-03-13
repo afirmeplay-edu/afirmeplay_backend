@@ -8,13 +8,12 @@ Este sistema permite gerar e corrigir provas físicas integrado com o banco de d
 - `app/models/physicalTestForm.py` - Modelo para formulários físicos
 - `app/models/physicalTestAnswer.py` - Modelo para respostas físicas
 
-### Serviços
-- `app/services/physical_test_pdf_generator.py` - Geração de PDFs com provas e formulários
-- `app/services/physical_test_correction.py` - Correção automática usando OpenCV
-- `app/services/physical_test_form_service.py` - Serviço principal de coordenação
+### Serviços (neste pacote)
+- `app/physical_tests/pdf_generator.py` - Geração de PDFs com provas e formulários
+- `app/physical_tests/form_service.py` - Serviço principal de coordenação
 
-### Rotas
-- `app/routes/physical_test_routes.py` - Endpoints da API
+### Rotas (neste pacote)
+- `app/physical_tests/routes.py` - Endpoints da API
 
 ## Fluxo de Funcionamento
 

@@ -4,7 +4,7 @@ Pacote de tasks Celery para processamento assíncrono
 Todas as tasks demoradas devem ser criadas aqui
 """
 
-from app.services.celery_tasks.physical_test_tasks import (
+from app.physical_tests.tasks import (
     generate_physical_forms_async
 )
 from app.services.celery_tasks.answer_sheet_tasks import (

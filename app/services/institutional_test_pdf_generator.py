@@ -464,7 +464,7 @@ class InstitutionalTestPDFGenerator:
             story.append(Spacer(1, 20))
             
             # Adicionar gabarito
-            from app.services.physical_test_pdf_generator import PhysicalTestPDFGenerator
+            from app.physical_tests.pdf_generator import PhysicalTestPDFGenerator
             physical_generator = PhysicalTestPDFGenerator()
             story.extend(physical_generator._create_answer_key(test_data, questions_data, None))
             
@@ -517,7 +517,7 @@ class InstitutionalTestPDFGenerator:
                 story.append(PageBreak())
             
             # 4. Adicionar gabarito (usando o gerador existente)
-            from app.services.physical_test_pdf_generator import PhysicalTestPDFGenerator
+            from app.physical_tests.pdf_generator import PhysicalTestPDFGenerator
             physical_generator = PhysicalTestPDFGenerator()
             story.extend(physical_generator._create_answer_sheet(test_data, student, questions_data))
             

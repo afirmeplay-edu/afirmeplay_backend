@@ -11,8 +11,8 @@ from app.models.student import Student
 from app.models.user import User
 from app.models.evaluationResult import EvaluationResult
 from app.models.physicalTestForm import PhysicalTestForm
-from app.services.physical_test_pdf_generator import PhysicalTestPDFGenerator
-from app.services.physical_test_form_service import PhysicalTestFormService
+from app.physical_tests.pdf_generator import PhysicalTestPDFGenerator
+from app.physical_tests.form_service import PhysicalTestFormService
 from app.services.batch_correction_service import batch_correction_service
 import logging
 import base64

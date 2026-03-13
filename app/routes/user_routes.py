@@ -1286,8 +1286,8 @@ def bulk_upload_students():
         except Exception as e:
             return jsonify({"erro": f"Erro ao ler arquivo: {str(e)}"}), 400
         
-        # Verificar colunas obrigatórias (email e senha são gerados pelo sistema)
-        required_columns = ['nome', 'data_nascimento', 'escola', 'endereco_escola', 'estado_escola', 'municipio_escola', 'serie', 'turma']
+        # Verificar colunas obrigatórias (email e senha são gerados pelo sistema; data_nascimento é opcional)
+        required_columns = ['nome', 'escola', 'endereco_escola', 'estado_escola', 'municipio_escola', 'grade_id', 'serie', 'turma']
         if rows:
             missing_columns = [col for col in required_columns if col not in rows[0].keys()]
         else:
@@ -1300,8 +1300,14 @@ def bulk_upload_students():
                 "colunas_obrigatorias": required_columns
             }), 400
         
+        # DEBUG: ver o que está chegando do arquivo (cabeçalhos e primeiras linhas, foco em grade_id)
+        print("[bulk-upload-students] Colunas do arquivo:", list(rows[0].keys()) if rows else [])
+        for i, row in enumerate(rows[:3]):
+            raw_grade = row.get('grade_id')
+            print(f"[bulk-upload-students] Linha {i+2}: grade_id raw={repr(raw_grade)}, type={type(raw_grade).__name__}, serie={repr(row.get('serie'))}")
+        
         # Limpar dados (nome e dados da escola/turma obrigatórios; email e senha não vêm do arquivo)
-        rows = [row for row in rows if all(str(row.get(col, '')).strip() for col in ['nome', 'escola', 'endereco_escola', 'estado_escola', 'municipio_escola', 'serie', 'turma'])]
+        rows = [row for row in rows if all(str(row.get(col, '')).strip() for col in ['nome', 'escola', 'endereco_escola', 'estado_escola', 'municipio_escola', 'grade_id', 'serie', 'turma'])]
         
         # Converter data de nascimento
         def parse_date(date_value):
@@ -1453,25 +1459,40 @@ def bulk_upload_students():
                     })
                     continue
                 
-                # Buscar série existente (busca normalizada - case-insensitive e espaços normalizados)
-                serie_nome = str(row.get('serie', '')).strip()
-                serie_nome_normalizado = normalizar_nome_para_busca(serie_nome)
+                # Buscar série pelo grade_id (coluna grade_id contém o UUID; serie contém o nome para contexto)
+                grade_id_raw = row.get('grade_id')
+                # Normalizar: Excel pode trazer UUID como float ou número; garantir string
+                if grade_id_raw is None:
+                    grade_id_str = ''
+                elif isinstance(grade_id_raw, (int, float)):
+                    grade_id_str = str(int(grade_id_raw)) if isinstance(grade_id_raw, float) and grade_id_raw == int(grade_id_raw) else str(grade_id_raw).strip()
+                else:
+                    grade_id_str = str(grade_id_raw).strip()
+                serie_nome = str(row.get('serie', '')).strip()  # mantido para mensagens de erro
                 
-                # Buscar todas as séries e comparar com normalização
-                todas_series = Grade.query.all()
-                serie = None
-                for serie_candidata in todas_series:
-                    nome_serie_normalizado = normalizar_nome_para_busca(serie_candidata.name)
-                    if nome_serie_normalizado == serie_nome_normalizado:
-                        serie = serie_candidata
-                        break
+                # DEBUG: ver valor usado no lookup
+                if index < 3:
+                    print(f"[bulk-upload-students] Linha {index + 2} lookup: grade_id_str={repr(grade_id_str)}")
                 
+                if not grade_id_str:
+                    results["erros"].append({
+                        "linha": index + 2,
+                        "campo": "grade_id",
+                        "valor": grade_id_raw,
+                        "erro": "grade_id é obrigatório"
+                    })
+                    continue
+                
+                serie = Grade.query.get(grade_id_str)
+                if index < 3:
+                    print(f"[bulk-upload-students] Linha {index + 2} Grade.query.get({repr(grade_id_str)}) = {serie}")
                 if not serie:
                     results["erros"].append({
                         "linha": index + 2,
-                        "campo": "serie",
-                        "valor": serie_nome,
-                        "erro": "Série não encontrada"
+                        "campo": "grade_id",
+                        "valor": grade_id_str,
+                        "erro": "Série não encontrada",
+                        "serie_nome": serie_nome or None
                     })
                     continue
                 
@@ -1516,16 +1537,8 @@ def bulk_upload_students():
                         })
                         continue
                 
-                # Validar data de nascimento
+                # Data de nascimento é opcional
                 data_nascimento = row.get('data_nascimento_parsed')
-                if not data_nascimento:
-                    results["erros"].append({
-                        "linha": index + 2,
-                        "campo": "data_nascimento",
-                        "valor": row.get('data_nascimento', ''),
-                        "erro": "Data de nascimento inválida"
-                    })
-                    continue
                 
                 # Criar usuário: não gravar matrícula em User (única em public) para evitar
                 # conflito entre cidades; matrícula fica só em Student (única por city schema)
@@ -1571,21 +1584,23 @@ def bulk_upload_students():
                 )
                 db.session.add(password_log)
                 
+                # Montar dados da resposta ANTES do commit (evita acessar objetos expirados após commit)
+                aluno_criado_info = {
+                    "nome": nome_completo,
+                    "email": email,
+                    "senha": senha,
+                    "matricula": matricula,
+                    "escola": escola.name,
+                    "serie": serie.name,
+                    "turma": turma.name
+                }
+                
                 # Commit para esta linha
                 db.session.commit()
                 
                 results["sucessos"] += 1
-                results["alunos_criados"].append({
-                    "nome": novo_aluno.name,
-                    "email": novo_usuario.email,
-                    "senha": senha,
-                    "matricula": novo_aluno.registration,
-                    "escola": escola.name,
-                    "serie": serie.name,
-                    "turma": turma.name
-                })
-                
-                logging.info(f"Aluno criado com sucesso: {novo_aluno.name} ({novo_usuario.email})")
+                results["alunos_criados"].append(aluno_criado_info)
+                logging.info(f"Aluno criado com sucesso: {aluno_criado_info['nome']} ({aluno_criado_info['email']})")
                 
             except Exception as e:
                 db.session.rollback()

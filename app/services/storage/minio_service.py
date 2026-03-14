@@ -368,21 +368,30 @@ class MinIOService:
             data=image_data
         )
     
-    def upload_question_image(self, question_id: str, image_data: bytes, image_name: str) -> Dict[str, str]:
+    def upload_question_image(self, question_id: str, image_data: bytes, image_name: str) -> Optional[Dict[str, str]]:
         """
-        Upload de imagem de questão
+        Upload de imagem de questão.
+        Garante que o bucket question-images existe antes do upload.
         
         Args:
             question_id: ID da questão
             image_data: Dados binários da imagem
-            image_name: Nome do arquivo da imagem
+            image_name: Nome do arquivo da imagem (ex: {image_id}.png)
         
         Returns:
-            Dict com informações do upload
+            Dict com url, object_name, bucket, size ou None se falhar
         """
+        bucket_name = self.BUCKETS['QUESTION_IMAGES']
+        try:
+            if not self.client.bucket_exists(bucket_name):
+                self.client.make_bucket(bucket_name)
+                logger.info(f"✅ Bucket '{bucket_name}' criado automaticamente")
+        except S3Error as e:
+            logger.error(f"❌ Erro ao garantir bucket question-images: {str(e)}")
+            return None
         object_name = f"{question_id}/{image_name}"
         return self.upload_file(
-            bucket_name=self.BUCKETS['QUESTION_IMAGES'],
+            bucket_name=bucket_name,
             object_name=object_name,
             data=image_data
         )

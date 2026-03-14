@@ -1742,6 +1742,195 @@
       "subject_id": "4d29b4f1-7bd7-42c0-84d5-111dc7025b90",
       "grade_id": "f5688bb2-9624-487f-ab1f-40b191c96b76",
       "comment": "Única: 5º Ano"
+    },
+    {
+      "code": "9L1.1",
+      "description": "Identificar o uso de recursos persuasivos em textos verbais e não verbais.",
+      "subject_id": "4d29b4f1-7bd7-42c0-84d5-111dc7025b90",
+      "grade_id": "3c68a0b5-9613-469e-8376-6fb678c60363",
+      "comment": "9º Ano"
+    },
+    {
+      "code": "9L1.2",
+      "description": "Identificar elementos constitutivos de textos pertencentes ao domínio jornalístico/midiático.",
+      "subject_id": "4d29b4f1-7bd7-42c0-84d5-111dc7025b90",
+      "grade_id": "3c68a0b5-9613-469e-8376-6fb678c60363",
+      "comment": "9º Ano"
+    },
+    {
+      "code": "9L1.3",
+      "description": "Identificar formas de organização de textos normativos, legais e/ou reivindicatórios.",
+      "subject_id": "4d29b4f1-7bd7-42c0-84d5-111dc7025b90",
+      "grade_id": "3c68a0b5-9613-469e-8376-6fb678c60363",
+      "comment": "9º Ano"
+    },
+    {
+      "code": "9L1.4",
+      "description": "Identificar teses/opiniões/posicionamento explícitos e argumentos em textos.",
+      "subject_id": "4d29b4f1-7bd7-42c0-84d5-111dc7025b90",
+      "grade_id": "3c68a0b5-9613-469e-8376-6fb678c60363",
+      "comment": "9º Ano"
+    },
+    {
+      "code": "9L1.5",
+      "description": "Identificar elementos constitutivos de gêneros de divulgação científica.",
+      "subject_id": "4d29b4f1-7bd7-42c0-84d5-111dc7025b90",
+      "grade_id": "3c68a0b5-9613-469e-8376-6fb678c60363",
+      "comment": "9º Ano"
+    },
+    {
+      "code": "9L2.1",
+      "description": "Analisar elementos constitutivos de textos pertencentes ao domínio literário.",
+      "subject_id": "4d29b4f1-7bd7-42c0-84d5-111dc7025b90",
+      "grade_id": "3c68a0b5-9613-469e-8376-6fb678c60363",
+      "comment": "9º Ano"
+    },
+    {
+      "code": "9L2.2",
+      "description": "Analisar a intertextualidade entre textos literários ou entre estes e outros textos verbais ou não verbais.",
+      "subject_id": "4d29b4f1-7bd7-42c0-84d5-111dc7025b90",
+      "grade_id": "3c68a0b5-9613-469e-8376-6fb678c60363",
+      "comment": "9º Ano"
+    },
+    {
+      "code": "9L2.3",
+      "description": "Inferir a presença de valores sociais, culturais e humanos em textos literários.",
+      "subject_id": "4d29b4f1-7bd7-42c0-84d5-111dc7025b90",
+      "grade_id": "3c68a0b5-9613-469e-8376-6fb678c60363",
+      "comment": "9º Ano"
+    },
+    {
+      "code": "9L2.4",
+      "description": "Analisar efeitos de sentido produzido pelo uso de formas de apropriação textual (paráfrase, citação etc.).",
+      "subject_id": "4d29b4f1-7bd7-42c0-84d5-111dc7025b90",
+      "grade_id": "3c68a0b5-9613-469e-8376-6fb678c60363",
+      "comment": "9º Ano"
+    },
+    {
+      "code": "9L2.5",
+      "description": "Inferir informações implícitas em distintos textos.",
+      "subject_id": "4d29b4f1-7bd7-42c0-84d5-111dc7025b90",
+      "grade_id": "3c68a0b5-9613-469e-8376-6fb678c60363",
+      "comment": "9º Ano"
+    },
+    {
+      "code": "9L2.6",
+      "description": "Distinguir fatos de opiniões em textos.",
+      "subject_id": "4d29b4f1-7bd7-42c0-84d5-111dc7025b90",
+      "grade_id": "3c68a0b5-9613-469e-8376-6fb678c60363",
+      "comment": "9º Ano"
+    },
+    {
+      "code": "9L2.7",
+      "description": "Inferir, em textos multissemióticos, efeitos de humor, ironia e/ou crítica.",
+      "subject_id": "4d29b4f1-7bd7-42c0-84d5-111dc7025b90",
+      "grade_id": "3c68a0b5-9613-469e-8376-6fb678c60363",
+      "comment": "9º Ano"
+    },
+    {
+      "code": "9L2.8",
+      "description": "Analisar marcas de parcialidade em textos jornalísticos.",
+      "subject_id": "4d29b4f1-7bd7-42c0-84d5-111dc7025b90",
+      "grade_id": "3c68a0b5-9613-469e-8376-6fb678c60363",
+      "comment": "9º Ano"
+    },
+    {
+      "code": "9L2.9",
+      "description": "Analisar a relação temática entre diferentes gêneros jornalísticos.",
+      "subject_id": "4d29b4f1-7bd7-42c0-84d5-111dc7025b90",
+      "grade_id": "3c68a0b5-9613-469e-8376-6fb678c60363",
+      "comment": "9º Ano"
+    },
+    {
+      "code": "9L2.10",
+      "description": "Analisar os efeitos de sentido decorrentes dos mecanismos de construção de textos jornalísticos/midiáticos.",
+      "subject_id": "4d29b4f1-7bd7-42c0-84d5-111dc7025b90",
+      "grade_id": "3c68a0b5-9613-469e-8376-6fb678c60363",
+      "comment": "9º Ano"
+    },
+    {
+      "code": "9L3.1",
+      "description": "Avaliar diferentes graus de parcialidade em textos jornalísticos.",
+      "subject_id": "4d29b4f1-7bd7-42c0-84d5-111dc7025b90",
+      "grade_id": "3c68a0b5-9613-469e-8376-6fb678c60363",
+      "comment": "9º Ano"
+    },
+    {
+      "code": "9L3.2",
+      "description": "Avaliar a fidedignidade de informações sobre um mesmo fato divulgado em diferentes veículos e mídias.",
+      "subject_id": "4d29b4f1-7bd7-42c0-84d5-111dc7025b90",
+      "grade_id": "3c68a0b5-9613-469e-8376-6fb678c60363",
+      "comment": "9º Ano"
+    },
+    {
+      "code": "9A1.1",
+      "description": "Identificar os recursos de modalização em textos diversos.",
+      "subject_id": "4d29b4f1-7bd7-42c0-84d5-111dc7025b90",
+      "grade_id": "3c68a0b5-9613-469e-8376-6fb678c60363",
+      "comment": "9º Ano"
+    },
+    {
+      "code": "9A2.1",
+      "description": "Analisar o uso de figuras de linguagem como estratégia argumentativa.",
+      "subject_id": "4d29b4f1-7bd7-42c0-84d5-111dc7025b90",
+      "grade_id": "3c68a0b5-9613-469e-8376-6fb678c60363",
+      "comment": "9º Ano"
+    },
+    {
+      "code": "9A2.2",
+      "description": "Analisar os efeitos de sentido dos tempos, modos e/ou vozes verbais com base no gênero textual e na intenção comunicativa.",
+      "subject_id": "4d29b4f1-7bd7-42c0-84d5-111dc7025b90",
+      "grade_id": "3c68a0b5-9613-469e-8376-6fb678c60363",
+      "comment": "9º Ano"
+    },
+    {
+      "code": "9A2.3",
+      "description": "Analisar os mecanismos que contribuem para a progressão textual.",
+      "subject_id": "4d29b4f1-7bd7-42c0-84d5-111dc7025b90",
+      "grade_id": "3c68a0b5-9613-469e-8376-6fb678c60363",
+      "comment": "9º Ano"
+    },
+    {
+      "code": "9A2.4",
+      "description": "Analisar os processos de referenciação lexical e pronominal.",
+      "subject_id": "4d29b4f1-7bd7-42c0-84d5-111dc7025b90",
+      "grade_id": "3c68a0b5-9613-469e-8376-6fb678c60363",
+      "comment": "9º Ano"
+    },
+    {
+      "code": "9A2.5",
+      "description": "Analisar as variedades linguísticas em textos.",
+      "subject_id": "4d29b4f1-7bd7-42c0-84d5-111dc7025b90",
+      "grade_id": "3c68a0b5-9613-469e-8376-6fb678c60363",
+      "comment": "9º Ano"
+    },
+    {
+      "code": "9A2.6",
+      "description": "Analisar os efeitos de sentido produzidos pelo uso de modalizadores em textos diversos.",
+      "subject_id": "4d29b4f1-7bd7-42c0-84d5-111dc7025b90",
+      "grade_id": "3c68a0b5-9613-469e-8376-6fb678c60363",
+      "comment": "9º Ano"
+    },
+    {
+      "code": "9A3.1",
+      "description": "Avaliar a adequação das variedades linguísticas em contextos de uso.",
+      "subject_id": "4d29b4f1-7bd7-42c0-84d5-111dc7025b90",
+      "grade_id": "3c68a0b5-9613-469e-8376-6fb678c60363",
+      "comment": "9º Ano"
+    },
+    {
+      "code": "9A3.2",
+      "description": "Avaliar a eficácia das estratégias argumentativas em textos de diferentes gêneros.",
+      "subject_id": "4d29b4f1-7bd7-42c0-84d5-111dc7025b90",
+      "grade_id": "3c68a0b5-9613-469e-8376-6fb678c60363",
+      "comment": "9º Ano"
+    },
+    {
+      "code": "9A4.1",
+      "description": "Produzir texto em língua portuguesa, de acordo com o gênero textual e o tema demandados.",
+      "subject_id": "4d29b4f1-7bd7-42c0-84d5-111dc7025b90",
+      "grade_id": "3c68a0b5-9613-469e-8376-6fb678c60363",
+      "comment": "9º Ano"
     }
   ]
 }

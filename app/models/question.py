@@ -11,18 +11,10 @@ class Question(db.Model):
     text = db.Column(db.String)  # Texto simples da questão
     formatted_text = db.Column(db.Text)  # Texto formatado em HTML
     secondstatement = db.Column(db.String)
-    images = db.Column(JSON)  # Array de objetos com informações das imagens
-    # Exemplo de estrutura do images:
-    # [
-    #   {
-    #     "id": "uuid",
-    #     "name": "nome_do_arquivo.jpg",
-    #     "type": "image/jpeg",
-    #     "size": 12345,
-    #     "url": "caminho/para/imagem.jpg" ou null se armazenada em BYTEA
-    #     "data": "base64_ou_bytes" ou null se armazenada em URL
-    #   }
-    # ]
+    images = db.Column(JSON)  # Array de objetos com informações das imagens (armazenadas no MinIO)
+    # Estrutura: id, type, width, height, minio_bucket, minio_object_name (sem "data").
+    # Exemplo: {"id": "uuid", "type": "image/png", "width": 300, "height": 200,
+    #           "minio_bucket": "question-images", "minio_object_name": "{question_id}/{image_id}.png"}
     subject_id = db.Column(db.String, db.ForeignKey('subject.id'))
     title = db.Column(db.String)
     description = db.Column(db.String)

@@ -498,6 +498,8 @@ CREATE TABLE IF NOT EXISTS "{schema}".competitions (
     ranking_visibility VARCHAR DEFAULT 'final',
     max_participants INTEGER,
     recurrence VARCHAR DEFAULT 'manual',
+    edition_number INTEGER,
+    edition_series VARCHAR,
     template_id VARCHAR,
     status VARCHAR DEFAULT 'rascunho',
     created_by VARCHAR REFERENCES public.users(id),

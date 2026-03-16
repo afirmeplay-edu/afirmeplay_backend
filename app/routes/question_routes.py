@@ -1,4 +1,4 @@
-from flask import Blueprint, request, jsonify
+from flask import Blueprint, request, jsonify, send_file
 from app.models.question import Question
 from app.models.subject import Subject
 from app.models.grades import Grade
@@ -21,6 +21,8 @@ import uuid
 import os
 from PIL import Image
 import io
+import re
+from io import BytesIO
 from sqlalchemy.orm import aliased, joinedload, subqueryload
 from app.utils.response_formatters import format_question_response, format_test_response
 
@@ -61,22 +63,78 @@ def process_image(image_data, image_type):
 
 def extract_images_from_html(html_content):
     """
-    Extrai imagens em base64 do conteúdo HTML
+    Extrai imagens em base64 do conteúdo HTML (legado; usado por migração).
+    Retorna lista de dicts com id, type, width, height, data (base64).
     """
-    import re
     images = []
-    
-    # Procura por tags img com src em base64
     img_pattern = r'<img[^>]+src="(data:image/[^;]+;base64,[^"]+)"[^>]*>'
-    matches = re.finditer(img_pattern, html_content)
-    
-    for match in matches:
+    for match in re.finditer(img_pattern, html_content or ''):
         base64_data = match.group(1)
         image_type = base64_data.split(';')[0].split(':')[1]
         image_info = process_image(base64_data, image_type)
         images.append(image_info)
-    
     return images
+
+
+def _mime_to_ext(mime):
+    """Mapeia MIME type para extensão de arquivo."""
+    m = (mime or '').lower()
+    if 'png' in m:
+        return 'png'
+    if 'jpeg' in m or 'jpg' in m:
+        return 'jpg'
+    if 'gif' in m:
+        return 'gif'
+    if 'webp' in m:
+        return 'webp'
+    return 'png'
+
+
+def _upload_html_base64_images_to_minio(question_id, html_content):
+    """
+    Extrai imagens base64 do HTML, envia para MinIO e substitui src por URL da API.
+    Retorna (novo_html, lista de metadados de imagens sem campo 'data').
+    """
+    if not html_content or 'data:image/' not in html_content:
+        return html_content, []
+    img_pattern = r'<img[^>]+src="(data:image/[^;]+;base64,[^"]+)"[^>]*>'
+    from app.services.storage.minio_service import MinIOService
+    minio = MinIOService()
+    bucket_name = MinIOService.BUCKETS['QUESTION_IMAGES']
+    new_html = html_content
+    images_meta = []
+    for match in re.finditer(img_pattern, html_content):
+        src = match.group(1)
+        b64 = src.split(',', 1)[1] if ',' in src else src
+        try:
+            image_bytes = base64.b64decode(b64)
+        except Exception as e:
+            logging.warning(f"Decode base64 image failed: {e}")
+            continue
+        mime = src.split(';')[0].split(':')[-1].strip()
+        image_id = str(uuid.uuid4())
+        ext = _mime_to_ext(mime)
+        image_name = f"{image_id}.{ext}"
+        result = minio.upload_question_image(question_id, image_bytes, image_name)
+        if not result:
+            logging.error(f"Upload question image failed for question {question_id}")
+            continue
+        try:
+            pil_img = Image.open(io.BytesIO(image_bytes))
+            width, height = pil_img.width, pil_img.height
+        except Exception:
+            width, height = None, None
+        images_meta.append({
+            "id": image_id,
+            "type": mime,
+            "width": width,
+            "height": height,
+            "minio_bucket": bucket_name,
+            "minio_object_name": result["object_name"],
+        })
+        api_url = f"/questions/{question_id}/images/{image_id}"
+        new_html = new_html.replace(src, api_url, 1)
+    return new_html, images_meta
 
 @bp.errorhandler(SQLAlchemyError)
 def handle_db_error(error):
@@ -116,15 +174,6 @@ def create_question():
         
         user_role = current_user.get('role')
         user_city_id = current_user.get('tenant_id') or current_user.get('city_id')
-
-        # Processa imagens do texto formatado
-        images = []
-        if data.get('formattedText'):
-            images.extend(extract_images_from_html(data['formattedText']))
-        
-        # Processa imagens da solução formatada
-        if data.get('formattedSolution'):
-            images.extend(extract_images_from_html(data['formattedSolution']))
 
         # Validações específicas por tipo de questão
         if data['type'] == 'multipleChoice':
@@ -167,7 +216,7 @@ def create_question():
             text=data.get('text'),
             formatted_text=data.get('formattedText'),
             secondstatement=data.get('secondStatement'),
-            images=images,
+            images=[],
             subject_id=data.get('subjectId'),
             title=data.get('title'),
             description=data.get('description'),
@@ -203,6 +252,24 @@ def create_question():
         
         # Restaurar search_path original
         db.session.execute(text(f"SET search_path TO {current_search_path}"))
+
+        # Enviar imagens base64 para MinIO e substituir por URL da API
+        new_formatted_text = question.formatted_text
+        new_formatted_solution = question.formatted_solution
+        images_meta = []
+        if question.formatted_text:
+            new_formatted_text, meta_text = _upload_html_base64_images_to_minio(question.id, question.formatted_text)
+            images_meta.extend(meta_text)
+        if question.formatted_solution:
+            new_formatted_solution, meta_solution = _upload_html_base64_images_to_minio(question.id, question.formatted_solution)
+            images_meta.extend(meta_solution)
+        if images_meta:
+            question.formatted_text = new_formatted_text
+            question.formatted_solution = new_formatted_solution
+            question.images = images_meta
+            db.session.execute(text("SET search_path TO public"))
+            db.session.commit()
+            db.session.execute(text(f"SET search_path TO {current_search_path}"))
 
         return jsonify({
             "message": "Question created successfully",
@@ -422,6 +489,34 @@ def get_questions_batch():
         return jsonify({"error": "Erro ao buscar questões em lote", "details": str(e)}), 500
 
 
+@bp.route('/<string:question_id>/images/<string:image_id>', methods=['GET'])
+def get_question_image(question_id, image_id):
+    """
+    Serve imagem de questão a partir do MinIO.
+    Não expõe URLs do MinIO; retorna o binário com Content-Type correto.
+    """
+    try:
+        question = Question.query.get(question_id)
+        if not question:
+            return jsonify({"error": "Question not found"}), 404
+        images = question.images or []
+        image_meta = next((img for img in images if isinstance(img, dict) and img.get("id") == image_id), None)
+        if not image_meta:
+            return jsonify({"error": "Image not found"}), 404
+        bucket = image_meta.get("minio_bucket")
+        object_name = image_meta.get("minio_object_name")
+        if not bucket or not object_name:
+            return jsonify({"error": "Image not stored in MinIO"}), 404
+        from app.services.storage.minio_service import MinIOService
+        minio = MinIOService()
+        data = minio.download_file(bucket_name=bucket, object_name=object_name)
+        content_type = image_meta.get("type") or "application/octet-stream"
+        return send_file(BytesIO(data), mimetype=content_type, as_attachment=False)
+    except Exception as e:
+        logging.error(f"Error serving question image: {str(e)}", exc_info=True)
+        return jsonify({"error": "Error loading image", "details": str(e)}), 500
+
+
 @bp.route('/<string:question_id>', methods=['GET'])
 @jwt_required()
 @role_required("admin", "professor", "coordenador", "diretor","tecadm")
@@ -533,7 +628,30 @@ def update_question(question_id):
             else:
                 # Se vier string, usar diretamente
                 question.skill = skills_input
-        
+
+        # Enviar novas imagens base64 para MinIO e substituir por URL da API
+        if 'formattedText' in data or 'formattedSolution' in data:
+            ft = question.formatted_text or ''
+            fs = question.formatted_solution or ''
+            new_ft, meta_t = _upload_html_base64_images_to_minio(question_id, ft)
+            new_fs, meta_s = _upload_html_base64_images_to_minio(question_id, fs)
+            existing_by_id = {
+                img['id']: img for img in (question.images or [])
+                if isinstance(img, dict) and img.get('minio_object_name')
+            }
+            new_meta_by_id = {m['id']: m for m in meta_t + meta_s}
+            ids_in_ft = re.findall(r'/questions/[^/]+/images/([a-f0-9-]{36})', new_ft)
+            ids_in_fs = re.findall(r'/questions/[^/]+/images/([a-f0-9-]{36})', new_fs)
+            all_ids = list(dict.fromkeys(ids_in_ft + ids_in_fs))
+            images_list = [
+                new_meta_by_id.get(iid) or existing_by_id.get(iid)
+                for iid in all_ids
+                if new_meta_by_id.get(iid) or existing_by_id.get(iid)
+            ]
+            question.formatted_text = new_ft
+            question.formatted_solution = new_fs
+            question.images = images_list
+
         question.version += 1
 
         db.session.commit()

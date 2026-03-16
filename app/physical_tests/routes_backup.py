@@ -6,7 +6,7 @@ Rotas para sistema de formulários físicos de provas
 from flask import Blueprint, request, jsonify, send_file
 from flask_jwt_extended import jwt_required
 from app.decorators.role_required import role_required, get_current_user_from_token
-from app.services.physical_test_form_service import PhysicalTestFormService
+from app.physical_tests.form_service import PhysicalTestFormService
 from app.services.institutional_test_pdf_generator import InstitutionalTestPDFGenerator
 from app.models.test import Test
 from app.models.classTest import ClassTest
@@ -349,7 +349,7 @@ def process_physical_correction(test_id):
             return jsonify({"error": "Imagem não fornecida"}), 400
         
         # Processar correção usando gabarito de referência
-        from app.services.physical_test_pdf_generator import PhysicalTestPDFGenerator
+        from app.physical_tests.pdf_generator import PhysicalTestPDFGenerator
         pdf_generator = PhysicalTestPDFGenerator()
         
         # Converter image_data para base64 string se necessário

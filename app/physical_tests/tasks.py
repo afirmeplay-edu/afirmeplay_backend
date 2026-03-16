@@ -178,7 +178,7 @@ def generate_physical_forms_async(
         from app.models.testQuestion import TestQuestion
         from app.models.answerSheetGabarito import AnswerSheetGabarito
         from app.models.studentClass import Class
-        from app.services.physical_test_form_service import PhysicalTestFormService
+        from app.physical_tests.form_service import PhysicalTestFormService
         from app.models.city import City
         from sqlalchemy import text
         
@@ -280,6 +280,23 @@ def generate_physical_forms_async(
             test_id=test_id
         ).order_by(TestQuestion.order).all()
         
+        from app.models.skill import Skill
+        
+        def _resolve_question_subject_id(question) -> Optional[str]:
+            """Resolve disciplina da questão: via primeira habilidade (skill), fallback subject_id."""
+            if question.skill:
+                skill_id_raw = (question.skill or '').strip().strip('{}')
+                if skill_id_raw:
+                    try:
+                        skill_obj = Skill.query.get(skill_id_raw)
+                        if skill_obj and getattr(skill_obj, 'subject_id', None):
+                            return str(skill_obj.subject_id)
+                    except Exception:
+                        pass
+            if getattr(question, 'subject_id', None):
+                return str(question.subject_id)
+            return None
+        
         questions_data = []
         for tq in test_questions:
             question = Question.query.get(tq.question_id)
@@ -291,7 +308,8 @@ def generate_physical_forms_async(
                     'title': question.title,
                     'alternatives': question.alternatives or [],
                     'correct_answer': question.correct_answer,
-                    'order': tq.order
+                    'order': tq.order,
+                    'subject_id': _resolve_question_subject_id(question),
                 })
         
         num_questions = len(questions_data)
@@ -337,20 +355,80 @@ def generate_physical_forms_async(
         # ✅ CRÍTICO: Gerar estrutura completa (topology) SEMPRE que use_blocks=True
         # Isso garante que a topologia completa seja salva no banco
         if use_blocks:
-            if 'topology' not in blocks_config or not blocks_config.get('topology'):
-                logger.info(f"[CELERY] 🔨 Gerando estrutura completa de blocos...")
-                from app.routes.physical_test_routes import _generate_complete_structure
-                
-                complete_structure = _generate_complete_structure(
-                    num_questions=num_questions,
-                    use_blocks=use_blocks,
-                    blocks_config=blocks_config,
-                    questions_options=questions_options
-                )
-                blocks_config['topology'] = complete_structure
-                logger.info(f"[CELERY] ✅ Estrutura gerada: {blocks_config.get('num_blocks', 1)} blocos, {len(complete_structure.get('blocks', []))} blocos na topology")
-            else:
+            if 'topology' in blocks_config and blocks_config.get('topology'):
                 logger.info(f"[CELERY] ✅ Topology já existe no blocks_config")
+            elif blocks_config.get('separate_by_subject'):
+                # ✅ Separar por disciplina: 2–4 blocos, um por disciplina; disciplina da questão via primeira habilidade
+                from app.utils.response_formatters import _get_all_subjects_from_test
+                subjects_info = _get_all_subjects_from_test(test)
+                if not subjects_info:
+                    logger.info(f"[CELERY] separate_by_subject ativo mas sem disciplinas na prova; usando estrutura padrão")
+                    from app.physical_tests.routes import _generate_complete_structure
+                    complete_structure = _generate_complete_structure(
+                        num_questions=num_questions,
+                        use_blocks=use_blocks,
+                        blocks_config=blocks_config,
+                        questions_options=questions_options
+                    )
+                    blocks_config['topology'] = complete_structure
+                else:
+                    num_blocks = min(4, max(2, len(subjects_info)))
+                    # Mapa número da questão (1-based) -> alternativas
+                    questions_map = {}
+                    for key, value in questions_options.items():
+                        try:
+                            q_num = int(key)
+                            questions_map[q_num] = value if isinstance(value, list) and len(value) >= 2 else ['A', 'B', 'C', 'D']
+                        except (ValueError, TypeError):
+                            continue
+                    for q in range(1, num_questions + 1):
+                        if q not in questions_map:
+                            questions_map[q] = ['A', 'B', 'C', 'D']
+                    subject_ids_ordered = [str(s['id']) for s in subjects_info]
+                    blocks_question_numbers = []
+                    if len(subjects_info) == 1 and num_blocks == 2:
+                        # Uma disciplina com 2 blocos: repartir em até 22 no primeiro, resto no segundo
+                        sid = subject_ids_ordered[0]
+                        q_nums = [i + 1 for i in range(num_questions) if (questions_data[i].get('subject_id') or '').strip() == sid]
+                        if not q_nums:
+                            q_nums = list(range(1, num_questions + 1))
+                        n = len(q_nums)
+                        blocks_question_numbers = [q_nums[: min(22, n)], q_nums[min(22, n):]]
+                    else:
+                        # Um bloco por disciplina (máx. 4 disciplinas)
+                        for subj in subjects_info[:num_blocks]:
+                            sid = str(subj['id'])
+                            q_nums = [i + 1 for i in range(num_questions) if (questions_data[i].get('subject_id') or '').strip() == sid]
+                            blocks_question_numbers.append(q_nums)
+                    topology_blocks = []
+                    for block_idx, q_nums in enumerate(blocks_question_numbers, start=1):
+                        questions_in_block = [
+                            {"q": q_num, "alternatives": questions_map.get(q_num, ['A', 'B', 'C', 'D'])}
+                            for q_num in q_nums
+                        ]
+                        topology_blocks.append({"block_id": block_idx, "questions": questions_in_block})
+                    if not topology_blocks and num_questions > 0:
+                        topology_blocks = [{
+                            "block_id": 1,
+                            "questions": [{"q": i, "alternatives": questions_map.get(i, ['A', 'B', 'C', 'D'])} for i in range(1, num_questions + 1)]
+                        }]
+                    blocks_config['topology'] = {'blocks': topology_blocks}
+                    blocks_config['num_blocks'] = len(topology_blocks)
+                    logger.info(f"[CELERY] ✅ Estrutura por disciplina: {len(topology_blocks)} blocos")
+            else:
+                if 'topology' not in blocks_config or not blocks_config.get('topology'):
+                    logger.info(f"[CELERY] 🔨 Gerando estrutura completa de blocos...")
+                    from app.physical_tests.routes import _generate_complete_structure
+                    complete_structure = _generate_complete_structure(
+                        num_questions=num_questions,
+                        use_blocks=use_blocks,
+                        blocks_config=blocks_config,
+                        questions_options=questions_options
+                    )
+                    blocks_config['topology'] = complete_structure
+                    logger.info(f"[CELERY] ✅ Estrutura gerada: {blocks_config.get('num_blocks', 1)} blocos, {len(complete_structure.get('blocks', []))} blocos na topology")
+                else:
+                    logger.info(f"[CELERY] ✅ Topology já existe no blocks_config")
         
         # ✅ MODIFICADO: Não criar AnswerSheetGabarito para provas físicas
         # Os dados serão salvos diretamente no PhysicalTestForm quando cada formulário for criado

@@ -162,7 +162,9 @@ def generate_physical_forms_async(
         if result.ready():
             data = result.get()
     """
+    job_id = None
     try:
+        job_id = self.request.id
         print(f"[CELERY] ========== TASK CELERY INICIADA ==========")
         print(f"[CELERY] test_id: {test_id}")
         print(f"[CELERY] city_id: {city_id}")
@@ -475,6 +477,11 @@ def generate_physical_forms_async(
             }
         }
         
+        # ✅ Job de progresso para polling detalhado (turmas/alunos/erros)
+        from app.services.progress_store import create_job, complete_job
+        create_job(job_id=job_id, total=len(students_data), test_id=test_id)
+        test_data['job_id'] = job_id
+        
         print(f"[CELERY] test_data['correction_data'] existe: {'correction_data' in test_data}")
         print(f"[CELERY] ========== CHAMANDO FORM_SERVICE ==========")
         
@@ -608,6 +615,7 @@ def generate_physical_forms_async(
                     except Exception as e:
                         logger.warning(f"[CELERY] ⚠️ Erro ao limpar arquivos temporários: {str(e)}")
             
+            complete_job(job_id)
             return {
                 'success': True,
                 'test_id': test_id,
@@ -624,18 +632,23 @@ def generate_physical_forms_async(
         else:
             error_msg = result.get('error', 'Erro desconhecido ao gerar formulários')
             logger.error(f"[CELERY] ❌ Erro na geração: {error_msg}")
+            if job_id:
+                complete_job(job_id)
             raise Exception(error_msg)
     
     except Exception as e:
+        from app.services.progress_store import complete_job as _complete_job
         error_msg = str(e)
         logger.error(f"[CELERY] ❌ Erro ao gerar formulários físicos: {error_msg}", exc_info=True)
-        
+
         # 🔒 NÃO fazer retry por erro de MinIO - apenas por erros críticos de geração
         # Se PDFs foram gerados mas upload falhou, não retryar
         is_minio_error = 'minio' in error_msg.lower() or 's3' in error_msg.lower() or 'ssl' in error_msg.lower()
-        
+
         if is_minio_error:
             logger.warning(f"[CELERY] ⚠️ Erro de MinIO detectado - não retryando task (PDFs podem ter sido gerados)")
+            if job_id:
+                _complete_job(job_id)
             return {
                 'success': False,
                 'error': error_msg,
@@ -643,13 +656,14 @@ def generate_physical_forms_async(
                 'generated_forms': 0,
                 'is_minio_error': True
             }
-        
+
         # Retry apenas para erros críticos (não relacionados a MinIO)
         if self.request.retries < self.max_retries:
             logger.info(f"[CELERY] 🔄 Tentando novamente (retry {self.request.retries + 1}/{self.max_retries})...")
             raise self.retry(exc=e)
         else:
-            # Retornar erro após esgotar retries
+            if job_id:
+                _complete_job(job_id)
             return {
                 'success': False,
                 'error': error_msg,

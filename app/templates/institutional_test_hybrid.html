@@ -932,7 +932,12 @@
 		</style>
 	</head>
 	<body>
+		{% set include_cover = include_cover|default(True) %}
+		{% set include_questions = include_questions|default(True) %}
+		{% set include_answer_sheet = include_answer_sheet|default(True) %}
+
 		<!-- Capa Institucional -->
+		{% if include_cover %}
 		<div class="institutional-cover">
 			<div class="cover-header">
 				<div class="municipality-logo">
@@ -1004,8 +1009,10 @@
 				</div>
 			</div>
 		</div>
+		{% endif %}
 
 		<!-- Disciplinas e Questões -->
+		{% if include_questions %}
 		{% if questions_by_block %} {% for block in questions_by_block %}
 		<div class="subject-cover">
 			<div class="block-number">
@@ -1135,8 +1142,10 @@
 			{% endfor %}
 		</div>
 		{% endfor %} {% endif %}
+		{% endif %}
 
 		<!-- Formulário de Respostas com Marcadores Geométricos -->
+		{% if include_answer_sheet %}
 		<div class="answer-sheet">
 			<!-- ÂNCORAS DA PÁGINA A4 (dentro do .answer-sheet com position: relative) -->
 			<div class="a4-anchor-square anchor-top-left">
@@ -1464,5 +1473,6 @@
 			</div>
 			<!-- Fim do answer-grid-wrapper -->
 		</div>
+		{% endif %}
 	</body>
 </html>

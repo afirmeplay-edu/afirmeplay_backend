@@ -21,6 +21,7 @@ com o formato:
 
 USO:
     python scripts/update_portuguese_skills.py
+    python scripts/update_portuguese_skills.py 9A1.1 9A2.1 9A2.2   # processa só esses códigos
 """
 
 import os
@@ -64,11 +65,20 @@ def update_portuguese_skills():
     logger.info("\n📂 Carregando dados das habilidades...")
     data = load_habilidades_data()
     habilidades = data.get('habilidades', [])
-    logger.info(f"✅ {len(habilidades)} habilidades carregadas do JSON")
-    
+    # Filtrar por códigos se passados na linha de comando
+    only_codes = [c.strip() for c in sys.argv[1:] if c.strip()]
+    if only_codes:
+        habilidades = [h for h in habilidades if h.get('code') in only_codes]
+        logger.info(f"✅ Filtrado: {len(habilidades)} habilidades (códigos: {', '.join(only_codes)})")
+    else:
+        logger.info(f"✅ {len(habilidades)} habilidades carregadas do JSON")
+    if not habilidades:
+        logger.warning("Nenhuma habilidade para processar.")
+        return
     # Importações do app
     from app import create_app, db
     from app.models.skill import Skill
+    from app.models.grades import Grade
     
     # Estatísticas
     stats = {
@@ -102,24 +112,32 @@ def update_portuguese_skills():
                     skill = Skill.query.filter_by(code=code).first()
                     
                     if skill:
-                        # EXISTE: Atualizar APENAS a description
+                        # EXISTE: Atualizar description, subject_id e garantir vínculo com a série
                         skill.description = description
+                        if subject_id is not None:
+                            skill.subject_id = subject_id
+                        if grade_id_str:
+                            grade_id_uuid = UUID(grade_id_str)
+                            grade = Grade.query.get(grade_id_uuid)
+                            if grade and grade not in (skill.grades or []):
+                                skill.grades.append(grade)
                         stats['updated'] += 1
                         logger.info(f"   ✏️  [{idx}/{len(habilidades)}] Atualizada: {code}")
                     else:
-                        # NÃO EXISTE: Criar nova
-                        # Converter grade_id para UUID se não for null
-                        grade_id_uuid = UUID(grade_id_str) if grade_id_str else None
-                        
+                        # NÃO EXISTE: Criar nova (modelo usa skill_grade N:N, não grade_id)
                         skill = Skill(
                             code=code,
                             description=description,
                             subject_id=subject_id,
-                            grade_id=grade_id_uuid
                         )
                         db.session.add(skill)
+                        db.session.flush()
+                        if grade_id_str:
+                            grade_id_uuid = UUID(grade_id_str)
+                            grade = Grade.query.get(grade_id_uuid)
+                            if grade:
+                                skill.grades.append(grade)
                         stats['created'] += 1
-                        
                         grade_info = f"grade={grade_id_str[:8]}..." if grade_id_str else "grade=NULL"
                         logger.info(f"   ➕ [{idx}/{len(habilidades)}] Criada: {code} ({grade_info})")
                 

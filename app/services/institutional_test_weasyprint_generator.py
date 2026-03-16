@@ -261,7 +261,22 @@ class InstitutionalTestWeasyPrintGenerator:
 
             # Gerar PDF com WeasyPrint
             pdf_buffer = io.BytesIO()
-            HTML(string=html_content).write_pdf(pdf_buffer)
+
+            # Usar base_url público para resolver URLs relativas (ex: /questions/.../images/...)
+            public_api_base_url = os.getenv("PUBLIC_API_BASE_URL")
+            if not public_api_base_url:
+                app_env = (os.getenv("APP_ENV") or "").lower()
+                # Fallback sensato para desenvolvimento/local
+                if app_env in ("development", "dev", "local"):
+                    public_api_base_url = "http://localhost:5000"
+
+            if public_api_base_url:
+                html_obj = HTML(string=html_content, base_url=public_api_base_url)
+            else:
+                # Sem base_url: manter comportamento antigo (pode falhar para URLs relativas)
+                html_obj = HTML(string=html_content)
+
+            html_obj.write_pdf(pdf_buffer)
             pdf_buffer.seek(0)
 
             return pdf_buffer.read()

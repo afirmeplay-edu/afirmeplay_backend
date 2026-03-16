@@ -171,32 +171,30 @@ def create_job(job_id: str, total: int, test_id: str = None, gabarito_id: str = 
         return progress[job_id]
 
 
-def update_item_processing(job_id: str, index: int):
+def update_item_processing(job_id: str, index: int, extra: dict = None):
     """
-    Marca item como em processamento
-    
-    Args:
-        job_id: ID do job
-        index: Índice do item (0-based)
+    Marca item como em processamento.
+    extra: dict opcional (class_id, class_name, school_name, student_id, student_name) para progresso detalhado.
     """
     with lock:
         if job_id in progress:
-            progress[job_id]["items"][str(index)] = {"status": "processing"}
+            item = {"status": "processing"}
+            if extra:
+                for key in ("student_id", "student_name", "class_id", "class_name", "school_name"):
+                    if key in extra and extra[key] is not None:
+                        item[key] = extra[key]
+            progress[job_id]["items"][str(index)] = item
             logger.debug(f"🔄 Job {job_id}: Item {index} em processamento")
 
 
 def update_item_done(job_id: str, index: int, result: dict):
     """
-    Marca item como concluído com sucesso
-    
-    Args:
-        job_id: ID do job
-        index: Índice do item (0-based)
-        result: Resultado da correção
+    Marca item como concluído com sucesso.
+    Aceita campos de correção (correct, total, percentage) e/ou de formulários físicos (class_id, class_name, school_name).
     """
     with lock:
         if job_id in progress:
-            progress[job_id]["items"][str(index)] = {
+            item = {
                 "status": "done",
                 "student_id": result.get("student_id"),
                 "student_name": result.get("student_name"),
@@ -205,29 +203,31 @@ def update_item_done(job_id: str, index: int, result: dict):
                 "percentage": result.get("percentage"),
                 "grade": result.get("grade"),
                 "classification": result.get("classification"),
-                "proficiency": result.get("proficiency")
+                "proficiency": result.get("proficiency"),
+                "class_id": result.get("class_id"),
+                "class_name": result.get("class_name"),
+                "school_name": result.get("school_name"),
             }
+            progress[job_id]["items"][str(index)] = {"status": "done", **{k: v for k, v in item.items() if k != "status" and v is not None}}
             progress[job_id]["completed"] += 1
             progress[job_id]["successful"] += 1
             progress[job_id]["results"].append(result)
             logger.info(f"✅ Job {job_id}: Item {index} concluído - {result.get('student_name', 'N/A')}")
 
 
-def update_item_error(job_id: str, index: int, error: str):
+def update_item_error(job_id: str, index: int, error: str, extra: dict = None):
     """
-    Marca item como erro
-    
-    Args:
-        job_id: ID do job
-        index: Índice do item (0-based)
-        error: Mensagem de erro
+    Marca item como erro.
+    extra: dict opcional com student_id, student_name, class_id, class_name, school_name para status detalhado.
     """
     with lock:
         if job_id in progress:
-            progress[job_id]["items"][str(index)] = {
-                "status": "error",
-                "error": error
-            }
+            item = {"status": "error", "error": error}
+            if extra:
+                for key in ("student_id", "student_name", "class_id", "class_name", "school_name"):
+                    if key in extra and extra[key] is not None:
+                        item[key] = extra[key]
+            progress[job_id]["items"][str(index)] = item
             progress[job_id]["completed"] += 1
             progress[job_id]["failed"] += 1
             logger.warning(f"❌ Job {job_id}: Item {index} falhou - {error}")

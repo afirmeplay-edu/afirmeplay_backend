@@ -232,7 +232,7 @@ class PhysicalTestFormService:
             test_data = base_test_data
             
             questions_data = [self._format_question_data(q) for q in questions]
-            
+
             students_data = [self._format_student_data(s) for s in students]
             
             # Buscar ClassTest associado à prova
@@ -240,13 +240,13 @@ class PhysicalTestFormService:
             class_test_id = class_tests[0].id if class_tests else "temp-class-test-id"
             
             # Gerar PDFs institucionais usando WeasyPrint (suporta HTML/CSS completo)
-            # Este método gera a prova completa: capa, questões, imagens, alternativas e formulário
+            # ✅ Architecture 4: gerar 1 PDF de questões + 1 PDF aluno (capa+OMR) e mesclar.
             from app.services.institutional_test_weasyprint_generator import InstitutionalTestWeasyPrintGenerator
             institutional_generator = InstitutionalTestWeasyPrintGenerator()
 
             # Gerar PDFs institucionais com processamento incremental (salva em disco)
             # output_dir padrão será usado se não fornecido (/tmp/celery_pdfs/physical_tests)
-            generated_files = institutional_generator.generate_institutional_test_pdf(
+            generated_files = institutional_generator.generate_institutional_test_pdf_arch4(
                 test_data, students_data, questions_data, class_test_id,
                 output_dir=output_dir  # Se None, usa padrão /tmp/celery_pdfs/physical_tests
             )
@@ -347,6 +347,7 @@ class PhysicalTestFormService:
             'secondstatement': question.secondstatement,
             'alternatives': question.alternatives or [],
             'correct_answer': question.correct_answer,
+            'images': getattr(question, 'images', None) or [],  # ✅ Necessário para inline base64 no WeasyPrint
             'subject_id': question.subject_id,  # Incluir ID da disciplina da questão
             'skill': question.skill,  # Incluir ID da habilidade da questão
             'order': getattr(question, 'order', None)  # Incluir ordem da questão (campo order da TestQuestion)

@@ -16,6 +16,7 @@ import gc
 from datetime import datetime
 from typing import List, Dict, Any, Optional
 from PIL import Image as PILImage
+from pypdf import PdfReader, PdfWriter
 
 
 class InstitutionalTestWeasyPrintGenerator:
@@ -34,6 +35,334 @@ class InstitutionalTestWeasyPrintGenerator:
 
         # Adicionar filtros personalizados
         self.env.filters['safe'] = lambda x: x
+        self._minio_service = None
+        self._image_data_uri_cache: Dict[str, str] = {}
+
+    def _get_minio_service(self):
+        if self._minio_service is None:
+            from app.services.storage.minio_service import MinIOService
+            self._minio_service = MinIOService()
+        return self._minio_service
+
+    def _weasyprint_base_url(self) -> Optional[str]:
+        public_api_base_url = os.getenv("PUBLIC_API_BASE_URL")
+        if not public_api_base_url:
+            app_env = (os.getenv("APP_ENV") or "").lower()
+            if app_env in ("development", "dev", "local"):
+                public_api_base_url = "http://localhost:5000"
+        return public_api_base_url
+
+    def _render_template(self, template_name: str, template_data: Dict[str, Any]) -> str:
+        template = self.env.get_template(template_name)
+        return template.render(**template_data)
+
+    def _html_to_pdf_bytes(self, html_content: str) -> bytes:
+        pdf_buffer = io.BytesIO()
+        base_url = self._weasyprint_base_url()
+        if base_url:
+            html_obj = HTML(string=html_content, base_url=base_url)
+        else:
+            html_obj = HTML(string=html_content)
+        html_obj.write_pdf(pdf_buffer)
+        pdf_buffer.seek(0)
+        return pdf_buffer.read()
+
+    def _inline_question_images_html(self, html: str, images_meta: Any) -> str:
+        """
+        Substitui <img src="/questions/<question_id>/images/<image_id>"> por data:...;base64,...
+        Usa question.images (minio_bucket/minio_object_name) quando existir; senão fallback
+        via MinIO com bucket question-images e object_name {question_id}/{image_id}.png
+        """
+        if not html or not isinstance(html, str):
+            return html or ""
+
+        import re
+        # Captura question_id (grupo 1) e image_id (grupo 2) da URL
+        pattern = re.compile(r'''src\s*=\s*["']/questions/([^/"']+)/images/([a-fA-F0-9-]{36})["']''')
+
+        by_id: Dict[str, Dict[str, Any]] = {}
+        if isinstance(images_meta, list):
+            for img in images_meta:
+                if isinstance(img, dict) and img.get("id"):
+                    by_id[str(img["id"])] = img
+
+        def _replace(match):
+            question_id = match.group(1)
+            image_id = match.group(2)
+            meta = by_id.get(image_id)
+            bucket = None
+            object_name = None
+            mime = "image/png"
+            if meta:
+                bucket = meta.get("minio_bucket")
+                object_name = meta.get("minio_object_name")
+                mime = meta.get("type") or mime
+            if not bucket or not object_name:
+                # Fallback: path padrão MinIO question-images/{question_id}/{image_id}.png
+                bucket = "question-images"
+                object_name = f"{question_id}/{image_id}.png"
+
+            cache_key = f"{bucket}:{object_name}"
+            cached = self._image_data_uri_cache.get(cache_key)
+            if cached:
+                return f'src="{cached}"'
+
+            try:
+                data = self._get_minio_service().download_file(bucket, object_name)
+                if not data:
+                    return match.group(0)
+                b64 = base64.b64encode(data).decode("utf-8")
+                data_uri = f"data:{mime};base64,{b64}"
+                self._image_data_uri_cache[cache_key] = data_uri
+                return f'src="{data_uri}"'
+            except Exception:
+                return match.group(0)
+
+        return pattern.sub(_replace, html)
+
+    def generate_institutional_test_pdf_arch4(
+        self,
+        test_data: Dict,
+        students_data: List[Dict],
+        questions_data: List[Dict],
+        class_test_id: str = None,
+        output_dir: str = None
+    ) -> List[Dict]:
+        """
+        Architecture 4 (otimizada):
+        - Gera 1 PDF base (capa institucional genérica + blocos + questões), uma vez.
+        - Gera 1 PDF por aluno contendo apenas a folha de respostas (OMR), 1 página.
+        - Não chama _generate_answer_sheet_base64 (resultado não é usado pelo template).
+        - Mescla: base + página OMR do aluno.
+        """
+        if output_dir is None:
+            output_dir = '/tmp/celery_pdfs/physical_tests'
+        os.makedirs(output_dir, exist_ok=True)
+
+        # Preparar estrutura comum de questões (uma vez)
+        questions_by_subject = self._organize_questions_by_subject(questions_data, test_data)
+        blocks_config = test_data.get('blocks_config', {})
+        use_blocks = blocks_config.get('use_blocks', False)
+        if use_blocks:
+            questions_by_block = self._organize_questions_by_blocks(questions_data, test_data)
+            question_counter = 1
+            for block in questions_by_block:
+                if block and 'questions' in block:
+                    for question in block['questions']:
+                        if question:
+                            question['question_number'] = question_counter
+                            question_counter += 1
+        else:
+            questions_by_block = None
+            question_counter = 1
+            for subject_name, subject_questions in questions_by_subject.items():
+                for question in subject_questions:
+                    question['question_number'] = question_counter
+                    question_counter += 1
+
+        total_questions = len(questions_data)
+        questions_map = {}
+        letters = ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H']
+        for question in questions_data:
+            question_num = question.get('question_number')
+            if not question_num:
+                continue
+            alternatives = question.get('alternatives', [])
+            if isinstance(alternatives, str):
+                try:
+                    alternatives = json.loads(alternatives)
+                except Exception:
+                    alternatives = []
+            options_list = []
+            if isinstance(alternatives, list) and len(alternatives) > 0:
+                for idx, _alt in enumerate(alternatives):
+                    if idx < len(letters):
+                        options_list.append(letters[idx])
+            else:
+                options_list = ['A', 'B', 'C', 'D']
+            if len(options_list) < 2:
+                options_list = ['A', 'B', 'C', 'D']
+            questions_map[question_num] = options_list
+
+        # Inline base64 nas questões (uma vez)
+        if questions_by_block:
+            for block in questions_by_block:
+                for q in block.get('questions', []) or []:
+                    if not isinstance(q, dict):
+                        continue
+                    q['content'] = Markup(self._inline_question_images_html(str(q.get('content') or ''), q.get('images') or []))
+                    if q.get('prompt'):
+                        q['prompt'] = Markup(self._inline_question_images_html(str(q.get('prompt') or ''), q.get('images') or []))
+                    alts = q.get('alternatives') or []
+                    if isinstance(alts, list):
+                        for alt in alts:
+                            if isinstance(alt, dict) and alt.get('content'):
+                                alt['content'] = Markup(self._inline_question_images_html(str(alt['content']), q.get('images') or []))
+        else:
+            for subject_questions in questions_by_subject.values():
+                for q in subject_questions:
+                    if not isinstance(q, dict):
+                        continue
+                    q['content'] = Markup(self._inline_question_images_html(str(q.get('content') or ''), q.get('images') or []))
+                    if q.get('prompt'):
+                        q['prompt'] = Markup(self._inline_question_images_html(str(q.get('prompt') or ''), q.get('images') or []))
+                    alts = q.get('alternatives') or []
+                    if isinstance(alts, list):
+                        for alt in alts:
+                            if isinstance(alt, dict) and alt.get('content'):
+                                alt['content'] = Markup(self._inline_question_images_html(str(alt['content']), q.get('images') or []))
+
+        default_logo_base64 = self._load_default_logo()
+        # Aluno genérico para a capa do base (rodapé usa fallbacks do template)
+        base_student = {'school_name': '', 'class_name': '', 'name': ''}
+        base_template_data = {
+            'test_data': test_data,
+            'student': base_student,
+            'questions_by_subject': questions_by_subject,
+            'questions_by_block': questions_by_block,
+            'blocks_config': blocks_config,
+            'questions_map': questions_map,
+            'answer_sheet_image': '',
+            'total_questions': total_questions,
+            'datetime': datetime,
+            'generated_date': datetime.now().strftime('%d/%m/%Y %H:%M'),
+            'default_logo': default_logo_base64,
+            'include_cover': True,
+            'include_questions': True,
+            'include_answer_sheet': False,
+        }
+        base_html = self._render_template('institutional_test_hybrid.html', base_template_data)
+        base_pdf_bytes = self._html_to_pdf_bytes(base_html)
+        base_reader = PdfReader(io.BytesIO(base_pdf_bytes))
+
+        # Coordenadas (uma vez)
+        coordinates = self._map_existing_form_coordinates(questions_data)
+
+        generated_files: List[Dict[str, Any]] = []
+        total_students = len(students_data)
+        job_id = (test_data or {}).get('job_id')
+        for idx, student in enumerate(students_data, 1):
+            index_0 = idx - 1
+            if job_id:
+                try:
+                    from app.services.progress_store import update_item_processing
+                    update_item_processing(job_id, index_0, extra={
+                        'student_id': str(student.get('id', '')),
+                        'student_name': student.get('name', student.get('nome', '')),
+                        'class_id': str(student.get('class_id', '')) if student.get('class_id') else None,
+                        'class_name': student.get('class_name'),
+                        'school_name': student.get('school_name'),
+                    })
+                except Exception:
+                    pass
+            try:
+                # Gerar QR code no formato JSON (igual ao fluxo atual)
+                student_id = str(student.get('id', ''))
+                test_id = str(test_data.get('id', ''))
+                qr_metadata = {"student_id": student_id, "test_id": test_id}
+                import qrcode as _qrcode
+                from io import BytesIO as _BytesIO
+                qr = _qrcode.QRCode(
+                    version=1,
+                    error_correction=_qrcode.constants.ERROR_CORRECT_L,
+                    box_size=10,
+                    border=2,
+                )
+                qr.add_data(json.dumps(qr_metadata))
+                qr.make(fit=True)
+                qr_img = qr.make_image(fill_color="black", back_color="white")
+                qr_buffer = _BytesIO()
+                qr_img.save(qr_buffer, format="PNG")
+                qr_buffer.seek(0)
+                qr_code_base64 = base64.b64encode(qr_buffer.read()).decode()
+
+                student_with_qr = student.copy()
+                student_with_qr['qr_code'] = qr_code_base64
+
+                # Apenas folha OMR por aluno (sem capa; sem _generate_answer_sheet_base64 - não é usada pelo template)
+                student_template_data = {
+                    'test_data': test_data,
+                    'student': student_with_qr,
+                    'questions_by_subject': questions_by_subject,
+                    'questions_by_block': questions_by_block,
+                    'blocks_config': blocks_config,
+                    'questions_map': questions_map,
+                    'answer_sheet_image': '',
+                    'total_questions': total_questions,
+                    'datetime': datetime,
+                    'generated_date': datetime.now().strftime('%d/%m/%Y %H:%M'),
+                    'default_logo': default_logo_base64,
+                    'include_cover': False,
+                    'include_questions': False,
+                    'include_answer_sheet': True,
+                }
+                student_html = self._render_template('institutional_test_hybrid.html', student_template_data)
+                student_pdf_bytes = self._html_to_pdf_bytes(student_html)
+                student_reader = PdfReader(io.BytesIO(student_pdf_bytes))
+
+                if len(student_reader.pages) < 1:
+                    logging.warning(f"PDF OMR do aluno {student.get('id')} sem páginas; usando apenas base")
+                    final_pdf_bytes = base_pdf_bytes
+                else:
+                    writer = PdfWriter()
+                    for p in base_reader.pages:
+                        writer.add_page(p)
+                    writer.add_page(student_reader.pages[0])
+                    out = io.BytesIO()
+                    writer.write(out)
+                    final_pdf_bytes = out.getvalue()
+
+                # Persistir em disco para o pipeline existente
+                student_name_safe = student.get('name', student.get('nome', 'aluno')).replace(' ', '_').replace('/', '_')
+                pdf_path = os.path.join(output_dir, f"prova_{student_name_safe}_{student.get('id')}.pdf")
+                with open(pdf_path, 'wb') as f:
+                    f.write(final_pdf_bytes)
+
+                qr_data_job = self._generate_qr_code_with_metadata(student.get('id'), test_data.get('id'))
+                file_info = {
+                    'student_id': student.get('id'),
+                    'student_name': student.get('name', student.get('nome', 'Nome não informado')),
+                    'qr_code_data': json.dumps(qr_data_job),
+                    'coordinates': coordinates,
+                    'has_pdf_data': True,
+                    'has_answer_sheet_data': False,
+                    'pdf_path': pdf_path,
+                }
+                generated_files.append(file_info)
+
+                if job_id:
+                    try:
+                        from app.services.progress_store import update_item_done
+                        update_item_done(job_id, index_0, {
+                            'student_id': student_id,
+                            'student_name': student.get('name', student.get('nome', '')),
+                            'class_id': str(student.get('class_id', '')) if student.get('class_id') else None,
+                            'class_name': student.get('class_name'),
+                            'school_name': student.get('school_name'),
+                        })
+                    except Exception:
+                        pass
+
+                gc.collect()
+                if idx % 10 == 0 or idx == total_students:
+                    logging.debug(f"Gerados {idx}/{total_students} PDFs institucionais (arch4)")
+            except Exception as e:
+                logging.error(f"Erro ao gerar PDF institucional WeasyPrint (arch4) para aluno {student.get('id', 'N/A')}: {str(e)}", exc_info=True)
+                if job_id:
+                    try:
+                        from app.services.progress_store import update_item_error
+                        update_item_error(job_id, index_0, str(e), extra={
+                            'student_id': str(student.get('id', '')),
+                            'student_name': student.get('name', student.get('nome', '')),
+                            'class_id': str(student.get('class_id', '')) if student.get('class_id') else None,
+                            'class_name': student.get('class_name'),
+                            'school_name': student.get('school_name'),
+                        })
+                    except Exception:
+                        pass
+                continue
+
+        return generated_files
 
     def generate_institutional_test_pdf(self, test_data: Dict, students_data: List[Dict],
                                       questions_data: List[Dict], class_test_id: str = None,
@@ -463,14 +792,18 @@ class InstitutionalTestWeasyPrintGenerator:
                     # Remover o título do conteúdo
                     main_content = main_content[title_match.end():]
 
+        images_meta = processed.get('images') or []
+
         processed['instruction'] = instruction
         processed['title'] = title
-        processed['content'] = self._process_html_content(main_content)
+        main_content_inlined = self._inline_question_images_html(main_content, images_meta)
+        processed['content'] = self._process_html_content(main_content_inlined)
 
         # Processar secondstatement como pergunta/objetivo (aparece APÓS content e ANTES de alternatives)
         prompt = processed.get('secondstatement', '')
         if prompt:
-            processed['prompt'] = self._process_html_content(prompt)
+            prompt_inlined = self._inline_question_images_html(prompt, images_meta)
+            processed['prompt'] = self._process_html_content(prompt_inlined)
         else:
             processed['prompt'] = None
 
@@ -493,9 +826,10 @@ class InstitutionalTestWeasyPrintGenerator:
                     alt_content = str(alt)
                     alt_id = chr(65 + i)
 
+                alt_content_inlined = self._inline_question_images_html(alt_content, images_meta)
                 processed_alt = {
                     'letter': chr(65 + i),  # A, B, C, D...
-                    'content': self._process_html_content(alt_content),
+                    'content': self._process_html_content(alt_content_inlined),
                     'id': alt_id
                 }
                 processed_alternatives.append(processed_alt)

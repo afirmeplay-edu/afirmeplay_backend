@@ -6,8 +6,8 @@ Suporta correção única (síncrona) e em lote (assíncrona com polling)
 """
 
 from flask import Blueprint, request, jsonify, send_file
-from flask_jwt_extended import jwt_required, get_jwt_identity
-from app.decorators.role_required import role_required
+from flask_jwt_extended import jwt_required, get_jwt_identity, get_jwt
+from app.decorators.role_required import role_required, get_current_user_from_token as get_user_for_permission_check
 from app.decorators import requires_city_context
 from app import db
 from app.models.test import Test
@@ -397,8 +397,10 @@ def get_physical_test_scope(test_id):
 @requires_city_context
 def generate_physical_forms(test_id):
     """
-    Dispara geração ASSÍNCRONA de formulários físicos usando Celery
-    
+    Dispara geração ASSÍNCRONA de formulários físicos usando Celery.
+
+    Fluxo atual: Arch4 + PDF Overlay — 1× WeasyPrint (prova base) + 1× WeasyPrint (template OMR)
+    + por aluno apenas overlay ReportLab (nome, escola, turma, QR) aplicado sobre o template.
     A geração é feita em background para evitar timeout em turmas grandes.
     O frontend deve fazer polling na rota /task/<task_id>/status para acompanhar o progresso.
     
@@ -1799,7 +1801,8 @@ def delete_all_physical_forms_by_test(test_id):
         - Número de formulários excluídos
     """
     try:
-        user = get_current_user_from_token()
+        # Usar get_user_for_permission_check (role como string) para a checagem admin/criador/município
+        user = get_user_for_permission_check()
         if not user:
             return jsonify({"error": "User not found or token invalid"}), 401
         
@@ -1808,15 +1811,17 @@ def delete_all_physical_forms_by_test(test_id):
         if not test:
             return jsonify({"error": "Prova não encontrada"}), 404
         
-        # Verificar permissões
+        # Verificar permissões (user.role já é string, ex.: 'admin')
         user_role = user.get('role')
         user_id = user.get('id')
         user_city_id = user.get('tenant_id') or user.get('city_id')
         
         can_delete = False
         
-        if user_role == 'admin':
-            # Admin pode excluir qualquer formulário
+        # Admin pode excluir qualquer formulário (usar role do JWT para evitar 403 quando user do DB não reflete admin)
+        if get_jwt().get('role') == 'admin':
+            can_delete = True
+        elif user_role == 'admin':
             can_delete = True
         elif test.created_by == user_id:
             # Criador pode excluir seus próprios formulários

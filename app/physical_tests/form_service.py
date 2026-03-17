@@ -239,13 +239,12 @@ class PhysicalTestFormService:
             class_tests = ClassTest.query.filter_by(test_id=test_id).all()
             class_test_id = class_tests[0].id if class_tests else "temp-class-test-id"
             
-            # Gerar PDFs institucionais usando WeasyPrint (suporta HTML/CSS completo)
-            # ✅ Architecture 4: gerar 1 PDF de questões + 1 PDF aluno (capa+OMR) e mesclar.
+            # Gerar PDFs institucionais: fluxo atual = Arch4 + PDF Overlay (WeasyPrint 2×, overlay por aluno)
+            # 1× PDF base (capa + questões) + 1× template OMR (dados neutros) + por aluno: overlay ReportLab + merge
             from app.services.institutional_test_weasyprint_generator import InstitutionalTestWeasyPrintGenerator
             institutional_generator = InstitutionalTestWeasyPrintGenerator()
 
-            # Gerar PDFs institucionais com processamento incremental (salva em disco)
-            # output_dir padrão será usado se não fornecido (/tmp/celery_pdfs/physical_tests)
+            # Geração com processamento incremental (salva em disco); usa overlay para cartão OMR (sem WeasyPrint por aluno)
             generated_files = institutional_generator.generate_institutional_test_pdf_arch4(
                 test_data, students_data, questions_data, class_test_id,
                 output_dir=output_dir  # Se None, usa padrão /tmp/celery_pdfs/physical_tests

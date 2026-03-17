@@ -299,6 +299,15 @@ CREATE TABLE IF NOT EXISTS "{schema}".physical_test_answers (
 );
 COMMENT ON TABLE "{schema}".physical_test_answers IS 'Respostas de formulários físicos';
 
+CREATE TABLE IF NOT EXISTS "{schema}".physical_test_zip (
+    test_id VARCHAR PRIMARY KEY REFERENCES "{schema}".test(id),
+    minio_url VARCHAR(500),
+    minio_object_name VARCHAR(200),
+    minio_bucket VARCHAR(100),
+    zip_generated_at TIMESTAMP
+);
+COMMENT ON TABLE "{schema}".physical_test_zip IS 'URL do ZIP de provas físicas (download all) por prova';
+
 CREATE TABLE IF NOT EXISTS "{schema}".form_coordinates (
     id VARCHAR(36) PRIMARY KEY,
     test_id VARCHAR(36) REFERENCES "{schema}".test(id),
@@ -342,6 +351,8 @@ CREATE TABLE IF NOT EXISTS "{schema}".answer_sheet_gabaritos (
     minio_object_name VARCHAR(200),
     minio_bucket VARCHAR(100),
     zip_generated_at TIMESTAMP,
+    last_generation_classes_count INTEGER,
+    last_generation_students_count INTEGER,
     batch_id VARCHAR(36),
     last_generation_job_id VARCHAR(36)
 );

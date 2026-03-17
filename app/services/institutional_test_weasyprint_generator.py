@@ -129,11 +129,12 @@ class InstitutionalTestWeasyPrintGenerator:
         output_dir: str = None
     ) -> List[Dict]:
         """
-        Architecture 4 (otimizada):
+        Architecture 4 (otimizada) com PDF Overlay para OMR:
         - Gera 1 PDF base (capa institucional genérica + blocos + questões), uma vez.
-        - Gera 1 PDF por aluno contendo apenas a folha de respostas (OMR), 1 página.
-        - Não chama _generate_answer_sheet_base64 (resultado não é usado pelo template).
-        - Mescla: base + página OMR do aluno.
+        - Gera 1 PDF template do cartão OMR (WeasyPrint, dados neutros), uma vez.
+        - Por aluno: gera apenas overlay PDF (ReportLab: nome, escola, turma, QR) e aplica
+          sobre o template OMR; depois mescla base + cartão OMR preenchido.
+        - WeasyPrint roda apenas 2 vezes (prova + template OMR), não N vezes por aluno.
         """
         if output_dir is None:
             output_dir = '/tmp/celery_pdfs/physical_tests'
@@ -235,6 +236,37 @@ class InstitutionalTestWeasyPrintGenerator:
         base_pdf_bytes = self._html_to_pdf_bytes(base_html)
         base_reader = PdfReader(io.BytesIO(base_pdf_bytes))
 
+        # PASSO 1 — Gerar UMA VEZ o PDF template do cartão OMR (dados neutros, sem aluno)
+        # Layout idêntico (bolhas, âncoras, triângulos, grid); nome/QR vazios para overlay depois
+        placeholder_qr = self._get_omr_placeholder_qr_base64()
+        omr_placeholder_student = {
+            'id': '',
+            'name': '',
+            'nome': '',
+            'school_name': '',
+            'class_name': '',
+            'class_id': '',
+            'qr_code': placeholder_qr,
+        }
+        omr_template_data = {
+            'test_data': test_data,
+            'student': omr_placeholder_student,
+            'questions_by_subject': questions_by_subject,
+            'questions_by_block': questions_by_block,
+            'blocks_config': blocks_config,
+            'questions_map': questions_map,
+            'answer_sheet_image': '',
+            'total_questions': total_questions,
+            'datetime': datetime,
+            'generated_date': datetime.now().strftime('%d/%m/%Y %H:%M'),
+            'default_logo': default_logo_base64,
+            'include_cover': False,
+            'include_questions': False,
+            'include_answer_sheet': True,
+        }
+        omr_template_html = self._render_template('institutional_test_hybrid.html', omr_template_data)
+        omr_template_pdf_bytes = self._html_to_pdf_bytes(omr_template_html)
+
         # Coordenadas (uma vez)
         coordinates = self._map_existing_form_coordinates(questions_data)
 
@@ -256,61 +288,38 @@ class InstitutionalTestWeasyPrintGenerator:
                 except Exception:
                     pass
             try:
-                # Gerar QR code no formato JSON (igual ao fluxo atual)
                 student_id = str(student.get('id', ''))
                 test_id = str(test_data.get('id', ''))
-                qr_metadata = {"student_id": student_id, "test_id": test_id}
-                import qrcode as _qrcode
-                from io import BytesIO as _BytesIO
-                qr = _qrcode.QRCode(
-                    version=1,
-                    error_correction=_qrcode.constants.ERROR_CORRECT_L,
-                    box_size=10,
-                    border=2,
-                )
-                qr.add_data(json.dumps(qr_metadata))
-                qr.make(fit=True)
-                qr_img = qr.make_image(fill_color="black", back_color="white")
-                qr_buffer = _BytesIO()
-                qr_img.save(qr_buffer, format="PNG")
-                qr_buffer.seek(0)
-                qr_code_base64 = base64.b64encode(qr_buffer.read()).decode()
 
-                student_with_qr = student.copy()
-                student_with_qr['qr_code'] = qr_code_base64
+                # PASSO 2 e 3 — Overlay: gerar PDF só com nome, escola, turma e QR; aplicar sobre template OMR
+                overlay_pdf_bytes = self._generate_student_overlay_pdf(student, test_data)
+                if not overlay_pdf_bytes:
+                    raise RuntimeError("Falha ao gerar overlay PDF do aluno")
 
-                # Apenas folha OMR por aluno (sem capa; sem _generate_answer_sheet_base64 - não é usada pelo template)
-                student_template_data = {
-                    'test_data': test_data,
-                    'student': student_with_qr,
-                    'questions_by_subject': questions_by_subject,
-                    'questions_by_block': questions_by_block,
-                    'blocks_config': blocks_config,
-                    'questions_map': questions_map,
-                    'answer_sheet_image': '',
-                    'total_questions': total_questions,
-                    'datetime': datetime,
-                    'generated_date': datetime.now().strftime('%d/%m/%Y %H:%M'),
-                    'default_logo': default_logo_base64,
-                    'include_cover': False,
-                    'include_questions': False,
-                    'include_answer_sheet': True,
-                }
-                student_html = self._render_template('institutional_test_hybrid.html', student_template_data)
-                student_pdf_bytes = self._html_to_pdf_bytes(student_html)
-                student_reader = PdfReader(io.BytesIO(student_pdf_bytes))
+                # Carregar template OMR (cópia por aluno para não mutar a página)
+                omr_template_reader = PdfReader(io.BytesIO(omr_template_pdf_bytes))
+                overlay_reader = PdfReader(io.BytesIO(overlay_pdf_bytes))
+                if len(omr_template_reader.pages) < 1 or len(overlay_reader.pages) < 1:
+                    raise RuntimeError("Template OMR ou overlay sem páginas")
 
-                if len(student_reader.pages) < 1:
-                    logging.warning(f"PDF OMR do aluno {student.get('id')} sem páginas; usando apenas base")
-                    final_pdf_bytes = base_pdf_bytes
-                else:
-                    writer = PdfWriter()
-                    for p in base_reader.pages:
-                        writer.add_page(p)
-                    writer.add_page(student_reader.pages[0])
-                    out = io.BytesIO()
-                    writer.write(out)
-                    final_pdf_bytes = out.getvalue()
+                template_page = omr_template_reader.pages[0]
+                overlay_page = overlay_reader.pages[0]
+                template_page.merge_page(overlay_page)
+                student_omr_writer = PdfWriter()
+                student_omr_writer.add_page(template_page)
+                student_omr_buffer = io.BytesIO()
+                student_omr_writer.write(student_omr_buffer)
+                student_omr_buffer.seek(0)
+                student_omr_pdf_bytes = student_omr_buffer.read()
+
+                # PASSO 4 — Merge: prova base + cartão OMR preenchido (igual ao fluxo anterior)
+                writer = PdfWriter()
+                for p in base_reader.pages:
+                    writer.add_page(p)
+                writer.add_page(PdfReader(io.BytesIO(student_omr_pdf_bytes)).pages[0])
+                out = io.BytesIO()
+                writer.write(out)
+                final_pdf_bytes = out.getvalue()
 
                 # Persistir em disco para o pipeline existente
                 student_name_safe = student.get('name', student.get('nome', 'aluno')).replace(' ', '_').replace('/', '_')
@@ -958,6 +967,99 @@ class InstitutionalTestWeasyPrintGenerator:
             import traceback
             logging.error(traceback.format_exc())
             return {}
+
+    def _get_omr_placeholder_qr_base64(self) -> str:
+        """
+        Retorna uma imagem PNG 1x1 branca em base64 para usar no template OMR
+        quando não há dados de aluno (template base sem QR/nome).
+        Evita quebrar o <img src="data:..."> do template.
+        """
+        buf = io.BytesIO()
+        img = PILImage.new('RGB', (1, 1), (255, 255, 255))
+        img.save(buf, format='PNG')
+        buf.seek(0)
+        return base64.b64encode(buf.read()).decode('utf-8')
+
+    def _generate_student_overlay_pdf(
+        self, student: Dict, test_data: Dict
+    ) -> Optional[bytes]:
+        """
+        Gera um PDF A4 contendo apenas os dados variáveis do cartão OMR
+        (nome, escola, turma, QR code) nas posições exatas do layout atual.
+        Usado para overlay sobre o template OMR (evita rodar WeasyPrint por aluno).
+
+        Coordenadas conforme COORDENADAS_OMR_OVERLAY.md (ReportLab: origem inferior esquerdo).
+        """
+        try:
+            from reportlab.pdfgen.canvas import Canvas
+            from reportlab.lib.pagesizes import A4
+            from reportlab.lib.utils import ImageReader
+
+            # A4 em pontos (595.28 x 841.89)
+            buffer = io.BytesIO()
+            c = Canvas(buffer, pagesize=A4)
+            c.setPageSize(A4)
+
+            # Coordenadas em pt (origem inferior esquerdo) - COORDENADAS_OMR_OVERLAY.md
+            X_VALUE = 150.45
+            Y_PDF_STUDENT_NAME = 782.37   # baseline NOME COMPLETO
+            Y_PDF_SCHOOL = 758.37         # baseline ESCOLA
+            Y_PDF_TURMA = 750.37          # baseline TURMA
+            QR_X = 433.65
+            QR_Y = 672.15
+            QR_SIZE = 90
+            FONT_NAME = 'Helvetica'
+            FONT_SIZE = 7
+            MAX_TEXT_WIDTH_CHARS = 50     # truncar para caber em ~268 pt
+
+            def _truncate(s: str, max_chars: int = MAX_TEXT_WIDTH_CHARS) -> str:
+                s = (s or '').strip()
+                if len(s) <= max_chars:
+                    return s
+                return s[: max_chars - 1] + '…'
+
+            c.setFont(FONT_NAME, FONT_SIZE)
+            student_name = _truncate(student.get('name') or student.get('nome') or '')
+            school_name = _truncate(student.get('school_name') or 'Não informado')
+            grade_name = (test_data or {}).get('grade_name') or 'Sem turma'
+            class_name = (student.get('class_name') or 'A').strip()
+            turma_text = f"{grade_name} - {class_name}"
+            turma_text = _truncate(turma_text, max_chars=55)
+
+            c.drawString(X_VALUE, Y_PDF_STUDENT_NAME, student_name.upper())
+            c.drawString(X_VALUE, Y_PDF_SCHOOL, school_name.upper())
+            c.drawString(X_VALUE, Y_PDF_TURMA, turma_text.upper())
+
+            # QR code: mesmo formato que o fluxo atual (student_id + test_id)
+            student_id = str(student.get('id', ''))
+            test_id = str((test_data or {}).get('id', ''))
+            qr_metadata = {"student_id": student_id, "test_id": test_id}
+            import qrcode as _qrcode
+            qr = _qrcode.QRCode(
+                version=1,
+                error_correction=_qrcode.constants.ERROR_CORRECT_L,
+                box_size=10,
+                border=2,
+            )
+            qr.add_data(json.dumps(qr_metadata))
+            qr.make(fit=True)
+            qr_img = qr.make_image(fill_color="black", back_color="white")
+            qr_buffer = io.BytesIO()
+            qr_img.save(qr_buffer, format="PNG")
+            qr_buffer.seek(0)
+            c.drawImage(
+                ImageReader(qr_buffer),
+                QR_X, QR_Y,
+                width=QR_SIZE,
+                height=QR_SIZE,
+            )
+
+            c.save()
+            buffer.seek(0)
+            return buffer.read()
+        except Exception as e:
+            logging.error(f"Erro ao gerar overlay PDF do aluno {student.get('id', 'N/A')}: {str(e)}", exc_info=True)
+            return None
 
     def _map_existing_form_coordinates(self, questions_data: List[Dict]) -> Dict:
         """

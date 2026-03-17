@@ -1851,32 +1851,31 @@ class AnswerSheetCorrectionNewGrid:
                         return {"success": False, "error": error_msg}
                 
                 elif test_id:
-                    # ✅ MODIFICADO: Para provas físicas, buscar em PhysicalTestForm ao invés de AnswerSheetGabarito
-                    from app.models.physicalTestForm import PhysicalTestForm
+                    # ✅ MODIFICADO: Buscar PRIMEIRO em AnswerSheetGabarito (fonte central)
+                    # Fallback: PhysicalTestForm (compatibilidade com provas antigas)
+                    gabarito_obj = AnswerSheetGabarito.query.filter_by(test_id=test_id).first()
                     
-                    # Buscar PhysicalTestForm por test_id (prova física)
-                    # Pegar o primeiro formulário da prova para obter os dados de correção
-                    physical_form = PhysicalTestForm.query.filter_by(test_id=test_id).first()
-                    
-                    if physical_form and physical_form.blocks_config and physical_form.correct_answers:
-                        # Criar objeto temporário compatível com a interface esperada
-                        class GabaritoTemp:
-                            def __init__(self, form):
-                                self.id = f"physical_{form.test_id}"
-                                self.test_id = form.test_id
-                                self.num_questions = form.num_questions
-                                self.use_blocks = form.use_blocks
-                                self.blocks_config = form.blocks_config
-                                self.correct_answers = form.correct_answers
-                        
-                        gabarito_obj = GabaritoTemp(physical_form)
-                        self.logger.info(f"✅ Dados de correção encontrados em PhysicalTestForm para test_id: {test_id[:8]}...")
+                    if gabarito_obj:
+                        self.logger.info(f"✅ Gabarito encontrado em AnswerSheetGabarito (fonte central) para test_id: {gabarito_obj.id[:8]}...")
                     else:
-                        # Fallback: tentar buscar em AnswerSheetGabarito (compatibilidade)
-                        gabarito_obj = AnswerSheetGabarito.query.filter_by(test_id=test_id).first()
+                        # Fallback: buscar em PhysicalTestForm (compatibilidade com provas antigas)
+                        from app.models.physicalTestForm import PhysicalTestForm
                         
-                        if gabarito_obj:
-                            self.logger.info(f"✅ Gabarito encontrado em AnswerSheetGabarito (fallback) para test_id: {gabarito_obj.id[:8]}...")
+                        physical_form = PhysicalTestForm.query.filter_by(test_id=test_id).first()
+                        
+                        if physical_form and physical_form.blocks_config and physical_form.correct_answers:
+                            # Criar objeto temporário compatível com a interface esperada
+                            class GabaritoTemp:
+                                def __init__(self, form):
+                                    self.id = f"physical_{form.test_id}"
+                                    self.test_id = form.test_id
+                                    self.num_questions = form.num_questions
+                                    self.use_blocks = form.use_blocks
+                                    self.blocks_config = form.blocks_config
+                                    self.correct_answers = form.correct_answers
+                            
+                            gabarito_obj = GabaritoTemp(physical_form)
+                            self.logger.info(f"✅ Dados de correção encontrados em PhysicalTestForm (fallback) para test_id: {test_id[:8]}...")
                         else:
                             # Último recurso: criar temporário a partir do Test
                             self.logger.warning(f"⚠️ Dados de correção não encontrados para test_id {test_id[:8]}..., montando dinamicamente")
@@ -2370,25 +2369,27 @@ class AnswerSheetCorrectionNewGrid:
         Primeiro salva respostas em StudentAnswer, depois calcula EvaluationResult
         """
         try:
-            # ✅ MODIFICADO: Buscar dados de correção em PhysicalTestForm para provas físicas
-            from app.models.physicalTestForm import PhysicalTestForm
+            # ✅ MODIFICADO: Buscar PRIMEIRO em AnswerSheetGabarito (fonte central)
+            # Fallback: PhysicalTestForm (compatibilidade com provas antigas)
+            from app.models.answerSheetGabarito import AnswerSheetGabarito
             
-            # 1. Buscar PhysicalTestForm para obter respostas corretas
-            physical_form = PhysicalTestForm.query.filter_by(test_id=test_id).first()
+            # 1. Buscar AnswerSheetGabarito (fonte central)
+            gabarito_obj = AnswerSheetGabarito.query.filter_by(test_id=test_id).first()
             
-            if not physical_form or not physical_form.correct_answers:
-                # Fallback: tentar buscar em AnswerSheetGabarito (compatibilidade)
-                from app.models.answerSheetGabarito import AnswerSheetGabarito
-                gabarito_obj = AnswerSheetGabarito.query.filter_by(test_id=test_id).first()
-                if gabarito_obj:
-                    correct_answers = gabarito_obj.correct_answers
-                    self.logger.info(f"✅ Dados de correção obtidos de AnswerSheetGabarito (fallback)")
+            if gabarito_obj and gabarito_obj.correct_answers:
+                correct_answers = gabarito_obj.correct_answers
+                self.logger.info(f"✅ Dados de correção obtidos de AnswerSheetGabarito (fonte central)")
+            else:
+                # Fallback: buscar em PhysicalTestForm (compatibilidade com provas antigas)
+                from app.models.physicalTestForm import PhysicalTestForm
+                physical_form = PhysicalTestForm.query.filter_by(test_id=test_id).first()
+                
+                if physical_form and physical_form.correct_answers:
+                    correct_answers = physical_form.correct_answers
+                    self.logger.info(f"✅ Dados de correção obtidos de PhysicalTestForm (fallback)")
                 else:
                     self.logger.error(f"Gabarito não encontrado para test_id={test_id}")
                     return None
-            else:
-                correct_answers = physical_form.correct_answers
-                self.logger.info(f"✅ Dados de correção obtidos de PhysicalTestForm")
             
             # Converter correct_answers para dict
             if isinstance(correct_answers, str):

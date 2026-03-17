@@ -167,21 +167,28 @@ def _get_job_from_redis(job_id: str) -> Optional[dict]:
         return None
 
 
-def create_job(job_id: str, total: int, test_id: str = None, gabarito_id: str = None, user_id: str = None, task_ids: list = None) -> dict:
+def create_job(job_id: str, total: int, test_id: str = None, gabarito_id: str = None, user_id: str = None, task_ids: list = None, items_meta: list = None) -> dict:
     """
-    Cria um novo job de correção em lote
+    Cria um novo job de correção em lote.
     
-    Args:
-        job_id: ID único do job
-        total: Número total de imagens a processar
-        test_id: ID da prova (opcional)
-        gabarito_id: ID do gabarito (opcional)
-        user_id: ID do usuário que criou o job (opcional, para validação de acesso)
-        task_ids: Lista de IDs de tasks Celery associadas ao job (opcional)
-    
-    Returns:
-        dict: Dados do job criado
+    items_meta: Lista opcional de dicts (um por índice), com chaves opcionais:
+        class_id, class_name, school_name, student_id, student_name.
+        Se fornecida e len(items_meta)==total, cada item nasce com esses campos
+        para o status mostrar turmas corretas desde o início.
     """
+    meta_keys = ("class_id", "class_name", "school_name", "student_id", "student_name")
+    if items_meta is not None and len(items_meta) == total:
+        items = {}
+        for i in range(total):
+            meta = items_meta[i] or {}
+            item = {"status": "pending"}
+            for k in meta_keys:
+                if k in meta and meta[k] is not None and meta[k] != "":
+                    item[k] = meta[k]
+            items[str(i)] = item
+    else:
+        items = {str(i): {"status": "pending"} for i in range(total)}
+
     with lock:
         progress[job_id] = {
             "total": total,
@@ -195,11 +202,13 @@ def create_job(job_id: str, total: int, test_id: str = None, gabarito_id: str = 
             "task_ids": task_ids or [],
             "warnings": [],
             "created_at": datetime.utcnow().isoformat(),
-            "items": {str(i): {"status": "pending"} for i in range(total)},
-            "results": []
+            "items": items,
+            "results": [],
+            "phase": "generating",
+            "stage_message": "Gerando formulários PDF...",
         }
         job_snapshot = copy.deepcopy(progress[job_id])
-        logger.info(f"📋 Job criado: {job_id} com {total} imagens")
+        logger.info(f"📋 Job criado: {job_id} com {total} itens")
     _persist_job_to_redis(job_id, job_snapshot)
     return progress[job_id]
 
@@ -283,15 +292,14 @@ def update_item_error(job_id: str, index: int, error: str, extra: dict = None):
 
 def complete_job(job_id: str):
     """
-    Marca job como concluído
-    
-    Args:
-        job_id: ID do job
+    Marca job como concluído (phase=done para o frontend saber que terminou).
     """
     with lock:
         if job_id in progress:
             progress[job_id]["status"] = "completed"
             progress[job_id]["completed_at"] = datetime.utcnow().isoformat()
+            progress[job_id]["phase"] = "done"
+            progress[job_id]["stage_message"] = "Concluído"
             job_snapshot = copy.deepcopy(progress[job_id])
             logger.info(f"🏁 Job {job_id} concluído: {progress[job_id]['successful']} sucesso, {progress[job_id]['failed']} falhas")
         else:

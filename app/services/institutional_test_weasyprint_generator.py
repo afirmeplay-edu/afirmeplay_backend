@@ -77,8 +77,44 @@ class InstitutionalTestWeasyPrintGenerator:
             return html or ""
 
         import re
-        # Captura question_id (grupo 1) e image_id (grupo 2) da URL
-        pattern = re.compile(r'''src\s*=\s*["']/questions/([^/"']+)/images/([a-fA-F0-9-]{36})["']''')
+        def _sanitize_img_tag(img_tag_html: str) -> str:
+            """
+            Normaliza <img> vindo do editor para o PDF:
+            - Remove width/height (podem forçar largura excessiva no WeasyPrint)
+            - Remove declarações width/height do style inline (mantém o restante)
+            Mantém o layout/CSS do template como fonte de verdade.
+            """
+            if not img_tag_html:
+                return img_tag_html
+
+            # Remove width/height como atributos (com ou sem aspas)
+            img_tag_html = re.sub(r"""\s+\b(width|height)\b\s*=\s*(".*?"|'.*?'|[^\s>]+)""", "", img_tag_html, flags=re.IGNORECASE)
+
+            # Remove width/height dentro do style inline, preservando outras regras
+            def _strip_style(m: re.Match) -> str:
+                quote = m.group(1)
+                style = m.group(2) or ""
+                # remove width/height: ...; (aceita com/sem ';' final)
+                style = re.sub(r"""(^|;)\s*(width|height)\s*:\s*[^;]+""", "", style, flags=re.IGNORECASE)
+                # normaliza separators e espaços
+                style = re.sub(r"""\s*;\s*""", "; ", style).strip()
+                style = style.strip("; ").strip()
+                if not style:
+                    return ""
+                return f' style={quote}{style}{quote}'
+
+            img_tag_html = re.sub(r"""\s+style\s*=\s*(")(.*?)\1""", _strip_style, img_tag_html, flags=re.IGNORECASE | re.DOTALL)
+            img_tag_html = re.sub(r"""\s+style\s*=\s*(')(.*?)\1""", _strip_style, img_tag_html, flags=re.IGNORECASE | re.DOTALL)
+
+            # Limpa espaços duplicados antes do fechamento
+            img_tag_html = re.sub(r"""\s+>""", ">", img_tag_html)
+            return img_tag_html
+
+        # Captura tags <img ... src="/questions/<question_id>/images/<image_id>" ...>
+        img_tag_pattern = re.compile(
+            r"""<img\b[^>]*\bsrc\s*=\s*["']/questions/([^/"']+)/images/([a-fA-F0-9-]{36})["'][^>]*>""",
+            flags=re.IGNORECASE
+        )
 
         by_id: Dict[str, Dict[str, Any]] = {}
         if isinstance(images_meta, list):
@@ -86,7 +122,8 @@ class InstitutionalTestWeasyPrintGenerator:
                 if isinstance(img, dict) and img.get("id"):
                     by_id[str(img["id"])] = img
 
-        def _replace(match):
+        def _replace(match: "re.Match"):
+            img_tag = match.group(0)
             question_id = match.group(1)
             image_id = match.group(2)
             meta = by_id.get(image_id)
@@ -105,20 +142,34 @@ class InstitutionalTestWeasyPrintGenerator:
             cache_key = f"{bucket}:{object_name}"
             cached = self._image_data_uri_cache.get(cache_key)
             if cached:
-                return f'src="{cached}"'
+                replaced = re.sub(
+                    r"""\bsrc\s*=\s*["'][^"']*["']""",
+                    f'src="{cached}"',
+                    img_tag,
+                    count=1,
+                    flags=re.IGNORECASE
+                )
+                return _sanitize_img_tag(replaced)
 
             try:
                 data = self._get_minio_service().download_file(bucket, object_name)
                 if not data:
-                    return match.group(0)
+                    return _sanitize_img_tag(img_tag)
                 b64 = base64.b64encode(data).decode("utf-8")
                 data_uri = f"data:{mime};base64,{b64}"
                 self._image_data_uri_cache[cache_key] = data_uri
-                return f'src="{data_uri}"'
+                replaced = re.sub(
+                    r"""\bsrc\s*=\s*["'][^"']*["']""",
+                    f'src="{data_uri}"',
+                    img_tag,
+                    count=1,
+                    flags=re.IGNORECASE
+                )
+                return _sanitize_img_tag(replaced)
             except Exception:
-                return match.group(0)
+                return _sanitize_img_tag(img_tag)
 
-        return pattern.sub(_replace, html)
+        return img_tag_pattern.sub(_replace, html)
 
     def generate_institutional_test_pdf_arch4(
         self,
@@ -236,17 +287,12 @@ class InstitutionalTestWeasyPrintGenerator:
         base_pdf_bytes = self._html_to_pdf_bytes(base_html)
         base_reader = PdfReader(io.BytesIO(base_pdf_bytes))
 
-        # PASSO 1 — Gerar UMA VEZ o PDF template do cartão OMR (dados neutros, sem aluno)
-        # Layout idêntico (bolhas, âncoras, triângulos, grid); nome/QR vazios para overlay depois
-        placeholder_qr = self._get_omr_placeholder_qr_base64()
+        # Template OMR único (WeasyPrint com dados vazios/placeholder) — uma vez
         omr_placeholder_student = {
-            'id': '',
             'name': '',
-            'nome': '',
             'school_name': '',
             'class_name': '',
-            'class_id': '',
-            'qr_code': placeholder_qr,
+            'qr_code': self._get_omr_placeholder_qr_base64(),
         }
         omr_template_data = {
             'test_data': test_data,
@@ -266,6 +312,11 @@ class InstitutionalTestWeasyPrintGenerator:
         }
         omr_template_html = self._render_template('institutional_test_hybrid.html', omr_template_data)
         omr_template_pdf_bytes = self._html_to_pdf_bytes(omr_template_html)
+        omr_template_reader = PdfReader(io.BytesIO(omr_template_pdf_bytes))
+        if len(omr_template_reader.pages) < 1:
+            raise RuntimeError("Template OMR sem páginas")
+        # Manter bytes para clonar a página por aluno (merge overlay em cima)
+        del omr_template_reader
 
         # Coordenadas (uma vez)
         coordinates = self._map_existing_form_coordinates(questions_data)
@@ -273,9 +324,18 @@ class InstitutionalTestWeasyPrintGenerator:
         generated_files: List[Dict[str, Any]] = []
         total_students = len(students_data)
         job_id = (test_data or {}).get('job_id')
+        previous_class_name = None
         for idx, student in enumerate(students_data, 1):
             index_0 = idx - 1
+            current_class_name = student.get('class_name') or ''
             if job_id:
+                try:
+                    if current_class_name != previous_class_name:
+                        from app.services.progress_store import update_job
+                        update_job(job_id, {"stage_message": f"Gerando turma {current_class_name or '...'}..."})
+                        previous_class_name = current_class_name
+                except Exception:
+                    pass
                 try:
                     from app.services.progress_store import update_item_processing
                     update_item_processing(job_id, index_0, extra={
@@ -289,34 +349,21 @@ class InstitutionalTestWeasyPrintGenerator:
                     pass
             try:
                 student_id = str(student.get('id', ''))
-                test_id = str(test_data.get('id', ''))
+                # Overlay ReportLab (nome, escola, turma, QR) nas posições do template
+                overlay_bytes = self._generate_student_overlay_pdf(student, test_data)
+                if not overlay_bytes:
+                    raise RuntimeError("Falha ao gerar overlay do aluno")
+                overlay_reader = PdfReader(io.BytesIO(overlay_bytes))
+                # Clonar página do template OMR e aplicar overlay por cima
+                omr_fresh = PdfReader(io.BytesIO(omr_template_pdf_bytes))
+                omr_page = omr_fresh.pages[0]
+                omr_page.merge_page(overlay_reader.pages[0])
 
-                # PASSO 2 e 3 — Overlay: gerar PDF só com nome, escola, turma e QR; aplicar sobre template OMR
-                overlay_pdf_bytes = self._generate_student_overlay_pdf(student, test_data)
-                if not overlay_pdf_bytes:
-                    raise RuntimeError("Falha ao gerar overlay PDF do aluno")
-
-                # Carregar template OMR (cópia por aluno para não mutar a página)
-                omr_template_reader = PdfReader(io.BytesIO(omr_template_pdf_bytes))
-                overlay_reader = PdfReader(io.BytesIO(overlay_pdf_bytes))
-                if len(omr_template_reader.pages) < 1 or len(overlay_reader.pages) < 1:
-                    raise RuntimeError("Template OMR ou overlay sem páginas")
-
-                template_page = omr_template_reader.pages[0]
-                overlay_page = overlay_reader.pages[0]
-                template_page.merge_page(overlay_page)
-                student_omr_writer = PdfWriter()
-                student_omr_writer.add_page(template_page)
-                student_omr_buffer = io.BytesIO()
-                student_omr_writer.write(student_omr_buffer)
-                student_omr_buffer.seek(0)
-                student_omr_pdf_bytes = student_omr_buffer.read()
-
-                # PASSO 4 — Merge: prova base + cartão OMR preenchido (igual ao fluxo anterior)
+                # Merge: prova base + cartão OMR (template + overlay)
                 writer = PdfWriter()
                 for p in base_reader.pages:
                     writer.add_page(p)
-                writer.add_page(PdfReader(io.BytesIO(student_omr_pdf_bytes)).pages[0])
+                writer.add_page(omr_page)
                 out = io.BytesIO()
                 writer.write(out)
                 final_pdf_bytes = out.getvalue()
@@ -507,12 +554,17 @@ class InstitutionalTestWeasyPrintGenerator:
             # Obter IDs completos
             student_id = str(student.get('id', ''))
             test_id = str(test_data.get('id', ''))
+            gabarito_id = str(test_data.get('gabarito_id', ''))
             
             # Criar metadados do QR code no formato JSON
+            # ✅ NOVO: Incluir gabarito_id para correção usar gabarito central
             qr_metadata = {
                 "student_id": student_id,
-                "test_id": test_id  # Usar test_id para buscar gabarito depois
+                "test_id": test_id
             }
+            
+            if gabarito_id:
+                qr_metadata["gabarito_id"] = gabarito_id
             
             # Converter para JSON
             qr_data = json.dumps(qr_metadata)
@@ -875,8 +927,6 @@ class InstitutionalTestWeasyPrintGenerator:
         if not content:
             return Markup('')
 
-        # WeasyPrint aceita HTML completo!
-        # Apenas remover algumas tags que podem causar problemas de layout
         import re
 
         # Remover node-imageComponent e image-component spans (são wrappers desnecessários)
@@ -892,8 +942,63 @@ class InstitutionalTestWeasyPrintGenerator:
         processed = re.sub(r'^<p[^>]*>', '', processed)
         processed = re.sub(r'</p>$', '', processed)
 
+        # Sanitizar TODAS as <img> — remove width/height para que o CSS do template
+        # (max-width: 100%) controle o tamanho.
+        # _inline_question_images_html já faz isso para imagens /questions/.../images/UUID,
+        # mas imagens com data: URL embutidas pelo editor chegam aqui sem sanitização.
+        processed = self._sanitize_all_img_dimensions(processed)
+
         # Retornar como Markup para Jinja2 não escapar HTML
         return Markup(processed)
+
+    def _sanitize_all_img_dimensions(self, html: str) -> str:
+        """
+        Remove atributos width/height e propriedades width/height do style inline
+        de TODAS as tags <img> no HTML, independente do padrão de URL da imagem.
+        Garante que o CSS do template (max-width: 100%) seja a única fonte de verdade
+        para o tamanho das imagens no PDF.
+        """
+        import re
+
+        def _strip_img_tag(m: re.Match) -> str:
+            tag = m.group(0)
+            # Remove atributos width="..." e height="..."
+            tag = re.sub(
+                r"""\s+\b(width|height)\b\s*=\s*(?:"[^"]*"|'[^']*'|\S+)""",
+                '',
+                tag,
+                flags=re.IGNORECASE,
+            )
+            # Remove width:/height: dentro do style inline, mantendo outras regras
+            def _strip_style(sm: re.Match) -> str:
+                quote = sm.group(1)
+                style = sm.group(2) or ''
+                style = re.sub(
+                    r'(?:^|(?<=;))\s*(?:width|height)\s*:[^;]+',
+                    '',
+                    style,
+                    flags=re.IGNORECASE,
+                )
+                style = re.sub(r';\s*;', ';', style).strip().strip(';').strip()
+                if not style:
+                    return ''
+                return f' style={quote}{style}{quote}'
+
+            tag = re.sub(
+                r"""\s+style\s*=\s*(")(.*?)\1""",
+                _strip_style,
+                tag,
+                flags=re.IGNORECASE | re.DOTALL,
+            )
+            tag = re.sub(
+                r"""\s+style\s*=\s*(')(.*?)\1""",
+                _strip_style,
+                tag,
+                flags=re.IGNORECASE | re.DOTALL,
+            )
+            return tag
+
+        return re.sub(r'<img\b[^>]*>', _strip_img_tag, html, flags=re.IGNORECASE)
 
     def _generate_answer_sheet_base64(self, student: Dict, questions_data: List[Dict],
                                      test_data: Dict) -> str:
@@ -985,32 +1090,55 @@ class InstitutionalTestWeasyPrintGenerator:
     ) -> Optional[bytes]:
         """
         Gera um PDF A4 contendo apenas os dados variáveis do cartão OMR
-        (nome, escola, turma, QR code) nas posições exatas do layout atual.
-        Usado para overlay sobre o template OMR (evita rodar WeasyPrint por aluno).
-
-        Coordenadas conforme COORDENADAS_OMR_OVERLAY.md (ReportLab: origem inferior esquerdo).
+        (nome, escola, turma, QR code) nas posições exatas do layout.
+        Coordenadas fixas derivadas do template (COORDENADAS_OMR_OVERLAY.md);
+        sem arquivo de configuração externo.
         """
         try:
             from reportlab.pdfgen.canvas import Canvas
             from reportlab.lib.pagesizes import A4
             from reportlab.lib.utils import ImageReader
+            from reportlab.lib.colors import HexColor
 
-            # A4 em pontos (595.28 x 841.89)
+            # A4 em pontos (595.28 x 841.89); ReportLab: origem inferior esquerda
             buffer = io.BytesIO()
             c = Canvas(buffer, pagesize=A4)
             c.setPageSize(A4)
 
-            # Coordenadas em pt (origem inferior esquerdo) - COORDENADAS_OMR_OVERLAY.md
-            X_VALUE = 150.45
-            Y_PDF_STUDENT_NAME = 782.37   # baseline NOME COMPLETO
-            Y_PDF_SCHOOL = 758.37         # baseline ESCOLA
-            Y_PDF_TURMA = 750.37          # baseline TURMA
-            QR_X = 433.65
-            QR_Y = 672.15
+            # Coordenadas em pt derivadas do CSS do template (institutional_test_hybrid.html)
+            # Origem ReportLab: canto inferior esquerdo da página A4 (595.28 x 841.89 pt)
+            #
+            # Cálculo base:
+            #   @page answer-sheet-omr { margin: 0 }
+            #   .answer-sheet { padding: 1.2cm 2cm ... }  → conteúdo começa em x=56.69pt, y_top=34.02pt
+            #   .answer-sheet-header { border:1px; padding:4px } → conteúdo em x=60.44pt, y_top=37.77pt
+            #   .header-info-line { font-size:7pt; line-height:1.6 } → linha=11.2pt, margem=0.375pt
+            #   .header-info-line .label { min-width:120px=90pt; display:inline-block }
+            #     → valor começa sempre em x = 60.44 + 90 = 150.44pt ≈ X_TEXT
+            #
+            # Linha 1 (NOME DA PROVA)  : baseline ≈ 48.7pt do topo  → ~793pt do rodapé
+            # Linha 2 (NOME COMPLETO)  : baseline ≈ 61.7pt do topo  → Y_PDF_NAME
+            # Linha 3 (ESTADO)         : baseline ≈ 73.7pt do topo  → estático, não sobreposto
+            # Linha 4 (MUNICÍPIO)      : baseline ≈ 85.6pt do topo  → estático, não sobreposto
+            # Linha 5 (ESCOLA)         : baseline ≈ 97.6pt do topo  → Y_PDF_SCHOOL
+            # Linha 6 (TURMA)          : baseline ≈ 109.5pt do topo → Y_PDF_TURMA
+            #
+            # QR: .header-right (width=140px=105pt, padding-left=10px, border-left=1px)
+            #     .qr-code-box (120px=90pt, box-sizing:border-box, border:1px) centralizado
+            # X_TEXT: conteúdo começa em 60.44pt (left padding+border+padding do header)
+            #         + min-width do label: 100px = 75pt → X_TEXT = 60.44 + 75 = 135.44pt
+            X_TEXT = 135.44
+            Y_PDF_NAME   = 780.16  # baseline NOME COMPLETO  (linha 2)
+            Y_PDF_SCHOOL = 744.31  # baseline ESCOLA          (linha 5, após ESTADO e MUNICÍPIO)
+            Y_PDF_TURMA  = 732.36  # baseline TURMA           (linha 6, 1 linha abaixo de ESCOLA)
+            QR_X = 441.46          # borda esquerda do qr-code-box
+            QR_Y = 680.77          # borda inferior do qr-code-box
             QR_SIZE = 90
+
             FONT_NAME = 'Helvetica'
             FONT_SIZE = 7
-            MAX_TEXT_WIDTH_CHARS = 50     # truncar para caber em ~268 pt
+            FONT_COLOR = HexColor('#374151')
+            MAX_TEXT_WIDTH_CHARS = 50
 
             def _truncate(s: str, max_chars: int = MAX_TEXT_WIDTH_CHARS) -> str:
                 s = (s or '').strip()
@@ -1018,22 +1146,42 @@ class InstitutionalTestWeasyPrintGenerator:
                     return s
                 return s[: max_chars - 1] + '…'
 
-            c.setFont(FONT_NAME, FONT_SIZE)
             student_name = _truncate(student.get('name') or student.get('nome') or '')
-            school_name = _truncate(student.get('school_name') or 'Não informado')
-            grade_name = (test_data or {}).get('grade_name') or 'Sem turma'
-            class_name = (student.get('class_name') or 'A').strip()
-            turma_text = f"{grade_name} - {class_name}"
-            turma_text = _truncate(turma_text, max_chars=55)
+            raw_school = (student.get('school_name') or '').strip()
+            upper_school = raw_school.upper()
+            if raw_school and 'NÃO INFORMADO' not in upper_school:
+                school_name = _truncate(raw_school)
+            else:
+                school_name = ''
+            class_name = (student.get('class_name') or student.get('turma') or '').strip()
+            grade_name = ((test_data or {}).get('grade_name') or '').strip()
+            # Monta o valor completo de TURMA idêntico ao template:
+            # "grade_name - class_name" → espelha {{ test_data.grade_name }} - {{ student.class_name }}
+            if grade_name and class_name:
+                turma_display = _truncate(f"{grade_name} - {class_name}")
+            elif grade_name:
+                turma_display = _truncate(grade_name)
+            else:
+                turma_display = _truncate(class_name)
 
-            c.drawString(X_VALUE, Y_PDF_STUDENT_NAME, student_name.upper())
-            c.drawString(X_VALUE, Y_PDF_SCHOOL, school_name.upper())
-            c.drawString(X_VALUE, Y_PDF_TURMA, turma_text.upper())
+            c.setFont(FONT_NAME, FONT_SIZE)
+            c.setFillColor(FONT_COLOR)
+            if student_name:
+                c.drawString(X_TEXT, Y_PDF_NAME, student_name.upper())
+            if school_name:
+                c.drawString(X_TEXT, Y_PDF_SCHOOL, school_name.upper())
+            if turma_display:
+                c.drawString(X_TEXT, Y_PDF_TURMA, turma_display.upper())
 
-            # QR code: mesmo formato que o fluxo atual (student_id + test_id)
+            # QR code: incluir gabarito_id para correção usar gabarito central
             student_id = str(student.get('id', ''))
             test_id = str((test_data or {}).get('id', ''))
+            gabarito_id = str((test_data or {}).get('gabarito_id', ''))
+            
+            # ✅ NOVO: Incluir gabarito_id no QR Code para provas físicas
             qr_metadata = {"student_id": student_id, "test_id": test_id}
+            if gabarito_id:
+                qr_metadata["gabarito_id"] = gabarito_id
             import qrcode as _qrcode
             qr = _qrcode.QRCode(
                 version=1,
@@ -1129,15 +1277,25 @@ class InstitutionalTestWeasyPrintGenerator:
             logging.error(f"Erro ao carregar logo padrão: {str(e)}")
             return None
 
-    def _generate_qr_code_with_metadata(self, student_id: str, test_id: str) -> dict:
+    def _generate_qr_code_with_metadata(self, student_id: str, test_id: str, gabarito_id: str = None) -> dict:
         """
-        Gera QR code com metadados simplificados (apenas student_id e test_id)
+        Gera QR code com metadados simplificados (student_id, test_id e opcionalmente gabarito_id)
+        
+        Args:
+            student_id: ID do aluno
+            test_id: ID da prova
+            gabarito_id: ID do gabarito central (opcional, usado para provas físicas)
         """
         try:
             qr_data = {
                 'student_id': student_id,
                 'test_id': test_id
             }
+            
+            # ✅ NOVO: Incluir gabarito_id se fornecido
+            if gabarito_id:
+                qr_data['gabarito_id'] = gabarito_id
+            
             return qr_data
 
         except Exception as e:

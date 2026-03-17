@@ -923,6 +923,11 @@ def get_task_status(task_id):
             response['classes'] = classes_list
             response['errors'] = errors_list if errors_list else None
 
+            # Mensagem e fase atuais (feedback por etapa: gerando, salvando, zip, upload, concluído)
+            if job.get('stage_message'):
+                response['message'] = job['stage_message']
+            response['phase'] = job.get('phase')
+
             if task.state == 'SUCCESS' and task.result:
                 res = task.result
                 if isinstance(res, dict):

@@ -6,8 +6,8 @@ Suporta correção única (síncrona) e em lote (assíncrona com polling)
 """
 
 from flask import Blueprint, request, jsonify, send_file
-from flask_jwt_extended import jwt_required, get_jwt_identity
-from app.decorators.role_required import role_required
+from flask_jwt_extended import jwt_required, get_jwt_identity, get_jwt
+from app.decorators.role_required import role_required, get_current_user_from_token as get_user_for_permission_check
 from app.decorators import requires_city_context
 from app import db
 from app.models.test import Test
@@ -397,8 +397,10 @@ def get_physical_test_scope(test_id):
 @requires_city_context
 def generate_physical_forms(test_id):
     """
-    Dispara geração ASSÍNCRONA de formulários físicos usando Celery
-    
+    Dispara geração ASSÍNCRONA de formulários físicos usando Celery.
+
+    Fluxo atual: Arch4 + PDF Overlay — 1× WeasyPrint (prova base) + 1× WeasyPrint (template OMR)
+    + por aluno apenas overlay ReportLab (nome, escola, turma, QR) aplicado sobre o template.
     A geração é feita em background para evitar timeout em turmas grandes.
     O frontend deve fazer polling na rota /task/<task_id>/status para acompanhar o progresso.
     
@@ -784,89 +786,171 @@ def generate_physical_forms(test_id):
 @jwt_required()
 def get_task_status(task_id):
     """
-    Verifica o status de uma task Celery de geração de formulários físicos
-    
-    O frontend deve fazer polling nesta rota (a cada 2-3 segundos) para acompanhar o progresso.
-    
-    Args:
-        task_id: ID da task Celery retornado na rota /generate-forms
-    
-    Returns:
-        200 OK com status da task:
-        - status: "pending" | "processing" | "completed" | "failed" | "retrying"
-        - message: Mensagem descritiva
-        - result: Dados retornados pela task (quando completed)
-        - error: Mensagem de erro (quando failed)
-    
-    Example Response (Processing):
-        {
-            "status": "processing",
-            "message": "Gerando formulários..."
-        }
-    
-    Example Response (Completed):
-        {
-            "status": "completed",
-            "message": "Formulários gerados com sucesso",
-            "result": {
-                "success": true,
-                "test_id": "...",
-                "generated_forms": 35,
-                "forms": [...]
-            }
-        }
+    Verifica o status de uma task Celery de geração de formulários físicos.
+    Retorna progresso em tempo real por turma e por aluno, além de erros detalhados.
+
+    Resposta inclui:
+    - status, progress (current/total/percentage)
+    - summary (total_classes, completed_classes, successful_classes, failed_classes, total_students, zip_minio_url)
+    - classes[] (por turma: class_id, class_name, school_name, status, total_students, completed, errors)
+    - errors[] (por item com falha: class_id, class_name, student_id, student_name, error)
     """
     try:
         from celery.result import AsyncResult
         from app.physical_tests.tasks import generate_physical_forms_async
 
         task = AsyncResult(task_id, app=generate_physical_forms_async.app)
-        
+        job = get_job(task_id)
+
+        # Status geral a partir do estado Celery
         if task.state == 'PENDING':
-            response = {
-                'status': 'pending',
-                'message': 'Aguardando processamento...',
-                'task_id': task_id
-            }
+            status_key = 'pending'
+            message = 'Aguardando processamento...'
         elif task.state == 'STARTED':
-            response = {
-                'status': 'processing',
-                'message': 'Gerando formulários PDF (isso pode levar alguns minutos)...',
-                'task_id': task_id
-            }
+            status_key = 'processing'
+            message = 'Gerando formulários PDF (isso pode levar alguns minutos)...'
         elif task.state == 'SUCCESS':
+            status_key = 'completed'
             result_data = task.result
-            response = {
-                'status': 'completed',
-                'message': result_data.get('message', 'Formulários gerados com sucesso'),
-                'task_id': task_id,
-                'result': result_data
-            }
+            message = result_data.get('message', 'Formulários gerados com sucesso') if result_data else 'Formulários gerados com sucesso'
         elif task.state == 'FAILURE':
-            response = {
-                'status': 'failed',
-                'message': 'Erro ao gerar formulários',
-                'task_id': task_id,
-                'error': str(task.info)  # Exception
-            }
+            status_key = 'failed'
+            message = 'Erro ao gerar formulários'
         elif task.state == 'RETRY':
-            response = {
-                'status': 'retrying',
-                'message': 'Tentando novamente após erro temporário...',
-                'task_id': task_id,
-                'retries': task.info.get('retries', 0) if hasattr(task, 'info') and task.info else 0
-            }
+            status_key = 'retrying'
+            message = 'Tentando novamente após erro temporário...'
         else:
-            response = {
-                'status': task.state.lower(),
-                'message': f'Estado: {task.state}',
-                'task_id': task_id
+            status_key = task.state.lower() if task.state else 'unknown'
+            message = f'Estado: {task.state}'
+
+        response = {
+            'task_id': task_id,
+            'status': status_key,
+            'message': message,
+        }
+
+        if task.state == 'FAILURE':
+            response['error'] = str(task.info) if task.info else 'Erro desconhecido'
+        if task.state == 'RETRY' and hasattr(task, 'info') and task.info:
+            response['retries'] = task.info.get('retries', 0)
+
+        # Progresso detalhado (job de progresso)
+        if job:
+            total = job.get('total', 0)
+            completed = job.get('completed', 0)
+            successful = job.get('successful', 0)
+            failed = job.get('failed', 0)
+            pct = int(round((completed / total * 100))) if total > 0 else 0
+
+            response['progress'] = {
+                'current': completed,
+                'total': total,
+                'percentage': min(100, pct),
             }
-        
+
+            items = job.get('items') or {}
+            classes_map = {}
+            errors_list = []
+
+            for idx_str, item in items.items():
+                st = item.get('status', 'pending')
+                class_id = item.get('class_id') or ''
+                class_name = item.get('class_name') or 'Turma não informada'
+                school_name = item.get('school_name') or ''
+                student_id = item.get('student_id')
+                student_name = item.get('student_name') or ''
+
+                key = (class_id, class_name, school_name)
+                if key not in classes_map:
+                    classes_map[key] = {
+                        'class_id': class_id,
+                        'class_name': class_name,
+                        'school_name': school_name,
+                        'status': 'pending',
+                        'total_students': 0,
+                        'completed': 0,
+                        'successful': 0,
+                        'failed': 0,
+                        'errors': [],
+                    }
+                classes_map[key]['total_students'] += 1
+                if st == 'done':
+                    classes_map[key]['completed'] += 1
+                    classes_map[key]['successful'] += 1
+                elif st == 'error':
+                    classes_map[key]['completed'] += 1
+                    classes_map[key]['failed'] += 1
+                    err_msg = item.get('error', 'Erro desconhecido')
+                    classes_map[key]['errors'].append({
+                        'student_id': student_id,
+                        'student_name': student_name,
+                        'error': err_msg,
+                    })
+                    errors_list.append({
+                        'class_id': class_id,
+                        'class_name': class_name,
+                        'school_name': school_name,
+                        'student_id': student_id,
+                        'student_name': student_name,
+                        'error': err_msg,
+                    })
+                elif st == 'processing':
+                    classes_map[key]['status'] = 'processing'
+
+                if classes_map[key]['status'] == 'pending' and st in ('processing', 'done', 'error'):
+                    classes_map[key]['status'] = 'processing' if st == 'processing' else 'completed'
+
+            classes_list = list(classes_map.values())
+            for c in classes_list:
+                if c['failed'] > 0:
+                    c['status'] = 'completed_with_errors'
+                elif c['completed'] == c['total_students'] and c['total_students'] > 0:
+                    c['status'] = 'completed'
+
+            response['summary'] = {
+                'total_classes': len(classes_list),
+                'completed_classes': sum(1 for c in classes_list if c['status'] in ('completed', 'completed_with_errors')),
+                'successful_classes': sum(1 for c in classes_list if c['failed'] == 0 and c['completed'] == c['total_students']),
+                'failed_classes': sum(1 for c in classes_list if c['failed'] > 0),
+                'total_students': total,
+                'completed_students': completed,
+                'successful_students': successful,
+                'failed_students': failed,
+                'zip_minio_url': None,
+                'can_download': False,
+            }
+
+            response['classes'] = classes_list
+            response['errors'] = errors_list if errors_list else None
+
+            # Mensagem e fase atuais (feedback por etapa: gerando, salvando, zip, upload, concluído)
+            if job.get('stage_message'):
+                response['message'] = job['stage_message']
+            response['phase'] = job.get('phase')
+
+            if task.state == 'SUCCESS' and task.result:
+                res = task.result
+                if isinstance(res, dict):
+                    response['summary']['zip_minio_url'] = res.get('minio_url')
+                    response['summary']['can_download'] = bool(res.get('minio_url'))
+            if status_key == 'completed' and task.result and isinstance(task.result, dict):
+                response['result'] = task.result
+        else:
+            response['progress'] = {
+                'current': 0,
+                'total': 0,
+                'percentage': 0,
+            }
+            response['summary'] = None
+            response['classes'] = []
+            response['errors'] = None
+            if task.state == 'SUCCESS' and task.result:
+                response['result'] = task.result
+
         return jsonify(response), 200
-        
+
     except Exception as e:
-        logging.error(f"Erro ao verificar status da task {task_id}: {str(e)}")
+        logging.error(f"Erro ao verificar status da task {task_id}: {str(e)}", exc_info=True)
         return jsonify({
             "status": "error",
             "message": "Erro ao verificar status da task",
@@ -1722,7 +1806,8 @@ def delete_all_physical_forms_by_test(test_id):
         - Número de formulários excluídos
     """
     try:
-        user = get_current_user_from_token()
+        # Usar get_user_for_permission_check (role como string) para a checagem admin/criador/município
+        user = get_user_for_permission_check()
         if not user:
             return jsonify({"error": "User not found or token invalid"}), 401
         
@@ -1731,15 +1816,17 @@ def delete_all_physical_forms_by_test(test_id):
         if not test:
             return jsonify({"error": "Prova não encontrada"}), 404
         
-        # Verificar permissões
+        # Verificar permissões (user.role já é string, ex.: 'admin')
         user_role = user.get('role')
         user_id = user.get('id')
         user_city_id = user.get('tenant_id') or user.get('city_id')
         
         can_delete = False
         
-        if user_role == 'admin':
-            # Admin pode excluir qualquer formulário
+        # Admin pode excluir qualquer formulário (usar role do JWT para evitar 403 quando user do DB não reflete admin)
+        if get_jwt().get('role') == 'admin':
+            can_delete = True
+        elif user_role == 'admin':
             can_delete = True
         elif test.created_by == user_id:
             # Criador pode excluir seus próprios formulários

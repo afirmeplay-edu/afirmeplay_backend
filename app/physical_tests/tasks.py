@@ -162,7 +162,9 @@ def generate_physical_forms_async(
         if result.ready():
             data = result.get()
     """
+    job_id = None
     try:
+        job_id = self.request.id
         print(f"[CELERY] ========== TASK CELERY INICIADA ==========")
         print(f"[CELERY] test_id: {test_id}")
         print(f"[CELERY] city_id: {city_id}")
@@ -178,6 +180,7 @@ def generate_physical_forms_async(
         from app.models.testQuestion import TestQuestion
         from app.models.answerSheetGabarito import AnswerSheetGabarito
         from app.models.studentClass import Class
+        from app.models.school import School
         from app.physical_tests.form_service import PhysicalTestFormService
         from app.models.city import City
         from sqlalchemy import text
@@ -430,13 +433,73 @@ def generate_physical_forms_async(
                 else:
                     logger.info(f"[CELERY] ✅ Topology já existe no blocks_config")
         
-        # ✅ MODIFICADO: Não criar AnswerSheetGabarito para provas físicas
-        # Os dados serão salvos diretamente no PhysicalTestForm quando cada formulário for criado
-        logger.info(f"[CELERY] 📋 Dados de correção preparados para salvar em PhysicalTestForm")
+        # ✅ MODIFICADO: SEMPRE criar/atualizar AnswerSheetGabarito central para provas físicas
+        # Isso centraliza os dados pesados (topology + gabarito) em um único lugar
+        logger.info(f"[CELERY] 📋 Criando/atualizando AnswerSheetGabarito central para prova física")
         logger.info(f"[CELERY]    num_questions={num_questions}, use_blocks={use_blocks}, num_blocks={blocks_config.get('num_blocks', 1)}")
         logger.info(f"[CELERY]    blocks_config tem topology: {'topology' in blocks_config}")
         if 'topology' in blocks_config:
             logger.info(f"[CELERY]    topology tem {len(blocks_config['topology'].get('blocks', []))} blocos")
+        
+        # Buscar ou criar AnswerSheetGabarito
+        gabarito = AnswerSheetGabarito.query.filter_by(test_id=test_id).first()
+        
+        # Buscar metadados da primeira turma para o gabarito
+        first_class_id = class_ids[0] if class_ids else None
+        school_id = None
+        school_name = ''
+        municipality = ''
+        state = ''
+        
+        if first_class_id:
+            first_class = Class.query.get(first_class_id)
+            if first_class and first_class.school_id:
+                school = School.query.get(first_class.school_id)
+                if school:
+                    school_id = school.id
+                    school_name = school.name or ''
+                    if school.city_id:
+                        city_obj = City.query.get(school.city_id)
+                        if city_obj:
+                            municipality = city_obj.name or ''
+                            state = city_obj.state or ''
+        
+        if gabarito:
+            # Atualizar gabarito existente com novos dados
+            gabarito.num_questions = num_questions
+            gabarito.use_blocks = use_blocks
+            gabarito.blocks_config = blocks_config.copy()
+            gabarito.correct_answers = correct_answers.copy()
+            gabarito.class_id = first_class_id
+            gabarito.school_id = str(school_id) if school_id else None
+            gabarito.school_name = school_name
+            gabarito.municipality = municipality
+            gabarito.state = state
+            gabarito.grade_name = test.grade.name if test.grade else None
+            gabarito.title = test.title
+            logger.info(f"[CELERY] ✅ AnswerSheetGabarito atualizado: {gabarito.id}")
+        else:
+            # Criar novo gabarito central
+            gabarito = AnswerSheetGabarito(
+                test_id=test_id,
+                class_id=first_class_id,
+                num_questions=num_questions,
+                use_blocks=use_blocks,
+                blocks_config=blocks_config.copy(),
+                correct_answers=correct_answers.copy(),
+                title=test.title,
+                school_id=str(school_id) if school_id else None,
+                school_name=school_name,
+                municipality=municipality,
+                state=state,
+                grade_name=test.grade.name if test.grade else None
+            )
+            db.session.add(gabarito)
+            logger.info(f"[CELERY] ✅ AnswerSheetGabarito criado para prova física")
+        
+        db.session.commit()
+        gabarito_id = gabarito.id
+        logger.info(f"[CELERY] ✅ Gabarito central salvo: gabarito_id={gabarito_id}")
         
         # Preparar test_data com blocks_config atualizado
         print(f"[CELERY] ========== PREPARANDO CORRECTION_DATA ==========")
@@ -464,6 +527,8 @@ def generate_physical_forms_async(
             'description': test.description or '',
             'blocks_config': blocks_config or {},
             'num_questions': num_questions,
+            # ✅ NOVO: Passar gabarito_id para incluir no QR Code
+            'gabarito_id': gabarito_id,
             # ✅ NOVO: Passar dados de correção para salvar no PhysicalTestForm
             # IMPORTANTE: blocks_config aqui já deve ter a topology completa
             'correction_data': correction_data_to_pass,
@@ -474,6 +539,29 @@ def generate_physical_forms_async(
                 'class_ids': class_ids or None
             }
         }
+        
+        # ✅ Job de progresso: items com turma desde o início (status mostra turmas corretas logo no primeiro GET)
+        from app.services.progress_store import create_job, complete_job, update_job
+        class_ids_unique = list({s.class_id for s in students if s.class_id})
+        classes_objs = Class.query.filter(Class.id.in_(class_ids_unique)).all() if class_ids_unique else []
+        class_map = {c.id: c for c in classes_objs}
+        school_ids_unique = list({c.school_id for c in classes_objs if c.school_id})
+        schools_objs = School.query.filter(School.id.in_(school_ids_unique)).all() if school_ids_unique else []
+        school_map = {s.id: (s.name or '') for s in schools_objs}
+        items_meta = []
+        for s in students:
+            c = class_map.get(s.class_id)
+            class_name = (c.name or '') if c else ''
+            school_name = school_map.get(c.school_id, '') if c and c.school_id else ''
+            items_meta.append({
+                'student_id': str(s.id),
+                'student_name': s.name or '',
+                'class_id': str(s.class_id) if s.class_id else '',
+                'class_name': class_name,
+                'school_name': school_name,
+            })
+        create_job(job_id=job_id, total=len(students_data), test_id=test_id, items_meta=items_meta)
+        test_data['job_id'] = job_id
         
         print(f"[CELERY] test_data['correction_data'] existe: {'correction_data' in test_data}")
         print(f"[CELERY] ========== CHAMANDO FORM_SERVICE ==========")
@@ -517,7 +605,10 @@ def generate_physical_forms_async(
             # CRIAR ZIP A PARTIR DE ARQUIVOS EM DISCO (NÃO EM MEMÓRIA)
             # ========================================================================
             zip_path = os.path.join(temp_dir, f'provas_fisicas_{test_id}.zip')
-            
+            try:
+                update_job(job_id, {"phase": "zipping", "stage_message": "Criando pacote para download..."})
+            except Exception:
+                pass
             logger.info(f"[CELERY] 📦 Criando ZIP a partir de arquivos em disco...")
             
             minio_url = None
@@ -527,15 +618,54 @@ def generate_physical_forms_async(
             
             if generated_files:
                 try:
-                    # Criar ZIP usando arquivos em disco diretamente dos generated_files
+                    # Estrutura de pastas no ZIP = mesma do cartão-resposta: municipio_/escola_/serie_/turma_/arquivo.pdf
+                    from app.services.cartao_resposta.answer_sheet_generator import sanitize_filename
+                    from app.models.grades import Grade
+
+                    student_id_to_class_id = {str(s.id): s.class_id for s in students}
+                    city_ids = list({s.city_id for s in schools_objs if getattr(s, 'city_id', None)})
+                    cities = {c.id: c for c in (City.query.filter(City.id.in_(city_ids)).all() if city_ids else [])}
+                    grade_ids = list({c.grade_id for c in classes_objs if c.grade_id})
+                    grades = {g.id: g for g in (Grade.query.filter(Grade.id.in_(grade_ids)).all() if grade_ids else [])}
+
+                    class_id_to_path_parts = {}
+                    for c in classes_objs:
+                        school = next((s for s in schools_objs if s.id == c.school_id), None)
+                        city_name = 'municipio'
+                        if school and getattr(school, 'city_id', None):
+                            city_obj = cities.get(school.city_id)
+                            if city_obj and getattr(city_obj, 'name', None):
+                                city_name = city_obj.name
+                        school_name = (school.name if school else None) or 'escola'
+                        grade_name = (grades.get(c.grade_id).name if c.grade_id and grades.get(c.grade_id) else None) or 'serie'
+                        class_name = (c.name or 'turma').strip() or 'turma'
+                        class_id_to_path_parts[c.id] = (city_name, school_name, grade_name, class_name)
+
+                    fallback_parts = ('municipio', 'escola', 'serie', 'turma')
+
                     with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zf:
                         for file_info in generated_files:
                             pdf_path = file_info.get('pdf_path')
                             if pdf_path and os.path.exists(pdf_path):
-                                # Usar zipfile.write() com arquivo em disco (eficiente)
-                                student_name = file_info['student_name'].replace(' ', '_').replace('/', '_')
-                                filename = f"prova_{student_name}_{file_info['student_id']}.pdf"
-                                zf.write(pdf_path, filename)
+                                student_id = file_info.get('student_id')
+                                student_name = file_info.get('student_name') or 'aluno'
+                                class_id = student_id_to_class_id.get(str(student_id)) if student_id else None
+                                if class_id and class_id in class_id_to_path_parts:
+                                    city_name, school_name, grade_name, class_name = class_id_to_path_parts[class_id]
+                                else:
+                                    city_name, school_name, grade_name, class_name = fallback_parts
+                                folder_path = os.path.join(
+                                    f"municipio_{sanitize_filename(city_name, max_length=60)}",
+                                    f"escola_{sanitize_filename(school_name, max_length=60)}",
+                                    f"serie_{sanitize_filename(grade_name, max_length=40)}",
+                                    f"turma_{sanitize_filename(class_name, max_length=40)}",
+                                )
+                                grade_safe = sanitize_filename(grade_name, max_length=40)
+                                class_safe = sanitize_filename(class_name, max_length=40)
+                                name_safe = sanitize_filename(student_name, max_length=60)
+                                filename = f"{name_safe}_{grade_safe}_{class_safe}.pdf"
+                                arcname = os.path.join(folder_path, filename)
+                                zf.write(pdf_path, arcname)
                     
                     zip_size = os.path.getsize(zip_path)
                     logger.info(f"[CELERY] ✅ ZIP criado: {zip_size} bytes")
@@ -543,6 +673,10 @@ def generate_physical_forms_async(
                     # ========================================================================
                     # UPLOAD PARA MINIO (NÃO CRÍTICO - não deve derrubar a task)
                     # ========================================================================
+                    try:
+                        update_job(job_id, {"phase": "uploading", "stage_message": "Enviando arquivos para o servidor..."})
+                    except Exception:
+                        pass
                     logger.info(f"[CELERY] ☁️ Enviando ZIP para MinIO...")
                     try:
                         from app.services.storage.minio_service import MinIOService
@@ -608,6 +742,7 @@ def generate_physical_forms_async(
                     except Exception as e:
                         logger.warning(f"[CELERY] ⚠️ Erro ao limpar arquivos temporários: {str(e)}")
             
+            complete_job(job_id)
             return {
                 'success': True,
                 'test_id': test_id,
@@ -624,18 +759,23 @@ def generate_physical_forms_async(
         else:
             error_msg = result.get('error', 'Erro desconhecido ao gerar formulários')
             logger.error(f"[CELERY] ❌ Erro na geração: {error_msg}")
+            if job_id:
+                complete_job(job_id)
             raise Exception(error_msg)
     
     except Exception as e:
+        from app.services.progress_store import complete_job as _complete_job
         error_msg = str(e)
         logger.error(f"[CELERY] ❌ Erro ao gerar formulários físicos: {error_msg}", exc_info=True)
-        
+
         # 🔒 NÃO fazer retry por erro de MinIO - apenas por erros críticos de geração
         # Se PDFs foram gerados mas upload falhou, não retryar
         is_minio_error = 'minio' in error_msg.lower() or 's3' in error_msg.lower() or 'ssl' in error_msg.lower()
-        
+
         if is_minio_error:
             logger.warning(f"[CELERY] ⚠️ Erro de MinIO detectado - não retryando task (PDFs podem ter sido gerados)")
+            if job_id:
+                _complete_job(job_id)
             return {
                 'success': False,
                 'error': error_msg,
@@ -643,13 +783,14 @@ def generate_physical_forms_async(
                 'generated_forms': 0,
                 'is_minio_error': True
             }
-        
+
         # Retry apenas para erros críticos (não relacionados a MinIO)
         if self.request.retries < self.max_retries:
             logger.info(f"[CELERY] 🔄 Tentando novamente (retry {self.request.retries + 1}/{self.max_retries})...")
             raise self.retry(exc=e)
         else:
-            # Retornar erro após esgotar retries
+            if job_id:
+                _complete_job(job_id)
             return {
                 'success': False,
                 'error': error_msg,

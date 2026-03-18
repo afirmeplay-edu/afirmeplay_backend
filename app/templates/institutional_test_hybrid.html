@@ -394,6 +394,22 @@
 				border: none;
 			}
 
+		/* Contenção global de imagens em todos os contextos de questão.
+		   !important garante precedência sobre qualquer width/height inline
+		   remanescente (data: URLs do editor podem trazer style inline). */
+		.question-content img,
+		.question-prompt img,
+		.alternative-content img,
+		.question-instruction-text img,
+		.question-title img {
+				max-width: 100% !important;
+				width: auto !important;
+				height: auto !important;
+				display: block !important;
+				margin-left: auto !important;
+				margin-right: auto !important;
+			}
+
 			.question-subtitle {
 				font-size: 10pt;
 				font-style: italic;
@@ -569,6 +585,8 @@
 
 			.header-info-line .label {
 				font-weight: bold;
+				min-width: 100px;      /* largura fixa → todos os valores iniciam no mesmo X (≈75pt) */
+				display: inline-block; /* necessário para min-width funcionar em <span> */
 			}
 
 			.header-info-line .value {
@@ -932,7 +950,12 @@
 		</style>
 	</head>
 	<body>
+		{% set include_cover = include_cover|default(True) %}
+		{% set include_questions = include_questions|default(True) %}
+		{% set include_answer_sheet = include_answer_sheet|default(True) %}
+
 		<!-- Capa Institucional -->
+		{% if include_cover %}
 		<div class="institutional-cover">
 			<div class="cover-header">
 				<div class="municipality-logo">
@@ -1004,8 +1027,10 @@
 				</div>
 			</div>
 		</div>
+		{% endif %}
 
 		<!-- Disciplinas e Questões -->
+		{% if include_questions %}
 		{% if questions_by_block %} {% for block in questions_by_block %}
 		<div class="subject-cover">
 			<div class="block-number">
@@ -1135,8 +1160,10 @@
 			{% endfor %}
 		</div>
 		{% endfor %} {% endif %}
+		{% endif %}
 
 		<!-- Formulário de Respostas com Marcadores Geométricos -->
+		{% if include_answer_sheet %}
 		<div class="answer-sheet">
 			<!-- ÂNCORAS DA PÁGINA A4 (dentro do .answer-sheet com position: relative) -->
 			<div class="a4-anchor-square anchor-top-left">
@@ -1219,15 +1246,13 @@
 						<div class="header-info-line">
 							<span class="label">ESCOLA:</span>
 							<span class="value"
-								>{{ student.school_name or 'Não informado'
-								}}</span
+								>{{ student.school_name }}</span
 							>
 						</div>
 						<div class="header-info-line">
 							<span class="label">TURMA:</span>
 							<span class="value"
-								>{{ test_data.grade_name or 'Sem turma' }} - {{
-								student.class_name or 'A' }}</span
+								>{% if student.class_name %}{{ test_data.grade_name or '' }} - {{ student.class_name }}{% elif student.name or student.nome %}{{ test_data.grade_name or '' }}{% endif %}</span
 							>
 						</div>
 					</div>
@@ -1464,5 +1489,6 @@
 			</div>
 			<!-- Fim do answer-grid-wrapper -->
 		</div>
+		{% endif %}
 	</body>
 </html>

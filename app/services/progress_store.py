@@ -28,8 +28,10 @@ Formato do progress:
 
 from threading import Lock
 from datetime import datetime
+import json
 import logging
 import os
+import copy
 from typing import Optional
 
 # Dicionário global de progresso (memória; progresso de answer_sheet também vai para Redis)
@@ -40,6 +42,7 @@ logger = logging.getLogger(__name__)
 
 # Prefixo e TTL para chaves de progresso no Redis (compartilhado entre Flask e Celery)
 REDIS_PROGRESS_KEY_PREFIX = "as_job_progress:"
+REDIS_JOB_FULL_KEY_PREFIX = "as_job_full:"  # Job completo (JSON) para Flask ver progresso quando worker está em outro processo
 REDIS_PROGRESS_TTL_SEC = 24 * 3600  # 24 horas
 
 
@@ -136,21 +139,56 @@ def get_job_progress_redis(job_id: str) -> Optional[dict]:
         return None
 
 
-def create_job(job_id: str, total: int, test_id: str = None, gabarito_id: str = None, user_id: str = None, task_ids: list = None) -> dict:
+def _persist_job_to_redis(job_id: str, job_dict: dict) -> None:
+    """Persiste o job completo no Redis para o Flask (GET /task/.../status) ver progresso atualizado pelo Celery."""
+    r = _get_redis_client()
+    if not r:
+        return
+    key = REDIS_JOB_FULL_KEY_PREFIX + job_id
+    try:
+        r.set(key, json.dumps(job_dict, default=str), ex=REDIS_PROGRESS_TTL_SEC)
+    except Exception as e:
+        logger.debug("Falha ao persistir job no Redis: %s", e)
+
+
+def _get_job_from_redis(job_id: str) -> Optional[dict]:
+    """Lê o job completo do Redis. Usado pelo Flask quando o job foi criado/atualizado pelo worker (outro processo)."""
+    r = _get_redis_client()
+    if not r:
+        return None
+    key = REDIS_JOB_FULL_KEY_PREFIX + job_id
+    try:
+        raw = r.get(key)
+        if not raw:
+            return None
+        return json.loads(raw)
+    except Exception as e:
+        logger.debug("Falha ao ler job do Redis: %s", e)
+        return None
+
+
+def create_job(job_id: str, total: int, test_id: str = None, gabarito_id: str = None, user_id: str = None, task_ids: list = None, items_meta: list = None) -> dict:
     """
-    Cria um novo job de correção em lote
+    Cria um novo job de correção em lote.
     
-    Args:
-        job_id: ID único do job
-        total: Número total de imagens a processar
-        test_id: ID da prova (opcional)
-        gabarito_id: ID do gabarito (opcional)
-        user_id: ID do usuário que criou o job (opcional, para validação de acesso)
-        task_ids: Lista de IDs de tasks Celery associadas ao job (opcional)
-    
-    Returns:
-        dict: Dados do job criado
+    items_meta: Lista opcional de dicts (um por índice), com chaves opcionais:
+        class_id, class_name, school_name, student_id, student_name.
+        Se fornecida e len(items_meta)==total, cada item nasce com esses campos
+        para o status mostrar turmas corretas desde o início.
     """
+    meta_keys = ("class_id", "class_name", "school_name", "student_id", "student_name")
+    if items_meta is not None and len(items_meta) == total:
+        items = {}
+        for i in range(total):
+            meta = items_meta[i] or {}
+            item = {"status": "pending"}
+            for k in meta_keys:
+                if k in meta and meta[k] is not None and meta[k] != "":
+                    item[k] = meta[k]
+            items[str(i)] = item
+    else:
+        items = {str(i): {"status": "pending"} for i in range(total)}
+
     with lock:
         progress[job_id] = {
             "total": total,
@@ -164,39 +202,46 @@ def create_job(job_id: str, total: int, test_id: str = None, gabarito_id: str = 
             "task_ids": task_ids or [],
             "warnings": [],
             "created_at": datetime.utcnow().isoformat(),
-            "items": {str(i): {"status": "pending"} for i in range(total)},
-            "results": []
+            "items": items,
+            "results": [],
+            "phase": "generating",
+            "stage_message": "Gerando formulários PDF...",
         }
-        logger.info(f"📋 Job criado: {job_id} com {total} imagens")
-        return progress[job_id]
+        job_snapshot = copy.deepcopy(progress[job_id])
+        logger.info(f"📋 Job criado: {job_id} com {total} itens")
+    _persist_job_to_redis(job_id, job_snapshot)
+    return progress[job_id]
 
 
-def update_item_processing(job_id: str, index: int):
+def update_item_processing(job_id: str, index: int, extra: dict = None):
     """
-    Marca item como em processamento
-    
-    Args:
-        job_id: ID do job
-        index: Índice do item (0-based)
+    Marca item como em processamento.
+    extra: dict opcional (class_id, class_name, school_name, student_id, student_name) para progresso detalhado.
     """
     with lock:
         if job_id in progress:
-            progress[job_id]["items"][str(index)] = {"status": "processing"}
+            item = {"status": "processing"}
+            if extra:
+                for key in ("student_id", "student_name", "class_id", "class_name", "school_name"):
+                    if key in extra and extra[key] is not None:
+                        item[key] = extra[key]
+            progress[job_id]["items"][str(index)] = item
+            job_snapshot = copy.deepcopy(progress[job_id])
             logger.debug(f"🔄 Job {job_id}: Item {index} em processamento")
+        else:
+            job_snapshot = None
+    if job_snapshot is not None:
+        _persist_job_to_redis(job_id, job_snapshot)
 
 
 def update_item_done(job_id: str, index: int, result: dict):
     """
-    Marca item como concluído com sucesso
-    
-    Args:
-        job_id: ID do job
-        index: Índice do item (0-based)
-        result: Resultado da correção
+    Marca item como concluído com sucesso.
+    Aceita campos de correção (correct, total, percentage) e/ou de formulários físicos (class_id, class_name, school_name).
     """
     with lock:
         if job_id in progress:
-            progress[job_id]["items"][str(index)] = {
+            item = {
                 "status": "done",
                 "student_id": result.get("student_id"),
                 "student_name": result.get("student_name"),
@@ -205,64 +250,85 @@ def update_item_done(job_id: str, index: int, result: dict):
                 "percentage": result.get("percentage"),
                 "grade": result.get("grade"),
                 "classification": result.get("classification"),
-                "proficiency": result.get("proficiency")
+                "proficiency": result.get("proficiency"),
+                "class_id": result.get("class_id"),
+                "class_name": result.get("class_name"),
+                "school_name": result.get("school_name"),
             }
+            progress[job_id]["items"][str(index)] = {"status": "done", **{k: v for k, v in item.items() if k != "status" and v is not None}}
             progress[job_id]["completed"] += 1
             progress[job_id]["successful"] += 1
             progress[job_id]["results"].append(result)
+            job_snapshot = copy.deepcopy(progress[job_id])
             logger.info(f"✅ Job {job_id}: Item {index} concluído - {result.get('student_name', 'N/A')}")
+        else:
+            job_snapshot = None
+    if job_snapshot is not None:
+        _persist_job_to_redis(job_id, job_snapshot)
 
 
-def update_item_error(job_id: str, index: int, error: str):
+def update_item_error(job_id: str, index: int, error: str, extra: dict = None):
     """
-    Marca item como erro
-    
-    Args:
-        job_id: ID do job
-        index: Índice do item (0-based)
-        error: Mensagem de erro
+    Marca item como erro.
+    extra: dict opcional com student_id, student_name, class_id, class_name, school_name para status detalhado.
     """
     with lock:
         if job_id in progress:
-            progress[job_id]["items"][str(index)] = {
-                "status": "error",
-                "error": error
-            }
+            item = {"status": "error", "error": error}
+            if extra:
+                for key in ("student_id", "student_name", "class_id", "class_name", "school_name"):
+                    if key in extra and extra[key] is not None:
+                        item[key] = extra[key]
+            progress[job_id]["items"][str(index)] = item
             progress[job_id]["completed"] += 1
             progress[job_id]["failed"] += 1
+            job_snapshot = copy.deepcopy(progress[job_id])
             logger.warning(f"❌ Job {job_id}: Item {index} falhou - {error}")
+        else:
+            job_snapshot = None
+    if job_snapshot is not None:
+        _persist_job_to_redis(job_id, job_snapshot)
 
 
 def complete_job(job_id: str):
     """
-    Marca job como concluído
-    
-    Args:
-        job_id: ID do job
+    Marca job como concluído (phase=done para o frontend saber que terminou).
     """
     with lock:
         if job_id in progress:
             progress[job_id]["status"] = "completed"
             progress[job_id]["completed_at"] = datetime.utcnow().isoformat()
+            progress[job_id]["phase"] = "done"
+            progress[job_id]["stage_message"] = "Concluído"
+            job_snapshot = copy.deepcopy(progress[job_id])
             logger.info(f"🏁 Job {job_id} concluído: {progress[job_id]['successful']} sucesso, {progress[job_id]['failed']} falhas")
+        else:
+            job_snapshot = None
+    if job_snapshot is not None:
+        _persist_job_to_redis(job_id, job_snapshot)
 
 
 def get_job(job_id: str) -> Optional[dict]:
     """
-    Retorna dados do job. Para jobs de answer_sheet, mescla progress_current e progress_percentage
-    vindos do Redis (atualizados pelo Celery) para que o progresso seja gradual no status.
+    Retorna dados do job. Se o job estiver em memória (mesmo processo), usa ele e opcionalmente
+    mescla progress_current/progress_percentage do Redis. Se não estiver em memória (ex.: Flask
+    consultando job criado pelo Celery), carrega o job completo do Redis para o status mostrar
+    progresso, turmas e summary em tempo real.
     """
     with lock:
         job = progress.get(job_id)
     if job is None:
-        return None
-    redis_progress = get_job_progress_redis(job_id)
-    if redis_progress:
-        job = dict(job)
-        if "progress_current" in redis_progress:
-            job["progress_current"] = redis_progress["progress_current"]
-        if "progress_percentage" in redis_progress:
-            job["progress_percentage"] = redis_progress["progress_percentage"]
+        job = _get_job_from_redis(job_id)
+        if job is None:
+            return None
+    else:
+        redis_progress = get_job_progress_redis(job_id)
+        if redis_progress:
+            job = dict(job)
+            if "progress_current" in redis_progress:
+                job["progress_current"] = redis_progress["progress_current"]
+            if "progress_percentage" in redis_progress:
+                job["progress_percentage"] = redis_progress["progress_percentage"]
     return job
 
 

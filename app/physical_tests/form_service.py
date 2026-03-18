@@ -232,24 +232,32 @@ class PhysicalTestFormService:
             test_data = base_test_data
             
             questions_data = [self._format_question_data(q) for q in questions]
-            
+
             students_data = [self._format_student_data(s) for s in students]
             
             # Buscar ClassTest associado à prova
             class_tests = ClassTest.query.filter_by(test_id=test_id).all()
             class_test_id = class_tests[0].id if class_tests else "temp-class-test-id"
             
-            # Gerar PDFs institucionais usando WeasyPrint (suporta HTML/CSS completo)
-            # Este método gera a prova completa: capa, questões, imagens, alternativas e formulário
+            # Gerar PDFs institucionais: fluxo atual = Arch4 + PDF Overlay (WeasyPrint 2×, overlay por aluno)
+            # 1× PDF base (capa + questões) + 1× template OMR (dados neutros) + por aluno: overlay ReportLab + merge
             from app.services.institutional_test_weasyprint_generator import InstitutionalTestWeasyPrintGenerator
             institutional_generator = InstitutionalTestWeasyPrintGenerator()
 
-            # Gerar PDFs institucionais com processamento incremental (salva em disco)
-            # output_dir padrão será usado se não fornecido (/tmp/celery_pdfs/physical_tests)
-            generated_files = institutional_generator.generate_institutional_test_pdf(
+            # Geração com processamento incremental (salva em disco); usa overlay para cartão OMR (sem WeasyPrint por aluno)
+            generated_files = institutional_generator.generate_institutional_test_pdf_arch4(
                 test_data, students_data, questions_data, class_test_id,
                 output_dir=output_dir  # Se None, usa padrão /tmp/celery_pdfs/physical_tests
             )
+            
+            # Atualizar etapa para o usuário (polling de status)
+            job_id = (test_data or {}).get('job_id')
+            if job_id:
+                try:
+                    from app.services.progress_store import update_job
+                    update_job(job_id, {"phase": "saving", "stage_message": "Salvando arquivos no banco de dados..."})
+                except Exception:
+                    pass
             
             # Salvar informações no banco de dados (processamento incremental)
             print(f"[SERVICE] ========== CHAMANDO _save_physical_forms_to_db ==========")
@@ -347,6 +355,7 @@ class PhysicalTestFormService:
             'secondstatement': question.secondstatement,
             'alternatives': question.alternatives or [],
             'correct_answer': question.correct_answer,
+            'images': getattr(question, 'images', None) or [],  # ✅ Necessário para inline base64 no WeasyPrint
             'subject_id': question.subject_id,  # Incluir ID da disciplina da questão
             'skill': question.skill,  # Incluir ID da habilidade da questão
             'order': getattr(question, 'order', None)  # Incluir ordem da questão (campo order da TestQuestion)
@@ -356,8 +365,10 @@ class PhysicalTestFormService:
         """Formata dados do aluno para geração do PDF"""
         # Buscar dados completos da turma e escola
         class_obj = None
-        school_name = 'Não informado'
-        class_name = 'Não informado'
+        # Para o cartão-resposta OMR, é melhor deixar escola/turma vazios
+        # quando não houver dados reais, em vez de exibir "Não informado".
+        school_name = ''
+        class_name = ''
 
         if student.class_id:
             class_obj = Class.query.get(student.class_id)
@@ -368,15 +379,19 @@ class PhysicalTestFormService:
                     if school_obj:
                         school_name = school_obj.name
 
-        # Gerar QR Code com metadados simplificados (apenas student_id)
+        # Gerar QR Code com metadados simplificados (student_id + gabarito_id se disponível)
         # NOTA: test_id será preenchido quando o QR code for gerado no contexto da prova (institutional_test_weasyprint_generator.py)
-        # Removido: qr_code_id para tornar QR code menor e mais fácil de decodificar
+        # ✅ NOVO: Incluir gabarito_id para correção usar gabarito central
         import json
         
-        # Criar metadados simplificados do QR code (apenas student_id)
+        # Criar metadados simplificados do QR code
         qr_metadata = {
             "student_id": str(student.id)
         }
+        
+        # ✅ NOVO: Se gabarito_id foi passado no test_data, incluir no QR Code
+        # Isso será preenchido pela task Celery após criar o AnswerSheetGabarito
+        # (não está disponível aqui ainda, será adicionado no institutional_test_weasyprint_generator.py)
         
         # Converter para JSON
         qr_json = json.dumps(qr_metadata)

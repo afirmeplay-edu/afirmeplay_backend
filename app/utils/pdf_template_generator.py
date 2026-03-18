@@ -100,7 +100,7 @@ def _gerar_grafico_classificacao(niveis_aprendizagem: Dict, scope_type: str, dis
                 sizes_filtered,
                 labels=None,
                 colors=colors_filtered,
-                autopct='%1.0f',
+                autopct='%1.2f',
                 startangle=90,
                 pctdistance=0.85,
                 textprops={'fontsize': 12, 'fontweight': 'bold', 'color': 'white'}
@@ -226,7 +226,7 @@ def _gerar_grafico_proficiencia(proficiencia: Dict, scope_type: str) -> BytesIO:
                 for bar, valor in zip(bars, valores):
                     height = bar.get_height()
                     ax.text(bar.get_x() + bar.get_width() / 2., height,
-                           f'{valor:.1f}',
+                           f'{valor:.2f}',
                            ha='center', va='bottom', fontsize=11, fontweight='bold')
                 
                 # Remover bordas superior e direita
@@ -330,7 +330,7 @@ def _gerar_grafico_notas(nota_geral: Dict, scope_type: str, disciplinas_prof: Li
             for i, (bar, valor) in enumerate(zip(bars, valores)):
                 height = bar.get_height()
                 ax.text(bar.get_x() + bar.get_width() / 2., height,
-                       f'{valor:.1f}',
+                       f'{valor:.2f}',
                        ha='center', va='bottom', fontsize=11, fontweight='bold')
             
             # Remover bordas superior e direita
@@ -1136,10 +1136,10 @@ def _adicionar_niveis_aprendizagem(elements: List, niveis_aprendizagem: Dict, av
         total_geral = geral_data.get('total', 0)
         resumo_niveis_geral = [
             Paragraph(f"GERAL (total de {total_geral} alunos avaliados):", estilos['resumo_style']),
-            Paragraph(f"• Abaixo do básico: {geral_data.get('abaixo_do_basico', 0)} alunos ({(geral_data.get('abaixo_do_basico', 0)/total_geral*100) if total_geral > 0 else 0:.1f}%)", estilos['resumo_style']),
-            Paragraph(f"• Básico: {geral_data.get('basico', 0)} alunos ({(geral_data.get('basico', 0)/total_geral*100) if total_geral > 0 else 0:.1f}%)", estilos['resumo_style']),
-            Paragraph(f"• Adequado: {geral_data.get('adequado', 0)} alunos ({(geral_data.get('adequado', 0)/total_geral*100) if total_geral > 0 else 0:.1f}%)", estilos['resumo_style']),
-            Paragraph(f"• Avançado: {geral_data.get('avancado', 0)} alunos ({(geral_data.get('avancado', 0)/total_geral*100) if total_geral > 0 else 0:.1f}%)", estilos['resumo_style'])
+            Paragraph(f"• Abaixo do básico: {geral_data.get('abaixo_do_basico', 0)} alunos ({(geral_data.get('abaixo_do_basico', 0)/total_geral*100) if total_geral > 0 else 0:.2f}%)", estilos['resumo_style']),
+            Paragraph(f"• Básico: {geral_data.get('basico', 0)} alunos ({(geral_data.get('basico', 0)/total_geral*100) if total_geral > 0 else 0:.2f}%)", estilos['resumo_style']),
+            Paragraph(f"• Adequado: {geral_data.get('adequado', 0)} alunos ({(geral_data.get('adequado', 0)/total_geral*100) if total_geral > 0 else 0:.2f}%)", estilos['resumo_style']),
+            Paragraph(f"• Avançado: {geral_data.get('avancado', 0)} alunos ({(geral_data.get('avancado', 0)/total_geral*100) if total_geral > 0 else 0:.2f}%)", estilos['resumo_style'])
         ]
     else:
         resumo_niveis_geral = [Paragraph("Dados não disponíveis", estilos['resumo_style'])]
@@ -1272,10 +1272,10 @@ def _adicionar_niveis_aprendizagem(elements: List, niveis_aprendizagem: Dict, av
                     total_disc = disc_data.get('total', 0)
                     elementos_analise = [
                         Paragraph(f"{disciplina.upper()} (total de {total_disc} alunos avaliados):", estilos['resumo_style']),
-                        Paragraph(f"• Abaixo do básico: {disc_data.get('abaixo_do_basico', 0)} alunos ({(disc_data.get('abaixo_do_basico', 0)/total_disc*100) if total_disc > 0 else 0:.1f}%)", estilos['resumo_style']),
-                        Paragraph(f"• Básico: {disc_data.get('basico', 0)} alunos ({(disc_data.get('basico', 0)/total_disc*100) if total_disc > 0 else 0:.1f}%)", estilos['resumo_style']),
-                        Paragraph(f"• Adequado: {disc_data.get('adequado', 0)} alunos ({(disc_data.get('adequado', 0)/total_disc*100) if total_disc > 0 else 0:.1f}%)", estilos['resumo_style']),
-                        Paragraph(f"• Avançado: {disc_data.get('avancado', 0)} alunos ({(disc_data.get('avancado', 0)/total_disc*100) if total_disc > 0 else 0:.1f}%)", estilos['resumo_style'])
+                        Paragraph(f"• Abaixo do básico: {disc_data.get('abaixo_do_basico', 0)} alunos ({(disc_data.get('abaixo_do_basico', 0)/total_disc*100) if total_disc > 0 else 0:.2f}%)", estilos['resumo_style']),
+                        Paragraph(f"• Básico: {disc_data.get('basico', 0)} alunos ({(disc_data.get('basico', 0)/total_disc*100) if total_disc > 0 else 0:.2f}%)", estilos['resumo_style']),
+                        Paragraph(f"• Adequado: {disc_data.get('adequado', 0)} alunos ({(disc_data.get('adequado', 0)/total_disc*100) if total_disc > 0 else 0:.2f}%)", estilos['resumo_style']),
+                        Paragraph(f"• Avançado: {disc_data.get('avancado', 0)} alunos ({(disc_data.get('avancado', 0)/total_disc*100) if total_disc > 0 else 0:.2f}%)", estilos['resumo_style'])
                     ]
                 else:
                     elementos_analise = [Paragraph("Dados não disponíveis", estilos['resumo_style'])]

@@ -2,6 +2,7 @@
 from app import db
 from datetime import datetime
 import uuid
+from sqlalchemy.dialects.postgresql import JSONB
 
 class EvaluationResult(db.Model):
     __tablename__ = 'evaluation_results'
@@ -11,13 +12,17 @@ class EvaluationResult(db.Model):
     student_id = db.Column(db.String, db.ForeignKey('student.id'), nullable=False)
     session_id = db.Column(db.String, db.ForeignKey('test_sessions.id'), nullable=False)
     
-    # Dados de cálculo
+    # Dados de cálculo gerais
     correct_answers = db.Column(db.Integer, nullable=False)
     total_questions = db.Column(db.Integer, nullable=False)
     score_percentage = db.Column(db.Float, nullable=False)
     grade = db.Column(db.Float, nullable=False)
     proficiency = db.Column(db.Float, nullable=False)
     classification = db.Column(db.String(50), nullable=False)
+    
+    # Resultados por disciplina (JSONB para evitar nova tabela)
+    # Formato: {"subject_id": {"grade": 2.5, "proficiency": 250.0, "classification": "Básico", ...}}
+    subject_results = db.Column(JSONB, nullable=True)
     
     # Metadados
     calculated_at = db.Column(db.TIMESTAMP, default=datetime.utcnow)
@@ -60,6 +65,7 @@ class EvaluationResult(db.Model):
             'grade': self.grade,
             'proficiency': self.proficiency,
             'classification': self.classification,
+            'subject_results': self.subject_results,
             'calculated_at': self.calculated_at.isoformat() if self.calculated_at else None
         }
     

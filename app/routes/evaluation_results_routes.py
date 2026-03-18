@@ -1285,7 +1285,8 @@ def _gerar_tabela_detalhada_por_disciplina(avaliacao_id: str, scope_info: Dict, 
                 else:
                     all_students = []
             else:
-                all_students = []
+                # Admin/Tecadm (e outros roles): respeitar o filtro de escola do escopo calculado
+                all_students = _buscar_alunos_por_escopo(escopo_calculo)
         else:
             all_students = _buscar_alunos_por_escopo(escopo_calculo)
         

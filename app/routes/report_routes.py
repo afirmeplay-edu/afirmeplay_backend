@@ -45,6 +45,7 @@ from app.models.grades import Grade
 from app.models.classTest import ClassTest
 from app.models.evaluationResult import EvaluationResult
 from app.utils.uuid_helpers import ensure_uuid, ensure_uuid_list
+from app.utils.decimal_helpers import round_to_two_decimals
 from app import db
 import logging
 from typing import Dict, Any, List, Optional, Union
@@ -1987,7 +1988,7 @@ def _filtrar_payload_por_turmas_professor(payload: Dict[str, Any], teacher_class
     filtered_payload["total_alunos"]["total_geral"] = {
         "matriculados": total_matriculados,
         "avaliados": total_avaliados,
-        "percentual": round(total_percentual, 1),
+        "percentual": round_to_two_decimals(total_percentual),
         "faltosos": total_faltosos
     }
     
@@ -2039,7 +2040,7 @@ def _filtrar_payload_por_turmas_professor(payload: Dict[str, Any], teacher_class
         
         filtered_por_disciplina_prof[disciplina] = {
             "por_turma": filtered_por_turma_prof,
-            "media_geral": round(media_geral, 2)
+            "media_geral": round_to_two_decimals(media_geral)
         }
     
     filtered_payload["proficiencia"] = {
@@ -2067,7 +2068,7 @@ def _filtrar_payload_por_turmas_professor(payload: Dict[str, Any], teacher_class
         
         filtered_por_disciplina_nota[disciplina] = {
             "por_turma": filtered_por_turma_nota,
-            "media_geral": round(media_geral, 2)
+            "media_geral": round_to_two_decimals(media_geral)
         }
     
     filtered_payload["nota_geral"] = {
@@ -2450,7 +2451,7 @@ def _gerar_pdf_com_reportlab(test: Test, total_alunos: Dict, niveis_aprendizagem
             for turma_data in proficiencia['por_disciplina']['GERAL']['por_turma']:
                 data.append([
                     turma_data.get("turma", ""),
-                    f"{turma_data.get('proficiencia', 0):.1f}"
+                    f"{turma_data.get('proficiencia', 0):.2f}"
                 ])
             
             if data:
@@ -3428,7 +3429,7 @@ def _calcular_totais_alunos_por_municipio(evaluation_id: str, class_tests: List[
             "escola": escola_nome,
             "matriculados": matriculados,
             "avaliados": avaliados,
-            "percentual": round(percentual, 1),
+            "percentual": round_to_two_decimals(percentual),
             "faltosos": faltosos
         })
         
@@ -3444,7 +3445,7 @@ def _calcular_totais_alunos_por_municipio(evaluation_id: str, class_tests: List[
         "total_geral": {
             "matriculados": total_matriculados,
             "avaliados": total_avaliados,
-            "percentual": round(total_percentual, 1),
+            "percentual": round_to_two_decimals(total_percentual),
             "faltosos": total_faltosos
         }
     }
@@ -3512,7 +3513,7 @@ def _calcular_totais_alunos(evaluation_id: str, class_tests: List[ClassTest]) ->
             "turma": turma_nome,
             "matriculados": matriculados,
             "avaliados": avaliados,
-            "percentual": round(percentual, 1),
+            "percentual": round_to_two_decimals(percentual),
             "faltosos": faltosos
         })
     
@@ -3525,7 +3526,7 @@ def _calcular_totais_alunos(evaluation_id: str, class_tests: List[ClassTest]) ->
         "total_geral": {
             "matriculados": total_matriculados,
             "avaliados": total_avaliados,
-            "percentual": round(total_percentual, 1),
+            "percentual": round_to_two_decimals(total_percentual),
             "faltosos": total_faltosos
         }
     }
@@ -3585,6 +3586,8 @@ def _calcular_niveis_aprendizagem_por_municipio(evaluation_id: str, class_tests:
     # Mapear questões para disciplinas
     question_disciplines = {}
     disciplinas_identificadas = set()
+    # ✅ NOVO: Mapear nome da disciplina para UUID (para buscar em subject_results)
+    disciplina_nome_para_uuid = {}
     
     for question in test.questions:
         if question.skill and question.skill.strip() and question.skill != '{}':
@@ -3596,6 +3599,8 @@ def _calcular_niveis_aprendizagem_por_municipio(evaluation_id: str, class_tests:
                 if subject:
                     question_disciplines[question.id] = subject.name
                     disciplinas_identificadas.add(subject.name)
+                    # ✅ NOVO: Armazenar mapeamento nome -> UUID
+                    disciplina_nome_para_uuid[subject.name] = str(subject.id)
             else:
                 question_disciplines[question.id] = "Disciplina Geral"
                 disciplinas_identificadas.add("Disciplina Geral")
@@ -3603,6 +3608,8 @@ def _calcular_niveis_aprendizagem_por_municipio(evaluation_id: str, class_tests:
             if test.subject_rel:
                 question_disciplines[question.id] = test.subject_rel.name
                 disciplinas_identificadas.add(test.subject_rel.name)
+                # ✅ NOVO: Armazenar mapeamento nome -> UUID
+                disciplina_nome_para_uuid[test.subject_rel.name] = str(test.subject_rel.id)
             else:
                 question_disciplines[question.id] = "Disciplina Geral"
                 disciplinas_identificadas.add("Disciplina Geral")
@@ -3650,17 +3657,38 @@ def _calcular_niveis_aprendizagem_por_municipio(evaluation_id: str, class_tests:
         total_geral = 0
         
         for school_id, school_results in results_by_school.items():
-            # Filtrar resultados por disciplina (simplificado - usando todos os resultados da escola)
             escola_nome = "Escola Desconhecida"
             if school_results and school_results[0].student.class_ and school_results[0].student.class_.school:
                 escola_nome = school_results[0].student.class_.school.name
             
-            # Contar classificações
-            abaixo = sum(1 for r in school_results if 'abaixo' in r.classification.lower() or 'básico' in r.classification.lower())
-            basico = sum(1 for r in school_results if 'básico' in r.classification.lower() and 'abaixo' not in r.classification.lower())
-            adequado = sum(1 for r in school_results if 'adequado' in r.classification.lower())
-            avancado = sum(1 for r in school_results if 'avançado' in r.classification.lower() or 'avancado' in r.classification.lower())
-            total_escola = len(school_results)
+            # ✅ CORRIGIDO: Usar classificação específica da disciplina do campo subject_results
+            abaixo = 0
+            basico = 0
+            adequado = 0
+            avancado = 0
+            total_escola = 0
+            
+            for r in school_results:
+                # ✅ CORRIGIDO: Buscar classificação específica usando UUID da disciplina
+                if r.subject_results and isinstance(r.subject_results, dict):
+                    # Obter UUID da disciplina a partir do nome
+                    subject_uuid = disciplina_nome_para_uuid.get(disciplina)
+                    if subject_uuid:
+                        # Buscar usando UUID como chave
+                        subject_data = r.subject_results.get(subject_uuid)
+                        if subject_data and 'classification' in subject_data:
+                            classificacao_disciplina = subject_data['classification'].lower()
+                            total_escola += 1
+                            
+                            # Contar classificação específica da disciplina
+                            if 'abaixo' in classificacao_disciplina:
+                                abaixo += 1
+                            elif 'básico' in classificacao_disciplina or 'basico' in classificacao_disciplina:
+                                basico += 1
+                            elif 'adequado' in classificacao_disciplina:
+                                adequado += 1
+                            elif 'avançado' in classificacao_disciplina or 'avancado' in classificacao_disciplina:
+                                avancado += 1
             
             niveis_por_disciplina[disciplina]['por_escola'].append({
                 'escola': escola_nome,
@@ -4369,7 +4397,7 @@ def _calcular_proficiencia_por_municipio(evaluation_id: str, class_tests: List[C
             
             proficiencia_por_disciplina[disciplina]['por_escola'].append({
                 'escola': escola_nome,
-                'proficiencia': round(media_escola, 2),
+                'proficiencia': round_to_two_decimals(media_escola),
                 'total_alunos': total_alunos
             })
             
@@ -4378,7 +4406,7 @@ def _calcular_proficiencia_por_municipio(evaluation_id: str, class_tests: List[C
         
         # Calcular média geral
         if total_escolas > 0:
-            proficiencia_por_disciplina[disciplina]['media_geral'] = round(total_proficiencia / total_escolas, 2)
+            proficiencia_por_disciplina[disciplina]['media_geral'] = round_to_two_decimals(total_proficiencia / total_escolas)
     
     # Adicionar seção GERAL que engloba todas as disciplinas
     dados_gerais_por_escola_lista = []
@@ -4403,12 +4431,12 @@ def _calcular_proficiencia_por_municipio(evaluation_id: str, class_tests: List[C
     # Calcular média geral por escola
     for escola_data in dados_gerais_por_escola_lista:
         if escola_data['total_alunos'] > 0:
-            escola_data['proficiencia'] = round(escola_data['proficiencia'] / len(proficiencia_por_disciplina), 2)
+            escola_data['proficiencia'] = round_to_two_decimals(escola_data['proficiencia'] / len(proficiencia_por_disciplina))
     
     # Adicionar seção GERAL
     proficiencia_por_disciplina["GERAL"] = {
         "por_escola": dados_gerais_por_escola_lista,
-        "media_geral": round(sum(item['proficiencia'] for item in dados_gerais_por_escola_lista) / len(dados_gerais_por_escola_lista), 2) if dados_gerais_por_escola_lista else 0
+        "media_geral": round_to_two_decimals(sum(item['proficiencia'] for item in dados_gerais_por_escola_lista) / len(dados_gerais_por_escola_lista)) if dados_gerais_por_escola_lista else 0
     }
     
     # Ordenar disciplinas pela ordem de aparição na avaliação
@@ -4594,7 +4622,7 @@ def _calcular_proficiencia(evaluation_id: str, class_tests: List[ClassTest]) -> 
                 
                 disciplinas_proficiencia[disciplina]["por_turma"].append({
                     "turma": turma_nome,
-                    "proficiencia": round(media_proficiencia, 2)
+                    "proficiencia": round_to_two_decimals(media_proficiencia)
                 })
         
         # Calcular dados gerais para esta turma (média das disciplinas específicas)
@@ -4640,7 +4668,7 @@ def _calcular_proficiencia(evaluation_id: str, class_tests: List[ClassTest]) -> 
             media_proficiencia_geral_turma = sum(proficiencias_gerais_turma) / len(proficiencias_gerais_turma)
             dados_gerais_por_turma[turma_nome].append({
                 "turma": turma_nome,
-                "proficiencia": round(media_proficiencia_geral_turma, 2)
+                "proficiencia": round_to_two_decimals(media_proficiencia_geral_turma)
             })
             dados_gerais_total_proficiencia += sum(proficiencias_gerais_turma)
             dados_gerais_total_alunos += len(proficiencias_gerais_turma)
@@ -4676,7 +4704,7 @@ def _calcular_proficiencia(evaluation_id: str, class_tests: List[ClassTest]) -> 
                 media_prof = dados_turma["total_proficiencia"] / dados_turma["total_alunos"] if dados_turma["total_alunos"] > 0 else 0
                 turmas_disciplina_lista.append({
                     "turma": turma_nome,
-                    "proficiencia": round(media_prof, 2)
+                    "proficiencia": round_to_two_decimals(media_prof)
                 })
             else:
                 turmas_disciplina_lista.append({
@@ -4686,7 +4714,7 @@ def _calcular_proficiencia(evaluation_id: str, class_tests: List[ClassTest]) -> 
 
         resultado_final[disciplina] = {
             "por_turma": turmas_disciplina_lista,
-            "media_geral": round(media_geral_disciplina, 2)
+            "media_geral": round_to_two_decimals(media_geral_disciplina)
         }
 
     # Adicionar dados gerais que englobam todas as disciplinas
@@ -4709,7 +4737,7 @@ def _calcular_proficiencia(evaluation_id: str, class_tests: List[ClassTest]) -> 
             media_prof = dados_turma["total_proficiencia"] / dados_turma["total_ocorrencias"] if dados_turma["total_ocorrencias"] > 0 else 0
             dados_gerais_lista.append({
                 "turma": turma_nome,
-                "proficiencia": round(media_prof, 2)
+                "proficiencia": round_to_two_decimals(media_prof)
             })
         else:
             dados_gerais_lista.append({
@@ -4719,7 +4747,7 @@ def _calcular_proficiencia(evaluation_id: str, class_tests: List[ClassTest]) -> 
 
     resultado_final["GERAL"] = {
         "por_turma": dados_gerais_lista,
-        "media_geral": round(media_geral_total, 2)
+        "media_geral": round_to_two_decimals(media_geral_total)
     }
 
     # Calcular média municipal por disciplina
@@ -4951,7 +4979,7 @@ def _calcular_nota_geral_por_municipio(evaluation_id: str, class_tests: List[Cla
             
             nota_por_disciplina[disciplina]['por_escola'].append({
                 'escola': escola_nome,
-                'nota': round(nota_escola, 2),
+                'nota': round_to_two_decimals(nota_escola),
                 'total_alunos': total_alunos
             })
             
@@ -4960,7 +4988,7 @@ def _calcular_nota_geral_por_municipio(evaluation_id: str, class_tests: List[Cla
         
         # Calcular média geral
         if total_escolas > 0:
-            nota_por_disciplina[disciplina]['media_geral'] = round(total_nota / total_escolas, 2)
+            nota_por_disciplina[disciplina]['media_geral'] = round_to_two_decimals(total_nota / total_escolas)
     
     # Adicionar seção GERAL que engloba todas as disciplinas
     dados_gerais_por_escola_lista = []
@@ -4985,12 +5013,12 @@ def _calcular_nota_geral_por_municipio(evaluation_id: str, class_tests: List[Cla
     # Calcular média geral por escola
     for escola_data in dados_gerais_por_escola_lista:
         if escola_data['total_alunos'] > 0:
-            escola_data['nota'] = round(escola_data['nota'] / len(nota_por_disciplina), 2)
+            escola_data['nota'] = round_to_two_decimals(escola_data['nota'] / len(nota_por_disciplina))
     
     # Adicionar seção GERAL
     nota_por_disciplina["GERAL"] = {
         "por_escola": dados_gerais_por_escola_lista,
-        "media_geral": round(sum(item['nota'] for item in dados_gerais_por_escola_lista) / len(dados_gerais_por_escola_lista), 2) if dados_gerais_por_escola_lista else 0
+        "media_geral": round_to_two_decimals(sum(item['nota'] for item in dados_gerais_por_escola_lista) / len(dados_gerais_por_escola_lista)) if dados_gerais_por_escola_lista else 0
     }
     
     # Ordenar disciplinas pela ordem de aparição na avaliação
@@ -5188,7 +5216,7 @@ def _calcular_nota_geral(evaluation_id: str, class_tests: List[ClassTest]) -> Di
                 
                 disciplinas_notas[disciplina]["por_turma"].append({
                     "turma": turma_nome,
-                    "nota": round(media_nota, 2)
+                    "nota": round_to_two_decimals(media_nota)
                 })
         
         # Calcular dados gerais para esta turma (média das disciplinas específicas)
@@ -5245,7 +5273,7 @@ def _calcular_nota_geral(evaluation_id: str, class_tests: List[ClassTest]) -> Di
             media_nota_geral_turma = sum(notas_gerais_turma) / len(notas_gerais_turma)
             dados_gerais_por_turma[turma_nome].append({
                 "turma": turma_nome,
-                "nota": round(media_nota_geral_turma, 2)
+                "nota": round_to_two_decimals(media_nota_geral_turma)
             })
             dados_gerais_total_notas += sum(notas_gerais_turma)
             dados_gerais_total_alunos += len(notas_gerais_turma)
@@ -5279,7 +5307,7 @@ def _calcular_nota_geral(evaluation_id: str, class_tests: List[ClassTest]) -> Di
                 media_nota = dados_turma["total_notas"] / dados_turma["total_alunos"] if dados_turma["total_alunos"] > 0 else 0
                 turmas_disciplina_lista.append({
                     "turma": turma_nome,
-                    "nota": round(media_nota, 2)
+                    "nota": round_to_two_decimals(media_nota)
                 })
             else:
                 turmas_disciplina_lista.append({
@@ -5289,7 +5317,7 @@ def _calcular_nota_geral(evaluation_id: str, class_tests: List[ClassTest]) -> Di
 
         resultado_final[disciplina] = {
             "por_turma": turmas_disciplina_lista,
-            "media_geral": round(media_geral_disciplina, 2)
+            "media_geral": round_to_two_decimals(media_geral_disciplina)
         }
 
     # Adicionar dados gerais que englobam todas as disciplinas
@@ -5312,7 +5340,7 @@ def _calcular_nota_geral(evaluation_id: str, class_tests: List[ClassTest]) -> Di
             media_nota = dados_turma["total_notas"] / dados_turma["total_ocorrencias"] if dados_turma["total_ocorrencias"] > 0 else 0
             dados_gerais_notas_lista.append({
                 "turma": turma_nome,
-                "nota": round(media_nota, 2)
+                "nota": round_to_two_decimals(media_nota)
             })
         else:
             dados_gerais_notas_lista.append({
@@ -5322,7 +5350,7 @@ def _calcular_nota_geral(evaluation_id: str, class_tests: List[ClassTest]) -> Di
 
     resultado_final["GERAL"] = {
         "por_turma": dados_gerais_notas_lista,
-        "media_geral": round(media_geral_total, 2)
+        "media_geral": round_to_two_decimals(media_geral_total)
     }
 
     # Calcular média municipal por disciplina
@@ -5633,7 +5661,7 @@ def _calcular_acertos_habilidade(evaluation_id: str) -> Dict[str, Any]:
             "descricao": skill_description,
             "acertos": acertos,
             "total": total_respostas,
-            "percentual": round(percentual, 1)
+            "percentual": round_to_two_decimals(percentual)
         })
     
     # Agrupar por disciplina mantendo a ordem original das questões
@@ -5868,7 +5896,7 @@ def _calcular_media_municipal_por_disciplina(evaluation_id: str, question_discip
         for disciplina, proficiencias in disciplinas_proficiencia.items():
             if proficiencias:
                 media = sum(proficiencias) / len(proficiencias)
-                medias_por_disciplina[disciplina] = round(media, 2)
+                medias_por_disciplina[disciplina] = round_to_two_decimals(media)
 
         return medias_por_disciplina
         
@@ -5979,7 +6007,7 @@ def _calcular_media_municipal_nota_por_disciplina(evaluation_id: str, question_d
         for disciplina, notas in disciplinas_notas.items():
             if notas:
                 media = sum(notas) / len(notas)
-                medias_por_disciplina[disciplina] = round(media, 2)
+                medias_por_disciplina[disciplina] = round_to_two_decimals(media)
 
         return medias_por_disciplina
         
@@ -6057,7 +6085,7 @@ def _gerar_analise_proficiencia(template_data: Dict) -> str:
         
         disciplinas_list = list(medias_disciplinas.keys())
         for i, disciplina in enumerate(disciplinas_list):
-            media = round(medias_disciplinas[disciplina], 2)
+            media = round_to_two_decimals(medias_disciplinas[disciplina])
             if i == 0:
                 analise += f"{media} em {disciplina}"
             elif i == len(disciplinas_list) - 1:
@@ -6108,11 +6136,11 @@ def _gerar_analise_notas(template_data: Dict) -> str:
         media_geral = sum(medias_disciplinas.values()) / len(medias_disciplinas)
         
         # Gerar análise
-        analise = f"A média geral de nota da escola na avaliação diagnóstica foi de {round(media_geral, 2)}, com "
+        analise = f"A média geral de nota da escola na avaliação diagnóstica foi de {round_to_two_decimals(media_geral)}, com "
         
         disciplinas_list = list(medias_disciplinas.keys())
         for i, disciplina in enumerate(disciplinas_list):
-            media = round(medias_disciplinas[disciplina], 2)
+            media = round_to_two_decimals(medias_disciplinas[disciplina])
             if i == 0:
                 analise += f"{media} em {disciplina}"
             elif i == len(disciplinas_list) - 1:
@@ -6121,7 +6149,7 @@ def _gerar_analise_notas(template_data: Dict) -> str:
                 analise += f", {media} em {disciplina}"
         
         # Comparação com referencial
-        analise += f" Esta média geral de {round(media_geral, 2)} está "
+        analise += f" Esta média geral de {round_to_two_decimals(media_geral)} está "
         
         if media_geral >= 6.0:
             analise += "exatamente alinhada e ligeiramente acima da nota padronizada de 6,1 obtida na Prova Saeb/2023 para o 9º ano, o que é um resultado muito positivo para a escola como um todo. "

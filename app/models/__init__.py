@@ -31,6 +31,7 @@ from .studentPasswordLog import StudentPasswordLog
 from .user_settings import UserSettings
 from .reportAggregate import ReportAggregate
 from .answerSheetGabarito import AnswerSheetGabarito
+from app.services.cartao_resposta.answer_sheet_gabarito_generation import AnswerSheetGabaritoGeneration
 from .answerSheetGenerationJob import AnswerSheetGenerationJob
 from .answerSheetResult import AnswerSheetResult
 

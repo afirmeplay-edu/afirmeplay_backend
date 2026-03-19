@@ -358,6 +358,26 @@ CREATE TABLE IF NOT EXISTS "{schema}".answer_sheet_gabaritos (
 );
 COMMENT ON TABLE "{schema}".answer_sheet_gabaritos IS 'Gabaritos de cartões resposta';
 
+CREATE TABLE IF NOT EXISTS "{schema}".answer_sheet_generations (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    gabarito_id VARCHAR NOT NULL REFERENCES "{schema}".answer_sheet_gabaritos(id) ON DELETE CASCADE,
+    job_id VARCHAR(36) NOT NULL,
+    scope_type VARCHAR(50),
+    scope_snapshot JSONB,
+    minio_url VARCHAR(500),
+    minio_object_name VARCHAR(500),
+    minio_bucket VARCHAR(100),
+    zip_generated_at TIMESTAMP,
+    total_classes INTEGER,
+    total_students INTEGER,
+    status VARCHAR(30) NOT NULL DEFAULT 'completed',
+    created_by VARCHAR REFERENCES public.users(id),
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+COMMENT ON TABLE "{schema}".answer_sheet_generations IS 'Histórico de gerações de ZIP por gabarito (escopos distintos)';
+CREATE INDEX IF NOT EXISTS idx_as_gen_gabarito ON "{schema}".answer_sheet_generations(gabarito_id);
+CREATE INDEX IF NOT EXISTS idx_as_gen_job ON "{schema}".answer_sheet_generations(job_id);
+
 CREATE TABLE IF NOT EXISTS "{schema}".answer_sheet_results (
     id VARCHAR PRIMARY KEY,
     gabarito_id VARCHAR REFERENCES "{schema}".answer_sheet_gabaritos(id),

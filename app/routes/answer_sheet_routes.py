@@ -10,6 +10,7 @@ from app.decorators import requires_city_context
 from app.utils.tenant_middleware import get_current_tenant_context, set_search_path
 from app import db
 from app.models.answerSheetGabarito import AnswerSheetGabarito
+from app.models.answerSheetGenerationJob import AnswerSheetGenerationJob
 from app.models.answerSheetResult import AnswerSheetResult
 from app.models.studentClass import Class
 from app.models.student import Student
@@ -25,13 +26,19 @@ from app.services.answer_sheet_job_store import (
     create_answer_sheet_job,
     get_answer_sheet_job,
     update_answer_sheet_job,
+    seed_answer_sheet_progress_job,
 )
 from app.models.school import School
 from app.models.grades import Grade
 from app.models.city import City
 from app.models.skill import Skill
 from typing import Dict, Optional, List, Any
-from sqlalchemy import cast, String
+from collections import defaultdict
+from sqlalchemy import cast, String, desc
+from app.services.cartao_resposta.answer_sheet_gabarito_generation import (
+    AnswerSheetGabaritoGeneration,
+    enrich_scope_snapshot,
+)
 import logging
 import re
 import base64
@@ -43,6 +50,7 @@ import threading
 import uuid
 from io import BytesIO
 from datetime import datetime
+from urllib.parse import urlencode
 
 bp = Blueprint('answer_sheets', __name__, url_prefix='/answer-sheets')
 
@@ -570,42 +578,27 @@ def generate_answer_sheets():
             base_output_dir = os.path.join(answer_sheets_base, job_id)
             os.makedirs(base_output_dir, exist_ok=True)
 
-            from app.services.celery_tasks.answer_sheet_tasks import (
-                generate_answer_sheets_single_class_async,
-                build_zip_and_upload_answer_sheets,
-            )
-            from celery import chord, group
+            # ========================================================================
+            # OTIMIZADO: 1 Task Batch Única (sem chord)
+            # Gera 1 template base para TODAS as turmas + overlay por aluno
+            # Igual às provas físicas (simples, confiável, rápido com arch4)
+            # ========================================================================
+            from app.services.celery_tasks.answer_sheet_tasks import generate_answer_sheets_batch_async
 
-            common_kw = {
-                "base_output_dir": base_output_dir,
-                "city_id": city_id_scope,
-                "gabarito_id": existing_gabarito_id,
-                "num_questions": gabarito.num_questions,
-                "correct_answers": gabarito.correct_answers,
-                "test_data": test_data_complete,
-                "use_blocks": gabarito.use_blocks,
-                "blocks_config": gabarito.blocks_config or {},
-                "questions_options": questions_options_from_gabarito,
-                "batch_id": job_id,
-                "total_classes": len(class_ids),
-            }
-            header = group(
-                generate_answer_sheets_single_class_async.s(class_id=cid, **common_kw)
-                for cid in class_ids
+            task = generate_answer_sheets_batch_async.delay(
+                gabarito_ids=[existing_gabarito_id],
+                city_id=city_id_scope,
+                num_questions=gabarito.num_questions,
+                correct_answers=gabarito.correct_answers,
+                test_data=test_data_complete,
+                use_blocks=gabarito.use_blocks,
+                blocks_config=gabarito.blocks_config or {},
+                questions_options=questions_options_from_gabarito,
+                batch_id=job_id,
+                scope=scope_type,
+                class_ids=class_ids  # Lista de turmas para processar
             )
-            chord_sig = chord(header)(
-                build_zip_and_upload_answer_sheets.s(
-                    batch_id=job_id,
-                    base_output_dir=base_output_dir,
-                    city_id=city_id_scope,
-                    gabarito_ids=[existing_gabarito_id],
-                    scope=scope_type,
-                    num_questions=gabarito.num_questions,
-                )
-            )
-            # Em alguns setups (ex.: CELERY_ALWAYS_EAGER) chord() pode retornar AsyncResult em vez de Signature
-            chord_result = chord_sig.apply_async() if hasattr(chord_sig, "apply_async") else chord_sig
-            task_id = chord_result.id
+            task_id = task.id
             create_answer_sheet_job(
                 job_id=job_id,
                 total=len(classes_to_generate),
@@ -614,6 +607,15 @@ def generate_answer_sheets():
                 task_ids=[task_id],
                 city_id=city_id_scope,
                 scope_type=scope_type,
+            )
+            for cls in classes_to_generate:
+                db.session.refresh(cls)
+            seed_answer_sheet_progress_job(
+                job_id=job_id,
+                classes_to_generate=classes_to_generate,
+                gabarito_id=existing_gabarito_id,
+                user_id=str(user['id']),
+                task_ids=[task_id],
             )
             gabarito.last_generation_job_id = job_id
             db.session.commit()
@@ -854,114 +856,80 @@ def generate_answer_sheets():
             'grade_name': test_data.get('grade_name', '')
         }
         
-        # ✅ 8. DISPARAR CELERY: 1 task por turma (group) + chord para ZIP/upload
-        from app.services.celery_tasks.answer_sheet_tasks import (
-            generate_answer_sheets_single_class_async,
-            build_zip_and_upload_answer_sheets,
-        )
-        from app.decorators.tenant_required import get_current_tenant_context
-        from celery import chord, group
+        # ✅ 8. DISPARAR CELERY: 1 task batch (1× template WeasyPrint + overlay por aluno) — SEM chord / task por turma
+        from app.services.celery_tasks.answer_sheet_tasks import generate_answer_sheets_batch_async
 
-        context = get_current_tenant_context()
-        city_id = context.city_id if context else None
-
-        if not city_id:
+        if not city_id_scope:
             logging.error("[ROTA] ❌ Contexto de cidade não encontrado")
             return jsonify({"error": "City context not found"}), 500
 
-        class_ids = [str(cls.id) for cls in classes_to_generate]
+        class_ids_for_batch = [str(cls.id) for cls in classes_to_generate]
         job_id = str(uuid.uuid4())
 
         answer_sheets_base = os.environ.get("ANSWER_SHEETS_TMP_BASE", "/app/tmp/answer_sheets")
         os.makedirs(answer_sheets_base, exist_ok=True)
-        base_output_dir = os.path.join(answer_sheets_base, job_id)
-        os.makedirs(base_output_dir, exist_ok=True)
+        _base_output_dir = os.path.join(answer_sheets_base, job_id)
+        os.makedirs(_base_output_dir, exist_ok=True)
 
-        common_kw = {
-            "base_output_dir": base_output_dir,
-            "city_id": city_id,
-            "gabarito_id": gabarito_id,
-            "num_questions": num_questions,
-            "correct_answers": correct_answers,
-            "test_data": test_data_complete,
-            "use_blocks": use_blocks,
-            "blocks_config": blocks_config,
-            "questions_options": questions_options,
-            "batch_id": job_id,
-            "total_classes": len(class_ids),
-        }
-        header = group(
-            generate_answer_sheets_single_class_async.s(class_id=cid, **common_kw)
-            for cid in class_ids
+        task = generate_answer_sheets_batch_async.delay(
+            gabarito_ids=[gabarito_id],
+            city_id=city_id_scope,
+            num_questions=num_questions,
+            correct_answers=correct_answers,
+            test_data=test_data_complete,
+            use_blocks=use_blocks,
+            blocks_config=blocks_config or {},
+            questions_options=questions_options,
+            batch_id=job_id,
+            scope=scope_type,
+            class_ids=class_ids_for_batch,
         )
-        chord_sig = chord(header)(
-            build_zip_and_upload_answer_sheets.s(
-                batch_id=job_id,
-                base_output_dir=base_output_dir,
-                city_id=city_id,
-                gabarito_ids=[gabarito_id],
-                scope=scope_type,
-                num_questions=num_questions,
-            )
-        )
-        # Em alguns setups (ex.: CELERY_ALWAYS_EAGER) chord() pode retornar AsyncResult em vez de Signature
-        chord_result = chord_sig.apply_async() if hasattr(chord_sig, "apply_async") else chord_sig
-        task_id = chord_result.id
+        task_id = task.id
 
-        logging.info(f"[ROTA] ✅ Chord disparado: {task_id} para {len(class_ids)} turma(s), gabarito {gabarito_id}")
-        
-        # Preparar resposta com informações de cada turma
-        response_tasks = [
-            {
-                'class_id': str(class_obj.id),
-                'class_name': class_obj.name,
-                'status': 'pending'
-            }
-            for class_obj in classes_to_generate
-        ]
-        
-        task_ids = [task_id]
-        
-        # ✅ 9. CRIAR JOB PARA RASTREAMENTO (persistido em public.answer_sheet_generation_jobs)
         create_answer_sheet_job(
             job_id=job_id,
             total=len(classes_to_generate),
             gabarito_id=gabarito_id,
             user_id=str(user['id']),
-            task_ids=task_ids,
-            city_id=city_id,
+            task_ids=[task_id],
+            city_id=city_id_scope,
             scope_type=scope_type,
+        )
+        for cls in classes_to_generate:
+            db.session.refresh(cls)
+        seed_answer_sheet_progress_job(
+            job_id=job_id,
+            classes_to_generate=classes_to_generate,
+            gabarito_id=gabarito_id,
+            user_id=str(user['id']),
+            task_ids=[task_id],
         )
         gabarito.last_generation_job_id = job_id
         db.session.commit()
-        
-        # ⚠️ Contar total de alunos (pode mudar até task executar)
-        print(f"\n=== DEBUG CONTAGEM INICIAL ===")
-        print(f"Total de classes encontradas: {len(classes_to_generate)}")
-        print(f"Sessão atual SQLAlchemy: {db.session}")
-        
+
+        logging.info(
+            "[ROTA] ✅ Batch async disparado (1 template base / todas as turmas): task=%s job=%s gabarito=%s turmas=%s",
+            task_id,
+            job_id,
+            gabarito_id,
+            len(class_ids_for_batch),
+        )
+
         total_students = 0
-        for i, cls in enumerate(classes_to_generate):
-            # Forçar reload da relação students
+        for cls in classes_to_generate:
             db.session.refresh(cls)
-            students_via_relationship = len(cls.students) if cls.students else 0
-            # Comparar com query direta
-            from app.models.student import Student
-            students_via_query = Student.query.filter_by(class_id=cls.id).count()
-            
-            print(f"Classe {i+1} (ID: {cls.id}, Nome: {cls.name}):")
-            print(f"  - Via relacionamento (após refresh): {students_via_relationship} estudantes")
-            print(f"  - Via query direta: {students_via_query} estudantes")
-            print(f"  - Relação cls.students carregada: {'Sim' if hasattr(cls, '_sa_instance_state') and 'students' in cls._sa_instance_state.committed_state else 'Não'}")
-            
-            total_students += students_via_relationship
-        
-        print(f"\nRESUMO CONTAGEM INICIAL:")
-        print(f"Total classes: {len(classes_to_generate)}")
-        print(f"Total estudantes (relacionamento): {total_students}")
-        print(f"================================\n")
-        
-        response_data = {
+            total_students += len(cls.students) if cls.students else 0
+
+        response_tasks = [
+            {
+                'class_id': str(class_obj.id),
+                'class_name': class_obj.name,
+                'status': 'pending',
+            }
+            for class_obj in classes_to_generate
+        ]
+
+        return jsonify({
             'status': 'processing',
             'job_id': job_id,
             'gabarito_id': gabarito_id,
@@ -970,14 +938,8 @@ def generate_answer_sheets():
             'total_students': total_students,
             'note': 'Números de alunos e turmas são estimativas. Valores reais estão no status do job.',
             'tasks': response_tasks,
-            'polling_url': f"/answer-sheets/jobs/{job_id}/status"
-        }
-        
-        print(f"\n=== RESPOSTA FINAL ENDPOINT ===")
-        print(f"Response enviado: {response_data}")
-        print(f"============================\n")
-        
-        return jsonify(response_data), 202
+            'polling_url': f"/answer-sheets/jobs/{job_id}/status",
+        }), 202
     
     except Exception as e:
         db.session.rollback()
@@ -1275,8 +1237,15 @@ def get_answer_sheet_correction_progress(job_id):
 @requires_city_context
 def list_gabaritos():
     """
-    Lista os gabaritos (cartões resposta gerados) criados pelo usuário atual com paginação
-    
+    Lista **todos** os cartões (gabaritos) do usuário no **tenant atual** (schema city_xxx via contexto).
+
+    Em **uma única resposta**, cada item inclui:
+    - Dados resumidos do cartão (último download em minio_url / can_download, etc.)
+    - **generations**: histórico **completo** de todas as gerações (cada job tem ZIP próprio: `minio_url`,
+      `download_url` com `job_id`). O `minio_url` / `download_url` no **nível do cartão** espelham só a
+      **última** geração gravada no registro do gabarito — para baixar uma geração antiga use o item em
+      `generations[]`.
+
     Query Parameters:
         page: Número da página (padrão: 1)
         per_page: Itens por página (padrão: 20)
@@ -1284,9 +1253,6 @@ def list_gabaritos():
         test_id: Filtrar por prova (opcional)
         school_id: Filtrar por escola (opcional)
         title: Filtrar por título (busca parcial, opcional)
-    
-    Returns:
-        Lista de gabaritos criados pelo usuário com informações resumidas
     """
     try:
         user = get_current_user_from_token()
@@ -1319,6 +1285,42 @@ def list_gabaritos():
         
         # Paginação
         pagination = query.paginate(page=page, per_page=per_page, error_out=False)
+
+        # Histórico de gerações por gabarito (todos os escopos / jobs)
+        page_ids = [str(g.id) for g in pagination.items]
+        generations_by_gabarito: Dict[str, List[dict]] = defaultdict(list)
+        if page_ids:
+            try:
+                gen_rows = (
+                    AnswerSheetGabaritoGeneration.query.filter(
+                        AnswerSheetGabaritoGeneration.gabarito_id.in_(page_ids)
+                    )
+                    .order_by(
+                        AnswerSheetGabaritoGeneration.gabarito_id,
+                        desc(AnswerSheetGabaritoGeneration.created_at),
+                    )
+                    .all()
+                )
+                for gr in gen_rows:
+                    row_dict = gr.to_dict()
+                    row_dict["scope_snapshot"] = enrich_scope_snapshot(
+                        row_dict.get("scope_snapshot")
+                    )
+                    _dl = url_for(
+                        "answer_sheets.download_gabarito",
+                        gabarito_id=str(gr.gabarito_id),
+                        _external=True,
+                    )
+                    row_dict["download_url"] = (
+                        f"{_dl}?{urlencode({'redirect': '1', 'job_id': row_dict['job_id']})}"
+                    )
+                    generations_by_gabarito[str(gr.gabarito_id)].append(row_dict)
+            except Exception as gen_err:
+                logging.warning(
+                    'Listagem generations (tabela ausente ou erro): %s',
+                    gen_err,
+                    exc_info=True,
+                )
         
         # Formatar resultados
         gabaritos = []
@@ -1465,23 +1467,39 @@ def list_gabaritos():
                 "minio_url": gabarito.minio_url,
                 "can_download": bool(gabarito.minio_url or gabarito.minio_object_name),
                 "download_url": (
-                    request.url_root.rstrip("/") + url_for("answer_sheets.download_gabarito", gabarito_id=gabarito.id) + "?redirect=1"
+                    request.url_root.rstrip("/")
+                    + url_for("answer_sheets.download_gabarito", gabarito_id=gabarito.id)
+                    + "?redirect=1"
                     if gabarito.minio_object_name else None
                 ),
+                "latest_generation_job_id": gabarito.last_generation_job_id,
                 "created_at": gabarito.created_at.isoformat() if gabarito.created_at else None,
                 "created_by": str(gabarito.created_by) if gabarito.created_by else None,
                 "creator_name": creator_name,
             }
             if gabarito.scope_type == "city":
                 item["schools_summary"] = schools_summary
+            gens = generations_by_gabarito.get(str(gabarito.id), [])
+            item["generations"] = gens
+            item["generations_count"] = len(gens)
             gabaritos.append(item)
+
+        tenant_city_id = None
+        try:
+            from app.decorators.tenant_required import get_current_tenant_context as _ctx
+            _c = _ctx()
+            if _c and getattr(_c, 'city_id', None):
+                tenant_city_id = str(_c.city_id)
+        except Exception:
+            pass
         
         return jsonify({
             "gabaritos": gabaritos,
             "total": pagination.total,
             "page": page,
             "per_page": per_page,
-            "pages": pagination.pages
+            "pages": pagination.pages,
+            "city_id": tenant_city_id,
         }), 200
         
     except Exception as e:
@@ -1492,15 +1510,13 @@ def list_gabaritos():
 @bp.route('/gabarito/<string:gabarito_id>/download', methods=['GET'])
 @jwt_required()
 @role_required("admin", "professor", "coordenador", "diretor", "tecadm")
+@requires_city_context
 def download_gabarito(gabarito_id):
     """
-    Retorna URL pré-assinada para download do ZIP de cartões do MinIO
-    
-    Se o ZIP ainda não foi gerado, retorna erro pedindo para gerar primeiro.
-    O ZIP é gerado automaticamente pela task Celery após POST /answer-sheets/generate.
-    
-    Returns:
-        JSON com URL pré-assinada válida por 1 hora
+    URL pré-assinada para o ZIP no MinIO.
+
+    - Sem **job_id**: objeto no gabarito (em geral a última geração).
+    - Com **?job_id=&lt;uuid&gt;**: ZIP daquela linha em ``answer_sheet_generations`` (qualquer geração).
     """
     try:
         from app.services.storage.minio_service import MinIOService
@@ -1510,53 +1526,78 @@ def download_gabarito(gabarito_id):
         if not user:
             return jsonify({"error": "Usuário não encontrado"}), 401
         
-        # Buscar gabarito
         gabarito = AnswerSheetGabarito.query.get(gabarito_id)
         if not gabarito:
             return jsonify({"error": "Gabarito não encontrado"}), 404
         
-        # Verificar permissão (admin pode baixar qualquer gabarito)
         if user['role'] != 'admin' and gabarito.created_by != str(user['id']):
             return jsonify({"error": "Você não tem permissão para acessar este gabarito"}), 403
         
-        # Verificar se ZIP foi gerado no MinIO
-        if not gabarito.minio_object_name:
-            return jsonify({
-                "error": "ZIP de cartões ainda não foi gerado",
-                "message": "Use a rota POST /answer-sheets/generate para gerar os cartões primeiro. Após a geração (verifique status via polling), o ZIP estará disponível para download.",
-                "gabarito_id": gabarito_id,
-                "status": "not_generated"
-            }), 400
-        
-        # Gerar URL pré-assinada (válida por 1 hora) — host público: files.afirmeplay.com.br
         minio = MinIOService()
+        job_id_param = (request.args.get("job_id") or "").strip() or None
+        bucket_name = gabarito.minio_bucket or minio.BUCKETS['ANSWER_SHEETS']
+        object_name = None
+        zip_generated_at = gabarito.zip_generated_at
+        resolved_job_id = gabarito.last_generation_job_id
+        minio_url_out = gabarito.minio_url
+        gen_row = None
+
+        if job_id_param:
+            gen_row = AnswerSheetGabaritoGeneration.query.filter_by(
+                gabarito_id=gabarito_id,
+                job_id=job_id_param,
+            ).first()
+            if not gen_row:
+                return jsonify({
+                    "error": "Geração não encontrada para este cartão",
+                    "gabarito_id": gabarito_id,
+                    "job_id": job_id_param,
+                }), 404
+            if not gen_row.minio_object_name:
+                return jsonify({
+                    "error": "ZIP desta geração não está disponível",
+                    "job_id": job_id_param,
+                }), 400
+            object_name = gen_row.minio_object_name
+            bucket_name = gen_row.minio_bucket or minio.BUCKETS['ANSWER_SHEETS']
+            zip_generated_at = gen_row.zip_generated_at
+            resolved_job_id = gen_row.job_id
+            minio_url_out = gen_row.minio_url
+        else:
+            if not gabarito.minio_object_name:
+                return jsonify({
+                    "error": "ZIP de cartões ainda não foi gerado",
+                    "message": "Use a rota POST /answer-sheets/generate para gerar os cartões primeiro. Após a geração (verifique status via polling), o ZIP estará disponível para download.",
+                    "gabarito_id": gabarito_id,
+                    "status": "not_generated"
+                }), 400
+            object_name = gabarito.minio_object_name
         
         try:
             presigned_url = minio.get_presigned_url(
-                bucket_name=gabarito.minio_bucket or minio.BUCKETS['ANSWER_SHEETS'],
-                object_name=gabarito.minio_object_name,
+                bucket_name=bucket_name,
+                object_name=object_name,
                 expires=timedelta(hours=1)
             )
             
-            # Se vier com ?redirect=1 (ex.: link da listagem), redirecionar para a URL pré-assinada
             if request.args.get("redirect") == "1":
                 return redirect(presigned_url, code=302)
             
-            # Buscar turma para informações adicionais
             class_obj = Class.query.get(gabarito.class_id) if gabarito.class_id else None
             
             return jsonify({
                 "download_url": presigned_url,
                 "expires_in": "1 hour",
                 "gabarito_id": str(gabarito.id),
+                "job_id": resolved_job_id,
                 "test_id": str(gabarito.test_id) if gabarito.test_id else None,
                 "class_id": str(gabarito.class_id) if gabarito.class_id else None,
                 "class_name": class_obj.name if class_obj else None,
                 "title": gabarito.title,
                 "num_questions": gabarito.num_questions,
-                "generated_at": gabarito.zip_generated_at.isoformat() if gabarito.zip_generated_at else None,
+                "generated_at": zip_generated_at.isoformat() if zip_generated_at else None,
                 "created_at": gabarito.created_at.isoformat() if gabarito.created_at else None,
-                "minio_url": gabarito.minio_url
+                "minio_url": minio_url_out,
             }), 200
             
         except Exception as minio_error:
@@ -1574,12 +1615,10 @@ def download_gabarito(gabarito_id):
 @bp.route('/gabarito/<string:gabarito_id>', methods=['GET'])
 @jwt_required()
 @role_required("admin", "professor", "coordenador", "diretor", "tecadm")
+@requires_city_context
 def get_gabarito(gabarito_id):
     """
-    Busca informações de um gabarito
-    
-    Returns:
-        Dados do gabarito
+    Busca um gabarito com o mesmo histórico **generations** da listagem (todas as gerações / ZIPs).
     """
     try:
         user = get_current_user_from_token()
@@ -1589,6 +1628,31 @@ def get_gabarito(gabarito_id):
         gabarito = AnswerSheetGabarito.query.get(gabarito_id)
         if not gabarito:
             return jsonify({"error": "Gabarito não encontrado"}), 404
+
+        if gabarito.created_by and str(gabarito.created_by) != str(user.get('id')):
+            return jsonify({"error": "Você não tem permissão para acessar este gabarito"}), 403
+
+        generations_list = []
+        try:
+            gen_rows = (
+                AnswerSheetGabaritoGeneration.query.filter_by(gabarito_id=gabarito_id)
+                .order_by(desc(AnswerSheetGabaritoGeneration.created_at))
+                .all()
+            )
+            for gr in gen_rows:
+                row_dict = gr.to_dict()
+                row_dict["scope_snapshot"] = enrich_scope_snapshot(row_dict.get("scope_snapshot"))
+                _dl = url_for(
+                    "answer_sheets.download_gabarito",
+                    gabarito_id=str(gr.gabarito_id),
+                    _external=True,
+                )
+                row_dict["download_url"] = (
+                    f"{_dl}?{urlencode({'redirect': '1', 'job_id': row_dict['job_id']})}"
+                )
+                generations_list.append(row_dict)
+        except Exception as gen_err:
+            logging.warning("get_gabarito generations: %s", gen_err, exc_info=True)
         
         return jsonify({
             "id": gabarito.id,
@@ -1599,7 +1663,10 @@ def get_gabarito(gabarito_id):
             "blocks_config": gabarito.blocks_config,
             "correct_answers": gabarito.correct_answers,
             "title": gabarito.title,
-            "created_at": gabarito.created_at.isoformat() if gabarito.created_at else None
+            "created_at": gabarito.created_at.isoformat() if gabarito.created_at else None,
+            "latest_generation_job_id": gabarito.last_generation_job_id,
+            "generations": generations_list,
+            "generations_count": len(generations_list),
         }), 200
         
     except Exception as e:
@@ -3203,6 +3270,81 @@ def generate_hierarchical_answer_sheets():
     }), 410
 
 
+@bp.route('/gabaritos/<string:gabarito_id>/generation-jobs', methods=['GET'])
+@jwt_required()
+@requires_city_context
+def list_generation_jobs_for_gabarito(gabarito_id):
+    """
+    Lista todos os jobs de geração associados a um cartão resposta (gabarito), em qualquer status
+    (processing, completed, failed, etc.), para o front retomar o polling ou saber que pode gerar de novo.
+
+    GET /answer-sheets/gabaritos/<gabarito_id>/generation-jobs
+    """
+    try:
+        user = get_current_user_from_token()
+        if not user:
+            return jsonify({"error": "Usuário não encontrado"}), 401
+
+        gabarito = AnswerSheetGabarito.query.get(gabarito_id)
+        if not gabarito:
+            return jsonify({"error": "Gabarito não encontrado"}), 404
+
+        if gabarito.created_by and str(gabarito.created_by) != str(user.get('id')):
+            return jsonify({"error": "Você não tem permissão para acessar este gabarito"}), 403
+
+        current_user_id = str(user.get('id'))
+        rows = (
+            AnswerSheetGenerationJob.query.filter_by(
+                gabarito_id=gabarito_id,
+                user_id=current_user_id,
+            )
+            .order_by(AnswerSheetGenerationJob.created_at.desc())
+            .all()
+        )
+
+        jobs = []
+        for row in rows:
+            jid = row.job_id
+            jobs.append(
+                {
+                    "job_id": jid,
+                    "gabarito_id": row.gabarito_id,
+                    "status": row.status,
+                    "scope_type": row.scope_type,
+                    "total": row.total,
+                    "completed": row.completed,
+                    "successful": row.successful,
+                    "failed": row.failed,
+                    "progress_current": row.progress_current,
+                    "progress_percentage": row.progress_percentage,
+                    "created_at": row.created_at.isoformat() if row.created_at else None,
+                    "completed_at": row.completed_at.isoformat() if row.completed_at else None,
+                    "total_students_generated": row.total_students_generated,
+                    "classes_generated": row.classes_generated,
+                    "polling_url": f"/answer-sheets/jobs/{jid}/status",
+                }
+            )
+
+        return (
+            jsonify(
+                {
+                    "gabarito_id": gabarito_id,
+                    "last_generation_job_id": gabarito.last_generation_job_id,
+                    "jobs": jobs,
+                }
+            ),
+            200,
+        )
+    except Exception as e:
+        logging.error(
+            "Erro ao listar jobs de geração do gabarito %s: %s",
+            gabarito_id,
+            str(e),
+            exc_info=True,
+        )
+        return jsonify({"error": "Erro ao listar jobs de geração"}), 500
+
+
 @bp.route('/jobs/<job_id>/status', methods=['GET'])
 @jwt_required()
 def get_job_status(job_id):
@@ -3246,7 +3388,18 @@ def get_job_status(job_id):
 
         current_user_id = get_jwt_identity()
         job_from_db = get_answer_sheet_job(job_id)
-        job = job_from_db or get_job(job_id)
+        job_redis = get_job(job_id)
+        # DB não guarda items (to_dict devolve items={}); Celery grava progresso detalhado no Redis — mesclar.
+        if job_from_db:
+            job = dict(job_from_db)
+            if job_redis:
+                if 'items' in job_redis and job_redis['items'] is not None:
+                    job['items'] = job_redis['items']
+                for k in ('phase', 'stage_message', 'completed', 'successful', 'failed', 'results', 'warnings'):
+                    if k in job_redis and job_redis[k] is not None:
+                        job[k] = job_redis[k]
+        else:
+            job = job_redis
         
         if not job:
             return jsonify({"error": "Job não encontrado"}), 404
@@ -3264,6 +3417,7 @@ def get_job_status(job_id):
         classes_generated = 0
         total_students_generated = 0
         errors = []
+        message = 'Processando...'
         
         if task_ids:
             # Agora temos apenas 1 task batch
@@ -3271,6 +3425,21 @@ def get_job_status(job_id):
             try:
                 from app.services.celery_tasks.answer_sheet_tasks import generate_answer_sheets_batch_async
                 task_result = AsyncResult(task_id, app=generate_answer_sheets_batch_async.app)
+                
+                # Determinar mensagem baseada no estado da task
+                if task_result.state == 'PENDING':
+                    message = 'Aguardando processamento...'
+                elif task_result.state == 'STARTED':
+                    message = 'Gerando cartões resposta PDF (isso pode levar alguns minutos)...'
+                elif task_result.state == 'SUCCESS':
+                    result_data_task = task_result.result
+                    message = result_data_task.get('message', 'Cartões gerados com sucesso') if result_data_task else 'Cartões gerados com sucesso'
+                elif task_result.state == 'FAILURE':
+                    message = 'Erro ao gerar cartões'
+                elif task_result.state == 'RETRY':
+                    message = 'Tentando novamente após erro temporário...'
+                else:
+                    message = f'Estado: {task_result.state}'
                 
                 if task_result.state == 'SUCCESS':
                     completed = 1
@@ -3330,6 +3499,7 @@ def get_job_status(job_id):
             gabarito = AnswerSheetGabarito.query.get(gabarito_id)
         
         # ✅ PREPARAR PROGRESSO: progressivo durante execução, 100% ao concluir
+        # job.get('total') = número de TURMAS (não alunos!)
         total_classes = job.get('total', 1)
         if job_status == "processing" and total_classes > 0:
             progress_current = job.get('progress_current', 0)
@@ -3337,15 +3507,77 @@ def get_job_status(job_id):
             progress = {
                 'current': progress_current,
                 'total': total_classes,
-                'percentage': min(100, progress_pct)
+                'percentage': min(100, progress_pct),
+                'message': f'Processando turma {progress_current}/{total_classes}'
             }
         else:
             progress = {
                 'current': total_classes if job_status == "completed" else 0,
                 'total': total_classes,
-                'percentage': 100 if job_status == "completed" else 0
+                'percentage': 100 if job_status == "completed" else 0,
+                'message': 'Concluído' if job_status == "completed" else 'Aguardando...'
             }
         
+        # ✅ INFORMAÇÕES DETALHADAS POR TURMA (igual provas físicas)
+        items = job.get('items') or {}
+        classes_map = {}
+        errors_list = []
+
+        for idx_str, item in items.items():
+            st = item.get('status', 'pending')
+            class_id = item.get('class_id') or ''
+            class_name = item.get('class_name') or 'Turma não informada'
+            school_name = item.get('school_name') or ''
+            student_id = item.get('student_id')
+            student_name = item.get('student_name') or ''
+
+            key = (class_id, class_name, school_name)
+            if key not in classes_map:
+                classes_map[key] = {
+                    'class_id': class_id,
+                    'class_name': class_name,
+                    'school_name': school_name,
+                    'status': 'pending',
+                    'total_students': 0,
+                    'completed': 0,
+                    'successful': 0,
+                    'failed': 0,
+                    'errors': [],
+                }
+            classes_map[key]['total_students'] += 1
+            if st == 'done':
+                classes_map[key]['completed'] += 1
+                classes_map[key]['successful'] += 1
+            elif st == 'error':
+                classes_map[key]['completed'] += 1
+                classes_map[key]['failed'] += 1
+                err_msg = item.get('error', 'Erro desconhecido')
+                classes_map[key]['errors'].append({
+                    'student_id': student_id,
+                    'student_name': student_name,
+                    'error': err_msg,
+                })
+                errors_list.append({
+                    'class_id': class_id,
+                    'class_name': class_name,
+                    'school_name': school_name,
+                    'student_id': student_id,
+                    'student_name': student_name,
+                    'error': err_msg,
+                })
+            elif st == 'processing':
+                classes_map[key]['status'] = 'processing'
+
+            if classes_map[key]['status'] == 'pending' and st in ('processing', 'done', 'error'):
+                classes_map[key]['status'] = 'processing' if st == 'processing' else 'completed'
+
+        classes_list = list(classes_map.values())
+        for c in classes_list:
+            if c['failed'] > 0:
+                c['status'] = 'completed_with_errors'
+            elif c['completed'] == c['total_students'] and c['total_students'] > 0:
+                c['status'] = 'completed'
+
         result_data = {
             'classes_generated': classes_generated,
             'total_students': total_students_generated,
@@ -3361,11 +3593,31 @@ def get_job_status(job_id):
         response = {
             'job_id': job_id,
             'gabarito_id': gabarito_id,
+            'task_id': task_ids[0] if task_ids else None,
             'status': job_status,
+            'message': message,
             'progress': progress,
             'result': result_data,
-            'errors': errors if errors else None
+            'summary': {
+                'total_classes': len(classes_list) if classes_list else total_classes,
+                'completed_classes': sum(1 for c in classes_list if c['status'] in ('completed', 'completed_with_errors')),
+                'successful_classes': sum(1 for c in classes_list if c['failed'] == 0 and c['completed'] == c['total_students']),
+                'failed_classes': sum(1 for c in classes_list if c['failed'] > 0),
+                'total_students': total_students_generated if job_status == 'completed' else sum(c['total_students'] for c in classes_list),
+                'completed_students': sum(c['completed'] for c in classes_list),
+                'successful_students': sum(c['successful'] for c in classes_list),
+                'failed_students': sum(c['failed'] for c in classes_list),
+                'zip_minio_url': gabarito.minio_url if gabarito else None,
+                'can_download': bool(gabarito and gabarito.minio_url),
+            },
+            'classes': classes_list,
+            'errors': errors_list if errors_list else errors
         }
+        
+        # Mensagem e fase atuais
+        if job.get('stage_message'):
+            response['message'] = job['stage_message']
+        response['phase'] = job.get('phase')
         
         # ✅ ATUALIZAR JOB NO STORE
         updates = {

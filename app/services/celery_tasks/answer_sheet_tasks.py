@@ -168,6 +168,19 @@ def generate_answer_sheets_async(
     gabarito_id: str = None
 ) -> Dict[str, Any]:
     """
+    ⚠️ TASK DESCONTINUADA - NÃO ESTÁ SENDO USADA
+    
+    Esta task gera 1 PDF ÚNICO com múltiplas páginas (1 página por aluno).
+    
+    PROBLEMA: Demora muito para várias turmas.
+    
+    SUBSTITUTO: Use generate_answer_sheets_single_class_async que gera PDFs
+    individuais por aluno e é usado pela rota POST /answer-sheets/generate.
+    
+    Esta task foi mantida apenas para compatibilidade com código legado.
+    
+    ---
+    
     Task Celery para geração ASSÍNCRONA de cartões de resposta para UMA turma.
     
     Args:
@@ -224,7 +237,8 @@ def generate_answer_sheets_async(
             use_blocks=use_blocks,
             blocks_config=blocks_config,
             questions_options=questions_options,
-            gabarito_id=gabarito_id
+            gabarito_id=gabarito_id,
+            use_arch4=True  # ✅ Architecture 4: Template Base + Overlay (10-50× mais rápido)
         )
         
         logger.info(f"[CELERY] ✅ Cartões gerados com sucesso para turma {class_id}")
@@ -369,7 +383,8 @@ def generate_answer_sheets_batch_async(
                         correct_answers=correct_answers,
                         gabarito_id=str(gabarito_master.id),
                         questions_options=questions_options,
-                        output_dir=output_dir
+                        output_dir=output_dir,
+                        use_arch4=True  # ✅ Architecture 4: Template Base + Overlay (10-50× mais rápido)
                     )
 
                     # Turma sem alunos: generator retorna None — pular sem erro
@@ -435,7 +450,8 @@ def generate_answer_sheets_batch_async(
                         correct_answers=correct_answers,
                         gabarito_id=str(gabarito.id),
                         questions_options=questions_options,
-                        output_dir=output_dir
+                        output_dir=output_dir,
+                        use_arch4=True  # ✅ Architecture 4: Template Base + Overlay (10-50× mais rápido)
                     )
                     
                     # Turma sem alunos: generator retorna None — pular sem erro

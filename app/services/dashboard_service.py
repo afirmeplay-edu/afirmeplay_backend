@@ -903,52 +903,61 @@ class DashboardService:
 
     @classmethod
     def _count_questions(cls, scope: Dict[str, Any]) -> int:
-        query = Question.query
-        if scope["scope"] == "municipio" and scope.get("city_id"):
-            query = query.join(User, User.id == Question.created_by).filter(User.city_id == scope["city_id"])
-        elif scope["scope"] == "escola":
-            school_ids = scope.get("school_ids") or []
-            if school_ids:
-                # Converter school_ids para strings (SchoolTeacher.school_id é VARCHAR)
-                school_ids_str = uuid_list_to_str(school_ids) if school_ids else []
-                teacher_ids = (
-                    Teacher.query.join(SchoolTeacher, SchoolTeacher.teacher_id == Teacher.id)
-                    .filter(SchoolTeacher.school_id.in_(school_ids_str))
-                    .with_entities(Teacher.user_id)
-                    .all()
-                )
-                user_ids = [row.user_id for row in teacher_ids if row.user_id]
-                if user_ids:
-                    query = query.filter(Question.created_by.in_(user_ids))
-                else:
-                    return 0
-            else:
-                return 0
+        """
+        Conta questões visíveis no escopo do usuário.
+        Usa a mesma lógica de _questions_base_query para consistência.
+        """
+        query = cls._questions_base_query(scope)
         return query.count()
 
     @classmethod
     def _questions_base_query(cls, scope: Dict[str, Any]):
-        """Query base de questões com filtro de escopo (reutilizada para listagem e contagem)."""
+        """
+        Query base de questões com filtro de escopo (reutilizada para listagem e contagem).
+        
+        Aplica filtro baseado no sistema de escopo de questões:
+        - GLOBAL: Todos podem ver
+        - CITY: Apenas usuários do mesmo município
+        - PRIVATE: Apenas o criador
+        """
+        from sqlalchemy import or_, and_
+        
         query = Question.query
-        if scope["scope"] == "municipio" and scope.get("city_id"):
-            query = query.join(User, User.id == Question.created_by).filter(User.city_id == scope["city_id"])
-        elif scope["scope"] == "escola":
-            school_ids = scope.get("school_ids") or []
-            if school_ids:
-                school_ids_str = uuid_list_to_str(school_ids) if school_ids else []
-                teacher_ids = (
-                    Teacher.query.join(SchoolTeacher, SchoolTeacher.teacher_id == Teacher.id)
-                    .filter(SchoolTeacher.school_id.in_(school_ids_str))
-                    .with_entities(Teacher.user_id)
-                    .all()
+        user = scope.get("user", {})
+        user_id = user.get("id")
+        city_id = scope.get("city_id")
+        
+        # Construir filtros de visibilidade baseado no scope_type da questão
+        scope_filters = []
+        
+        # 1. GLOBAL: todos podem ver
+        scope_filters.append(Question.scope_type == 'GLOBAL')
+        
+        # 2. CITY: apenas do município atual (se tiver city_id)
+        if city_id:
+            scope_filters.append(
+                and_(
+                    Question.scope_type == 'CITY',
+                    Question.owner_city_id == city_id
                 )
-                user_ids = [row.user_id for row in teacher_ids if row.user_id]
-                if user_ids:
-                    query = query.filter(Question.created_by.in_(user_ids))
-                else:
-                    query = query.filter(False)
-            else:
-                query = query.filter(False)
+            )
+        
+        # 3. PRIVATE: apenas do próprio usuário
+        if user_id:
+            scope_filters.append(
+                and_(
+                    Question.scope_type == 'PRIVATE',
+                    Question.owner_user_id == user_id
+                )
+            )
+        
+        # Aplicar filtro de scope (OR entre todos os filtros)
+        if scope_filters:
+            query = query.filter(or_(*scope_filters))
+        else:
+            # Se não há filtros, não retornar nada
+            query = query.filter(False)
+        
         return query
 
     @staticmethod

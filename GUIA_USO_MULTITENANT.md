@@ -289,6 +289,7 @@ SELECT current_schema();
 - [x] `/socioeconomic-forms` (todas)
 - [x] `/plantao-online` (todas)
 - [x] `/play-tv` (todas)
+- [x] `/calendar` (todas) - Corrigido em 2026-03-19
 
 ### Rotas que NÃO precisam:
 

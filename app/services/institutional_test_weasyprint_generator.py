@@ -921,34 +921,47 @@ class InstitutionalTestWeasyPrintGenerator:
 
     def _process_html_content(self, content: str) -> Markup:
         """
-        Processa conteúdo HTML - WeasyPrint suporta HTML/CSS completo,
-        então não precisamos limpar atributos como no ReportLab!
+        Processa conteúdo HTML para renderização pelo WeasyPrint.
+
+        Princípio: o WeasyPrint renderiza HTML/CSS nativamente — passamos o HTML
+        do editor o mais íntegro possível e usamos CSS como grade de proteção.
+
+        O que é feito aqui:
+          1. Remove APENAS os wrappers de imagem do editor (node-imageComponent,
+             image-component) como pares completos — preserva todos os outros <span>
+             e seus fechamentos (bold, italic, cores etc. do editor).
+          2. Mantém todos os <p> com seus atributos de style (text-align, etc.),
+             preservando quebras de parágrafo e alinhamento definidos pelo editor.
+          3. Sanitiza dimensões de <img> para que o CSS do template controle o tamanho.
         """
         if not content:
             return Markup('')
 
         import re
 
-        # Remover node-imageComponent e image-component spans (são wrappers desnecessários)
-        processed = re.sub(r'<span class="node-imageComponent">', '', content)
-        processed = re.sub(r'<span class="image-component">', '', processed)
-        processed = re.sub(r'</span>', '', processed)
-
-        # Mesclar múltiplos <p> em um único parágrafo para evitar quebras indesejadas
-        # Substituir </p><p> por espaço para manter texto contínuo
-        processed = re.sub(r'</p>\s*<p[^>]*>', ' ', processed)
-
-        # Remover <p> no início e </p> no final se houver
-        processed = re.sub(r'^<p[^>]*>', '', processed)
-        processed = re.sub(r'</p>$', '', processed)
+        # Remove os wrappers de imagem do editor como PARES COMPLETOS (abertura + conteúdo + fechamento).
+        # Isso preserva o conteúdo interno e não deixa </span> órfãos que causariam
+        # vazamento de formatação (bold/italic leaking) para o texto seguinte.
+        processed = re.sub(
+            r'<span\s+class="node-imageComponent">(.*?)</span>',
+            r'\1',
+            content,
+            flags=re.DOTALL | re.IGNORECASE,
+        )
+        processed = re.sub(
+            r'<span\s+class="image-component">(.*?)</span>',
+            r'\1',
+            processed,
+            flags=re.DOTALL | re.IGNORECASE,
+        )
 
         # Sanitizar TODAS as <img> — remove width/height para que o CSS do template
         # (max-width: 100%) controle o tamanho.
-        # _inline_question_images_html já faz isso para imagens /questions/.../images/UUID,
-        # mas imagens com data: URL embutidas pelo editor chegam aqui sem sanitização.
         processed = self._sanitize_all_img_dimensions(processed)
 
-        # Retornar como Markup para Jinja2 não escapar HTML
+        # Retornar como Markup para Jinja2 não escapar HTML.
+        # Os <p> do editor (com style="text-align: center/justify/left" etc.) chegam
+        # intactos ao WeasyPrint, que os renderiza respeitando os inline styles.
         return Markup(processed)
 
     def _sanitize_all_img_dimensions(self, html: str) -> str:

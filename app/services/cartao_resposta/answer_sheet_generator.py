@@ -1064,10 +1064,19 @@ class AnswerSheetGenerator:
             # Linhas: font-size 7pt, margin 0.5px, label min-width 100px
             # ========================================================================
             
-            # COORDENADA X AJUSTADA: Template cartão resposta NÃO tem min-width no label
-            # Diferente das provas físicas que têm min-width: 100px (75pt)
-            # Cálculo: padding(56.69) + border(0.75) + padding_header(3) + label_width(~35) ≈ 95pt
-            X_TEXT = 95.0            # Início dos valores (logo após labels)
+            # COORDENADAS X: Cada campo tem X diferente baseado no tamanho do label
+            # Template cartão resposta NÃO tem min-width no label (diferente das provas físicas)
+            # Cálculo: padding(56.69) + border(0.75) + padding_header(3) = 60.44pt (base)
+            # Labels têm tamanhos diferentes:
+            #   - "NOME COMPLETO:" ≈ 85pt (label mais largo)
+            #   - "ESCOLA:" ≈ 45pt (label médio)
+            #   - "TURMA:" ≈ 40pt (label menor)
+            X_BASE = 60.44
+            X_NOME = X_BASE + 90     # 150.44pt - após "NOME COMPLETO:" (label mais largo)
+            X_ESCOLA = X_BASE + 50   # 110.44pt - após "ESCOLA:"
+            X_TURMA = X_BASE + 45    # 105.44pt - após "TURMA:"
+            
+            # COORDENADAS Y (validadas das provas físicas)
             Y_PDF_NAME = 780.16      # Baseline do NOME COMPLETO (linha 2)
             Y_PDF_SCHOOL = 744.31    # Baseline da ESCOLA (linha 5, após ESTADO e MUNICÍPIO)
             Y_PDF_TURMA = 732.36     # Baseline da TURMA (linha 6, 1 linha abaixo de ESCOLA)
@@ -1122,14 +1131,15 @@ class AnswerSheetGenerator:
             c.setFont(FONT_NAME, FONT_SIZE)
             c.setFillColor(FONT_COLOR)
             
+            # Usar coordenada X específica para cada campo (labels têm tamanhos diferentes)
             if student_name:
-                c.drawString(X_TEXT, Y_PDF_NAME, student_name.upper())
+                c.drawString(X_NOME, Y_PDF_NAME, student_name.upper())
             
             if school_name:
-                c.drawString(X_TEXT, Y_PDF_SCHOOL, school_name.upper())
+                c.drawString(X_ESCOLA, Y_PDF_SCHOOL, school_name.upper())
             
             if turma_display:
-                c.drawString(X_TEXT, Y_PDF_TURMA, turma_display.upper())
+                c.drawString(X_TURMA, Y_PDF_TURMA, turma_display.upper())
 
             # ========================================================================
             # GERAR E DESENHAR QR CODE

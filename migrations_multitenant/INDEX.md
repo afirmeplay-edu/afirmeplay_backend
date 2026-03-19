@@ -15,6 +15,7 @@ migrations_multitenant/
 │
 ├── 🔧 Scripts Principais
 │   ├── 0001_init_city_schemas.py       # Script de migração inicial
+│   ├── 0003_add_answer_sheet_generations.py  # Histórico de ZIPs por gabarito (city_xxx)
 │   ├── validate_migration.py           # Validação pós-migração
 │   ├── backup_database.py              # Backup antes de migrar
 │   └── check_prerequisites.py          # Verificação de pré-requisitos

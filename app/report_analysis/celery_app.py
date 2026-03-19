@@ -83,11 +83,27 @@ celery_app.conf.update(
     timezone='America/Sao_Paulo',
     enable_utc=True,
     task_track_started=True,
-    task_time_limit=300,  # 5 minutos máximo por task
-    task_soft_time_limit=240,  # 4 minutos soft limit
+    # ❌ REMOVIDO task_time_limit global - cada task define seu próprio limite
+    # task_time_limit será definido individualmente em cada task
     task_acks_late=True,  # Ack apenas após conclusão
     task_always_eager=False,  # Executar de forma assíncrona
     task_eager_propagates=True,
+    
+    # ✅ CHORD FIX: Configurações para garantir que chords funcionem corretamente
+    result_expires=3600,  # Resultados expiram após 1 hora (tempo suficiente para chord callback)
+    result_backend_transport_options={
+        'master_name': 'mymaster',
+        'socket_keepalive': True,
+        'socket_keepalive_options': {
+            1: 1,  # TCP_KEEPIDLE
+            2: 1,  # TCP_KEEPINTVL
+            3: 3,  # TCP_KEEPCNT
+        },
+        'retry_on_timeout': True,
+        'health_check_interval': 30,
+    },
+    # Garantir que chord body (callback) seja executado mesmo se demorar
+    task_chord_unlock_max_retries=10,  # Tentar executar callback até 10 vezes se falhar
 )
 
 # 🔥 ÚNICA FORMA CORRETA DE PASSAR SENHA PARA REDIS NO CELERY

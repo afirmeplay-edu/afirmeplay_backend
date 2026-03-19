@@ -13,6 +13,7 @@ from app.models.answerSheetGenerationJob import AnswerSheetGenerationJob
 from app.services.progress_store import (
     get_job_progress_redis,
     update_job_progress_redis,
+    create_job as create_progress_job,
 )
 
 logger = logging.getLogger(__name__)
@@ -49,6 +50,44 @@ def create_answer_sheet_job(
     db.session.commit()
     logger.info("📋 Job de cartões criado (DB): %s com %s turmas", job_id, total)
     return job.to_dict()
+
+
+def seed_answer_sheet_progress_job(
+    job_id: str,
+    classes_to_generate: list,
+    gabarito_id: str,
+    user_id: str,
+    task_ids: list,
+) -> None:
+    """
+    Semeia Redis (progress_store) com um item por aluno e metadados de turma/escola,
+    igual à prova física, para GET /jobs/.../status mostrar turmas e progresso em tempo real
+    antes e durante a task Celery.
+    """
+    items_meta = []
+    for cls in classes_to_generate:
+        school_name = (cls.school.name if getattr(cls, "school", None) else None) or "Sem Escola"
+        students = getattr(cls, "students", None) or []
+        for student in students:
+            items_meta.append(
+                {
+                    "class_id": str(cls.id),
+                    "class_name": cls.name or "",
+                    "school_name": school_name,
+                    "student_id": str(student.id),
+                    "student_name": student.name or "",
+                }
+            )
+    total = len(items_meta)
+    create_progress_job(
+        job_id,
+        total,
+        gabarito_id=gabarito_id,
+        user_id=user_id,
+        task_ids=task_ids or [],
+        items_meta=items_meta if total > 0 else None,
+        stage_message="Gerando cartões PDF...",
+    )
 
 
 def get_answer_sheet_job(job_id: str) -> Optional[Dict[str, Any]]:

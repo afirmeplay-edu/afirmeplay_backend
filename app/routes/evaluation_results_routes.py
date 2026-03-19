@@ -1921,16 +1921,28 @@ def _calcular_estatisticas_municipio(class_tests: list, scope_info) -> Dict[str,
             'adequado': 0,
             'avancado': 0
         }
+
+        def _normalize_classification(value: str) -> str:
+            """
+            Normaliza strings de classificação para comparação exata,
+            removendo acentos e diferenças de caixa.
+            """
+            if not value:
+                return ""
+            import unicodedata
+            value_norm = unicodedata.normalize("NFD", str(value).strip().lower())
+            return "".join(ch for ch in value_norm if unicodedata.category(ch) != "Mn")
         
         for resultado in todos_resultados:
-            classificacao = resultado.classification.lower()
-            if 'abaixo' in classificacao or 'básico' in classificacao:
+            classificacao_norm = _normalize_classification(resultado.classification)
+            # Comparação exata (evita "Básico" cair em "Abaixo do Básico" por substring)
+            if classificacao_norm == "abaixodobasico":
                 distribuicao_geral['abaixo_do_basico'] += 1
-            elif 'básico' in classificacao or 'basico' in classificacao:
+            elif classificacao_norm == "basico":
                 distribuicao_geral['basico'] += 1
-            elif 'adequado' in classificacao:
+            elif classificacao_norm == "adequado":
                 distribuicao_geral['adequado'] += 1
-            elif 'avançado' in classificacao or 'avancado' in classificacao:
+            elif classificacao_norm == "avancado":
                 distribuicao_geral['avancado'] += 1
         
         city_data = scope_info.get('city_data')
@@ -6281,16 +6293,28 @@ def _calcular_estatisticas_consolidadas_por_escopo(class_tests: list, scope_info
             'adequado': 0,
             'avancado': 0
         }
+
+        def _normalize_classification(value: str) -> str:
+            """
+            Normaliza strings de classificação para comparação exata,
+            removendo acentos e diferenças de caixa.
+            """
+            if not value:
+                return ""
+            import unicodedata
+            value_norm = unicodedata.normalize("NFD", str(value).strip().lower())
+            return "".join(ch for ch in value_norm if unicodedata.category(ch) != "Mn")
         
         for resultado in resultados_escopo:
-            classificacao = resultado.classification.lower()
-            if 'abaixo' in classificacao or 'básico' in classificacao:
+            classificacao_norm = _normalize_classification(resultado.classification)
+            # Comparação exata (evita "Básico" cair em "Abaixo do Básico" por substring)
+            if classificacao_norm == "abaixodobasico":
                 distribuicao_geral['abaixo_do_basico'] += 1
-            elif 'básico' in classificacao or 'basico' in classificacao:
+            elif classificacao_norm == "basico":
                 distribuicao_geral['basico'] += 1
-            elif 'adequado' in classificacao:
+            elif classificacao_norm == "adequado":
                 distribuicao_geral['adequado'] += 1
-            elif 'avançado' in classificacao or 'avancado' in classificacao:
+            elif classificacao_norm == "avancado":
                 distribuicao_geral['avancado'] += 1
         
         # Determinar informações específicas baseadas no nível de granularidade

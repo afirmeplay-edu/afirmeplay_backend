@@ -164,6 +164,14 @@ Nestes pontos, o código foi ajustado para **eliminar erros de `UUID` x `VARCHAR
         - Join **Class ↔ School** na query de turmas do professor: antes `Class.school_id == cast(School.id, PostgresUUID)`; agora **`School.id == cast(Class.school_id, String)`**.
     - Objetivo: comparar sempre VARCHAR com string, alinhado ao padrão do documento.
 
+- **Arquivo**: `app/routes/calendar_routes.py`
+    - **Erro**: `operator does not exist: character varying = uuid` ao buscar targets do usuário (role tecadm). Rota: **`GET /calendar/targets/me`**. SQL gerado: `JOIN school ON class.school_id = CAST(school.id AS UUID)` na função `_obter_turmas_por_municipio_formatadas`. A coluna `class.school_id` é VARCHAR e a comparação com `CAST(school.id AS UUID)` gera o erro.
+    - **Ajustes**:
+        - Import: adicionar **`String`** em `from sqlalchemy import cast, String`.
+        - Join **Class ↔ School** na função `_obter_turmas_por_municipio_formatadas`: antes `Class.school_id == cast(School.id, PostgresUUID)`; agora **`School.id == cast(Class.school_id, String)`**.
+        - **Adequação ao multitenant**: adicionado `@requires_city_context` em todas as rotas de calendar e corrigido comportamento do Admin para respeitar o contexto do município (ver `docs/CORRECAO_CALENDAR_MULTITENANT.md`).
+    - Objetivo: comparar sempre VARCHAR com string, alinhado ao padrão do documento.
+
 ---
 
 ### 3. Plano sugerido de migração futura

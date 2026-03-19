@@ -366,7 +366,7 @@
 
 			.question-prompt {
 				font-size: 10pt;
-				font-weight: bold;
+				font-weight: normal; /* Formatação vem do banco (editor) — não forçamos negrito */
 				color: #000;
 				margin: 15px 0;
 				line-height: 1.4;
@@ -410,7 +410,66 @@
 				margin-right: auto !important;
 			}
 
-			.question-subtitle {
+		/* ── Grade de proteção horizontal ──────────────────────────────────────
+		   O conteúdo das questões vem do editor (TipTap/Quill) e pode conter
+		   palavras muito longas, URLs ou tabelas com larguras fixas.
+		   Estas regras garantem que nada transborde a margem da página,
+		   sem interferir nos inline styles de alinhamento do editor
+		   (text-align: center/justify etc. definidos em <p style="...">) */
+
+		/* Áreas de texto: quebra palavras longas antes de transbordar */
+		.question-content,
+		.question-prompt,
+		.alternative-content,
+		.question-instruction-text {
+				overflow-wrap: break-word;
+				word-break: break-word;
+				max-width: 100%;
+			}
+
+		/* Parágrafos gerados pelo editor: herdam o alinhamento do inline style;
+		   o text-align: justify abaixo é apenas o fallback para <p> sem style */
+		.question-content p,
+		.question-prompt p,
+		.alternative-content p {
+				overflow-wrap: break-word;
+				word-break: break-word;
+				max-width: 100%;
+			}
+
+		/* Tabelas inseridas pelo editor */
+		.question-content table,
+		.question-prompt table,
+		.alternative-content table {
+				max-width: 100%;
+				table-layout: fixed;   /* distribui colunas dentro da largura disponível */
+				width: 100%;
+				border-collapse: collapse;
+			}
+
+		.question-content td,
+		.question-content th,
+		.question-prompt td,
+		.question-prompt th,
+		.alternative-content td,
+		.alternative-content th {
+				overflow-wrap: break-word;
+				word-break: break-word;
+				max-width: 100%;
+			}
+
+		/* Listas inseridas pelo editor */
+		.question-content ul,
+		.question-content ol,
+		.question-prompt ul,
+		.question-prompt ol {
+				padding-left: 20px;
+				max-width: 100%;
+			}
+
+		/* ─────────────────────────────────────────────────────────────────── */
+
+		.question-subtitle {
 				font-size: 10pt;
 				font-style: italic;
 				color: #000;

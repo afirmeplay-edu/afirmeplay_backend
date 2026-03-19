@@ -53,7 +53,9 @@ from app.models.school import School
 from app.models.city import City
 from app.models.studentClass import Class
 from app.models.grades import Grade
+from app.models.evaluationResult import EvaluationResult
 from app.utils.uuid_helpers import ensure_uuid, ensure_uuid_list
+from app.utils.decimal_helpers import round_to_two_decimals
 from sqlalchemy import cast, String
 from sqlalchemy.dialects.postgresql import UUID as PostgresUUID
 from app.models.classTest import ClassTest
@@ -509,9 +511,10 @@ def handle_error(error):
 
 def format_decimal_two_places(value: float) -> float:
     """
-    Formata um número para duas casas decimais sem arredondamento (trunca)
+    Formata um número para duas casas decimais
+    DEPRECIADO: Use round_to_two_decimals de app.utils.decimal_helpers
     """
-    return float(f"{value:.2f}")
+    return round_to_two_decimals(value)
 
 def convert_proficiency_to_1000_scale(proficiency: float, course: str, subject: str) -> float:
     """
@@ -1407,12 +1410,38 @@ def _gerar_tabela_detalhada_por_disciplina(avaliacao_id: str, scope_info: Dict, 
                                 "resposta": None
                             })
 
+                # Buscar resultado pré-calculado do aluno
+                evaluation_result = results_dict.get(student.id)
+                
+                # Tentar buscar dados por disciplina do campo JSON
                 disciplina_nota = 0.0
                 disciplina_proficiencia = 0.0
                 disciplina_classificacao = None
-
-                if total_respondidas > 0:
-                    # course_name já carregado uma vez no início da função
+                
+                if evaluation_result and evaluation_result.subject_results:
+                    # Usar dados pré-calculados do JSON (FONTE DA VERDADE)
+                    subject_data = evaluation_result.subject_results.get(subject_id)
+                    if subject_data:
+                        disciplina_nota = subject_data.get('grade', 0.0)
+                        disciplina_proficiencia = subject_data.get('proficiency', 0.0)
+                        disciplina_classificacao = subject_data.get('classification')
+                    else:
+                        # Fallback: calcular se não houver dados salvos
+                        if total_respondidas > 0:
+                            logging.warning(f"Resultado por disciplina não encontrado no JSON para aluno {student.id}, disciplina {subject_id}. Recalculando...")
+                            from app.services.evaluation_calculator import EvaluationCalculator
+                            result = EvaluationCalculator.calculate_complete_evaluation(
+                                correct_answers=total_acertos,
+                                total_questions=total_respondidas,
+                                course_name=course_name,
+                                subject_name=disciplina_data['nome']
+                            )
+                            disciplina_nota = result['grade']
+                            disciplina_proficiencia = result['proficiency']
+                            disciplina_classificacao = result['classification']
+                elif total_respondidas > 0:
+                    # Fallback: calcular se não houver evaluation_result
+                    logging.warning(f"EvaluationResult não encontrado para aluno {student.id}. Recalculando...")
                     from app.services.evaluation_calculator import EvaluationCalculator
                     result = EvaluationCalculator.calculate_complete_evaluation(
                         correct_answers=total_acertos,
@@ -1442,7 +1471,7 @@ def _gerar_tabela_detalhada_por_disciplina(avaliacao_id: str, scope_info: Dict, 
                     "nota": disciplina_nota,
                     "proficiencia": disciplina_proficiencia,
                     "status": status,
-                    "percentual_acertos": round((total_acertos / total_respondidas * 100), 2) if total_respondidas > 0 else 0.0
+                    "percentual_acertos": round_to_two_decimals((total_acertos / total_respondidas * 100)) if total_respondidas > 0 else 0.0
                 }
                 
                 alunos_disciplina.append(aluno_disciplina)
@@ -1465,12 +1494,13 @@ def _gerar_tabela_detalhada_por_disciplina(avaliacao_id: str, scope_info: Dict, 
 def _calcular_dados_gerais_alunos(questoes_por_disciplina: dict, course_name: str = "Anos Iniciais") -> dict:
     """
     Calcula dados gerais (média de todas as disciplinas) para cada aluno
+    ATUALIZADO: Usa dados pré-calculados por disciplina (já arredondados para 2 casas decimais)
     """
     try:
         # Criar dicionário para armazenar dados consolidados por aluno
         dados_alunos = {}
         
-        # Para cada disciplina, coletar dados dos alunos
+        # Para cada disciplina, coletar dados dos alunos (já pré-calculados)
         for disciplina_id, disciplina_data in questoes_por_disciplina.items():
             for aluno_data in disciplina_data.get("alunos", []):
                 aluno_id = aluno_data["id"]
@@ -1490,7 +1520,7 @@ def _calcular_dados_gerais_alunos(questoes_por_disciplina: dict, course_name: st
                         "total_respondidas_geral": 0
                     }
                 
-                # Acumular dados das disciplinas
+                # Acumular dados das disciplinas (já arredondados para 2 casas decimais)
                 dados_alunos[aluno_id]["notas_disciplinas"].append(aluno_data["nota"])
                 dados_alunos[aluno_id]["proficiencias_disciplinas"].append(aluno_data["proficiencia"])
                 dados_alunos[aluno_id]["total_acertos_geral"] += aluno_data["total_acertos"]
@@ -1500,10 +1530,13 @@ def _calcular_dados_gerais_alunos(questoes_por_disciplina: dict, course_name: st
         # Calcular médias e classificação geral para cada aluno
         alunos_gerais = []
         for aluno_id, dados in dados_alunos.items():
-            # Calcular médias
+            # Calcular médias (usando dados já arredondados para 2 casas decimais)
             if dados["notas_disciplinas"]:
                 nota_geral = sum(dados["notas_disciplinas"]) / len(dados["notas_disciplinas"])
                 proficiencia_geral = sum(dados["proficiencias_disciplinas"]) / len(dados["proficiencias_disciplinas"])
+                # Arredondar as médias para 2 casas decimais
+                nota_geral = round_to_two_decimals(nota_geral)
+                proficiencia_geral = round_to_two_decimals(proficiencia_geral)
             else:
                 nota_geral = 0.0
                 proficiencia_geral = 0.0
@@ -1511,6 +1544,7 @@ def _calcular_dados_gerais_alunos(questoes_por_disciplina: dict, course_name: st
             # Calcular percentual geral
             if dados["total_questoes_geral"] > 0:
                 percentual_acertos_geral = (dados["total_acertos_geral"] / dados["total_questoes_geral"]) * 100
+                percentual_acertos_geral = round_to_two_decimals(percentual_acertos_geral)
             else:
                 percentual_acertos_geral = 0.0
             
@@ -1561,14 +1595,14 @@ def _calcular_dados_gerais_alunos(questoes_por_disciplina: dict, course_name: st
                 "escola": dados["escola"],
                 "serie": dados["serie"],
                 "turma": dados["turma"],
-                "nota_geral": round(nota_geral, 2),
-                "proficiencia_geral": format_decimal_two_places(proficiencia_geral),
+                "nota_geral": nota_geral,  # Já arredondado para 2 casas decimais
+                "proficiencia_geral": proficiencia_geral,  # Já arredondado para 2 casas decimais
                 "nivel_proficiencia_geral": nivel_proficiencia_geral,
                 "total_acertos_geral": dados["total_acertos_geral"],
                 "total_questoes_geral": dados["total_questoes_geral"],
                 "total_respondidas_geral": dados["total_respondidas_geral"],
                 "total_em_branco_geral": dados["total_questoes_geral"] - dados["total_respondidas_geral"],
-                "percentual_acertos_geral": round(percentual_acertos_geral, 2),
+                "percentual_acertos_geral": percentual_acertos_geral,  # Já arredondado para 2 casas decimais
                 "status_geral": status_geral
             }
             
@@ -1695,7 +1729,7 @@ def _calculate_evaluation_stats_frontend(test_id: str) -> Dict[str, Any]:
             pass
     
     # Calcular médias apenas dos alunos que participaram
-    media_nota = round(sum(notas) / len(notas), 2) if notas else 0.0
+    media_nota = round_to_two_decimals(sum(notas) / len(notas)) if notas else 0.0
     media_proficiencia = format_decimal_two_places(sum(proficiencias) / len(proficiencias)) if proficiencias else 0.0
     
     return {
@@ -1818,7 +1852,7 @@ def _calculate_evaluation_stats_by_class(test_id: str, class_id: str) -> Dict[st
             pass
     
     # Calcular médias apenas dos alunos que participaram
-    media_nota = round(sum(notas) / len(notas), 2) if notas else 0.0
+    media_nota = round_to_two_decimals(sum(notas) / len(notas)) if notas else 0.0
     media_proficiencia = format_decimal_two_places(sum(proficiencias) / len(proficiencias)) if proficiencias else 0.0
     
     return {
@@ -1934,9 +1968,9 @@ def _calcular_estatisticas_municipio(class_tests: list, scope_info) -> Dict[str,
             return "".join(ch for ch in value_norm if unicodedata.category(ch) != "Mn")
         
         for resultado in todos_resultados:
-            classificacao_norm = _normalize_classification(resultado.classification)
-            # Comparação exata (evita "Básico" cair em "Abaixo do Básico" por substring)
-            if classificacao_norm == "abaixodobasico":
+            classificacao = resultado.classification.lower()
+            # ✅ CORRIGIDO: Verificar 'abaixo' PRIMEIRO (mais específico)
+            if 'abaixo' in classificacao:
                 distribuicao_geral['abaixo_do_basico'] += 1
             elif classificacao_norm == "basico":
                 distribuicao_geral['basico'] += 1
@@ -1954,8 +1988,8 @@ def _calcular_estatisticas_municipio(class_tests: list, scope_info) -> Dict[str,
             "total_alunos": total_alunos,
             "alunos_participantes": alunos_participantes,
             "alunos_pendentes": total_alunos - alunos_participantes,
-            "alunos_ausentes": total_alunos - alunos_participantes,  # Calculado corretamente
-            "media_nota_geral": round(media_nota_geral, 2),
+            "alunos_ausentes": total_alunos - alunos_participantes,
+            "media_nota_geral": round_to_two_decimals(media_nota_geral),
             "media_proficiencia_geral": format_decimal_two_places(media_proficiencia_geral),
             "distribuicao_classificacao_geral": distribuicao_geral
         }
@@ -2324,7 +2358,8 @@ def _calcular_estatisticas_gerais(class_tests: list, scope_info, nivel_granulari
         
         for resultado in todos_resultados:
             classificacao = resultado.classification.lower()
-            if 'abaixo' in classificacao or 'básico' in classificacao:
+            # ✅ CORRIGIDO: Verificar 'abaixo' PRIMEIRO (mais específico)
+            if 'abaixo' in classificacao:
                 distribuicao_geral['abaixo_do_basico'] += 1
             elif 'básico' in classificacao or 'basico' in classificacao:
                 distribuicao_geral['basico'] += 1
@@ -2367,7 +2402,7 @@ def _calcular_estatisticas_gerais(class_tests: list, scope_info, nivel_granulari
             "alunos_participantes": alunos_participantes,
             "alunos_pendentes": total_alunos - alunos_participantes,
             "alunos_ausentes": 0,  # Pode ser calculado se necessário
-            "media_nota_geral": round(media_nota_geral, 2),
+            "media_nota_geral": round_to_two_decimals(media_nota_geral),
             "media_proficiencia_geral": format_decimal_two_places(media_proficiencia_geral),
             "distribuicao_classificacao_geral": distribuicao_geral
         }
@@ -2974,8 +3009,8 @@ def relatorio_detalhado(evaluation_id: str):
                 "codigo_habilidade": question.skill or "N/A",
                 "tipo": question.question_type or "multipleChoice",
                 "dificuldade": question.difficulty_level or "Médio",
-                "porcentagem_acertos": round(porcentagem_acertos, 2),
-                "porcentagem_erros": round(100 - porcentagem_acertos, 2)
+                "porcentagem_acertos": round_to_two_decimals(porcentagem_acertos),
+                "porcentagem_erros": round_to_two_decimals(100 - porcentagem_acertos)
             })
 
         from app.models.evaluationResult import EvaluationResult
@@ -3113,6 +3148,142 @@ def recalcular_avaliacao():
     except Exception as e:
         logging.error(f"Erro ao recalcular avaliação: {str(e)}", exc_info=True)
         return jsonify({"error": "Erro ao recalcular avaliação", "details": str(e)}), 500
+
+
+@bp.route('/debug/<string:evaluation_id>', methods=['GET'])
+@jwt_required()
+@role_required("admin", "tecadm")
+def debug_evaluation(evaluation_id):
+    """
+    Debug de uma avaliação - mostra dados detalhados do banco
+    
+    Query Parameters:
+        city_id: ID da cidade (obrigatório para multi-tenancy)
+    """
+    try:
+        city_id = request.args.get('city_id')
+        
+        if not city_id:
+            return jsonify({"error": "city_id é obrigatório"}), 400
+        
+        # Definir schema correto
+        schema_name = city_id_to_schema_name(city_id)
+        set_search_path(schema_name)
+        
+        # Buscar avaliação
+        test = Test.query.get(evaluation_id)
+        if not test:
+            return jsonify({"error": "Avaliação não encontrada"}), 404
+        
+        # Buscar resultados
+        results = EvaluationResult.query.filter_by(test_id=evaluation_id).all()
+        
+        results_data = []
+        for result in results:
+            student = Student.query.get(result.student_id)
+            
+            result_info = {
+                "student_id": result.student_id,
+                "student_name": student.name if student else "Desconhecido",
+                "grade": result.grade,
+                "proficiency": result.proficiency,
+                "classification": result.classification,
+                "correct_answers": result.correct_answers,
+                "total_questions": result.total_questions,
+                "subject_results": result.subject_results
+            }
+            results_data.append(result_info)
+        
+        return jsonify({
+            "evaluation_id": evaluation_id,
+            "city_id": city_id,
+            "schema": schema_name,
+            "test_title": test.title,
+            "test_course": test.course,
+            "test_subjects_info": test.subjects_info,
+            "total_results": len(results),
+            "results": results_data
+        }), 200
+        
+    except Exception as e:
+        logging.error(f"Erro ao debug avaliação: {str(e)}", exc_info=True)
+        return jsonify({"error": str(e)}), 500
+
+
+@bp.route('/result/<string:result_id>/recalculate', methods=['POST'])
+@jwt_required()
+@role_required("admin", "tecadm")
+def recalculate_single_result(result_id):
+    """
+    Recalcula um resultado específico de avaliação
+    
+    Args:
+        result_id: ID do EvaluationResult a recalcular
+        
+    Body (JSON):
+        city_id: ID da cidade (obrigatório para multi-tenancy)
+    """
+    try:
+        data = request.get_json() or {}
+        city_id = data.get('city_id')
+        
+        if not city_id:
+            return jsonify({"error": "city_id é obrigatório no body da requisição"}), 400
+        
+        # Definir o schema correto baseado no city_id
+        schema_name = city_id_to_schema_name(city_id)
+        set_search_path(schema_name)
+        
+        logging.info(f"Usando schema: {schema_name}")
+        
+        # Buscar o resultado existente
+        evaluation_result = EvaluationResult.query.get(result_id)
+        
+        if not evaluation_result:
+            return jsonify({"error": f"Resultado não encontrado no schema {schema_name}"}), 404
+        
+        logging.info(f"Recalculando resultado {result_id}")
+        logging.info(f"  Test ID: {evaluation_result.test_id}")
+        logging.info(f"  Student ID: {evaluation_result.student_id}")
+        logging.info(f"  Nota atual: {evaluation_result.grade}")
+        logging.info(f"  Proficiência atual: {evaluation_result.proficiency}")
+        
+        # Recalcular usando o serviço
+        new_result = EvaluationResultService.calculate_and_save_result(
+            test_id=evaluation_result.test_id,
+            student_id=evaluation_result.student_id,
+            session_id=evaluation_result.session_id
+        )
+        
+        if not new_result:
+            return jsonify({"error": "Erro ao recalcular resultado"}), 500
+        
+        # Buscar resultado atualizado
+        updated_result = EvaluationResult.query.get(result_id)
+        
+        response = {
+            "message": "Resultado recalculado com sucesso",
+            "result_id": result_id,
+            "city_id": city_id,
+            "schema": schema_name,
+            "test_id": evaluation_result.test_id,
+            "student_id": evaluation_result.student_id,
+            "updated_data": {
+                "grade": updated_result.grade,
+                "proficiency": updated_result.proficiency,
+                "classification": updated_result.classification,
+                "subject_results": updated_result.subject_results
+            }
+        }
+        
+        logging.info(f"✅ Resultado recalculado: nota={updated_result.grade}, proficiência={updated_result.proficiency}")
+        
+        return jsonify(response), 200
+
+    except Exception as e:
+        db.session.rollback()
+        logging.error(f"Erro ao recalcular resultado {result_id}: {str(e)}", exc_info=True)
+        return jsonify({"error": "Erro ao recalcular resultado", "details": str(e)}), 500
 
 
 @bp.route('/<string:test_id>/rebuild-cache', methods=['POST'])
@@ -3740,7 +3911,7 @@ def save_evaluation_correction(evaluation_id):
         # Calcular percentual
         total_possible = session.total_questions * 1  # Assumindo 1 ponto por questão
         if total_possible > 0:
-            session.score = round((total_score / total_possible) * 100, 1)
+            session.score = round_to_two_decimals((total_score / total_possible) * 100)
 
         db.session.commit()
 
@@ -3821,7 +3992,7 @@ def finish_evaluation_correction(evaluation_id):
         # Calcular percentual
         total_possible = session.total_questions * 1  # Assumindo 1 ponto por questão
         if total_possible > 0:
-            session.score = round((total_score / total_possible) * 100, 1)
+            session.score = round_to_two_decimals((total_score / total_possible) * 100)
 
         db.session.commit()
 
@@ -4226,10 +4397,10 @@ def get_student_test_results(test_id, student_id):
             "total_questions": total_questions,
             "answered_questions": correct_answers,  # Simplificado - usar acertos como questões respondidas
             "correct_answers": correct_answers,
-            "score_percentage": round(score_percentage, 2),
-            "total_score": round(grade, 2),  # Usar nota como total_score
+            "score_percentage": round_to_two_decimals(score_percentage),
+            "total_score": round_to_two_decimals(grade),  # Usar nota como total_score
             "max_possible_score": total_questions,  # Simplificado
-            "grade": round(grade, 2),
+            "grade": round_to_two_decimals(grade),
             "proficiencia": format_decimal_two_places(proficiency_original),
             "classificacao": classification,
             "calculated_at": evaluation_result.calculated_at.isoformat() if evaluation_result.calculated_at else None,
@@ -4587,7 +4758,7 @@ def get_student_answers(test_id, student_id):
             "total_answers": len(answers_data),
             "total_questions": total_questions,
             "correct_answers": correct_count,
-            "score_percentage": round((correct_count / total_questions * 100), 2) if total_questions > 0 else 0,
+            "score_percentage": round_to_two_decimals((correct_count / total_questions * 100)) if total_questions > 0 else 0,
             "answers": answers_data
         }
         
@@ -5944,7 +6115,7 @@ def obter_estatisticas_status():
         # Calcular porcentagens
         status_percentages = {}
         for status, count in status_counts.items():
-            status_percentages[status] = round((count / total_tests) * 100, 2) if total_tests > 0 else 0
+            status_percentages[status] = round_to_two_decimals((count / total_tests) * 100) if total_tests > 0 else 0
         
         return jsonify({
             "total_avaliacoes": total_tests,
@@ -6306,9 +6477,9 @@ def _calcular_estatisticas_consolidadas_por_escopo(class_tests: list, scope_info
             return "".join(ch for ch in value_norm if unicodedata.category(ch) != "Mn")
         
         for resultado in resultados_escopo:
-            classificacao_norm = _normalize_classification(resultado.classification)
-            # Comparação exata (evita "Básico" cair em "Abaixo do Básico" por substring)
-            if classificacao_norm == "abaixodobasico":
+            classificacao = resultado.classification.lower()
+            # ✅ CORRIGIDO: Verificar 'abaixo' PRIMEIRO (mais específico)
+            if 'abaixo' in classificacao:
                 distribuicao_geral['abaixo_do_basico'] += 1
             elif classificacao_norm == "basico":
                 distribuicao_geral['basico'] += 1
@@ -6667,7 +6838,7 @@ def _calcular_ranking_global_alunos(avaliacao_id: str, scope_info: Dict, nivel_g
             del aluno['pontuacao_ranking']
             
             # Formatar descrição do ranking
-            descricao_ranking = f"{aluno['nome']}, Acertos {aluno['total_acertos']}, Nota {aluno['nota']:.1f}"
+            descricao_ranking = f"{aluno['nome']}, Acertos {aluno['total_acertos']}, Nota {aluno['nota']:.2f}"
             
             ranking_final.append({
                 "posicao": i + 1,

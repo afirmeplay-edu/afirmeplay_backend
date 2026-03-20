@@ -167,7 +167,32 @@ def _get_job_from_redis(job_id: str) -> Optional[dict]:
         return None
 
 
-def create_job(job_id: str, total: int, test_id: str = None, gabarito_id: str = None, user_id: str = None, task_ids: list = None, items_meta: list = None) -> dict:
+def _ensure_job_in_memory(job_id: str) -> bool:
+    """
+    Garante progress[job_id] preenchido (carrega do Redis se o job foi criado em outro processo,
+    ex.: API Flask semeia items e o worker Celery atualiza item a item).
+    """
+    with lock:
+        if job_id in progress:
+            return True
+        loaded = _get_job_from_redis(job_id)
+        if loaded:
+            progress[job_id] = loaded
+            logger.debug("Job %s carregado do Redis para memória local", job_id)
+            return True
+        return False
+
+
+def create_job(
+    job_id: str,
+    total: int,
+    test_id: str = None,
+    gabarito_id: str = None,
+    user_id: str = None,
+    task_ids: list = None,
+    items_meta: list = None,
+    stage_message: str = None,
+) -> dict:
     """
     Cria um novo job de correção em lote.
     
@@ -205,7 +230,7 @@ def create_job(job_id: str, total: int, test_id: str = None, gabarito_id: str = 
             "items": items,
             "results": [],
             "phase": "generating",
-            "stage_message": "Gerando formulários PDF...",
+            "stage_message": stage_message or "Gerando formulários PDF...",
         }
         job_snapshot = copy.deepcopy(progress[job_id])
         logger.info(f"📋 Job criado: {job_id} com {total} itens")
@@ -218,6 +243,9 @@ def update_item_processing(job_id: str, index: int, extra: dict = None):
     Marca item como em processamento.
     extra: dict opcional (class_id, class_name, school_name, student_id, student_name) para progresso detalhado.
     """
+    if not _ensure_job_in_memory(job_id):
+        logger.warning("update_item_processing: job %s não encontrado (memória nem Redis)", job_id)
+        return
     with lock:
         if job_id in progress:
             item = {"status": "processing"}
@@ -239,6 +267,9 @@ def update_item_done(job_id: str, index: int, result: dict):
     Marca item como concluído com sucesso.
     Aceita campos de correção (correct, total, percentage) e/ou de formulários físicos (class_id, class_name, school_name).
     """
+    if not _ensure_job_in_memory(job_id):
+        logger.warning("update_item_done: job %s não encontrado (memória nem Redis)", job_id)
+        return
     with lock:
         if job_id in progress:
             item = {
@@ -272,6 +303,9 @@ def update_item_error(job_id: str, index: int, error: str, extra: dict = None):
     Marca item como erro.
     extra: dict opcional com student_id, student_name, class_id, class_name, school_name para status detalhado.
     """
+    if not _ensure_job_in_memory(job_id):
+        logger.warning("update_item_error: job %s não encontrado (memória nem Redis)", job_id)
+        return
     with lock:
         if job_id in progress:
             item = {"status": "error", "error": error}
@@ -294,6 +328,9 @@ def complete_job(job_id: str):
     """
     Marca job como concluído (phase=done para o frontend saber que terminou).
     """
+    if not _ensure_job_in_memory(job_id):
+        logger.warning("complete_job: job %s não encontrado (memória nem Redis)", job_id)
+        return
     with lock:
         if job_id in progress:
             progress[job_id]["status"] = "completed"
@@ -310,18 +347,26 @@ def complete_job(job_id: str):
 
 def get_job(job_id: str) -> Optional[dict]:
     """
-    Retorna dados do job. Se o job estiver em memória (mesmo processo), usa ele e opcionalmente
-    mescla progress_current/progress_percentage do Redis. Se não estiver em memória (ex.: Flask
-    consultando job criado pelo Celery), carrega o job completo do Redis para o status mostrar
-    progresso, turmas e summary em tempo real.
+    Retorna dados do job.
+
+    Se o job existir só no Redis (ex.: Celery), carrega o JSON completo e mescla o hash
+    as_job_progress (progress_current / progress_percentage).
+
+    Se existir em memória no processo (ex.: após seed na API), a memória pode estar **obsoleta**
+    para items/contadores — o worker atualiza apenas Redis. Nesse caso mesclamos do snapshot
+    completo em Redis (items, completed, successful, failed, phase, etc.), sem sobrescrever
+    ``total`` (pode ser turmas no DB vs alunos no job de progresso).
+
+    Após mesclar, atualizamos ``progress[job_id]`` para o próximo GET não repetir o problema.
     """
     with lock:
-        job = progress.get(job_id)
-    if job is None:
-        job = _get_job_from_redis(job_id)
+        job_local = progress.get(job_id)
+    redis_full = _get_job_from_redis(job_id)
+
+    if job_local is None:
+        job = redis_full
         if job is None:
             return None
-    else:
         redis_progress = get_job_progress_redis(job_id)
         if redis_progress:
             job = dict(job)
@@ -329,6 +374,36 @@ def get_job(job_id: str) -> Optional[dict]:
                 job["progress_current"] = redis_progress["progress_current"]
             if "progress_percentage" in redis_progress:
                 job["progress_percentage"] = redis_progress["progress_percentage"]
+        return job
+
+    job = dict(job_local)
+    if redis_full:
+        for key in (
+            "items",
+            "completed",
+            "successful",
+            "failed",
+            "results",
+            "phase",
+            "stage_message",
+            "status",
+            "completed_at",
+            "warnings",
+        ):
+            if key in redis_full:
+                job[key] = redis_full[key]
+
+    redis_progress = get_job_progress_redis(job_id)
+    if redis_progress:
+        if "progress_current" in redis_progress:
+            job["progress_current"] = redis_progress["progress_current"]
+        if "progress_percentage" in redis_progress:
+            job["progress_percentage"] = redis_progress["progress_percentage"]
+
+    with lock:
+        if job_id in progress:
+            progress[job_id] = job
+
     return job
 
 
@@ -338,6 +413,8 @@ def update_job(job_id: str, updates: dict) -> dict:
     Se updates contiver progress_current ou progress_percentage, também grava no Redis
     para que o Flask (GET /jobs/.../status) veja o progresso gradual atualizado pelo Celery.
     """
+    if not _ensure_job_in_memory(job_id):
+        return None
     with lock:
         if job_id in progress:
             progress[job_id].update(updates)
@@ -384,6 +461,23 @@ def delete_job(job_id: str) -> bool:
             logger.info(f"🗑️ Job {job_id} removido do store")
             return True
         return False
+
+
+def purge_answer_sheet_job_keys(job_id: str) -> None:
+    """
+    Remove job da memória local e das chaves Redis usadas pelo progresso de cartões
+    (as_job_progress / as_job_full).
+    """
+    delete_job(job_id)
+    r = _get_redis_client()
+    if not r:
+        return
+    try:
+        r.delete(REDIS_PROGRESS_KEY_PREFIX + job_id)
+        r.delete(REDIS_JOB_FULL_KEY_PREFIX + job_id)
+        logger.debug("Redis purgado para job %s", job_id)
+    except Exception as e:
+        logger.debug("Falha ao purgar Redis do job %s: %s", job_id, e)
 
 
 def cleanup_old_jobs(max_age_hours: int = 24):

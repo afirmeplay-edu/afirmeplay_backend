@@ -137,12 +137,18 @@ def analise_sistema():
 @bp.route("/dashboard/questoes", methods=["GET"])
 @jwt_required()
 @role_required("admin", "tecadm", "diretor", "coordenador", "professor")
+@requires_city_context
 def dashboard_questoes():
     """
     Retorna lista de questões para o card do dashboard, com detalhes ricos:
     quantidade de respostas, taxa de acerto, quantidade de avaliações,
     última utilização, disciplina, ano, autor, dificuldade, tipo.
     Query params: limit (default 20), offset (default 0).
+    
+    Filtra questões por escopo:
+    - GLOBAL: Todos podem ver
+    - CITY: Apenas usuários do mesmo município
+    - PRIVATE: Apenas o criador
     """
     try:
         from flask import request

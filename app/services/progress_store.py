@@ -463,6 +463,23 @@ def delete_job(job_id: str) -> bool:
         return False
 
 
+def purge_answer_sheet_job_keys(job_id: str) -> None:
+    """
+    Remove job da memória local e das chaves Redis usadas pelo progresso de cartões
+    (as_job_progress / as_job_full).
+    """
+    delete_job(job_id)
+    r = _get_redis_client()
+    if not r:
+        return
+    try:
+        r.delete(REDIS_PROGRESS_KEY_PREFIX + job_id)
+        r.delete(REDIS_JOB_FULL_KEY_PREFIX + job_id)
+        logger.debug("Redis purgado para job %s", job_id)
+    except Exception as e:
+        logger.debug("Falha ao purgar Redis do job %s: %s", job_id, e)
+
+
 def cleanup_old_jobs(max_age_hours: int = 24):
     """
     Remove jobs antigos do store

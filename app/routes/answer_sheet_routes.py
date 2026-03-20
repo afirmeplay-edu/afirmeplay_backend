@@ -20,7 +20,7 @@ from app.services.cartao_resposta.answer_sheet_correction_service import AnswerS
 from app.services.cartao_resposta.correction_new_grid import AnswerSheetCorrectionNewGrid
 from app.services.progress_store import (
     create_job, update_item_processing, update_item_done,
-    update_item_error, complete_job, get_job
+    update_item_error, complete_job, get_job, purge_answer_sheet_job_keys,
 )
 from app.services.answer_sheet_job_store import (
     create_answer_sheet_job,
@@ -38,6 +38,7 @@ from sqlalchemy import cast, String, desc
 from app.services.cartao_resposta.answer_sheet_gabarito_generation import (
     AnswerSheetGabaritoGeneration,
     enrich_scope_snapshot,
+    reapply_gabarito_minio_from_generations,
 )
 import logging
 import re
@@ -1610,6 +1611,139 @@ def download_gabarito(gabarito_id):
     except Exception as e:
         logging.error(f"Erro ao baixar gabarito: {str(e)}", exc_info=True)
         return jsonify({"error": f"Erro ao baixar gabarito: {str(e)}"}), 500
+
+
+@bp.route('/gabarito/<string:gabarito_id>/generations/<string:job_id>', methods=['DELETE'])
+@jwt_required()
+@role_required("admin", "professor", "coordenador", "diretor", "tecadm")
+@requires_city_context
+def delete_answer_sheet_generation(gabarito_id, job_id):
+    """
+    Remove **uma** geração (histórico + ZIP no MinIO + job em public + cache Redis).
+    O cartão (gabarito) permanece; campos minio/last_generation no gabarito são realinhados
+    com a geração mais recente que sobrar.
+    """
+    try:
+        user = get_current_user_from_token()
+        if not user:
+            return jsonify({"error": "Usuário não encontrado"}), 401
+
+        gabarito = AnswerSheetGabarito.query.get(gabarito_id)
+        if not gabarito:
+            return jsonify({"error": "Gabarito não encontrado"}), 404
+        if user["role"] != "admin" and str(gabarito.created_by) != str(user.get("id")):
+            return jsonify({"error": "Você não tem permissão"}), 403
+
+        gen = AnswerSheetGabaritoGeneration.query.filter_by(
+            gabarito_id=gabarito_id, job_id=job_id
+        ).first()
+        if not gen:
+            return jsonify({"error": "Geração não encontrada", "job_id": job_id}), 404
+
+        from app.services.storage.minio_service import MinIOService
+
+        minio = MinIOService()
+        if gen.minio_object_name:
+            bucket = gen.minio_bucket or minio.BUCKETS["ANSWER_SHEETS"]
+            try:
+                minio.delete_file(bucket, gen.minio_object_name)
+            except Exception as ex:
+                logging.warning(
+                    "MinIO ao excluir geração %s: %s", job_id, ex, exc_info=True
+                )
+
+        db.session.delete(gen)
+        pub = AnswerSheetGenerationJob.query.filter_by(job_id=job_id).first()
+        if pub:
+            db.session.delete(pub)
+
+        reapply_gabarito_minio_from_generations(gabarito_id)
+        db.session.commit()
+        purge_answer_sheet_job_keys(job_id)
+
+        return (
+            jsonify(
+                {
+                    "message": "Geração removida",
+                    "gabarito_id": gabarito_id,
+                    "job_id": job_id,
+                }
+            ),
+            200,
+        )
+    except Exception as e:
+        db.session.rollback()
+        logging.error("Erro ao excluir geração: %s", e, exc_info=True)
+        return jsonify({"error": "Erro ao excluir geração"}), 500
+
+
+@bp.route('/gabarito/<string:gabarito_id>/generations', methods=['DELETE'])
+@jwt_required()
+@role_required("admin", "professor", "coordenador", "diretor", "tecadm")
+@requires_city_context
+def delete_all_answer_sheet_generations(gabarito_id):
+    """
+    Remove **todas** as gerações do cartão (cada ZIP + registros + jobs + Redis), sem apagar o gabarito.
+    """
+    try:
+        user = get_current_user_from_token()
+        if not user:
+            return jsonify({"error": "Usuário não encontrado"}), 401
+
+        gabarito = AnswerSheetGabarito.query.get(gabarito_id)
+        if not gabarito:
+            return jsonify({"error": "Gabarito não encontrado"}), 404
+        if user["role"] != "admin" and str(gabarito.created_by) != str(user.get("id")):
+            return jsonify({"error": "Você não tem permissão"}), 403
+
+        rows = AnswerSheetGabaritoGeneration.query.filter_by(
+            gabarito_id=gabarito_id
+        ).all()
+        if not rows:
+            return jsonify(
+                {"message": "Nenhuma geração para remover", "gabarito_id": gabarito_id, "removed": 0}
+            ), 200
+
+        from app.services.storage.minio_service import MinIOService
+
+        minio = MinIOService()
+        job_ids_removed = []
+        for gen in rows:
+            jid = gen.job_id
+            job_ids_removed.append(jid)
+            if gen.minio_object_name:
+                bucket = gen.minio_bucket or minio.BUCKETS["ANSWER_SHEETS"]
+                try:
+                    minio.delete_file(bucket, gen.minio_object_name)
+                except Exception as ex:
+                    logging.warning(
+                        "MinIO ao excluir geração %s: %s", jid, ex, exc_info=True
+                    )
+            db.session.delete(gen)
+            pub = AnswerSheetGenerationJob.query.filter_by(job_id=jid).first()
+            if pub:
+                db.session.delete(pub)
+
+        reapply_gabarito_minio_from_generations(gabarito_id)
+        db.session.commit()
+        for jid in job_ids_removed:
+            purge_answer_sheet_job_keys(jid)
+
+        return (
+            jsonify(
+                {
+                    "message": "Gerações removidas",
+                    "gabarito_id": gabarito_id,
+                    "removed": len(job_ids_removed),
+                    "job_ids": job_ids_removed,
+                }
+            ),
+            200,
+        )
+    except Exception as e:
+        db.session.rollback()
+        logging.error("Erro ao excluir gerações: %s", e, exc_info=True)
+        return jsonify({"error": "Erro ao excluir gerações"}), 500
 
 
 @bp.route('/gabarito/<string:gabarito_id>', methods=['GET'])

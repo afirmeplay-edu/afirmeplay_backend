@@ -188,7 +188,6 @@ class AnswerSheetGenerator:
             
             # Gerar PDF base com WeasyPrint (1× apenas)
             base_pdf_bytes = HTML(string=base_html).write_pdf()
-            base_reader = PdfReader(io.BytesIO(base_pdf_bytes))
             
             logging.info(f"[GENERATOR ARCH4] ✅ Template base gerado ({len(base_pdf_bytes)} bytes)")
 
@@ -216,10 +215,10 @@ class AnswerSheetGenerator:
                         logging.error(f"[GENERATOR ARCH4] Falha ao gerar overlay para aluno {student.id}")
                         continue
                     
-                    # Clonar página do template base
-                    base_page = base_reader.pages[0]
-                    
-                    # Aplicar overlay sobre a página base
+                    # Nova leitura do PDF base por aluno (merge_page muta a página; mesmo padrão que
+                    # institutional_test_weasyprint_generator.generate_institutional_test_pdf_arch4)
+                    base_fresh = PdfReader(io.BytesIO(base_pdf_bytes))
+                    base_page = base_fresh.pages[0]
                     overlay_reader = PdfReader(io.BytesIO(overlay_bytes))
                     base_page.merge_page(overlay_reader.pages[0])
                     
@@ -265,7 +264,7 @@ class AnswerSheetGenerator:
                     grade_name = grade_obj.name
 
             # Liberar memória
-            del pdf_bytes, pdf_buffer, base_pdf_bytes, base_reader, writer
+            del pdf_bytes, pdf_buffer, base_pdf_bytes, writer
             gc.collect()
 
             return {
@@ -657,7 +656,6 @@ class AnswerSheetGenerator:
                 template = self.env.get_template('answer_sheet.html')
                 base_html = template.render(**base_template_data)
                 base_pdf_bytes = HTML(string=base_html).write_pdf()
-                base_reader = PdfReader(io.BytesIO(base_pdf_bytes))
                 
                 logging.info(f"[GENERATOR ARCH4] ✅ Template base gerado ({len(base_pdf_bytes)} bytes)")
                 
@@ -678,8 +676,9 @@ class AnswerSheetGenerator:
                             logging.error(f"[GENERATOR ARCH4] Falha ao gerar overlay para aluno {student.id}")
                             continue
                         
-                        # Clonar página base e aplicar overlay
-                        base_page = base_reader.pages[0]
+                        # Nova leitura do PDF base por aluno (merge_page muta a página)
+                        base_fresh = PdfReader(io.BytesIO(base_pdf_bytes))
+                        base_page = base_fresh.pages[0]
                         overlay_reader = PdfReader(io.BytesIO(overlay_bytes))
                         base_page.merge_page(overlay_reader.pages[0])
                         

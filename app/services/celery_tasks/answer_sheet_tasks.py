@@ -414,7 +414,6 @@ def generate_answer_sheets_batch_async(
             template = generator.env.get_template('answer_sheet.html')
             base_html = template.render(**base_template_data)
             base_pdf_bytes = HTML(string=base_html).write_pdf()
-            base_reader = PdfReader(io.BytesIO(base_pdf_bytes))
             
             logger.info(f"[CELERY-BATCH] ✅ Template base gerado ({len(base_pdf_bytes)} bytes) - será reutilizado para TODAS as turmas")
             
@@ -505,8 +504,9 @@ def generate_answer_sheets_batch_async(
                                     })
                                 continue
                             
-                            # Clonar página base e aplicar overlay
-                            base_page = base_reader.pages[0]
+                            # Nova leitura do PDF base por aluno (merge_page muta a página)
+                            base_fresh = PdfReader(io.BytesIO(base_pdf_bytes))
+                            base_page = base_fresh.pages[0]
                             overlay_reader = PdfReader(io.BytesIO(overlay_bytes))
                             base_page.merge_page(overlay_reader.pages[0])
                             

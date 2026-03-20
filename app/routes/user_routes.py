@@ -985,6 +985,14 @@ def delete_user(user_id):
 
         deleted_relations = []
 
+        def _set_search_path_for_user():
+            """Volta o search_path para o schema do usuário (para manter consistência multi-tenant)."""
+            if user_to_delete.city_id:
+                schema = city_id_to_schema_name(user_to_delete.city_id)
+                db.session.execute(text(f'SET search_path TO "{schema}", public'))
+            else:
+                db.session.execute(text("SET search_path TO public"))
+
         teacher = Teacher.query.filter_by(user_id=user_id).first()
         teacher_id = teacher.id if teacher else None
 
@@ -1021,8 +1029,37 @@ def delete_user(user_id):
         if teacher_id:
             db.session.flush()
 
-        deleted_count = Student.query.filter_by(user_id=user_id).delete(synchronize_session=False)
-        if deleted_count > 0:
+        # IMPORTANTE: os loops acima mexem no search_path. Antes de deletar tabelas do usuário,
+        # precisamos restaurar para o schema do usuário.
+        _set_search_path_for_user()
+
+        # Ao deletar Student por `user_id`, pode existir dependência em `physical_test_forms`
+        # (FK: physical_test_forms.student_id -> student.id). Como usamos bulk delete,
+        # a cascata do ORM não garante remoção no banco: precisamos deletar dependências antes.
+        from app.models.physicalTestForm import PhysicalTestForm
+        from app.models.physicalTestAnswer import PhysicalTestAnswer
+
+        students_to_delete = Student.query.filter_by(user_id=user_id).all()
+        student_ids_to_delete = [s.id for s in students_to_delete]
+        if student_ids_to_delete:
+            physical_forms_subq = (
+                PhysicalTestForm.query.with_entities(PhysicalTestForm.id)
+                .filter(PhysicalTestForm.student_id.in_(student_ids_to_delete))
+                .subquery()
+            )
+
+            # Remove respostas (dependentes) antes de apagar os formulários físicos.
+            PhysicalTestAnswer.query.filter(
+                PhysicalTestAnswer.physical_form_id.in_(physical_forms_subq)
+            ).delete(synchronize_session=False)
+
+            PhysicalTestForm.query.filter(
+                PhysicalTestForm.student_id.in_(student_ids_to_delete)
+            ).delete(synchronize_session=False)
+
+        for student in students_to_delete:
+            db.session.delete(student)
+        if students_to_delete:
             deleted_relations.append("estudante")
 
         # Remover logs de senha do aluno no schema da cidade (evita órfãos e duplicatas ao recadastrar)
@@ -1044,6 +1081,9 @@ def delete_user(user_id):
             if user_to_delete.city_id:
                 user_schema = city_id_to_schema_name(user_to_delete.city_id)
                 db.session.execute(text(f'SET search_path TO "{user_schema}", public'))
+
+        # Mesma lógica: Teacher/Professor também pode ter mudado o search_path.
+        _set_search_path_for_user()
 
         deleted_count = Manager.query.filter_by(user_id=user_id).delete(synchronize_session=False)
         if deleted_count > 0:
@@ -1074,9 +1114,11 @@ def delete_user(user_id):
 
     except SQLAlchemyError as e:
         db.session.rollback()
+        logging.error(f"Erro no banco de dados ao deletar usuário {user_id}: {str(e)}", exc_info=True)
         return jsonify({"erro": "Erro interno do servidor"}), 500
     except Exception as e:
         db.session.rollback()
+        logging.error(f"Erro inesperado ao deletar usuário {user_id}: {str(e)}", exc_info=True)
         return jsonify({"erro": "Erro interno do servidor"}), 500
 
 def _user_settings_in_public(fn):

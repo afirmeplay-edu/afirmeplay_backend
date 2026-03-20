@@ -1365,6 +1365,33 @@ def bulk_delete_tests():
                 # Apenas remove a associação, NÃO a questão
                 db.session.delete(test_question)
             logging.info(f"🗑️ Removidas {len(test_questions)} associações de questões para teste {test.id} (questões preservadas)")
+
+            # 7.1 Excluir gabaritos e resultados de cartões resposta ligados a este teste
+            # (evita FK violation ao deletar `test`, ex.: answer_sheet_gabaritos_test_id_fkey)
+            from app.models.answerSheetGabarito import AnswerSheetGabarito
+            from app.models.answerSheetResult import AnswerSheetResult
+
+            gabaritos_subq = (
+                AnswerSheetGabarito.query.with_entities(AnswerSheetGabarito.id)
+                .filter(AnswerSheetGabarito.test_id == str(test.id))
+                .subquery()
+            )
+
+            deleted_answer_sheet_results = AnswerSheetResult.query.filter(
+                AnswerSheetResult.gabarito_id.in_(gabaritos_subq)
+            ).delete(synchronize_session=False)
+            if deleted_answer_sheet_results:
+                logging.info(
+                    f"🗑️ Excluídas {deleted_answer_sheet_results} answer_sheet_results para teste {test.id}"
+                )
+
+            deleted_answer_sheet_gabaritos = AnswerSheetGabarito.query.filter(
+                AnswerSheetGabarito.test_id == str(test.id)
+            ).delete(synchronize_session=False)
+            if deleted_answer_sheet_gabaritos:
+                logging.info(
+                    f"🗑️ Excluídos {deleted_answer_sheet_gabaritos} answer_sheet_gabaritos para teste {test.id}"
+                )
             
             # 8. Finalmente, excluir o teste
             db.session.delete(test)
@@ -1495,6 +1522,33 @@ def deletar_avaliacao(test_id):
             # Apenas remove a associação, NÃO a questão
             db.session.delete(test_question)
         logging.info(f"🗑️ Removidas {len(test_questions)} associações de questões (questões preservadas)")
+
+        # 7.1 Excluir gabaritos e resultados de cartões resposta ligados a este teste
+        # (evita FK violation ao deletar `test`, ex.: answer_sheet_gabaritos_test_id_fkey)
+        from app.models.answerSheetGabarito import AnswerSheetGabarito
+        from app.models.answerSheetResult import AnswerSheetResult
+
+        gabaritos_subq = (
+            AnswerSheetGabarito.query.with_entities(AnswerSheetGabarito.id)
+            .filter(AnswerSheetGabarito.test_id == str(test_id))
+            .subquery()
+        )
+
+        deleted_answer_sheet_results = AnswerSheetResult.query.filter(
+            AnswerSheetResult.gabarito_id.in_(gabaritos_subq)
+        ).delete(synchronize_session=False)
+        if deleted_answer_sheet_results:
+            logging.info(
+                f"🗑️ Excluídas {deleted_answer_sheet_results} answer_sheet_results para teste {test_id}"
+            )
+
+        deleted_answer_sheet_gabaritos = AnswerSheetGabarito.query.filter(
+            AnswerSheetGabarito.test_id == str(test_id)
+        ).delete(synchronize_session=False)
+        if deleted_answer_sheet_gabaritos:
+            logging.info(
+                f"🗑️ Excluídos {deleted_answer_sheet_gabaritos} answer_sheet_gabaritos para teste {test_id}"
+            )
         
         # 8. Finalmente, excluir o teste
         db.session.delete(test)

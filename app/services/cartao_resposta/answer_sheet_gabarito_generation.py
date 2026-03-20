@@ -149,6 +149,40 @@ def enrich_scope_snapshot(scope_snapshot: Optional[Dict[str, Any]]) -> Optional[
     return out
 
 
+def reapply_gabarito_minio_from_generations(gabarito_id: str) -> None:
+    """
+    Após remover gerações, atualiza o registro do gabarito com o ZIP mais recente que sobrou
+    ou limpa minio/last_generation_* se não houver mais gerações.
+    """
+    from app.models.answerSheetGabarito import AnswerSheetGabarito
+    from sqlalchemy import desc
+
+    latest = (
+        AnswerSheetGabaritoGeneration.query.filter_by(gabarito_id=str(gabarito_id))
+        .order_by(desc(AnswerSheetGabaritoGeneration.created_at))
+        .first()
+    )
+    g = AnswerSheetGabarito.query.get(gabarito_id)
+    if not g:
+        return
+    if latest:
+        g.minio_url = latest.minio_url
+        g.minio_object_name = latest.minio_object_name
+        g.minio_bucket = latest.minio_bucket
+        g.zip_generated_at = latest.zip_generated_at
+        g.last_generation_job_id = latest.job_id
+        g.last_generation_classes_count = latest.total_classes
+        g.last_generation_students_count = latest.total_students
+    else:
+        g.minio_url = None
+        g.minio_object_name = None
+        g.minio_bucket = None
+        g.zip_generated_at = None
+        g.last_generation_job_id = None
+        g.last_generation_classes_count = None
+        g.last_generation_students_count = None
+
+
 def record_answer_sheet_generations(
     gabarito_ids: List[str],
     batch_id: str,

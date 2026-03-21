@@ -11,6 +11,12 @@ from app.permissions.utils import get_teacher_classes
 from app.utils.question_helpers import get_questions_from_test
 from app.utils.uuid_helpers import ensure_uuid, ensure_uuid_list
 from app.utils.tenant_middleware import set_search_path, city_id_to_schema_name
+from app.routes.answer_sheet_evaluation_listing import (
+    collect_skill_ids_from_gabarito_topology,
+    fetch_answer_sheet_gabarito_for_detail,
+    is_answer_sheet_report_entity,
+)
+from app.permissions.rules import get_user_permission_scope
 from app.utils.eja_grade_mapping import get_effective_grade_id_for_skills
 
 import logging
@@ -338,6 +344,41 @@ def get_skills_by_evaluation(test_id):
         user = get_current_user_from_token()
         if not user:
             return jsonify({"error": "Usuário não encontrado"}), 401
+
+        if is_answer_sheet_report_entity():
+            permissao = get_user_permission_scope(user)
+            gab, _results, err = fetch_answer_sheet_gabarito_for_detail(
+                user, permissao, test_id
+            )
+            if err:
+                resp, code = err
+                return resp, code
+            skill_ids = collect_skill_ids_from_gabarito_topology(gab)
+            if not skill_ids:
+                return jsonify(
+                    {"message": "Gabarito não possui habilidades na topologia."}
+                ), 404
+            skills_objs = Skill.query.filter(Skill.id.in_(skill_ids)).all()
+            by_id = {str(s.id): s for s in skills_objs}
+            skills_data = []
+            for sid in skill_ids:
+                sk = by_id.get(sid)
+                if sk:
+                    skills_data.append(_skill_to_dict(sk))
+                else:
+                    skills_data.append(
+                        {
+                            "id": sid,
+                            "code": sid,
+                            "description": f"Habilidade {sid} (não cadastrada)",
+                            "subject_id": None,
+                            "grade_ids": [],
+                            "grade_id": None,
+                            "source": "topology",
+                        }
+                    )
+            skills_data.sort(key=lambda x: str(x.get("code") or ""))
+            return jsonify(skills_data), 200
 
         # Professor: garantir schema do município para encontrar Test e ClassTest (multi-tenant)
         if user['role'] == 'professor' and user.get('city_id'):

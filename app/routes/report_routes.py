@@ -936,6 +936,219 @@ def _montar_resposta_relatorio_por_turmas(
     }
 
 
+def _sanitize_relatorio_pdf_filename(title: str) -> str:
+    t = title or "relatorio"
+    return (
+        t.replace(" ", "_")
+        .replace("/", "_")
+        .replace("\\", "_")
+        .replace(":", "_")
+        .replace("?", "_")
+        .replace("*", "_")
+        .replace('"', "_")
+        .replace("<", "_")
+        .replace(">", "_")
+        .replace("|", "_")
+    )
+
+
+def _render_relatorio_organized_pdf_response(context: Dict[str, Any], nome_avaliacao_raw: str):
+    """Renderiza `report_organized.html` com WeasyPrint e devolve resposta PDF."""
+    app_dir = os.path.dirname(os.path.dirname(__file__))  # app/
+    templates_dir = os.path.join(app_dir, "templates")
+    env = Environment(loader=FileSystemLoader(templates_dir), autoescape=select_autoescape(["html", "xml"]))
+
+    def sum_values(items, attr="value"):
+        try:
+            return sum(
+                item.get(attr, 0) if isinstance(item, dict) else getattr(item, attr, 0) for item in items
+            )
+        except (TypeError, AttributeError):
+            return 0
+
+    def cos_filter(value):
+        try:
+            return math.cos(float(value))
+        except (TypeError, ValueError):
+            return 0
+
+    def sin_filter(value):
+        try:
+            return math.sin(float(value))
+        except (TypeError, ValueError):
+            return 0
+
+    def formatar_texto_ia(texto):
+        if not texto:
+            return Markup("")
+
+        if "\n\n" not in texto:
+            texto = texto.replace("Destaques e Recomendações:", "\n\nDestaques e Recomendações:")
+            texto = texto.replace("Classificação:", "\n\nClassificação:")
+            texto = texto.replace("PARECER TÉCNICO:", "\n\nPARECER TÉCNICO:")
+            texto = re.sub(r"(\d+\.\s)", r"\n\n\1", texto)
+            texto = re.sub(r"([A-ZÁÊÔÇ][A-ZÁÊÔÇ\s]{10,}:)", r"\n\n\1", texto)
+
+        paragrafos = texto.split("\n\n")
+        resultado = []
+        for paragrafo in paragrafos:
+            paragrafo = paragrafo.strip()
+            if not paragrafo:
+                continue
+
+            if (len(paragrafo) > 10 and paragrafo.isupper() and paragrafo.endswith(":")) or (
+                len(paragrafo) > 2
+                and paragrafo[0].isdigit()
+                and paragrafo[1] == "."
+                and paragrafo[2] == " "
+            ):
+                resultado.append(
+                    f'<p style="font-weight: bold; margin-top: 12px; margin-bottom: 8px;">{paragrafo}</p>'
+                )
+            elif (
+                paragrafo.startswith("Destaques e Recomendações:")
+                or paragrafo.startswith("Classificação:")
+                or paragrafo.startswith("PARECER TÉCNICO:")
+                or paragrafo.startswith("PARECER TÉCNICO DE PARTICIPAÇÃO:")
+                or paragrafo.startswith("PARECER TÉCNICO: NOTA IDAV:")
+            ):
+                resultado.append(
+                    f'<p style="font-weight: bold; margin-top: 12px; margin-bottom: 8px;">{paragrafo}</p>'
+                )
+            elif "•" in paragrafo:
+                partes = paragrafo.split("•")
+                primeira_parte = partes[0].strip()
+                itens_lista = [item.strip() for item in partes[1:] if item.strip()]
+
+                if primeira_parte:
+                    resultado.append(f"<p>{primeira_parte}</p>")
+
+                if itens_lista:
+                    resultado.append(
+                        '<ul style="margin-left: 20px; margin-top: 8px; margin-bottom: 8px;">'
+                    )
+                    for item in itens_lista:
+                        resultado.append(f'<li style="margin-bottom: 4px;">{item}</li>')
+                    resultado.append("</ul>")
+            else:
+                paragrafo_html = paragrafo.replace("\n", "<br/>")
+                resultado.append(f'<p style="margin-top: 8px; margin-bottom: 8px;">{paragrafo_html}</p>')
+
+        return Markup("".join(resultado)) if resultado else Markup("")
+
+    env.filters["sum_values"] = sum_values
+    env.filters["cos"] = cos_filter
+    env.filters["sin"] = sin_filter
+    env.filters["formatar_texto_ia"] = formatar_texto_ia
+
+    template = env.get_template("report_organized.html")
+    html_content = template.render(**context)
+
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".html", delete=False, encoding="utf-8") as temp_html:
+        temp_html.write(html_content)
+        temp_html_path = temp_html.name
+
+    try:
+        pdf_content = HTML(filename=temp_html_path, base_url=app_dir).write_pdf()
+    finally:
+        try:
+            os.unlink(temp_html_path)
+        except OSError:
+            pass
+
+    nome_arquivo = f"relatorio_{_sanitize_relatorio_pdf_filename(nome_avaliacao_raw)}.pdf"
+    response = make_response(pdf_content)
+    response.headers["Content-Type"] = "application/pdf"
+    response.headers["Content-Disposition"] = f"attachment; filename={nome_arquivo}"
+    return response
+
+
+def _relatorio_pdf_answer_sheet(gabarito_id: str):
+    """PDF para cartão-resposta: cache em AnswerSheetReportAggregate (mesmo payload que dados-json)."""
+    from app.models.answerSheetGabarito import AnswerSheetGabarito
+    from app.models.answerSheetResult import AnswerSheetResult
+    from app.permissions.utils import get_teacher_classes
+    from app.report_analysis.answer_sheet_aggregate_service import AnswerSheetReportAggregateService
+    from app.report_analysis.routes import _resolve_report_schema
+    from app.utils.tenant_middleware import set_search_path
+
+    user = get_current_user_from_token()
+    if not user:
+        return jsonify({"error": "Usuário não autenticado"}), 401
+
+    school_id_raw = request.args.get("school_id")
+    city_id = request.args.get("city_id")
+
+    try:
+        scope_type, scope_ref_id = _determinar_escopo_por_role(user, school_id_raw, city_id)
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+
+    schema = _resolve_report_schema(scope_type, scope_ref_id, city_id)
+    if not schema:
+        return jsonify(
+            {
+                "error": "Para acessar o relatório, informe city_id ou school_id na URL (ex.: ?city_id=... ou ?school_id=...)"
+            }
+        ), 400
+
+    set_search_path(schema)
+
+    if scope_type == "school" and not city_id:
+        school_obj = School.query.get(scope_ref_id)
+        if school_obj and school_obj.city_id:
+            city_id = school_obj.city_id
+
+    gab = AnswerSheetGabarito.query.get(gabarito_id)
+    if not gab:
+        return jsonify({"error": "Gabarito não encontrado"}), 404
+
+    if scope_type == "teacher":
+        teacher_class_ids = get_teacher_classes(user.get("id"))
+        if not teacher_class_ids:
+            return jsonify({"error": "Professor não vinculado a nenhuma turma"}), 404
+        has_any = (
+            AnswerSheetResult.query.filter_by(gabarito_id=gabarito_id)
+            .join(Student, AnswerSheetResult.student_id == Student.id)
+            .filter(Student.class_id.in_(teacher_class_ids))
+            .first()
+        )
+        if not has_any:
+            return jsonify(
+                {
+                    "error": "Nenhum resultado de cartão-resposta para suas turmas neste gabarito",
+                }
+            ), 404
+
+    db.session.expire_all()
+    ntype, nid = AnswerSheetReportAggregateService._normalize_scope(scope_type, scope_ref_id)
+    status = AnswerSheetReportAggregateService.get_status(gabarito_id, ntype, nid)
+
+    if status["status"] != "ready":
+        return jsonify(
+            {
+                "error": "Relatório ainda está sendo processado",
+                "status": "processing",
+                "message": "Aguarde o processamento concluir antes de gerar o PDF. Tente novamente em alguns instantes.",
+                "has_payload": status["has_payload"],
+                "has_ai_analysis": status["has_ai_analysis"],
+                "last_update": status["last_update"].isoformat() if status["last_update"] else None,
+                "report_entity_type": "answer_sheet",
+            }
+        ), 409
+
+    aggregate = AnswerSheetReportAggregateService.get(gabarito_id, ntype, nid)
+    if not aggregate:
+        return jsonify({"error": "Relatório não encontrado"}), 404
+
+    context = aggregate.payload or {}
+    context["analise_ia"] = aggregate.ai_analysis or {}
+    context["default_logo"] = _load_default_logo()
+
+    nome_raw = gab.title or (context.get("avaliacao") or {}).get("titulo") or "cartao_resposta"
+    return _render_relatorio_organized_pdf_response(context, nome_raw)
+
+
 @bp.route('/relatorio-pdf/<string:evaluation_id>', methods=['GET'])
 @jwt_required()
 @role_required("admin", "professor", "coordenador", "diretor","tecadm")
@@ -950,11 +1163,15 @@ def relatorio_pdf(evaluation_id: str):
         school_id: ID da escola (opcional) - gera relatório por escola específica
         city_id: ID do município (opcional) - gera relatório por município
         Se nenhum parâmetro for fornecido, gera relatório de todas as turmas da avaliação
+        report_entity_type: use ``answer_sheet`` com o ID do gabarito para cartão-resposta
     
     Returns:
         Arquivo PDF do relatório para download
     """
     try:
+        if (request.args.get("report_entity_type") or "").strip().lower() == "answer_sheet":
+            return _relatorio_pdf_answer_sheet(evaluation_id)
+
         # Verificar se a avaliação existe
         test = Test.query.get(evaluation_id)
         if not test:
@@ -1024,132 +1241,9 @@ def relatorio_pdf(evaluation_id: str):
         # Adicionar logo padrão ao contexto (para templates que precisam)
         context['default_logo'] = _load_default_logo()
 
-        app_dir = os.path.dirname(os.path.dirname(__file__))  # app/
-        templates_dir = os.path.join(app_dir, 'templates')
-        env = Environment(loader=FileSystemLoader(templates_dir), autoescape=select_autoescape(['html', 'xml']))
-
-        def sum_values(items, attr='value'):
-            try:
-                return sum(item.get(attr, 0) if isinstance(item, dict) else getattr(item, attr, 0) for item in items)
-            except (TypeError, AttributeError):
-                return 0
-
-        def cos_filter(value):
-            try:
-                return math.cos(float(value))
-            except (TypeError, ValueError):
-                return 0
-
-        def sin_filter(value):
-            try:
-                return math.sin(float(value))
-            except (TypeError, ValueError):
-                return 0
-
-        def formatar_texto_ia(texto):
-            """
-            Formata texto da IA para HTML preservando quebras de linha e formatação
-            Converte quebras de linha duplas em parágrafos e simples em <br/>
-            """
-            if not texto:
-                return Markup("")
-            
-            # Se não houver quebras de linha duplas, tentar detectar padrões para quebrar
-            if '\n\n' not in texto:
-                # Detectar padrões de títulos no meio do texto
-                texto = texto.replace('Destaques e Recomendações:', '\n\nDestaques e Recomendações:')
-                texto = texto.replace('Classificação:', '\n\nClassificação:')
-                texto = texto.replace('PARECER TÉCNICO:', '\n\nPARECER TÉCNICO:')
-                # Detectar números como títulos (ex: "1. ", "2. ", "3. ")
-                texto = re.sub(r'(\d+\.\s)', r'\n\n\1', texto)
-                # Detectar títulos em maiúsculas seguidas de dois pontos
-                texto = re.sub(r'([A-ZÁÊÔÇ][A-ZÁÊÔÇ\s]{10,}:)', r'\n\n\1', texto)
-            
-            # Dividir por quebras de linha duplas (parágrafos)
-            paragrafos = texto.split('\n\n')
-            
-            resultado = []
-            for paragrafo in paragrafos:
-                paragrafo = paragrafo.strip()
-                if not paragrafo:
-                    continue
-                
-                # Verificar se é um título (maiúsculas seguidas de dois pontos, ou números como "1. ", "2. ")
-                if (len(paragrafo) > 10 and paragrafo.isupper() and paragrafo.endswith(':')) or \
-                   (len(paragrafo) > 2 and paragrafo[0].isdigit() and paragrafo[1] == '.' and paragrafo[2] == ' '):
-                    # É um título - converter para negrito
-                    resultado.append(f'<p style="font-weight: bold; margin-top: 12px; margin-bottom: 8px;">{paragrafo}</p>')
-                # Verificar se começa com títulos específicos
-                elif paragrafo.startswith('Destaques e Recomendações:') or \
-                     paragrafo.startswith('Classificação:') or \
-                     paragrafo.startswith('PARECER TÉCNICO:') or \
-                     paragrafo.startswith('PARECER TÉCNICO DE PARTICIPAÇÃO:') or \
-                     paragrafo.startswith('PARECER TÉCNICO: NOTA IDAV:'):
-                    # É um título - converter para negrito
-                    resultado.append(f'<p style="font-weight: bold; margin-top: 12px; margin-bottom: 8px;">{paragrafo}</p>')
-                # Verificar se contém bullets (•) - converter em lista
-                elif '•' in paragrafo:
-                    # Dividir por bullets
-                    partes = paragrafo.split('•')
-                    primeira_parte = partes[0].strip()
-                    itens_lista = [item.strip() for item in partes[1:] if item.strip()]
-                    
-                    if primeira_parte:
-                        resultado.append(f'<p>{primeira_parte}</p>')
-                    
-                    if itens_lista:
-                        resultado.append('<ul style="margin-left: 20px; margin-top: 8px; margin-bottom: 8px;">')
-                        for item in itens_lista:
-                            resultado.append(f'<li style="margin-bottom: 4px;">{item}</li>')
-                        resultado.append('</ul>')
-                else:
-                    # Parágrafo normal - converter quebras de linha simples em <br/>
-                    paragrafo_html = paragrafo.replace('\n', '<br/>')
-                    resultado.append(f'<p style="margin-top: 8px; margin-bottom: 8px;">{paragrafo_html}</p>')
-            
-            return Markup(''.join(resultado)) if resultado else Markup("")
-
-        env.filters['sum_values'] = sum_values
-        env.filters['cos'] = cos_filter
-        env.filters['sin'] = sin_filter
-        # formatar_texto_ia está registrado globalmente no Flask app.jinja_env
-        # Mas também registramos aqui para garantir compatibilidade com Environment customizado
-        env.filters['formatar_texto_ia'] = formatar_texto_ia
-
-        template = env.get_template('report_organized.html')
-        html_content = template.render(**context)
-
-        # SOLUÇÃO: Salvar HTML em arquivo temporário e usar filename em vez de string
-        # Isso faz o WeasyPrint processar o documento como arquivo, preservando a ordem semântica
-        # e evitando que o layout engine reorganize os blocos (DADOS/ANÁLISE)
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.html', delete=False, encoding='utf-8') as temp_html:
-            temp_html.write(html_content)
-            temp_html_path = temp_html.name
-        
-        try:
-            # base_url=app_dir para @font-face url("resources/Fonts/...") resolver em app/resources/
-            pdf_content = HTML(
-                filename=temp_html_path,
-                base_url=app_dir
-            ).write_pdf()
-        finally:
-            # Limpar arquivo temporário
-            try:
-                os.unlink(temp_html_path)
-            except OSError:
-                pass  # Ignorar erros ao deletar arquivo temporário
-
         test = Test.query.get(evaluation_id)
-        nome_avaliacao = (test.title if test else 'relatorio')
-        nome_avaliacao = nome_avaliacao.replace(' ', '_').replace('/', '_').replace('\\', '_') \
-                                       .replace(':', '_').replace('?', '_').replace('*', '_') \
-                                       .replace('"', '_').replace('<', '_').replace('>', '_').replace('|', '_')
-        nome_arquivo = f"relatorio_{nome_avaliacao}.pdf"
-
-        response = make_response(pdf_content)
-        response.headers['Content-Type'] = 'application/pdf'
-        response.headers['Content-Disposition'] = f'attachment; filename={nome_arquivo}'
-        return response
+        nome_raw = test.title if test else "relatorio"
+        return _render_relatorio_organized_pdf_response(context, nome_raw)
 
     except (ValueError, LookupError) as e:
         return jsonify({"error": str(e)}), 404

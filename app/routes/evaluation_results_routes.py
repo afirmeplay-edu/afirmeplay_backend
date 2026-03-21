@@ -1319,6 +1319,8 @@ def _gerar_tabela_detalhada_por_disciplina(avaliacao_id: str, scope_info: Dict, 
             except (ValueError, TypeError, Exception):
                 pass
 
+        use_simple_calculation = getattr(test, 'grade_calculation_type', None) == 'simple'
+
         # Log para debug
         logging.debug("Tabela detalhada: %d alunos encontrados", len(all_students))
 
@@ -1420,7 +1422,12 @@ def _gerar_tabela_detalhada_por_disciplina(avaliacao_id: str, scope_info: Dict, 
                 
                 if evaluation_result and evaluation_result.subject_results:
                     # Usar dados pré-calculados do JSON (FONTE DA VERDADE)
-                    subject_data = evaluation_result.subject_results.get(subject_id)
+                    srs = evaluation_result.subject_results
+                    subject_data = None
+                    if isinstance(srs, dict):
+                        subject_data = srs.get(subject_id)
+                        if subject_data is None:
+                            subject_data = srs.get(str(subject_id))
                     if subject_data:
                         disciplina_nota = subject_data.get('grade', 0.0)
                         disciplina_proficiencia = subject_data.get('proficiency', 0.0)
@@ -1434,7 +1441,8 @@ def _gerar_tabela_detalhada_por_disciplina(avaliacao_id: str, scope_info: Dict, 
                                 correct_answers=total_acertos,
                                 total_questions=total_respondidas,
                                 course_name=course_name,
-                                subject_name=disciplina_data['nome']
+                                subject_name=disciplina_data['nome'],
+                                use_simple_calculation=use_simple_calculation
                             )
                             disciplina_nota = result['grade']
                             disciplina_proficiencia = result['proficiency']
@@ -1447,7 +1455,8 @@ def _gerar_tabela_detalhada_por_disciplina(avaliacao_id: str, scope_info: Dict, 
                         correct_answers=total_acertos,
                         total_questions=total_respondidas,
                         course_name=course_name,
-                        subject_name=disciplina_data['nome']
+                        subject_name=disciplina_data['nome'],
+                        use_simple_calculation=use_simple_calculation
                     )
                     disciplina_nota = result['grade']
                     disciplina_proficiencia = result['proficiency']
@@ -2790,18 +2799,29 @@ def listar_alunos():
         }
 
         total_questions = TestQuestion.query.filter_by(test_id=avaliacao_id).count()
-        
+        test_id_str = str(avaliacao_id)
+        sid_list = [s.id for s in all_students]
+        answered_rows = (
+            db.session.query(StudentAnswer.student_id, func.count(StudentAnswer.id))
+            .filter(
+                StudentAnswer.test_id == test_id_str,
+                StudentAnswer.student_id.in_(sid_list),
+            )
+            .group_by(StudentAnswer.student_id)
+            .all()
+        )
+        answered_by_student = {row[0]: int(row[1]) for row in answered_rows}
+
         results = []
         for student in all_students:
             er = results_dict.get(student.id)
+            total_answered = answered_by_student.get(student.id, 0)
             if er:
-                total_answered = er["correct_answers"]
                 correct_answers = er["correct_answers"]
                 proficiency_original = er["proficiency"]
                 classification_original = er["classification"]
                 status = "concluida"
             else:
-                total_answered = 0
                 correct_answers = 0
                 proficiency_original = 0.0
                 classification_original = None

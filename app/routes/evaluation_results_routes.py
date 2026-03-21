@@ -63,6 +63,17 @@ from app.models.studentTestOlimpics import StudentTestOlimpics
 from app.models.schoolTeacher import SchoolTeacher
 from app.models.skill import Skill
 from app.utils.tenant_middleware import city_id_to_schema_name, set_search_path, get_current_tenant_context
+from app.routes.answer_sheet_evaluation_listing import (
+    build_answer_sheet_evaluation_by_id_json,
+    build_answer_sheet_relatorio_detalhado_json,
+    fetch_answer_sheet_gabarito_for_detail,
+    is_answer_sheet_report_entity,
+    listar_avaliacoes_answer_sheet_response,
+    obter_escolas_por_gabarito,
+    obter_gabaritos_por_municipio,
+    obter_series_por_gabarito_escola,
+    obter_turmas_por_gabarito_escola_serie,
+)
 from app import db
 import logging
 from typing import Dict, Any, List, Optional
@@ -678,6 +689,26 @@ def listar_avaliacoes():
         if escola_id_validada:
             escola = escola_id_validada
             logging.info(f"Escola validada para {user.get('role')}: {escola}")
+        
+        if is_answer_sheet_report_entity():
+            municipio_str = str(municipio).strip() if municipio else ""
+            if not municipio_str:
+                return jsonify({"error": "Município é obrigatório"}), 400
+            set_search_path(city_id_to_schema_name(municipio_str))
+            return listar_avaliacoes_answer_sheet_response(
+                estado=estado or "",
+                municipio=municipio_str,
+                escola=escola or "all",
+                serie=serie or "all",
+                turma=turma or "all",
+                avaliacao=avaliacao or "all",
+                page=page,
+                per_page=per_page,
+                user=user,
+                permissao=permissao,
+                scope_info=scope_info,
+                city_data=city_data,
+            )
         
         # Buscar escolas do escopo baseado nas permissões
         escolas_escopo = scope_info.get('escolas', [])
@@ -2879,6 +2910,19 @@ def get_evaluation_by_id(evaluation_id: str):
         if not user:
             return jsonify({"error": "Usuário não encontrado"}), 401
 
+        if is_answer_sheet_report_entity():
+            permissao = verificar_permissao_filtros(user)
+            if not permissao.get("permitted"):
+                return jsonify({"error": permissao.get("error", "Acesso negado")}), 403
+            gab, results, err = fetch_answer_sheet_gabarito_for_detail(
+                user, permissao, evaluation_id
+            )
+            if err:
+                resp, code = err
+                return resp, code
+            payload = build_answer_sheet_evaluation_by_id_json(gab, results or [])
+            return jsonify(payload), 200
+
         # Verificar se avaliação existe (eager load subject_rel para evitar query extra)
         test = Test.query.options(joinedload(Test.subject_rel)).get(evaluation_id)
         if not test:
@@ -2972,6 +3016,19 @@ def relatorio_detalhado(evaluation_id: str):
         user = get_current_user_from_token()
         if not user:
             return jsonify({"error": "Usuário não encontrado"}), 401
+
+        if is_answer_sheet_report_entity():
+            permissao = verificar_permissao_filtros(user)
+            if not permissao.get("permitted"):
+                return jsonify({"error": permissao.get("error", "Acesso negado")}), 403
+            gab, results, err = fetch_answer_sheet_gabarito_for_detail(
+                user, permissao, evaluation_id
+            )
+            if err:
+                resp, code = err
+                return resp, code
+            payload = build_answer_sheet_relatorio_detalhado_json(gab, results or [])
+            return jsonify(payload), 200
 
         test = Test.query.options(joinedload(Test.subject_rel)).get(evaluation_id)
         if not test:
@@ -6377,19 +6434,40 @@ def obter_opcoes_filtros():
             # 3. Se município fornecido, retornar avaliações (nível 2)
             if municipio:
                 escola_param = request.args.get('escola', 'all')
-                response["avaliacoes"] = _obter_avaliacoes_por_municipio(municipio, user, permissao, escola_param)
-                
-                # 4. Se avaliação fornecido, retornar escolas (nível 3)
-                if avaliacao:
-                    response["escolas"] = _obter_escolas_por_avaliacao(avaliacao, municipio, user, permissao)
-                    
-                    # 5. Se escola fornecido, retornar séries (nível 4)
-                    if escola:
-                        response["series"] = _obter_series_por_escola(avaliacao, escola, municipio, user, permissao)
-                        
-                        # 6. Se série fornecido, retornar turmas (nível 5)
-                        if serie:
-                            response["turmas"] = _obter_turmas_por_serie(avaliacao, escola, serie, municipio, user, permissao)
+                municipio_str = str(municipio).strip()
+                if is_answer_sheet_report_entity():
+                    set_search_path(city_id_to_schema_name(municipio_str))
+                    response["avaliacoes"] = obter_gabaritos_por_municipio(
+                        municipio_str, user, permissao, escola_param
+                    )
+                    if avaliacao:
+                        response["escolas"] = obter_escolas_por_gabarito(
+                            avaliacao, municipio_str, user, permissao
+                        )
+                        if escola:
+                            response["series"] = obter_series_por_gabarito_escola(
+                                avaliacao, escola, municipio_str, user, permissao
+                            )
+                            if serie:
+                                response["turmas"] = obter_turmas_por_gabarito_escola_serie(
+                                    avaliacao, escola, serie, municipio_str, user, permissao
+                                )
+                else:
+                    response["avaliacoes"] = _obter_avaliacoes_por_municipio(
+                        municipio, user, permissao, escola_param
+                    )
+                    if avaliacao:
+                        response["escolas"] = _obter_escolas_por_avaliacao(
+                            avaliacao, municipio, user, permissao
+                        )
+                        if escola:
+                            response["series"] = _obter_series_por_escola(
+                                avaliacao, escola, municipio, user, permissao
+                            )
+                            if serie:
+                                response["turmas"] = _obter_turmas_por_serie(
+                                    avaliacao, escola, serie, municipio, user, permissao
+                                )
         
         return jsonify(response), 200
 

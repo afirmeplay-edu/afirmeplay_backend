@@ -440,6 +440,26 @@ COMMENT ON TABLE "{schema}".report_aggregates IS 'Cache de relatórios agregados
 CREATE INDEX IF NOT EXISTS idx_report_aggregates_test ON "{schema}".report_aggregates(test_id);
 CREATE INDEX IF NOT EXISTS idx_report_aggregates_scope ON "{schema}".report_aggregates(scope_type, scope_id);
 
+CREATE TABLE IF NOT EXISTS "{schema}".answer_sheet_report_aggregates (
+    id VARCHAR PRIMARY KEY,
+    gabarito_id VARCHAR NOT NULL REFERENCES "{schema}".answer_sheet_gabaritos(id) ON DELETE CASCADE,
+    scope_type VARCHAR(32) NOT NULL,
+    scope_id VARCHAR,
+    payload JSON NOT NULL DEFAULT '{{}}',
+    student_count INTEGER NOT NULL DEFAULT 0,
+    ai_analysis JSON DEFAULT '{{}}',
+    ai_analysis_generated_at TIMESTAMP,
+    ai_analysis_is_dirty BOOLEAN NOT NULL DEFAULT false,
+    generated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    is_dirty BOOLEAN NOT NULL DEFAULT false,
+    CONSTRAINT uq_answer_sheet_report_aggregate_scope UNIQUE(gabarito_id, scope_type, scope_id)
+);
+COMMENT ON TABLE "{schema}".answer_sheet_report_aggregates IS 'Cache de relatórios agregados para cartão-resposta';
+CREATE INDEX IF NOT EXISTS idx_as_report_agg_gabarito ON "{schema}".answer_sheet_report_aggregates(gabarito_id);
+CREATE INDEX IF NOT EXISTS idx_as_report_agg_scope ON "{schema}".answer_sheet_report_aggregates(scope_type, scope_id);
+
 CREATE TABLE IF NOT EXISTS "{schema}".games (
     id VARCHAR PRIMARY KEY,
     url VARCHAR(500) NOT NULL,

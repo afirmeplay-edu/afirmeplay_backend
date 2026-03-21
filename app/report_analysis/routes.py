@@ -30,18 +30,30 @@ from app.permissions import role_required, get_current_user_from_token
 from app.models.test import Test
 from app.models.classTest import ClassTest
 from app.models.school import School
+from app.models.answerSheetGabarito import AnswerSheetGabarito
+from app.models.answerSheetResult import AnswerSheetResult
+from app.models.student import Student
 from app.permissions.utils import get_teacher_classes, get_manager_school, get_teacher
 from app.permissions.rules import can_view_test
 from app.routes.report_routes import _determinar_escopo_por_role
 import logging
 
 from app.report_analysis.services import ReportAggregateService
+from app.report_analysis.answer_sheet_aggregate_service import AnswerSheetReportAggregateService
 from app.report_analysis.tasks import trigger_rebuild_if_needed
+from app.report_analysis.tasks import trigger_rebuild_answer_sheet_if_needed
+from app.report_analysis.tasks import rebuild_answer_sheet_report_for_scope
 from app.report_analysis.tasks import _get_schema_for_scope
 from app.utils.tenant_middleware import city_id_to_schema_name, set_search_path, get_current_tenant_context
 from app import db
 
 logger = logging.getLogger(__name__)
+
+REPORT_ENTITY_TYPE_ANSWER_SHEET = "answer_sheet"
+
+
+def _is_answer_sheet_report_request() -> bool:
+    return (request.args.get("report_entity_type") or "").strip().lower() == REPORT_ENTITY_TYPE_ANSWER_SHEET
 
 
 def _resolve_report_schema(scope_type: str, scope_ref_id, city_id_from_request: str = None):
@@ -62,6 +74,104 @@ def _resolve_report_schema(scope_type: str, scope_ref_id, city_id_from_request: 
         return _get_schema_for_scope(scope_type, scope_ref_id)
     return None
 
+
+def _dados_json_answer_sheet(gabarito_id: str, user: dict, scope_type: str, scope_ref_id, city_id: str):
+    """Fluxo GET /reports/dados-json para cartão-resposta (gabarito)."""
+    gab = AnswerSheetGabarito.query.get(gabarito_id)
+    if not gab:
+        return jsonify({"error": "Gabarito não encontrado"}), 404
+
+    if scope_type == "teacher":
+        teacher_class_ids = get_teacher_classes(user.get("id"))
+        if not teacher_class_ids:
+            return jsonify({"error": "Professor não vinculado a nenhuma turma"}), 404
+        has_any = (
+            AnswerSheetResult.query.filter_by(gabarito_id=gabarito_id)
+            .join(Student, AnswerSheetResult.student_id == Student.id)
+            .filter(Student.class_id.in_(teacher_class_ids))
+            .first()
+        )
+        if not has_any:
+            return jsonify(
+                {"error": "Nenhum resultado de cartão-resposta para suas turmas neste gabarito"}
+            ), 404
+
+    db.session.expire_all()
+    ntype, nid = AnswerSheetReportAggregateService._normalize_scope(scope_type, scope_ref_id)
+    aggregate = AnswerSheetReportAggregateService.get(gabarito_id, ntype, nid)
+    status = AnswerSheetReportAggregateService.get_status(gabarito_id, ntype, nid)
+
+    if status["status"] != "ready":
+        city_id_for_task = (
+            city_id
+            or (scope_ref_id if scope_type == "city" else None)
+            or user.get("city_id")
+        )
+        try:
+            trigger_rebuild_answer_sheet_if_needed.delay(
+                gabarito_id, scope_type, scope_ref_id, city_id_for_task
+            )
+        except Exception as e:
+            logger.error("Erro ao disparar rebuild answer_sheet: %s", e)
+
+        return jsonify(
+            {
+                "status": "processing",
+                "message": "Relatório sendo processado em background",
+                "has_payload": status["has_payload"],
+                "has_ai_analysis": status["has_ai_analysis"],
+                "is_dirty": status["is_dirty"],
+                "ai_analysis_is_dirty": status["ai_analysis_is_dirty"],
+                "last_update": status["last_update"].isoformat() if status["last_update"] else None,
+                "evaluation_id": gabarito_id,
+                "gabarito_id": gabarito_id,
+                "report_entity_type": REPORT_ENTITY_TYPE_ANSWER_SHEET,
+                "scope_type": scope_type,
+                "scope_id": scope_ref_id,
+            }
+        ), 202
+
+    payload = aggregate.payload or {}
+    ai_analysis = aggregate.ai_analysis or {}
+    payload["analise_ia"] = ai_analysis
+    return jsonify({"status": "ready", **payload, "report_entity_type": REPORT_ENTITY_TYPE_ANSWER_SHEET}), 200
+
+
+def _status_answer_sheet(gabarito_id: str, user: dict, scope_type: str, scope_ref_id, city_id: str):
+    gab = AnswerSheetGabarito.query.get(gabarito_id)
+    if not gab:
+        return jsonify({"error": "Gabarito não encontrado"}), 404
+    if scope_type == "teacher":
+        teacher_class_ids = get_teacher_classes(user.get("id"))
+        if not teacher_class_ids:
+            return jsonify({"error": "Professor não vinculado a nenhuma turma"}), 404
+        has_any = (
+            AnswerSheetResult.query.filter_by(gabarito_id=gabarito_id)
+            .join(Student, AnswerSheetResult.student_id == Student.id)
+            .filter(Student.class_id.in_(teacher_class_ids))
+            .first()
+        )
+        if not has_any:
+            return jsonify(
+                {"error": "Nenhum resultado de cartão-resposta para suas turmas neste gabarito"}
+            ), 404
+
+    db.session.expire_all()
+    ntype, nid = AnswerSheetReportAggregateService._normalize_scope(scope_type, scope_ref_id)
+    status = AnswerSheetReportAggregateService.get_status(gabarito_id, ntype, nid)
+    return jsonify(
+        {
+            **status,
+            "last_update": status["last_update"].isoformat() if status["last_update"] else None,
+            "evaluation_id": gabarito_id,
+            "gabarito_id": gabarito_id,
+            "report_entity_type": REPORT_ENTITY_TYPE_ANSWER_SHEET,
+            "scope_type": scope_type,
+            "scope_id": scope_ref_id,
+        }
+    ), 200
+
+
 # Criar blueprint
 bp = Blueprint('report_analysis', __name__, url_prefix='/reports')
 
@@ -81,6 +191,7 @@ def dados_json(evaluation_id: str):
     Query Parameters:
         school_id: ID da escola (opcional)
         city_id: ID do município (opcional)
+        report_entity_type: opcional; use ``answer_sheet`` para relatório de cartão-resposta (gabarito).
     
     Returns:
         - HTTP 200: Relatório pronto com dados completos
@@ -115,6 +226,9 @@ def dados_json(evaluation_id: str):
             school_obj = School.query.get(scope_ref_id)
             if school_obj and school_obj.city_id:
                 city_id = school_obj.city_id
+
+        if _is_answer_sheet_report_request():
+            return _dados_json_answer_sheet(evaluation_id, user, scope_type, scope_ref_id, city_id)
         
         # Verificar se a avaliação existe
         test = Test.query.get(evaluation_id)
@@ -208,6 +322,7 @@ def get_report_status(evaluation_id: str):
     Query Parameters:
         school_id: ID da escola (opcional)
         city_id: ID do município (opcional)
+        report_entity_type: opcional; ``answer_sheet`` para cartão-resposta.
     
     Returns:
         JSON com status do relatório
@@ -240,6 +355,9 @@ def get_report_status(evaluation_id: str):
             school_obj = School.query.get(scope_ref_id)
             if school_obj and school_obj.city_id:
                 city_id = school_obj.city_id
+
+        if _is_answer_sheet_report_request():
+            return _status_answer_sheet(evaluation_id, user, scope_type, scope_ref_id, city_id)
         
         # Verificar se a avaliação existe
         test = Test.query.get(evaluation_id)
@@ -295,14 +413,51 @@ def force_rebuild(evaluation_id: str):
             }), 400
         
         set_search_path(schema)
+
+        from app.report_analysis.debounce import ReportDebounceService
+
+        if (request.args.get("report_entity_type") or "").strip().lower() == REPORT_ENTITY_TYPE_ANSWER_SHEET:
+            gab = AnswerSheetGabarito.query.get(evaluation_id)
+            if not gab:
+                return jsonify({"error": "Gabarito não encontrado"}), 404
+            ReportDebounceService.clear_debounce(
+                evaluation_id, scope_type=scope_type, scope_id=scope_ref_id, kind="answer_sheet"
+            )
+            city_id_for_rebuild = (
+                city_id
+                or (scope_ref_id if scope_type == "city" else None)
+                or user.get("city_id")
+            )
+            if use_sync:
+                result = rebuild_answer_sheet_report_for_scope(
+                    evaluation_id, scope_type, scope_ref_id, city_id_for_rebuild
+                )
+                if result.get("success"):
+                    return jsonify({"message": "Rebuild concluído com sucesso", "result": result}), 200
+                return jsonify({"error": "Erro ao processar rebuild", "result": result}), 500
+            task = rebuild_answer_sheet_report_for_scope.delay(
+                evaluation_id, scope_type, scope_ref_id, city_id_for_rebuild
+            )
+            return jsonify(
+                {
+                    "message": "Rebuild forçado agendado",
+                    "task_id": task.id,
+                    "evaluation_id": evaluation_id,
+                    "gabarito_id": evaluation_id,
+                    "report_entity_type": REPORT_ENTITY_TYPE_ANSWER_SHEET,
+                    "scope_type": scope_type,
+                    "scope_id": scope_ref_id,
+                }
+            ), 200
         
         test = Test.query.get(evaluation_id)
         if not test:
             return jsonify({"error": "Avaliação não encontrada"}), 404
         
         # Limpar debounce
-        from app.report_analysis.debounce import ReportDebounceService
-        ReportDebounceService.clear_debounce(evaluation_id, scope_type=scope_type, scope_id=scope_ref_id)
+        ReportDebounceService.clear_debounce(
+            evaluation_id, scope_type=scope_type, scope_id=scope_ref_id, kind="test"
+        )
         
         city_id_for_rebuild = (
             city_id

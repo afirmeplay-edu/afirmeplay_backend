@@ -73,28 +73,39 @@ class ReportDebounceService:
         return cls._redis_client
     
     @classmethod
-    def _make_key(cls, test_id: str, scope_type: Optional[str] = None, scope_id: Optional[str] = None) -> str:
-        """Gera a chave Redis incluindo escopo para evitar colisão entre scopes do mesmo test."""
+    def _make_key(
+        cls,
+        entity_id: str,
+        scope_type: Optional[str] = None,
+        scope_id: Optional[str] = None,
+        *,
+        kind: str = "test",
+    ) -> str:
+        """Gera a chave Redis. kind=test (avaliação) ou kind=answer_sheet (cartão-resposta)."""
+        prefix = "report_rebuild:as:" if kind == "answer_sheet" else "report_rebuild:"
         if scope_type:
-            return f"report_rebuild:{test_id}:{scope_type}:{scope_id or 'all'}"
-        return f"report_rebuild:{test_id}"
+            return f"{prefix}{entity_id}:{scope_type}:{scope_id or 'all'}"
+        return f"{prefix}{entity_id}"
 
     @classmethod
     def should_trigger_rebuild(
         cls,
-        test_id: str,
+        entity_id: str,
         ttl: Optional[int] = None,
         scope_type: Optional[str] = None,
         scope_id: Optional[str] = None,
+        *,
+        kind: str = "test",
     ) -> bool:
         """
         Verifica se deve disparar rebuild (debounce).
         
         Args:
-            test_id: ID da avaliação
+            entity_id: ID da avaliação ou gabarito
             ttl: Tempo de vida da chave em segundos (padrão: 60s)
             scope_type: Tipo de escopo (city, school, teacher, overall)
             scope_id: ID do escopo
+            kind: test | answer_sheet
         
         Returns:
             True se deve disparar rebuild, False se está em debounce
@@ -104,7 +115,7 @@ class ReportDebounceService:
             return True
         
         ttl = ttl or cls._debounce_ttl
-        key = cls._make_key(test_id, scope_type, scope_id)
+        key = cls._make_key(entity_id, scope_type, scope_id, kind=kind)
         
         try:
             result = redis_client.set(key, "1", ex=ttl, nx=True)
@@ -116,23 +127,26 @@ class ReportDebounceService:
     @classmethod
     def clear_debounce(
         cls,
-        test_id: str,
+        entity_id: str,
         scope_type: Optional[str] = None,
         scope_id: Optional[str] = None,
+        *,
+        kind: str = "test",
     ) -> None:
         """
         Remove debounce manualmente (útil para testes ou rebuild forçado).
         
         Args:
-            test_id: ID da avaliação
+            entity_id: ID da avaliação ou gabarito
             scope_type: Tipo de escopo (opcional)
             scope_id: ID do escopo (opcional)
+            kind: test | answer_sheet
         """
         redis_client = cls._get_redis_client()
         if not redis_client:
             return
         
-        key = cls._make_key(test_id, scope_type, scope_id)
+        key = cls._make_key(entity_id, scope_type, scope_id, kind=kind)
         try:
             redis_client.delete(key)
             logger.info(f"Debounce removido para {key}")
@@ -142,17 +156,20 @@ class ReportDebounceService:
     @classmethod
     def get_remaining_ttl(
         cls,
-        test_id: str,
+        entity_id: str,
         scope_type: Optional[str] = None,
         scope_id: Optional[str] = None,
+        *,
+        kind: str = "test",
     ) -> Optional[int]:
         """
         Retorna TTL restante do debounce.
         
         Args:
-            test_id: ID da avaliação
+            entity_id: ID da avaliação ou gabarito
             scope_type: Tipo de escopo (opcional)
             scope_id: ID do escopo (opcional)
+            kind: test | answer_sheet
         
         Returns:
             TTL restante em segundos ou None se não existe
@@ -161,7 +178,7 @@ class ReportDebounceService:
         if not redis_client:
             return None
         
-        key = cls._make_key(test_id, scope_type, scope_id)
+        key = cls._make_key(entity_id, scope_type, scope_id, kind=kind)
         try:
             ttl = redis_client.ttl(key)
             return ttl if ttl > 0 else None

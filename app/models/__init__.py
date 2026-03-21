@@ -34,6 +34,7 @@ from .answerSheetGabarito import AnswerSheetGabarito
 from app.services.cartao_resposta.answer_sheet_gabarito_generation import AnswerSheetGabaritoGeneration
 from .answerSheetGenerationJob import AnswerSheetGenerationJob
 from .answerSheetResult import AnswerSheetResult
+from .answerSheetReportAggregate import AnswerSheetReportAggregate
 
 from .calendar_event import CalendarEvent, CalendarVisibilityScope
 from .calendar_event_target import CalendarEventTarget, CalendarTargetType

@@ -313,6 +313,16 @@ class AnswerSheetCorrectionService:
                 existing_result.detection_method = 'geometric'
                 
                 db.session.commit()
+                try:
+                    from app.report_analysis.answer_sheet_aggregate_service import (
+                        invalidate_answer_sheet_report_cache_after_result,
+                    )
+
+                    invalidate_answer_sheet_report_cache_after_result(
+                        gabarito_id, student_id, commit=True
+                    )
+                except Exception as inv_err:
+                    self.logger.warning("Invalidate answer_sheet report cache: %s", inv_err)
                 return existing_result.to_dict()
             else:
                 # Criar novo
@@ -335,6 +345,16 @@ class AnswerSheetCorrectionService:
                 
                 db.session.add(result)
                 db.session.commit()
+                try:
+                    from app.report_analysis.answer_sheet_aggregate_service import (
+                        invalidate_answer_sheet_report_cache_after_result,
+                    )
+
+                    invalidate_answer_sheet_report_cache_after_result(
+                        gabarito_id, student_id, commit=True
+                    )
+                except Exception as inv_err:
+                    self.logger.warning("Invalidate answer_sheet report cache: %s", inv_err)
                 return result.to_dict()
                 
         except Exception as e:

@@ -2329,6 +2329,16 @@ class AnswerSheetCorrectionNewGrid:
                 
                 db.session.commit()
                 self.logger.info(f"✅ AnswerSheetResult atualizado: {existing_result.id}")
+                try:
+                    from app.report_analysis.answer_sheet_aggregate_service import (
+                        invalidate_answer_sheet_report_cache_after_result,
+                    )
+
+                    invalidate_answer_sheet_report_cache_after_result(
+                        gabarito_id, student_id, commit=True
+                    )
+                except Exception as inv_err:
+                    self.logger.warning("Invalidate answer_sheet report cache: %s", inv_err)
                 return existing_result.to_dict()
             else:
                 # Criar novo
@@ -2352,6 +2362,16 @@ class AnswerSheetCorrectionNewGrid:
                 db.session.add(result)
                 db.session.commit()
                 self.logger.info(f"✅ AnswerSheetResult criado: {result.id}")
+                try:
+                    from app.report_analysis.answer_sheet_aggregate_service import (
+                        invalidate_answer_sheet_report_cache_after_result,
+                    )
+
+                    invalidate_answer_sheet_report_cache_after_result(
+                        gabarito_id, student_id, commit=True
+                    )
+                except Exception as inv_err:
+                    self.logger.warning("Invalidate answer_sheet report cache: %s", inv_err)
                 return result.to_dict()
                 
         except Exception as e:

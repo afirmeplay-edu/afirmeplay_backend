@@ -386,7 +386,9 @@ def trigger_rebuild_if_needed(
         schema = _get_schema_for_scope(scope_type, scope_id)
     _set_tenant_schema(schema)
     
-    should_trigger = ReportDebounceService.should_trigger_rebuild(test_id, scope_type=scope_type, scope_id=scope_id)
+    should_trigger = ReportDebounceService.should_trigger_rebuild(
+        test_id, scope_type=scope_type, scope_id=scope_id, kind="test"
+    )
     if not should_trigger:
         print(f"[TRIGGER_REBUILD] ⏸️ Rebuild em debounce para {scope_type}:{scope_id}. Ignorando.")
         logger.info(f"Rebuild em debounce para test_id={test_id}. Ignorando.")
@@ -431,5 +433,195 @@ def trigger_rebuild_if_needed(
         'scope_type': scope_type,
         'scope_id': scope_id,
         'task_id': task.id
+    }
+
+
+@celery_app.task(bind=True, max_retries=3, default_retry_delay=60)
+def rebuild_answer_sheet_report_for_scope(
+    self: Task,
+    gabarito_id: str,
+    scope_type: str,
+    scope_id: Optional[str] = None,
+    city_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Rebuild do cache de relatório para cartão-resposta (gabarito)."""
+    from app.models.answerSheetGabarito import AnswerSheetGabarito
+    from app.report_analysis.answer_sheet_aggregate_service import AnswerSheetReportAggregateService
+    from app.report_analysis.answer_sheet_report_builder import build_answer_sheet_report_payload
+    from app.services.ai_analysis_service import AIAnalysisService
+
+    try:
+        if city_id and scope_type in ("overall", "all", "city", "school"):
+            schema = city_id_to_schema_name(city_id)
+        else:
+            schema = _get_schema_for_scope(scope_type, scope_id)
+        _set_tenant_schema(schema)
+
+        gab = AnswerSheetGabarito.query.get(gabarito_id)
+        if not gab:
+            raise ValueError(f"Gabarito {gabarito_id} não encontrado")
+
+        ntype, nid = AnswerSheetReportAggregateService._normalize_scope(scope_type or "overall", scope_id)
+
+        aggregate_cached = AnswerSheetReportAggregateService.get(gabarito_id, ntype, nid)
+        use_cached = bool(
+            aggregate_cached and not aggregate_cached.is_dirty and aggregate_cached.payload
+        )
+
+        if use_cached:
+            payload = aggregate_cached.payload or {}
+            student_count = (
+                (payload.get("total_alunos") or {}).get("total_geral") or {}
+            ).get("avaliados", 0)
+        else:
+            try:
+                payload = build_answer_sheet_report_payload(
+                    gabarito_id, ntype, nid, include_ai=False
+                )
+            except LookupError as le:
+                logger.warning("Answer sheet report sem dados no escopo: %s", le)
+                from app.report_analysis.answer_sheet_report_builder import empty_answer_sheet_payload
+
+                payload = empty_answer_sheet_payload(gab, ntype, nid)
+            student_count = (
+                (payload.get("total_alunos") or {}).get("total_geral") or {}
+            ).get("avaliados", 0)
+            AnswerSheetReportAggregateService.save_payload(
+                gabarito_id=gabarito_id,
+                scope_type=ntype,
+                scope_id=nid,
+                payload=payload,
+                student_count=student_count,
+                commit=True,
+            )
+            db.session.expire_all()
+
+        try:
+            ai_service = AIAnalysisService()
+            ai_analysis = ai_service.analyze_report_data(
+                {
+                    "avaliacao": payload.get("avaliacao", {}),
+                    "total_alunos": payload.get("total_alunos", {}),
+                    "niveis_aprendizagem": payload.get("niveis_aprendizagem", {}),
+                    "proficiencia": payload.get("proficiencia", {}),
+                    "nota_geral": payload.get("nota_geral", {}),
+                    "acertos_por_habilidade": payload.get("acertos_por_habilidade", {}),
+                    "scope_type": ntype,
+                    "scope_id": nid,
+                }
+            )
+            AnswerSheetReportAggregateService.save_ai_analysis(
+                gabarito_id=gabarito_id,
+                scope_type=ntype,
+                scope_id=nid,
+                ai_analysis=ai_analysis,
+                commit=True,
+            )
+            db.session.expire_all()
+        except Exception as e:
+            logger.error("Erro IA answer_sheet report: %s", e, exc_info=True)
+            AnswerSheetReportAggregateService.mark_ai_dirty(
+                gabarito_id, ntype, nid, commit=True
+            )
+
+        db.session.expire_all()
+        final_status = AnswerSheetReportAggregateService.get_status(gabarito_id, ntype, nid)
+        return {
+            "success": True,
+            "gabarito_id": gabarito_id,
+            "scope_type": ntype,
+            "scope_id": nid,
+            "student_count": student_count,
+            "final_status": final_status,
+        }
+    except Exception as e:
+        logger.error("Erro rebuild answer_sheet report: %s", e, exc_info=True)
+        raise self.retry(exc=e)
+
+
+@celery_app.task(bind=True, max_retries=2, default_retry_delay=30)
+def rebuild_answer_sheet_reports_for_gabarito(
+    self: Task, gabarito_id: str, city_id: Optional[str] = None
+) -> Dict[str, Any]:
+    """Agenda rebuild dos escopos dirty (ou overall inicial) para um gabarito."""
+    from app.models.answerSheetReportAggregate import AnswerSheetReportAggregate
+
+    schema = city_id_to_schema_name(city_id) if city_id else None
+    _set_tenant_schema(schema)
+
+    aggregates = AnswerSheetReportAggregate.query.filter_by(gabarito_id=gabarito_id).all()
+    if not aggregates:
+        scopes_to_rebuild = [("overall", None)]
+    else:
+        scopes_to_rebuild = []
+        for agg in aggregates:
+            if agg.is_dirty or agg.ai_analysis_is_dirty:
+                scopes_to_rebuild.append((agg.scope_type, agg.scope_id))
+    if not scopes_to_rebuild:
+        return {
+            "success": True,
+            "gabarito_id": gabarito_id,
+            "message": "Nenhum escopo precisa de rebuild",
+            "scopes_processed": 0,
+        }
+    task_ids = []
+    for st, sid in scopes_to_rebuild:
+        t = rebuild_answer_sheet_report_for_scope.delay(gabarito_id, st, sid, city_id)
+        task_ids.append({"scope_type": st, "scope_id": sid, "task_id": t.id})
+    return {
+        "success": True,
+        "gabarito_id": gabarito_id,
+        "scopes_processed": len(task_ids),
+        "task_ids": task_ids,
+    }
+
+
+@celery_app.task(bind=True, max_retries=1, default_retry_delay=30)
+def trigger_rebuild_answer_sheet_if_needed(
+    self: Task,
+    gabarito_id: str,
+    scope_type: str,
+    scope_id: Optional[str] = None,
+    city_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    from app.report_analysis.answer_sheet_aggregate_service import AnswerSheetReportAggregateService
+    from app.report_analysis.debounce import ReportDebounceService
+
+    if city_id and scope_type in ("overall", "all", "city", "school"):
+        schema = city_id_to_schema_name(city_id)
+    else:
+        schema = _get_schema_for_scope(scope_type, scope_id)
+    _set_tenant_schema(schema)
+
+    should_trigger = ReportDebounceService.should_trigger_rebuild(
+        gabarito_id, scope_type=scope_type, scope_id=scope_id, kind="answer_sheet"
+    )
+    if not should_trigger:
+        return {
+            "success": False,
+            "message": "Rebuild em debounce",
+            "gabarito_id": gabarito_id,
+        }
+
+    ntype, nid = AnswerSheetReportAggregateService._normalize_scope(scope_type or "overall", scope_id)
+    aggregate = AnswerSheetReportAggregateService.get(gabarito_id, ntype, nid)
+    needs_rebuild = not aggregate or aggregate.is_dirty or aggregate.ai_analysis_is_dirty
+    if not needs_rebuild:
+        return {
+            "success": True,
+            "message": "Relatório já está atualizado",
+            "gabarito_id": gabarito_id,
+            "scope_type": ntype,
+            "scope_id": nid,
+        }
+
+    task = rebuild_answer_sheet_report_for_scope.delay(gabarito_id, scope_type, scope_id, city_id)
+    return {
+        "success": True,
+        "message": "Rebuild agendado",
+        "gabarito_id": gabarito_id,
+        "scope_type": scope_type,
+        "scope_id": scope_id,
+        "task_id": task.id,
     }
 

@@ -2535,7 +2535,8 @@ def _calcular_estatisticas_consolidadas_cartao(scope_info, nivel_granularidade, 
             if not r.classification:
                 continue
             c = (r.classification or '').lower()
-            if 'abaixo' in c or 'básico' in c:
+            # "Básico" contém "básico": testar "abaixo" antes para não confundir com "Abaixo do Básico"
+            if 'abaixo' in c:
                 dist['abaixo_do_basico'] += 1
             elif 'básico' in c or 'basico' in c:
                 dist['basico'] += 1
@@ -2600,7 +2601,7 @@ def _calcular_estatisticas_grupo_cartao(class_ids, gabarito_id):
     dist = {'abaixo_do_basico': 0, 'basico': 0, 'adequado': 0, 'avancado': 0}
     for r in resultados:
         c = (r.classification or '').lower()
-        if 'abaixo' in c or 'básico' in c:
+        if 'abaixo' in c:
             dist['abaixo_do_basico'] += 1
         elif 'básico' in c or 'basico' in c:
             dist['basico'] += 1
@@ -2771,7 +2772,7 @@ def _calcular_resultados_por_disciplina_cartao(scope_info, nivel_granularidade, 
                 )
             by_subject[sid]['soma_nota'] += float(nota_disc) if nota_disc is not None else 0.0
             cl = (data.get('classification') or '').lower()
-            if 'abaixo' in cl or 'básico' in cl:
+            if 'abaixo' in cl:
                 by_subject[sid]['dist']['abaixo_do_basico'] += 1
             elif 'básico' in cl or 'basico' in cl:
                 by_subject[sid]['dist']['basico'] += 1
@@ -2882,9 +2883,15 @@ def _gerar_tabela_detalhada_cartao(scope_info, nivel_granularidade, gabarito_id,
             disc_data = (pbs or {}).get(str(subject_id), pbs.get(subject_id, {}))
             disciplina_proficiencia = disc_data.get('proficiency') if isinstance(disc_data, dict) else (r.proficiency if r else 0)
             disciplina_classificacao = disc_data.get('classification') if isinstance(disc_data, dict) else (r.classification if r else None)
-            disciplina_nota = (disciplina_proficiencia / 35.0) if disciplina_proficiencia else 0
-            if r and r.grade is not None:
-                disciplina_nota = r.grade
+            # Nota por disciplina: calcular a partir dos acertos do bloco (mesma base de respostas_por_questao).
+            # proficiency_by_subject.grade às vezes foi gravado com a nota geral — não priorizar o JSON.
+            nq = len(q_numbers)
+            if nq > 0:
+                disciplina_nota = (total_acertos / nq) * 10.0
+            elif isinstance(disc_data, dict) and disc_data.get('grade') is not None:
+                disciplina_nota = float(disc_data['grade'])
+            else:
+                disciplina_nota = 0.0
             alunos_disciplina.append({
                 "id": str(s.id),
                 "nome": s.name or "N/A",
@@ -2951,6 +2958,9 @@ def _calcular_dados_gerais_alunos_cartao(disciplinas_out, grade_name):
             dados_alunos[aluno_id]["total_acertos_geral"] += aluno_data["total_acertos"]
             dados_alunos[aluno_id]["total_questoes_geral"] += aluno_data["total_questoes_disciplina"]
             dados_alunos[aluno_id]["total_respondidas_geral"] += aluno_data["total_respondidas"]
+    from app.services.cartao_resposta.proficiency_by_subject import _get_course_name_from_grade
+    from app.services.evaluation_calculator import EvaluationCalculator
+    course_name_geral = _get_course_name_from_grade(grade_name)
     alunos_gerais = []
     for aluno_id, dados in dados_alunos.items():
         nota_geral = sum(dados["notas_disciplinas"]) / len(dados["notas_disciplinas"]) if dados["notas_disciplinas"] else 0.0
@@ -2958,11 +2968,9 @@ def _calcular_dados_gerais_alunos_cartao(disciplinas_out, grade_name):
         percentual = (dados["total_acertos_geral"] / dados["total_questoes_geral"] * 100) if dados["total_questoes_geral"] > 0 else 0.0
         cl = None
         if dados["proficiencias_disciplinas"]:
-            media_prof = proficiencia_geral
-            if "finais" in (grade_name or "").lower() or "médio" in (grade_name or "").lower() or "medio" in (grade_name or "").lower():
-                cl = "Avançado" if media_prof >= 340 else "Adequado" if media_prof >= 290 else "Básico" if media_prof >= 212.50 else "Abaixo do Básico"
-            else:
-                cl = "Avançado" if media_prof >= 263 else "Adequado" if media_prof >= 213 else "Básico" if media_prof >= 163 else "Abaixo do Básico"
+            cl = EvaluationCalculator.determine_classification(
+                proficiencia_geral, course_name_geral, "GERAL"
+            )
         alunos_gerais.append({
             "id": dados["id"],
             "nome": dados["nome"],

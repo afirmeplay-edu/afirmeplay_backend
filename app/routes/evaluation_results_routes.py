@@ -64,6 +64,7 @@ from app.models.schoolTeacher import SchoolTeacher
 from app.models.skill import Skill
 from app.utils.tenant_middleware import city_id_to_schema_name, set_search_path, get_current_tenant_context
 from app.routes.answer_sheet_evaluation_listing import (
+    answer_sheet_target_classes_visible_for_user,
     build_answer_sheet_evaluation_by_id_json,
     build_answer_sheet_relatorio_detalhado_json,
     fetch_answer_sheet_gabarito_for_detail,
@@ -2914,7 +2915,7 @@ def get_evaluation_by_id(evaluation_id: str):
             permissao = verificar_permissao_filtros(user)
             if not permissao.get("permitted"):
                 return jsonify({"error": permissao.get("error", "Acesso negado")}), 403
-            gab, results, err = fetch_answer_sheet_gabarito_for_detail(
+            gab, results, err, _city_id = fetch_answer_sheet_gabarito_for_detail(
                 user, permissao, evaluation_id
             )
             if err:
@@ -3021,13 +3022,18 @@ def relatorio_detalhado(evaluation_id: str):
             permissao = verificar_permissao_filtros(user)
             if not permissao.get("permitted"):
                 return jsonify({"error": permissao.get("error", "Acesso negado")}), 403
-            gab, results, err = fetch_answer_sheet_gabarito_for_detail(
+            gab, results, err, city_id = fetch_answer_sheet_gabarito_for_detail(
                 user, permissao, evaluation_id
             )
             if err:
                 resp, code = err
                 return resp, code
-            payload = build_answer_sheet_relatorio_detalhado_json(gab, results or [])
+            visible = answer_sheet_target_classes_visible_for_user(
+                gab, user, permissao, city_id or ""
+            )
+            payload = build_answer_sheet_relatorio_detalhado_json(
+                gab, results or [], visible
+            )
             return jsonify(payload), 200
 
         test = Test.query.options(joinedload(Test.subject_rel)).get(evaluation_id)

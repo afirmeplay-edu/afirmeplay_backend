@@ -5,11 +5,10 @@ Listagem e filtros de cartão-resposta em evaluation-results (Acertos e níveis 
 from __future__ import annotations
 
 from collections import defaultdict
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from flask import jsonify, request
-from sqlalchemy import cast, String
-
+from sqlalchemy import or_
 from sqlalchemy.orm import joinedload
 
 from app import db
@@ -24,7 +23,12 @@ from app.models.teacher import Teacher
 from app.models.teacherClass import TeacherClass
 from app.utils.decimal_helpers import round_to_two_decimals
 from app.utils.tenant_middleware import city_id_to_schema_name, set_search_path
-from app.report_analysis.answer_sheet_report_builder import _question_skills_map_from_gabarito
+from app.report_analysis.answer_sheet_report_builder import (
+    _question_skills_map_from_gabarito,
+    answer_sheet_total_question_count,
+    get_answer_sheet_target_classes_for_report,
+    ordered_question_numbers_for_gabarito,
+)
 
 REPORT_ENTITY_ANSWER_SHEET = "answer_sheet"
 
@@ -33,35 +37,79 @@ def is_answer_sheet_report_entity() -> bool:
     return (request.args.get("report_entity_type") or "").strip().lower() == REPORT_ENTITY_ANSWER_SHEET
 
 
-def base_gabarito_results_query():
-    return (
-        db.session.query(AnswerSheetGabarito.id, AnswerSheetGabarito.title)
-        .join(AnswerSheetResult, AnswerSheetResult.gabarito_id == AnswerSheetGabarito.id)
-        .join(Student, AnswerSheetResult.student_id == Student.id)
-        .join(Class, Student.class_id == Class.id)
-        .join(School, Class._school_id == School.id)
-    )
-
-
 def obter_gabaritos_por_municipio(
     municipio_id: str, user: dict, permissao: dict, escola_param: str = "all"
 ) -> List[Dict[str, Any]]:
+    """
+    Cartões-resposta do município com ou sem resultado (não exige AnswerSheetResult).
+    Liga escola/turma do gabarito ou resultados já existentes ao city_id.
+    """
     city = City.query.get(municipio_id)
     if not city:
         return []
     if permissao["scope"] != "all" and user.get("city_id") != city.id:
         return []
 
-    q = base_gabarito_results_query().filter(School.city_id == city.id)
+    school_ids_city = [s[0] for s in db.session.query(School.id).filter(School.city_id == city.id).all()]
+    if not school_ids_city:
+        return []
+
+    class_ids_in_city = db.session.query(Class.id).filter(Class._school_id.in_(school_ids_city))
+    gab_ids_from_results = (
+        db.session.query(AnswerSheetGabarito.id)
+        .join(AnswerSheetResult, AnswerSheetResult.gabarito_id == AnswerSheetGabarito.id)
+        .join(Student, AnswerSheetResult.student_id == Student.id)
+        .join(Class, Student.class_id == Class.id)
+        .join(School, Class._school_id == School.id)
+        .filter(School.city_id == city.id)
+        .distinct()
+    )
+
+    conds = [
+        AnswerSheetGabarito.school_id.in_(school_ids_city),
+        AnswerSheetGabarito.class_id.in_(class_ids_in_city),
+        AnswerSheetGabarito.id.in_(gab_ids_from_results),
+    ]
+    q = AnswerSheetGabarito.query.filter(or_(*conds))
 
     if escola_param and escola_param.lower() != "all":
-        q = q.filter(School.id == escola_param)
+        eid = escola_param
+        class_ids_escola = db.session.query(Class.id).filter(Class._school_id == eid)
+        q = q.filter(
+            or_(
+                AnswerSheetGabarito.school_id == eid,
+                AnswerSheetGabarito.class_id.in_(class_ids_escola),
+                AnswerSheetGabarito.id.in_(
+                    db.session.query(AnswerSheetGabarito.id)
+                    .join(AnswerSheetResult, AnswerSheetResult.gabarito_id == AnswerSheetGabarito.id)
+                    .join(Student, AnswerSheetResult.student_id == Student.id)
+                    .join(Class, Student.class_id == Class.id)
+                    .filter(Class._school_id == eid)
+                    .distinct()
+                ),
+            )
+        )
 
     if permissao["scope"] == "escola":
         if user.get("role") in ("diretor", "coordenador"):
             manager = Manager.query.filter_by(user_id=user["id"]).first()
             if manager and manager.school_id:
-                q = q.filter(School.id == manager.school_id)
+                mid = manager.school_id
+                class_ids_mgr = db.session.query(Class.id).filter(Class._school_id == mid)
+                q = q.filter(
+                    or_(
+                        AnswerSheetGabarito.school_id == mid,
+                        AnswerSheetGabarito.class_id.in_(class_ids_mgr),
+                        AnswerSheetGabarito.id.in_(
+                            db.session.query(AnswerSheetGabarito.id)
+                            .join(AnswerSheetResult, AnswerSheetResult.gabarito_id == AnswerSheetGabarito.id)
+                            .join(Student, AnswerSheetResult.student_id == Student.id)
+                            .join(Class, Student.class_id == Class.id)
+                            .filter(Class._school_id == mid)
+                            .distinct()
+                        ),
+                    )
+                )
             else:
                 return []
         elif user.get("role") == "professor":
@@ -72,11 +120,42 @@ def obter_gabaritos_por_municipio(
             cids = [tc.class_id for tc in tcs]
             if not cids:
                 return []
-            q = q.filter(Student.class_id.in_(cids))
+            school_ids_prof = [
+                r[0]
+                for r in db.session.query(Class._school_id)
+                .filter(Class.id.in_(cids))
+                .distinct()
+                .all()
+                if r[0]
+            ]
+            gab_ids_prof = (
+                db.session.query(AnswerSheetGabarito.id)
+                .join(AnswerSheetResult, AnswerSheetResult.gabarito_id == AnswerSheetGabarito.id)
+                .join(Student, AnswerSheetResult.student_id == Student.id)
+                .filter(Student.class_id.in_(cids))
+                .distinct()
+            )
+            prof_parts = [
+                AnswerSheetGabarito.created_by == str(user.get("id") or ""),
+                AnswerSheetGabarito.class_id.in_(cids),
+                AnswerSheetGabarito.id.in_(gab_ids_prof),
+            ]
+            if school_ids_prof:
+                prof_parts.append(AnswerSheetGabarito.school_id.in_(school_ids_prof))
+            q = q.filter(or_(*prof_parts))
         else:
             return []
-    rows = q.distinct().all()
-    return [{"id": str(r[0]), "titulo": r[1] or "Cartão resposta"} for r in rows]
+
+    # DISTINCT só em id: PostgreSQL não permite DISTINCT na linha inteira se há colunas json.
+    gab_ids = [r[0] for r in q.with_entities(AnswerSheetGabarito.id).distinct().all()]
+    if not gab_ids:
+        return []
+    rows = (
+        AnswerSheetGabarito.query.filter(AnswerSheetGabarito.id.in_(gab_ids))
+        .order_by(AnswerSheetGabarito.created_at.desc())
+        .all()
+    )
+    return [{"id": str(r.id), "titulo": r.title or "Cartão resposta"} for r in rows]
 
 
 def obter_escolas_por_gabarito(
@@ -88,32 +167,21 @@ def obter_escolas_por_gabarito(
     if permissao["scope"] != "all" and user.get("city_id") != city.id:
         return []
 
-    q = (
-        School.query.with_entities(School.id, School.name)
-        .join(Class, School.id == cast(Class.school_id, String))
-        .join(Student, Class.id == Student.class_id)
-        .join(AnswerSheetResult, Student.id == AnswerSheetResult.student_id)
-        .filter(AnswerSheetResult.gabarito_id == gabarito_id)
+    gab = AnswerSheetGabarito.query.get(gabarito_id)
+    if not gab:
+        return []
+
+    classes = answer_sheet_target_classes_visible_for_user(gab, user, permissao, municipio_id)
+    school_ids = {c.school_id for c in classes if getattr(c, "school_id", None)}
+    if not school_ids:
+        return []
+    escolas = (
+        School.query.filter(School.id.in_(school_ids))
         .filter(School.city_id == city.id)
+        .order_by(School.name)
+        .all()
     )
-    if permissao["scope"] == "escola":
-        if user.get("role") in ("diretor", "coordenador"):
-            manager = Manager.query.filter_by(user_id=user["id"]).first()
-            if manager and manager.school_id:
-                q = q.filter(School.id == manager.school_id)
-            else:
-                return []
-        elif user.get("role") == "professor":
-            teacher = Teacher.query.filter_by(user_id=user["id"]).first()
-            if not teacher:
-                return []
-            tcs = TeacherClass.query.filter_by(teacher_id=teacher.id).all()
-            cids = [tc.class_id for tc in tcs]
-            if not cids:
-                return []
-            q = q.filter(Class.id.in_(cids))
-    escolas = q.distinct().all()
-    return [{"id": str(e[0]), "nome": e[1]} for e in escolas]
+    return [{"id": str(e.id), "nome": e.name} for e in escolas]
 
 
 def obter_series_por_gabarito_escola(
@@ -124,27 +192,20 @@ def obter_series_por_gabarito_escola(
     city = City.query.get(municipio_id)
     if not city:
         return []
-    q = (
-        Grade.query.with_entities(Grade.id, Grade.name)
-        .join(Class, Grade.id == Class.grade_id)
-        .join(Student, Class.id == Student.class_id)
-        .join(AnswerSheetResult, Student.id == AnswerSheetResult.student_id)
-        .join(School, Class._school_id == School.id)
-        .filter(AnswerSheetResult.gabarito_id == gabarito_id)
-        .filter(School.id == escola_id)
-        .filter(School.city_id == city.id)
-    )
-    if permissao["scope"] == "escola" and user.get("role") == "professor":
-        teacher = Teacher.query.filter_by(user_id=user["id"]).first()
-        if not teacher:
-            return []
-        tcs = TeacherClass.query.filter_by(teacher_id=teacher.id).all()
-        cids = [tc.class_id for tc in tcs]
-        if not cids:
-            return []
-        q = q.filter(Class.id.in_(cids))
-    series = q.distinct().all()
-    return [{"id": str(s[0]), "name": s[1]} for s in series]
+    if permissao["scope"] != "all" and user.get("city_id") != city.id:
+        return []
+
+    gab = AnswerSheetGabarito.query.get(gabarito_id)
+    if not gab:
+        return []
+
+    classes = answer_sheet_target_classes_visible_for_user(gab, user, permissao, municipio_id)
+    classes = [c for c in classes if str(c.school_id) == str(escola_id)]
+    grade_ids = {c.grade_id for c in classes if getattr(c, "grade_id", None)}
+    if not grade_ids:
+        return []
+    rows = Grade.query.filter(Grade.id.in_(grade_ids)).order_by(Grade.name).all()
+    return [{"id": str(s.id), "name": s.name} for s in rows]
 
 
 def obter_turmas_por_gabarito_escola_serie(
@@ -158,27 +219,21 @@ def obter_turmas_por_gabarito_escola_serie(
     city = City.query.get(municipio_id)
     if not city:
         return []
-    q = (
-        Class.query.with_entities(Class.id, Class.name)
-        .join(Student, Class.id == Student.class_id)
-        .join(AnswerSheetResult, Student.id == AnswerSheetResult.student_id)
-        .join(School, Class._school_id == School.id)
-        .filter(AnswerSheetResult.gabarito_id == gabarito_id)
-        .filter(School.id == escola_id)
-        .filter(Class.grade_id == serie_id)
-        .filter(School.city_id == city.id)
-    )
-    if permissao["scope"] == "escola" and user.get("role") == "professor":
-        teacher = Teacher.query.filter_by(user_id=user["id"]).first()
-        if not teacher:
-            return []
-        tcs = TeacherClass.query.filter_by(teacher_id=teacher.id).all()
-        cids = [tc.class_id for tc in tcs]
-        if not cids:
-            return []
-        q = q.filter(Class.id.in_(cids))
-    turmas = q.distinct().all()
-    return [{"id": str(t[0]), "name": t[1] or f"Turma {t[0]}"} for t in turmas]
+    if permissao["scope"] != "all" and user.get("city_id") != city.id:
+        return []
+
+    gab = AnswerSheetGabarito.query.get(gabarito_id)
+    if not gab:
+        return []
+
+    classes = answer_sheet_target_classes_visible_for_user(gab, user, permissao, municipio_id)
+    turmas = [
+        c
+        for c in classes
+        if str(c.school_id) == str(escola_id) and str(c.grade_id) == str(serie_id)
+    ]
+    turmas.sort(key=lambda c: (c.name or "") or str(c.id))
+    return [{"id": str(t.id), "name": t.name or f"Turma {t.id}"} for t in turmas]
 
 
 def results_for_listing_filters(
@@ -187,6 +242,7 @@ def results_for_listing_filters(
     escola: Optional[str],
     serie: Optional[str],
     turma: Optional[str],
+    allowed_class_ids: Optional[Set[str]] = None,
 ) -> List[AnswerSheetResult]:
     q = (
         AnswerSheetResult.query.filter_by(gabarito_id=gabarito_id)
@@ -196,6 +252,20 @@ def results_for_listing_filters(
         .options(joinedload(AnswerSheetResult.student))
     )
     q = q.filter(School.city_id == municipio_id)
+    if allowed_class_ids is not None:
+        if not allowed_class_ids:
+            return []
+        from uuid import UUID
+
+        uuids = []
+        for x in allowed_class_ids:
+            try:
+                uuids.append(UUID(str(x)))
+            except ValueError:
+                continue
+        if not uuids:
+            return []
+        q = q.filter(Class.id.in_(uuids))
     if escola and escola.lower() != "all":
         q = q.filter(School.id == escola)
     if serie and serie.lower() != "all":
@@ -288,7 +358,11 @@ def listar_avaliacoes_answer_sheet_response(
     if not gab:
         return jsonify({"error": "Gabarito não encontrado"}), 404
 
-    results = results_for_listing_filters(avaliacao, municipio, escola, serie, turma)
+    scope_classes = get_answer_sheet_target_classes_for_report(gab, "city", municipio)
+    allowed_scope = {str(c.id) for c in scope_classes}
+    results = results_for_listing_filters(
+        avaliacao, municipio, escola, serie, turma, allowed_class_ids=allowed_scope
+    )
     if permissao["scope"] == "escola" and user.get("role") == "professor":
         teacher = Teacher.query.filter_by(user_id=user["id"]).first()
         if teacher:
@@ -415,7 +489,9 @@ def resolve_city_id_for_answer_sheet_detail(user: dict, permissao: dict) -> Tupl
     return user_city, None
 
 
-def user_can_access_gabarito(user: dict, permissao: dict, gab: AnswerSheetGabarito) -> bool:
+def user_can_access_gabarito(
+    user: dict, permissao: dict, gab: AnswerSheetGabarito, city_id: Optional[str] = None
+) -> bool:
     from app.permissions.roles import Roles
 
     role = Roles.normalize(user.get("role", ""))
@@ -424,18 +500,45 @@ def user_can_access_gabarito(user: dict, permissao: dict, gab: AnswerSheetGabari
     if permissao.get("scope") == "municipio":
         return True
 
+    if not city_id:
+        if role in (Roles.DIRETOR, Roles.COORDENADOR):
+            manager = Manager.query.filter_by(user_id=user["id"]).first()
+            if not manager or not manager.school_id:
+                return False
+            return (
+                AnswerSheetResult.query.filter_by(gabarito_id=gab.id)
+                .join(Student, AnswerSheetResult.student_id == Student.id)
+                .join(Class, Student.class_id == Class.id)
+                .filter(Class._school_id == manager.school_id)
+                .first()
+                is not None
+            )
+        if role == Roles.PROFESSOR:
+            if str(gab.created_by or "") == str(user.get("id") or ""):
+                return True
+            teacher = Teacher.query.filter_by(user_id=user["id"]).first()
+            if not teacher:
+                return False
+            tcs = TeacherClass.query.filter_by(teacher_id=teacher.id).all()
+            cids = [tc.class_id for tc in tcs]
+            if not cids:
+                return False
+            return (
+                AnswerSheetResult.query.filter_by(gabarito_id=gab.id)
+                .join(Student, AnswerSheetResult.student_id == Student.id)
+                .filter(Student.class_id.in_(cids))
+                .first()
+                is not None
+            )
+        return False
+
+    classes = get_answer_sheet_target_classes_for_report(gab, "city", city_id)
+
     if role in (Roles.DIRETOR, Roles.COORDENADOR):
         manager = Manager.query.filter_by(user_id=user["id"]).first()
         if not manager or not manager.school_id:
             return False
-        return (
-            AnswerSheetResult.query.filter_by(gabarito_id=gab.id)
-            .join(Student, AnswerSheetResult.student_id == Student.id)
-            .join(Class, Student.class_id == Class.id)
-            .filter(Class._school_id == manager.school_id)
-            .first()
-            is not None
-        )
+        return any(str(c.school_id) == str(manager.school_id) for c in classes)
 
     if role == Roles.PROFESSOR:
         if str(gab.created_by or "") == str(user.get("id") or ""):
@@ -444,18 +547,37 @@ def user_can_access_gabarito(user: dict, permissao: dict, gab: AnswerSheetGabari
         if not teacher:
             return False
         tcs = TeacherClass.query.filter_by(teacher_id=teacher.id).all()
-        cids = [tc.class_id for tc in tcs]
-        if not cids:
-            return False
-        return (
-            AnswerSheetResult.query.filter_by(gabarito_id=gab.id)
-            .join(Student, AnswerSheetResult.student_id == Student.id)
-            .filter(Student.class_id.in_(cids))
-            .first()
-            is not None
-        )
+        allowed = {str(tc.class_id) for tc in tcs}
+        return any(str(c.id) in allowed for c in classes)
 
     return False
+
+
+def answer_sheet_target_classes_visible_for_user(
+    gab: AnswerSheetGabarito, user: dict, permissao: dict, city_id: str
+) -> List[Class]:
+    """Turmas do cartão no município, respeitando escopo diretor/professor."""
+    from app.permissions.roles import Roles
+
+    classes = get_answer_sheet_target_classes_for_report(gab, "city", city_id)
+    role = Roles.normalize(user.get("role", ""))
+    if permissao.get("scope") in ("all", "municipio"):
+        return classes
+    if role in (Roles.DIRETOR, Roles.COORDENADOR):
+        manager = Manager.query.filter_by(user_id=user["id"]).first()
+        if not manager or not manager.school_id:
+            return []
+        return [c for c in classes if str(c.school_id) == str(manager.school_id)]
+    if role == Roles.PROFESSOR:
+        if str(gab.created_by or "") == str(user.get("id") or ""):
+            return classes
+        teacher = Teacher.query.filter_by(user_id=user["id"]).first()
+        if not teacher:
+            return []
+        tcs = TeacherClass.query.filter_by(teacher_id=teacher.id).all()
+        allowed = {str(tc.class_id) for tc in tcs}
+        return [c for c in classes if str(c.id) in allowed]
+    return classes
 
 
 def answer_sheet_results_for_detail(
@@ -464,39 +586,42 @@ def answer_sheet_results_for_detail(
     from app.permissions.roles import Roles
 
     role = Roles.normalize(user.get("role", ""))
-    q = AnswerSheetResult.query.filter_by(gabarito_id=gab.id).options(
-        joinedload(AnswerSheetResult.student)
-    )
+
+    def _by_class_ids(class_ids: List[Any]) -> List[AnswerSheetResult]:
+        if not class_ids:
+            return []
+        return (
+            AnswerSheetResult.query.filter_by(gabarito_id=gab.id)
+            .options(joinedload(AnswerSheetResult.student))
+            .join(Student, AnswerSheetResult.student_id == Student.id)
+            .filter(Student.class_id.in_(class_ids))
+            .all()
+        )
 
     if permissao.get("scope") in ("all", "municipio"):
-        return q.all()
+        target = get_answer_sheet_target_classes_for_report(gab, "overall", None)
+        return _by_class_ids([c.id for c in target])
 
     if role in (Roles.DIRETOR, Roles.COORDENADOR):
         manager = Manager.query.filter_by(user_id=user["id"]).first()
         if not manager or not manager.school_id:
             return []
-        return (
-            q.join(Student, AnswerSheetResult.student_id == Student.id)
-            .join(Class, Student.class_id == Class.id)
-            .filter(Class._school_id == manager.school_id)
-            .all()
+        target = get_answer_sheet_target_classes_for_report(
+            gab, "school", str(manager.school_id)
         )
+        return _by_class_ids([c.id for c in target])
 
     if role == Roles.PROFESSOR:
         if str(gab.created_by or "") == str(user.get("id") or ""):
-            return q.all()
+            target = get_answer_sheet_target_classes_for_report(gab, "overall", None)
+            return _by_class_ids([c.id for c in target])
         teacher = Teacher.query.filter_by(user_id=user["id"]).first()
         if not teacher:
             return []
-        tcs = TeacherClass.query.filter_by(teacher_id=teacher.id).all()
-        cids = [tc.class_id for tc in tcs]
-        if not cids:
-            return []
-        return (
-            q.join(Student, AnswerSheetResult.student_id == Student.id)
-            .filter(Student.class_id.in_(cids))
-            .all()
+        target = get_answer_sheet_target_classes_for_report(
+            gab, "teacher", str(teacher.id)
         )
+        return _by_class_ids([c.id for c in target])
 
     return []
 
@@ -549,31 +674,36 @@ def stats_from_answer_sheet_results(results: List[AnswerSheetResult]) -> Dict[st
 
 def fetch_answer_sheet_gabarito_for_detail(
     user: dict, permissao: dict, gabarito_id: str
-) -> Tuple[Optional[AnswerSheetGabarito], Optional[List[AnswerSheetResult]], Optional[Tuple[Any, int]]]:
+) -> Tuple[
+    Optional[AnswerSheetGabarito],
+    Optional[List[AnswerSheetResult]],
+    Optional[Tuple[Any, int]],
+    Optional[str],
+]:
     """
     Resolve city/schema, carrega gabarito e verifica acesso.
-    Retorna (gabarito, results, None) ou (None, None, (Response Flask, status)).
+    Retorna (gabarito, results, erro_ou_None, city_id) em sucesso city_id preenchido.
     """
     if not permissao.get("permitted"):
         return None, None, (
             jsonify({"error": permissao.get("error", "Acesso negado")}),
             403,
-        )
+        ), None
 
     city_id, err = resolve_city_id_for_answer_sheet_detail(user, permissao)
     if err:
-        return None, None, err
+        return None, None, err, None
 
     set_search_path(city_id_to_schema_name(city_id))
     gab = AnswerSheetGabarito.query.get(gabarito_id)
     if not gab:
-        return None, None, (jsonify({"error": "Gabarito não encontrado"}), 404)
+        return None, None, (jsonify({"error": "Gabarito não encontrado"}), 404), None
 
-    if not user_can_access_gabarito(user, permissao, gab):
-        return None, None, (jsonify({"error": "Acesso negado"}), 403)
+    if not user_can_access_gabarito(user, permissao, gab, city_id):
+        return None, None, (jsonify({"error": "Acesso negado"}), 403), None
 
     results = answer_sheet_results_for_detail(user, permissao, gab)
-    return gab, results, None
+    return gab, results, None, city_id
 
 
 def build_answer_sheet_evaluation_by_id_json(
@@ -582,6 +712,7 @@ def build_answer_sheet_evaluation_by_id_json(
     from app.models.test import Test
 
     stats = stats_from_answer_sheet_results(results)
+    nq = answer_sheet_total_question_count(gab)
     disciplina = "N/A"
     if gab.test_id:
         t = (
@@ -608,53 +739,19 @@ def build_answer_sheet_evaluation_by_id_json(
         else None,
         "status": "concluida",
         "report_entity_type": REPORT_ENTITY_ANSWER_SHEET,
+        "total_questoes": nq,
         **stats,
     }
 
 
-def _ordered_question_numbers_from_gabarito(gab: AnswerSheetGabarito) -> List[int]:
-    cfg = gab.blocks_config or {}
-    topo = cfg.get("topology") or {}
-    blocks = topo.get("blocks") or []
-    nums: List[int] = []
-    seen: set = set()
-    for block in blocks:
-        for q in block.get("questions") or []:
-            qn = q.get("q") or q.get("numero")
-            if qn is None:
-                continue
-            try:
-                n = int(qn)
-            except (TypeError, ValueError):
-                continue
-            if n not in seen:
-                seen.add(n)
-                nums.append(n)
-    if nums:
-        return nums
-    correct_json = gab.correct_answers or {}
-    if isinstance(correct_json, str):
-        import json
-
-        correct_json = json.loads(correct_json) or {}
-    keys: List[int] = []
-    for k in (correct_json or {}).keys():
-        try:
-            keys.append(int(k))
-        except (TypeError, ValueError):
-            continue
-    keys.sort()
-    if keys:
-        return keys
-    nq = gab.num_questions or 0
-    return list(range(1, nq + 1)) if nq > 0 else []
-
-
 def build_answer_sheet_relatorio_detalhado_json(
-    gab: AnswerSheetGabarito, results: List[AnswerSheetResult]
+    gab: AnswerSheetGabarito,
+    results: List[AnswerSheetResult],
+    target_classes: Optional[List[Class]] = None,
 ) -> Dict[str, Any]:
     """
     Mesmo formato de GET /relatorio-detalhado (Test), para cartão-resposta (gabarito).
+    Com target_classes, inclui todos os alunos matriculados nessas turmas (sem resultado = nao_respondida).
     """
     from uuid import UUID
 
@@ -674,7 +771,7 @@ def build_answer_sheet_relatorio_detalhado_json(
         except (TypeError, ValueError):
             continue
 
-    question_nums = _ordered_question_numbers_from_gabarito(gab)
+    question_nums = ordered_question_numbers_for_gabarito(gab)
     if not question_nums:
         question_nums = sorted(gab_map.keys())
 
@@ -742,13 +839,11 @@ def build_answer_sheet_relatorio_detalhado_json(
             }
         )
 
-    alunos_data: List[Dict[str, Any]] = []
-    for res in results:
+    def row_concluida(res: AnswerSheetResult) -> Optional[Dict[str, Any]]:
         student = res.student
         if not student:
-            continue
+            return None
         turma_nome = student.class_.name if student.class_ else "N/A"
-
         respostas: List[Dict[str, Any]] = []
         for qn in question_nums:
             ca = gab_map.get(qn)
@@ -769,23 +864,82 @@ def build_answer_sheet_relatorio_detalhado_json(
                     "tempo_gasto": 120,
                 }
             )
-
         prof = res.proficiency
-        alunos_data.append(
-            {
-                "id": student.id,
-                "nome": student.name or (student.user.name if student.user else "N/A"),
-                "turma": turma_nome,
-                "respostas": respostas,
-                "total_acertos": res.correct_answers,
-                "total_erros": res.incorrect_answers,
-                "total_em_branco": res.unanswered_questions,
-                "nota_final": float(res.grade or 0),
-                "proficiencia": round_to_two_decimals(float(prof)) if prof is not None else 0.0,
-                "classificacao": res.classification,
-                "status": "concluida",
-            }
+        return {
+            "id": student.id,
+            "nome": student.name or (student.user.name if student.user else "N/A"),
+            "turma": turma_nome,
+            "respostas": respostas,
+            "total_acertos": res.correct_answers,
+            "total_erros": res.incorrect_answers,
+            "total_em_branco": res.unanswered_questions,
+            "nota_final": float(res.grade or 0),
+            "proficiencia": round_to_two_decimals(float(prof)) if prof is not None else 0.0,
+            "classificacao": res.classification,
+            "status": "concluida",
+        }
+
+    def row_nao_respondida(student: Student) -> Dict[str, Any]:
+        turma_nome = student.class_.name if student.class_ else "N/A"
+        respostas: List[Dict[str, Any]] = []
+        nq = len(question_nums)
+        for qn in question_nums:
+            qid = f"{gab.id}-q{qn}"
+            respostas.append(
+                {
+                    "questao_id": qid,
+                    "questao_numero": qn,
+                    "resposta_correta": False,
+                    "resposta_em_branco": True,
+                    "tempo_gasto": 0,
+                }
+            )
+        return {
+            "id": student.id,
+            "nome": student.name or (student.user.name if student.user else "N/A"),
+            "turma": turma_nome,
+            "respostas": respostas,
+            "total_acertos": 0,
+            "total_erros": 0,
+            "total_em_branco": nq,
+            "nota_final": 0.0,
+            "proficiencia": 0.0,
+            "classificacao": None,
+            "status": "nao_respondida",
+        }
+
+    alunos_data: List[Dict[str, Any]] = []
+    if target_classes:
+        by_sid = {str(r.student_id): r for r in results if r.student_id}
+        class_ids = [c.id for c in target_classes]
+        enrolled = (
+            Student.query.options(joinedload(Student.class_), joinedload(Student.user))
+            .filter(Student.class_id.in_(class_ids))
+            .order_by(Student.class_id, Student.name)
+            .all()
         )
+        listed: set = set()
+        for student in enrolled:
+            sid = str(student.id)
+            listed.add(sid)
+            res = by_sid.get(sid)
+            if res:
+                row = row_concluida(res)
+                if row:
+                    alunos_data.append(row)
+            else:
+                alunos_data.append(row_nao_respondida(student))
+        for res in results:
+            sid = str(res.student_id) if res.student_id else ""
+            if sid and sid not in listed:
+                row = row_concluida(res)
+                if row:
+                    alunos_data.append(row)
+    else:
+        for res in results:
+            row = row_concluida(res)
+            if row:
+                alunos_data.append(row)
 
     avaliacao_data = {
         "id": gab.id,

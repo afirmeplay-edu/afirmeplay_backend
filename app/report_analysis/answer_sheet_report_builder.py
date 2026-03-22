@@ -4,10 +4,11 @@ Monta o payload de relatório (cartão-resposta) compatível com o consumo de /r
 """
 from __future__ import annotations
 
-from collections import defaultdict
+from collections import OrderedDict, defaultdict
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Set, Tuple
 
+from sqlalchemy import desc, func
 from sqlalchemy.orm import joinedload
 
 from app import db
@@ -52,24 +53,97 @@ def _fetch_skill_code_description_by_ids(skill_ids: List[str]) -> Dict[str, Tupl
     return {str(sk.id): (sk.code, sk.description) for sk in rows}
 
 
+def _correct_answers_int_keys(gabarito: AnswerSheetGabarito) -> Dict[int, Any]:
+    raw = gabarito.correct_answers
+    if isinstance(raw, str):
+        import json
+
+        raw = json.loads(raw) or {}
+    out: Dict[int, Any] = {}
+    for k, v in (raw or {}).items():
+        try:
+            out[int(k)] = v
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
+def answer_sheet_total_question_count(gabarito: AnswerSheetGabarito) -> int:
+    """
+    Total de questões do cartão: alinha num_questions, chaves do gabarito e topologia
+    (evita listar só o subconjunto da topology quando há duplicatas ou buracos).
+    """
+    n = int(gabarito.num_questions or 0)
+    correct = _correct_answers_int_keys(gabarito)
+    if correct:
+        n = max(n, max(correct.keys()))
+    cfg = gabarito.blocks_config or {}
+    topo = cfg.get("topology") or {}
+    blocks = topo.get("blocks") or []
+    flat_n = 0
+    explicit_max = 0
+    for block in blocks:
+        for q in block.get("questions") or []:
+            flat_n += 1
+            raw = q.get("q")
+            if raw is None:
+                raw = q.get("numero")
+            if raw is not None:
+                try:
+                    explicit_max = max(explicit_max, int(raw))
+                except (TypeError, ValueError):
+                    pass
+    return max(n, explicit_max, flat_n)
+
+
+def ordered_question_numbers_for_gabarito(gabarito: AnswerSheetGabarito) -> List[int]:
+    """Lista 1..N como nas avaliações em prova (N = total de questões do gabarito)."""
+    n = answer_sheet_total_question_count(gabarito)
+    if n <= 0:
+        return []
+    return list(range(1, n + 1))
+
+
 def _question_skills_map_from_gabarito(gabarito: AnswerSheetGabarito) -> Dict[int, List[str]]:
-    """Mapeia número da questão -> lista de IDs de habilidade (topology)."""
+    """
+    Mapeia número da questão -> IDs de habilidade na ordem da topologia (blocos/questões).
+    Se faltar q/numero, usa a posição sequencial na folha (1..) como nas avaliações normais.
+    Duas entradas com o mesmo número de questão unificam as habilidades sem sobrescrever.
+    """
     out: Dict[int, List[str]] = {}
     cfg = gabarito.blocks_config or {}
     topo = cfg.get("topology") or {}
     blocks = topo.get("blocks") or []
+    flat_index = 0
+
+    def _merge_skills(qn: int, skills: List[Any]) -> None:
+        skill_strs = [str(s) for s in (skills or []) if s]
+        if not skill_strs:
+            return
+        if qn not in out:
+            out[qn] = list(skill_strs)
+            return
+        seen = set(out[qn])
+        for s in skill_strs:
+            if s not in seen:
+                out[qn].append(s)
+                seen.add(s)
+
     for block in blocks:
         for q in block.get("questions") or []:
-            qn = q.get("q") or q.get("numero")
-            if qn is None:
-                continue
-            try:
-                n = int(qn)
-            except (TypeError, ValueError):
-                continue
-            skills = q.get("skills") or []
-            if skills:
-                out[n] = [str(s) for s in skills]
+            flat_index += 1
+            raw_q = q.get("q")
+            if raw_q is None:
+                raw_q = q.get("numero")
+            if raw_q is not None:
+                try:
+                    qn = int(raw_q)
+                except (TypeError, ValueError):
+                    qn = flat_index
+            else:
+                qn = flat_index
+            _merge_skills(qn, q.get("skills") or [])
+
     return out
 
 
@@ -108,20 +182,204 @@ def _fetch_results_scoped(
     return list({r.id: r for r in rows}.values())
 
 
-def _school_name_map_from_results(results: List[AnswerSheetResult]) -> Dict[str, str]:
+def _class_ids_from_answer_sheet_results(gabarito_id: str) -> Set[str]:
+    q = (
+        db.session.query(Student.class_id)
+        .join(AnswerSheetResult, AnswerSheetResult.student_id == Student.id)
+        .filter(AnswerSheetResult.gabarito_id == gabarito_id)
+        .distinct()
+    )
+    return {str(row[0]) for row in q.all() if row[0] is not None}
+
+
+def _resolve_target_class_ids(
+    gab: AnswerSheetGabarito,
+    report_scope_type: str,
+    report_scope_ref_id: Optional[str],
+) -> List[str]:
     """
-    Nomes de escola via consulta em lote. ``Class.school`` é property (não relationship),
-    então o PDF não deve depender só do lazy load para preencher rótulos no escopo city.
+    Turmas que fazem parte do cartão (histórico de geração + metadados do gabarito),
+    filtradas pelo escopo do relatório (city/school/teacher/overall).
+
+    Se houver escopo explícito de geração (scope_snapshot ou batch com turmas), não expande
+    escola/série/cidade inteiras — apenas o que foi gerado (+ turmas com resultado).
+    Sem isso, mantém o comportamento legado (expansão por scope_type do gabarito).
     """
+    ids_snapshot: Set[str] = set()
+    try:
+        from app.services.cartao_resposta.answer_sheet_gabarito_generation import (
+            AnswerSheetGabaritoGeneration,
+        )
+
+        row = (
+            AnswerSheetGabaritoGeneration.query.filter_by(gabarito_id=str(gab.id))
+            .order_by(desc(AnswerSheetGabaritoGeneration.created_at))
+            .first()
+        )
+        if row and row.scope_snapshot and isinstance(row.scope_snapshot, dict):
+            raw = row.scope_snapshot.get("class_ids") or []
+            for item in raw:
+                if isinstance(item, dict) and item.get("class_id"):
+                    ids_snapshot.add(str(item["class_id"]))
+                elif isinstance(item, str) and item:
+                    ids_snapshot.add(item)
+    except Exception:
+        pass
+
+    ids_batch: Set[str] = set()
+    if gab.batch_id:
+        others = (
+            AnswerSheetGabarito.query.filter(
+                AnswerSheetGabarito.batch_id == gab.batch_id,
+                AnswerSheetGabarito.class_id.isnot(None),
+            ).all()
+        )
+        for o in others:
+            ids_batch.add(str(o.class_id))
+
+    ids_results = _class_ids_from_answer_sheet_results(str(gab.id))
+
+    ids_gab: Set[str] = set()
+    if gab.class_id:
+        ids_gab.add(str(gab.class_id))
+
+    explicit_generation_scope = bool(ids_snapshot) or bool(ids_batch)
+
     ids: Set[str] = set()
-    for r in results:
-        st = r.student
-        if st and st.class_ and st.class_.school_id:
-            ids.add(str(st.class_.school_id))
+    ids |= ids_snapshot
+    ids |= ids_batch
+    ids |= ids_results
+    ids |= ids_gab
+
+    if not explicit_generation_scope:
+        st = (gab.scope_type or "").lower()
+        if st == "school" and gab.school_id:
+            for c in Class.query.filter(Class.school_id == gab.school_id).all():
+                ids.add(str(c.id))
+        elif st == "grade" and gab.school_id and gab.grade_id:
+            for c in Class.query.filter(
+                Class.school_id == gab.school_id,
+                Class.grade_id == gab.grade_id,
+            ).all():
+                ids.add(str(c.id))
+        elif st == "city" and report_scope_ref_id:
+            school_ids = [
+                s[0]
+                for s in db.session.query(School.id)
+                .filter(School.city_id == report_scope_ref_id)
+                .all()
+            ]
+            if school_ids:
+                for c in Class.query.filter(Class.school_id.in_(school_ids)).all():
+                    ids.add(str(c.id))
+
+    filtered: List[Class] = []
+    rtype = (report_scope_type or "overall").lower()
+    from uuid import UUID
+
+    for cid in ids:
+        try:
+            uid = UUID(str(cid))
+        except ValueError:
+            continue
+        co = Class.query.get(uid)
+        if not co:
+            continue
+        if rtype == "school" and report_scope_ref_id:
+            if str(co.school_id) != str(report_scope_ref_id):
+                continue
+        elif rtype == "city" and report_scope_ref_id:
+            sch = co.school
+            if not sch or str(sch.city_id) != str(report_scope_ref_id):
+                continue
+        elif rtype == "teacher" and report_scope_ref_id:
+            tcs = TeacherClass.query.filter_by(teacher_id=report_scope_ref_id).all()
+            allowed = {str(tc.class_id) for tc in tcs}
+            if str(co.id) not in allowed:
+                continue
+        filtered.append(co)
+
+    by_id = {str(c.id): c for c in filtered}
+
+    def sort_key(c: Class) -> Tuple[str, str, str]:
+        g = (c.grade.name if c.grade else "") or ""
+        return (g.upper(), (c.name or "").upper(), str(c.id))
+
+    ordered = sorted(by_id.values(), key=sort_key)
+    return [str(c.id) for c in ordered]
+
+
+def _load_classes_ordered(class_ids: List[str]) -> List[Class]:
+    from uuid import UUID
+
+    if not class_ids:
+        return []
+    uuids = []
+    for x in class_ids:
+        try:
+            uuids.append(UUID(str(x)))
+        except ValueError:
+            continue
+    if not uuids:
+        return []
+    rows = (
+        Class.query.options(joinedload(Class.grade))
+        .filter(Class.id.in_(uuids))
+        .all()
+    )
+    by_id = {str(c.id): c for c in rows}
+    return [by_id[i] for i in class_ids if i in by_id]
+
+
+def get_answer_sheet_target_classes_for_report(
+    gab: AnswerSheetGabarito,
+    report_scope_type: str,
+    report_scope_ref_id: Optional[str],
+) -> List[Class]:
+    """Turmas-alvo do cartão para o escopo do relatório (listagens / PDF / detalhe)."""
+    ids = _resolve_target_class_ids(gab, report_scope_type, report_scope_ref_id)
+    return _load_classes_ordered(ids)
+
+
+def _student_count_by_class(class_ids: List[Any]) -> Dict[str, int]:
+    if not class_ids:
+        return {}
+    rows = (
+        db.session.query(Student.class_id, func.count(Student.id))
+        .filter(Student.class_id.in_(class_ids))
+        .group_by(Student.class_id)
+        .all()
+    )
+    return {str(row[0]): int(row[1]) for row in rows if row[0] is not None}
+
+
+def _school_name_map_from_ids(school_ids: Set[str]) -> Dict[str, str]:
+    ids = {x for x in school_ids if x and x != "_sem_escola"}
     if not ids:
         return {}
     rows = School.query.filter(School.id.in_(ids)).all()
     return {str(s.id): (s.name.strip() if s.name else "Escola") for s in rows}
+
+
+def _question_subject_name_by_num(gabarito: AnswerSheetGabarito) -> Dict[int, str]:
+    """Número da questão -> nome da disciplina (bloco na topology)."""
+    out: Dict[int, str] = {}
+    cfg = gabarito.blocks_config or {}
+    topo = cfg.get("topology") or {}
+    for block in topo.get("blocks") or []:
+        subj = (block.get("subject_name") or "").strip() or "Disciplina Geral"
+        for q in block.get("questions") or []:
+            raw = q.get("q")
+            if raw is None:
+                raw = q.get("numero")
+            if raw is None:
+                continue
+            try:
+                qn = int(raw)
+            except (TypeError, ValueError):
+                continue
+            out[qn] = subj
+    return out
 
 
 def _build_acertos_por_habilidade(
@@ -129,115 +387,193 @@ def _build_acertos_por_habilidade(
     gabarito: AnswerSheetGabarito,
     q_skills: Dict[int, List[str]],
 ) -> Dict[str, Any]:
-    if not q_skills:
-        return {}
+    """
+    Mesmo formato de relatório de avaliação normal: por disciplina com lista `questoes`
+    (uma entrada por questão do cartão), com % mesmo quando zerado.
+    """
     correct_json = gabarito.correct_answers or {}
     if isinstance(correct_json, str):
         import json
 
-        correct_json = json.loads(correct_json)
-    gab: Dict[int, str] = {}
+        correct_json = json.loads(correct_json) or {}
+    gab_map: Dict[int, str] = {}
     for k, v in (correct_json or {}).items():
         try:
-            gab[int(k)] = str(v).upper() if v else ""
+            gab_map[int(k)] = str(v).upper() if v else ""
         except (TypeError, ValueError):
             continue
 
-    # skill_id -> {correct, total}
-    acc: Dict[str, Dict[str, int]] = defaultdict(lambda: {"correct": 0, "total": 0})
+    subject_by_qn = _question_subject_name_by_num(gabarito)
+    question_nums = ordered_question_numbers_for_gabarito(gabarito)
+    if not question_nums:
+        question_nums = sorted(
+            set(q_skills.keys()) | set(gab_map.keys()) | set(subject_by_qn.keys())
+        )
+
+    per_q: Dict[int, Dict[str, int]] = {
+        qn: {"correct": 0, "total": 0} for qn in question_nums
+    }
 
     for res in results:
         detected = res.detected_answers or {}
-        for qn, skill_ids in q_skills.items():
-            ca = gab.get(qn)
-            if ca is None:
-                continue
-            st = detected.get(str(qn), detected.get(qn))
-            st = str(st).upper() if st else ""
-            ok = bool(st) and st == ca
-            for sid in skill_ids:
-                acc[sid]["total"] += 1
-                if ok:
-                    acc[sid]["correct"] += 1
+        for qn in question_nums:
+            ca = gab_map.get(qn)
+            raw = detected.get(str(qn), detected.get(qn))
+            st = str(raw).upper() if raw else ""
+            ok = bool(ca is not None and st and st == ca)
+            per_q[qn]["total"] += 1
+            if ok:
+                per_q[qn]["correct"] += 1
 
-    code_map = _fetch_skill_code_description_by_ids(list(acc.keys()))
+    skill_ids_for_fetch: List[str] = []
+    for qn in question_nums:
+        for sid in q_skills.get(qn) or []:
+            if sid:
+                skill_ids_for_fetch.append(str(sid).strip())
+    code_map = _fetch_skill_code_description_by_ids(list(dict.fromkeys(skill_ids_for_fetch)))
 
-    # Formato simplificado por "disciplina" única GERAL de habilidades
-    habilidades: Dict[str, Any] = {}
-    for sid, v in acc.items():
-        t = v["total"]
-        c = v["correct"]
-        pct = round_to_two_decimals((c / t * 100) if t else 0.0)
-        nk = _norm_skill_uuid_key(sid)
-        code, description = code_map.get(nk, (None, None))
-        habilidades[sid] = {
-            "habilidade_id": sid,
-            "code": code,
-            "description": description,
-            "acertos": c,
-            "total": t,
-            "percentual": pct,
-        }
-    return {"GERAL": habilidades} if habilidades else {}
+    questoes_flat: List[Dict[str, Any]] = []
+    for qn in question_nums:
+        disc = subject_by_qn.get(qn) or "Disciplina Geral"
+        sids = q_skills.get(qn) or []
+        first = str(sids[0]).strip() if sids else ""
+        nk = _norm_skill_uuid_key(first) if first else ""
+        code, description = code_map.get(nk, (None, None)) if first else (None, None)
+        code_out = (code or "").strip() or (first if first else "—")
+        desc_out = (description or "").strip() or (
+            f"Questão {qn}" if not first else f"Habilidade ({code_out})"
+        )
+
+        pq = per_q.get(qn, {"correct": 0, "total": 0})
+        c, t = int(pq["correct"]), int(pq["total"])
+        pct = round_to_two_decimals((c / t * 100) if t > 0 else 0.0)
+
+        questoes_flat.append(
+            {
+                "disciplina": disc,
+                "numero_questao": qn,
+                "codigo": code_out,
+                "descricao": desc_out,
+                "acertos": c,
+                "total": t,
+                "percentual": float(pct),
+            }
+        )
+
+    by_disc: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+    disc_order: List[str] = []
+    for row in questoes_flat:
+        d = row["disciplina"]
+        if d not in disc_order:
+            disc_order.append(d)
+        by_disc[d].append(
+            {
+                "numero_questao": row["numero_questao"],
+                "codigo": row["codigo"],
+                "descricao": row["descricao"],
+                "acertos": row["acertos"],
+                "total": row["total"],
+                "percentual": row["percentual"],
+            }
+        )
+
+    out_ord: "OrderedDict[str, Any]" = OrderedDict()
+    for d in disc_order:
+        out_ord[d] = {"questoes": by_disc[d]}
+
+    out_ord["GERAL"] = {
+        "questoes": [
+            {
+                "numero_questao": r["numero_questao"],
+                "codigo": r["codigo"],
+                "descricao": r["descricao"],
+                "acertos": r["acertos"],
+                "total": r["total"],
+                "percentual": r["percentual"],
+            }
+            for r in questoes_flat
+        ]
+    }
+
+    return dict(out_ord) if out_ord else {}
 
 
 def _build_total_alunos(
     results: List[AnswerSheetResult],
     school_name_map: Dict[str, str],
+    target_classes: List[Class],
+    student_count_by_class: Dict[str, int],
 ) -> Dict[str, Any]:
-    by_class: Dict[str, List[AnswerSheetResult]] = defaultdict(list)
-    by_school: Dict[str, List[AnswerSheetResult]] = defaultdict(list)
+    """Matriculados = alunos da turma no escopo do cartão; avaliados = com resultado (como prova)."""
+    by_class_results: Dict[str, List[AnswerSheetResult]] = defaultdict(list)
     for r in results:
         st = r.student
-        cid = str(st.class_id) if st and st.class_id else "_sem_turma"
-        by_class[cid].append(r)
-        sid = "_sem_escola"
-        if st and st.class_ and st.class_.school_id:
-            sid = str(st.class_.school_id)
-        by_school[sid].append(r)
+        if st and st.class_id:
+            by_class_results[str(st.class_id)].append(r)
 
     por_turma: List[Dict[str, Any]] = []
-    total_avaliados = len(results)
-    for cid, lst in by_class.items():
-        nome = "Sem turma"
-        if lst and lst[0].student and lst[0].student.class_:
-            nome = lst[0].student.class_.name or nome
+    for c in target_classes:
+        cid = str(c.id)
+        mat = int(student_count_by_class.get(cid, 0))
+        ava = len({r.student_id for r in by_class_results.get(cid, [])})
+        pct = round_to_two_decimals((ava / mat * 100) if mat > 0 else 0.0)
         por_turma.append(
             {
-                "turma": nome,
-                "turma_id": cid if cid != "_sem_turma" else None,
-                "matriculados": len(lst),
-                "avaliados": len(lst),
-                "percentual": 100.0 if lst else 0.0,
-                "faltosos": 0,
+                "turma": c.name or "Turma",
+                "turma_id": cid,
+                "matriculados": mat,
+                "avaliados": ava,
+                "percentual": pct,
+                "faltosos": mat - ava,
             }
         )
     por_turma.sort(key=lambda x: (x.get("turma") or "").upper())
 
-    por_escola: List[Dict[str, Any]] = []
-    for sid, lst in by_school.items():
-        label = "Sem escola"
+    agg: Dict[str, Dict[str, Any]] = defaultdict(
+        lambda: {"mat": 0, "ava": 0, "label": "Sem escola"}
+    )
+    for c in target_classes:
+        cid = str(c.id)
+        sid = str(c.school_id) if c.school_id else "_sem_escola"
+        mat = int(student_count_by_class.get(cid, 0))
+        ava = len({r.student_id for r in by_class_results.get(cid, [])})
+        agg[sid]["mat"] += mat
+        agg[sid]["ava"] += ava
         if sid != "_sem_escola":
-            label = school_name_map.get(sid) or "Escola"
+            agg[sid]["label"] = school_name_map.get(sid) or (
+                (c.school.name.strip() if c.school and c.school.name else None) or "Escola"
+            )
+
+    por_escola: List[Dict[str, Any]] = []
+    for sid, v in agg.items():
+        mat, ava = v["mat"], v["ava"]
+        pct = round_to_two_decimals((ava / mat * 100) if mat > 0 else 0.0)
         por_escola.append(
             {
-                "escola": label,
-                "matriculados": len(lst),
-                "avaliados": len(lst),
-                "percentual": round_to_two_decimals(100.0) if lst else 0.0,
-                "faltosos": 0,
+                "escola": v["label"],
+                "matriculados": mat,
+                "avaliados": ava,
+                "percentual": pct,
+                "faltosos": mat - ava,
             }
         )
     por_escola.sort(key=lambda x: (x.get("escola") or "").upper())
+
+    total_mat = sum(int(student_count_by_class.get(str(c.id), 0)) for c in target_classes)
+    total_ava = sum(
+        len({r.student_id for r in by_class_results.get(str(c.id), [])})
+        for c in target_classes
+    )
+    total_pct = round_to_two_decimals((total_ava / total_mat * 100) if total_mat > 0 else 0.0)
 
     return {
         "por_turma": por_turma,
         "por_escola": por_escola,
         "total_geral": {
-            "matriculados": total_avaliados,
-            "avaliados": total_avaliados,
-            "percentual": 100.0 if total_avaliados else 0.0,
-            "faltosos": 0,
+            "matriculados": total_mat,
+            "avaliados": total_ava,
+            "percentual": total_pct,
+            "faltosos": total_mat - total_ava,
         },
     }
 
@@ -284,55 +620,46 @@ def _totais_niveis(b: Dict[str, int]) -> Dict[str, Any]:
 def _build_niveis(
     results: List[AnswerSheetResult],
     school_name_map: Dict[str, str],
+    target_classes: List[Class],
 ) -> Dict[str, Any]:
     """
     Mesma forma que relatório de prova: por_turma / por_escola com colunas fixas
-    e bloco geral com .total (PDF report_organized.html).
+    e bloco geral com .total (PDF report_organized.html). Turmas sem resultado aparecem zeradas.
     """
-    if not results:
-        z = _totais_niveis(_empty_nivel_buckets())
-        return {
-            "GERAL": {
-                "por_turma": [],
-                "por_escola": [],
-                "geral": z,
-            }
-        }
-
-    by_class: Dict[str, List[AnswerSheetResult]] = defaultdict(list)
-    by_school: Dict[str, List[AnswerSheetResult]] = defaultdict(list)
+    by_class_results: Dict[str, List[AnswerSheetResult]] = defaultdict(list)
     for r in results:
         st = r.student
-        cid = str(st.class_id) if st and st.class_id else "_sem_turma"
-        by_class[cid].append(r)
-        sid = "_sem_escola"
-        if st and st.class_ and st.class_.school_id:
-            sid = str(st.class_.school_id)
-        by_school[sid].append(r)
+        if st and st.class_id:
+            by_class_results[str(st.class_id)].append(r)
 
     por_turma: List[Dict[str, Any]] = []
-    for cid, lst in by_class.items():
-        nome = "Sem turma"
-        if lst and lst[0].student and lst[0].student.class_:
-            nome = lst[0].student.class_.name or nome
+    for c in target_classes:
+        cid = str(c.id)
+        lst = by_class_results.get(cid, [])
         b = _empty_nivel_buckets()
         for r in lst:
             b[_bucket_for_classification(r.classification or "")] += 1
         row = _totais_niveis(b)
-        row["turma"] = nome
-        row["turma_id"] = cid if cid != "_sem_turma" else None
+        row["turma"] = c.name or "Turma"
+        row["turma_id"] = cid
         por_turma.append(row)
     por_turma.sort(key=lambda x: (x.get("turma") or "").upper())
 
+    school_b: Dict[str, Dict[str, int]] = defaultdict(
+        lambda: {"abaixo_do_basico": 0, "basico": 0, "adequado": 0, "avancado": 0}
+    )
+    for c in target_classes:
+        sid = str(c.school_id) if c.school_id else "_sem_escola"
+        for r in by_class_results.get(str(c.id), []):
+            k = _bucket_for_classification(r.classification or "")
+            school_b[sid][k] += 1
+
     por_escola: List[Dict[str, Any]] = []
-    for sid, lst in by_school.items():
+    for sid, b in school_b.items():
+        row = _totais_niveis(b)
         nome = "Sem escola"
         if sid != "_sem_escola":
             nome = school_name_map.get(sid) or "Escola"
-        b = _empty_nivel_buckets()
-        for r in lst:
-            b[_bucket_for_classification(r.classification or "")] += 1
-        row = _totais_niveis(b)
         row["escola"] = nome
         por_escola.append(row)
     por_escola.sort(key=lambda x: (x.get("escola") or "").upper())
@@ -353,10 +680,12 @@ def _build_niveis(
 def _build_proficiencia_nota(
     results: List[AnswerSheetResult],
     school_name_map: Dict[str, str],
+    target_classes: List[Class],
 ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     """
     Mesmo formato do relatório de prova (report_organized.html): por disciplina,
     ``media_geral``, ``por_turma`` (``proficiencia`` / ``nota``) e ``por_escola``.
+    Inclui todas as turmas-alvo, com zero quando não há média.
     """
     prof_by_class: Dict[str, Dict[str, List[float]]] = defaultdict(lambda: defaultdict(list))
     prof_by_school: Dict[str, Dict[str, List[float]]] = defaultdict(lambda: defaultdict(list))
@@ -364,18 +693,20 @@ def _build_proficiencia_nota(
     nota_by_school: Dict[str, Dict[str, List[float]]] = defaultdict(lambda: defaultdict(list))
 
     class_id_to_name: Dict[str, str] = {}
+    for c in target_classes:
+        class_id_to_name[str(c.id)] = c.name or "Sem turma"
 
     for r in results:
         st = r.student
         cid = str(st.class_id) if st and st.class_id else "_sem_turma"
         sid = "_sem_escola"
         if st and st.class_:
-            class_id_to_name[cid] = st.class_.name or "Sem turma"
+            class_id_to_name.setdefault(cid, st.class_.name or "Sem turma")
             raw_sid = st.class_.school_id
             if raw_sid:
                 sid = str(raw_sid)
         elif st and st.class_id:
-            class_id_to_name[cid] = "Sem turma"
+            class_id_to_name.setdefault(cid, "Sem turma")
 
         pbs = r.proficiency_by_subject or {}
         if isinstance(pbs, dict):
@@ -429,41 +760,43 @@ def _build_proficiencia_nota(
         value_key: str,
     ) -> Dict[str, Any]:
         out: Dict[str, Any] = {}
-        all_names = set(by_class.keys()) | set(by_school.keys())
+        all_names: Set[str] = set(by_class.keys()) | set(by_school.keys())
+        if target_classes and "GERAL" not in all_names:
+            all_names.add("GERAL")
         for name in all_names:
             all_vals: List[float] = []
             for vs in by_class.get(name, {}).values():
                 all_vals.extend(vs)
-            if not all_vals:
+            if not all_vals and not target_classes:
                 continue
             por_turma: List[Dict[str, Any]] = []
-            for cl_id, vals in sorted(
-                by_class.get(name, {}).items(),
-                key=lambda x: (class_id_to_name.get(x[0], x[0]), x[0]),
-            ):
-                if not vals:
-                    continue
+            for c in target_classes:
+                cl_id = str(c.id)
+                vals = by_class.get(name, {}).get(cl_id, [])
                 por_turma.append(
                     {
-                        "turma": class_id_to_name.get(cl_id, "Sem turma"),
-                        "turma_id": cl_id if cl_id != "_sem_turma" else None,
+                        "turma": c.name or "Turma",
+                        "turma_id": cl_id,
                         value_key: _mean(vals),
                     }
                 )
+            por_turma.sort(key=lambda x: (x.get("turma") or "").upper())
+            school_vals: Dict[str, List[float]] = defaultdict(list)
+            for c in target_classes:
+                cl_id = str(c.id)
+                sid = str(c.school_id) if c.school_id else "_sem_escola"
+                school_vals[sid].extend(by_class.get(name, {}).get(cl_id, []))
+            schools_order = sorted(
+                {str(c.school_id) if c.school_id else "_sem_escola" for c in target_classes},
+                key=lambda s: _label_escola(s),
+            )
             por_escola: List[Dict[str, Any]] = []
-            for sc_id, vals in sorted(
-                by_school.get(name, {}).items(),
-                key=lambda x: (_label_escola(x[0]), x[0]),
-            ):
-                if not vals:
-                    continue
+            for sc_id in schools_order:
+                vals = school_vals.get(sc_id, [])
                 por_escola.append(
-                    {
-                        "escola": _label_escola(sc_id),
-                        value_key: _mean(vals),
-                    }
+                    {"escola": _label_escola(sc_id), value_key: _mean(vals)}
                 )
-            media_geral = _mean(all_vals)
+            media_geral = _mean(all_vals) if all_vals else 0.0
             out[name] = {
                 "por_turma": por_turma,
                 "por_escola": por_escola,
@@ -484,6 +817,8 @@ def _build_proficiencia_nota(
 
 def empty_answer_sheet_payload(gabarito: AnswerSheetGabarito, scope_type: str, scope_ref_id: Optional[str]) -> Dict[str, Any]:
     """Payload mínimo quando não há resultados no escopo (relatório vazio)."""
+    q_skills = _question_skills_map_from_gabarito(gabarito)
+    acertos_empty = _build_acertos_por_habilidade([], gabarito, q_skills)
     avaliacao_data = {
         "id": str(gabarito.id),
         "titulo": gabarito.title or "Cartão resposta",
@@ -507,7 +842,7 @@ def empty_answer_sheet_payload(gabarito: AnswerSheetGabarito, scope_type: str, s
         "faltosos": 0,
     }
     return {
-        "acertos_por_habilidade": {},
+        "acertos_por_habilidade": acertos_empty,
         "analise_ia": {},
         "avaliacao": avaliacao_data,
         "metadados": metadados,
@@ -530,18 +865,37 @@ def build_answer_sheet_report_payload(
         raise ValueError("Gabarito não encontrado")
 
     results = _fetch_results_scoped(gabarito_id, scope_type, scope_ref_id)
-    if not results:
+    target_classes = get_answer_sheet_target_classes_for_report(gab, scope_type, scope_ref_id)
+    if not results and not target_classes:
         raise LookupError("Nenhum resultado de cartão-resposta para o escopo")
 
+    counts = _student_count_by_class([c.id for c in target_classes])
+    school_ids: Set[str] = set()
+    for c in target_classes:
+        if c.school_id:
+            school_ids.add(str(c.school_id))
+    for r in results:
+        st = r.student
+        if st and st.class_ and st.class_.school_id:
+            school_ids.add(str(st.class_.school_id))
+    school_names = _school_name_map_from_ids(school_ids)
+
     q_skills = _question_skills_map_from_gabarito(gab)
-    acertos = _build_acertos_por_habilidade(results, gab, q_skills)
-    school_names = _school_name_map_from_results(results)
-    total_alunos = _build_total_alunos(results, school_names)
-    niveis = _build_niveis(results, school_names)
-    proficiencia, nota_geral = _build_proficiencia_nota(results, school_names)
+    acertos = _build_acertos_por_habilidade(results or [], gab, q_skills)
+    total_alunos = _build_total_alunos(results, school_names, target_classes, counts)
+    niveis = _build_niveis(results, school_names, target_classes)
+    proficiencia, nota_geral = _build_proficiencia_nota(
+        results, school_names, target_classes
+    )
 
     series_ordered: List[str] = []
     seen = set()
+    for c in target_classes:
+        if c.grade and c.grade.name:
+            gname = c.grade.name.strip()
+            if gname and gname not in seen:
+                seen.add(gname)
+                series_ordered.append(gname)
     for r in results:
         st = r.student
         if st and st.class_ and st.class_.grade and st.class_.grade.name:

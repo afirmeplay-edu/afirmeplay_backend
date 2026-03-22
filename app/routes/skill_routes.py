@@ -347,7 +347,7 @@ def get_skills_by_evaluation(test_id):
 
         if is_answer_sheet_report_entity():
             permissao = get_user_permission_scope(user)
-            gab, _results, err = fetch_answer_sheet_gabarito_for_detail(
+            gab, _results, err, _city_id = fetch_answer_sheet_gabarito_for_detail(
                 user, permissao, test_id
             )
             if err:

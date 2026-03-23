@@ -964,3 +964,28 @@ def collect_skill_ids_from_gabarito_topology(gab: AnswerSheetGabarito) -> List[s
             if sid:
                 ids.add(str(sid).strip())
     return sorted(ids)
+
+
+def collect_skill_ids_for_answer_sheet_gabarito(gab: AnswerSheetGabarito) -> List[str]:
+    """
+    Habilidades do cartão: primeiro topology (blocks_config), depois questões da prova vinculada (test_id).
+    Muitos gabaritos não repetem skills em cada questão da topology; a prova costuma ser a fonte.
+    """
+    ids = collect_skill_ids_from_gabarito_topology(gab)
+    if ids:
+        return ids
+    tid = getattr(gab, "test_id", None)
+    if not tid:
+        return []
+    from app.utils.question_helpers import get_questions_from_test
+
+    skills_set: Set[str] = set()
+    for question in get_questions_from_test(str(tid), order_by_test_question=True):
+        raw = getattr(question, "skill", None) or ""
+        if not raw:
+            continue
+        for part in str(raw).split(","):
+            code = part.strip().replace("{", "").replace("}", "")
+            if code:
+                skills_set.add(code)
+    return sorted(skills_set)

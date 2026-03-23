@@ -2563,6 +2563,20 @@ def _calcular_estatisticas_consolidadas_cartao(scope_info, nivel_granularidade, 
             g = Grade.query.get(scope_info['serie'])
             serie_nome = g.name if g else None
 
+        # Com gabarito na consulta, a série do cartão resposta deve aparecer mesmo sem filtro ?serie=
+        if serie_nome is None and gabarito_id:
+            gab = AnswerSheetGabarito.query.get(str(gabarito_id).strip())
+            if gab:
+                if gab.grade_name and str(gab.grade_name).strip():
+                    serie_nome = gab.grade_name.strip()
+                elif gab.grade_id:
+                    g = Grade.query.get(gab.grade_id)
+                    serie_nome = g.name if g else None
+        if serie_nome is None and len(series_unicas) == 1:
+            only_gid = next(iter(series_unicas))
+            g = Grade.query.get(only_gid)
+            serie_nome = g.name if g else None
+
         return {
             "tipo": nivel_granularidade,
             "nome": _get_nome_granularidade_cartao(nivel_granularidade, scope_info, escola_nome, serie_nome),

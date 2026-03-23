@@ -12,7 +12,7 @@ from app.utils.question_helpers import get_questions_from_test
 from app.utils.uuid_helpers import ensure_uuid, ensure_uuid_list
 from app.utils.tenant_middleware import set_search_path, city_id_to_schema_name
 from app.routes.answer_sheet_evaluation_listing import (
-    collect_skill_ids_from_gabarito_topology,
+    collect_skill_ids_for_answer_sheet_gabarito,
     fetch_answer_sheet_gabarito_for_detail,
     is_answer_sheet_report_entity,
 )
@@ -353,11 +353,9 @@ def get_skills_by_evaluation(test_id):
             if err:
                 resp, code = err
                 return resp, code
-            skill_ids = collect_skill_ids_from_gabarito_topology(gab)
+            skill_ids = collect_skill_ids_for_answer_sheet_gabarito(gab)
             if not skill_ids:
-                return jsonify(
-                    {"message": "Gabarito não possui habilidades na topologia."}
-                ), 404
+                return jsonify([]), 200
             skills_objs = Skill.query.filter(Skill.id.in_(skill_ids)).all()
             by_id = {str(s.id): s for s in skills_objs}
             skills_data = []

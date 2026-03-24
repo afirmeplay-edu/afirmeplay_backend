@@ -1,4 +1,4 @@
-FROM python:3.12-slim
+FROM python:3.11-bullseye
 
 RUN apt-get update && apt-get install -y \
     build-essential \
@@ -18,11 +18,11 @@ RUN apt-get update && apt-get install -y \
     liblcms2-dev \
     libwebp-dev \
     libtiff-dev \
-    libopenjp2-dev \
+    libopenjp2-7-dev \
     libharfbuzz-dev \
     libfribidi-dev \
     libxcb1-dev \
-    libgl1-mesa-glx \
+    libgl1 \
     libzbar0 \
     libglib2.0-0 \
     fonts-dejavu-core \

@@ -134,7 +134,6 @@ image_build:
             echo "GOOGLE_AI_STUDIO_MODEL=$GOOGLE_AI_STUDIO_MODEL" >> app/.env
             echo "APP_ENV=$APP_ENV" >> app/.env
             echo "PUBLIC_API_BASE_URL=$PUBLIC_API_BASE_URL" >> app/.env
-            echo "SUBDOMAIN_MODE=$SUBDOMAIN_MODE" >> app/.env
 
             docker build --no-cache -t "$IMAGE_TAG" .
 

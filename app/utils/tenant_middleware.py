@@ -56,8 +56,6 @@ from app.models.user import User, RoleEnum
 SECRET_KEY = os.getenv("JWT_SECRET_KEY")
 # Ambiente da aplicação: "production", "development", etc.
 APP_ENV = os.getenv("APP_ENV", "development").lower()
-SUBDOMAIN_MODE = os.getenv("SUBDOMAIN_MODE", "standard").strip().lower()
-DEMO_SUBDOMAIN_SUFFIX = "-demo"
 
 # Domínios que devem ser ignorados na resolução de subdomínio
 IGNORED_HOSTS = [
@@ -92,32 +90,6 @@ def city_id_to_schema_name(city_id):
     if not city_id:
         return 'public'
     return f"city_{str(city_id).replace('-', '_')}"
-
-
-def normalize_city_slug_from_subdomain(slug):
-    """
-    Normaliza o slug extraído do host para o slug real salvo em public.city.
-
-    Modos:
-        - standard: usa slug como está (ex: city)
-        - demo_suffix: exige sufixo '-demo' e remove para buscar cidade (ex: city-demo -> city)
-    """
-    if not slug or not isinstance(slug, str):
-        return None
-
-    slug = slug.strip().lower()
-    if not re.match(r'^[a-z0-9-]+$', slug):
-        return None
-
-    if SUBDOMAIN_MODE == "demo_suffix":
-        if not slug.endswith(DEMO_SUBDOMAIN_SUFFIX):
-            return None
-        base_slug = slug[:-len(DEMO_SUBDOMAIN_SUFFIX)]
-        if not base_slug or not re.match(r'^[a-z0-9-]+$', base_slug):
-            return None
-        return base_slug
-
-    return slug
 
 
 def extract_subdomain(host):
@@ -163,8 +135,8 @@ def extract_subdomain(host):
         parts = host.split('.')
         # Exemplo válido: jiparana.afirmeplay.com.br
         if len(parts) > 3:
-            slug = normalize_city_slug_from_subdomain(parts[0])
-            if slug:
+            slug = parts[0]
+            if re.match(r'^[a-z0-9-]+$', slug):
                 return slug
         
         return None
@@ -178,8 +150,8 @@ def extract_subdomain(host):
     if 'afirmeplay.com.br' in host:
         parts = host.split('.')
         if len(parts) > 3:
-            slug = normalize_city_slug_from_subdomain(parts[0])
-            if slug:
+            slug = parts[0]
+            if re.match(r'^[a-z0-9-]+$', slug):
                 return slug
     
     # 2) Suporte a subdomínios em localhost: ex: jiparana.localhost, jaru.localhost
@@ -187,8 +159,8 @@ def extract_subdomain(host):
         parts = host.split('.')
         # Ex: ["jiparana", "localhost"]
         if len(parts) >= 2:
-            slug = normalize_city_slug_from_subdomain(parts[0])
-            if slug:
+            slug = parts[0]
+            if re.match(r'^[a-z0-9-]+$', slug):
                 return slug
     
     return None

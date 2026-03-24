@@ -26,7 +26,7 @@ class AnswerSheetGabarito(db.Model):
     # Vinculação opcional com prova ou turma
     test_id = db.Column(db.String, db.ForeignKey('test.id'), nullable=True)
     class_id = db.Column(UUID(as_uuid=True), db.ForeignKey('class.id'), nullable=True)
-    grade_id = db.Column(UUID(as_uuid=True), db.ForeignKey('grade.id'), nullable=True)
+    grade_id = db.Column(UUID(as_uuid=True), db.ForeignKey('public.grade.id'), nullable=True)
     
     # Configuração do cartão
     num_questions = db.Column(db.Integer, nullable=False)
@@ -82,11 +82,18 @@ class AnswerSheetGabarito(db.Model):
     minio_bucket = db.Column(db.String(100), nullable=True)  # Nome do bucket
     zip_generated_at = db.Column(db.DateTime, nullable=True)  # Timestamp de geração do ZIP
     
+    # Totais da última geração (para listagem quando escopo veio de POST /generate)
+    last_generation_classes_count = db.Column(db.Integer, nullable=True)
+    last_generation_students_count = db.Column(db.Integer, nullable=True)
+    
     # =========================================================================
     # ✅ Campo para agrupar gabaritos gerados em batch (múltiplas turmas)
     # =========================================================================
     batch_id = db.Column(db.String(36), nullable=True)  # UUID comum para gabaritos do mesmo batch
-    
+
+    # Último job de geração (preenchido apenas quando a rota generate é chamada; null em create-gabaritos)
+    last_generation_job_id = db.Column(db.String(36), nullable=True)
+
     # Relacionamentos
     test = db.relationship('Test', foreign_keys=[test_id])
     class_ = db.relationship('Class', foreign_keys=[class_id])

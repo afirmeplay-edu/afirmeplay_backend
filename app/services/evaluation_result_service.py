@@ -12,6 +12,7 @@ from app.models.studentClass import Class
 from app.models.studentAnswer import StudentAnswer
 from app.services.evaluation_calculator import EvaluationCalculator
 from app.report_analysis.services import ReportAggregateService
+from app.utils.decimal_helpers import round_to_two_decimals
 from datetime import datetime
 import logging
 from typing import Dict, Any, Optional, List
@@ -28,20 +29,13 @@ class EvaluationResultService:
         if not correct_answer or not student_answer:
             logging.warning(f"Alternativa correta ou resposta do aluno vazias: correct_answer={correct_answer}, student_answer={student_answer}")
             return False
-            
+
         student_answer = str(student_answer).strip()
         correct_answer = str(correct_answer).strip()
-        
-        logging.info(f"Verificando resposta: '{student_answer}' contra alternativa correta: '{correct_answer}'")
-        
+
         # Comparação direta (case-insensitive para maior flexibilidade)
         is_correct = student_answer.lower() == correct_answer.lower()
-        
-        if is_correct:
-            logging.info(f"Resposta correta! student_answer='{student_answer}' == correct_answer='{correct_answer}'")
-        else:
-            logging.info(f"Resposta incorreta: student_answer='{student_answer}' != correct_answer='{correct_answer}'")
-            
+        logging.debug("Verificando resposta: '%s' vs '%s' => %s", student_answer, correct_answer, is_correct)
         return is_correct
     
     @staticmethod
@@ -84,6 +78,7 @@ class EvaluationResultService:
             # Filtrar respostas para esta disciplina
             subject_question_ids = [q.id for q in subject_questions]
             subject_answers = [a for a in answers if a.question_id in subject_question_ids]
+            answered_questions = len(subject_answers)
             
             # Calcular acertos para esta disciplina
             correct_answers_subject = 0
@@ -98,21 +93,24 @@ class EvaluationResultService:
                         if str(answer.answer).strip().lower() == str(question.correct_answer).strip().lower():
                             correct_answers_subject += 1
             
-            # Calcular resultado para esta disciplina
+            # Calcular resultado para esta disciplina usando questões respondidas
             result = EvaluationCalculator.calculate_complete_evaluation(
                 correct_answers=correct_answers_subject,
-                total_questions=total_questions_subject,
+                total_questions=answered_questions if answered_questions > 0 else total_questions_subject,
                 course_name=course_name,
                 subject_name=subject_name,
                 use_simple_calculation=False
             )
+            
+            score_percentage = (correct_answers_subject / answered_questions * 100) if answered_questions > 0 else 0
             
             subject_results.append({
                 'subject_id': subject_id,
                 'subject_name': subject_name,
                 'correct_answers': correct_answers_subject,
                 'total_questions': total_questions_subject,
-                'score_percentage': (correct_answers_subject / total_questions_subject * 100) if total_questions_subject > 0 else 0,
+                'answered_questions': answered_questions,
+                'score_percentage': round_to_two_decimals(score_percentage),
                 'grade': result['grade'],
                 'proficiency': result['proficiency'],
                 'classification': result['classification']
@@ -252,12 +250,12 @@ class EvaluationResultService:
                             classification_geral = "Abaixo do Básico"
                     
                     result = {
-                        'proficiency': round(proficiency_geral, 2),
-                        'grade': round(grade_geral, 2),
+                        'proficiency': round_to_two_decimals(proficiency_geral),
+                        'grade': round_to_two_decimals(grade_geral),
                         'classification': classification_geral,
                         'correct_answers': correct_answers,
                         'total_questions': total_questions,
-                        'accuracy_rate': round((correct_answers / total_questions) * 100, 2) if total_questions > 0 else 0.0
+                        'accuracy_rate': round_to_two_decimals((correct_answers / total_questions) * 100) if total_questions > 0 else 0.0
                     }
                 else:
                     # Fallback se não conseguir calcular por disciplina
@@ -281,6 +279,22 @@ class EvaluationResultService:
             # Calcular percentual de acertos
             score_percentage = (correct_answers / total_questions * 100) if total_questions > 0 else 0
             
+            # Preparar resultados por disciplina para salvar em JSON
+            subject_results_json = None
+            if use_subjects_info and subject_results:
+                subject_results_json = {}
+                for sr in subject_results:
+                    subject_results_json[str(sr['subject_id'])] = {
+                        'subject_name': sr['subject_name'],
+                        'correct_answers': sr['correct_answers'],
+                        'total_questions': sr['total_questions'],
+                        'answered_questions': sr['answered_questions'],
+                        'score_percentage': sr['score_percentage'],
+                        'grade': sr['grade'],
+                        'proficiency': sr['proficiency'],
+                        'classification': sr['classification']
+                    }
+            
             # Verificar se já existe resultado para este aluno neste teste
             existing_result = EvaluationResult.query.filter_by(
                 test_id=test_id,
@@ -295,6 +309,7 @@ class EvaluationResultService:
                 existing_result.grade = result['grade']
                 existing_result.proficiency = result['proficiency']
                 existing_result.classification = result['classification']
+                existing_result.subject_results = subject_results_json
                 existing_result.calculated_at = datetime.utcnow()
                 
                 evaluation_result = existing_result
@@ -311,6 +326,7 @@ class EvaluationResultService:
                     proficiency=result['proficiency'],
                     classification=result['classification']
                 )
+                evaluation_result.subject_results = subject_results_json
                 db.session.add(evaluation_result)
 
             # Marcar agregados como desatualizados antes do commit
@@ -358,11 +374,15 @@ class EvaluationResultService:
             
             db.session.commit()
             
-            # NOVO: Disparar task Celery para rebuild (com debounce)
+            # Disparar task Celery para rebuild (com debounce). Passar city_id para a task
+            # setar o schema do tenant (multi-tenant: Celery não tem JWT/request).
             try:
-                from app.report_analysis.tasks import rebuild_reports_for_test
-                rebuild_reports_for_test.delay(test_id)
-                logging.info(f"Task de rebuild agendada para test_id={test_id}")
+                if scope_city_id:
+                    from app.report_analysis.tasks import rebuild_reports_for_test
+                    rebuild_reports_for_test.delay(test_id, str(scope_city_id))
+                    logging.info(f"Task de rebuild agendada para test_id={test_id}, city_id={scope_city_id}")
+                else:
+                    logging.debug("Rebuild não agendado: scope_city_id ausente (sem tenant para report_aggregates)")
             except Exception as e:
                 logging.warning(f"Erro ao agendar task de rebuild: {str(e)}. Continuando sem rebuild automático.")
                 # Não falhar se Celery não estiver disponível
@@ -574,10 +594,10 @@ class EvaluationResultService:
             if scope_info and nivel_granularidade:
                 # Aplicar filtros de granularidade
                 from app.routes.evaluation_results_routes import _determinar_escopo_calculo, _buscar_alunos_por_escopo
-                
+
                 escopo_calculo = _determinar_escopo_calculo(scope_info, nivel_granularidade)
                 alunos_escopo = _buscar_alunos_por_escopo(escopo_calculo)
-                
+
                 if alunos_escopo:
                     student_ids = [aluno.id for aluno in alunos_escopo]
                     results = EvaluationResult.query.filter(
@@ -589,7 +609,7 @@ class EvaluationResultService:
             else:
                 # Sem filtros de granularidade, buscar todos os resultados
                 results = EvaluationResult.query.filter_by(test_id=test_id).all()
-            
+
             subject_statistics = {}
             
             # 9. Para cada disciplina em subjects_info, calcular estatísticas
@@ -609,63 +629,79 @@ class EvaluationResultService:
                 if not questions_with_answer:
                     continue
                 
-                # Calcular estatísticas dos alunos para esta disciplina
+                # Buscar estatísticas dos alunos para esta disciplina (USAR DADOS SALVOS DO JSON)
                 subject_results = []
                 for result in results:
-                    # Para cada aluno, calcular acertos específicos desta disciplina
-                    from app.models.studentAnswer import StudentAnswer
-                    subject_question_ids = [q.id for q in questions_with_answer]
-                    student_answers = StudentAnswer.query.filter(
-                        StudentAnswer.test_id == test_id,
-                        StudentAnswer.student_id == result.student_id,
-                        StudentAnswer.question_id.in_(subject_question_ids)
-                    ).all()
-                    
-                    # CORREÇÃO: Usar apenas questões respondidas (igual à tabela detalhada)
-                    total_respondidas = len(student_answers)
-                    
-                    # Pular alunos que não responderam nenhuma questão desta disciplina
-                    if total_respondidas == 0:
-                        continue
-                    
-                    # Calcular acertos para esta disciplina
-                    correct_answers_subject = 0
-                    for answer in student_answers:
-                        question = next((q for q in questions_with_answer if q.id == answer.question_id), None)
-                        if question:
-                            if question.question_type == 'multiple_choice':
-                                is_correct = EvaluationResultService.check_multiple_choice_answer(answer.answer, question.correct_answer)
-                                if is_correct:
-                                    correct_answers_subject += 1
-                            elif question.correct_answer:
-                                if str(answer.answer).strip().lower() == str(question.correct_answer).strip().lower():
-                                    correct_answers_subject += 1
-                    
-                    # CORRIGIDO: Usar total_respondidas ao invés de len(questions_with_answer)
-                    # Isso iguala a lógica da tabela detalhada por disciplina
-                    evaluation_result = EvaluationCalculator.calculate_complete_evaluation(
-                        correct_answers=correct_answers_subject,
-                        total_questions=total_respondidas,  # ✅ MUDANÇA: usar questões respondidas
-                        course_name=course_name,
-                        subject_name=subject_name
-                    )
-                    
-                    subject_results.append({
-                        'student_id': result.student_id,
-                        'correct_answers': correct_answers_subject,
-                        'total_questions': total_respondidas,  # ✅ MUDANÇA: armazenar questões respondidas
-                        'proficiency': evaluation_result['proficiency'],
-                        'grade': evaluation_result['grade'],
-                        'classification': evaluation_result['classification'],
-                        'score_percentage': round((correct_answers_subject / total_respondidas) * 100, 2) if total_respondidas > 0 else 0  # ✅ MUDANÇA: calcular com base em respondidas
-                    })
+                    # Buscar resultado pré-calculado por disciplina do campo JSON
+                    if result.subject_results and str(subject_id) in result.subject_results:
+                        # Usar dados pré-calculados do JSON (FONTE DA VERDADE)
+                        subject_data = result.subject_results[str(subject_id)]
+                        subject_results.append({
+                            'student_id': result.student_id,
+                            'correct_answers': subject_data.get('correct_answers', 0),
+                            'total_questions': subject_data.get('answered_questions', 0),
+                            'proficiency': subject_data.get('proficiency', 0.0),
+                            'grade': subject_data.get('grade', 0.0),
+                            'classification': subject_data.get('classification', 'Abaixo do Básico'),
+                            'score_percentage': subject_data.get('score_percentage', 0.0)
+                        })
+                    else:
+                        # Fallback: calcular se não houver dados salvos (não deveria acontecer)
+                        logging.warning(f"Resultado por disciplina não encontrado no JSON para aluno {result.student_id}, disciplina {subject_id}. Recalculando...")
+                        
+                        from app.models.studentAnswer import StudentAnswer
+                        subject_question_ids = [q.id for q in questions_with_answer]
+                        student_answers = StudentAnswer.query.filter(
+                            StudentAnswer.test_id == test_id,
+                            StudentAnswer.student_id == result.student_id,
+                            StudentAnswer.question_id.in_(subject_question_ids)
+                        ).all()
+                        
+                        total_respondidas = len(student_answers)
+                        
+                        if total_respondidas == 0:
+                            continue
+                        
+                        correct_answers_subject = 0
+                        for answer in student_answers:
+                            question = next((q for q in questions_with_answer if q.id == answer.question_id), None)
+                            if question:
+                                if question.question_type == 'multiple_choice':
+                                    is_correct = EvaluationResultService.check_multiple_choice_answer(answer.answer, question.correct_answer)
+                                    if is_correct:
+                                        correct_answers_subject += 1
+                                elif question.correct_answer:
+                                    if str(answer.answer).strip().lower() == str(question.correct_answer).strip().lower():
+                                        correct_answers_subject += 1
+                        
+                        evaluation_result = EvaluationCalculator.calculate_complete_evaluation(
+                            correct_answers=correct_answers_subject,
+                            total_questions=total_respondidas,
+                            course_name=course_name,
+                            subject_name=subject_name
+                        )
+                        
+                        subject_results.append({
+                            'student_id': result.student_id,
+                            'correct_answers': correct_answers_subject,
+                            'total_questions': total_respondidas,
+                            'proficiency': evaluation_result['proficiency'],
+                            'grade': evaluation_result['grade'],
+                            'classification': evaluation_result['classification'],
+                            'score_percentage': round_to_two_decimals((correct_answers_subject / total_respondidas) * 100) if total_respondidas > 0 else 0
+                        })
                 
                 if subject_results:
-                    # Calcular estatísticas agregadas da disciplina
+                    # Calcular estatísticas agregadas da disciplina (arredondar para 2 casas decimais)
                     total_students = len(subject_results)
                     avg_proficiency = sum(sr['proficiency'] for sr in subject_results) / total_students
                     avg_grade = sum(sr['grade'] for sr in subject_results) / total_students
                     avg_score_percentage = sum(sr['score_percentage'] for sr in subject_results) / total_students
+                    
+                    # Arredondar médias para 2 casas decimais
+                    avg_proficiency = round_to_two_decimals(avg_proficiency)
+                    avg_grade = round_to_two_decimals(avg_grade)
+                    avg_score_percentage = round_to_two_decimals(avg_score_percentage)
                     
                     # Distribuição de classificação
                     classification_distribution = {
@@ -693,9 +729,9 @@ class EvaluationResultService:
                         'total_questions': total_questions_subject,
                         'questions_with_answer': len(questions_with_answer),
                         'total_students': total_students,
-                        'average_proficiency': round(avg_proficiency, 2),
-                        'average_grade': round(avg_grade, 2),
-                        'average_score_percentage': round(avg_score_percentage, 2),
+                        'average_proficiency': avg_proficiency,  # Já arredondado para 2 casas decimais
+                        'average_grade': avg_grade,  # Já arredondado para 2 casas decimais
+                        'average_score_percentage': avg_score_percentage,  # Já arredondado para 2 casas decimais
                         'classification_distribution': classification_distribution,
                         'student_results': subject_results
                     }

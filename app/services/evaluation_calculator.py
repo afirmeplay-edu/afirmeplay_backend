@@ -6,6 +6,7 @@ Implementa as fórmulas específicas conforme os requisitos do sistema
 import logging
 from typing import Dict, Optional, Tuple
 from enum import Enum
+from app.utils.decimal_helpers import round_to_two_decimals
 
 
 class CourseLevel(Enum):
@@ -229,7 +230,7 @@ class EvaluationCalculator:
         # CORREÇÃO: Garantir que a proficiência não exceda o máximo permitido
         proficiency = min(proficiency, max_proficiency)
         
-        return round(proficiency, 2)
+        return round_to_two_decimals(proficiency)
 
     @classmethod
     def calculate_grade(cls, proficiency: float, course_name: str, subject_name: str, 
@@ -254,7 +255,7 @@ class EvaluationCalculator:
             if total_questions == 0:
                 return 0.0
             simple_grade = (correct_answers / total_questions) * 10
-            return round(simple_grade, 2)
+            return round_to_two_decimals(simple_grade)
         
         # Cálculo complexo baseado na proficiência (método original)
         course_level = cls._determine_course_level(course_name)
@@ -271,7 +272,7 @@ class EvaluationCalculator:
         # Limitar entre 0 e 10
         grade = max(0.0, min(10.0, grade))
         
-        return round(grade, 2)
+        return round_to_two_decimals(grade)
 
     @classmethod
     def determine_classification(cls, proficiency: float, course_name: str, subject_name: str) -> str:
@@ -359,5 +360,5 @@ class EvaluationCalculator:
             "classification": classification,
             "correct_answers": correct_answers,
             "total_questions": total_questions,
-            "accuracy_rate": round((correct_answers / total_questions) * 100, 2) if total_questions > 0 else 0.0
+            "accuracy_rate": round_to_two_decimals((correct_answers / total_questions) * 100) if total_questions > 0 else 0.0
         } 

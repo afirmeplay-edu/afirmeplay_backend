@@ -4,7 +4,7 @@ from app.models.user import User, RoleEnum
 from app.decorators.role_required import role_required, get_current_user_from_token
 from flask_jwt_extended import jwt_required
 from sqlalchemy.exc import SQLAlchemyError
-from sqlalchemy import func
+from sqlalchemy import func, text
 import logging
 from werkzeug.security import generate_password_hash, check_password_hash
 from app import db
@@ -19,6 +19,7 @@ from app.models.studentPasswordLog import StudentPasswordLog
 from app.models.user_settings import UserSettings
 from sqlalchemy.orm import joinedload
 from app.utils.email_service import EmailService
+from app.utils.tenant_middleware import city_id_to_schema_name, get_current_tenant_context
 from datetime import datetime, timedelta, date
 from flask import current_app
 import csv
@@ -32,6 +33,7 @@ import re
 
 bp = Blueprint('users', __name__, url_prefix='/users')
 
+
 def normalizar_nome_para_busca(nome):
     """
     Normaliza um nome para busca, removendo espaços extras e convertendo para minúsculas.
@@ -42,6 +44,45 @@ def normalizar_nome_para_busca(nome):
     # Converter para string, remover espaços no início/fim e normalizar espaços múltiplos
     nome_normalizado = re.sub(r'\s+', ' ', str(nome).strip())
     return nome_normalizado.lower()
+
+
+def gerar_iniciais_email(nome_completo):
+    """
+    Gera a parte local do email com a primeira letra de cada nome.
+    Ex: "Artur Alexandre Calderon" -> "aac"
+    """
+    if not nome_completo:
+        return ""
+    partes = re.sub(r'\s+', ' ', str(nome_completo).strip()).split()
+    return "".join(p[0].lower() for p in partes if p)
+
+
+def gerar_primeiro_nome(nome_completo):
+    """
+    Retorna o primeiro nome em minúsculas.
+    Ex: "Artur Alexandre Calderon" -> "artur"
+    """
+    if not nome_completo:
+        return ""
+    partes = re.sub(r'\s+', ' ', str(nome_completo).strip()).split()
+    return partes[0].lower() if partes else ""
+
+
+def obter_email_disponivel(base_local, dominio="@afirmeplay.com.br", usados_nesse_batch=None):
+    """
+    Retorna um email disponível: base_local + dominio.
+    Se base_local@dominio já existir (no banco ou no batch), usa base_local1, base_local2, etc.
+    """
+    usados_nesse_batch = usados_nesse_batch or set()
+    candidato = f"{base_local}{dominio}"
+    if candidato not in usados_nesse_batch and not User.query.filter(func.lower(User.email) == candidato.lower()).first():
+        return candidato
+    suffix = 1
+    while True:
+        candidato = f"{base_local}{suffix}{dominio}"
+        if candidato not in usados_nesse_batch and not User.query.filter(func.lower(User.email) == candidato.lower()).first():
+            return candidato
+        suffix += 1
 
 def format_student_details(student):
     user_details = None
@@ -88,10 +129,22 @@ def format_student_details(student):
 
 
 def format_user_settings(settings_instance):
+    if not settings_instance:
+        return {
+            "theme": None,
+            "fontFamily": None,
+            "fontSize": None,
+            "sidebar_theme_id": None,
+            "frame_id": None,
+            "stamp_id": None,
+        }
     return {
-        "theme": settings_instance.theme if settings_instance else None,
-        "fontFamily": settings_instance.font_family if settings_instance else None,
-        "fontSize": settings_instance.font_size if settings_instance else None
+        "theme": settings_instance.theme,
+        "fontFamily": settings_instance.font_family,
+        "fontSize": settings_instance.font_size,
+        "sidebar_theme_id": settings_instance.sidebar_theme_id,
+        "frame_id": settings_instance.frame_id,
+        "stamp_id": settings_instance.stamp_id,
     }
 
 @bp.route('/list', methods=['GET'])
@@ -256,12 +309,17 @@ def create_user():
         return jsonify({"error": "Error creating user", "details": str(e)}), 500
 
 def serialize_user(user):
+    role_val = None
+    if getattr(user, 'role', None) is not None:
+        role_val = getattr(user.role, 'value', user.role)
+        if callable(role_val):
+            role_val = None
     return {
         "id": user.id,
         "name": user.name,
         "email": user.email,
         "registration": user.registration,
-        "role": user.role.value if user.role else None,
+        "role": role_val,
         "city_id": user.city_id,
         "birth_date": user.birth_date.isoformat() if user.birth_date else None,
         "nationality": user.nationality,
@@ -273,6 +331,160 @@ def serialize_user(user):
         "created_at": user.created_at.isoformat() if user.created_at else None,
         "updated_at": user.updated_at.isoformat() if user.updated_at else None
     }
+
+
+def _user_needs_onboarding(user):
+    """Considera que o usuário precisa de onboarding se não tiver onboarding_completed em avatar_config."""
+    if not user:
+        return True
+    ac = user.avatar_config
+    if not ac or not isinstance(ac, dict):
+        return True
+    return ac.get("onboarding_completed") is not True
+
+
+@bp.route('/me/onboarding-status', methods=['GET'])
+@jwt_required()
+def get_onboarding_status():
+    """
+    Retorna se o usuário atual precisa preencher o modal de primeiro acesso (onboarding).
+    Usado pelo frontend para exibir o modal e pré-preencher os campos.
+    Sem migration: usa avatar_config.onboarding_completed (JSON existente).
+    """
+    try:
+        current_user = get_current_user_from_token()
+        if not current_user:
+            return jsonify({"erro": "Usuário não encontrado"}), 401
+
+        user = User.query.get(current_user["id"])
+        if not user:
+            return jsonify({"erro": "Usuário não encontrado"}), 404
+
+        needs_onboarding = _user_needs_onboarding(user)
+        profile = {
+            "name": user.name,
+            "birth_date": user.birth_date.isoformat() if user.birth_date else None,
+            "phone": user.phone,
+            "gender": user.gender,
+            "nationality": user.nationality,
+            "address": user.address,
+            "traits": user.traits,
+            "avatar_config": user.avatar_config,
+        }
+        return jsonify({
+            "needs_onboarding": needs_onboarding,
+            "profile": profile,
+        }), 200
+    except Exception as e:
+        logging.error(f"Erro ao obter status de onboarding: {str(e)}", exc_info=True)
+        return jsonify({"erro": "Erro ao obter status de onboarding", "detalhes": str(e)}), 500
+
+
+@bp.route('/me/onboarding', methods=['POST'])
+@jwt_required()
+def submit_onboarding():
+    """
+    Envio do formulário do modal de primeiro acesso.
+    Atualiza: name, birth_date, phone, gender, nationality, address, traits, avatar_config
+    e marca onboarding_completed em avatar_config (sem migration).
+    """
+    try:
+        current_user = get_current_user_from_token()
+        if not current_user:
+            return jsonify({"erro": "Usuário não encontrado"}), 401
+
+        user = User.query.get(current_user["id"])
+        if not user:
+            return jsonify({"erro": "Usuário não encontrado"}), 404
+
+        data = request.get_json() or {}
+
+        # name (opcional no onboarding)
+        name = data.get("name")
+        if name is not None and isinstance(name, str) and name.strip():
+            user.name = name.strip()
+
+        # birth_date
+        birth_date_value = data.get("birth_date")
+        if birth_date_value:
+            try:
+                if isinstance(birth_date_value, str):
+                    user.birth_date = datetime.strptime(birth_date_value, "%Y-%m-%d").date()
+                elif isinstance(birth_date_value, date):
+                    user.birth_date = birth_date_value
+                else:
+                    return jsonify({"erro": "birth_date deve estar no formato YYYY-MM-DD"}), 400
+            except ValueError:
+                return jsonify({"erro": "birth_date inválido"}), 400
+
+        # nationality
+        nationality = data.get("nationality")
+        if nationality is not None:
+            user.nationality = nationality.strip() if isinstance(nationality, str) and nationality.strip() else None
+
+        # phone
+        phone = data.get("phone")
+        if phone is not None:
+            if phone:
+                phone_digits = re.sub(r"\D", "", str(phone))
+                user.phone = phone_digits if phone_digits and phone_digits.isdigit() else None
+            else:
+                user.phone = None
+
+        # gender
+        gender = data.get("gender")
+        allowed_genders = {"masculino", "feminino", "outro", "prefiro_nao_informar"}
+        if gender is not None:
+            if gender:
+                g = gender.strip().lower()
+                if g not in allowed_genders:
+                    return jsonify({"erro": "gender inválido"}), 400
+                user.gender = g
+            else:
+                user.gender = None
+
+        # traits (características - lista de strings)
+        traits = data.get("traits")
+        if traits is not None:
+            if traits in ("", [], None):
+                user.traits = None
+            elif isinstance(traits, list) and all(isinstance(t, str) for t in traits):
+                user.traits = traits
+            else:
+                return jsonify({"erro": "traits deve ser uma lista de strings ou null"}), 400
+
+        # address
+        address = data.get("address")
+        if address is not None:
+            user.address = address.strip() if isinstance(address, str) and address.strip() else None
+
+        # avatar_config: theme (modo escuro), font, icon + marcar onboarding_completed
+        avatar_config = dict(user.avatar_config) if user.avatar_config and isinstance(user.avatar_config, dict) else {}
+        if "theme" in data:
+            v = data["theme"]
+            if v in ("light", "dark", "system"):
+                avatar_config["theme"] = v
+        if "font" in data and data["font"]:
+            avatar_config["font"] = str(data["font"]).strip()
+        if "icon" in data:
+            avatar_config["icon"] = data["icon"]  # string ou número do ícone
+        avatar_config["onboarding_completed"] = True
+        user.avatar_config = avatar_config
+
+        db.session.commit()
+
+        return jsonify({
+            "message": "Configuração concluída. Você já pode acessar o sistema.",
+            "user": serialize_user(user),
+        }), 200
+    except SQLAlchemyError as e:
+        db.session.rollback()
+        logging.error(f"Erro ao salvar onboarding: {str(e)}")
+        return jsonify({"erro": "Erro ao salvar configuração", "detalhes": str(e)}), 500
+    except Exception as e:
+        db.session.rollback()
+        logging.error(f"Erro inesperado no onboarding: {str(e)}", exc_info=True)
+        return jsonify({"erro": "Erro ao salvar configuração"}), 500
 
 
 @bp.route('/<string:user_id>', methods=['GET'])
@@ -290,16 +502,25 @@ def get_user_by_id(user_id):
 
         user_data = serialize_user(user)
 
-        if user.role == RoleEnum.ALUNO:
-            student = Student.query.options(
-                joinedload(Student.school),
-                joinedload(Student.class_),
-                joinedload(Student.grade)
-            ).filter_by(user_id=user.id).first()
-
+        if getattr(user, 'role', None) == RoleEnum.ALUNO:
+            student = None
+            try:
+                from app.utils.tenant_middleware import ensure_tenant_schema_for_user
+                if ensure_tenant_schema_for_user(user.id):
+                    student = Student.query.options(
+                        joinedload(Student.school),
+                        joinedload(Student.class_),
+                        joinedload(Student.grade)
+                    ).filter_by(user_id=user.id).first()
+            except Exception as student_err:
+                logging.warning(f"Erro ao buscar student_details para user {user_id}: {student_err}")
             if student:
-                student_details = format_student_details(student)
-                user_data['student_details'] = student_details
+                try:
+                    student_details = format_student_details(student)
+                    user_data['student_details'] = student_details
+                except Exception as fmt_err:
+                    logging.warning(f"Erro ao formatar student_details para user {user_id}: {fmt_err}", exc_info=True)
+                    user_data['student_details'] = None
 
         return jsonify(user_data), 200
 
@@ -485,6 +706,54 @@ def change_password():
     except Exception as e:
         logging.error(f"Erro inesperado ao alterar senha: {e}", exc_info=True)
         return jsonify({"erro": "Erro interno do servidor"}), 500
+
+@bp.route('/check-email', methods=['POST'])
+@jwt_required()
+@role_required("admin", "tecadm", "diretor", "coordenador", "professor")
+def check_email_availability():
+    """Verifica se um email está disponível e sugere uma alternativa caso já esteja em uso"""
+    try:
+        data = request.get_json()
+        if not data or 'email' not in data:
+            return jsonify({"erro": "O campo 'email' é obrigatório"}), 400
+
+        email = data['email'].strip().lower()
+
+        if '@' not in email:
+            return jsonify({"erro": "Email inválido"}), 400
+
+        prefix, domain = email.split('@', 1)
+
+        if not prefix:
+            return jsonify({"erro": "Email inválido"}), 400
+
+        existing = User.query.filter(func.lower(User.email) == email).first()
+
+        if not existing:
+            return jsonify({
+                "disponivel": True,
+                "email": email
+            }), 200
+
+        # Encontrar o próximo email disponível (ex: aac2, aac3, ...)
+        suffix = 2
+        while True:
+            candidate = f"{prefix}{suffix}@{domain}"
+            if not User.query.filter(func.lower(User.email) == candidate).first():
+                return jsonify({
+                    "disponivel": False,
+                    "email": email,
+                    "email_sugerido": candidate
+                }), 200
+            suffix += 1
+
+    except SQLAlchemyError as e:
+        logging.error(f"Erro no banco de dados ao verificar email: {e}")
+        return jsonify({"erro": "Erro interno do servidor"}), 500
+    except Exception as e:
+        logging.error(f"Erro inesperado ao verificar email: {e}", exc_info=True)
+        return jsonify({"erro": "Erro interno do servidor"}), 500
+
 
 @bp.route('/validate-reset-token', methods=['POST'])
 def validate_reset_token():
@@ -693,100 +962,176 @@ def delete_user(user_id):
     """Deleta um usuário específico"""
     try:
         current_user = get_current_user_from_token()
+
         if not current_user:
             return jsonify({"erro": "Usuário não encontrado"}), 404
-        
-        # Verificar se o usuário está tentando deletar a si mesmo
+
         if current_user['id'] == user_id:
             return jsonify({"erro": "Não é possível deletar o próprio usuário"}), 400
-        
-        # Buscar usuário a ser deletado
+
         user_to_delete = User.query.get(user_id)
         if not user_to_delete:
             return jsonify({"erro": "Usuário não encontrado"}), 404
-        
-        # Verificar se o usuário atual tem permissão para deletar o usuário alvo
-        # Tecadm só pode deletar usuários da mesma cidade
+
+        if user_to_delete.city_id:
+            user_schema = city_id_to_schema_name(user_to_delete.city_id)
+            search_path = f'"{user_schema}", public'
+            db.session.execute(text(f"SET search_path TO {search_path}"))
+
         if current_user['role'] == "tecadm":
             current_city_id = current_user.get('tenant_id') or current_user.get('city_id')
             if user_to_delete.city_id != current_city_id:
                 return jsonify({"erro": "Sem permissão para deletar usuário de outra cidade"}), 403
-        
-        # Exclusão em cascata - deletar registros relacionados primeiro
+
         deleted_relations = []
-        
-        # Verificar e deletar se é um estudante
-        student = Student.query.filter_by(user_id=user_id).first()
-        if student:
-            db.session.delete(student)
-            deleted_relations.append("estudante")
-            logging.info(f"Deletando registro de estudante para usuário {user_id}")
-        
-        # Verificar e deletar se é um professor
+
+        def _set_search_path_for_user():
+            """Volta o search_path para o schema do usuário (para manter consistência multi-tenant)."""
+            if user_to_delete.city_id:
+                schema = city_id_to_schema_name(user_to_delete.city_id)
+                db.session.execute(text(f'SET search_path TO "{schema}", public'))
+            else:
+                db.session.execute(text("SET search_path TO public"))
+
         teacher = Teacher.query.filter_by(user_id=user_id).first()
+        teacher_id = teacher.id if teacher else None
+
+        all_cities = City.query.all() if teacher_id else []
+
+        if teacher_id:
+            from app.models.teacherClass import TeacherClass
+            total_deleted = 0
+            for city in all_cities:
+                city_schema = city_id_to_schema_name(city.id)
+                db.session.execute(text(f'SET search_path TO "{city_schema}", public'))
+                deleted = TeacherClass.query.filter_by(teacher_id=teacher_id).delete(synchronize_session=False)
+                total_deleted += deleted
+            if total_deleted > 0:
+                deleted_relations.append(f"{total_deleted} vínculos com turmas")
+            if user_to_delete.city_id:
+                user_schema = city_id_to_schema_name(user_to_delete.city_id)
+                db.session.execute(text(f'SET search_path TO "{user_schema}", public'))
+
+        if teacher_id:
+            from app.models.schoolTeacher import SchoolTeacher
+            total_deleted = 0
+            for city in all_cities:
+                city_schema = city_id_to_schema_name(city.id)
+                db.session.execute(text(f'SET search_path TO "{city_schema}", public'))
+                deleted = SchoolTeacher.query.filter_by(teacher_id=teacher_id).delete(synchronize_session=False)
+                total_deleted += deleted
+            if total_deleted > 0:
+                deleted_relations.append(f"{total_deleted} vínculos escolares")
+            if user_to_delete.city_id:
+                user_schema = city_id_to_schema_name(user_to_delete.city_id)
+                db.session.execute(text(f'SET search_path TO "{user_schema}", public'))
+
+        if teacher_id:
+            db.session.flush()
+
+        # IMPORTANTE: os loops acima mexem no search_path. Antes de deletar tabelas do usuário,
+        # precisamos restaurar para o schema do usuário.
+        _set_search_path_for_user()
+
+        # Ao deletar Student por `user_id`, pode existir dependência em `physical_test_forms`
+        # (FK: physical_test_forms.student_id -> student.id). Como usamos bulk delete,
+        # a cascata do ORM não garante remoção no banco: precisamos deletar dependências antes.
+        from app.models.physicalTestForm import PhysicalTestForm
+        from app.models.physicalTestAnswer import PhysicalTestAnswer
+
+        students_to_delete = Student.query.filter_by(user_id=user_id).all()
+        student_ids_to_delete = [s.id for s in students_to_delete]
+        if student_ids_to_delete:
+            physical_forms_subq = (
+                PhysicalTestForm.query.with_entities(PhysicalTestForm.id)
+                .filter(PhysicalTestForm.student_id.in_(student_ids_to_delete))
+                .subquery()
+            )
+
+            # Remove respostas (dependentes) antes de apagar os formulários físicos.
+            PhysicalTestAnswer.query.filter(
+                PhysicalTestAnswer.physical_form_id.in_(physical_forms_subq)
+            ).delete(synchronize_session=False)
+
+            PhysicalTestForm.query.filter(
+                PhysicalTestForm.student_id.in_(student_ids_to_delete)
+            ).delete(synchronize_session=False)
+
+        for student in students_to_delete:
+            db.session.delete(student)
+        if students_to_delete:
+            deleted_relations.append("estudante")
+
+        # Remover logs de senha do aluno no schema da cidade (evita órfãos e duplicatas ao recadastrar)
+        if user_to_delete.city_id:
+            db.session.execute(text(f'SET search_path TO "{city_id_to_schema_name(user_to_delete.city_id)}", public'))
+            deleted_logs = StudentPasswordLog.query.filter_by(user_id=user_id).delete(synchronize_session=False)
+            if deleted_logs > 0:
+                deleted_relations.append("log de senhas (student_password_log)")
+
         if teacher:
-            db.session.delete(teacher)
-            deleted_relations.append("professor")
-            logging.info(f"Deletando registro de professor para usuário {user_id}")
-        
-        # Verificar e deletar se é um diretor/coordenador/tecadm
-        manager = Manager.query.filter_by(user_id=user_id).first()
-        if manager:
-            db.session.delete(manager)
+            total_deleted = 0
+            for city in all_cities:
+                city_schema = city_id_to_schema_name(city.id)
+                db.session.execute(text(f'SET search_path TO "{city_schema}", public'))
+                deleted = Teacher.query.filter_by(user_id=user_id).delete(synchronize_session=False)
+                total_deleted += deleted
+            if total_deleted > 0:
+                deleted_relations.append(f"professor ({total_deleted} schemas)")
+            if user_to_delete.city_id:
+                user_schema = city_id_to_schema_name(user_to_delete.city_id)
+                db.session.execute(text(f'SET search_path TO "{user_schema}", public'))
+
+        # Mesma lógica: Teacher/Professor também pode ter mudado o search_path.
+        _set_search_path_for_user()
+
+        deleted_count = Manager.query.filter_by(user_id=user_id).delete(synchronize_session=False)
+        if deleted_count > 0:
             deleted_relations.append("manager")
-            logging.info(f"Deletando registro de manager para usuário {user_id}")
-        
-        # Verificar e deletar vínculos com escolas (SchoolTeacher)
-        from app.models.schoolTeacher import SchoolTeacher
-        school_teachers = SchoolTeacher.query.filter_by(teacher_id=user_id).all()
-        if school_teachers:
-            for school_teacher in school_teachers:
-                db.session.delete(school_teacher)
-            deleted_relations.append(f"{len(school_teachers)} vínculos escolares")
-            logging.info(f"Deletando {len(school_teachers)} vínculos escolares para usuário {user_id}")
-        
-        # Verificar e deletar vínculos com turmas (TeacherClass)
-        from app.models.teacherClass import TeacherClass
-        teacher_classes = TeacherClass.query.filter_by(teacher_id=user_id).all()
-        if teacher_classes:
-            for teacher_class in teacher_classes:
-                db.session.delete(teacher_class)
-            deleted_relations.append(f"{len(teacher_classes)} vínculos com turmas")
-            logging.info(f"Deletando {len(teacher_classes)} vínculos com turmas para usuário {user_id}")
-        
-        # Verificar e deletar UserQuickLinks
+
         from app.models.userQuickLinks import UserQuickLinks
-        user_quick_links = UserQuickLinks.query.filter_by(user_id=user_id).first()
-        if user_quick_links:
-            db.session.delete(user_quick_links)
+        deleted_count = UserQuickLinks.query.filter_by(user_id=user_id).delete(synchronize_session=False)
+        if deleted_count > 0:
             deleted_relations.append("atalhos rápidos")
-            logging.info(f"Deletando atalhos rápidos para usuário {user_id}")
-        
-        # Deletar usuário
+
+        db.session.flush()
+
         db.session.delete(user_to_delete)
+
         db.session.commit()
-        
-        logging.info(f"Usuário {user_to_delete.email} deletado por {current_user['email']}")
-        
-        # Preparar mensagem de resposta
+
+
         if deleted_relations:
             relations_text = ", ".join(deleted_relations)
             message = f"Usuário deletado com sucesso. Registros relacionados também deletados: {relations_text}"
         else:
             message = "Usuário deletado com sucesso"
-        
+
         return jsonify({
             "mensagem": message,
             "deleted_relations": deleted_relations
         }), 200
-        
+
     except SQLAlchemyError as e:
         db.session.rollback()
-        logging.error(f"Erro no banco de dados ao deletar usuário: {e}")
+        logging.error(f"Erro no banco de dados ao deletar usuário {user_id}: {str(e)}", exc_info=True)
         return jsonify({"erro": "Erro interno do servidor"}), 500
     except Exception as e:
-        logging.error(f"Erro inesperado ao deletar usuário: {e}", exc_info=True)
-        return jsonify({"erro": "Erro interno do servidor"}), 500 
+        db.session.rollback()
+        logging.error(f"Erro inesperado ao deletar usuário {user_id}: {str(e)}", exc_info=True)
+        return jsonify({"erro": "Erro interno do servidor"}), 500
+
+def _user_settings_in_public(fn):
+    """Executa uma função com search_path em public para garantir leitura/escrita em public.user_settings (evita divergência multi-tenant)."""
+    try:
+        db.session.execute(text("SET search_path TO public"))
+        return fn()
+    finally:
+        try:
+            db.session.execute(text("SET search_path TO public"))
+        except Exception:
+            pass
+
 
 @bp.route('/user-settings/<string:user_id>', methods=['POST'])
 @jwt_required()
@@ -812,28 +1157,49 @@ def save_user_settings(user_id):
         if not isinstance(settings_data, dict):
             return jsonify({"erro": "Objeto settings deve ser um dicionário"}), 400
 
-        theme = settings_data.get('theme')
-        font_family = settings_data.get('fontFamily')
-        font_size = settings_data.get('fontSize')
-
-        if font_size is not None:
+        def _parse_font_size(val):
+            """Aceita int, '110' ou '110%' e retorna int (110) ou None."""
+            if val is None:
+                return None
+            if isinstance(val, int):
+                return val
+            s = str(val).strip().rstrip('%')
+            if not s:
+                return None
             try:
-                font_size = int(font_size)
-            except (ValueError, TypeError):
-                return jsonify({"erro": "fontSize deve ser um número inteiro"}), 400
+                return int(s)
+            except ValueError:
+                return None
 
-        user_settings = UserSettings.query.filter_by(user_id=user_id).first()
-        if not user_settings:
-            user_settings = UserSettings(user_id=user_id)
-            db.session.add(user_settings)
+        if 'fontSize' in settings_data and settings_data['fontSize'] is not None:
+            parsed = _parse_font_size(settings_data['fontSize'])
+            if parsed is None:
+                return jsonify({"erro": "fontSize deve ser um número inteiro ou percentual (ex: 110 ou 110%)"}), 400
 
-        user_settings.theme = theme
-        user_settings.font_family = font_family
-        user_settings.font_size = font_size
+        def _save():
+            user_settings = UserSettings.query.filter_by(user_id=user_id).first()
+            if not user_settings:
+                user_settings = UserSettings(user_id=user_id)
+                db.session.add(user_settings)
 
-        db.session.commit()
+            # Atualização parcial: só altera os campos que vieram no body (evita apagar tema/fonte quando só envia sidebar_theme_id)
+            if 'theme' in settings_data:
+                user_settings.theme = settings_data.get('theme')
+            if 'fontFamily' in settings_data:
+                user_settings.font_family = settings_data.get('fontFamily')
+            if 'fontSize' in settings_data:
+                user_settings.font_size = _parse_font_size(settings_data['fontSize'])
+            if 'sidebar_theme_id' in settings_data:
+                user_settings.sidebar_theme_id = settings_data.get('sidebar_theme_id')
+            if 'frame_id' in settings_data:
+                user_settings.frame_id = settings_data.get('frame_id')
+            if 'stamp_id' in settings_data:
+                user_settings.stamp_id = settings_data.get('stamp_id')
 
-        return jsonify({"settings": format_user_settings(user_settings)}), 200
+            db.session.commit()
+            return jsonify({"settings": format_user_settings(user_settings)}), 200
+
+        return _user_settings_in_public(_save)
 
     except SQLAlchemyError as e:
         db.session.rollback()
@@ -861,9 +1227,11 @@ def get_user_settings(user_id):
         if not user:
             return jsonify({"erro": "Usuário não encontrado"}), 404
 
-        user_settings = UserSettings.query.filter_by(user_id=user_id).first()
+        def _get():
+            user_settings = UserSettings.query.filter_by(user_id=user_id).first()
+            return jsonify({"settings": format_user_settings(user_settings)}), 200
 
-        return jsonify({"settings": format_user_settings(user_settings)}), 200
+        return _user_settings_in_public(_get)
 
     except SQLAlchemyError as e:
         logging.error(f"Erro no banco de dados ao buscar preferências do usuário {user_id}: {str(e)}")
@@ -878,7 +1246,12 @@ def get_user_settings(user_id):
 @role_required("admin", "tecadm", "diretor", "coordenador")
 def bulk_upload_students():
     """
-    Rota para upload em massa de alunos via arquivo CSV ou Excel
+    Rota para upload em massa de alunos via arquivo CSV ou Excel.
+    O arquivo NÃO deve conter email nem senha: o sistema gera automaticamente
+    email = primeira letra de cada nome + @afirmeplay.com.br (ex: aac@afirmeplay.com.br);
+    senha = primeiro nome + @afirmeplay (ex: artur@afirmeplay).
+    Em caso de iniciais repetidas, é acrescentado número (aac1, aac2, ...).
+    Retorna nomes, emails e senhas criados.
     """
     try:
         # Verificar se há arquivo no request
@@ -900,6 +1273,15 @@ def bulk_upload_students():
         current_user = get_current_user_from_token()
         if not current_user:
             return jsonify({"erro": "Usuário não encontrado"}), 404
+        
+        # Exigir contexto de cidade: school/student existem só em city_xxx, não em public
+        tenant_ctx = get_current_tenant_context()
+        if not tenant_ctx or not getattr(tenant_ctx, 'has_tenant_context', False) or tenant_ctx.schema == 'public':
+            return jsonify({
+                "erro": "É necessário informar o município para esta operação. "
+                        "Se for admin, envie o header X-City-ID (ou X-City-Slug). "
+                        "Se for tecadm, diretor ou coordenador, faça login com usuário vinculado a uma cidade."
+            }), 400
         
         # Ler o arquivo
         try:
@@ -946,8 +1328,8 @@ def bulk_upload_students():
         except Exception as e:
             return jsonify({"erro": f"Erro ao ler arquivo: {str(e)}"}), 400
         
-        # Verificar colunas obrigatórias
-        required_columns = ['nome', 'email', 'senha', 'data_nascimento', 'escola', 'endereco_escola', 'estado_escola', 'municipio_escola', 'serie', 'turma']
+        # Verificar colunas obrigatórias (email e senha são gerados pelo sistema; data_nascimento é opcional)
+        required_columns = ['nome', 'escola', 'endereco_escola', 'estado_escola', 'municipio_escola', 'grade_id', 'serie', 'turma']
         if rows:
             missing_columns = [col for col in required_columns if col not in rows[0].keys()]
         else:
@@ -960,8 +1342,14 @@ def bulk_upload_students():
                 "colunas_obrigatorias": required_columns
             }), 400
         
-        # Limpar dados
-        rows = [row for row in rows if all(str(row.get(col, '')).strip() for col in ['nome', 'email', 'escola', 'endereco_escola', 'estado_escola', 'municipio_escola', 'serie', 'turma'])]
+        # DEBUG: ver o que está chegando do arquivo (cabeçalhos e primeiras linhas, foco em grade_id)
+        print("[bulk-upload-students] Colunas do arquivo:", list(rows[0].keys()) if rows else [])
+        for i, row in enumerate(rows[:3]):
+            raw_grade = row.get('grade_id')
+            print(f"[bulk-upload-students] Linha {i+2}: grade_id raw={repr(raw_grade)}, type={type(raw_grade).__name__}, serie={repr(row.get('serie'))}")
+        
+        # Limpar dados (nome e dados da escola/turma obrigatórios; email e senha não vêm do arquivo)
+        rows = [row for row in rows if all(str(row.get(col, '')).strip() for col in ['nome', 'escola', 'endereco_escola', 'estado_escola', 'municipio_escola', 'grade_id', 'serie', 'turma'])]
         
         # Converter data de nascimento
         def parse_date(date_value):
@@ -1026,41 +1414,38 @@ def bulk_upload_students():
         if not allowed_schools:
             return jsonify({"erro": "Usuário não tem permissão para criar alunos em nenhuma escola"}), 403
         
+        # Conjunto de emails já atribuídos neste batch (para evitar duplicatas)
+        emails_usados_no_batch = set()
+        
         # Processar cada linha
         for index, row in enumerate(rows):
             try:
-                # Validar email
-                email = str(row.get('email', '')).strip().lower()
-                if not email or '@' not in email:
+                nome_completo = str(row.get('nome', '')).strip()
+                if not nome_completo:
                     results["erros"].append({
-                        "linha": index + 2,  # +2 porque index começa em 0 e há cabeçalho
-                        "campo": "email",
-                        "valor": email,
-                        "erro": "Email inválido"
+                        "linha": index + 2,
+                        "campo": "nome",
+                        "valor": "",
+                        "erro": "Nome é obrigatório"
                     })
                     continue
                 
-                # Verificar se email já existe
-                existing_user = User.query.filter_by(email=email).first()
-                if existing_user:
-                    # Verificar se o usuário já é um aluno
-                    existing_student = Student.query.filter_by(user_id=existing_user.id).first()
-                    if existing_student:
-                        results["erros"].append({
-                            "linha": index + 2,
-                            "campo": "email",
-                            "valor": email,
-                            "erro": "Aluno já cadastrado no sistema"
-                        })
-                        continue
-                    else:
-                        results["erros"].append({
-                            "linha": index + 2,
-                            "campo": "email",
-                            "valor": email,
-                            "erro": "Email já cadastrado para outro tipo de usuário"
-                        })
-                        continue
+                # Gerar email: primeira letra de cada nome + @afirmeplay.com.br (com sufixo se duplicado)
+                base_local = gerar_iniciais_email(nome_completo)
+                if not base_local:
+                    results["erros"].append({
+                        "linha": index + 2,
+                        "campo": "nome",
+                        "valor": nome_completo,
+                        "erro": "Não foi possível gerar iniciais para o email"
+                    })
+                    continue
+                email = obter_email_disponivel(base_local, "@afirmeplay.com.br", emails_usados_no_batch)
+                emails_usados_no_batch.add(email.lower())
+                
+                # Gerar senha: primeiro nome + @afirmeplay
+                primeiro_nome = gerar_primeiro_nome(nome_completo)
+                senha = f"{primeiro_nome}@afirmeplay" if primeiro_nome else "aluno@afirmeplay"
                 
                 # Validar matrícula se fornecida (opcional)
                 matricula_raw = row.get('matricula', '')
@@ -1073,13 +1458,14 @@ def bulk_upload_students():
                     if not matricula or matricula.lower() in ['none', 'null', 'nulo', '']:
                         matricula = None
                 
-                # Verificar se matrícula já existe (apenas se foi fornecida)
-                if matricula and User.query.filter_by(registration=matricula).first():
+                # Verificar se matrícula já existe nesta cidade (Student no schema atual)
+                # Matrícula é única por cidade, não globalmente em User
+                if matricula and Student.query.filter_by(registration=matricula).first():
                     results["erros"].append({
                         "linha": index + 2,
                         "campo": "matricula",
                         "valor": matricula,
-                        "erro": "Matrícula já cadastrada"
+                        "erro": "Matrícula já cadastrada nesta cidade"
                     })
                     continue
                 
@@ -1115,25 +1501,40 @@ def bulk_upload_students():
                     })
                     continue
                 
-                # Buscar série existente (busca normalizada - case-insensitive e espaços normalizados)
-                serie_nome = str(row.get('serie', '')).strip()
-                serie_nome_normalizado = normalizar_nome_para_busca(serie_nome)
+                # Buscar série pelo grade_id (coluna grade_id contém o UUID; serie contém o nome para contexto)
+                grade_id_raw = row.get('grade_id')
+                # Normalizar: Excel pode trazer UUID como float ou número; garantir string
+                if grade_id_raw is None:
+                    grade_id_str = ''
+                elif isinstance(grade_id_raw, (int, float)):
+                    grade_id_str = str(int(grade_id_raw)) if isinstance(grade_id_raw, float) and grade_id_raw == int(grade_id_raw) else str(grade_id_raw).strip()
+                else:
+                    grade_id_str = str(grade_id_raw).strip()
+                serie_nome = str(row.get('serie', '')).strip()  # mantido para mensagens de erro
                 
-                # Buscar todas as séries e comparar com normalização
-                todas_series = Grade.query.all()
-                serie = None
-                for serie_candidata in todas_series:
-                    nome_serie_normalizado = normalizar_nome_para_busca(serie_candidata.name)
-                    if nome_serie_normalizado == serie_nome_normalizado:
-                        serie = serie_candidata
-                        break
+                # DEBUG: ver valor usado no lookup
+                if index < 3:
+                    print(f"[bulk-upload-students] Linha {index + 2} lookup: grade_id_str={repr(grade_id_str)}")
                 
+                if not grade_id_str:
+                    results["erros"].append({
+                        "linha": index + 2,
+                        "campo": "grade_id",
+                        "valor": grade_id_raw,
+                        "erro": "grade_id é obrigatório"
+                    })
+                    continue
+                
+                serie = Grade.query.get(grade_id_str)
+                if index < 3:
+                    print(f"[bulk-upload-students] Linha {index + 2} Grade.query.get({repr(grade_id_str)}) = {serie}")
                 if not serie:
                     results["erros"].append({
                         "linha": index + 2,
-                        "campo": "serie",
-                        "valor": serie_nome,
-                        "erro": "Série não encontrada"
+                        "campo": "grade_id",
+                        "valor": grade_id_str,
+                        "erro": "Série não encontrada",
+                        "serie_nome": serie_nome or None
                     })
                     continue
                 
@@ -1178,35 +1579,17 @@ def bulk_upload_students():
                         })
                         continue
                 
-                # Validar data de nascimento
+                # Data de nascimento é opcional
                 data_nascimento = row.get('data_nascimento_parsed')
-                if not data_nascimento:
-                    results["erros"].append({
-                        "linha": index + 2,
-                        "campo": "data_nascimento",
-                        "valor": row.get('data_nascimento', ''),
-                        "erro": "Data de nascimento inválida"
-                    })
-                    continue
                 
-                # Validar senha (obrigatória)
-                senha = str(row.get('senha', '')).strip()
-                if not senha:
-                    results["erros"].append({
-                        "linha": index + 2,
-                        "campo": "senha",
-                        "valor": "",
-                        "erro": "Senha não fornecida"
-                    })
-                    continue
-                
-                # Criar usuário com senha do Excel (criptografada)
+                # Criar usuário: não gravar matrícula em User (única em public) para evitar
+                # conflito entre cidades; matrícula fica só em Student (única por city schema)
                 novo_usuario = User(
                     id=str(uuid.uuid4()),
                     name=str(row.get('nome', '')).strip(),
                     email=email,
-                    password_hash=generate_password_hash(senha),  # Senha do Excel criptografada
-                    registration=matricula if matricula else None,
+                    password_hash=generate_password_hash(senha),
+                    registration=None,  # matrícula apenas em Student (por cidade)
                     role=RoleEnum.ALUNO,
                     city_id=escola.city_id
                 )
@@ -1232,7 +1615,7 @@ def bulk_upload_students():
                 password_log = StudentPasswordLog(
                     student_name=str(row.get('nome', '')).strip(),
                     email=email,
-                    password=senha,  # Senha em texto plano (do Excel, sem hash)
+                    password=senha,  # Senha em texto plano (gerada pelo sistema)
                     registration=matricula if matricula else None,
                     user_id=novo_usuario.id,
                     student_id=novo_aluno.id,
@@ -1243,20 +1626,23 @@ def bulk_upload_students():
                 )
                 db.session.add(password_log)
                 
+                # Montar dados da resposta ANTES do commit (evita acessar objetos expirados após commit)
+                aluno_criado_info = {
+                    "nome": nome_completo,
+                    "email": email,
+                    "senha": senha,
+                    "matricula": matricula,
+                    "escola": escola.name,
+                    "serie": serie.name,
+                    "turma": turma.name
+                }
+                
                 # Commit para esta linha
                 db.session.commit()
                 
                 results["sucessos"] += 1
-                results["alunos_criados"].append({
-                    "nome": novo_aluno.name,
-                    "email": novo_usuario.email,
-                    "matricula": novo_aluno.registration,
-                    "escola": escola.name,
-                    "serie": serie.name,
-                    "turma": turma.name
-                })
-                
-                logging.info(f"Aluno criado com sucesso: {novo_aluno.name} ({novo_usuario.email})")
+                results["alunos_criados"].append(aluno_criado_info)
+                logging.info(f"Aluno criado com sucesso: {aluno_criado_info['nome']} ({aluno_criado_info['email']})")
                 
             except Exception as e:
                 db.session.rollback()

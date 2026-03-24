@@ -13,13 +13,16 @@ from app.models.game import Game
 from app.models.manager import Manager
 from app.models.question import Question
 from app.models.school import School
+from app.models.skill import Skill
 from app.models.schoolTeacher import SchoolTeacher
 from app.models.student import Student
 from app.models.studentAnswer import StudentAnswer
 from app.models.studentClass import Class
+from app.models.grades import Grade
 from app.models.teacher import Teacher
 from app.models.teacherClass import TeacherClass
 from app.models.test import Test
+from app.models.testQuestion import TestQuestion
 from app.models.testSession import TestSession
 from app.models.user import User
 from app.models.evaluationResult import EvaluationResult
@@ -30,6 +33,16 @@ from app.permissions.utils import (
     get_teacher_classes,
     get_user_scope,
 )
+from app.certification.services.certificate_service import CertificateService
+
+
+def _safe_build(build_fn, scope: Dict[str, Any], default: Any) -> Any:
+    """Executa build_fn(scope) e, em caso de exceção, retorna default (evita ERR_EMPTY_RESPONSE)."""
+    try:
+        return build_fn(scope)
+    except Exception:
+        db.session.rollback()
+        return default
 
 
 class DashboardService:
@@ -46,14 +59,14 @@ class DashboardService:
     @classmethod
     def get_admin_dashboard(cls, user: Dict[str, Any]) -> Dict[str, Any]:
         scope = cls._resolve_scope(user)
-        summary = cls._build_summary(scope)
-        kpis = cls._build_main_kpis(scope)
-        secondary_cards = cls._build_secondary_cards(scope)
-        rankings = cls._build_rankings(scope)
-        recent_evaluations = cls._build_recent_evaluations(scope)
-        recent_students = cls._build_recent_students(scope)
-        engagement = cls._build_engagement(scope)
-        filters_available = cls._build_filters(scope)
+        summary = _safe_build(cls._build_summary, scope, {})
+        kpis = _safe_build(cls._build_main_kpis, scope, {})
+        secondary_cards = _safe_build(cls._build_secondary_cards, scope, [])
+        rankings = _safe_build(cls._build_rankings, scope, {"classes": [], "students": [], "teacher_rankings": []})
+        recent_evaluations = _safe_build(cls._build_recent_evaluations, scope, [])
+        recent_students = _safe_build(cls._build_recent_students, scope, [])
+        engagement = _safe_build(cls._build_engagement, scope, {})
+        filters_available = _safe_build(cls._build_filters, scope, [])
 
         return {
             "summary": summary,
@@ -159,6 +172,111 @@ class DashboardService:
         classes = Class.query.filter(Class.school_id.in_(school_ids_str)).with_entities(Class.id).all() if school_ids_str else []
         return [row.id for row in classes]
 
+    @staticmethod
+    def _resolve_explicit_ranking_scope(
+        user: Dict[str, Any],
+        scope_type: str,
+        scope_id: str
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Monta escopo para ranking de alunos a partir de parâmetros explícitos (turma, escola, município).
+        Retorna None se o usuário não tiver permissão para aquele escopo.
+        """
+        if not scope_id or scope_type not in ("turma", "escola", "municipio"):
+            return None
+
+        user_scope = get_user_scope(user)
+        role_scope = user_scope.get("scope")
+
+        # Admin pode ver qualquer escopo
+        if role_scope == "all":
+            if scope_type == "turma":
+                clazz = Class.query.get(scope_id)
+                if not clazz:
+                    return None
+                return {
+                    "scope": "turma",
+                    "class_id": scope_id,
+                    "user": user,
+                    "school_ids": None,
+                    "city_id": None,
+                }
+            if scope_type == "escola":
+                school_ids_str = uuid_list_to_str([scope_id]) if scope_id else []
+                return {
+                    "scope": "escola",
+                    "user": user,
+                    "school_ids": school_ids_str,
+                    "city_id": None,
+                }
+            if scope_type == "municipio":
+                return {
+                    "scope": "municipio",
+                    "city_id": scope_id,
+                    "user": user,
+                    "school_ids": None,
+                }
+            return None
+
+        # Tecadm: apenas município dele (city_id) ou escola/turma dentro do município
+        if role_scope == "municipio":
+            user_city_id = user_scope.get("city_id") or user.get("city_id") or user.get("tenant_id")
+            if scope_type == "municipio":
+                if scope_id != user_city_id:
+                    return None
+                return {"scope": "municipio", "city_id": scope_id, "user": user, "school_ids": None}
+            if scope_type == "escola":
+                school = School.query.get(scope_id) if scope_id else None
+                if not school or str(school.city_id) != str(user_city_id):
+                    return None
+                school_ids_str = uuid_list_to_str([scope_id])
+                return {"scope": "escola", "user": user, "school_ids": school_ids_str, "city_id": user_city_id}
+            if scope_type == "turma":
+                clazz = Class.query.get(scope_id)
+                if not clazz:
+                    return None
+                school = School.query.get(clazz.school_id) if getattr(clazz, "school_id", None) else None
+                if not school or str(school.city_id) != str(user_city_id):
+                    return None
+                return {"scope": "turma", "class_id": scope_id, "user": user, "school_ids": None, "city_id": user_city_id}
+            return None
+
+        # Diretor, coordenador, professor: escopo escola (school_ids)
+        if role_scope == "escola":
+            allowed_school_ids = user_scope.get("school_ids") or []
+            allowed_school_ids_str = [str(s) for s in allowed_school_ids] if allowed_school_ids else []
+
+            if scope_type == "municipio":
+                # Só pode ver município da sua escola
+                if not allowed_school_ids_str:
+                    return None
+                first_school = School.query.get(allowed_school_ids_str[0])
+                city_id = first_school.city_id if first_school else None
+                if not city_id or str(scope_id) != str(city_id):
+                    return None
+                return {"scope": "municipio", "city_id": scope_id, "user": user, "school_ids": None}
+
+            if scope_type == "escola":
+                if str(scope_id) not in allowed_school_ids_str:
+                    return None
+                return {"scope": "escola", "user": user, "school_ids": [str(scope_id)], "city_id": user_scope.get("city_id")}
+
+            if scope_type == "turma":
+                clazz = Class.query.get(scope_id)
+                if not clazz:
+                    return None
+                if str(clazz.school_id) not in allowed_school_ids_str:
+                    return None
+                # Professor: restringir a turmas que leciona
+                if user.get("role") == "professor":
+                    teacher_class_ids = get_teacher_classes(user["id"]) or []
+                    if scope_id not in teacher_class_ids:
+                        return None
+                return {"scope": "turma", "class_id": scope_id, "user": user, "school_ids": allowed_school_ids_str, "city_id": user_scope.get("city_id")}
+            return None
+
+        return None
+
     # ------------------------------------------------------------------ #
     # Blocos comuns (Admin / TecAdm)
     # ------------------------------------------------------------------ #
@@ -227,21 +345,19 @@ class DashboardService:
             {
                 "id": "notices",
                 "label": "Avisos",
-                "value": None,
-                "status": "in_implementation",
+                "value": cls._count_notices(scope),
             },
             {
                 "id": "certificates",
                 "label": "Certificados",
-                "value": None,
-                "status": "in_implementation",
+                "value": cls._count_certificates(scope),
             },
         ]
 
     @classmethod
     def _build_rankings(cls, scope: Dict[str, Any]) -> Dict[str, Any]:
         return {
-            "schools": cls._build_school_rankings(scope),
+            "classes": cls._build_class_rankings(scope),
             "students": cls._build_student_rankings(scope),
             "teacher_rankings": [],  # Ainda não suportado
         }
@@ -340,22 +456,149 @@ class DashboardService:
             else:
                 end_date = None
 
+            # Status exibido: "concluida" quando todas as sessões foram finalizadas
+            if sessions and sessions.total and (sessions.completed or 0) >= sessions.total:
+                display_status = "concluida"
+            else:
+                display_status = test.status or "pendente"
+
             results.append(
                 {
                     "evaluation_id": test.id,
                     "title": test.title,
                     "subject": test.subject_rel.name if test.subject_rel else None,
                     "school": school_name,
-                    "status": test.status,
+                    "status": display_status,
                     "progress_percentage": progress_percentage,
                     "total_students": student_count,
                     "completed_students": int(sessions.completed or 0) if sessions else 0,
-                    "average_score": round(avg_score or 0, 2),
+                    "average_score": float(avg_score or 0),
                     "start_date": start_date,
                     "end_date": end_date,
                     "class_name": class_name,
                 }
             )
+
+        return results
+
+    TYPE_AVALIACAO = "AVALIACAO"
+
+    @classmethod
+    def get_recent_evaluations_avaliacao(
+        cls, scope: Dict[str, Any], limit: int = MAX_LIST_SIZE
+    ) -> List[Dict[str, Any]]:
+        """
+        Retorna avaliações recentes (Tests) com type == AVALIACAO, para card/listagem.
+        Campos: quantidade de alunos que fizeram, que vão fazer, prazo, progresso,
+        status, disciplina, escola(s).
+        """
+        test_query = (
+            Test.query.filter(Test.type == cls.TYPE_AVALIACAO)
+            .with_entities(Test.id, Test.created_at)
+            .order_by(Test.created_at.desc())
+        )
+
+        if scope["scope"] == "municipio" and scope.get("city_id"):
+            city_school_ids = cls._extract_school_ids(scope) or []
+            if city_school_ids:
+                city_school_ids_str = uuid_list_to_str(city_school_ids) if city_school_ids else []
+                test_query = (
+                    test_query.join(ClassTest, ClassTest.test_id == Test.id)
+                    .join(Class, Class.id == ClassTest.class_id)
+                    .filter(Class.school_id.in_(city_school_ids_str))
+                    .distinct()
+                ) if city_school_ids_str else test_query.filter(False)
+        elif scope["scope"] == "escola":
+            school_ids = scope.get("school_ids") or []
+            if school_ids:
+                school_ids_str = uuid_list_to_str(school_ids) if school_ids else []
+                test_query = (
+                    test_query.join(ClassTest, ClassTest.test_id == Test.id)
+                    .join(Class, Class.id == ClassTest.class_id)
+                    .filter(Class.school_id.in_(school_ids_str))
+                    .distinct()
+                ) if school_ids_str else test_query.filter(False)
+        elif scope["scope"] == "all":
+            # Admin sem cidade: filtrar apenas por tipo, qualquer escola
+            test_query = (
+                test_query.join(ClassTest, ClassTest.test_id == Test.id)
+                .join(Class, Class.id == ClassTest.class_id)
+                .distinct()
+            )
+
+        test_ids = [row.id for row in test_query.limit(limit).all()]
+
+        if not test_ids:
+            return []
+
+        tests_dict = {test.id: test for test in Test.query.filter(Test.id.in_(test_ids)).all()}
+        tests = [tests_dict[tid] for tid in test_ids if tid in tests_dict]
+
+        results = []
+        for test in tests:
+            class_tests = (
+                ClassTest.query.filter(ClassTest.test_id == test.id)
+                .join(Class, Class.id == ClassTest.class_id)
+                .all()
+            )
+            class_ids = [ct.class_id for ct in class_tests]
+            alunos_que_vao_fazer = (
+                Student.query.filter(Student.class_id.in_(class_ids)).count() if class_ids else 0
+            )
+
+            sessions_row = (
+                TestSession.query.filter(TestSession.test_id == test.id)
+                .with_entities(
+                    func.count(TestSession.id).label("total"),
+                    func.sum(case((TestSession.submitted_at.isnot(None), 1), else_=0)).label("completed"),
+                )
+                .first()
+            )
+            alunos_que_fizeram = int(sessions_row.completed or 0) if sessions_row else 0
+
+            if alunos_que_vao_fazer and alunos_que_vao_fazer > 0:
+                progresso = round((alunos_que_fizeram / alunos_que_vao_fazer) * 100, 2)
+            else:
+                progresso = 0.0
+
+            # Prazo: Test.end_time (datetime) ou primeiro ClassTest.expiration (text)
+            if test.end_time:
+                prazo = test.end_time.isoformat() if hasattr(test.end_time, "isoformat") else str(test.end_time)
+            elif class_tests and class_tests[0].expiration:
+                prazo = str(class_tests[0].expiration)
+            else:
+                prazo = None
+
+            # Disciplina
+            disciplina = test.subject_rel.name if test.subject_rel else None
+
+            # Escola(s): nomes distintos das escolas das turmas aplicadas
+            escolas_nomes = []
+            for ct in class_tests:
+                if ct.class_ and getattr(ct.class_, "school", None) and ct.class_.school:
+                    nome = ct.class_.school.name
+                    if nome and nome not in escolas_nomes:
+                        escolas_nomes.append(nome)
+            escola = ", ".join(escolas_nomes) if escolas_nomes else None
+
+            # Status exibido: "concluida" quando todos os alunos que iam fazer já fizeram
+            if alunos_que_vao_fazer and alunos_que_fizeram >= alunos_que_vao_fazer:
+                display_status = "concluida"
+            else:
+                display_status = test.status or "pendente"
+
+            results.append({
+                "avaliacao_id": test.id,
+                "titulo": test.title,
+                "quantidade_alunos_fizeram": alunos_que_fizeram,
+                "quantidade_alunos_vao_fazer": alunos_que_vao_fazer,
+                "prazo": prazo,
+                "progresso": progresso,
+                "status": display_status,
+                "disciplina": disciplina,
+                "escola": escola,
+                "escolas": escolas_nomes,
+            })
 
         return results
 
@@ -573,6 +816,20 @@ class DashboardService:
         return query.count()
 
     @classmethod
+    def _count_notices(cls, scope: Dict[str, Any]) -> int:
+        """
+        Retorna a quantidade de avisos no escopo do usuário.
+        Quando existir modelo/tabela de avisos, implementar a contagem aqui.
+        """
+        return 0
+
+    @classmethod
+    def _count_certificates(cls, scope: Dict[str, Any]) -> int:
+        """Retorna a quantidade de certificados emitidos no escopo do usuário."""
+        school_ids = cls._extract_school_ids(scope)
+        return CertificateService.count_issued(school_ids)
+
+    @classmethod
     def _count_evaluations(cls, scope: Dict[str, Any]) -> int:
         query = Test.query.with_entities(Test.id)
 
@@ -646,28 +903,230 @@ class DashboardService:
 
     @classmethod
     def _count_questions(cls, scope: Dict[str, Any]) -> int:
-        query = Question.query
-        if scope["scope"] == "municipio" and scope.get("city_id"):
-            query = query.join(User, User.id == Question.created_by).filter(User.city_id == scope["city_id"])
-        elif scope["scope"] == "escola":
-            school_ids = scope.get("school_ids") or []
-            if school_ids:
-                # Converter school_ids para strings (SchoolTeacher.school_id é VARCHAR)
-                school_ids_str = uuid_list_to_str(school_ids) if school_ids else []
-                teacher_ids = (
-                    Teacher.query.join(SchoolTeacher, SchoolTeacher.teacher_id == Teacher.id)
-                    .filter(SchoolTeacher.school_id.in_(school_ids_str))
-                    .with_entities(Teacher.user_id)
-                    .all()
-                )
-                user_ids = [row.user_id for row in teacher_ids if row.user_id]
-                if user_ids:
-                    query = query.filter(Question.created_by.in_(user_ids))
-                else:
-                    return 0
-            else:
-                return 0
+        """
+        Conta questões visíveis no escopo do usuário.
+        Usa a mesma lógica de _questions_base_query para consistência.
+        """
+        query = cls._questions_base_query(scope)
         return query.count()
+
+    @classmethod
+    def _questions_base_query(cls, scope: Dict[str, Any]):
+        """
+        Query base de questões com filtro de escopo (reutilizada para listagem e contagem).
+        
+        Aplica filtro baseado no sistema de escopo de questões:
+        - GLOBAL: Todos podem ver
+        - CITY: Apenas usuários do mesmo município
+        - PRIVATE: Apenas o criador
+        """
+        from sqlalchemy import or_, and_
+        
+        query = Question.query
+        user = scope.get("user", {})
+        user_id = user.get("id")
+        city_id = scope.get("city_id")
+        
+        # Construir filtros de visibilidade baseado no scope_type da questão
+        scope_filters = []
+        
+        # 1. GLOBAL: todos podem ver
+        scope_filters.append(Question.scope_type == 'GLOBAL')
+        
+        # 2. CITY: apenas do município atual (se tiver city_id)
+        if city_id:
+            scope_filters.append(
+                and_(
+                    Question.scope_type == 'CITY',
+                    Question.owner_city_id == city_id
+                )
+            )
+        
+        # 3. PRIVATE: apenas do próprio usuário
+        if user_id:
+            scope_filters.append(
+                and_(
+                    Question.scope_type == 'PRIVATE',
+                    Question.owner_user_id == user_id
+                )
+            )
+        
+        # Aplicar filtro de scope (OR entre todos os filtros)
+        if scope_filters:
+            query = query.filter(or_(*scope_filters))
+        else:
+            # Se não há filtros, não retornar nada
+            query = query.filter(False)
+        
+        return query
+
+    @staticmethod
+    def _dificuldade_para_classificacao(difficulty_level: Optional[str]) -> str:
+        """
+        Mapeia difficulty_level da questão para uma das classificações exibidas no dashboard:
+        Abaixo do Básico, Básico, Adequado, Avançado.
+        """
+        if not difficulty_level or not str(difficulty_level).strip():
+            return "Adequado"
+        v = str(difficulty_level).strip()
+        # Já está no formato de classificação (comparação normalizada)
+        v_norm = v.lower().replace("_", " ").replace("-", " ")
+        for label in ("Abaixo do Básico", "Básico", "Adequado", "Avançado"):
+            if v_norm == label.lower() or v_norm == label.lower().replace("á", "a"):
+                return label
+        # Mapear níveis de dificuldade comuns
+        if v_norm in ("fácil", "facil", "1", "easy", "baixo"):
+            return "Básico"
+        if v_norm in ("médio", "medio", "2", "medium", "média", "media"):
+            return "Adequado"
+        if v_norm in ("difícil", "dificil", "3", "hard", "alto"):
+            return "Avançado"
+        return "Adequado"
+
+    @staticmethod
+    def _classificacao_por_taxa_acerto(taxa_acerto: Optional[float]) -> Optional[str]:
+        """
+        Infere classificação (Abaixo do Básico, Básico, Adequado, Avançado) a partir
+        da taxa de acerto da questão, alinhado à lógica de porcentagem usada no sistema.
+        Retorna None se taxa_acerto for None (sem dados para inferir).
+        """
+        if taxa_acerto is None:
+            return None
+        if taxa_acerto >= 80:
+            return "Avançado"
+        if taxa_acerto >= 65:
+            return "Adequado"
+        if taxa_acerto >= 50:
+            return "Básico"
+        return "Abaixo do Básico"
+
+    @classmethod
+    def get_questoes_dashboard(
+        cls, scope: Dict[str, Any], limit: int = 20, offset: int = 0
+    ) -> Dict[str, Any]:
+        """
+        Lista questões para o card do dashboard com detalhes ricos: quantidade de
+        respostas, taxa de acerto, quantidade de avaliações em que aparece,
+        última utilização, disciplina, ano, autor, dificuldade, tipo.
+        """
+        from sqlalchemy.exc import SQLAlchemyError
+
+        try:
+            query = cls._questions_base_query(scope).order_by(Question.created_at.desc())
+            total = query.count()
+            questions = (
+                query.options(
+                    db.joinedload(Question.subject),
+                    db.joinedload(Question.grade),
+                    db.joinedload(Question.creator),
+                )
+                .offset(offset)
+                .limit(limit)
+                .all()
+            )
+            if not questions:
+                return {"questoes": [], "total": total, "limit": limit, "offset": offset}
+
+            question_ids = [q.id for q in questions]
+
+            # Estatísticas de respostas por questão: total, corretas, última resposta
+            answers_subq = (
+                db.session.query(
+                    StudentAnswer.question_id,
+                    func.count(StudentAnswer.id).label("total_respostas"),
+                    func.sum(case((StudentAnswer.is_correct == True, 1), else_=0)).label("corretas"),
+                    func.max(StudentAnswer.answered_at).label("ultima_resposta"),
+                )
+                .filter(StudentAnswer.question_id.in_(question_ids))
+                .group_by(StudentAnswer.question_id)
+            ).subquery()
+
+            answers_map = {}
+            for row in db.session.query(answers_subq).all():
+                qid = str(row.question_id)
+                total_r = int(row.total_respostas or 0)
+                corretas = int(row.corretas or 0)
+                answers_map[qid] = {
+                    "quantidade_respostas": total_r,
+                    "taxa_acerto": round((corretas / total_r * 100), 2) if total_r else None,
+                    "ultima_utilizacao": row.ultima_resposta.isoformat() if row.ultima_resposta and hasattr(row.ultima_resposta, "isoformat") else str(row.ultima_resposta) if row.ultima_resposta else None,
+                }
+
+            # Quantidade de avaliações (testes) em que a questão aparece
+            tests_subq = (
+                db.session.query(
+                    TestQuestion.question_id,
+                    func.count(distinct(TestQuestion.test_id)).label("quantidade_avaliacoes"),
+                )
+                .filter(TestQuestion.question_id.in_(question_ids))
+                .group_by(TestQuestion.question_id)
+            ).subquery()
+
+            tests_map = {}
+            for row in db.session.query(tests_subq).all():
+                tests_map[str(row.question_id)] = int(row.quantidade_avaliacoes or 0)
+
+            # Resolver habilidade: Question.skill guarda ID da Skill; retornar o código (nome)
+            skill_ids_clean = set()
+            for q in questions:
+                if q.skill and str(q.skill).strip() and str(q.skill).strip() != "{}":
+                    skill_ids_clean.add(str(q.skill).strip().strip("{}"))
+            skill_code_map = {}
+            if skill_ids_clean:
+                import uuid as uuid_module
+                for sid in skill_ids_clean:
+                    skill_obj = None
+                    try:
+                        skill_uuid = uuid_module.UUID(sid)
+                        skill_obj = Skill.query.filter(Skill.id == str(skill_uuid)).first()
+                    except (ValueError, TypeError):
+                        pass
+                    if not skill_obj:
+                        skill_obj = Skill.query.filter(Skill.code == sid).first()
+                    if skill_obj:
+                        skill_code_map[sid] = skill_obj.code
+                    else:
+                        skill_code_map[sid] = sid  # fallback: usar o valor como está (ex.: já é código)
+
+            listagem = []
+            for q in questions:
+                stats = answers_map.get(q.id, {"quantidade_respostas": 0, "taxa_acerto": None, "ultima_utilizacao": None})
+                skill_raw = q.skill.strip("{}").strip() if q.skill and str(q.skill).strip() and str(q.skill).strip() != "{}" else None
+                habilidade_codigo = skill_code_map.get(skill_raw, skill_raw) if skill_raw else None
+                # Dificuldade/classificação: se o banco está vazio ou sempre "Abaixo do Básico", inferir pela taxa de acerto
+                from_db = cls._dificuldade_para_classificacao(q.difficulty_level)
+                raw_val = (q.difficulty_level or "").strip().lower().replace("_", " ").replace("á", "a")
+                is_abaixo_basico_or_empty = not q.difficulty_level or not str(q.difficulty_level).strip() or "abaixo" in raw_val and "basico" in raw_val
+                if is_abaixo_basico_or_empty and stats["taxa_acerto"] is not None:
+                    dificuldade = cls._classificacao_por_taxa_acerto(stats["taxa_acerto"]) or from_db
+                else:
+                    dificuldade = from_db
+                listagem.append({
+                    "id": q.id,
+                    "titulo": (q.title or (q.text[:80] + "..." if (q.text and len(q.text) > 80) else (q.text or ""))),
+                    "disciplina": q.subject.name if q.subject else None,
+                    "ano_serie": q.grade.name if q.grade else None,
+                    "autor": q.creator.name if q.creator else None,
+                    "data_criacao": q.created_at.isoformat() if q.created_at and hasattr(q.created_at, "isoformat") else str(q.created_at) if q.created_at else None,
+                    "dificuldade": dificuldade,
+                    "classification": dificuldade,
+                    "tipo_questao": q.question_type or "multipleChoice",
+                    "quantidade_respostas": stats["quantidade_respostas"],
+                    "taxa_acerto": stats["taxa_acerto"],
+                    "quantidade_avaliacoes": tests_map.get(q.id, 0),
+                    "ultima_utilizacao": stats["ultima_utilizacao"],
+                    "habilidade": habilidade_codigo,
+                })
+
+            return {
+                "questoes": listagem,
+                "total": total,
+                "limit": limit,
+                "offset": offset,
+            }
+        except SQLAlchemyError as e:
+            db.session.rollback()
+            raise
 
     @classmethod
     def _count_classes(cls, scope: Dict[str, Any]) -> int:
@@ -831,7 +1290,7 @@ class DashboardService:
                         "school_id": school_id_str,
                         "school_name": row.school_name,
                         "municipality": row.municipality,
-                        "average_score": round(row.average_score or 0, 2),
+                        "average_score": float(row.average_score or 0),
                         "completion_rate": completion_rate,
                         "total_students": int(row.total_students or 0),
                         "total_evaluations": int(row.total_evaluations or 0),
@@ -843,10 +1302,298 @@ class DashboardService:
             raise
 
     @classmethod
+    def _build_class_rankings(cls, scope: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """Ranking de turmas: turma, série, média, acerto, conclusão, alunos, avaliações."""
+        from sqlalchemy.exc import SQLAlchemyError
+        from sqlalchemy import cast
+        from sqlalchemy.dialects.postgresql import VARCHAR
+
+        try:
+            school_ids = cls._extract_school_ids(scope)
+            if school_ids is not None:
+                school_ids_str = uuid_list_to_str(school_ids) if school_ids else []
+                if not school_ids_str:
+                    return []
+
+            query = (
+                db.session.query(
+                    Class.id.label("class_id"),
+                    Class.name.label("turma"),
+                    Grade.name.label("serie"),
+                    func.count(distinct(Student.id)).label("alunos"),
+                    func.coalesce(func.avg(EvaluationResult.grade), 0).label("media"),
+                    func.coalesce(func.sum(EvaluationResult.correct_answers), 0).label("acerto_total"),
+                    func.coalesce(func.avg(EvaluationResult.score_percentage), 0).label("acerto_percent"),
+                    func.count(distinct(EvaluationResult.test_id)).label("avaliacoes"),
+                )
+                .outerjoin(Grade, Class.grade_id == Grade.id)
+                .join(Student, Student.class_id == Class.id)
+                .outerjoin(EvaluationResult, EvaluationResult.student_id == Student.id)
+            )
+
+            if scope["scope"] == "municipio" and scope.get("city_id"):
+                query = query.join(School, cast(Class._school_id, VARCHAR) == cast(School.id, VARCHAR)).filter(
+                    School.city_id == scope["city_id"]
+                )
+            elif school_ids is not None:
+                school_ids_str = uuid_list_to_str(school_ids) if school_ids else []
+                query = query.filter(Class._school_id.in_(school_ids_str))
+
+            query = query.group_by(Class.id, Class.name, Grade.name).order_by(
+                func.coalesce(func.avg(EvaluationResult.grade), 0).desc()
+            )
+
+            class_stats = query.limit(cls.MAX_LIST_SIZE).all()
+
+            # Taxa de conclusão por turma: sessões finalizadas / total de sessões
+            completion_subquery = (
+                db.session.query(
+                    Student.class_id.label("class_id"),
+                    func.sum(case((TestSession.submitted_at.isnot(None), 1), else_=0)).label("completed_sessions"),
+                    func.count(TestSession.id).label("total_sessions"),
+                )
+                .join(Student, Student.id == TestSession.student_id)
+                .group_by(Student.class_id)
+                .subquery()
+            )
+            completion_map = {
+                str(row.class_id): (row.completed_sessions or 0, row.total_sessions or 0)
+                for row in db.session.query(completion_subquery).all()
+            }
+
+            rankings = []
+            for idx, row in enumerate(class_stats):
+                class_id_str = str(row.class_id)
+                completed, total = completion_map.get(class_id_str, (0, 0))
+                conclusao = round((completed / total) * 100, 2) if total else 0.0
+                rankings.append(
+                    {
+                        "position": idx + 1,
+                        "class_id": class_id_str,
+                        "turma": row.turma or "",
+                        "serie": row.serie or "",
+                        "media": float(row.media or 0),
+                        "acerto": int(row.acerto_total or 0),
+                        "acerto_percent": float(row.acerto_percent or 0),
+                        "conclusao": conclusao,
+                        "alunos": int(row.alunos or 0),
+                        "avaliacoes": int(row.avaliacoes or 0),
+                    }
+                )
+            return rankings
+        except SQLAlchemyError as e:
+            db.session.rollback()
+            raise
+
+    @classmethod
+    def get_school_ranking_card(
+        cls,
+        scope: Dict[str, Any],
+        limit: int = 20,
+        offset: int = 0,
+    ) -> Dict[str, Any]:
+        """
+        Retorna ranking de escolas para card, com métricas para exibição e ordenação.
+        Inclui: média (nota 0-10 e %), quantidade de alunos, taxa de conclusão,
+        quantidade de avaliações, total de turmas, total de provas entregues.
+        """
+        from sqlalchemy.exc import SQLAlchemyError
+        from sqlalchemy import cast
+        from sqlalchemy.dialects.postgresql import VARCHAR
+
+        try:
+            school_ids = cls._extract_school_ids(scope)
+            query = (
+                db.session.query(
+                    School.id.label("school_id"),
+                    School.name.label("school_name"),
+                    City.name.label("municipality"),
+                    func.count(distinct(Student.id)).label("total_students"),
+                    func.coalesce(func.avg(EvaluationResult.grade), 0).label("media"),
+                    func.coalesce(func.avg(EvaluationResult.score_percentage), 0).label("media_score_percent"),
+                    func.count(distinct(EvaluationResult.test_id)).label("quantidade_avaliacoes"),
+                    func.count(EvaluationResult.id).label("total_provas_entregues"),
+                )
+                .join(Student, cast(Student.school_id, VARCHAR) == cast(School.id, VARCHAR))
+                .outerjoin(EvaluationResult, EvaluationResult.student_id == Student.id)
+                .outerjoin(City, City.id == School.city_id)
+            )
+
+            if scope["scope"] == "municipio" and scope.get("city_id"):
+                query = query.filter(School.city_id == scope["city_id"])
+            elif school_ids is not None:
+                school_ids_str = uuid_list_to_str(school_ids) if school_ids else []
+                query = query.filter(School.id.in_(school_ids_str)) if school_ids_str else query.filter(False)
+
+            query = query.group_by(School.id, School.name, City.name).order_by(
+                func.coalesce(func.avg(EvaluationResult.grade), 0).desc()
+            )
+
+            # Contar total de escolas (sem limit/offset) para paginação
+            total_count = query.count()
+            school_stats = query.offset(offset).limit(limit).all()
+
+            # Taxa de conclusão: sessões finalizadas / total de sessões por escola
+            completion_subquery = (
+                db.session.query(
+                    cast(Student.school_id, VARCHAR).label("school_id"),
+                    func.sum(case((TestSession.submitted_at.isnot(None), 1), else_=0)).label("completed_sessions"),
+                    func.count(TestSession.id).label("total_sessions"),
+                )
+                .join(Student, Student.id == TestSession.student_id)
+                .group_by(Student.school_id)
+                .subquery()
+            )
+            completion_map = {
+                str(row.school_id): (row.completed_sessions or 0, row.total_sessions or 0)
+                for row in db.session.query(completion_subquery).all()
+            }
+
+            # Total de turmas por escola
+            classes_subquery = (
+                db.session.query(
+                    cast(Class._school_id, VARCHAR).label("school_id"),
+                    func.count(distinct(Class.id)).label("total_turmas"),
+                )
+                .group_by(Class._school_id)
+                .subquery()
+            )
+            classes_map = {
+                str(row.school_id): int(row.total_turmas or 0)
+                for row in db.session.query(classes_subquery).all()
+            }
+
+            ranking = []
+            for idx, row in enumerate(school_stats):
+                school_id_str = str(row.school_id)
+                completed, total = completion_map.get(school_id_str, (0, 0))
+                taxa_conclusao = round((completed / total) * 100, 2) if total else 0.0
+
+                ranking.append({
+                    "posicao": offset + idx + 1,
+                    "escola_id": school_id_str,
+                    "nome_escola": row.school_name,
+                    "municipio": row.municipality,
+                    "media": float(row.media or 0),
+                    "media_score_percent": float(row.media_score_percent or 0),
+                    "quantidade_alunos": int(row.total_students or 0),
+                    "taxa_conclusao": taxa_conclusao,
+                    "quantidade_avaliacoes": int(row.quantidade_avaliacoes or 0),
+                    "total_turmas": classes_map.get(school_id_str, 0),
+                    "total_provas_entregues": int(row.total_provas_entregues or 0),
+                })
+
+            return {
+                "ranking": ranking,
+                "total": total_count,
+                "limit": limit,
+                "offset": offset,
+            }
+        except SQLAlchemyError as e:
+            db.session.rollback()
+            raise
+
+    @classmethod
+    def get_class_ranking_card(
+        cls,
+        scope: Dict[str, Any],
+        limit: int = 20,
+        offset: int = 0,
+    ) -> Dict[str, Any]:
+        """
+        Retorna ranking de turmas para o card: turma, série, média, acerto, conclusão,
+        alunos, avaliações. Respeita o escopo do usuário (município ou escola).
+        """
+        from sqlalchemy.exc import SQLAlchemyError
+        from sqlalchemy import cast
+        from sqlalchemy.dialects.postgresql import VARCHAR
+
+        try:
+            school_ids = cls._extract_school_ids(scope)
+            if school_ids is not None:
+                school_ids_str = uuid_list_to_str(school_ids) if school_ids else []
+                if not school_ids_str:
+                    return {"ranking": [], "total": 0, "limit": limit, "offset": offset}
+
+            query = (
+                db.session.query(
+                    Class.id.label("class_id"),
+                    Class.name.label("turma"),
+                    Grade.name.label("serie"),
+                    func.count(distinct(Student.id)).label("alunos"),
+                    func.coalesce(func.avg(EvaluationResult.grade), 0).label("media"),
+                    func.coalesce(func.sum(EvaluationResult.correct_answers), 0).label("acerto_total"),
+                    func.coalesce(func.avg(EvaluationResult.score_percentage), 0).label("acerto_percent"),
+                    func.count(distinct(EvaluationResult.test_id)).label("avaliacoes"),
+                )
+                .outerjoin(Grade, Class.grade_id == Grade.id)
+                .join(Student, Student.class_id == Class.id)
+                .outerjoin(EvaluationResult, EvaluationResult.student_id == Student.id)
+            )
+
+            if scope["scope"] == "municipio" and scope.get("city_id"):
+                query = query.join(School, cast(Class._school_id, VARCHAR) == cast(School.id, VARCHAR)).filter(
+                    School.city_id == scope["city_id"]
+                )
+            elif school_ids is not None:
+                school_ids_str = uuid_list_to_str(school_ids) if school_ids else []
+                query = query.filter(Class._school_id.in_(school_ids_str))
+
+            query = query.group_by(Class.id, Class.name, Grade.name).order_by(
+                func.coalesce(func.avg(EvaluationResult.grade), 0).desc()
+            )
+
+            total_count = query.count()
+            class_stats = query.offset(offset).limit(limit).all()
+
+            completion_subquery = (
+                db.session.query(
+                    Student.class_id.label("class_id"),
+                    func.sum(case((TestSession.submitted_at.isnot(None), 1), else_=0)).label("completed_sessions"),
+                    func.count(TestSession.id).label("total_sessions"),
+                )
+                .join(Student, Student.id == TestSession.student_id)
+                .group_by(Student.class_id)
+                .subquery()
+            )
+            completion_map = {
+                str(row.class_id): (row.completed_sessions or 0, row.total_sessions or 0)
+                for row in db.session.query(completion_subquery).all()
+            }
+
+            ranking = []
+            for idx, row in enumerate(class_stats):
+                class_id_str = str(row.class_id)
+                completed, total = completion_map.get(class_id_str, (0, 0))
+                conclusao = round((completed / total) * 100, 2) if total else 0.0
+                ranking.append({
+                    "posicao": offset + idx + 1,
+                    "class_id": class_id_str,
+                    "turma": row.turma or "",
+                    "serie": row.serie or "",
+                    "media": float(row.media or 0),
+                    "acerto": int(row.acerto_total or 0),
+                    "acerto_percent": float(row.acerto_percent or 0),
+                    "conclusao": conclusao,
+                    "alunos": int(row.alunos or 0),
+                    "avaliacoes": int(row.avaliacoes or 0),
+                })
+
+            return {
+                "ranking": ranking,
+                "total": total_count,
+                "limit": limit,
+                "offset": offset,
+            }
+        except SQLAlchemyError as e:
+            db.session.rollback()
+            raise
+
+    @classmethod
     def _build_student_rankings(cls, scope: Dict[str, Any]) -> List[Dict[str, Any]]:
         from sqlalchemy import cast
         from sqlalchemy.dialects.postgresql import VARCHAR
-        
+
         school_alias = aliased(School)
         class_alias = aliased(Class)
 
@@ -856,22 +1603,22 @@ class DashboardService:
                 Student.name.label("student_name"),
                 school_alias.name.label("school_name"),
                 class_alias.name.label("class_name"),
-                func.avg(EvaluationResult.grade).label("average_grade"),
+                Grade.name.label("serie"),
+                func.coalesce(func.avg(EvaluationResult.grade), 0).label("average_grade"),
                 func.count(distinct(EvaluationResult.test_id)).label("completed_evaluations"),
             )
             .join(EvaluationResult, EvaluationResult.student_id == Student.id)
-            # ✅ CORRIGIDO: Garantir que ambos sejam strings no join (School.id é VARCHAR)
             .outerjoin(school_alias, cast(school_alias.id, VARCHAR) == cast(Student.school_id, VARCHAR))
             .outerjoin(class_alias, class_alias.id == Student.class_id)
-            .group_by(Student.id, Student.name, school_alias.name, class_alias.name)
-            .order_by(func.avg(EvaluationResult.grade).desc())
+            .outerjoin(Grade, Grade.id == Student.grade_id)
+            .group_by(Student.id, Student.name, school_alias.name, class_alias.name, Grade.name)
+            .order_by(func.coalesce(func.avg(EvaluationResult.grade), 0).desc())
         )
 
         if scope["scope"] == "municipio" and scope.get("city_id"):
             query = query.filter(school_alias.city_id == scope["city_id"])
         elif scope["scope"] == "escola":
             school_ids = scope.get("school_ids") or []
-            # ✅ CORRIGIDO: Converter school_ids para strings (Student.school_id é VARCHAR)
             school_ids_str = uuid_list_to_str(school_ids) if school_ids else []
             query = query.filter(Student.school_id.in_(school_ids_str)) if school_ids_str else query.filter(False)
 
@@ -883,12 +1630,106 @@ class DashboardService:
                     "name": row.student_name,
                     "school_name": row.school_name,
                     "class_name": row.class_name,
-                    "average_score": round(row.average_grade or 0, 2),
+                    "serie": row.serie or "",
+                    "media": float(row.average_grade or 0),
                     "completed_evaluations": int(row.completed_evaluations or 0),
                     "position": idx + 1,
                 }
             )
         return ranking
+
+    @classmethod
+    def get_ranking_alunos(cls, scope: Dict[str, Any], limit: int = 20) -> Dict[str, Any]:
+        """
+        Retorna o top de alunos (ranking) para o dashboard, respeitando o escopo
+        do usuário (município, escola ou global para admin).
+        Usa média de proficiência (mesma lógica do ranking de turmas do admin).
+        Inclui série, media (média de proficiência, 2 decimais), profile_picture e avatar_config.
+        """
+        import json
+        from sqlalchemy import cast
+        from sqlalchemy.dialects.postgresql import VARCHAR
+
+        school_alias = aliased(School)
+        class_alias = aliased(Class)
+        limit = min(max(1, limit), 50)
+        # Cast avatar_config (JSON) para Text no GROUP BY: PostgreSQL não tem operador de igualdade para json
+        avatar_config_expr = cast(User.avatar_config, db.Text)
+
+        # Média de proficiência (escala de pontos), alinhado ao ranking de turmas do dashboard admin.
+        # outerjoin em EvaluationResult: inclui todos os alunos do escopo, mesmo sem avaliações (média 0).
+        avg_proficiency = func.coalesce(func.avg(EvaluationResult.proficiency), 0)
+
+        query = (
+            db.session.query(
+                Student.id.label("student_id"),
+                Student.name.label("student_name"),
+                school_alias.name.label("school_name"),
+                class_alias.name.label("class_name"),
+                Grade.name.label("serie"),
+                avg_proficiency.label("average_proficiency"),
+                func.count(distinct(EvaluationResult.test_id)).label("completed_evaluations"),
+                Student.profile_picture.label("profile_picture"),
+                avatar_config_expr.label("avatar_config"),
+            )
+            .outerjoin(EvaluationResult, EvaluationResult.student_id == Student.id)
+            .outerjoin(User, User.id == Student.user_id)
+            .outerjoin(school_alias, cast(school_alias.id, VARCHAR) == cast(Student.school_id, VARCHAR))
+            .outerjoin(class_alias, class_alias.id == Student.class_id)
+            .outerjoin(Grade, Grade.id == Student.grade_id)
+            .group_by(Student.id, Student.name, school_alias.name, class_alias.name, Grade.name, Student.profile_picture, avatar_config_expr)
+            .order_by(avg_proficiency.desc())
+        )
+
+        if scope["scope"] == "turma" and scope.get("class_id"):
+            query = query.filter(Student.class_id == scope["class_id"])
+        elif scope["scope"] == "municipio" and scope.get("city_id"):
+            query = query.filter(school_alias.city_id == scope["city_id"])
+        elif scope["scope"] == "escola":
+            school_ids = scope.get("school_ids") or []
+            school_ids_str = uuid_list_to_str(school_ids) if school_ids else []
+            query = query.filter(Student.school_id.in_(school_ids_str)) if school_ids_str else query.filter(False)
+
+        # Classificação da medalha por posição: 1º platina, 2º ouro, 3º prata, 4º bronze
+        MEDALHA_POR_POSICAO = {1: "platina", 2: "ouro", 3: "prata", 4: "bronze"}
+
+        rows = query.limit(limit).all()
+        ranking = []
+        for idx, row in enumerate(rows):
+            position = idx + 1
+            # Média de proficiência (pontos), arredondada a 2 decimais para evitar floats esquisitos
+            media_proficiencia = round(float(row.average_proficiency or 0), 2)
+            item = {
+                "student_id": row.student_id,
+                "name": row.student_name,
+                "school_name": row.school_name,
+                "class_name": row.class_name,
+                "serie": row.serie or "",
+                "media": media_proficiencia,
+                "media_proficiencia": media_proficiencia,
+                "completed_evaluations": int(row.completed_evaluations or 0),
+                "position": position,
+                "medalha": MEDALHA_POR_POSICAO.get(position),
+            }
+            # Ícone/foto do perfil: foto (URL) ou avatar_config (ícone escolhido no app)
+            item["profile_picture"] = getattr(row, "profile_picture", None) or None
+            raw_avatar = getattr(row, "avatar_config", None)
+            # avatar_config vem como string (cast JSON->Text); devolver objeto se for JSON válido
+            if isinstance(raw_avatar, str) and raw_avatar.strip().startswith("{"):
+                try:
+                    item["avatar_config"] = json.loads(raw_avatar)
+                except Exception:
+                    item["avatar_config"] = raw_avatar
+            else:
+                item["avatar_config"] = raw_avatar
+            ranking.append(item)
+
+        # Diferença para o 1º lugar (calculada e arredondada no backend para evitar 11.150000000000006 no front)
+        primeiro_media = ranking[0]["media"] if ranking else 0
+        for item in ranking:
+            item["pontos_para_primeiro"] = round(primeiro_media - item["media"], 2)
+
+        return {"ranking": ranking, "total": len(ranking)}
 
     # ------------------------------------------------------------------ #
     # Engajamento
@@ -1021,7 +1862,7 @@ class DashboardService:
                 {
                     "class_id": row.class_id,
                     "class_name": row.class_name,
-                    "average_score": round(row.average_grade or 0, 2),
+                    "average_score": float(row.average_grade or 0),
                     "completion_rate": completion_rate,
                     "active_students": int(row.active_students or 0),
                     "position": idx + 1,
@@ -1064,7 +1905,7 @@ class DashboardService:
                 {
                     "teacher_id": row.teacher_id,
                     "teacher_name": row.teacher_name,
-                    "average_score": round(row.average_grade or 0, 2),
+                    "average_score": float(row.average_grade or 0),
                     "total_evaluations": int(row.total_evaluations or 0),
                     "classes_count": int(row.classes_count or 0),
                     "position": idx + 1,
@@ -1231,7 +2072,7 @@ class DashboardService:
             {
                 "id": "average_score",
                 "label": "Média geral",
-                "value": round(average_grade or 0, 2),
+                "value": float(average_grade or 0),
                 "trend_percentage": 0,
             },
         ]
@@ -1278,7 +2119,7 @@ class DashboardService:
                     "class_name": class_obj.name,
                     "students": len(student_ids),
                     "active_students": active_students,
-                    "average_score": round(average_grade or 0, 2),
+                    "average_score": float(average_grade or 0),
                     "pending_evaluations": pending_evaluations,
                 }
             )
@@ -1336,9 +2177,271 @@ class DashboardService:
                     "completed_students": completed,
                     "created_at": evaluation.created_at.isoformat() if evaluation.created_at else None,
                     "due_date": str(class_test.expiration) if class_test and class_test.expiration else None,
-                    "average_score": round(average_score or 0, 2),
+                    "average_score": float(average_score or 0),
                 }
             )
         return data
+
+    # ------------------------------------------------------------------ #
+    # Análise do sistema (modal administração)
+    # ------------------------------------------------------------------ #
+
+    @classmethod
+    def get_analise_sistema(cls) -> Dict[str, Any]:
+        """
+        Retorna dados agregados para o modal de análise do sistema: métricas gerais,
+        dados técnicos, dados por escopo (geral, estado, município, escola) e
+        séries para gráficos (evolução, distribuição, taxas).
+        """
+        import os
+        from sqlalchemy import cast
+        from sqlalchemy.dialects.postgresql import VARCHAR
+        from sqlalchemy.exc import SQLAlchemyError
+
+        scope_all = {"scope": "all", "city_id": None, "school_ids": None}
+
+        try:
+            # --- Métricas gerais (escopo global) ---
+            metricas_gerais = cls._build_summary(scope_all)
+            certificados = CertificateService.count_issued(None)
+            metricas_gerais["certificates"] = certificados
+
+            # --- Dados técnicos ---
+            dados_tecnicos = {
+                "ambiente": os.getenv("APP_ENV", "development"),
+                "timestamp": datetime.utcnow().isoformat(),
+                "timezone": "UTC",
+            }
+
+            # --- Dados de conexão (DB e backend) ---
+            try:
+                db_engine_name = (db.engine.url.drivername if db.engine and db.engine.url else None) or "unknown"
+                db_host = (db.engine.url.host if db.engine and db.engine.url else None) or ""
+                # Não expor porta/senha; apenas indicar se é remoto ou local
+                db_origem = "remoto" if (db_host and db_host not in ("localhost", "127.0.0.1")) else "local"
+            except Exception:
+                db_engine_name = "unknown"
+                db_origem = "unknown"
+            conexao = {
+                "db_engine": db_engine_name,
+                "db_origem": db_origem,
+                "db_status": "ok",
+                "verificado_em": datetime.utcnow().isoformat(),
+                "ambiente": dados_tecnicos["ambiente"],
+                "timezone": dados_tecnicos["timezone"],
+            }
+
+            # --- Por escopo: ESTADO (agregação por City.state) ---
+            estados_rows = (
+                db.session.query(
+                    City.state.label("estado"),
+                    func.count(distinct(City.id)).label("municipios"),
+                    func.count(distinct(School.id)).label("escolas"),
+                    func.count(distinct(Student.id)).label("alunos"),
+                )
+                .outerjoin(School, School.city_id == City.id)
+                .outerjoin(Student, cast(Student.school_id, VARCHAR) == cast(School.id, VARCHAR))
+                .group_by(City.state)
+                .order_by(func.count(distinct(Student.id)).desc())
+                .all()
+            )
+            por_estado = [
+                {
+                    "estado": row.estado or "N/I",
+                    "municipios": int(row.municipios or 0),
+                    "escolas": int(row.escolas or 0),
+                    "alunos": int(row.alunos or 0),
+                }
+                for row in estados_rows
+            ]
+
+            # Avaliações por estado (via Class -> School -> City)
+            test_per_state = (
+                db.session.query(
+                    City.state,
+                    func.count(distinct(Test.id)).label("avaliacoes"),
+                )
+                .join(School, School.city_id == City.id)
+                .join(Class, cast(Class._school_id, VARCHAR) == cast(School.id, VARCHAR))
+                .join(ClassTest, ClassTest.class_id == Class.id)
+                .join(Test, Test.id == ClassTest.test_id)
+                .group_by(City.state)
+                .all()
+            )
+            avaliacoes_por_estado = {str(r.state or "N/I"): int(r.avaliacoes or 0) for r in test_per_state}
+            for item in por_estado:
+                item["avaliacoes"] = avaliacoes_por_estado.get(item["estado"], 0)
+
+            # --- Por escopo: MUNICÍPIO (lista de cidades com totais) ---
+            municipios_rows = (
+                db.session.query(
+                    City.id,
+                    City.name,
+                    City.state,
+                    func.count(distinct(School.id)).label("escolas"),
+                    func.count(distinct(Student.id)).label("alunos"),
+                )
+                .outerjoin(School, School.city_id == City.id)
+                .outerjoin(Student, cast(Student.school_id, VARCHAR) == cast(School.id, VARCHAR))
+                .group_by(City.id, City.name, City.state)
+                .order_by(func.count(distinct(Student.id)).desc())
+                .limit(50)
+                .all()
+            )
+            por_municipio = [
+                {
+                    "municipio_id": str(row.id),
+                    "nome": row.name,
+                    "estado": row.state,
+                    "escolas": int(row.escolas or 0),
+                    "alunos": int(row.alunos or 0),
+                }
+                for row in municipios_rows
+            ]
+
+            # --- Por escopo: ESCOLA (lista de escolas com totais, top N) ---
+            escolas_rows = (
+                db.session.query(
+                    School.id,
+                    School.name,
+                    City.name.label("municipio_nome"),
+                    City.state,
+                    func.count(distinct(Student.id)).label("alunos"),
+                    func.count(distinct(Class.id)).label("turmas"),
+                )
+                .outerjoin(City, City.id == School.city_id)
+                .outerjoin(Student, cast(Student.school_id, VARCHAR) == cast(School.id, VARCHAR))
+                .outerjoin(Class, cast(Class._school_id, VARCHAR) == cast(School.id, VARCHAR))
+                .group_by(School.id, School.name, City.name, City.state)
+                .order_by(func.count(distinct(Student.id)).desc())
+                .limit(50)
+                .all()
+            )
+            por_escola = [
+                {
+                    "escola_id": str(row.id),
+                    "nome": row.name,
+                    "municipio": row.municipio_nome,
+                    "estado": row.state,
+                    "alunos": int(row.alunos or 0),
+                    "turmas": int(row.turmas or 0),
+                }
+                for row in escolas_rows
+            ]
+
+            # --- Gráficos: evolução últimos 12 meses (do mais antigo ao mais recente) ---
+            now = datetime.utcnow()
+            primeiro_dia_atual = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+            evolucao_meses = []
+            for i in range(11, -1, -1):
+                mes_start = primeiro_dia_atual
+                for _ in range(i):
+                    mes_start = (mes_start - timedelta(days=1)).replace(day=1)
+                mes_end = (mes_start.replace(day=28) + timedelta(days=5)).replace(day=1) - timedelta(days=1)
+                if mes_end > now:
+                    mes_end = now
+                mes_end = mes_end.replace(hour=23, minute=59, second=59, microsecond=999999)
+                label = mes_start.strftime("%Y-%m")
+                alunos_mes = Student.query.filter(
+                    Student.created_at >= mes_start,
+                    Student.created_at <= mes_end,
+                ).count()
+                avaliacoes_mes = Test.query.filter(
+                    Test.created_at >= mes_start,
+                    Test.created_at <= mes_end,
+                ).count()
+                sessoes_mes = TestSession.query.filter(
+                    TestSession.started_at >= mes_start,
+                    TestSession.started_at <= mes_end,
+                ).count()
+                evolucao_meses.append({
+                    "mes": label,
+                    "alunos": alunos_mes,
+                    "avaliacoes": avaliacoes_mes,
+                    "sessoes": sessoes_mes,
+                })
+
+            # --- Gráficos: distribuição (para gráfico de barras/pizza) ---
+            distribuicao_estado = [
+                {"estado": item["estado"], "alunos": item["alunos"], "escolas": item["escolas"]}
+                for item in por_estado
+            ]
+            distribuicao_municipio = [
+                {"municipio": item["nome"], "estado": item["estado"], "alunos": item["alunos"]}
+                for item in por_municipio[:15]
+            ]
+
+            # --- Taxa de conclusão e sessões (não repetir certificados; já está em metricas) ---
+            sessao_totais = db.session.query(
+                func.count(TestSession.id).label("total"),
+                func.sum(case((TestSession.submitted_at.isnot(None), 1), else_=0)).label("concluidas"),
+            ).first()
+            total_sessoes = int(sessao_totais.total or 0)
+            concluidas_sessoes = int(sessao_totais.concluidas or 0)
+            taxa_conclusao = round((concluidas_sessoes / total_sessoes * 100), 2) if total_sessoes else 0.0
+
+            # --- Métricas únicas para administração (evitar repetir o que já está em metricas) ---
+            media_notas_geral = db.session.query(func.avg(EvaluationResult.grade)).scalar()
+            total_respostas_questoes = StudentAnswer.query.count()
+            alunos_com_pelo_menos_uma = db.session.query(func.count(distinct(TestSession.student_id))).scalar() or 0
+            total_alunos = metricas_gerais.get("students", 0)
+            percentual_participacao = round((alunos_com_pelo_menos_uma / total_alunos * 100), 2) if total_alunos else 0.0
+            escolas_ativas = db.session.query(func.count(distinct(Student.school_id))).join(
+                TestSession, TestSession.student_id == Student.id
+            ).scalar() or 0
+            ultima_atividade = db.session.query(func.max(TestSession.submitted_at)).scalar()
+            avaliacoes_por_tipo_rows = (
+                db.session.query(Test.type, func.count(Test.id).label("total"))
+                .group_by(Test.type)
+                .all()
+            )
+            avaliacoes_por_tipo = [{"tipo": row.type or "N/I", "total": int(row.total or 0)} for row in avaliacoes_por_tipo_rows]
+            disciplinas_com_questoes = db.session.query(func.count(distinct(Question.subject_id))).filter(
+                Question.subject_id.isnot(None)
+            ).scalar() or 0
+
+            administracao = {
+                "taxa_conclusao_geral": taxa_conclusao,
+                "total_sessoes": total_sessoes,
+                "sessoes_concluidas": concluidas_sessoes,
+                "media_notas_geral": float(media_notas_geral or 0),
+                "total_respostas_questoes": int(total_respostas_questoes or 0),
+                "alunos_com_pelo_menos_uma_avaliacao": int(alunos_com_pelo_menos_uma or 0),
+                "percentual_participacao": percentual_participacao,
+                "escolas_ativas": int(escolas_ativas or 0),
+                "ultima_atividade": ultima_atividade.isoformat() if ultima_atividade and hasattr(ultima_atividade, "isoformat") else str(ultima_atividade) if ultima_atividade else None,
+                "avaliacoes_por_tipo": avaliacoes_por_tipo,
+                "disciplinas_com_questoes": int(disciplinas_com_questoes or 0),
+            }
+
+            # --- Gráficos adicionais (dados únicos para gráficos) ---
+            participacao_grafico = {
+                "total_alunos": total_alunos,
+                "alunos_com_pelo_menos_uma_avaliacao": int(alunos_com_pelo_menos_uma or 0),
+                "percentual_participacao": percentual_participacao,
+            }
+
+            return {
+                "metricas": metricas_gerais,
+                "dados_tecnicos": dados_tecnicos,
+                "conexao": conexao,
+                "por_escopo": {
+                    "geral": metricas_gerais,
+                    "estado": por_estado,
+                    "municipio": por_municipio,
+                    "escola": por_escola,
+                },
+                "graficos": {
+                    "evolucao_ultimos_12_meses": evolucao_meses,
+                    "distribuicao_por_estado": distribuicao_estado,
+                    "distribuicao_por_municipio": distribuicao_municipio,
+                    "avaliacoes_por_tipo": avaliacoes_por_tipo,
+                    "participacao": participacao_grafico,
+                },
+                "administracao": administracao,
+            }
+        except SQLAlchemyError as e:
+            db.session.rollback()
+            raise
 
 

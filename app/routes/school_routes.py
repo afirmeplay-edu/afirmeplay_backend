@@ -2,11 +2,12 @@ from flask import Blueprint, request, jsonify
 from app.models.school import School
 from app import db
 from app.decorators.role_required import role_required, get_current_user_from_token
+from app.decorators import requires_city_context
 from app.utils.uuid_helpers import ensure_uuid, ensure_uuid_list
 from flask_jwt_extended import jwt_required
 from app.decorators.role_required import get_current_tenant_id
 from sqlalchemy.exc import SQLAlchemyError
-from sqlalchemy import cast
+from sqlalchemy import cast, String
 from sqlalchemy.dialects.postgresql import UUID as PostgresUUID
 import logging
 from app.models.city import City
@@ -25,6 +26,7 @@ bp = Blueprint('school', __name__, url_prefix='/school')
 @bp.route('', methods=['POST'])
 @jwt_required()
 @role_required("admin",  "diretor", "coordenador","tecadm")
+@requires_city_context
 def criar_escola():
     try:
         data = request.get_json()
@@ -88,6 +90,7 @@ def criar_escola():
 @bp.route('', methods=['GET'])
 @jwt_required()
 @role_required("admin", "diretor", "coordenador", "professor", "tecadm")
+@requires_city_context
 def listar_escolas():
     try:
         user = get_current_user_from_token()
@@ -106,9 +109,19 @@ def listar_escolas():
         ).outerjoin(
             Student, School.id == Student.school_id
         ).outerjoin(
-            Class, cast(School.id, PostgresUUID) == Class.school_id
+            Class, School.id == cast(Class.school_id, String)
         ).group_by(
-            School.id, City.id
+            School.id,
+            School.name,
+            School.address,
+            School.domain,
+            School.created_at,
+            School.city_id,
+            City.id,
+            City.name,
+            City.state,
+            City.slug,
+            City.created_at
         )
 
         schools = []
@@ -249,6 +262,44 @@ def deletar_escola(escola_id):
         if not escola:
             return jsonify({"erro": "Escola não encontrada"}), 404
 
+        # Verificar dependências antes de deletar
+        from app.models.studentClass import Class
+        from app.models.student import Student
+        from app.models.schoolTeacher import SchoolTeacher
+        
+        # Contar turmas vinculadas
+        turmas = Class.query.filter(Class._school_id == escola_id).count()
+        if turmas > 0:
+            return jsonify({
+                "erro": "Não é possível excluir a escola",
+                "mensagem": f"A escola possui {turmas} turma(s) vinculada(s). Exclua ou reatribua as turmas para outra escola antes de excluir.",
+                "dependencias": {
+                    "turmas": turmas
+                }
+            }), 400
+        
+        # Contar alunos vinculados
+        alunos = Student.query.filter(Student.school_id == escola_id).count()
+        if alunos > 0:
+            return jsonify({
+                "erro": "Não é possível excluir a escola",
+                "mensagem": f"A escola possui {alunos} aluno(s) vinculado(s). Exclua ou reatribua os alunos para outra escola antes de excluir.",
+                "dependencias": {
+                    "alunos": alunos
+                }
+            }), 400
+        
+        # Contar professores vinculados
+        professores = SchoolTeacher.query.filter(SchoolTeacher.school_id == escola_id).count()
+        if professores > 0:
+            return jsonify({
+                "erro": "Não é possível excluir a escola",
+                "mensagem": f"A escola possui {professores} professor(es) vinculado(s). Desvincule os professores antes de excluir a escola.",
+                "dependencias": {
+                    "professores": professores
+                }
+            }), 400
+
         try:
             db.session.delete(escola)
             db.session.commit()
@@ -294,11 +345,21 @@ def buscar_escola(escola_id):
         ).outerjoin(
             Student, School.id == Student.school_id
         ).outerjoin(
-            Class, cast(School.id, PostgresUUID) == Class.school_id
+            Class, School.id == cast(Class.school_id, String)
         ).filter(
             School.id == escola_id
         ).group_by(
-            School.id, City.id
+            School.id,
+            School.name,
+            School.address,
+            School.domain,
+            School.created_at,
+            School.city_id,
+            City.id,
+            City.name,
+            City.state,
+            City.slug,
+            City.created_at
         ).first()
 
         if not result:
@@ -369,6 +430,7 @@ def buscar_escola(escola_id):
 @bp.route('/city/<string:city_id>', methods=['GET'])
 @jwt_required()
 @role_required("admin", "diretor", "coordenador", "professor", "tecadm")
+@requires_city_context
 def buscar_escolas_por_cidade(city_id):
     try:
         user = get_current_user_from_token()
@@ -387,11 +449,21 @@ def buscar_escolas_por_cidade(city_id):
         ).outerjoin(
             Student, School.id == Student.school_id
         ).outerjoin(
-            Class, cast(School.id, PostgresUUID) == Class.school_id
+            Class, School.id == cast(Class.school_id, String)
         ).filter(
             School.city_id == city_id
         ).group_by(
-            School.id, City.id
+            School.id,
+            School.name,
+            School.address,
+            School.domain,
+            School.created_at,
+            School.city_id,
+            City.id,
+            City.name,
+            City.state,
+            City.slug,
+            City.created_at
         )
 
         # Verifica permissões
@@ -482,7 +554,7 @@ def buscar_escolas_por_serie(grade_id):
         ).join(
             City, School.city_id == City.id
         ).join(
-            Class, cast(School.id, PostgresUUID) == Class.school_id
+            Class, School.id == cast(Class.school_id, String)
         ).outerjoin(
             Student, School.id == Student.school_id
         ).filter(
@@ -498,7 +570,19 @@ def buscar_escolas_por_serie(grade_id):
             query = query.filter(School.city_id == city_id)
 
         # Agrupar resultados
-        query = query.group_by(School.id, City.id)
+        query = query.group_by(
+            School.id,
+            School.name,
+            School.address,
+            School.domain,
+            School.created_at,
+            School.city_id,
+            City.id,
+            City.name,
+            City.state,
+            City.slug,
+            City.created_at
+        )
 
         # Aplicar filtros de permissão baseados na role
         if user['role'] == "admin":

@@ -20,6 +20,13 @@ from app import db
 from typing import Dict, List, Optional, Any
 from app.services.evaluation_result_service import EvaluationResultService
 from app.services.student_ranking_service import StudentRankingService
+from app.services.achievement_service import (
+    get_conquistas,
+    get_redeemed_keys_from_user,
+    get_coin_value_for_medal,
+    student_has_medal,
+)
+from app.balance.services.coin_service import CoinService
 import uuid
 
 bp = Blueprint('student_grades', __name__, url_prefix="/students")
@@ -359,3 +366,238 @@ def get_student_evaluation_grades(user_id, evaluation_id):
     except Exception as e:
         logging.error(f"Erro ao obter notas da avaliação {evaluation_id} do aluno {user_id}: {str(e)}", exc_info=True)
         return jsonify({"error": "Erro ao obter dados da avaliação", "details": str(e)}), 500
+
+
+# ---------------------------------------------------------------------------
+# Conquistas (achievements) - sem novas tabelas; resgate de moedas em User.traits
+# ---------------------------------------------------------------------------
+
+@bp.route('/me/conquistas', methods=['GET'])
+@jwt_required()
+@role_required("aluno", "admin", "professor", "coordenador", "diretor", "tecadm")
+def get_my_conquistas():
+    """
+    Retorna conquistas do aluno logado (estado, medalha, progresso, moedas_valor, resgatado).
+    """
+    try:
+        user = get_current_user_from_token()
+        if not user:
+            return jsonify({"error": "Usuário não encontrado"}), 401
+
+        student = Student.query.filter_by(user_id=user["id"]).first()
+        if not student:
+            return jsonify({"error": "Aluno não encontrado"}), 404
+
+        user_model = User.query.get(student.user_id) if student.user_id else None
+        redeemed_keys = get_redeemed_keys_from_user(user_model)
+
+        result = get_conquistas(student.id, redeemed_keys=redeemed_keys)
+        return jsonify(result), 200
+    except Exception as e:
+        logging.error(f"Erro ao obter conquistas: {str(e)}", exc_info=True)
+        return jsonify({"error": "Erro ao obter conquistas", "details": str(e)}), 500
+
+
+@bp.route('/<string:student_id>/conquistas', methods=['GET'])
+@jwt_required()
+@role_required("admin", "professor", "coordenador", "diretor", "tecadm")
+def get_student_conquistas(student_id):
+    """
+    Retorna conquistas de um aluno (para professor/admin/diretor/coordenador/tecadm).
+    """
+    try:
+        user = get_current_user_from_token()
+        if not user:
+            return jsonify({"error": "Usuário não encontrado"}), 401
+
+        student = Student.query.get(student_id)
+        if not student:
+            return jsonify({"error": "Aluno não encontrado"}), 404
+
+        if not _validate_student_access(user, student.id):
+            return jsonify({"error": "Você não tem permissão para acessar os dados deste aluno"}), 403
+
+        user_model = User.query.get(student.user_id) if student.user_id else None
+        redeemed_keys = get_redeemed_keys_from_user(user_model)
+
+        result = get_conquistas(student.id, redeemed_keys=redeemed_keys)
+        return jsonify(result), 200
+    except Exception as e:
+        logging.error(f"Erro ao obter conquistas do aluno {student_id}: {str(e)}", exc_info=True)
+        return jsonify({"error": "Erro ao obter conquistas", "details": str(e)}), 500
+
+
+@bp.route('/me/conquistas/resgatar', methods=['POST'])
+@jwt_required()
+@role_required("aluno")
+def resgatar_conquista():
+    """
+    Resgata moedas por uma conquista+medalha. Uma vez por par (conquista, medalha).
+    Body: { "achievement_id": "...", "medalha": "bronze"|"prata"|"ouro"|"platina" }
+    """
+    try:
+        user = get_current_user_from_token()
+        if not user:
+            return jsonify({"error": "Usuário não encontrado"}), 401
+
+        student = Student.query.filter_by(user_id=user["id"]).first()
+        if not student:
+            return jsonify({"error": "Aluno não encontrado"}), 404
+
+        data = request.get_json() or {}
+        achievement_id = (data.get("achievement_id") or "").strip()
+        medalha = (data.get("medalha") or "").strip().lower()
+
+        if not achievement_id or not medalha:
+            return jsonify({"error": "achievement_id e medalha são obrigatórios"}), 400
+
+        if medalha not in ("bronze", "prata", "ouro", "platina"):
+            return jsonify({"error": "medalha inválida"}), 400
+
+        user_model = User.query.get(student.user_id) if student.user_id else None
+        if not user_model:
+            return jsonify({"error": "Usuário do aluno não encontrado"}), 404
+
+        traits = dict(user_model.traits) if user_model.traits and isinstance(user_model.traits, dict) else {}
+        redeemed_list = list(traits.get("achievements_redeemed") or [])
+
+        chave = f"{achievement_id}_{medalha}"
+        if chave in redeemed_list:
+            return jsonify({"error": "Conquista já resgatada para esta medalha"}), 400
+
+        if not student_has_medal(student.id, achievement_id, medalha):
+            return jsonify({"error": "Você ainda não atingiu esta medalha para esta conquista"}), 400
+
+        valor = get_coin_value_for_medal(achievement_id, medalha)
+        if valor is None or valor <= 0:
+            return jsonify({"error": "Valor em moedas não definido para esta conquista/medalha"}), 400
+
+        CoinService.credit_coins(
+            student.id,
+            valor,
+            reason="achievement_redeem",
+            description=chave,
+        )
+
+        redeemed_list.append(chave)
+        traits["achievements_redeemed"] = redeemed_list
+        user_model.traits = traits
+        db.session.commit()
+
+        novo_saldo = CoinService.get_balance(student.id)
+        # Resposta enriquecida para o front exibir recompensa (ex.: "Conquista X (Ouro) resgatada! +50 moedas")
+        conquista_nome = _get_achievement_name(achievement_id)
+        return jsonify({
+            "message": "Moedas resgatadas com sucesso",
+            "moedas_creditadas": valor,
+            "novo_saldo": novo_saldo,
+            "conquista_nome": conquista_nome,
+            "medalha": medalha,
+        }), 200
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        logging.error(f"Erro ao resgatar conquista: {str(e)}", exc_info=True)
+        db.session.rollback()
+        return jsonify({"error": "Erro ao resgatar conquista", "details": str(e)}), 500
+
+
+def _get_achievement_name(achievement_id: str) -> Optional[str]:
+    """Retorna o nome de exibição da conquista pelo id."""
+    from app.services.achievement_service import (
+        ACHIEVEMENTS_CONFIG,
+        PERFEccionISTA_CONFIG,
+    )
+    if achievement_id == "perfeccionista":
+        return (PERFEccionISTA_CONFIG or {}).get("nome") or "Perfeccionista"
+    for cfg in (ACHIEVEMENTS_CONFIG or []):
+        if cfg.get("id") == achievement_id:
+            return cfg.get("nome") or achievement_id
+    return achievement_id
+
+
+@bp.route('/me/conquistas/resgatar-todas', methods=['POST'])
+@jwt_required()
+@role_required("aluno")
+def resgatar_todas_conquistas():
+    """
+    Resgata em uma única ação todas as conquistas desbloqueadas cujas moedas
+    ainda não foram resgatadas. O aluno pode usar um botão "Resgatar recompensas"
+    para ganhar todas as moedas pendentes e aumentar a sensação de recompensa.
+    Body: opcional {}.
+    Retorna: moedas_creditadas_total, itens_resgatados, novo_saldo.
+    """
+    try:
+        user = get_current_user_from_token()
+        if not user:
+            return jsonify({"error": "Usuário não encontrado"}), 401
+
+        student = Student.query.filter_by(user_id=user["id"]).first()
+        if not student:
+            return jsonify({"error": "Aluno não encontrado"}), 404
+
+        user_model = User.query.get(student.user_id) if student.user_id else None
+        if not user_model:
+            return jsonify({"error": "Usuário do aluno não encontrado"}), 404
+
+        traits = dict(user_model.traits) if user_model.traits and isinstance(user_model.traits, dict) else {}
+        redeemed_list = list(traits.get("achievements_redeemed") or [])
+
+        data = get_conquistas(student.id, redeemed_keys=redeemed_list)
+        conquistas = data.get("conquistas") or []
+
+        itens_resgatados: List[Dict[str, Any]] = []
+        total_moedas = 0
+
+        for c in conquistas:
+            achievement_id = c.get("id")
+            medalha = c.get("medalha_atual")
+            if not medalha or c.get("resgatado"):
+                continue
+            valor = c.get("moedas_valor") or 0
+            if valor <= 0:
+                continue
+            chave = f"{achievement_id}_{medalha}"
+            if chave in redeemed_list:
+                continue
+
+            CoinService.credit_coins(
+                student.id,
+                valor,
+                reason="achievement_redeem",
+                description=chave,
+            )
+            redeemed_list.append(chave)
+            total_moedas += valor
+            itens_resgatados.append({
+                "achievement_id": achievement_id,
+                "nome": c.get("nome") or _get_achievement_name(achievement_id),
+                "medalha": medalha,
+                "moedas": valor,
+            })
+
+        if itens_resgatados:
+            traits["achievements_redeemed"] = redeemed_list
+            user_model.traits = traits
+            db.session.commit()
+
+        novo_saldo = CoinService.get_balance(student.id)
+
+        if not itens_resgatados:
+            return jsonify({
+                "message": "Nenhuma conquista pendente para resgatar",
+                "moedas_creditadas_total": 0,
+                "itens_resgatados": [],
+                "novo_saldo": novo_saldo,
+            }), 200
+
+        return jsonify({
+            "message": f"Você resgatou {len(itens_resgatados)} conquista(s) e ganhou {total_moedas} moedas!",
+            "moedas_creditadas_total": total_moedas,
+            "itens_resgatados": itens_resgatados,
+            "novo_saldo": novo_saldo,
+        }), 200
+    except Exception as e:
+        logging.error(f"Erro ao resgatar todas as conquistas: {str(e)}", exc_info=True)
+        db.session.rollback()
+        return jsonify({"error": "Erro ao resgatar conquistas", "details": str(e)}), 500

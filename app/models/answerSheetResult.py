@@ -36,8 +36,10 @@ class AnswerSheetResult(db.Model):
     # Nota e classificação
     score_percentage = db.Column(db.Float, nullable=False)  # 0-100
     grade = db.Column(db.Float, nullable=False)  # Nota 0-10
-    proficiency = db.Column(db.Float, nullable=True)  # Proficiência 0-100 (opcional)
+    proficiency = db.Column(db.Float, nullable=True)  # Proficiência média geral (média das disciplinas)
     classification = db.Column(db.String(50), nullable=True)  # "Avançado", "Proficiente", "Básico", etc.
+    # Proficiência por disciplina: { subject_id: { subject_name, proficiency, classification, correct_answers, total_questions } }
+    proficiency_by_subject = db.Column(JSON, nullable=True)
     
     # Metadados
     corrected_at = db.Column(db.TIMESTAMP, default=datetime.utcnow)
@@ -63,6 +65,7 @@ class AnswerSheetResult(db.Model):
             'grade': self.grade,
             'proficiency': self.proficiency,
             'classification': self.classification,
+            'proficiency_by_subject': self.proficiency_by_subject,
             'corrected_at': self.corrected_at.isoformat() if self.corrected_at else None,
             'detection_method': self.detection_method
         }

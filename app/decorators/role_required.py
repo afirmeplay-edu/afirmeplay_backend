@@ -63,8 +63,16 @@ def role_required(*roles):
         @wraps(f)
         def wrapper(*args, **kwargs):
             user = get_current_user_from_token()
-            if not user or user['role'] not in roles:
-                return jsonify({"erro": "Acesso negado."}), 403
+            if not user:
+                return jsonify({
+                    "erro": "Acesso negado.",
+                    "mensagem": "Token inválido, expirado ou não informado. Envie o header Authorization: Bearer <token>."
+                }), 403
+            if user["role"] not in roles:
+                return jsonify({
+                    "erro": "Acesso negado.",
+                    "mensagem": f"Sua função ({user['role']}) não tem permissão para esta rota. Permitidas: {', '.join(roles)}."
+                }), 403
             return f(*args, **kwargs)
         return wrapper
     return decorator

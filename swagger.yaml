@@ -3442,6 +3442,179 @@ paths:
         '500':
           $ref: '#/responses/InternalServerError'
 
+  /evaluation-results/evolucao/opcoes-filtros:
+    get:
+      summary: Opções de filtro para a tela de Evolução (Estado → Município → Escola → Série → Turma)
+      description: |
+        Hierarquia da Evolução (não usa "avaliação" no meio). Retorna apenas opções que têm
+        pelo menos uma avaliação aplicada (escolas/séries/turmas com dados para comparar).
+        Use este endpoint para popular os dropdowns de filtro da página Evolução.
+      parameters:
+        - name: estado
+          in: query
+          schema:
+            type: string
+          description: Estado selecionado (para retornar municipios)
+        - name: municipio
+          in: query
+          schema:
+            type: string
+          description: ID do município (para retornar escolas)
+        - name: escola
+          in: query
+          schema:
+            type: string
+          description: ID da escola (para retornar series)
+        - name: serie
+          in: query
+          schema:
+            type: string
+          description: ID da série (para retornar turmas)
+      responses:
+        '200':
+          description: Opções hierárquicas (estados, municipios, escolas, series, turmas conforme parâmetros)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  estados:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id:
+                          type: string
+                        nome:
+                          type: string
+                  municipios:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id:
+                          type: string
+                        nome:
+                          type: string
+                  escolas:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id:
+                          type: string
+                        nome:
+                          type: string
+                  series:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id:
+                          type: string
+                        nome:
+                          type: string
+                  turmas:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id:
+                          type: string
+                        nome:
+                          type: string
+        '401':
+          $ref: '#/responses/UnauthorizedError'
+        '403':
+          $ref: '#/responses/ForbiddenError'
+        '500':
+          $ref: '#/responses/InternalServerError'
+
+  /evaluation-results/evolucao/avaliacoes:
+    get:
+      summary: Lista avaliações disponíveis para a tela de Evolução (filtros aplicados)
+      description: |
+        Retorna a lista de avaliações já filtrada para a tela de Evolução.
+        Use apenas este endpoint no front de Evolução para obter "Avaliações Disponíveis"
+        com todos os filtros (estado, município, escola, série, turma, data início/fim, nome).
+        Quando série é informada, retorna somente avaliações aplicadas em turmas dessa série.
+      parameters:
+        - name: estado
+          in: query
+          required: true
+          schema:
+            type: string
+          description: Nome do estado (ex ALAGOAS)
+        - name: municipio
+          in: query
+          required: true
+          schema:
+            type: string
+          description: ID do município
+        - name: escola
+          in: query
+          schema:
+            type: string
+          description: ID da escola ou 'all' para todas
+        - name: serie
+          in: query
+          schema:
+            type: string
+          description: ID da série ou 'all' para todas
+        - name: turma
+          in: query
+          schema:
+            type: string
+          description: ID da turma ou 'all'/'Todas' para todas
+        - name: data_inicio
+          in: query
+          schema:
+            type: string
+          description: Data início (dd/mm/aaaa ou ISO)
+        - name: data_fim
+          in: query
+          schema:
+            type: string
+          description: Data fim (dd/mm/aaaa ou ISO)
+        - name: nome
+          in: query
+          schema:
+            type: string
+          description: Trecho do nome da avaliação (busca)
+      responses:
+        '200':
+          description: Lista de avaliações e total
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  avaliacoes:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id:
+                          type: string
+                        titulo:
+                          type: string
+                        data:
+                          type: string
+                          nullable: true
+                          description: Data de aplicação (dd/mm/aaaa) ou null
+                  total:
+                    type: integer
+        '400':
+          description: estado e/ou municipio ausentes ou município não pertence ao estado
+        '401':
+          $ref: '#/responses/UnauthorizedError'
+        '403':
+          $ref: '#/responses/ForbiddenError'
+        '404':
+          description: Município não encontrado
+        '500':
+          $ref: '#/responses/InternalServerError'
+
   /evaluation-results/avaliacoes/{test_id}/verificar-status:
     post:
       summary: Check and update evaluation status
@@ -5667,6 +5840,31 @@ schemas:
         total_evaluations:
           type: integer
 
+    DashboardClassRankingEntry:
+      type: object
+      description: Entrada do ranking de turmas (turma, série, média, acerto, conclusão, alunos, avaliações)
+      properties:
+        position:
+          type: integer
+        class_id:
+          type: string
+        turma:
+          type: string
+        serie:
+          type: string
+        media:
+          type: number
+        acerto:
+          type: integer
+        acerto_percent:
+          type: number
+        conclusao:
+          type: number
+        alunos:
+          type: integer
+        avaliacoes:
+          type: integer
+
     DashboardStudentRankingEntry:
       type: object
       properties:
@@ -5682,18 +5880,24 @@ schemas:
         class_name:
           type: string
           nullable: true
-        average_score:
+        serie:
+          type: string
+          description: Série/ano do aluno (grade)
+          nullable: true
+        media:
           type: number
+          description: Média das notas (0-10), 2 decimais
         completed_evaluations:
           type: integer
 
     DashboardRankings:
       type: object
       properties:
-        schools:
+        classes:
           type: array
+          description: Ranking de turmas (turma, série, média, acerto, conclusão, alunos, avaliações)
           items:
-            $ref: '#/schemas/DashboardSchoolRankingEntry'
+            $ref: '#/schemas/DashboardClassRankingEntry'
         students:
           type: array
           items:
@@ -5716,7 +5920,7 @@ schemas:
               classes_count:
                 type: integer
       required:
-        - schools
+        - classes
         - students
         - teacher_rankings
 

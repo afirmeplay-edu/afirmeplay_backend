@@ -5,6 +5,7 @@ Endpoints básicos para filtros e dropdowns do frontend
 from flask import Blueprint, jsonify, request
 from flask_jwt_extended import jwt_required
 from app.decorators.role_required import role_required
+from app.decorators import requires_city_context
 from app.models.educationStage import EducationStage
 from app.models.subject import Subject
 from app.models.studentClass import Class
@@ -16,11 +17,12 @@ from app.models.studentAnswer import StudentAnswer
 from app.models.testSession import TestSession
 from app.utils.uuid_helpers import ensure_uuid, ensure_uuid_list
 from app import db
-from sqlalchemy import func
+from sqlalchemy import func, cast, String
 from datetime import datetime, timedelta
 import logging
 from app.models.question import Question
 from app.models.classTest import ClassTest
+from app.models.testQuestion import TestQuestion
 from app.models.schoolTeacher import SchoolTeacher
 from app.decorators.role_required import get_current_tenant_id
 from app.decorators.role_required import get_current_user_from_token
@@ -271,6 +273,7 @@ def dashboard_stats():
 @bp.route('/dashboard/comprehensive-stats', methods=['GET'])
 @jwt_required()
 @role_required("admin", "professor", "coordenador", "diretor", "tecadm")
+@requires_city_context
 def comprehensive_dashboard_stats():
     """
     Retorna estatísticas mais completas do dashboard
@@ -331,7 +334,7 @@ def comprehensive_dashboard_stats():
                 student_query = student_query.filter(Student.school_id.in_(school_ids))
                 
                 # Filtrar turmas por escolas da cidade
-                class_query = class_query.filter(Class.school_id.in_(ensure_uuid_list(school_ids)))
+                class_query = class_query.filter(cast(Class.school_id, String).in_(school_ids))
                 
                 # Filtrar professores por escolas da cidade através da tabela de associação
                 teacher_query = teacher_query.join(SchoolTeacher).filter(SchoolTeacher.school_id.in_(school_ids))
@@ -339,7 +342,7 @@ def comprehensive_dashboard_stats():
                 # Filtrar testes que têm turmas das escolas da cidade
                 class_tests = ClassTest.query.filter(
                     ClassTest.class_id.in_(
-                        Class.query.filter(Class.school_id.in_(ensure_uuid_list(school_ids))).with_entities(Class.id)
+                        Class.query.filter(cast(Class.school_id, String).in_(school_ids)).with_entities(Class.id)
                     )
                 ).with_entities(ClassTest.test_id).all()
                 test_ids = [ct.test_id for ct in class_tests]
@@ -513,6 +516,7 @@ def comprehensive_dashboard_stats():
 @bp.route('/evaluations/stats', methods=['GET'])
 @jwt_required()
 @role_required("admin", "professor", "coordenador", "diretor", "tecadm")
+@requires_city_context
 def evaluations_stats():
     """
     Retorna estatísticas específicas de avaliações de forma robusta
@@ -531,17 +535,21 @@ def evaluations_stats():
         }
     """
     try:
-        logging.info("📊 Iniciando cálculo de estatísticas de avaliações")
-        
         # Obter usuário atual para filtragem
         current_user = get_current_user_from_token()
         if not current_user:
             return jsonify({"erro": "Usuário não encontrado"}), 404
-        
+
         # Base queries
         test_query = Test.query
         question_query = Question.query
-        
+        # Filtro por tipos (ex: types=AVALIACAO,SIMULADO)
+        types_param = request.args.get('types')
+        if types_param:
+            types_list = [t.strip() for t in types_param.split(',') if t.strip()]
+            if types_list:
+                test_query = test_query.filter(Test.type.in_(types_list))
+
         # Filtragem baseada no papel do usuário
         if current_user['role'] == "admin":
             # Admin vê todas as estatísticas do sistema
@@ -558,13 +566,14 @@ def evaluations_stats():
             
             if school_ids:
                 # Filtrar testes que têm turmas das escolas da cidade
+                # class.school_id é VARCHAR → comparar com strings (evitar character varying = uuid)
                 class_tests = ClassTest.query.filter(
                     ClassTest.class_id.in_(
-                        Class.query.filter(Class.school_id.in_(ensure_uuid_list(school_ids))).with_entities(Class.id)
+                        Class.query.filter(cast(Class.school_id, String).in_(school_ids)).with_entities(Class.id)
                     )
                 ).with_entities(ClassTest.test_id).all()
                 test_ids = [ct.test_id for ct in class_tests]
-                
+
                 if test_ids:
                     test_query = test_query.filter(Test.id.in_(test_ids))
                 else:
@@ -581,7 +590,7 @@ def evaluations_stats():
                         "by_status": {},
                         "last_sync": datetime.now().isoformat()
                     }), 200
-                
+
                 # Filtrar questões por cidade (se tiver city_id)
                 if hasattr(Question, 'city_id'):
                     question_query = question_query.filter_by(city_id=city_id)
@@ -617,13 +626,14 @@ def evaluations_stats():
                 return jsonify({"erro": "Escola não encontrada"}), 400
             
             # Filtrar testes que têm turmas da escola
+            # class.school_id é VARCHAR; School.id é VARCHAR → comparar como string
             class_tests = ClassTest.query.filter(
                 ClassTest.class_id.in_(
-                    Class.query.filter_by(school_id=ensure_uuid(school.id)).with_entities(Class.id)
+                    Class.query.filter_by(school_id=school.id).with_entities(Class.id)
                 )
             ).with_entities(ClassTest.test_id).all()
             test_ids = [ct.test_id for ct in class_tests]
-            
+
             if test_ids:
                 test_query = test_query.filter(Test.id.in_(test_ids))
             else:
@@ -640,7 +650,7 @@ def evaluations_stats():
                     "by_status": {},
                     "last_sync": datetime.now().isoformat()
                 }), 200
-            
+
             # Filtrar questões por cidade da escola (se tiver city_id)
             if hasattr(Question, 'city_id'):
                 question_query = question_query.filter_by(city_id=school.city_id)
@@ -656,13 +666,14 @@ def evaluations_stats():
             
             if school_ids:
                 # Filtrar testes que têm turmas das escolas da cidade
+                # class.school_id é VARCHAR → comparar com strings (evitar character varying = uuid)
                 class_tests = ClassTest.query.filter(
                     ClassTest.class_id.in_(
-                        Class.query.filter(Class.school_id.in_(ensure_uuid_list(school_ids))).with_entities(Class.id)
+                        Class.query.filter(cast(Class.school_id, String).in_(school_ids)).with_entities(Class.id)
                     )
                 ).with_entities(ClassTest.test_id).all()
                 test_ids = [ct.test_id for ct in class_tests]
-                
+
                 if test_ids:
                     test_query = test_query.filter(Test.id.in_(test_ids))
                 else:
@@ -679,7 +690,7 @@ def evaluations_stats():
                         "by_status": {},
                         "last_sync": datetime.now().isoformat()
                     }), 200
-                
+
                 # Filtrar questões por cidade (se tiver city_id)
                 if hasattr(Question, 'city_id'):
                     question_query = question_query.filter_by(city_id=city_id)
@@ -697,115 +708,99 @@ def evaluations_stats():
                     "by_status": {},
                     "last_sync": datetime.now().isoformat()
                 }), 200
-        
-        # Estatísticas básicas - versão mais segura
-        logging.info("🔢 Contando total de avaliações...")
+
+        # Estatísticas básicas (sem carregar todos os testes em memória)
+        test_ids_subq = test_query.with_entities(Test.id)
         total_evaluations = test_query.count()
-        logging.info(f"✅ Total de avaliações: {total_evaluations}")
-        
-        # Avaliações deste mês
-        logging.info("📅 Contando avaliações deste mês...")
-        this_month_evaluations = 0
-        try:
-            current_month = datetime.now().month
-            current_year = datetime.now().year
-            
-            # Versão mais compatível sem extract
-            from sqlalchemy import and_
-            this_month_evaluations = test_query.filter(
-                and_(
-                    Test.created_at >= datetime(current_year, current_month, 1),
-                    Test.created_at < datetime(current_year, current_month + 1, 1) if current_month < 12 else datetime(current_year + 1, 1, 1)
-                )
-            ).count()
-            logging.info(f"✅ Avaliações deste mês: {this_month_evaluations}")
-        except Exception as e:
-            logging.error(f"❌ Erro ao contar avaliações deste mês: {e}")
-            this_month_evaluations = 0
-        
-        # Total de questões 
-        logging.info("❓ Contando total de questões...")
-        total_questions_result = 0
-        try:
-            total_questions_result = question_query.count()
-            logging.info(f"✅ Total de questões: {total_questions_result}")
-        except Exception as e:
-            logging.error(f"❌ Erro ao contar questões: {e}")
-            total_questions_result = 0
-        
-        # Média de questões por avaliação - versão simples
-        logging.info("📊 Calculando média de questões por avaliação...")
+
+        from sqlalchemy import and_
+        current_month = datetime.now().month
+        current_year = datetime.now().year
+        this_month_evaluations = test_query.filter(
+            and_(
+                Test.created_at >= datetime(current_year, current_month, 1),
+                Test.created_at < datetime(current_year, current_month + 1, 1) if current_month < 12 else datetime(current_year + 1, 1, 1)
+            )
+        ).count()
+
+        # Total e média de questões: JOIN test + test_questions no schema atual (evita 0 multi-tenant)
+        total_questions_in_tests = 0
         questions_per_evaluation = 0
         try:
-            # Buscar todas as avaliações e contar questões
-            evaluations = test_query.all()
-            if evaluations:
-                total_questions_in_evaluations = 0
-                evaluations_with_questions = 0
-                
-                for evaluation in evaluations:
-                    if hasattr(evaluation, 'questions') and evaluation.questions:
-                        if isinstance(evaluation.questions, list):
-                            total_questions_in_evaluations += len(evaluation.questions)
-                            evaluations_with_questions += 1
-                
-                questions_per_evaluation = total_questions_in_evaluations / evaluations_with_questions if evaluations_with_questions > 0 else 0
-            
-            logging.info(f"✅ Média de questões por avaliação: {questions_per_evaluation}")
+            # 1) Contagem por JOIN no mesmo schema (uma query só)
+            total_questions_in_tests = db.session.query(db.func.count(TestQuestion.id)).join(
+                Test, Test.id == TestQuestion.test_id
+            ).filter(Test.id.in_(test_ids_subq)).scalar() or 0
+            # 2) Fallback: materializar IDs e contar (alguns drivers falham com subquery)
+            if total_questions_in_tests == 0 and total_evaluations > 0:
+                test_ids_list = [r[0] for r in test_query.with_entities(Test.id).all()]
+                if test_ids_list:
+                    total_questions_in_tests = db.session.query(db.func.count(TestQuestion.id)).filter(
+                        TestQuestion.test_id.in_(test_ids_list)
+                    ).scalar() or 0
+            # 3) Se ainda 0, tentar schema public (testes podem estar em public para admin)
+            if total_questions_in_tests == 0 and total_evaluations > 0:
+                from sqlalchemy import text
+                from app.utils.tenant_middleware import set_search_path
+                r = db.session.execute(text("SHOW search_path")).fetchone()
+                path_before = (r[0] or "public").strip()
+                first_schema = path_before.split(",")[0].strip()
+                if first_schema != "public":
+                    try:
+                        set_search_path("public")
+                        test_ids_public = [x[0] for x in test_query.with_entities(Test.id).all()]
+                        if test_ids_public:
+                            total_questions_in_tests = db.session.query(db.func.count(TestQuestion.id)).filter(
+                                TestQuestion.test_id.in_(test_ids_public)
+                            ).scalar() or 0
+                    finally:
+                        db.session.execute(text(f"SET search_path TO {path_before}"))
+            questions_per_evaluation = total_questions_in_tests / total_evaluations if total_evaluations else 0
         except Exception as e:
-            logging.error(f"❌ Erro ao calcular média de questões: {e}")
-            questions_per_evaluation = 0
-        
-        # Estatísticas por tipo de avaliação
-        logging.info("📊 Calculando estatísticas por tipo...")
+            logging.debug("Total/média de questões (TestQuestion): %s", e)
+
+        # Alias para compatibilidade; resposta usa total_questions_in_tests
+        total_questions_result = total_questions_in_tests
+
         by_type = {}
         try:
-            evaluations_by_type = db.session.query(Test.type, db.func.count(Test.id)).filter(Test.id.in_(test_query.with_entities(Test.id))).group_by(Test.type).all()
+            evaluations_by_type = db.session.query(Test.type, db.func.count(Test.id)).filter(
+                Test.id.in_(test_ids_subq)
+            ).group_by(Test.type).all()
             by_type = {item[0]: item[1] for item in evaluations_by_type if item[0]}
-            logging.info(f"✅ Estatísticas por tipo: {by_type}")
         except Exception as e:
-            logging.error(f"❌ Erro ao calcular estatísticas por tipo: {e}")
-            by_type = {}
-        
-        # Estatísticas por modelo
-        logging.info("📊 Calculando estatísticas por modelo...")
+            logging.debug("by_type: %s", e)
+
         by_model = {}
         try:
-            evaluations_by_model = db.session.query(Test.model, db.func.count(Test.id)).filter(Test.id.in_(test_query.with_entities(Test.id))).group_by(Test.model).all()
-            by_model = {item[0]: item[1] for item in evaluations_by_type if item[0]}
-            logging.info(f"✅ Estatísticas por modelo: {by_model}")
+            evaluations_by_model = db.session.query(Test.model, db.func.count(Test.id)).filter(
+                Test.id.in_(test_ids_subq)
+            ).group_by(Test.model).all()
+            by_model = {item[0]: item[1] for item in evaluations_by_model if item[0]}
         except Exception as e:
-            logging.error(f"❌ Erro ao calcular estatísticas por modelo: {e}")
-            by_model = {}
-        
-        # Estatísticas por status
-        logging.info("📊 Calculando estatísticas por status...")
+            logging.debug("by_model: %s", e)
+
         by_status = {}
         try:
-            evaluations_by_status = db.session.query(Test.status, db.func.count(Test.id)).filter(Test.id.in_(test_query.with_entities(Test.id))).group_by(Test.status).all()
+            evaluations_by_status = db.session.query(Test.status, db.func.count(Test.id)).filter(
+                Test.id.in_(test_ids_subq)
+            ).group_by(Test.status).all()
             by_status = {item[0]: item[1] for item in evaluations_by_status if item[0]}
-            logging.info(f"✅ Estatísticas por status: {by_status}")
         except Exception as e:
-            logging.error(f"❌ Erro ao calcular estatísticas por status: {e}")
-            by_status = {}
-        
-        # Estatísticas por modo de avaliação
-        logging.info("📊 Calculando estatísticas por modo...")
+            logging.debug("by_status: %s", e)
+
         virtual_evaluations = 0
         physical_evaluations = 0
         try:
             virtual_evaluations = test_query.filter(Test.evaluation_mode == 'virtual').count()
             physical_evaluations = test_query.filter(Test.evaluation_mode == 'physical').count()
-            logging.info(f"✅ Virtuais: {virtual_evaluations}, Físicas: {physical_evaluations}")
         except Exception as e:
-            logging.error(f"❌ Erro ao calcular estatísticas por modo: {e}")
-            virtual_evaluations = 0
-            physical_evaluations = 0
-        
+            logging.debug("modo: %s", e)
+
         result = {
             "total": total_evaluations,
             "this_month": this_month_evaluations,
-            "total_questions": total_questions_result,
+            "total_questions": total_questions_in_tests,
             "average_questions": round(float(questions_per_evaluation), 2),
             "virtual_evaluations": virtual_evaluations,
             "physical_evaluations": physical_evaluations,
@@ -814,8 +809,6 @@ def evaluations_stats():
             "by_status": by_status,
             "last_sync": datetime.now().isoformat()
         }
-        
-        logging.info(f"🎉 Estatísticas calculadas com sucesso!")
         return jsonify(result), 200
         
     except Exception as e:
@@ -923,33 +916,43 @@ def get_submitted_evaluations():
         
         print("Query base criada com sucesso")
         
-        # Aplicar filtros
+        # Aplicar filtros (modelo usa finalizada/corrigida/revisada; aceitar também equivalentes em inglês)
         if status_filter and status_filter != 'all':
             if status_filter == 'pending':
                 query = query.filter(TestSession.status.in_(['finalizada', 'completed', 'submitted']))
             elif status_filter == 'correcting':
-                query = query.filter(TestSession.status == 'correcting')
+                query = query.filter(TestSession.status.in_(['correcting', 'em_correcao']))
             elif status_filter == 'corrected':
-                query = query.filter(TestSession.status == 'corrected')
+                query = query.filter(TestSession.status.in_(['corrected', 'corrigida']))
             elif status_filter == 'reviewed':
-                query = query.filter(TestSession.status.in_(['reviewed', 'finalized']))
+                query = query.filter(TestSession.status.in_(['reviewed', 'finalized', 'revisada']))
         
-        # Filtro por disciplina
+        # Filtro por disciplina (Test já foi unido acima)
         if subject_filter and subject_filter != 'all':
-            query = query.join(Test).filter(Test.subject == subject_filter)
+            query = query.filter(Test.subject == subject_filter)
         
-        # Filtro por série
+        # Filtro por série (Test já foi unido acima)
         if grade_filter and grade_filter != 'all':
-            query = query.join(Test).filter(Test.grade_id == grade_filter)
+            query = query.filter(Test.grade_id == grade_filter)
         
         # Filtro de busca por nome do aluno ou título da avaliação
         if search_filter:
-            query = query.join(Student).join(Test).filter(
-                db.or_(
-                    Student.name.ilike(f'%{search_filter}%'),
-                    Test.title.ilike(f'%{search_filter}%')
+            if user and user.get('role') == 'tecadm':
+                # tecadm já tem Student no join; só aplicar o filtro
+                query = query.filter(
+                    db.or_(
+                        Student.name.ilike(f'%{search_filter}%'),
+                        Test.title.ilike(f'%{search_filter}%')
+                    )
                 )
-            )
+            else:
+                # admin/outros: incluir join de Student só para a busca
+                query = query.join(Student).filter(
+                    db.or_(
+                        Student.name.ilike(f'%{search_filter}%'),
+                        Test.title.ilike(f'%{search_filter}%')
+                    )
+                )
         
         # Ordenar por data de envio (mais recentes primeiro)
         query = query.order_by(TestSession.submitted_at.desc())
@@ -999,7 +1002,7 @@ def get_submitted_evaluations():
                 "submitted_at": session.submitted_at.isoformat() if session.submitted_at else None,
                 "time_spent": time_spent,
                 "status": session.status,
-                "total_questions": len(session.test.questions) if session.test and session.test.questions else 0,
+                "total_questions": session.total_questions or (len(answers) if answers else 0),
                 "blank_answers": len([a for a in answers if not a.answer]),
                 "auto_score": auto_score,
                 "manual_score": manual_score,
@@ -1025,7 +1028,14 @@ def get_submitted_evaluations():
             }
             result.append(session_data)
         
-        return jsonify(result), 200
+        # Formato consistente com o retorno vazio (tecadm sem escolas): items + paginação
+        return jsonify({
+            "items": result,
+            "total": paginated_sessions.total,
+            "pages": paginated_sessions.pages,
+            "current_page": page,
+            "per_page": per_page,
+        }), 200
         
     except Exception as e:
         print(f"ERRO DETALHADO: {str(e)}")

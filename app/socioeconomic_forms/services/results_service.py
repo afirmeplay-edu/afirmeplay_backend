@@ -5,7 +5,7 @@ Contém a lógica de negócio para gerar relatórios de índices e perfis.
 """
 
 from app import db
-from app.socioeconomic_forms.models import Form, FormResponse, FormQuestion
+from app.socioeconomic_forms.models import Form, FormResponse, FormQuestion, FormRecipient
 from app.models import User, Student, School, Grade, Class, City
 from sqlalchemy.exc import SQLAlchemyError
 from collections import defaultdict
@@ -145,6 +145,132 @@ class ResultsService:
             raise
     
     @staticmethod
+    def calculate_responses_report(form_id, filters=None, page=1, limit=20):
+        """
+        Calcula o relatório "Respostas do socioeconômico": por questão,
+        quantidade de respostas, porcentagem sobre o total, contagem por opção
+        e lista paginada de quem respondeu e o que respondeu (mesmo formato dos índices).
+        
+        Args:
+            form_id: ID do formulário
+            filters: Filtros hierárquicos {state, municipio, escola, serie, turma}
+            page: Página para paginação das listas de alunos (por questão)
+            limit: Limite de alunos por página
+            
+        Returns:
+            dict: Relatório com questões, totais, porcentagens e alunos
+        """
+        try:
+            form = Form.query.get(form_id)
+            if not form:
+                raise ValueError("Formulário não encontrado")
+            
+            query = ResultsService._build_base_query(form_id, filters)
+            results = query.all()
+            total_respostas = len(results)
+            
+            if total_respostas == 0:
+                return ResultsService._empty_responses_response(form, filters)
+            
+            questoes = []
+            for question in form.questions:
+                if question.sub_questions:
+                    for sub_q in question.sub_questions:
+                        sub_id = sub_q.get('id')
+                        if not sub_id:
+                            continue
+                        block = ResultsService._build_question_response_block(
+                            results, total_respostas, question, sub_id, page, limit
+                        )
+                        if block:
+                            block['questionId'] = question.question_id
+                            block['subQuestionId'] = sub_id
+                            block['textoPergunta'] = question.text
+                            block['textoSubpergunta'] = sub_q.get('text', '')
+                            questoes.append(block)
+                else:
+                    block = ResultsService._build_question_response_block(
+                        results, total_respostas, question, question.question_id, page, limit
+                    )
+                    if block:
+                        block['questionId'] = question.question_id
+                        block['textoPergunta'] = question.text
+                        questoes.append(block)
+            
+            return {
+                'formId': form.id,
+                'formTitle': form.title,
+                'totalRespostas': total_respostas,
+                'filtros': ResultsService._format_filters_info(filters, results),
+                'questoes': questoes,
+                'geradoEm': datetime.utcnow().isoformat()
+            }
+            
+        except SQLAlchemyError as e:
+            logger.error(f"Erro ao calcular relatório de respostas: {str(e)}")
+            raise
+    
+    @staticmethod
+    def _build_question_response_block(results, total_respostas, question, answer_key, page, limit):
+        """
+        Monta um bloco por questão (ou subpergunta): totalRespostasQuestao,
+        porcentagemSobreTotal, contagem por opção, alunos (quem respondeu e o que respondeu).
+        """
+        contador = defaultdict(int)
+        alunos_list = []
+        
+        for response, user, student, school, grade, class_, city in results:
+            responses_data = response.responses or {}
+            answer = responses_data.get(answer_key)
+            if answer is not None and answer != '':
+                contador[str(answer)] += 1
+                alunos_list.append({
+                    'response': response,
+                    'user': user,
+                    'student': student,
+                    'school': school,
+                    'grade': grade,
+                    'class_': class_,
+                    'resposta': answer
+                })
+        
+        # Garantir que todas as opções configuradas apareçam, mesmo com 0 respostas
+        # Para perguntas simples e matriz_selecao, as opções vêm em question.options
+        options = getattr(question, 'options', None)
+        if isinstance(options, list):
+            for opt in options:
+                # Suportar tanto lista simples de strings quanto lista de dicts
+                if isinstance(opt, dict):
+                    opt_key = opt.get('value') or opt.get('id') or opt.get('label') or opt.get('text')
+                    if opt_key is None:
+                        continue
+                else:
+                    opt_key = opt
+                contador[str(opt_key)] = contador.get(str(opt_key), 0)
+        
+        total_questao = len(alunos_list)
+        porcentagem = (total_questao / total_respostas * 100) if total_respostas > 0 else 0
+        
+        start = (page - 1) * limit
+        end = start + limit
+        alunos_paginated = alunos_list[start:end]
+        
+        return {
+            'totalRespostasQuestao': total_questao,
+            'porcentagemSobreTotal': round(porcentagem, 2),
+            'contagem': dict(contador),
+            'alunos': {
+                'data': [ResultsService._format_aluno_info(a) for a in alunos_paginated],
+                'pagination': {
+                    'page': page,
+                    'limit': limit,
+                    'total': total_questao,
+                    'totalPages': (total_questao + limit - 1) // limit if limit > 0 else 0
+                }
+            }
+        }
+    
+    @staticmethod
     def _build_base_query(form_id, filters=None):
         """
         Constrói query base com todos os JOINs necessários.
@@ -199,6 +325,35 @@ class ResultsService:
                 query = query.filter(Student.class_id == filters['turma'])
         
         return query
+
+    @staticmethod
+    def count_recipients_in_scope(form_id: str, filters: dict = None) -> int:
+        """
+        Conta quantos destinatários do formulário (form_recipients) estão no escopo
+        definido pelos filtros (state, municipio, escola, serie, turma).
+        Usa User -> Student -> School -> City para aplicar os mesmos filtros de _build_base_query.
+        """
+        query = db.session.query(FormRecipient.id).join(
+            User, FormRecipient.user_id == User.id
+        ).join(
+            Student, User.id == Student.user_id
+        ).join(
+            School, Student.school_id == School.id
+        ).join(
+            City, School.city_id == City.id
+        ).filter(FormRecipient.form_id == form_id)
+        if filters:
+            if filters.get('state'):
+                query = query.filter(City.state == filters['state'])
+            if filters.get('municipio'):
+                query = query.filter(City.id == filters['municipio'])
+            if filters.get('escola'):
+                query = query.filter(School.id == filters['escola'])
+            if filters.get('serie'):
+                query = query.filter(Student.grade_id == filters['serie'])
+            if filters.get('turma'):
+                query = query.filter(Student.class_id == filters['turma'])
+        return query.distinct().count()
     
     @staticmethod
     def _calculate_distorcao_idade_serie(results, page, limit):
@@ -526,5 +681,17 @@ class ResultsService:
             'totalRespostas': 0,
             'filtros': filters or {},
             'perfis': {},
+            'geradoEm': datetime.utcnow().isoformat()
+        }
+    
+    @staticmethod
+    def _empty_responses_response(form, filters):
+        """Resposta vazia para relatório de respostas quando não há dados"""
+        return {
+            'formId': form.id,
+            'formTitle': form.title,
+            'totalRespostas': 0,
+            'filtros': filters or {},
+            'questoes': [],
             'geradoEm': datetime.utcnow().isoformat()
         }

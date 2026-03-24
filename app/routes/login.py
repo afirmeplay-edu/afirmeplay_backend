@@ -19,6 +19,31 @@ def login():
     if request.method == 'OPTIONS':
         return jsonify({}), 200
     
+    # ==========================
+    # DEBUG TENANT / SUBDOMÍNIO
+    # ==========================
+    try:
+        from flask import g
+        host = request.headers.get('Host')
+        origin = request.headers.get('Origin')
+        app_env = os.getenv("APP_ENV")
+        tenant_context = getattr(g, 'tenant_context', None)
+        
+        print("=== DEBUG LOGIN TENANT CONTEXT ===")
+        print(f"APP_ENV: {app_env}")
+        print(f"Host header: {host}")
+        print(f"Origin header: {origin}")
+        if tenant_context:
+            print(f"TenantContext.city_id: {tenant_context.city_id}")
+            print(f"TenantContext.city_slug: {tenant_context.city_slug}")
+            print(f"TenantContext.schema: {tenant_context.schema}")
+            print(f"TenantContext.has_tenant_context: {tenant_context.has_tenant_context}")
+        else:
+            print("TenantContext: None (g.tenant_context não definido)")
+        print("=== FIM DEBUG LOGIN TENANT CONTEXT ===")
+    except Exception as debug_exc:
+        print(f"Erro ao imprimir debug de tenant no login: {debug_exc}")
+    
     data = request.get_json()
     identificador = data.get('registration')
     password = data.get('password')
@@ -36,6 +61,42 @@ def login():
             logging.warning(f"Falha de login para o usuário: {identificador}")
             return jsonify({"erro": "Credenciais inválidas."}), 401
 
+        # ========================================
+        # VALIDAÇÃO DE SUBDOMÍNIO (SEGURANÇA)
+        # ========================================
+        # Usuários comuns DEVEM acessar via subdomínio do seu município
+        # Admin pode acessar qualquer subdomínio
+        
+        if usuario.role != RoleEnum('admin'):
+            # Obter contexto do subdomínio resolvido pelo middleware
+            from flask import g
+            tenant_context = getattr(g, 'tenant_context', None)
+            
+            # Verificar se há city_id no contexto (subdomínio especificado)
+            if not tenant_context or not tenant_context.city_id:
+                logging.warning(
+                    f"Tentativa de login sem subdomínio: "
+                    f"Usuário {usuario.email} (role: {usuario.role.value}, city_id: {usuario.city_id})"
+                )
+                return jsonify({
+                    "erro": "Acesso negado",
+                    "mensagem": "Você deve acessar através do subdomínio do seu município. "
+                               f"Exemplo: <seu-municipio>.afirmeplay.com.br"
+                }), 403
+            
+            # Validar se o usuário pertence ao município do subdomínio
+            if usuario.city_id != tenant_context.city_id:
+                logging.warning(
+                    f"Tentativa de login em município incorreto: "
+                    f"Usuário {usuario.email} (city_id: {usuario.city_id}) "
+                    f"tentou acessar subdomínio da cidade {tenant_context.city_id} (slug: {tenant_context.city_slug})"
+                )
+                return jsonify({
+                    "erro": "Acesso negado",
+                    "mensagem": "Você não tem permissão para acessar este município. "
+                               "Verifique se está usando o subdomínio correto."
+                }), 403
+        
         tenant_id = None
 
         # Define o tenant_id com base na role
@@ -68,10 +129,20 @@ def login():
             tenant_id = usuario.city_id
 
 
+        # Buscar informações da cidade (se houver tenant_id)
+        from app.models.city import City
+        city = None
+        city_slug = None
+        if tenant_id:
+            city = City.query.get(tenant_id)
+            if city:
+                city_slug = city.slug
+        
         token_payload = {
             "sub": usuario.id,
             "tenant_id": tenant_id,
             "role": usuario.role.value,
+            "city_slug": city_slug,  # Incluir slug no token para facilitar resolução
             "exp": datetime.datetime.utcnow() + datetime.timedelta(hours=1)
         }
 
@@ -83,6 +154,7 @@ def login():
             "email": usuario.email,
             "registration": usuario.registration,
             "tenant_id": tenant_id,
+            "city_slug": city_slug,  # Incluir slug na resposta
             "created_at": usuario.created_at,
             "role": usuario.role.value
         }

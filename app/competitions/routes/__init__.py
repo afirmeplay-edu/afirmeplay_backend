@@ -2,6 +2,8 @@
 """
 Rotas de competições.
 """
-from .competition_routes import bp
 
-__all__ = ['bp']
+from .competition_routes import bp as competitions_bp
+
+__all__ = ["competitions_bp"]
+

@@ -9,13 +9,6 @@ from app.services.scheduled_tasks import start_scheduler, stop_scheduler
 
 app = create_app()
 
-# print("Tentando criar tabelas do banco de dados...")
-# with app.app_context():
-#     try:
-#         db.create_all()
-#         print("Tabelas criadas com sucesso!")
-#     except Exception as e:
-#         print(f"Erro ao criar tabelas: {str(e)}")
 
 if __name__ == "__main__":
     # Verificar e inicializar o banco antes de rodar o servidor

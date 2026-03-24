@@ -20,7 +20,7 @@ class Test(db.Model):
     created_at = db.Column(db.TIMESTAMP, server_default=db.text('CURRENT_TIMESTAMP'))
     updated_at = db.Column(db.TIMESTAMP, server_default=db.text('CURRENT_TIMESTAMP'), onupdate=db.text('CURRENT_TIMESTAMP'))
     subject = db.Column(db.String, db.ForeignKey('subject.id'), nullable=True)
-    grade_id = db.Column(UUID(as_uuid=True), db.ForeignKey("grade.id"))
+    grade_id = db.Column(UUID(as_uuid=True), db.ForeignKey("public.grade.id"))
     
     # Novos campos
     municipalities = db.Column(JSON)  # Lista de municípios
@@ -49,6 +49,7 @@ class Test(db.Model):
         """Retorna as questões ordenadas"""
         from app.models.question import Question
         from app.models.testQuestion import TestQuestion
+        from sqlalchemy import text
         
         # Query direta para evitar problemas de relacionamento circular
         test_questions = TestQuestion.query.filter_by(test_id=self.id).order_by(TestQuestion.order).all()
@@ -57,8 +58,18 @@ class Test(db.Model):
         if not question_ids:
             return []
         
-        # Buscar questões diretamente
+        # MULTITENANT FIX: Buscar questões em public.question
+        # Salvar search_path atual
+        current_search_path = db.session.execute(text("SHOW search_path")).fetchone()[0]
+        
+        # Mudar para public para buscar questões globais/city
+        db.session.execute(text("SET search_path TO public"))
+        
+        # Buscar questões diretamente em public.question
         questions = Question.query.filter(Question.id.in_(question_ids)).all()
+        
+        # Restaurar search_path original
+        db.session.execute(text(f"SET search_path TO {current_search_path}"))
         
         # Ordenar pela ordem original
         questions_dict = {q.id: q for q in questions}

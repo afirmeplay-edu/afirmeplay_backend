@@ -11,18 +11,10 @@ class Question(db.Model):
     text = db.Column(db.String)  # Texto simples da questão
     formatted_text = db.Column(db.Text)  # Texto formatado em HTML
     secondstatement = db.Column(db.String)
-    images = db.Column(JSON)  # Array de objetos com informações das imagens
-    # Exemplo de estrutura do images:
-    # [
-    #   {
-    #     "id": "uuid",
-    #     "name": "nome_do_arquivo.jpg",
-    #     "type": "image/jpeg",
-    #     "size": 12345,
-    #     "url": "caminho/para/imagem.jpg" ou null se armazenada em BYTEA
-    #     "data": "base64_ou_bytes" ou null se armazenada em URL
-    #   }
-    # ]
+    images = db.Column(JSON)  # Array de objetos com informações das imagens (armazenadas no MinIO)
+    # Estrutura: id, type, width, height, minio_bucket, minio_object_name (sem "data").
+    # Exemplo: {"id": "uuid", "type": "image/png", "width": 300, "height": 200,
+    #           "minio_bucket": "question-images", "minio_object_name": "{question_id}/{image_id}.png"}
     subject_id = db.Column(db.String, db.ForeignKey('subject.id'))
     title = db.Column(db.String)
     description = db.Column(db.String)
@@ -30,7 +22,7 @@ class Question(db.Model):
     subtitle = db.Column(db.String)
     alternatives = db.Column(db.JSON)  # Array de opções com formatação
     skill = db.Column(db.String)
-    grade_level = db.Column(UUID(as_uuid=True), db.ForeignKey('grade.id'))
+    grade_level = db.Column(UUID(as_uuid=True), db.ForeignKey('public.grade.id'))
     education_stage_id = db.Column(UUID(as_uuid=True), db.ForeignKey('education_stage.id'))
     difficulty_level = db.Column(db.String)
     correct_answer = db.Column(db.String)
@@ -44,6 +36,13 @@ class Question(db.Model):
     created_at = db.Column(db.TIMESTAMP, server_default=db.text('CURRENT_TIMESTAMP'))
     updated_at = db.Column(db.TIMESTAMP, server_default=db.text('CURRENT_TIMESTAMP'), onupdate=db.text('CURRENT_TIMESTAMP'))
     last_modified_by = db.Column(db.String, db.ForeignKey('users.id'))
+    
+    # Campos de escopo multitenant
+    scope_type = db.Column(db.String, default='GLOBAL')  # 'GLOBAL', 'CITY' ou 'PRIVATE'
+    owner_city_id = db.Column(db.String, db.ForeignKey('city.id'))  # ID do município dono (para CITY)
+    owner_user_id = db.Column(db.String, db.ForeignKey('users.id'))  # ID do usuário dono (para PRIVATE)
+    approved_by = db.Column(db.String, db.ForeignKey('users.id'))  # Quem aprovou para uso global
+    approved_at = db.Column(db.TIMESTAMP)  # Data de aprovação para uso global
     
     # Relacionamentos
     subject = db.relationship('Subject', backref='questions')

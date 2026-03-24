@@ -100,7 +100,7 @@ def _gerar_grafico_classificacao(niveis_aprendizagem: Dict, scope_type: str, dis
                 sizes_filtered,
                 labels=None,
                 colors=colors_filtered,
-                autopct='%1.0f',
+                autopct='%1.2f',
                 startangle=90,
                 pctdistance=0.85,
                 textprops={'fontsize': 12, 'fontweight': 'bold', 'color': 'white'}
@@ -226,7 +226,7 @@ def _gerar_grafico_proficiencia(proficiencia: Dict, scope_type: str) -> BytesIO:
                 for bar, valor in zip(bars, valores):
                     height = bar.get_height()
                     ax.text(bar.get_x() + bar.get_width() / 2., height,
-                           f'{valor:.1f}',
+                           f'{valor:.2f}',
                            ha='center', va='bottom', fontsize=11, fontweight='bold')
                 
                 # Remover bordas superior e direita
@@ -330,7 +330,7 @@ def _gerar_grafico_notas(nota_geral: Dict, scope_type: str, disciplinas_prof: Li
             for i, (bar, valor) in enumerate(zip(bars, valores)):
                 height = bar.get_height()
                 ax.text(bar.get_x() + bar.get_width() / 2., height,
-                       f'{valor:.1f}',
+                       f'{valor:.2f}',
                        ha='center', va='bottom', fontsize=11, fontweight='bold')
             
             # Remover bordas superior e direita
@@ -1136,10 +1136,10 @@ def _adicionar_niveis_aprendizagem(elements: List, niveis_aprendizagem: Dict, av
         total_geral = geral_data.get('total', 0)
         resumo_niveis_geral = [
             Paragraph(f"GERAL (total de {total_geral} alunos avaliados):", estilos['resumo_style']),
-            Paragraph(f"• Abaixo do básico: {geral_data.get('abaixo_do_basico', 0)} alunos ({(geral_data.get('abaixo_do_basico', 0)/total_geral*100) if total_geral > 0 else 0:.1f}%)", estilos['resumo_style']),
-            Paragraph(f"• Básico: {geral_data.get('basico', 0)} alunos ({(geral_data.get('basico', 0)/total_geral*100) if total_geral > 0 else 0:.1f}%)", estilos['resumo_style']),
-            Paragraph(f"• Adequado: {geral_data.get('adequado', 0)} alunos ({(geral_data.get('adequado', 0)/total_geral*100) if total_geral > 0 else 0:.1f}%)", estilos['resumo_style']),
-            Paragraph(f"• Avançado: {geral_data.get('avancado', 0)} alunos ({(geral_data.get('avancado', 0)/total_geral*100) if total_geral > 0 else 0:.1f}%)", estilos['resumo_style'])
+            Paragraph(f"• Abaixo do básico: {geral_data.get('abaixo_do_basico', 0)} alunos ({(geral_data.get('abaixo_do_basico', 0)/total_geral*100) if total_geral > 0 else 0:.2f}%)", estilos['resumo_style']),
+            Paragraph(f"• Básico: {geral_data.get('basico', 0)} alunos ({(geral_data.get('basico', 0)/total_geral*100) if total_geral > 0 else 0:.2f}%)", estilos['resumo_style']),
+            Paragraph(f"• Adequado: {geral_data.get('adequado', 0)} alunos ({(geral_data.get('adequado', 0)/total_geral*100) if total_geral > 0 else 0:.2f}%)", estilos['resumo_style']),
+            Paragraph(f"• Avançado: {geral_data.get('avancado', 0)} alunos ({(geral_data.get('avancado', 0)/total_geral*100) if total_geral > 0 else 0:.2f}%)", estilos['resumo_style'])
         ]
     else:
         resumo_niveis_geral = [Paragraph("Dados não disponíveis", estilos['resumo_style'])]
@@ -1272,10 +1272,10 @@ def _adicionar_niveis_aprendizagem(elements: List, niveis_aprendizagem: Dict, av
                     total_disc = disc_data.get('total', 0)
                     elementos_analise = [
                         Paragraph(f"{disciplina.upper()} (total de {total_disc} alunos avaliados):", estilos['resumo_style']),
-                        Paragraph(f"• Abaixo do básico: {disc_data.get('abaixo_do_basico', 0)} alunos ({(disc_data.get('abaixo_do_basico', 0)/total_disc*100) if total_disc > 0 else 0:.1f}%)", estilos['resumo_style']),
-                        Paragraph(f"• Básico: {disc_data.get('basico', 0)} alunos ({(disc_data.get('basico', 0)/total_disc*100) if total_disc > 0 else 0:.1f}%)", estilos['resumo_style']),
-                        Paragraph(f"• Adequado: {disc_data.get('adequado', 0)} alunos ({(disc_data.get('adequado', 0)/total_disc*100) if total_disc > 0 else 0:.1f}%)", estilos['resumo_style']),
-                        Paragraph(f"• Avançado: {disc_data.get('avancado', 0)} alunos ({(disc_data.get('avancado', 0)/total_disc*100) if total_disc > 0 else 0:.1f}%)", estilos['resumo_style'])
+                        Paragraph(f"• Abaixo do básico: {disc_data.get('abaixo_do_basico', 0)} alunos ({(disc_data.get('abaixo_do_basico', 0)/total_disc*100) if total_disc > 0 else 0:.2f}%)", estilos['resumo_style']),
+                        Paragraph(f"• Básico: {disc_data.get('basico', 0)} alunos ({(disc_data.get('basico', 0)/total_disc*100) if total_disc > 0 else 0:.2f}%)", estilos['resumo_style']),
+                        Paragraph(f"• Adequado: {disc_data.get('adequado', 0)} alunos ({(disc_data.get('adequado', 0)/total_disc*100) if total_disc > 0 else 0:.2f}%)", estilos['resumo_style']),
+                        Paragraph(f"• Avançado: {disc_data.get('avancado', 0)} alunos ({(disc_data.get('avancado', 0)/total_disc*100) if total_disc > 0 else 0:.2f}%)", estilos['resumo_style'])
                     ]
                 else:
                     elementos_analise = [Paragraph("Dados não disponíveis", estilos['resumo_style'])]
@@ -1842,68 +1842,23 @@ def _adicionar_acertos_habilidade(elements: List, acertos_habilidade: Dict, aval
             # Título da disciplina
             titulo_disciplina_acertos = Paragraph(disciplina.upper(), estilos['subtitulo_tabela_style'])
             
-            # Obter questões dinâmicas
+            # Obter questões dinâmicas e dividir em faixas de 13 (uma embaixo da outra)
             questoes = dados['questoes']
+            QUESTOES_POR_FAIXA = 10
+            faixas = [questoes[i:i + QUESTOES_POR_FAIXA] for i in range(0, len(questoes), QUESTOES_POR_FAIXA)]
             
-            # Dividir questões em duas tabelas (1-13 e 14-26)
-            meio = len(questoes) // 2
-            questoes_1 = questoes[:meio] if meio > 0 else questoes
-            questoes_2 = questoes[meio:] if meio > 0 and len(questoes) > meio else []
-            
-            # Primeira tabela (questões 1-13)
-            if questoes_1:
-                # Linha 1: Números das questões
-                linha_questoes_1 = []
-                for questao in questoes_1:
-                    linha_questoes_1.append(f"{questao.get('numero_questao', 1)}ª Q")
-                
-                # Linha 2: Códigos das habilidades
-                linha_codigos_1 = []
-                for questao in questoes_1:
-                    linha_codigos_1.append(questao.get('codigo', 'N/A'))
-                
-                # Linha 3: Percentuais
-                linha_percentuais_1 = []
-                for questao in questoes_1:
-                    linha_percentuais_1.append(f"{questao.get('percentual', 0)}%")
-                
-                dados_acertos_1 = [linha_questoes_1, linha_codigos_1, linha_percentuais_1]
-                
-                # Criar tabela 1
-                tabela_acertos_1 = Table(dados_acertos_1, colWidths=[35] * len(linha_questoes_1))
-                tabela_acertos_1.setStyle(TableStyle(aplicar_cores_acertos(tabela_acertos_1, dados_acertos_1)))
-            
-            # Segunda tabela (questões 14-26)
-            if questoes_2:
-                # Linha 1: Números das questões
-                linha_questoes_2 = []
-                for questao in questoes_2:
-                    linha_questoes_2.append(f"{questao.get('numero_questao', 1)}ª Q")
-                
-                # Linha 2: Códigos das habilidades
-                linha_codigos_2 = []
-                for questao in questoes_2:
-                    linha_codigos_2.append(questao.get('codigo', 'N/A'))
-                
-                # Linha 3: Percentuais
-                linha_percentuais_2 = []
-                for questao in questoes_2:
-                    linha_percentuais_2.append(f"{questao.get('percentual', 0)}%")
-                
-                dados_acertos_2 = [linha_questoes_2, linha_codigos_2, linha_percentuais_2]
-                
-                # Criar tabela 2
-                tabela_acertos_2 = Table(dados_acertos_2, colWidths=[35] * len(linha_questoes_2))
-                tabela_acertos_2.setStyle(TableStyle(aplicar_cores_acertos(tabela_acertos_2, dados_acertos_2)))
-            
-            # Manter elementos da disciplina juntos
             elementos_disciplina_acertos = [titulo_disciplina_acertos, Spacer(1, 1)]
             
-            if questoes_1:
-                elementos_disciplina_acertos.append(tabela_acertos_1)
-                
-                if questoes_2:
-                    elementos_disciplina_acertos.append(Spacer(1, 6))  # Espaço entre tabelas
-                    elementos_disciplina_acertos.append(tabela_acertos_2)
+            for faixa in faixas:
+                linha_questoes = [f"{q.get('numero_questao', 1)}ª Q" for q in faixa]
+                linha_codigos = [q.get('codigo', 'N/A') for q in faixa]
+                linha_percentuais = [f"{q.get('percentual', 0)}%" for q in faixa]
+                dados_acertos = [linha_questoes, linha_codigos, linha_percentuais]
+                tabela = Table(dados_acertos, colWidths=[35] * len(faixa))
+                tabela.setStyle(TableStyle(aplicar_cores_acertos(tabela, dados_acertos)))
+                elementos_disciplina_acertos.append(tabela)
+                elementos_disciplina_acertos.append(Spacer(1, 6))
             
+            if len(elementos_disciplina_acertos) > 2:
+                elementos_disciplina_acertos.pop()  # remove último Spacer
             elements.append(KeepTogether(elementos_disciplina_acertos))

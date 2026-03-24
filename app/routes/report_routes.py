@@ -2,11 +2,36 @@
 """
 Rotas especializadas para relatórios de avaliações
 Endpoint para geração de relatórios completos com estatísticas detalhadas
+
+==============================================================
+RELATÓRIOS QUE USAM ESTE ARQUIVO:
+  - Análise das Avaliações  (frontend: AnaliseAvaliacoes / analise-avaliacoes)
+  - Relatório Escolar       (frontend: RelatorioEscolar)
+
+RESPONSABILIDADE:
+  - Funções de cálculo estatístico usadas pelas tasks Celery
+    (importadas via app/report_analysis/calculations.py)
+  - _determinar_escopo_por_role() → define o escopo de acesso por role
+    (importada diretamente em app/report_analysis/routes.py)
+  - _determinar_escopo_relatorio() → helper para admin escolher scope por params
+  - Funções auxiliares: _montar_resposta_relatorio, _calcular_*, _buscar_turmas_*, etc.
+
+ARQUIVOS RELACIONADOS AO SISTEMA DE RELATÓRIOS:
+  app/report_analysis/routes.py       → rotas Flask (importa _determinar_escopo_por_role daqui)
+  app/report_analysis/tasks.py        → tasks Celery
+  app/report_analysis/services.py     → ReportAggregateService (cache no banco)
+  app/report_analysis/calculations.py → re-exporta as funções de cálculo deste arquivo
+  app/report_analysis/debounce.py     → debounce Redis
+  app/report_analysis/celery_app.py   → configuração do Celery
+  app/routes/report_routes.py         ← este arquivo (funções de cálculo + escopo)
+  app/routes/evaluation_results_routes.py → dados tabulares (/avaliacoes e /opcoes-filtros)
+==============================================================
 """
 
 from flask import Blueprint, request, jsonify, render_template_string, send_file, make_response
 from flask_jwt_extended import jwt_required
 from app.permissions import role_required, get_current_user_from_token
+from app.decorators import requires_city_context
 from app.models.test import Test
 from app.models.student import Student
 from app.models.studentAnswer import StudentAnswer
@@ -20,14 +45,14 @@ from app.models.grades import Grade
 from app.models.classTest import ClassTest
 from app.models.evaluationResult import EvaluationResult
 from app.utils.uuid_helpers import ensure_uuid, ensure_uuid_list
+from app.utils.decimal_helpers import round_to_two_decimals
 from app import db
 import logging
 from typing import Dict, Any, List, Optional, Union
 import math
 import re
 import unicodedata
-from sqlalchemy import func, case, desc, cast
-from sqlalchemy.dialects.postgresql import UUID as PostgresUUID
+from sqlalchemy import func, case, desc
 from datetime import datetime
 from sqlalchemy.orm import joinedload
 from collections import defaultdict, OrderedDict
@@ -586,10 +611,15 @@ def dados_json(evaluation_id: str):
         status = ReportAggregateService.get_status(evaluation_id, scope_type, scope_ref_id)
         
         if status['status'] != 'ready':
-            # Disparar task assíncrona (com debounce)
+            # Disparar task assíncrona (com debounce). Passar city_id para scope school/city evita query em School no worker.
             from app.report_analysis.tasks import trigger_rebuild_if_needed
+            city_id_for_task = (
+                city_id                                            # admin passa pela URL
+                or (scope_ref_id if scope_type == 'city' else None)  # escopo city: scope_ref_id já é city_id
+                or user.get('city_id')                             # diretor/coordenador/professor: city_id do token
+            )
             try:
-                trigger_rebuild_if_needed.delay(evaluation_id, scope_type, scope_ref_id)
+                trigger_rebuild_if_needed.delay(evaluation_id, scope_type, scope_ref_id, city_id_for_task)
             except Exception as e:
                 logging.warning(f"Erro ao disparar task de rebuild: {str(e)}")
                 # Continuar mesmo se falhar (pode ser que Redis não esteja disponível)
@@ -906,6 +936,219 @@ def _montar_resposta_relatorio_por_turmas(
     }
 
 
+def _sanitize_relatorio_pdf_filename(title: str) -> str:
+    t = title or "relatorio"
+    return (
+        t.replace(" ", "_")
+        .replace("/", "_")
+        .replace("\\", "_")
+        .replace(":", "_")
+        .replace("?", "_")
+        .replace("*", "_")
+        .replace('"', "_")
+        .replace("<", "_")
+        .replace(">", "_")
+        .replace("|", "_")
+    )
+
+
+def _render_relatorio_organized_pdf_response(context: Dict[str, Any], nome_avaliacao_raw: str):
+    """Renderiza `report_organized.html` com WeasyPrint e devolve resposta PDF."""
+    app_dir = os.path.dirname(os.path.dirname(__file__))  # app/
+    templates_dir = os.path.join(app_dir, "templates")
+    env = Environment(loader=FileSystemLoader(templates_dir), autoescape=select_autoescape(["html", "xml"]))
+
+    def sum_values(items, attr="value"):
+        try:
+            return sum(
+                item.get(attr, 0) if isinstance(item, dict) else getattr(item, attr, 0) for item in items
+            )
+        except (TypeError, AttributeError):
+            return 0
+
+    def cos_filter(value):
+        try:
+            return math.cos(float(value))
+        except (TypeError, ValueError):
+            return 0
+
+    def sin_filter(value):
+        try:
+            return math.sin(float(value))
+        except (TypeError, ValueError):
+            return 0
+
+    def formatar_texto_ia(texto):
+        if not texto:
+            return Markup("")
+
+        if "\n\n" not in texto:
+            texto = texto.replace("Destaques e Recomendações:", "\n\nDestaques e Recomendações:")
+            texto = texto.replace("Classificação:", "\n\nClassificação:")
+            texto = texto.replace("PARECER TÉCNICO:", "\n\nPARECER TÉCNICO:")
+            texto = re.sub(r"(\d+\.\s)", r"\n\n\1", texto)
+            texto = re.sub(r"([A-ZÁÊÔÇ][A-ZÁÊÔÇ\s]{10,}:)", r"\n\n\1", texto)
+
+        paragrafos = texto.split("\n\n")
+        resultado = []
+        for paragrafo in paragrafos:
+            paragrafo = paragrafo.strip()
+            if not paragrafo:
+                continue
+
+            if (len(paragrafo) > 10 and paragrafo.isupper() and paragrafo.endswith(":")) or (
+                len(paragrafo) > 2
+                and paragrafo[0].isdigit()
+                and paragrafo[1] == "."
+                and paragrafo[2] == " "
+            ):
+                resultado.append(
+                    f'<p style="font-weight: bold; margin-top: 12px; margin-bottom: 8px;">{paragrafo}</p>'
+                )
+            elif (
+                paragrafo.startswith("Destaques e Recomendações:")
+                or paragrafo.startswith("Classificação:")
+                or paragrafo.startswith("PARECER TÉCNICO:")
+                or paragrafo.startswith("PARECER TÉCNICO DE PARTICIPAÇÃO:")
+                or paragrafo.startswith("PARECER TÉCNICO: NOTA IDAV:")
+            ):
+                resultado.append(
+                    f'<p style="font-weight: bold; margin-top: 12px; margin-bottom: 8px;">{paragrafo}</p>'
+                )
+            elif "•" in paragrafo:
+                partes = paragrafo.split("•")
+                primeira_parte = partes[0].strip()
+                itens_lista = [item.strip() for item in partes[1:] if item.strip()]
+
+                if primeira_parte:
+                    resultado.append(f"<p>{primeira_parte}</p>")
+
+                if itens_lista:
+                    resultado.append(
+                        '<ul style="margin-left: 20px; margin-top: 8px; margin-bottom: 8px;">'
+                    )
+                    for item in itens_lista:
+                        resultado.append(f'<li style="margin-bottom: 4px;">{item}</li>')
+                    resultado.append("</ul>")
+            else:
+                paragrafo_html = paragrafo.replace("\n", "<br/>")
+                resultado.append(f'<p style="margin-top: 8px; margin-bottom: 8px;">{paragrafo_html}</p>')
+
+        return Markup("".join(resultado)) if resultado else Markup("")
+
+    env.filters["sum_values"] = sum_values
+    env.filters["cos"] = cos_filter
+    env.filters["sin"] = sin_filter
+    env.filters["formatar_texto_ia"] = formatar_texto_ia
+
+    template = env.get_template("report_organized.html")
+    html_content = template.render(**context)
+
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".html", delete=False, encoding="utf-8") as temp_html:
+        temp_html.write(html_content)
+        temp_html_path = temp_html.name
+
+    try:
+        pdf_content = HTML(filename=temp_html_path, base_url=app_dir).write_pdf()
+    finally:
+        try:
+            os.unlink(temp_html_path)
+        except OSError:
+            pass
+
+    nome_arquivo = f"relatorio_{_sanitize_relatorio_pdf_filename(nome_avaliacao_raw)}.pdf"
+    response = make_response(pdf_content)
+    response.headers["Content-Type"] = "application/pdf"
+    response.headers["Content-Disposition"] = f"attachment; filename={nome_arquivo}"
+    return response
+
+
+def _relatorio_pdf_answer_sheet(gabarito_id: str):
+    """PDF para cartão-resposta: cache em AnswerSheetReportAggregate (mesmo payload que dados-json)."""
+    from app.models.answerSheetGabarito import AnswerSheetGabarito
+    from app.models.answerSheetResult import AnswerSheetResult
+    from app.permissions.utils import get_teacher_classes
+    from app.report_analysis.answer_sheet_aggregate_service import AnswerSheetReportAggregateService
+    from app.report_analysis.routes import _resolve_report_schema
+    from app.utils.tenant_middleware import set_search_path
+
+    user = get_current_user_from_token()
+    if not user:
+        return jsonify({"error": "Usuário não autenticado"}), 401
+
+    school_id_raw = request.args.get("school_id")
+    city_id = request.args.get("city_id")
+
+    try:
+        scope_type, scope_ref_id = _determinar_escopo_por_role(user, school_id_raw, city_id)
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+
+    schema = _resolve_report_schema(scope_type, scope_ref_id, city_id)
+    if not schema:
+        return jsonify(
+            {
+                "error": "Para acessar o relatório, informe city_id ou school_id na URL (ex.: ?city_id=... ou ?school_id=...)"
+            }
+        ), 400
+
+    set_search_path(schema)
+
+    if scope_type == "school" and not city_id:
+        school_obj = School.query.get(scope_ref_id)
+        if school_obj and school_obj.city_id:
+            city_id = school_obj.city_id
+
+    gab = AnswerSheetGabarito.query.get(gabarito_id)
+    if not gab:
+        return jsonify({"error": "Gabarito não encontrado"}), 404
+
+    if scope_type == "teacher":
+        teacher_class_ids = get_teacher_classes(user.get("id"))
+        if not teacher_class_ids:
+            return jsonify({"error": "Professor não vinculado a nenhuma turma"}), 404
+        has_any = (
+            AnswerSheetResult.query.filter_by(gabarito_id=gabarito_id)
+            .join(Student, AnswerSheetResult.student_id == Student.id)
+            .filter(Student.class_id.in_(teacher_class_ids))
+            .first()
+        )
+        if not has_any:
+            return jsonify(
+                {
+                    "error": "Nenhum resultado de cartão-resposta para suas turmas neste gabarito",
+                }
+            ), 404
+
+    db.session.expire_all()
+    ntype, nid = AnswerSheetReportAggregateService._normalize_scope(scope_type, scope_ref_id)
+    status = AnswerSheetReportAggregateService.get_status(gabarito_id, ntype, nid)
+
+    if status["status"] != "ready":
+        return jsonify(
+            {
+                "error": "Relatório ainda está sendo processado",
+                "status": "processing",
+                "message": "Aguarde o processamento concluir antes de gerar o PDF. Tente novamente em alguns instantes.",
+                "has_payload": status["has_payload"],
+                "has_ai_analysis": status["has_ai_analysis"],
+                "last_update": status["last_update"].isoformat() if status["last_update"] else None,
+                "report_entity_type": "answer_sheet",
+            }
+        ), 409
+
+    aggregate = AnswerSheetReportAggregateService.get(gabarito_id, ntype, nid)
+    if not aggregate:
+        return jsonify({"error": "Relatório não encontrado"}), 404
+
+    context = aggregate.payload or {}
+    context["analise_ia"] = aggregate.ai_analysis or {}
+    context["default_logo"] = _load_default_logo()
+
+    nome_raw = gab.title or (context.get("avaliacao") or {}).get("titulo") or "cartao_resposta"
+    return _render_relatorio_organized_pdf_response(context, nome_raw)
+
+
 @bp.route('/relatorio-pdf/<string:evaluation_id>', methods=['GET'])
 @jwt_required()
 @role_required("admin", "professor", "coordenador", "diretor","tecadm")
@@ -920,11 +1163,15 @@ def relatorio_pdf(evaluation_id: str):
         school_id: ID da escola (opcional) - gera relatório por escola específica
         city_id: ID do município (opcional) - gera relatório por município
         Se nenhum parâmetro for fornecido, gera relatório de todas as turmas da avaliação
+        report_entity_type: use ``answer_sheet`` com o ID do gabarito para cartão-resposta
     
     Returns:
         Arquivo PDF do relatório para download
     """
     try:
+        if (request.args.get("report_entity_type") or "").strip().lower() == "answer_sheet":
+            return _relatorio_pdf_answer_sheet(evaluation_id)
+
         # Verificar se a avaliação existe
         test = Test.query.get(evaluation_id)
         if not test:
@@ -994,131 +1241,9 @@ def relatorio_pdf(evaluation_id: str):
         # Adicionar logo padrão ao contexto (para templates que precisam)
         context['default_logo'] = _load_default_logo()
 
-        templates_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'templates')
-        env = Environment(loader=FileSystemLoader(templates_dir), autoescape=select_autoescape(['html', 'xml']))
-
-        def sum_values(items, attr='value'):
-            try:
-                return sum(item.get(attr, 0) if isinstance(item, dict) else getattr(item, attr, 0) for item in items)
-            except (TypeError, AttributeError):
-                return 0
-
-        def cos_filter(value):
-            try:
-                return math.cos(float(value))
-            except (TypeError, ValueError):
-                return 0
-
-        def sin_filter(value):
-            try:
-                return math.sin(float(value))
-            except (TypeError, ValueError):
-                return 0
-
-        def formatar_texto_ia(texto):
-            """
-            Formata texto da IA para HTML preservando quebras de linha e formatação
-            Converte quebras de linha duplas em parágrafos e simples em <br/>
-            """
-            if not texto:
-                return Markup("")
-            
-            # Se não houver quebras de linha duplas, tentar detectar padrões para quebrar
-            if '\n\n' not in texto:
-                # Detectar padrões de títulos no meio do texto
-                texto = texto.replace('Destaques e Recomendações:', '\n\nDestaques e Recomendações:')
-                texto = texto.replace('Classificação:', '\n\nClassificação:')
-                texto = texto.replace('PARECER TÉCNICO:', '\n\nPARECER TÉCNICO:')
-                # Detectar números como títulos (ex: "1. ", "2. ", "3. ")
-                texto = re.sub(r'(\d+\.\s)', r'\n\n\1', texto)
-                # Detectar títulos em maiúsculas seguidas de dois pontos
-                texto = re.sub(r'([A-ZÁÊÔÇ][A-ZÁÊÔÇ\s]{10,}:)', r'\n\n\1', texto)
-            
-            # Dividir por quebras de linha duplas (parágrafos)
-            paragrafos = texto.split('\n\n')
-            
-            resultado = []
-            for paragrafo in paragrafos:
-                paragrafo = paragrafo.strip()
-                if not paragrafo:
-                    continue
-                
-                # Verificar se é um título (maiúsculas seguidas de dois pontos, ou números como "1. ", "2. ")
-                if (len(paragrafo) > 10 and paragrafo.isupper() and paragrafo.endswith(':')) or \
-                   (len(paragrafo) > 2 and paragrafo[0].isdigit() and paragrafo[1] == '.' and paragrafo[2] == ' '):
-                    # É um título - converter para negrito
-                    resultado.append(f'<p style="font-weight: bold; margin-top: 12px; margin-bottom: 8px;">{paragrafo}</p>')
-                # Verificar se começa com títulos específicos
-                elif paragrafo.startswith('Destaques e Recomendações:') or \
-                     paragrafo.startswith('Classificação:') or \
-                     paragrafo.startswith('PARECER TÉCNICO:') or \
-                     paragrafo.startswith('PARECER TÉCNICO DE PARTICIPAÇÃO:') or \
-                     paragrafo.startswith('PARECER TÉCNICO: NOTA IDAV:'):
-                    # É um título - converter para negrito
-                    resultado.append(f'<p style="font-weight: bold; margin-top: 12px; margin-bottom: 8px;">{paragrafo}</p>')
-                # Verificar se contém bullets (•) - converter em lista
-                elif '•' in paragrafo:
-                    # Dividir por bullets
-                    partes = paragrafo.split('•')
-                    primeira_parte = partes[0].strip()
-                    itens_lista = [item.strip() for item in partes[1:] if item.strip()]
-                    
-                    if primeira_parte:
-                        resultado.append(f'<p>{primeira_parte}</p>')
-                    
-                    if itens_lista:
-                        resultado.append('<ul style="margin-left: 20px; margin-top: 8px; margin-bottom: 8px;">')
-                        for item in itens_lista:
-                            resultado.append(f'<li style="margin-bottom: 4px;">{item}</li>')
-                        resultado.append('</ul>')
-                else:
-                    # Parágrafo normal - converter quebras de linha simples em <br/>
-                    paragrafo_html = paragrafo.replace('\n', '<br/>')
-                    resultado.append(f'<p style="margin-top: 8px; margin-bottom: 8px;">{paragrafo_html}</p>')
-            
-            return Markup(''.join(resultado)) if resultado else Markup("")
-
-        env.filters['sum_values'] = sum_values
-        env.filters['cos'] = cos_filter
-        env.filters['sin'] = sin_filter
-        # formatar_texto_ia está registrado globalmente no Flask app.jinja_env
-        # Mas também registramos aqui para garantir compatibilidade com Environment customizado
-        env.filters['formatar_texto_ia'] = formatar_texto_ia
-
-        template = env.get_template('report_organized.html')
-        html_content = template.render(**context)
-
-        # SOLUÇÃO: Salvar HTML em arquivo temporário e usar filename em vez de string
-        # Isso faz o WeasyPrint processar o documento como arquivo, preservando a ordem semântica
-        # e evitando que o layout engine reorganize os blocos (DADOS/ANÁLISE)
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.html', delete=False, encoding='utf-8') as temp_html:
-            temp_html.write(html_content)
-            temp_html_path = temp_html.name
-        
-        try:
-            # Usar filename em vez de string para preservar ordem semântica do documento
-            pdf_content = HTML(
-                filename=temp_html_path,
-                base_url=templates_dir
-            ).write_pdf()
-        finally:
-            # Limpar arquivo temporário
-            try:
-                os.unlink(temp_html_path)
-            except OSError:
-                pass  # Ignorar erros ao deletar arquivo temporário
-
         test = Test.query.get(evaluation_id)
-        nome_avaliacao = (test.title if test else 'relatorio')
-        nome_avaliacao = nome_avaliacao.replace(' ', '_').replace('/', '_').replace('\\', '_') \
-                                       .replace(':', '_').replace('?', '_').replace('*', '_') \
-                                       .replace('"', '_').replace('<', '_').replace('>', '_').replace('|', '_')
-        nome_arquivo = f"relatorio_{nome_avaliacao}.pdf"
-
-        response = make_response(pdf_content)
-        response.headers['Content-Type'] = 'application/pdf'
-        response.headers['Content-Disposition'] = f'attachment; filename={nome_arquivo}'
-        return response
+        nome_raw = test.title if test else "relatorio"
+        return _render_relatorio_organized_pdf_response(context, nome_raw)
 
     except (ValueError, LookupError) as e:
         return jsonify({"error": str(e)}), 404
@@ -1829,10 +1954,12 @@ def _determinar_escopo_por_role(user: dict, school_id: str = None, city_id: str 
         return _determinar_escopo_relatorio(school_id, city_id)
     
     elif role == 'tecadm':
-        # Tecadm vê apenas seu município
+        # Tecadm vê apenas seu município, mas pode filtrar por escola específica
         city_id_user = user.get('city_id') or user.get('tenant_id')
         if not city_id_user:
             raise ValueError("Tecadm não vinculado a um município")
+        if school_id:
+            return ('school', school_id)
         return ('city', city_id_user)
     
     elif role in ['diretor', 'coordenador']:
@@ -1870,13 +1997,12 @@ def _buscar_turmas_por_escopo(evaluation_id: str, scope_type: str, scope_id: str
     
     if scope_type == 'school':
         # Filtrar por escola específica
-        # Converter scope_id para UUID (Class.school_id é UUID)
-        school_id_uuid = ensure_uuid(scope_id)
-        if school_id_uuid:
-            query = query.join(Class).filter(Class.school_id == school_id_uuid)
+        # Class._school_id e School.id são ambos VARCHAR/String(36)
+        query = query.join(Class).filter(Class._school_id == scope_id)
     elif scope_type == 'city':
         # Filtrar por município (todas as escolas do município)
-        query = query.join(Class).join(School, Class.school_id == cast(School.id, PostgresUUID)).filter(School.city_id == scope_id)
+        # ✅ CORRIGIDO: Class._school_id e School.id são VARCHAR, não UUID - remover cast
+        query = query.join(Class).join(School, Class._school_id == School.id).filter(School.city_id == scope_id)
     # Se scope_type == 'all', não aplicar filtros adicionais
     
     return query.all()
@@ -1956,7 +2082,7 @@ def _filtrar_payload_por_turmas_professor(payload: Dict[str, Any], teacher_class
     filtered_payload["total_alunos"]["total_geral"] = {
         "matriculados": total_matriculados,
         "avaliados": total_avaliados,
-        "percentual": round(total_percentual, 1),
+        "percentual": round_to_two_decimals(total_percentual),
         "faltosos": total_faltosos
     }
     
@@ -2008,7 +2134,7 @@ def _filtrar_payload_por_turmas_professor(payload: Dict[str, Any], teacher_class
         
         filtered_por_disciplina_prof[disciplina] = {
             "por_turma": filtered_por_turma_prof,
-            "media_geral": round(media_geral, 2)
+            "media_geral": round_to_two_decimals(media_geral)
         }
     
     filtered_payload["proficiencia"] = {
@@ -2036,7 +2162,7 @@ def _filtrar_payload_por_turmas_professor(payload: Dict[str, Any], teacher_class
         
         filtered_por_disciplina_nota[disciplina] = {
             "por_turma": filtered_por_turma_nota,
-            "media_geral": round(media_geral, 2)
+            "media_geral": round_to_two_decimals(media_geral)
         }
     
     filtered_payload["nota_geral"] = {
@@ -2419,7 +2545,7 @@ def _gerar_pdf_com_reportlab(test: Test, total_alunos: Dict, niveis_aprendizagem
             for turma_data in proficiencia['por_disciplina']['GERAL']['por_turma']:
                 data.append([
                     turma_data.get("turma", ""),
-                    f"{turma_data.get('proficiencia', 0):.1f}"
+                    f"{turma_data.get('proficiencia', 0):.2f}"
                 ])
             
             if data:
@@ -3397,7 +3523,7 @@ def _calcular_totais_alunos_por_municipio(evaluation_id: str, class_tests: List[
             "escola": escola_nome,
             "matriculados": matriculados,
             "avaliados": avaliados,
-            "percentual": round(percentual, 1),
+            "percentual": round_to_two_decimals(percentual),
             "faltosos": faltosos
         })
         
@@ -3413,7 +3539,7 @@ def _calcular_totais_alunos_por_municipio(evaluation_id: str, class_tests: List[
         "total_geral": {
             "matriculados": total_matriculados,
             "avaliados": total_avaliados,
-            "percentual": round(total_percentual, 1),
+            "percentual": round_to_two_decimals(total_percentual),
             "faltosos": total_faltosos
         }
     }
@@ -3481,7 +3607,7 @@ def _calcular_totais_alunos(evaluation_id: str, class_tests: List[ClassTest]) ->
             "turma": turma_nome,
             "matriculados": matriculados,
             "avaliados": avaliados,
-            "percentual": round(percentual, 1),
+            "percentual": round_to_two_decimals(percentual),
             "faltosos": faltosos
         })
     
@@ -3494,7 +3620,7 @@ def _calcular_totais_alunos(evaluation_id: str, class_tests: List[ClassTest]) ->
         "total_geral": {
             "matriculados": total_matriculados,
             "avaliados": total_avaliados,
-            "percentual": round(total_percentual, 1),
+            "percentual": round_to_two_decimals(total_percentual),
             "faltosos": total_faltosos
         }
     }
@@ -3554,6 +3680,8 @@ def _calcular_niveis_aprendizagem_por_municipio(evaluation_id: str, class_tests:
     # Mapear questões para disciplinas
     question_disciplines = {}
     disciplinas_identificadas = set()
+    # ✅ NOVO: Mapear nome da disciplina para UUID (para buscar em subject_results)
+    disciplina_nome_para_uuid = {}
     
     for question in test.questions:
         if question.skill and question.skill.strip() and question.skill != '{}':
@@ -3565,6 +3693,8 @@ def _calcular_niveis_aprendizagem_por_municipio(evaluation_id: str, class_tests:
                 if subject:
                     question_disciplines[question.id] = subject.name
                     disciplinas_identificadas.add(subject.name)
+                    # ✅ NOVO: Armazenar mapeamento nome -> UUID
+                    disciplina_nome_para_uuid[subject.name] = str(subject.id)
             else:
                 question_disciplines[question.id] = "Disciplina Geral"
                 disciplinas_identificadas.add("Disciplina Geral")
@@ -3572,6 +3702,8 @@ def _calcular_niveis_aprendizagem_por_municipio(evaluation_id: str, class_tests:
             if test.subject_rel:
                 question_disciplines[question.id] = test.subject_rel.name
                 disciplinas_identificadas.add(test.subject_rel.name)
+                # ✅ NOVO: Armazenar mapeamento nome -> UUID
+                disciplina_nome_para_uuid[test.subject_rel.name] = str(test.subject_rel.id)
             else:
                 question_disciplines[question.id] = "Disciplina Geral"
                 disciplinas_identificadas.add("Disciplina Geral")
@@ -3619,17 +3751,38 @@ def _calcular_niveis_aprendizagem_por_municipio(evaluation_id: str, class_tests:
         total_geral = 0
         
         for school_id, school_results in results_by_school.items():
-            # Filtrar resultados por disciplina (simplificado - usando todos os resultados da escola)
             escola_nome = "Escola Desconhecida"
             if school_results and school_results[0].student.class_ and school_results[0].student.class_.school:
                 escola_nome = school_results[0].student.class_.school.name
             
-            # Contar classificações
-            abaixo = sum(1 for r in school_results if 'abaixo' in r.classification.lower() or 'básico' in r.classification.lower())
-            basico = sum(1 for r in school_results if 'básico' in r.classification.lower() and 'abaixo' not in r.classification.lower())
-            adequado = sum(1 for r in school_results if 'adequado' in r.classification.lower())
-            avancado = sum(1 for r in school_results if 'avançado' in r.classification.lower() or 'avancado' in r.classification.lower())
-            total_escola = len(school_results)
+            # ✅ CORRIGIDO: Usar classificação específica da disciplina do campo subject_results
+            abaixo = 0
+            basico = 0
+            adequado = 0
+            avancado = 0
+            total_escola = 0
+            
+            for r in school_results:
+                # ✅ CORRIGIDO: Buscar classificação específica usando UUID da disciplina
+                if r.subject_results and isinstance(r.subject_results, dict):
+                    # Obter UUID da disciplina a partir do nome
+                    subject_uuid = disciplina_nome_para_uuid.get(disciplina)
+                    if subject_uuid:
+                        # Buscar usando UUID como chave
+                        subject_data = r.subject_results.get(subject_uuid)
+                        if subject_data and 'classification' in subject_data:
+                            classificacao_disciplina = subject_data['classification'].lower()
+                            total_escola += 1
+                            
+                            # Contar classificação específica da disciplina
+                            if 'abaixo' in classificacao_disciplina:
+                                abaixo += 1
+                            elif 'básico' in classificacao_disciplina or 'basico' in classificacao_disciplina:
+                                basico += 1
+                            elif 'adequado' in classificacao_disciplina:
+                                adequado += 1
+                            elif 'avançado' in classificacao_disciplina or 'avancado' in classificacao_disciplina:
+                                avancado += 1
             
             niveis_por_disciplina[disciplina]['por_escola'].append({
                 'escola': escola_nome,
@@ -4338,7 +4491,7 @@ def _calcular_proficiencia_por_municipio(evaluation_id: str, class_tests: List[C
             
             proficiencia_por_disciplina[disciplina]['por_escola'].append({
                 'escola': escola_nome,
-                'proficiencia': round(media_escola, 2),
+                'proficiencia': round_to_two_decimals(media_escola),
                 'total_alunos': total_alunos
             })
             
@@ -4347,7 +4500,7 @@ def _calcular_proficiencia_por_municipio(evaluation_id: str, class_tests: List[C
         
         # Calcular média geral
         if total_escolas > 0:
-            proficiencia_por_disciplina[disciplina]['media_geral'] = round(total_proficiencia / total_escolas, 2)
+            proficiencia_por_disciplina[disciplina]['media_geral'] = round_to_two_decimals(total_proficiencia / total_escolas)
     
     # Adicionar seção GERAL que engloba todas as disciplinas
     dados_gerais_por_escola_lista = []
@@ -4372,12 +4525,12 @@ def _calcular_proficiencia_por_municipio(evaluation_id: str, class_tests: List[C
     # Calcular média geral por escola
     for escola_data in dados_gerais_por_escola_lista:
         if escola_data['total_alunos'] > 0:
-            escola_data['proficiencia'] = round(escola_data['proficiencia'] / len(proficiencia_por_disciplina), 2)
+            escola_data['proficiencia'] = round_to_two_decimals(escola_data['proficiencia'] / len(proficiencia_por_disciplina))
     
     # Adicionar seção GERAL
     proficiencia_por_disciplina["GERAL"] = {
         "por_escola": dados_gerais_por_escola_lista,
-        "media_geral": round(sum(item['proficiencia'] for item in dados_gerais_por_escola_lista) / len(dados_gerais_por_escola_lista), 2) if dados_gerais_por_escola_lista else 0
+        "media_geral": round_to_two_decimals(sum(item['proficiencia'] for item in dados_gerais_por_escola_lista) / len(dados_gerais_por_escola_lista)) if dados_gerais_por_escola_lista else 0
     }
     
     # Ordenar disciplinas pela ordem de aparição na avaliação
@@ -4563,7 +4716,7 @@ def _calcular_proficiencia(evaluation_id: str, class_tests: List[ClassTest]) -> 
                 
                 disciplinas_proficiencia[disciplina]["por_turma"].append({
                     "turma": turma_nome,
-                    "proficiencia": round(media_proficiencia, 2)
+                    "proficiencia": round_to_two_decimals(media_proficiencia)
                 })
         
         # Calcular dados gerais para esta turma (média das disciplinas específicas)
@@ -4609,7 +4762,7 @@ def _calcular_proficiencia(evaluation_id: str, class_tests: List[ClassTest]) -> 
             media_proficiencia_geral_turma = sum(proficiencias_gerais_turma) / len(proficiencias_gerais_turma)
             dados_gerais_por_turma[turma_nome].append({
                 "turma": turma_nome,
-                "proficiencia": round(media_proficiencia_geral_turma, 2)
+                "proficiencia": round_to_two_decimals(media_proficiencia_geral_turma)
             })
             dados_gerais_total_proficiencia += sum(proficiencias_gerais_turma)
             dados_gerais_total_alunos += len(proficiencias_gerais_turma)
@@ -4645,7 +4798,7 @@ def _calcular_proficiencia(evaluation_id: str, class_tests: List[ClassTest]) -> 
                 media_prof = dados_turma["total_proficiencia"] / dados_turma["total_alunos"] if dados_turma["total_alunos"] > 0 else 0
                 turmas_disciplina_lista.append({
                     "turma": turma_nome,
-                    "proficiencia": round(media_prof, 2)
+                    "proficiencia": round_to_two_decimals(media_prof)
                 })
             else:
                 turmas_disciplina_lista.append({
@@ -4655,7 +4808,7 @@ def _calcular_proficiencia(evaluation_id: str, class_tests: List[ClassTest]) -> 
 
         resultado_final[disciplina] = {
             "por_turma": turmas_disciplina_lista,
-            "media_geral": round(media_geral_disciplina, 2)
+            "media_geral": round_to_two_decimals(media_geral_disciplina)
         }
 
     # Adicionar dados gerais que englobam todas as disciplinas
@@ -4678,7 +4831,7 @@ def _calcular_proficiencia(evaluation_id: str, class_tests: List[ClassTest]) -> 
             media_prof = dados_turma["total_proficiencia"] / dados_turma["total_ocorrencias"] if dados_turma["total_ocorrencias"] > 0 else 0
             dados_gerais_lista.append({
                 "turma": turma_nome,
-                "proficiencia": round(media_prof, 2)
+                "proficiencia": round_to_two_decimals(media_prof)
             })
         else:
             dados_gerais_lista.append({
@@ -4688,7 +4841,7 @@ def _calcular_proficiencia(evaluation_id: str, class_tests: List[ClassTest]) -> 
 
     resultado_final["GERAL"] = {
         "por_turma": dados_gerais_lista,
-        "media_geral": round(media_geral_total, 2)
+        "media_geral": round_to_two_decimals(media_geral_total)
     }
 
     # Calcular média municipal por disciplina
@@ -4920,7 +5073,7 @@ def _calcular_nota_geral_por_municipio(evaluation_id: str, class_tests: List[Cla
             
             nota_por_disciplina[disciplina]['por_escola'].append({
                 'escola': escola_nome,
-                'nota': round(nota_escola, 2),
+                'nota': round_to_two_decimals(nota_escola),
                 'total_alunos': total_alunos
             })
             
@@ -4929,7 +5082,7 @@ def _calcular_nota_geral_por_municipio(evaluation_id: str, class_tests: List[Cla
         
         # Calcular média geral
         if total_escolas > 0:
-            nota_por_disciplina[disciplina]['media_geral'] = round(total_nota / total_escolas, 2)
+            nota_por_disciplina[disciplina]['media_geral'] = round_to_two_decimals(total_nota / total_escolas)
     
     # Adicionar seção GERAL que engloba todas as disciplinas
     dados_gerais_por_escola_lista = []
@@ -4954,12 +5107,12 @@ def _calcular_nota_geral_por_municipio(evaluation_id: str, class_tests: List[Cla
     # Calcular média geral por escola
     for escola_data in dados_gerais_por_escola_lista:
         if escola_data['total_alunos'] > 0:
-            escola_data['nota'] = round(escola_data['nota'] / len(nota_por_disciplina), 2)
+            escola_data['nota'] = round_to_two_decimals(escola_data['nota'] / len(nota_por_disciplina))
     
     # Adicionar seção GERAL
     nota_por_disciplina["GERAL"] = {
         "por_escola": dados_gerais_por_escola_lista,
-        "media_geral": round(sum(item['nota'] for item in dados_gerais_por_escola_lista) / len(dados_gerais_por_escola_lista), 2) if dados_gerais_por_escola_lista else 0
+        "media_geral": round_to_two_decimals(sum(item['nota'] for item in dados_gerais_por_escola_lista) / len(dados_gerais_por_escola_lista)) if dados_gerais_por_escola_lista else 0
     }
     
     # Ordenar disciplinas pela ordem de aparição na avaliação
@@ -5157,7 +5310,7 @@ def _calcular_nota_geral(evaluation_id: str, class_tests: List[ClassTest]) -> Di
                 
                 disciplinas_notas[disciplina]["por_turma"].append({
                     "turma": turma_nome,
-                    "nota": round(media_nota, 2)
+                    "nota": round_to_two_decimals(media_nota)
                 })
         
         # Calcular dados gerais para esta turma (média das disciplinas específicas)
@@ -5214,7 +5367,7 @@ def _calcular_nota_geral(evaluation_id: str, class_tests: List[ClassTest]) -> Di
             media_nota_geral_turma = sum(notas_gerais_turma) / len(notas_gerais_turma)
             dados_gerais_por_turma[turma_nome].append({
                 "turma": turma_nome,
-                "nota": round(media_nota_geral_turma, 2)
+                "nota": round_to_two_decimals(media_nota_geral_turma)
             })
             dados_gerais_total_notas += sum(notas_gerais_turma)
             dados_gerais_total_alunos += len(notas_gerais_turma)
@@ -5248,7 +5401,7 @@ def _calcular_nota_geral(evaluation_id: str, class_tests: List[ClassTest]) -> Di
                 media_nota = dados_turma["total_notas"] / dados_turma["total_alunos"] if dados_turma["total_alunos"] > 0 else 0
                 turmas_disciplina_lista.append({
                     "turma": turma_nome,
-                    "nota": round(media_nota, 2)
+                    "nota": round_to_two_decimals(media_nota)
                 })
             else:
                 turmas_disciplina_lista.append({
@@ -5258,7 +5411,7 @@ def _calcular_nota_geral(evaluation_id: str, class_tests: List[ClassTest]) -> Di
 
         resultado_final[disciplina] = {
             "por_turma": turmas_disciplina_lista,
-            "media_geral": round(media_geral_disciplina, 2)
+            "media_geral": round_to_two_decimals(media_geral_disciplina)
         }
 
     # Adicionar dados gerais que englobam todas as disciplinas
@@ -5281,7 +5434,7 @@ def _calcular_nota_geral(evaluation_id: str, class_tests: List[ClassTest]) -> Di
             media_nota = dados_turma["total_notas"] / dados_turma["total_ocorrencias"] if dados_turma["total_ocorrencias"] > 0 else 0
             dados_gerais_notas_lista.append({
                 "turma": turma_nome,
-                "nota": round(media_nota, 2)
+                "nota": round_to_two_decimals(media_nota)
             })
         else:
             dados_gerais_notas_lista.append({
@@ -5291,7 +5444,7 @@ def _calcular_nota_geral(evaluation_id: str, class_tests: List[ClassTest]) -> Di
 
     resultado_final["GERAL"] = {
         "por_turma": dados_gerais_notas_lista,
-        "media_geral": round(media_geral_total, 2)
+        "media_geral": round_to_two_decimals(media_geral_total)
     }
 
     # Calcular média municipal por disciplina
@@ -5602,7 +5755,7 @@ def _calcular_acertos_habilidade(evaluation_id: str) -> Dict[str, Any]:
             "descricao": skill_description,
             "acertos": acertos,
             "total": total_respostas,
-            "percentual": round(percentual, 1)
+            "percentual": round_to_two_decimals(percentual)
         })
     
     # Agrupar por disciplina mantendo a ordem original das questões
@@ -5683,7 +5836,7 @@ def _calcular_media_municipal(evaluation_id: str) -> float:
         ).join(
             Class, Student.class_id == Class.id
         ).join(
-            School, Class.school_id == cast(School.id, PostgresUUID)
+            School, Class.school_id == School.id
         ).filter(
             School.city_id == city_id,
             EvaluationResult.test_id == evaluation_id
@@ -5727,7 +5880,7 @@ def _calcular_media_municipal_nota(evaluation_id: str) -> float:
         ).join(
             Class, Student.class_id == Class.id
         ).join(
-            School, Class.school_id == cast(School.id, PostgresUUID)
+            School, Class.school_id == School.id
         ).filter(
             School.city_id == city_id,
             EvaluationResult.test_id == evaluation_id
@@ -5771,7 +5924,7 @@ def _calcular_media_municipal_por_disciplina(evaluation_id: str, question_discip
         ).join(
             Class, Student.class_id == Class.id
         ).join(
-            School, Class.school_id == cast(School.id, PostgresUUID)
+            School, Class.school_id == School.id
         ).filter(
             School.city_id == city_id,
             EvaluationResult.test_id == evaluation_id
@@ -5837,7 +5990,7 @@ def _calcular_media_municipal_por_disciplina(evaluation_id: str, question_discip
         for disciplina, proficiencias in disciplinas_proficiencia.items():
             if proficiencias:
                 media = sum(proficiencias) / len(proficiencias)
-                medias_por_disciplina[disciplina] = round(media, 2)
+                medias_por_disciplina[disciplina] = round_to_two_decimals(media)
 
         return medias_por_disciplina
         
@@ -5873,7 +6026,7 @@ def _calcular_media_municipal_nota_por_disciplina(evaluation_id: str, question_d
         ).join(
             Class, Student.class_id == Class.id
         ).join(
-            School, Class.school_id == cast(School.id, PostgresUUID)
+            School, Class.school_id == School.id
         ).filter(
             School.city_id == city_id,
             EvaluationResult.test_id == evaluation_id
@@ -5948,7 +6101,7 @@ def _calcular_media_municipal_nota_por_disciplina(evaluation_id: str, question_d
         for disciplina, notas in disciplinas_notas.items():
             if notas:
                 media = sum(notas) / len(notas)
-                medias_por_disciplina[disciplina] = round(media, 2)
+                medias_por_disciplina[disciplina] = round_to_two_decimals(media)
 
         return medias_por_disciplina
         
@@ -6026,7 +6179,7 @@ def _gerar_analise_proficiencia(template_data: Dict) -> str:
         
         disciplinas_list = list(medias_disciplinas.keys())
         for i, disciplina in enumerate(disciplinas_list):
-            media = round(medias_disciplinas[disciplina], 2)
+            media = round_to_two_decimals(medias_disciplinas[disciplina])
             if i == 0:
                 analise += f"{media} em {disciplina}"
             elif i == len(disciplinas_list) - 1:
@@ -6077,11 +6230,11 @@ def _gerar_analise_notas(template_data: Dict) -> str:
         media_geral = sum(medias_disciplinas.values()) / len(medias_disciplinas)
         
         # Gerar análise
-        analise = f"A média geral de nota da escola na avaliação diagnóstica foi de {round(media_geral, 2)}, com "
+        analise = f"A média geral de nota da escola na avaliação diagnóstica foi de {round_to_two_decimals(media_geral)}, com "
         
         disciplinas_list = list(medias_disciplinas.keys())
         for i, disciplina in enumerate(disciplinas_list):
-            media = round(medias_disciplinas[disciplina], 2)
+            media = round_to_two_decimals(medias_disciplinas[disciplina])
             if i == 0:
                 analise += f"{media} em {disciplina}"
             elif i == len(disciplinas_list) - 1:
@@ -6090,7 +6243,7 @@ def _gerar_analise_notas(template_data: Dict) -> str:
                 analise += f", {media} em {disciplina}"
         
         # Comparação com referencial
-        analise += f" Esta média geral de {round(media_geral, 2)} está "
+        analise += f" Esta média geral de {round_to_two_decimals(media_geral)} está "
         
         if media_geral >= 6.0:
             analise += "exatamente alinhada e ligeiramente acima da nota padronizada de 6,1 obtida na Prova Saeb/2023 para o 9º ano, o que é um resultado muito positivo para a escola como um todo. "

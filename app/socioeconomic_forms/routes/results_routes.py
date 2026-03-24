@@ -3,15 +3,24 @@
 Rotas para API de Resultados de Formulários Socioeconômicos
 """
 
-from flask import Blueprint, request, jsonify
+from flask import Blueprint, request, jsonify, g
 from flask_jwt_extended import jwt_required
 from app.decorators.role_required import role_required
 from app.socioeconomic_forms.services.results_cache_service import ResultsCacheService
-from app.socioeconomic_forms.services.results_tasks import generate_indices_report, generate_profiles_report
+from app.socioeconomic_forms.services.results_tasks import generate_indices_report, generate_profiles_report, generate_responses_report
 from app.socioeconomic_forms.services.results_migration_tasks import populate_initial_cache_for_form, populate_all_forms_cache
+from app.socioeconomic_forms.services.inse_saeb_service import InseSaebService
 from celery.result import AsyncResult
 from app.report_analysis.celery_app import celery_app
 import logging
+
+
+def _get_tenant_schema():
+    """Retorna o schema do tenant do request atual (multi-tenant)."""
+    ctx = getattr(g, 'tenant_context', None)
+    if ctx and getattr(ctx, 'schema', None):
+        return ctx.schema
+    return 'public'
 
 bp = Blueprint('socioeconomic_results', __name__, url_prefix='/forms')
 
@@ -44,28 +53,26 @@ def get_indices_report(form_id):
             'serie': request.args.get('serie'),
             'turma': request.args.get('turma')
         }
-        # Remover None values
         filters = {k: v for k, v in filters.items() if v}
-        
-        # Paginação
         page = int(request.args.get('page', 1))
         limit = int(request.args.get('limit', 20))
         
-        # Verificar status do cache
         status = ResultsCacheService.get_status(form_id, 'indices', filters)
         
         if status['status'] == 'ready':
-            # Cache está pronto, retornar resultado
             result = ResultsCacheService.get_result(form_id, 'indices', filters)
             return jsonify(result), 200
         
-        # Cache dirty ou não existe - disparar task
-        task = generate_indices_report.delay(form_id, filters, page, limit)
-        
+        # Disparar task sem usar result backend (evita "Connection closed by server" no Redis em Windows)
+        schema = _get_tenant_schema()
+        generate_indices_report.apply_async(
+            (form_id, filters, page, limit, schema),
+            ignore_result=True
+        )
         return jsonify({
             'status': 'processing',
-            'taskId': task.id,
-            'message': 'Relatório sendo gerado em background',
+            'message': 'Relatório sendo gerado em background. Faça polling neste mesmo endpoint (GET indices) até receber 200 com os dados.',
+            'pollSameUrl': True,
             'cacheStatus': status
         }), 202  # HTTP 202 Accepted
         
@@ -107,17 +114,19 @@ def get_profiles_report(form_id):
         status = ResultsCacheService.get_status(form_id, 'profiles', filters)
         
         if status['status'] == 'ready':
-            # Cache está pronto, retornar resultado
             result = ResultsCacheService.get_result(form_id, 'profiles', filters)
             return jsonify(result), 200
         
-        # Cache dirty ou não existe - disparar task
-        task = generate_profiles_report.delay(form_id, filters)
-        
+        # Disparar task sem usar result backend (evita "Connection closed by server" no Redis em Windows)
+        schema = _get_tenant_schema()
+        generate_profiles_report.apply_async(
+            (form_id, filters, schema),
+            ignore_result=True
+        )
         return jsonify({
             'status': 'processing',
-            'taskId': task.id,
-            'message': 'Relatório sendo gerado em background',
+            'message': 'Relatório sendo gerado em background. Faça polling neste mesmo endpoint (GET profiles) até receber 200 com os dados.',
+            'pollSameUrl': True,
             'cacheStatus': status
         }), 202  # HTTP 202 Accepted
         
@@ -128,17 +137,115 @@ def get_profiles_report(form_id):
         return jsonify({"error": "Erro ao processar solicitação", "details": str(e)}), 500
 
 
+@bp.route('/<form_id>/results/inse-saeb', methods=['GET'])
+@jwt_required()
+@role_required("admin", "tecadm", "diretor", "coordenador")
+def get_inse_saeb_report(form_id):
+    """
+    Relatório INSE x SAEB: cruza respostas do formulário socioeconômico com resultados
+    da avaliação (proficiência por disciplina, INSE por aluno).
+
+    Query params:
+    - state: Estado (ex: "SP")
+    - municipio: ID do município (UUID)
+    - escola: ID da escola
+    - serie: ID da série (UUID)
+    - turma: ID da turma (UUID)
+    - avaliacao: ID da avaliação (test_id) — obrigatório
+    - page: Página da lista de alunos (default: 1)
+    - limit: Limite por página (default: 50)
+    """
+    try:
+        filters = {
+            'state': request.args.get('state'),
+            'municipio': request.args.get('municipio'),
+            'escola': request.args.get('escola'),
+            'serie': request.args.get('serie'),
+            'turma': request.args.get('turma'),
+        }
+        filters = {k: v for k, v in filters.items() if v}
+        avaliacao_id = request.args.get('avaliacao')
+        if not avaliacao_id:
+            return jsonify({"error": "Parâmetro 'avaliacao' é obrigatório"}), 400
+        page = int(request.args.get('page', 1))
+        limit = int(request.args.get('limit', 50))
+
+        result = InseSaebService.gerar_relatorio(
+            form_id=form_id,
+            filters=filters,
+            avaliacao_id=avaliacao_id,
+            page=page,
+            limit=limit,
+        )
+        return jsonify(result), 200
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        logger.error(f"Erro ao obter relatório INSE x SAEB: {str(e)}", exc_info=True)
+        return jsonify({"error": "Erro ao processar solicitação", "details": str(e)}), 500
+
+
+@bp.route('/<form_id>/results/respostas', methods=['GET'])
+@jwt_required()
+@role_required("admin", "tecadm", "diretor", "coordenador")
+def get_respostas_report(form_id):
+    """
+    Obtém relatório "Respostas do socioeconômico": por questão, quantidade de respostas,
+    porcentagem sobre o total, contagem por opção e quem respondeu / o que respondeu.
+    
+    Query params:
+    - state, municipio, escola, serie, turma: Filtros
+    - page: Página para listas de alunos (default: 1)
+    - limit: Limite de alunos por página (default: 20)
+    """
+    try:
+        filters = {
+            'state': request.args.get('state'),
+            'municipio': request.args.get('municipio'),
+            'escola': request.args.get('escola'),
+            'serie': request.args.get('serie'),
+            'turma': request.args.get('turma')
+        }
+        filters = {k: v for k, v in filters.items() if v}
+        page = int(request.args.get('page', 1))
+        limit = int(request.args.get('limit', 20))
+        
+        status = ResultsCacheService.get_status(form_id, 'respostas', filters)
+        
+        if status['status'] == 'ready':
+            result = ResultsCacheService.get_result(form_id, 'respostas', filters)
+            return jsonify(result), 200
+        
+        schema = _get_tenant_schema()
+        generate_responses_report.apply_async(
+            (form_id, filters, page, limit, schema),
+            ignore_result=True
+        )
+        return jsonify({
+            'status': 'processing',
+            'message': 'Relatório sendo gerado em background. Faça polling neste mesmo endpoint (GET respostas) até receber 200 com os dados.',
+            'pollSameUrl': True,
+            'cacheStatus': status
+        }), 202  # HTTP 202 Accepted
+        
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        logger.error(f"Erro ao obter relatório de respostas: {str(e)}", exc_info=True)
+        return jsonify({"error": "Erro ao processar solicitação", "details": str(e)}), 500
+
+
 @bp.route('/<form_id>/results/status/<task_id>', methods=['GET'])
 @jwt_required()
 @role_required("admin", "tecadm", "diretor", "coordenador")
 def check_task_status(form_id, task_id):
     """
     Verifica status de uma task Celery.
-    Frontend deve fazer polling neste endpoint até status = 'completed'.
+    Para resultados de formulários usamos ignore_result; use polling no mesmo endpoint
+    GET .../results/indices ou .../results/profiles até receber 200.
     """
     try:
         task = AsyncResult(task_id, app=celery_app)
-        
         if task.ready():
             if task.successful():
                 task_result = task.result
@@ -149,22 +256,20 @@ def check_task_status(form_id, task_id):
                     'studentCount': task_result.get('student_count', 0)
                 }), 200
             else:
-                # Task falhou
                 error_info = str(task.info) if task.info else "Erro desconhecido"
-                return jsonify({
-                    'status': 'failed',
-                    'error': error_info
-                }), 500
-        else:
-            # Task ainda está processando
-            return jsonify({
-                'status': 'processing',
-                'progress': task.info.get('progress', 0) if isinstance(task.info, dict) else 0
-            }), 200
-        
+                return jsonify({'status': 'failed', 'error': error_info}), 500
+        return jsonify({
+            'status': 'processing',
+            'progress': task.info.get('progress', 0) if isinstance(task.info, dict) else 0
+        }), 200
     except Exception as e:
-        logger.error(f"Erro ao verificar status da task: {str(e)}", exc_info=True)
-        return jsonify({"error": "Erro ao verificar status", "details": str(e)}), 500
+        # Result backend (Redis) pode falhar em alguns ambientes; orientar a usar polling no mesmo URL
+        logger.warning(f"Status da task não disponível (use polling no endpoint de indices/profiles): {e}")
+        return jsonify({
+            'status': 'processing',
+            'message': 'Faça polling no mesmo endpoint GET .../results/indices ou .../results/profiles com os mesmos filtros até receber 200 com os dados.',
+            'pollSameUrl': True
+        }), 200
 
 
 @bp.route('/<form_id>/results/cache/invalidate', methods=['POST'])
@@ -232,7 +337,8 @@ def populate_form_cache(form_id):
     Identifica automaticamente os filtros únicos e gera resultados para cada combinação.
     """
     try:
-        task = populate_initial_cache_for_form.delay(form_id)
+        schema = _get_tenant_schema()
+        task = populate_initial_cache_for_form.delay(form_id, schema)
         
         return jsonify({
             'message': 'População de cache iniciada',
@@ -251,13 +357,14 @@ def populate_form_cache(form_id):
 @role_required("admin", "tecadm")
 def populate_all_forms_cache_endpoint():
     """
-    Popula cache inicial de TODOS os formulários que têm respostas.
+    Popula cache inicial de TODOS os formulários que têm respostas (no tenant atual).
     
     ⚠️ ATENÇÃO: Esta operação pode gerar muitas tasks e levar tempo.
     Use apenas uma vez para migração inicial ou com cautela.
     """
     try:
-        task = populate_all_forms_cache.delay()
+        schema = _get_tenant_schema()
+        task = populate_all_forms_cache.delay(schema)
         
         return jsonify({
             'message': 'População de cache de todos os formulários iniciada',

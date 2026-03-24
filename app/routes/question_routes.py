@@ -1,4 +1,4 @@
-from flask import Blueprint, request, jsonify
+from flask import Blueprint, request, jsonify, send_file
 from app.models.question import Question
 from app.models.subject import Subject
 from app.models.grades import Grade
@@ -9,9 +9,11 @@ from app.models.user import User
 from app.models.studentAnswer import StudentAnswer
 from app import db
 from app.decorators.role_required import get_current_tenant_id
+from app.decorators.tenant_required import get_current_tenant_context
 from flask_jwt_extended import jwt_required
 from app.decorators.role_required import role_required, get_current_user_from_token
 from sqlalchemy.exc import SQLAlchemyError, IntegrityError
+from sqlalchemy import or_, and_, text
 from datetime import datetime
 import logging
 import base64
@@ -19,6 +21,8 @@ import uuid
 import os
 from PIL import Image
 import io
+import re
+from io import BytesIO
 from sqlalchemy.orm import aliased, joinedload, subqueryload
 from app.utils.response_formatters import format_question_response, format_test_response
 
@@ -59,22 +63,78 @@ def process_image(image_data, image_type):
 
 def extract_images_from_html(html_content):
     """
-    Extrai imagens em base64 do conteúdo HTML
+    Extrai imagens em base64 do conteúdo HTML (legado; usado por migração).
+    Retorna lista de dicts com id, type, width, height, data (base64).
     """
-    import re
     images = []
-    
-    # Procura por tags img com src em base64
     img_pattern = r'<img[^>]+src="(data:image/[^;]+;base64,[^"]+)"[^>]*>'
-    matches = re.finditer(img_pattern, html_content)
-    
-    for match in matches:
+    for match in re.finditer(img_pattern, html_content or ''):
         base64_data = match.group(1)
         image_type = base64_data.split(';')[0].split(':')[1]
         image_info = process_image(base64_data, image_type)
         images.append(image_info)
-    
     return images
+
+
+def _mime_to_ext(mime):
+    """Mapeia MIME type para extensão de arquivo."""
+    m = (mime or '').lower()
+    if 'png' in m:
+        return 'png'
+    if 'jpeg' in m or 'jpg' in m:
+        return 'jpg'
+    if 'gif' in m:
+        return 'gif'
+    if 'webp' in m:
+        return 'webp'
+    return 'png'
+
+
+def _upload_html_base64_images_to_minio(question_id, html_content):
+    """
+    Extrai imagens base64 do HTML, envia para MinIO e substitui src por URL da API.
+    Retorna (novo_html, lista de metadados de imagens sem campo 'data').
+    """
+    if not html_content or 'data:image/' not in html_content:
+        return html_content, []
+    img_pattern = r'<img[^>]+src="(data:image/[^;]+;base64,[^"]+)"[^>]*>'
+    from app.services.storage.minio_service import MinIOService
+    minio = MinIOService()
+    bucket_name = MinIOService.BUCKETS['QUESTION_IMAGES']
+    new_html = html_content
+    images_meta = []
+    for match in re.finditer(img_pattern, html_content):
+        src = match.group(1)
+        b64 = src.split(',', 1)[1] if ',' in src else src
+        try:
+            image_bytes = base64.b64decode(b64)
+        except Exception as e:
+            logging.warning(f"Decode base64 image failed: {e}")
+            continue
+        mime = src.split(';')[0].split(':')[-1].strip()
+        image_id = str(uuid.uuid4())
+        ext = _mime_to_ext(mime)
+        image_name = f"{image_id}.{ext}"
+        result = minio.upload_question_image(question_id, image_bytes, image_name)
+        if not result:
+            logging.error(f"Upload question image failed for question {question_id}")
+            continue
+        try:
+            pil_img = Image.open(io.BytesIO(image_bytes))
+            width, height = pil_img.width, pil_img.height
+        except Exception:
+            width, height = None, None
+        images_meta.append({
+            "id": image_id,
+            "type": mime,
+            "width": width,
+            "height": height,
+            "minio_bucket": bucket_name,
+            "minio_object_name": result["object_name"],
+        })
+        api_url = f"/questions/{question_id}/images/{image_id}"
+        new_html = new_html.replace(src, api_url, 1)
+    return new_html, images_meta
 
 @bp.errorhandler(SQLAlchemyError)
 def handle_db_error(error):
@@ -107,14 +167,13 @@ def create_question():
             if field not in data:
                 return jsonify({"error": f"Missing required field: {field}"}), 400
 
-        # Processa imagens do texto formatado
-        images = []
-        if data.get('formattedText'):
-            images.extend(extract_images_from_html(data['formattedText']))
+        # Obter informações do usuário logado
+        current_user = get_current_user_from_token()
+        if not current_user:
+            return jsonify({"error": "User not authenticated"}), 401
         
-        # Processa imagens da solução formatada
-        if data.get('formattedSolution'):
-            images.extend(extract_images_from_html(data['formattedSolution']))
+        user_role = current_user.get('role')
+        user_city_id = current_user.get('tenant_id') or current_user.get('city_id')
 
         # Validações específicas por tipo de questão
         if data['type'] == 'multipleChoice':
@@ -134,12 +193,30 @@ def create_question():
                 # Se vier string, usar diretamente
                 skill_value = skills_input
         
+        # Definir scope_type, owner_city_id e owner_user_id baseado na role
+        scope_type = None
+        owner_city_id = None
+        owner_user_id = None
+        
+        if user_role == 'admin':
+            scope_type = 'GLOBAL'
+            owner_city_id = None
+            owner_user_id = None
+        elif user_role == 'tecadm':
+            scope_type = 'CITY'
+            owner_city_id = user_city_id
+            owner_user_id = None
+        else:  # professor, coordenador, diretor
+            scope_type = 'PRIVATE'
+            owner_city_id = None
+            owner_user_id = current_user.get('user_id')
+        
         question = Question(
             number=data.get('number'),
             text=data.get('text'),
             formatted_text=data.get('formattedText'),
             secondstatement=data.get('secondStatement'),
-            images=images,
+            images=[],
             subject_id=data.get('subjectId'),
             title=data.get('title'),
             description=data.get('description'),
@@ -157,11 +234,42 @@ def create_question():
             version=data.get('version', 1),
             created_by=data.get('createdBy'),
             last_modified_by=data.get('lastModifiedBy'),
-            education_stage_id=data.get('educationStageId')
+            education_stage_id=data.get('educationStageId'),
+            scope_type=scope_type,
+            owner_city_id=owner_city_id,
+            owner_user_id=owner_user_id
         )
 
+        # MULTITENANT: Todas as questões agora vão para public.question
+        # Salvar temporariamente o search_path atual
+        current_search_path = db.session.execute(text("SHOW search_path")).fetchone()[0]
+        
+        # Mudar para public para salvar todas as questões
+        db.session.execute(text("SET search_path TO public"))
+        
         db.session.add(question)
         db.session.commit()
+        
+        # Restaurar search_path original
+        db.session.execute(text(f"SET search_path TO {current_search_path}"))
+
+        # Enviar imagens base64 para MinIO e substituir por URL da API
+        new_formatted_text = question.formatted_text
+        new_formatted_solution = question.formatted_solution
+        images_meta = []
+        if question.formatted_text:
+            new_formatted_text, meta_text = _upload_html_base64_images_to_minio(question.id, question.formatted_text)
+            images_meta.extend(meta_text)
+        if question.formatted_solution:
+            new_formatted_solution, meta_solution = _upload_html_base64_images_to_minio(question.id, question.formatted_solution)
+            images_meta.extend(meta_solution)
+        if images_meta:
+            question.formatted_text = new_formatted_text
+            question.formatted_solution = new_formatted_solution
+            question.images = images_meta
+            db.session.execute(text("SET search_path TO public"))
+            db.session.commit()
+            db.session.execute(text(f"SET search_path TO {current_search_path}"))
 
         return jsonify({
             "message": "Question created successfully",
@@ -173,11 +281,69 @@ def create_question():
         logging.error(f"Error creating question: {str(e)}", exc_info=True)
         return jsonify({"error": "Error creating question", "details": str(e)}), 500
 
+@bp.route('/debug', methods=['GET'])
+@jwt_required()
+@role_required("admin", "professor", "coordenador", "diretor", "tecadm")
+def debug_questions():
+    """Endpoint de debug para verificar questões e contexto"""
+    try:
+        from sqlalchemy import text
+        context = get_current_tenant_context()
+        
+        # Verificar search_path atual
+        search_path = db.session.execute(text("SHOW search_path")).scalar()
+        
+        # Contar questões sem filtro
+        total_questions = db.session.execute(text("SELECT COUNT(*) FROM public.question")).scalar()
+        
+        # Contar por scope_type
+        global_count = db.session.execute(text("SELECT COUNT(*) FROM public.question WHERE scope_type = 'GLOBAL'")).scalar()
+        city_count = db.session.execute(text("SELECT COUNT(*) FROM public.question WHERE scope_type = 'CITY'")).scalar()
+        private_count = db.session.execute(text("SELECT COUNT(*) FROM public.question WHERE scope_type = 'PRIVATE'")).scalar()
+        null_scope = db.session.execute(text("SELECT COUNT(*) FROM public.question WHERE scope_type IS NULL")).scalar()
+        
+        # Contar questões CITY para a cidade atual
+        city_questions = 0
+        if context and context.city_id:
+            city_questions = db.session.execute(
+                text("SELECT COUNT(*) FROM public.question WHERE scope_type = 'CITY' AND owner_city_id = :city_id"),
+                {"city_id": context.city_id}
+            ).scalar()
+        
+        # Testar query ORM
+        orm_count = Question.query.count()
+        
+        return jsonify({
+            "context": {
+                "city_id": context.city_id if context else None,
+                "city_slug": context.city_slug if context else None,
+                "schema": context.schema if context else None,
+                "has_tenant_context": context.has_tenant_context if context else False
+            },
+            "database": {
+                "search_path": search_path,
+                "total_questions": total_questions,
+                "global_questions": global_count,
+                "city_questions": city_count,
+                "private_questions": private_count,
+                "null_scope": null_scope,
+                "city_specific_questions": city_questions
+            },
+            "orm": {
+                "questions_found": orm_count
+            },
+            "info": "Todas as questões agora estão em public.question com scope_type: GLOBAL, CITY ou PRIVATE"
+        }), 200
+    except Exception as e:
+        logging.error(f"Error in debug endpoint: {str(e)}", exc_info=True)
+        return jsonify({"error": str(e)}), 500
+
 @bp.route('/', methods=['GET'])
 @jwt_required()
 @role_required("admin", "professor", "coordenador", "diretor", "tecadm")
 def list_questions():
     try:
+        
         user = get_current_user_from_token()
         if not user:
             return jsonify({"error": "User not found or token invalid"}), 401
@@ -186,6 +352,8 @@ def list_questions():
         question_type = request.args.get('type')
         subject_id = request.args.get('subject_id')
         created_by = request.args.get('created_by')
+        
+        
         
         # Se um test_id foi fornecido, retorna a avaliação completa com suas questões
         if test_id:
@@ -212,6 +380,18 @@ def list_questions():
             return jsonify(format_test_response(test)), 200
         
         # Se não foi fornecido test_id, retorna apenas as questões (comportamento original)
+        
+        
+        # FILTRO MULTITENANT: Aplicar escopo de questões
+        context = get_current_tenant_context()
+        
+        
+        # Salvar search_path atual
+        current_search_path = db.session.execute(text("SHOW search_path")).fetchone()[0]
+        
+        # Forçar busca em public.question (todas as questões agora estão aqui)
+        db.session.execute(text("SET search_path TO public"))
+        
         query = Question.query.options(
             joinedload(Question.subject),
             joinedload(Question.grade),
@@ -220,27 +400,122 @@ def list_questions():
             joinedload(Question.last_modifier)
         )
         
-        # ALTERAÇÃO: Permitir acesso a todo o banco de questões
-        # Anteriormente professores só viam suas próprias questões
-        # Agora todos os usuários (admin, professor, coordenador, diretor) 
-        # podem acessar todo o banco de questões para criar avaliações mais ricas
+        # Construir filtros de scope baseado na role e contexto
+        scope_filters = []
         
-        # Filtro específico por created_by apenas se solicitado explicitamente
-        if created_by:
-            query = query.filter(Question.created_by == created_by)
-
+        # 1. GLOBAL: todos podem ver
+        scope_filters.append(Question.scope_type == 'GLOBAL')
+        
+        # 2. CITY: apenas do município atual (se tiver contexto)
+        if context and context.city_id:
+            scope_filters.append(
+                and_(
+                    Question.scope_type == 'CITY',
+                    Question.owner_city_id == context.city_id
+                )
+            )
+        
+        # 3. PRIVATE: apenas do próprio usuário
+        if user.get('id'):
+            scope_filters.append(
+                and_(
+                    Question.scope_type == 'PRIVATE',
+                    Question.owner_user_id == user.get('id')
+                )
+            )
+        
+        # Aplicar filtro de scope (OR entre todos os filtros)
+        query = query.filter(or_(*scope_filters))
+        
+        # Aplicar filtros adicionais
         if question_type:
             query = query.filter(Question.question_type == question_type)
         if subject_id:
             query = query.filter(Question.subject_id == subject_id)
-
+        
+        # FILTRO created_by: se fornecido na URL, SEMPRE aplicar
+        if created_by:
+            query = query.filter(Question.created_by == created_by)
+        
         questions = query.all()
+        
+        
+        # Restaurar search_path original
+        db.session.execute(text(f"SET search_path TO {current_search_path}"))
         
         return jsonify([format_question_response(q) for q in questions]), 200
 
     except Exception as e:
         logging.error(f"Error listing questions: {str(e)}", exc_info=True)
         return jsonify({"error": "Error listing questions", "details": str(e)}), 500
+
+
+@bp.route('/batch', methods=['GET'])
+@jwt_required()
+@role_required("admin", "professor", "coordenador", "diretor", "tecadm")
+def get_questions_batch():
+    """
+    Retorna várias questões em uma única requisição.
+    Query: ids=uuid1,uuid2,uuid3 (máx. 100 IDs).
+    Evita ERR_EMPTY_RESPONSE ao carregar muitas questões em paralelo (ex.: detalhes de competição).
+    """
+    try:
+        ids_param = request.args.get('ids', '')
+        if not ids_param or not ids_param.strip():
+            return jsonify({"error": "Parâmetro ids é obrigatório (ex.: ?ids=uuid1,uuid2)"}), 400
+        raw_ids = [x.strip() for x in ids_param.split(',') if x.strip()]
+        if len(raw_ids) > 100:
+            return jsonify({"error": "Máximo de 100 questões por requisição"}), 400
+        if not raw_ids:
+            return jsonify([]), 200
+
+        questions = (
+            Question.query.options(
+                joinedload(Question.subject),
+                joinedload(Question.grade),
+                joinedload(Question.education_stage),
+                joinedload(Question.creator),
+                joinedload(Question.last_modifier),
+            )
+            .filter(Question.id.in_(raw_ids))
+            .all()
+        )
+        # Manter ordem dos IDs solicitados
+        by_id = {str(q.id): q for q in questions}
+        ordered = [format_question_response(by_id[qid]) for qid in raw_ids if qid in by_id]
+        return jsonify(ordered), 200
+    except Exception as e:
+        logging.error(f"Error in get_questions_batch: {str(e)}", exc_info=True)
+        return jsonify({"error": "Erro ao buscar questões em lote", "details": str(e)}), 500
+
+
+@bp.route('/<string:question_id>/images/<string:image_id>', methods=['GET'])
+def get_question_image(question_id, image_id):
+    """
+    Serve imagem de questão a partir do MinIO.
+    Não expõe URLs do MinIO; retorna o binário com Content-Type correto.
+    """
+    try:
+        question = Question.query.get(question_id)
+        if not question:
+            return jsonify({"error": "Question not found"}), 404
+        images = question.images or []
+        image_meta = next((img for img in images if isinstance(img, dict) and img.get("id") == image_id), None)
+        if not image_meta:
+            return jsonify({"error": "Image not found"}), 404
+        bucket = image_meta.get("minio_bucket")
+        object_name = image_meta.get("minio_object_name")
+        if not bucket or not object_name:
+            return jsonify({"error": "Image not stored in MinIO"}), 404
+        from app.services.storage.minio_service import MinIOService
+        minio = MinIOService()
+        data = minio.download_file(bucket_name=bucket, object_name=object_name)
+        content_type = image_meta.get("type") or "application/octet-stream"
+        return send_file(BytesIO(data), mimetype=content_type, as_attachment=False)
+    except Exception as e:
+        logging.error(f"Error serving question image: {str(e)}", exc_info=True)
+        return jsonify({"error": "Error loading image", "details": str(e)}), 500
+
 
 @bp.route('/<string:question_id>', methods=['GET'])
 @jwt_required()
@@ -261,8 +536,34 @@ def get_question(question_id):
         return jsonify(format_question_response(question)), 200
 
     except Exception as e:
-        logging.error(f"Error getting question: {str(e)}", exc_info=True)
+        logging.error(f"Error getting question {question_id}: {str(e)}", exc_info=True)
         return jsonify({"error": "Error getting question", "details": str(e)}), 500
+
+
+@bp.route('/<string:question_id>/quantidade-respostas', methods=['GET'])
+@jwt_required()
+@role_required("admin", "professor", "coordenador", "diretor", "tecadm")
+def get_question_answer_count(question_id):
+    """
+    Retorna a quantidade de vezes que uma questão foi respondida (total de
+    registros em StudentAnswer para essa question_id).
+    """
+    try:
+        question = Question.query.get(question_id)
+        if not question:
+            return jsonify({"error": "Questão não encontrada"}), 404
+        quantidade = StudentAnswer.query.filter(StudentAnswer.question_id == question_id).count()
+        return jsonify({
+            "question_id": question_id,
+            "quantidade": quantidade,
+        }), 200
+    except SQLAlchemyError as e:
+        db.session.rollback()
+        return jsonify({"error": "Erro ao buscar quantidade de respostas", "details": str(e)}), 500
+    except Exception as e:
+        logging.error(f"Error getting question answer count: {str(e)}", exc_info=True)
+        return jsonify({"error": "Erro ao buscar quantidade de respostas", "details": str(e)}), 500
+
 
 @bp.route('/<string:question_id>', methods=['PUT'])
 @jwt_required()
@@ -327,7 +628,30 @@ def update_question(question_id):
             else:
                 # Se vier string, usar diretamente
                 question.skill = skills_input
-        
+
+        # Enviar novas imagens base64 para MinIO e substituir por URL da API
+        if 'formattedText' in data or 'formattedSolution' in data:
+            ft = question.formatted_text or ''
+            fs = question.formatted_solution or ''
+            new_ft, meta_t = _upload_html_base64_images_to_minio(question_id, ft)
+            new_fs, meta_s = _upload_html_base64_images_to_minio(question_id, fs)
+            existing_by_id = {
+                img['id']: img for img in (question.images or [])
+                if isinstance(img, dict) and img.get('minio_object_name')
+            }
+            new_meta_by_id = {m['id']: m for m in meta_t + meta_s}
+            ids_in_ft = re.findall(r'/questions/[^/]+/images/([a-f0-9-]{36})', new_ft)
+            ids_in_fs = re.findall(r'/questions/[^/]+/images/([a-f0-9-]{36})', new_fs)
+            all_ids = list(dict.fromkeys(ids_in_ft + ids_in_fs))
+            images_list = [
+                new_meta_by_id.get(iid) or existing_by_id.get(iid)
+                for iid in all_ids
+                if new_meta_by_id.get(iid) or existing_by_id.get(iid)
+            ]
+            question.formatted_text = new_ft
+            question.formatted_solution = new_fs
+            question.images = images_list
+
         question.version += 1
 
         db.session.commit()

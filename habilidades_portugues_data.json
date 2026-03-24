@@ -1,0 +1,25 @@
+{
+  "habilidades": [
+    {
+      "code": "CEEF01LP01",
+      "description": "Identificar as múltiplas linguagens que fazem parte do cotidiano da criança.",
+      "subject_id": "4d29b4f1-7bd7-42c0-84d5-111dc7025b90",
+      "grade_id": null,
+      "comment": "Compartilhada: 1º, 2º, 3º, 4º e 5º Ano"
+    },
+    {
+      "code": "EF15LP01",
+      "description": "Identificar a função social de textos que circulam em campos da vida social dos quais participa cotidianamente (a casa, a rua, a comunidade, a escola) e nas mídias impressa, de massa e digital, reconhecendo para que foram produzidos, onde circulam, quem os produziu e a quem se destinam.",
+      "subject_id": "4d29b4f1-7bd7-42c0-84d5-111dc7025b90",
+      "grade_id": null,
+      "comment": "Compartilhada: 1º, 2º, 3º, 4º e 5º Ano"
+    },
+    {
+      "code": "EF01LP01",
+      "description": "Reconhecer que textos são lidos e escritos da esquerda para a direita e de cima para baixo da página.",
+      "subject_id": "4d29b4f1-7bd7-42c0-84d5-111dc7025b90",
+      "grade_id": "391ed6e8-fc45-46f8-8e4c-065005d2329f",
+      "comment": "Única: 1º Ano"
+    }
+  ]
+}

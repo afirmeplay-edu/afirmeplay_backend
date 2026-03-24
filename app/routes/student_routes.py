@@ -1,4 +1,4 @@
-from flask import Blueprint, request, jsonify, Response
+from flask import Blueprint, request, jsonify, Response, make_response
 from app.models.student import Student
 from app.models.user import User, RoleEnum
 from app.models.school import School
@@ -6,6 +6,7 @@ from app.models.studentPasswordLog import StudentPasswordLog
 from sqlalchemy.exc import SQLAlchemyError, IntegrityError
 import logging
 from app.decorators.role_required import role_required, get_current_user_from_token
+from app.decorators import requires_city_context
 from app.decorators.role_required import get_current_tenant_id
 from datetime import datetime
 from app import db
@@ -25,8 +26,20 @@ from sqlalchemy.orm import joinedload
 from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill, Alignment
 from io import BytesIO
+import os
+import shutil
+import tempfile
+from jinja2 import Environment, FileSystemLoader, select_autoescape
+from weasyprint import HTML
 
 bp = Blueprint('students', __name__, url_prefix="/students")
+
+
+def _get_logo_path():
+    """Retorna o caminho absoluto da logo do app (app/assets/afirme_logo.png) ou None."""
+    app_dir = os.path.dirname(os.path.dirname(__file__))
+    logo_path = os.path.join(app_dir, 'assets', 'afirme_logo.png')
+    return logo_path if os.path.exists(logo_path) else None
 
 @bp.errorhandler(SQLAlchemyError)
 def handle_db_error(error):
@@ -47,6 +60,7 @@ def handle_generic_error(error):
 @bp.route("", methods=['POST'])
 @jwt_required()
 @role_required("admin", "professor", "coordenador", "diretor", "tecadm")
+@requires_city_context
 def criar_usuario_e_aluno():
     try:
         logging.info("Iniciando criação de usuário/aluno combinada")
@@ -295,21 +309,18 @@ def listar_alunos():
             else:
                 return jsonify({"message": "Professor não está alocado em nenhuma escola"}), 400
         elif user['role'] in ["diretor", "coordenador"]:
-            # Diretor e coordenador veem alunos apenas de sua escola
-            # Precisamos buscar a escola do usuário
-            from app.models.teacher import Teacher
-            from app.models.schoolTeacher import SchoolTeacher
-            
-            teacher = Teacher.query.filter_by(user_id=user['id']).first()
-            if not teacher:
-                return jsonify({"message": "Usuário não encontrado como professor/diretor/coordenador"}), 404
-            
-            # Buscar a escola do diretor/coordenador
-            teacher_school = SchoolTeacher.query.filter_by(teacher_id=teacher.id).first()
-            if not teacher_school:
+            # Diretor e coordenador veem alunos apenas de sua escola (via Manager, não Teacher)
+            from app.models.manager import Manager
+            from app.utils.uuid_helpers import uuid_to_str
+
+            manager = Manager.query.filter_by(user_id=user['id']).first()
+            if not manager:
+                return jsonify({"message": "Diretor/Coordenador não encontrado na tabela manager"}), 404
+            school_id_str = uuid_to_str(manager.school_id) if manager.school_id else None
+            if not school_id_str:
                 return jsonify({"message": "Diretor/Coordenador não está vinculado a nenhuma escola"}), 400
-            
-            students = query.filter(Student.school_id == teacher_school.school_id).all()
+
+            students = query.filter(Student.school_id == school_id_str).all()
         else:
             # TecAdmin vê alunos de todas as escolas do município + alunos sem escola mas com city_id
             city_id = user.get('tenant_id') or user.get('city_id')
@@ -405,16 +416,15 @@ def obter_aluno_completo(student_id):
             if not school_ids or (student_obj.school_id and student_obj.school_id not in school_ids):
                 return jsonify({"message": "Você não tem permissão para visualizar este aluno"}), 403
         elif user['role'] in ["diretor", "coordenador"]:
-            # Diretor e coordenador só podem ver alunos de sua escola
-            from app.models.teacher import Teacher
-            from app.models.schoolTeacher import SchoolTeacher
-            
-            teacher = Teacher.query.filter_by(user_id=user['id']).first()
-            if not teacher:
-                return jsonify({"message": "Usuário não encontrado como diretor/coordenador"}), 404
-            
-            teacher_school = SchoolTeacher.query.filter_by(teacher_id=teacher.id).first()
-            if not teacher_school or student_obj.school_id != teacher_school.school_id:
+            # Diretor e coordenador só podem ver alunos de sua escola (via Manager)
+            from app.models.manager import Manager
+            from app.utils.uuid_helpers import uuid_to_str
+
+            manager = Manager.query.filter_by(user_id=user['id']).first()
+            if not manager:
+                return jsonify({"message": "Diretor/Coordenador não encontrado"}), 404
+            manager_school_id_str = uuid_to_str(manager.school_id) if manager.school_id else None
+            if not manager_school_id_str or student_obj.school_id != manager_school_id_str:
                 return jsonify({"message": "Você não tem permissão para visualizar este aluno"}), 403
         elif user['role'] == "tecadm":
             # TecAdmin só pode ver alunos do seu município
@@ -516,17 +526,57 @@ def atualizar_aluno(student_id, class_id):
             return jsonify({"error": "No data provided"}), 400
 
         # Atualiza dados do usuário vinculado
-        usuario = aluno.usuario
+        usuario = aluno.user
         if not usuario:
             return jsonify({"error": "Associated user not found"}), 404
 
-        usuario.name = dados.get("name", usuario.name)
-        usuario.email = dados.get("email", usuario.email)
-        usuario.registration = dados.get("registration", usuario.registration)
+        # Armazenar valores antigos para tracking
+        old_class_id = aluno.class_id
+        old_school_id = aluno.school_id
+        class_changed = False
+        school_changed = False
+        
+        # Processar mudança de turma
+        if "class_id" in dados and dados["class_id"] != old_class_id:
+            from app.utils.uuid_helpers import ensure_uuid
+            new_class_id = ensure_uuid(dados["class_id"])
+            
+            if not new_class_id:
+                return jsonify({"error": "ID de turma inválido"}), 400
+            
+            # Buscar nova turma
+            from app.models.studentClass import Class
+            new_class = Class.query.get(new_class_id)
+            
+            if not new_class:
+                return jsonify({"error": "Nova turma não encontrada"}), 404
+            
+            # Atualizar turma
+            aluno.class_id = new_class_id
+            class_changed = True
+            
+            # Se a turma pertence a outra escola, atualizar automaticamente
+            if new_class.school_id != old_school_id:
+                aluno.school_id = new_class.school_id
+                school_changed = True
+                
+                # Atualizar city_id do usuário
+                new_school = School.query.get(new_class.school_id)
+                if new_school and new_school.city_id != usuario.city_id:
+                    usuario.city_id = new_school.city_id
+                    logging.info(f"Aluno {student_id} movido para escola {new_class.school_id}. City_id atualizado para {new_school.city_id}")
+        
+        # Atualizar outros dados do usuário
+        if "name" in dados:
+            usuario.name = dados["name"]
+        if "email" in dados:
+            usuario.email = dados["email"]
+        if "registration" in dados:
+            usuario.registration = dados["registration"]
 
-        # Atualiza dados do aluno
-        aluno.class_id = dados.get("class_id", aluno.class_id)
-        aluno.grade_id = dados.get("grade_id", aluno.grade_id)
+        # Atualizar série
+        if "grade_id" in dados:
+            aluno.grade_id = dados["grade_id"]
 
         # Atualiza data de nascimento se enviada
         if "birth_date" in dados:
@@ -535,18 +585,42 @@ def atualizar_aluno(student_id, class_id):
             except ValueError:
                 return jsonify({"error": "Invalid date format. Use YYYY-MM-DD"}), 400
 
-        # Atualizar city_id do usuário se o aluno foi movido para outra escola
-        if aluno.school_id:
-            # ✅ CORRIGIDO: Converter para string (School.id é VARCHAR)
-            from app.utils.uuid_helpers import uuid_to_str
-            school_id_str = uuid_to_str(aluno.school_id)
-            school = School.query.filter(School.id == school_id_str).first() if school_id_str else None
+        # Se school_id mudou mas class_id não (caso raro), atualizar city_id
+        if not class_changed and aluno.school_id:
+            school = School.query.get(aluno.school_id)
             if school and school.city_id != usuario.city_id:
                 usuario.city_id = school.city_id
                 logging.info(f"Atualizando city_id do aluno {usuario.id} para {school.city_id}")
 
         db.session.commit()
-        return jsonify({"message": "Student updated successfully"}), 200
+        
+        # Preparar resposta detalhada
+        response = {
+            "message": "Aluno atualizado com sucesso",
+            "student": {
+                "id": aluno.id,
+                "name": usuario.name,
+                "email": usuario.email,
+                "class_id": str(aluno.class_id) if aluno.class_id else None,
+                "school_id": aluno.school_id,
+                "grade_id": str(aluno.grade_id) if aluno.grade_id else None
+            },
+            "changes": {
+                "class_changed": class_changed,
+                "school_changed": school_changed
+            }
+        }
+        
+        if class_changed or school_changed:
+            response["relocation"] = {
+                "old_class_id": str(old_class_id) if old_class_id else None,
+                "new_class_id": str(aluno.class_id) if aluno.class_id else None,
+                "old_school_id": old_school_id,
+                "new_school_id": aluno.school_id,
+                "city_updated": school_changed
+            }
+        
+        return jsonify(response), 200
 
     except IntegrityError as e:
         db.session.rollback()
@@ -567,8 +641,8 @@ def deletar_aluno(aluno_id):
             return jsonify({"error": "Student not found"}), 404
 
         # Verifica se existe usuário associado
-        if aluno.usuario:
-            db.session.delete(aluno.usuario)
+        if aluno.user:
+            db.session.delete(aluno.user)
         
         db.session.delete(aluno)
         db.session.commit()
@@ -1049,9 +1123,23 @@ def get_current_student():
     Inclui: nome completo, escola, estado, município, turma, série e professores
     """
     try:
+        from app.utils.tenant_middleware import get_current_tenant_context, set_search_path, city_id_to_schema_name
+
         user = get_current_user_from_token()
         if not user:
             return jsonify({"error": "Usuário não encontrado"}), 404
+
+        # Garantir schema do tenant: Student está em city_xxx, não em public
+        tenant_ctx = get_current_tenant_context()
+        if not tenant_ctx or not getattr(tenant_ctx, "has_tenant_context", False) or tenant_ctx.schema == "public":
+            user_obj = User.query.get(user["id"])
+            if user_obj and getattr(user_obj, "city_id", None):
+                schema = city_id_to_schema_name(str(user_obj.city_id))
+                set_search_path(schema)
+            else:
+                return jsonify({
+                    "error": "Contexto do município não disponível. Acesse pelo subdomínio da cidade (ex: cidade.afirmeplay.com.br) ou verifique se o usuário está vinculado a um município."
+                }), 400
 
         # Buscar aluno pelo user_id com todas as relações
         student = db.session.query(
@@ -1356,3 +1444,187 @@ def get_password_report():
     except Exception as e:
         logging.error(f"Erro ao gerar relatório Excel de senhas: {str(e)}", exc_info=True)
         return jsonify({"error": "Erro ao gerar relatório", "details": str(e)}), 500
+
+
+@bp.route('/password-report/pdf', methods=['GET'])
+@jwt_required()
+@role_required("admin", "professor", "coordenador", "diretor", "tecadm")
+def get_password_report_pdf():
+    """
+    Retorna relatório de alunos com e-mails e senhas em formato PDF, agrupado por turma.
+    Inclui capa com nome da escola e tabelas por turma (Nome, E-mail, Senha, Matrícula).
+
+    Query Parameters:
+        school_id: Escola (obrigatório para admin/tecadm; diretor/coordenador usam a escola vinculada)
+        grade_id: Filtrar por série (opcional) – todas as turmas dessa série
+        class_id: Filtrar por turma (opcional) – apenas uma turma
+
+    Returns:
+        Arquivo PDF com capa e tabelas por turma.
+    """
+    try:
+        user = get_current_user_from_token()
+        if not user:
+            return jsonify({"error": "Usuário não encontrado"}), 401
+
+        # Construir query base (mesma do Excel)
+        query = db.session.query(
+            StudentPasswordLog,
+            School,
+            City,
+            Class,
+            Grade
+        ).outerjoin(
+            School, StudentPasswordLog.school_id == School.id
+        ).outerjoin(
+            City, StudentPasswordLog.city_id == City.id
+        ).outerjoin(
+            Class, StudentPasswordLog.class_id == Class.id
+        ).outerjoin(
+            Grade, StudentPasswordLog.grade_id == Grade.id
+        )
+
+        # Filtros por role
+        school_id_param = request.args.get('school_id')
+        if user['role'] == "admin":
+            if not school_id_param:
+                return jsonify({"error": "Para gerar o PDF é necessário informar school_id"}), 400
+            query = query.filter(StudentPasswordLog.school_id == school_id_param)
+        elif user['role'] == "tecadm":
+            city_id = user.get('tenant_id') or user.get('city_id')
+            if not city_id:
+                return jsonify({"error": "ID da cidade não disponível para este usuário"}), 400
+            query = query.filter(StudentPasswordLog.city_id == city_id)
+            if school_id_param:
+                query = query.filter(StudentPasswordLog.school_id == school_id_param)
+        elif user['role'] in ["diretor", "coordenador"]:
+            manager = Manager.query.filter_by(user_id=user['id']).first()
+            if not manager or not manager.school_id:
+                return jsonify({"error": "Diretor/Coordenador não está vinculado a nenhuma escola"}), 400
+            query = query.filter(StudentPasswordLog.school_id == manager.school_id)
+            school_id_param = str(manager.school_id)
+        elif user['role'] == "professor":
+            teacher = Teacher.query.filter_by(user_id=user['id']).first()
+            if not teacher:
+                return jsonify({"error": "Professor não encontrado"}), 404
+            school_teachers = SchoolTeacher.query.filter_by(teacher_id=teacher.id).all()
+            school_ids = [st.school_id for st in school_teachers]
+            if not school_ids:
+                return jsonify({"error": "Professor não está vinculado a nenhuma escola"}), 400
+            query = query.filter(StudentPasswordLog.school_id.in_(school_ids))
+            if len(school_ids) > 1 and not school_id_param:
+                return jsonify({"error": "Professor vinculado a mais de uma escola. Informe school_id para gerar o PDF."}), 400
+            if not school_id_param:
+                school_id_param = school_ids[0]
+            else:
+                query = query.filter(StudentPasswordLog.school_id == school_id_param)
+
+        class_id_param = request.args.get('class_id')
+        grade_id_param = request.args.get('grade_id')
+        if class_id_param:
+            query = query.filter(StudentPasswordLog.class_id == class_id_param)
+        if grade_id_param:
+            query = query.filter(StudentPasswordLog.grade_id == grade_id_param)
+
+        # Ordenar por série, turma e nome para agrupamento
+        query = query.order_by(
+            Grade.name.asc().nullslast(),
+            Class.name.asc().nullslast(),
+            StudentPasswordLog.student_name.asc()
+        )
+        results = query.all()
+
+        # Agrupar por turma (class_id + class_name + grade_name)
+        turmas_map = {}
+        for log, school, city, class_obj, grade in results:
+            class_id_key = str(log.class_id) if log.class_id else "_sem_turma_"
+            class_name = class_obj.name if class_obj else "—"
+            grade_name = grade.name if grade else "—"
+            key = (class_id_key, class_name, grade_name)
+            if key not in turmas_map:
+                turmas_map[key] = {"class_name": class_name, "grade_name": grade_name, "alunos": []}
+            turmas_map[key]["alunos"].append({
+                "student_name": log.student_name,
+                "email": log.email,
+                "password": log.password,
+                "registration": log.registration,
+            })
+
+        turmas = list(turmas_map.values())
+
+        # Metadados para a capa
+        escola_nome = None
+        municipio_nome = None
+        serie_label = None
+        if results:
+            _, school, city, _, grade = results[0]
+            escola_nome = school.name if school else None
+            municipio_nome = city.name if city else None
+            if grade_id_param and grade:
+                serie_label = grade.name
+            elif grade:
+                serie_label = grade.name
+        if not escola_nome and school_id_param:
+            school_obj = School.query.get(school_id_param)
+            escola_nome = school_obj.name if school_obj else None
+            if school_obj and school_obj.city_id:
+                city_obj = City.query.get(school_obj.city_id)
+                municipio_nome = city_obj.name if city_obj else None
+
+        total_alunos = sum(len(t["alunos"]) for t in turmas)
+        data_geracao = datetime.now().strftime("%d/%m/%Y %H:%M")
+
+        metadados = {
+            "titulo": "Relatório de Acesso dos Alunos",
+            "escola": escola_nome,
+            "municipio": municipio_nome,
+            "data_geracao": data_geracao,
+            "serie_label": serie_label if grade_id_param else None,
+            "total_alunos": total_alunos,
+            "show_logo": False,
+        }
+
+        templates_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'templates')
+        app_dir = os.path.dirname(os.path.dirname(__file__))
+        temp_dir = tempfile.mkdtemp()
+        try:
+            logo_src = _get_logo_path()
+            if logo_src:
+                logo_dest = os.path.join(temp_dir, 'afirme_logo.png')
+                shutil.copy2(logo_src, logo_dest)
+                metadados["show_logo"] = True
+        except Exception as e:
+            logging.warning(f"Logo não copiada para temp: {e}")
+
+        env = Environment(loader=FileSystemLoader(templates_dir), autoescape=select_autoescape(['html', 'xml']))
+        template = env.get_template('student_passwords_report.html')
+        html_content = template.render(metadados=metadados, turmas=turmas)
+
+        temp_html_path = os.path.join(temp_dir, 'report.html')
+        with open(temp_html_path, 'w', encoding='utf-8') as f:
+            f.write(html_content)
+
+        try:
+            pdf_content = HTML(
+                filename=temp_html_path,
+                base_url=temp_dir
+            ).write_pdf()
+        finally:
+            try:
+                shutil.rmtree(temp_dir, ignore_errors=True)
+            except Exception:
+                pass
+
+        safe_escola = (escola_nome or "escola").replace(" ", "_").replace("/", "_")[:40]
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        nome_arquivo = f"relatorio_acesso_alunos_{safe_escola}_{timestamp}.pdf"
+
+        response = make_response(pdf_content)
+        response.headers['Content-Type'] = 'application/pdf'
+        response.headers['Content-Disposition'] = f'attachment; filename="{nome_arquivo}"'
+        logging.info(f"Relatório PDF de senhas gerado. Escola: {escola_nome}, Alunos: {total_alunos}")
+        return response
+
+    except Exception as e:
+        logging.error(f"Erro ao gerar relatório PDF de senhas: {str(e)}", exc_info=True)
+        return jsonify({"error": "Erro ao gerar relatório PDF", "details": str(e)}), 500

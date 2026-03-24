@@ -25,12 +25,16 @@ from .evaluationResult import EvaluationResult
 from .manager import Manager
 from .physicalTestAnswer import PhysicalTestAnswer
 from .physicalTestForm import PhysicalTestForm
+from .physicalTestZip import PhysicalTestZip
 from .formCoordinates import FormCoordinates
 from .studentPasswordLog import StudentPasswordLog
 from .user_settings import UserSettings
 from .reportAggregate import ReportAggregate
 from .answerSheetGabarito import AnswerSheetGabarito
+from app.services.cartao_resposta.answer_sheet_gabarito_generation import AnswerSheetGabaritoGeneration
+from .answerSheetGenerationJob import AnswerSheetGenerationJob
 from .answerSheetResult import AnswerSheetResult
+from .answerSheetReportAggregate import AnswerSheetReportAggregate
 
 from .calendar_event import CalendarEvent, CalendarVisibilityScope
 from .calendar_event_target import CalendarEventTarget, CalendarTargetType
@@ -48,4 +52,10 @@ from app.certification.models import CertificateTemplate, Certificate
 from app.balance.models import StudentCoins, CoinTransaction
 
 # Competições
-from app.competitions.models import CompetitionTemplate, Competition
+from app.competitions.models import Competition
+
+# Calculadora de Metas IDEB
+from app.ideb_meta.models import IdebMetaSave
+
+# Loja (itens compráveis com afirmecoins)
+from app.store.models import StoreItem, StudentPurchase

@@ -38,9 +38,14 @@ def create_app():
     # Configuração do CORS
     CORS(app, resources={
         r"/*": {
-            "origins": [os.getenv('FRONTEND_URL'), "http://localhost:8080",],
+            "origins": [os.getenv('FRONTEND_URL'), "http://localhost:8080", re.compile(r"^https?://[a-zA-Z0-9-]+\.localhost:8080$")],
             "methods": ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-            "allow_headers": ["Content-Type", "Authorization"],
+            "allow_headers": [
+                "Content-Type", 
+                "Authorization",
+                "X-City-ID",      # Header para admin especificar cidade por UUID
+                "X-City-Slug"     # Header para admin especificar cidade por slug
+            ],
             "expose_headers": ["Authorization"],
             "supports_credentials": True
         }
@@ -60,6 +65,55 @@ def create_app():
     db.init_app(app)
     jwt.init_app(app)
     migrate.init_app(app, db)
+    
+    # ========================================
+    # MIDDLEWARE MULTI-TENANT
+    # ========================================
+    # Resolução automática de schema PostgreSQL por request
+    # baseado em: JWT token, headers X-City-ID/Slug, e subdomínio
+    
+    from .utils.tenant_middleware import tenant_middleware
+    from sqlalchemy import text
+    
+    @app.before_request
+    def handle_tenant_resolution():
+        """Middleware de resolução de contexto de tenant (cidade/município)"""
+        return tenant_middleware()
+    
+    @app.teardown_appcontext
+    def reset_search_path(exception=None):
+        """
+        Reseta o search_path do PostgreSQL após cada request.
+        Garante isolamento entre requests e compatibilidade com pool de conexões.
+        Se a transação estiver abortada, faz rollback antes de SET search_path.
+        """
+        try:
+            if exception:
+                db.session.rollback()
+            else:
+                try:
+                    db.session.commit()
+                except Exception as commit_error:
+                    app.logger.warning(f"Erro ao fazer commit no teardown: {commit_error}")
+                    db.session.rollback()
+
+            db.session.execute(text("SET search_path TO public"))
+        except Exception as e:
+            err_msg = str(e).lower()
+            if "aborted" in err_msg or "current transaction" in err_msg:
+                try:
+                    db.session.rollback()
+                    db.session.execute(text("SET search_path TO public"))
+                except Exception as e2:
+                    app.logger.error(f"Erro ao resetar search_path (após rollback): {e2}")
+            else:
+                app.logger.error(f"Erro ao resetar search_path: {e}")
+        finally:
+            db.session.remove()
+    
+    # ========================================
+    # FIM MIDDLEWARE MULTI-TENANT
+    # ========================================
     
     # Registrar filtros Jinja2 globais
     @app.template_filter('formatar_texto_ia')
@@ -135,7 +189,8 @@ def create_app():
         app.logger.warning(f"Celery não pôde ser inicializado: {str(e)}. Processamento assíncrono desabilitado.")
     
     # Importar rotas
-    from .routes import school_routes, test_routes, question_routes, login, logout, admin_route, educationStage_routes, grades_routes, persistUser_routes, city_routes, student_routes, user_routes, class_routes, schoolTeacher, teacherClass, professor_route, subject_routes, skill_routes,student_answer_routes, userQuickLinks_routes, evaluation_results_routes, basic_endpoints, evaluation_routes, game_routes, manager_routes, report_routes, physical_test_routes, student_grades_routes, calendar_routes, dashboard_routes, answer_sheet_routes
+    from .routes import school_routes, test_routes, question_routes, login, logout, admin_route, educationStage_routes, grades_routes, persistUser_routes, city_routes, student_routes, student_preferences_routes, user_routes, class_routes, schoolTeacher, teacherClass, professor_route, subject_routes, skill_routes, student_answer_routes, userQuickLinks_routes, evaluation_results_routes, basic_endpoints, evaluation_routes, game_routes, manager_routes, report_routes, student_grades_routes, calendar_routes, dashboard_routes, answer_sheet_routes, subdomain_routes, lista_frequencia_routes
+    from app.physical_tests.routes import bp as physical_test_bp
     from app.socioeconomic_forms.routes import socioeconomic_form_routes
     from app.socioeconomic_forms.routes import filter_routes
     from app.socioeconomic_forms.routes import results_routes
@@ -144,7 +199,9 @@ def create_app():
     from .plantao_online import routes as plantao_online_routes
     from app.certification.routes import certificate_routes
     from app.balance.routes import bp as balance_bp
-    from app.competitions.routes import bp as competitions_bp
+    from app.competitions.routes import competitions_bp
+    from app.ideb_meta.routes import bp as ideb_meta_bp
+    from app.store.routes import bp as store_bp
     # Importar rotas de report_analysis (processamento assíncrono)
     from app.report_analysis import routes as report_analysis_routes
     
@@ -160,6 +217,7 @@ def create_app():
     app.register_blueprint(persistUser_routes.bp)
     app.register_blueprint(city_routes.bp)
     app.register_blueprint(student_routes.bp)
+    app.register_blueprint(student_preferences_routes.bp)
     app.register_blueprint(user_routes.bp)
     app.register_blueprint(class_routes.bp)
     app.register_blueprint(schoolTeacher.school_teacher_bp)
@@ -176,13 +234,15 @@ def create_app():
     # Depois registrar report_routes (rotas antigas ficam como fallback para outras rotas)
     app.register_blueprint(report_routes.bp)
     app.register_blueprint(basic_endpoints.bp)
+    app.register_blueprint(subdomain_routes.bp)
     app.register_blueprint(game_routes.bp)
     app.register_blueprint(manager_routes.bp)
-    app.register_blueprint(physical_test_routes.bp)
+    app.register_blueprint(physical_test_bp)
     app.register_blueprint(student_grades_routes.bp)
     app.register_blueprint(calendar_routes.bp)
     app.register_blueprint(dashboard_routes.bp)
     app.register_blueprint(answer_sheet_routes.bp)
+    app.register_blueprint(lista_frequencia_routes.bp)
     app.register_blueprint(socioeconomic_form_routes.bp)
     app.register_blueprint(filter_routes.bp)
     app.register_blueprint(results_routes.bp)
@@ -192,72 +252,110 @@ def create_app():
     app.register_blueprint(certificate_routes.bp)
     app.register_blueprint(balance_bp)
     app.register_blueprint(competitions_bp)
+    app.register_blueprint(ideb_meta_bp)
+    app.register_blueprint(store_bp)
 
-    # Thread em background: finaliza competições expiradas a cada 15 min (sem depender de Celery Beat)
-    def _run_finalize_competitions_loop(app_ref):
-        import time
-        from sqlalchemy.exc import OperationalError
-        interval_seconds = 15 * 60  # 15 minutos
-        while True:
-            time.sleep(interval_seconds)
-            try:
-                with app_ref.app_context():
-                    from app.services.competition_ranking_service import CompetitionRankingService
-                    result = CompetitionRankingService.finalize_all_expired_competitions()
-                    if result.get("processed"):
-                        app_ref.logger.info(
-                            "Competições finalizadas em background: %s",
-                            result,
-                        )
-            except OperationalError as e:
-                # Conexão fechada pelo servidor/pool (idle timeout etc.): descartar sessão para próxima rodada usar conexão nova
-                if app_ref:
-                    with app_ref.app_context():
-                        try:
-                            db.session.rollback()
-                        except Exception:
-                            pass
-                        db.session.remove()
-                    if app_ref:
-                        app_ref.logger.warning(
-                            "Conexão com o banco fechada no loop de competições (será retentado em 15 min): %s",
-                            str(e),
-                        )
-            except Exception as e:
-                if app_ref:
-                    with app_ref.app_context():
-                        try:
-                            db.session.rollback()
-                        except Exception:
-                            pass
-                        db.session.remove()
-                    if app_ref:
-                        app_ref.logger.exception(
-                            "Erro no loop de finalização de competições: %s",
-                            str(e),
-                        )
-
-    try:
-        import threading
-        # Uma vez na subida: finalizar competições já expiradas
-        with app.app_context():
-            try:
-                from app.services.competition_ranking_service import CompetitionRankingService
-                r = CompetitionRankingService.finalize_all_expired_competitions()
-                if r.get("processed"):
-                    app.logger.info("Competições expiradas finalizadas na subida: %s", r)
-            except Exception as e:
-                app.logger.warning("Finalização na subida falhou: %s", str(e))
-        _competition_finalize_thread = threading.Thread(
-            target=_run_finalize_competitions_loop,
-            args=(app,),
-            daemon=True,
-            name="competition_finalize",
-        )
-        _competition_finalize_thread.start()
-        app.logger.info("Thread de finalização de competições iniciada (intervalo 15 min)")
-    except Exception as e:
-        app.logger.warning("Não foi possível iniciar thread de finalização de competições: %s", str(e))
+    # ========================================================================
+    # THREAD DE FINALIZAÇÃO DE COMPETIÇÕES REMOVIDA (multitenant + Gunicorn)
+    # Thread interna + Gunicorn = arquitetura inválida: SIGKILL/timeout não
+    # chama teardown; conexão com search_path sujo volta ao pool.
+    # Finalização de competições expiradas é feita via Celery Beat:
+    # competition_tasks.process_finished_competitions (a cada hora).
+    # Código comentado abaixo para restauração em caso de necessidade.
+    # ========================================================================
+    # def _run_finalize_competitions_loop(app_ref):
+    #     import time
+    #     from sqlalchemy.exc import OperationalError, ProgrammingError
+    #     interval_seconds = 15 * 60  # 15 minutos
+    #     while True:
+    #         time.sleep(interval_seconds)
+    #         try:
+    #             with app_ref.app_context():
+    #                 from app.services.competition_ranking_service import CompetitionRankingService
+    #                 result = CompetitionRankingService.finalize_all_expired_competitions()
+    #                 if result.get("processed"):
+    #                     app_ref.logger.info(
+    #                         "Competições finalizadas em background: %s",
+    #                         result,
+    #                     )
+    #         except ProgrammingError as e:
+    #             err = str(getattr(e, "orig", e))
+    #             if "does not exist" in err or "UndefinedColumn" in err:
+    #                 if app_ref:
+    #                     app_ref.logger.debug(
+    #                         "Loop de competições: schema ainda não atualizado, omitindo."
+    #                     )
+    #                 if app_ref:
+    #                     with app_ref.app_context():
+    #                         try:
+    #                             db.session.rollback()
+    #                         except Exception:
+    #                             pass
+    #                         db.session.remove()
+    #             else:
+    #                 if app_ref:
+    #                     app_ref.logger.warning("Erro de SQL no loop de competições: %s", str(e))
+    #                     with app_ref.app_context():
+    #                         try:
+    #                             db.session.rollback()
+    #                         except Exception:
+    #                             pass
+    #                         db.session.remove()
+    #         except OperationalError as e:
+    #             if app_ref:
+    #                 with app_ref.app_context():
+    #                     try:
+    #                         db.session.rollback()
+    #                     except Exception:
+    #                         pass
+    #                     db.session.remove()
+    #                 app_ref.logger.warning(
+    #                     "Conexão com o banco fechada no loop de competições (será retentado em 15 min): %s",
+    #                     str(e),
+    #                 )
+    #         except Exception as e:
+    #             if app_ref:
+    #                 with app_ref.app_context():
+    #                     try:
+    #                         db.session.rollback()
+    #                     except Exception:
+    #                         pass
+    #                     db.session.remove()
+    #                 app_ref.logger.exception(
+    #                     "Erro no loop de finalização de competições: %s",
+    #                     str(e),
+    #                 )
+    #
+    # try:
+    #     import threading
+    #     from sqlalchemy.exc import ProgrammingError
+    #     with app.app_context():
+    #         try:
+    #             from app.services.competition_ranking_service import CompetitionRankingService
+    #             r = CompetitionRankingService.finalize_all_expired_competitions()
+    #             if r.get("processed"):
+    #                 app.logger.info("Competições expiradas finalizadas na subida: %s", r)
+    #         except ProgrammingError as e:
+    #             err = str(e.orig) if getattr(e, "orig", None) else str(e)
+    #             if "does not exist" in err or "UndefinedColumn" in err:
+    #                 app.logger.debug(
+    #                     "Finalização na subida omitida (schema de competições ainda não atualizado): %s",
+    #                     err[:200],
+    #                 )
+    #             else:
+    #                 app.logger.warning("Finalização na subida falhou: %s", str(e))
+    #         except Exception as e:
+    #             app.logger.warning("Finalização na subida falhou: %s", str(e))
+    #     _competition_finalize_thread = threading.Thread(
+    #         target=_run_finalize_competitions_loop,
+    #         args=(app,),
+    #         daemon=True,
+    #         name="competition_finalize",
+    #     )
+    #     _competition_finalize_thread.start()
+    #     app.logger.info("Thread de finalização de competições iniciada (intervalo 15 min)")
+    # except Exception as e:
+    #     app.logger.warning("Não foi possível iniciar thread de finalização de competições: %s", str(e))
 
     # Importar modelos para garantir que as tabelas sejam criadas
     from .models import City, School, SchoolTeacher, Teacher, Student, Subject, Class, ClassSubject, ClassTest, Test, EducationStage, Grade, Skill, Question, StudentAnswer, UserQuickLinks, TeacherClass, User, Manager

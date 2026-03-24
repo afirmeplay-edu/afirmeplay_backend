@@ -17,7 +17,10 @@ class TestSession(db.Model):
     actual_start_time = db.Column(db.TIMESTAMP, nullable=True)  # Tempo real de início
     submitted_at = db.Column(db.TIMESTAMP, nullable=True)  # Quando o aluno finalizou
     time_limit_minutes = db.Column(db.Integer, nullable=True)  # Tempo limite em minutos
-    
+    # Pausa do timer: descomente após rodar a migration/SQL que adiciona as colunas em TODOS os schemas (public + city_xxx)
+    # paused_at = db.Column(db.TIMESTAMP, nullable=True)
+    # total_paused_seconds = db.Column(db.Integer, default=0, nullable=False)
+
     # Status da sessão
     status = db.Column(db.String(20), default='em_andamento')  # em_andamento, finalizada, expirada, corrigida, revisada
     
@@ -61,13 +64,21 @@ class TestSession(db.Model):
     
     @property
     def duration_minutes(self):
-        """Retorna a duração da sessão em minutos"""
+        """Retorna a duração da sessão em minutos (tempo decorrido entre started_at e submitted_at ou agora)."""
         if not self.started_at:
             return 0
-        
-        end_time = self.submitted_at or datetime.utcnow()
-        duration = end_time - self.started_at
-        return int(duration.total_seconds() / 60)
+        try:
+            from datetime import timezone
+            end_time = self.submitted_at or datetime.utcnow()
+            start = self.started_at
+            if start.tzinfo and not getattr(end_time, 'tzinfo', None):
+                end_time = end_time.replace(tzinfo=timezone.utc)
+            elif getattr(end_time, 'tzinfo', None) and not start.tzinfo:
+                start = start.replace(tzinfo=timezone.utc) if hasattr(start, 'replace') else start
+            duration = end_time - start
+            return int(duration.total_seconds() / 60)
+        except (TypeError, AttributeError):
+            return 0
     
     def calculate_grade(self):
         """Calcula a nota final baseada nos acertos"""

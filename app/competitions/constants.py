@@ -7,7 +7,8 @@ Constantes de competições: níveis e mapeamento com etapas de ensino.
 COMPETITION_LEVEL_VALID = (1, 2)
 
 # Escopos aceitos na criação/edição de competições (sem série)
-SCOPE_OPTIONS = ('individual', 'turma', 'escola', 'municipio', 'estado')
+# global = competição aberta para todos (torneios automáticos Afirmeplay)
+SCOPE_OPTIONS = ('individual', 'turma', 'escola', 'municipio', 'estado', 'global')
 
 # Rótulos para exibição (frontend / API)
 LEVEL_OPTIONS = [
@@ -39,6 +40,22 @@ STAGE_NAMES_BY_LEVEL = {
     1: LEVEL_1_STAGE_NAMES,
     2: LEVEL_2_STAGE_NAMES,
 }
+
+# Rótulos de exibição do status da competição (evita "desconhecido" no front)
+COMPETITION_STATUS_DISPLAY = {
+    'rascunho': 'Rascunho',
+    'aberta': 'Aberta',
+    'em_andamento': 'Em andamento',
+    'encerrada': 'Finalizada',
+    'cancelada': 'Cancelada',
+}
+
+
+def get_competition_status_display(status):
+    """Retorna o rótulo de exibição do status (ex.: encerrada → Finalizada)."""
+    if not status:
+        return 'Desconhecido'
+    return COMPETITION_STATUS_DISPLAY.get((status or '').strip().lower(), status)
 
 
 def is_valid_level(level):
@@ -74,7 +91,8 @@ def validate_scope_and_filter(scope, scope_filter):
         raise ValueError(
             f"Escopo deve ser um dos: {', '.join(SCOPE_OPTIONS)}"
         )
-    if scope == 'individual':
+    # individual e global não exigem scope_filter
+    if scope in ('individual', 'global'):
         return
     sf = scope_filter or {}
     if scope == 'municipio':

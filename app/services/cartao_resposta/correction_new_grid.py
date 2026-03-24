@@ -1851,32 +1851,31 @@ class AnswerSheetCorrectionNewGrid:
                         return {"success": False, "error": error_msg}
                 
                 elif test_id:
-                    # ✅ MODIFICADO: Para provas físicas, buscar em PhysicalTestForm ao invés de AnswerSheetGabarito
-                    from app.models.physicalTestForm import PhysicalTestForm
+                    # ✅ MODIFICADO: Buscar PRIMEIRO em AnswerSheetGabarito (fonte central)
+                    # Fallback: PhysicalTestForm (compatibilidade com provas antigas)
+                    gabarito_obj = AnswerSheetGabarito.query.filter_by(test_id=test_id).first()
                     
-                    # Buscar PhysicalTestForm por test_id (prova física)
-                    # Pegar o primeiro formulário da prova para obter os dados de correção
-                    physical_form = PhysicalTestForm.query.filter_by(test_id=test_id).first()
-                    
-                    if physical_form and physical_form.blocks_config and physical_form.correct_answers:
-                        # Criar objeto temporário compatível com a interface esperada
-                        class GabaritoTemp:
-                            def __init__(self, form):
-                                self.id = f"physical_{form.test_id}"
-                                self.test_id = form.test_id
-                                self.num_questions = form.num_questions
-                                self.use_blocks = form.use_blocks
-                                self.blocks_config = form.blocks_config
-                                self.correct_answers = form.correct_answers
-                        
-                        gabarito_obj = GabaritoTemp(physical_form)
-                        self.logger.info(f"✅ Dados de correção encontrados em PhysicalTestForm para test_id: {test_id[:8]}...")
+                    if gabarito_obj:
+                        self.logger.info(f"✅ Gabarito encontrado em AnswerSheetGabarito (fonte central) para test_id: {gabarito_obj.id[:8]}...")
                     else:
-                        # Fallback: tentar buscar em AnswerSheetGabarito (compatibilidade)
-                        gabarito_obj = AnswerSheetGabarito.query.filter_by(test_id=test_id).first()
+                        # Fallback: buscar em PhysicalTestForm (compatibilidade com provas antigas)
+                        from app.models.physicalTestForm import PhysicalTestForm
                         
-                        if gabarito_obj:
-                            self.logger.info(f"✅ Gabarito encontrado em AnswerSheetGabarito (fallback) para test_id: {gabarito_obj.id[:8]}...")
+                        physical_form = PhysicalTestForm.query.filter_by(test_id=test_id).first()
+                        
+                        if physical_form and physical_form.blocks_config and physical_form.correct_answers:
+                            # Criar objeto temporário compatível com a interface esperada
+                            class GabaritoTemp:
+                                def __init__(self, form):
+                                    self.id = f"physical_{form.test_id}"
+                                    self.test_id = form.test_id
+                                    self.num_questions = form.num_questions
+                                    self.use_blocks = form.use_blocks
+                                    self.blocks_config = form.blocks_config
+                                    self.correct_answers = form.correct_answers
+                            
+                            gabarito_obj = GabaritoTemp(physical_form)
+                            self.logger.info(f"✅ Dados de correção encontrados em PhysicalTestForm (fallback) para test_id: {test_id[:8]}...")
                         else:
                             # Último recurso: criar temporário a partir do Test
                             self.logger.warning(f"⚠️ Dados de correção não encontrados para test_id {test_id[:8]}..., montando dinamicamente")
@@ -2300,7 +2299,8 @@ class AnswerSheetCorrectionNewGrid:
                                       detected_answers: Dict[int, Optional[str]],
                                       correction: Dict[str, Any],
                                       grade: float, proficiency: float,
-                                      classification: str) -> Optional[Dict[str, Any]]:
+                                      classification: str,
+                                      proficiency_by_subject: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
         """Salva resultado em AnswerSheetResult (cartões resposta)"""
         try:
             from app.models.answerSheetResult import AnswerSheetResult
@@ -2323,11 +2323,22 @@ class AnswerSheetCorrectionNewGrid:
                 existing_result.grade = grade
                 existing_result.proficiency = proficiency if proficiency > 0 else None
                 existing_result.classification = classification
+                existing_result.proficiency_by_subject = proficiency_by_subject
                 existing_result.corrected_at = datetime.utcnow()
                 existing_result.detection_method = 'new_grid'
                 
                 db.session.commit()
                 self.logger.info(f"✅ AnswerSheetResult atualizado: {existing_result.id}")
+                try:
+                    from app.report_analysis.answer_sheet_aggregate_service import (
+                        invalidate_answer_sheet_report_cache_after_result,
+                    )
+
+                    invalidate_answer_sheet_report_cache_after_result(
+                        gabarito_id, student_id, commit=True
+                    )
+                except Exception as inv_err:
+                    self.logger.warning("Invalidate answer_sheet report cache: %s", inv_err)
                 return existing_result.to_dict()
             else:
                 # Criar novo
@@ -2344,12 +2355,23 @@ class AnswerSheetCorrectionNewGrid:
                     grade=grade,
                     proficiency=proficiency if proficiency > 0 else None,
                     classification=classification,
+                    proficiency_by_subject=proficiency_by_subject,
                     detection_method='new_grid'
                 )
                 
                 db.session.add(result)
                 db.session.commit()
                 self.logger.info(f"✅ AnswerSheetResult criado: {result.id}")
+                try:
+                    from app.report_analysis.answer_sheet_aggregate_service import (
+                        invalidate_answer_sheet_report_cache_after_result,
+                    )
+
+                    invalidate_answer_sheet_report_cache_after_result(
+                        gabarito_id, student_id, commit=True
+                    )
+                except Exception as inv_err:
+                    self.logger.warning("Invalidate answer_sheet report cache: %s", inv_err)
                 return result.to_dict()
                 
         except Exception as e:
@@ -2367,25 +2389,27 @@ class AnswerSheetCorrectionNewGrid:
         Primeiro salva respostas em StudentAnswer, depois calcula EvaluationResult
         """
         try:
-            # ✅ MODIFICADO: Buscar dados de correção em PhysicalTestForm para provas físicas
-            from app.models.physicalTestForm import PhysicalTestForm
+            # ✅ MODIFICADO: Buscar PRIMEIRO em AnswerSheetGabarito (fonte central)
+            # Fallback: PhysicalTestForm (compatibilidade com provas antigas)
+            from app.models.answerSheetGabarito import AnswerSheetGabarito
             
-            # 1. Buscar PhysicalTestForm para obter respostas corretas
-            physical_form = PhysicalTestForm.query.filter_by(test_id=test_id).first()
+            # 1. Buscar AnswerSheetGabarito (fonte central)
+            gabarito_obj = AnswerSheetGabarito.query.filter_by(test_id=test_id).first()
             
-            if not physical_form or not physical_form.correct_answers:
-                # Fallback: tentar buscar em AnswerSheetGabarito (compatibilidade)
-                from app.models.answerSheetGabarito import AnswerSheetGabarito
-                gabarito_obj = AnswerSheetGabarito.query.filter_by(test_id=test_id).first()
-                if gabarito_obj:
-                    correct_answers = gabarito_obj.correct_answers
-                    self.logger.info(f"✅ Dados de correção obtidos de AnswerSheetGabarito (fallback)")
+            if gabarito_obj and gabarito_obj.correct_answers:
+                correct_answers = gabarito_obj.correct_answers
+                self.logger.info(f"✅ Dados de correção obtidos de AnswerSheetGabarito (fonte central)")
+            else:
+                # Fallback: buscar em PhysicalTestForm (compatibilidade com provas antigas)
+                from app.models.physicalTestForm import PhysicalTestForm
+                physical_form = PhysicalTestForm.query.filter_by(test_id=test_id).first()
+                
+                if physical_form and physical_form.correct_answers:
+                    correct_answers = physical_form.correct_answers
+                    self.logger.info(f"✅ Dados de correção obtidos de PhysicalTestForm (fallback)")
                 else:
                     self.logger.error(f"Gabarito não encontrado para test_id={test_id}")
                     return None
-            else:
-                correct_answers = physical_form.correct_answers
-                self.logger.info(f"✅ Dados de correção obtidos de PhysicalTestForm")
             
             # Converter correct_answers para dict
             if isinstance(correct_answers, str):
@@ -2550,28 +2574,36 @@ class AnswerSheetCorrectionNewGrid:
             # Calcular grade (0-10)
             grade = correction.get('score', 0.0) / 10.0
             
-            # Calcular proficiência e classificação
+            # Calcular proficiência por disciplina e média geral (cartão resposta)
             proficiency = 0.0
             classification = "Não calculado"
+            proficiency_by_subject = None
+            gabarito_obj = None
             
             if gabarito_id:
-                # Buscar gabarito para calcular proficiência
                 gabarito_obj = AnswerSheetGabarito.query.get(gabarito_id)
-                if gabarito_obj:
-                    proficiency, classification = self._calcular_proficiencia_classificacao(
-                        correct_answers=correction.get('correct_answers', 0),
-                        total_questions=correction.get('total_questions', 0),
-                        gabarito_obj=gabarito_obj
-                    )
             elif test_id:
-                # Buscar gabarito por test_id
                 gabarito_obj = AnswerSheetGabarito.query.filter_by(test_id=test_id).first()
-                if gabarito_obj:
-                    proficiency, classification = self._calcular_proficiencia_classificacao(
-                        correct_answers=correction.get('correct_answers', 0),
-                        total_questions=correction.get('total_questions', 0),
-                        gabarito_obj=gabarito_obj
-                    )
+            
+            if gabarito_obj:
+                blocks_config = getattr(gabarito_obj, 'blocks_config', None) or {}
+                correct_answers_json = gabarito_obj.correct_answers
+                if isinstance(correct_answers_json, str):
+                    import json
+                    correct_answers_json = json.loads(correct_answers_json)
+                gabarito_dict = {}
+                for k, v in (correct_answers_json or {}).items():
+                    try:
+                        gabarito_dict[int(k)] = str(v).upper() if v else ''
+                    except (ValueError, TypeError):
+                        pass
+                from app.services.cartao_resposta.proficiency_by_subject import calcular_proficiencia_por_disciplina
+                proficiency_by_subject, proficiency, classification = calcular_proficiencia_por_disciplina(
+                    blocks_config=blocks_config,
+                    validated_answers=detected_answers,
+                    gabarito_dict=gabarito_dict,
+                    grade_name=gabarito_obj.grade_name or '',
+                )
             
             # Decidir onde salvar
             if gabarito_id and not test_id:
@@ -2584,10 +2616,11 @@ class AnswerSheetCorrectionNewGrid:
                     correction=correction,
                     grade=grade,
                     proficiency=proficiency,
-                    classification=classification
+                    classification=classification,
+                    proficiency_by_subject=proficiency_by_subject
                 )
             elif test_id:
-                # Prova física: salvar em EvaluationResult
+                # Prova física: salvar em EvaluationResult (proficiency única, sem proficiency_by_subject)
                 self.logger.info(f"💾 Salvando resultado em EvaluationResult (test_id={test_id})")
                 return self._salvar_resultado_evaluation(
                     test_id=test_id,

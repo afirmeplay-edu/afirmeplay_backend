@@ -366,7 +366,7 @@
 
 			.question-prompt {
 				font-size: 10pt;
-				font-weight: bold;
+				font-weight: normal; /* Formatação vem do banco (editor) — não forçamos negrito */
 				color: #000;
 				margin: 15px 0;
 				line-height: 1.4;
@@ -394,7 +394,82 @@
 				border: none;
 			}
 
-			.question-subtitle {
+		/* Contenção global de imagens em todos os contextos de questão.
+		   !important garante precedência sobre qualquer width/height inline
+		   remanescente (data: URLs do editor podem trazer style inline). */
+		.question-content img,
+		.question-prompt img,
+		.alternative-content img,
+		.question-instruction-text img,
+		.question-title img {
+				max-width: 100% !important;
+				width: auto !important;
+				height: auto !important;
+				display: block !important;
+				margin-left: auto !important;
+				margin-right: auto !important;
+			}
+
+		/* ── Grade de proteção horizontal ──────────────────────────────────────
+		   O conteúdo das questões vem do editor (TipTap/Quill) e pode conter
+		   palavras muito longas, URLs ou tabelas com larguras fixas.
+		   Estas regras garantem que nada transborde a margem da página,
+		   sem interferir nos inline styles de alinhamento do editor
+		   (text-align: center/justify etc. definidos em <p style="...">) */
+
+		/* Áreas de texto: quebra palavras longas antes de transbordar */
+		.question-content,
+		.question-prompt,
+		.alternative-content,
+		.question-instruction-text {
+				overflow-wrap: break-word;
+				word-break: break-word;
+				max-width: 100%;
+			}
+
+		/* Parágrafos gerados pelo editor: herdam o alinhamento do inline style;
+		   o text-align: justify abaixo é apenas o fallback para <p> sem style */
+		.question-content p,
+		.question-prompt p,
+		.alternative-content p {
+				overflow-wrap: break-word;
+				word-break: break-word;
+				max-width: 100%;
+			}
+
+		/* Tabelas inseridas pelo editor */
+		.question-content table,
+		.question-prompt table,
+		.alternative-content table {
+				max-width: 100%;
+				table-layout: fixed;   /* distribui colunas dentro da largura disponível */
+				width: 100%;
+				border-collapse: collapse;
+			}
+
+		.question-content td,
+		.question-content th,
+		.question-prompt td,
+		.question-prompt th,
+		.alternative-content td,
+		.alternative-content th {
+				overflow-wrap: break-word;
+				word-break: break-word;
+				max-width: 100%;
+			}
+
+		/* Listas inseridas pelo editor */
+		.question-content ul,
+		.question-content ol,
+		.question-prompt ul,
+		.question-prompt ol {
+				padding-left: 20px;
+				max-width: 100%;
+			}
+
+		/* ─────────────────────────────────────────────────────────────────── */
+
+		.question-subtitle {
 				font-size: 10pt;
 				font-style: italic;
 				color: #000;
@@ -569,6 +644,8 @@
 
 			.header-info-line .label {
 				font-weight: bold;
+				min-width: 100px;      /* largura fixa → todos os valores iniciam no mesmo X (≈75pt) */
+				display: inline-block; /* necessário para min-width funcionar em <span> */
 			}
 
 			.header-info-line .value {
@@ -932,7 +1009,12 @@
 		</style>
 	</head>
 	<body>
+		{% set include_cover = include_cover|default(True) %}
+		{% set include_questions = include_questions|default(True) %}
+		{% set include_answer_sheet = include_answer_sheet|default(True) %}
+
 		<!-- Capa Institucional -->
+		{% if include_cover %}
 		<div class="institutional-cover">
 			<div class="cover-header">
 				<div class="municipality-logo">
@@ -1004,8 +1086,10 @@
 				</div>
 			</div>
 		</div>
+		{% endif %}
 
 		<!-- Disciplinas e Questões -->
+		{% if include_questions %}
 		{% if questions_by_block %} {% for block in questions_by_block %}
 		<div class="subject-cover">
 			<div class="block-number">
@@ -1028,7 +1112,7 @@
 
 			<div class="time-text">
 				<strong
-					>Você terá 25 minutos para responder a este bloco.</strong
+					>Você terá {{ blocks_config.minutes_per_block | default(25) }} minutos para responder a este bloco.</strong
 				>
 			</div>
 		</div>
@@ -1088,7 +1172,7 @@
 
 			<div class="time-text">
 				<strong
-					>Você terá 25 minutos para responder a este bloco.</strong
+					>Você terá {{ blocks_config.minutes_per_block | default(25) }} minutos para responder a este bloco.</strong
 				>
 			</div>
 		</div>
@@ -1135,8 +1219,10 @@
 			{% endfor %}
 		</div>
 		{% endfor %} {% endif %}
+		{% endif %}
 
 		<!-- Formulário de Respostas com Marcadores Geométricos -->
+		{% if include_answer_sheet %}
 		<div class="answer-sheet">
 			<!-- ÂNCORAS DA PÁGINA A4 (dentro do .answer-sheet com position: relative) -->
 			<div class="a4-anchor-square anchor-top-left">
@@ -1219,15 +1305,13 @@
 						<div class="header-info-line">
 							<span class="label">ESCOLA:</span>
 							<span class="value"
-								>{{ student.school_name or 'Não informado'
-								}}</span
+								>{{ student.school_name }}</span
 							>
 						</div>
 						<div class="header-info-line">
 							<span class="label">TURMA:</span>
 							<span class="value"
-								>{{ test_data.grade_name or 'Sem turma' }} - {{
-								student.class_name or 'A' }}</span
+								>{% if student.class_name %}{{ test_data.grade_name or '' }} - {{ student.class_name }}{% elif student.name or student.nome %}{{ test_data.grade_name or '' }}{% endif %}</span
 							>
 						</div>
 					</div>
@@ -1464,5 +1548,6 @@
 			</div>
 			<!-- Fim do answer-grid-wrapper -->
 		</div>
+		{% endif %}
 	</body>
 </html>

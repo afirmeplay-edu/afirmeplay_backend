@@ -38,13 +38,15 @@ ENV TZ=UTC
 RUN ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone
 
 WORKDIR /code
-COPY . .
+COPY requirements.txt .
 
 # Instalar dependências Python
 RUN pip install --no-cache-dir --upgrade pip && \
     pip install --no-cache-dir -r requirements.txt
 
+COPY . .
+
 EXPOSE 5000
 
 # Rodar Flask com Gunicorn
-CMD ["gunicorn", "--bind", "0.0.0.0:5000", "run:app"]
+CMD ["gunicorn","--bind", "0.0.0.0:5000","--workers", "2","--threads", "2","--timeout", "120","--graceful-timeout", "30","--max-requests", "500","--max-requests-jitter", "50","--preload","run:app"]

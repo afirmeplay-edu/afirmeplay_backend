@@ -31,6 +31,7 @@ class StudentAnswer(db.Model):
         self.test_id = test_id
         self.question_id = question_id
         self.answer = answer
+        self.answered_at = datetime.utcnow()  # Fix: setar explicitamente (column default só aplica no INSERT)
         
         # Aplicar qualquer outro parâmetro
         for key, value in kwargs.items():

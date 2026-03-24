@@ -13,10 +13,13 @@ from app.models.schoolTeacher import SchoolTeacher
 from app.models.teacher import Teacher
 from app import db
 from app.decorators.role_required import get_current_tenant_id
+from app.decorators import requires_city_context
+from app.utils.tenant_middleware import set_search_path, get_current_tenant_context, city_id_to_schema_name
 from app.utils.uuid_helpers import ensure_uuid, ensure_uuid_list
 from flask_jwt_extended import jwt_required
 from app.decorators.role_required import role_required, get_current_user_from_token
 from sqlalchemy.exc import SQLAlchemyError, IntegrityError
+from sqlalchemy import text
 from datetime import datetime, timedelta
 import logging
 import json
@@ -117,6 +120,7 @@ def handle_generic_error(error):
 @bp.route('', methods=['POST'])
 @jwt_required()
 @role_required("admin", "professor", "coordenador", "diretor", "tecadm")
+@requires_city_context
 def criar_avaliacao():
     try:
         data = request.get_json()
@@ -131,6 +135,15 @@ def criar_avaliacao():
             if field not in data:
                 logging.error(f"Campo obrigatório ausente: {field}")
                 return jsonify({"error": f"Missing required field: {field}"}), 400
+
+        # Obter informações do usuário logado para definir scope de questões
+        current_user = get_current_user_from_token()
+        if not current_user:
+            return jsonify({"error": "User not authenticated"}), 401
+        
+        user_role = current_user.get('role')
+        user_city_id = current_user.get('tenant_id') or current_user.get('city_id')
+        user_id = current_user.get('user_id')
 
         # Validação do campo duration se fornecido
         if 'duration' in data and data['duration'] is not None:
@@ -262,6 +275,24 @@ def criar_avaliacao():
                             # Se vier string, usar diretamente
                             skill_value = skills_input
                     
+                    # Definir scope_type e owner baseado na role do criador
+                    scope_type = None
+                    owner_city_id = None
+                    owner_user_id = None
+                    
+                    if user_role == 'admin':
+                        scope_type = 'GLOBAL'
+                        owner_city_id = None
+                        owner_user_id = None
+                    elif user_role == 'tecadm':
+                        scope_type = 'CITY'
+                        owner_city_id = user_city_id
+                        owner_user_id = None
+                    else:  # professor, coordenador, diretor
+                        scope_type = 'PRIVATE'
+                        owner_city_id = None
+                        owner_user_id = user_id
+                    
                     question = Question(
                         number=question_data.get('number'),
                         text=question_data.get('text'),
@@ -284,10 +315,21 @@ def criar_avaliacao():
                         topics=question_data.get('topics'),
                         education_stage_id=question_data.get('educationStageId'),
                         created_by=question_data.get('created_by') or data.get('created_by'),
-                        last_modified_by=question_data.get('lastModifiedBy') or data.get('lastModifiedBy')
+                        last_modified_by=question_data.get('lastModifiedBy') or data.get('lastModifiedBy'),
+                        scope_type=scope_type,
+                        owner_city_id=owner_city_id,
+                        owner_user_id=owner_user_id
                     )
+                    
+                    # Salvar questão em public.question (forçar search_path)
+                    current_search_path = db.session.execute(text("SHOW search_path")).fetchone()[0]
+                    db.session.execute(text("SET search_path TO public"))
+                    
                     db.session.add(question)
                     db.session.flush()  # Para obter o ID da questão
+                    
+                    # Restaurar search_path original
+                    db.session.execute(text(f"SET search_path TO {current_search_path}"))
                     
                     # Criar associação na tabela test_questions
                     from app.models.testQuestion import TestQuestion
@@ -317,6 +359,7 @@ def criar_avaliacao():
 @bp.route('/', methods=['GET'])
 @jwt_required()
 @role_required("admin", "professor", "coordenador", "diretor", "tecadm")
+@requires_city_context
 def listar_avaliacoes():
     try:
         user = get_current_user_from_token()
@@ -336,14 +379,12 @@ def listar_avaliacoes():
             # Para contagem, não carregar relacionamentos
             query = Test.query
         else:
-            # Para dados completos, carregar apenas relacionamentos essenciais
-            # Não carregar class_tests aqui para evitar problemas de transação
+            # Para dados completos, carregar relacionamentos essenciais + test_questions (só para contagem em format_test_response)
             query = Test.query.options(
                 joinedload(Test.creator),
                 joinedload(Test.subject_rel),
-                joinedload(Test.grade)
-                # Remover subqueryload de questions para melhor performance
-                # Não carregar class_tests aqui - será carregado sob demanda em format_test_response
+                joinedload(Test.grade),
+                subqueryload(Test.test_questions)
             )
 
         # Filtrar por município se for tecadm
@@ -489,6 +530,18 @@ def listar_avaliacoes():
         if grade_filter:
             query = query.filter(Test.grade_id == grade_filter)
 
+        # Filtro por criador (ex: created_by=uuid)
+        created_by_filter = request.args.get('created_by')
+        if created_by_filter:
+            query = query.filter(Test.created_by == created_by_filter)
+
+        # Filtro por tipos (ex: types=AVALIACAO,SIMULADO)
+        types_param = request.args.get('types')
+        if types_param:
+            types_list = [t.strip() for t in types_param.split(',') if t.strip()]
+            if types_list:
+                query = query.filter(Test.type.in_(types_list))
+
         # Se é apenas contagem, retornar rapidamente
         if only_count:
             total = query.count()
@@ -526,10 +579,10 @@ def listar_avaliacoes():
         )
         
         avaliacoes = paginated_query.items
-        
-        # Resposta com metadados de paginação
+
+        # Listagem leve: não carregar questões (questions=[] evita N+1 e carga pesada)
         response_data = {
-            "data": [format_test_response(a) for a in avaliacoes],
+            "data": [format_test_response(a, questions=[]) for a in avaliacoes],
             "pagination": {
                 "page": page,
                 "per_page": per_page,
@@ -806,23 +859,111 @@ def atualizar_status_avaliacao(test_id):
 @role_required("admin", "professor", "coordenador", "diretor", "aluno","tecadm")
 def obter_avaliacao(test_id):
     try:
+        from sqlalchemy import text
+        search_path_result = db.session.execute(text("SHOW search_path")).fetchone()
+        current_search_path = search_path_result[0]
+
         test = Test.query.options(
             joinedload(Test.creator),
             joinedload(Test.subject_rel),
-            joinedload(Test.grade),
-            subqueryload(Test.test_questions).subqueryload(TestQuestion.question).options(
-                joinedload(Question.subject),
-                joinedload(Question.grade),
-                joinedload(Question.education_stage),
-                joinedload(Question.creator),
-                joinedload(Question.last_modifier)
-            )
+            joinedload(Test.grade)
         ).get(test_id)
-        
+
+        # Prova de competição pode ter sido criada em public (fallback); tentar public se não achar no schema atual
+        if not test and current_search_path and current_search_path != "public":
+            db.session.execute(text("SET search_path TO public"))
+            test = Test.query.options(
+                joinedload(Test.creator),
+                joinedload(Test.subject_rel),
+                joinedload(Test.grade)
+            ).get(test_id)
+            if test:
+                current_search_path = "public"
+
         if not test:
+            if current_search_path != search_path_result[0]:
+                db.session.execute(text(f"SET search_path TO {search_path_result[0]}"))
             return jsonify({"error": "Test not found"}), 404
 
-        return jsonify(format_test_response(test)), 200
+        from app.models.testQuestion import TestQuestion
+        from app.models.question import Question
+        from sqlalchemy.orm import joinedload as jl
+
+        test_questions_list = []
+        try:
+            test_questions_list = TestQuestion.query.filter_by(test_id=test.id).order_by(TestQuestion.order).all()
+        except Exception:
+            pass
+        if not test_questions_list and current_search_path and current_search_path != "public":
+            try:
+                db.session.execute(text("SET search_path TO public"))
+                test_questions_list = TestQuestion.query.filter_by(test_id=test.id).order_by(TestQuestion.order).all()
+                if test_questions_list:
+                    current_search_path = "public"
+            except Exception:
+                pass
+
+        # Se não há test_questions (ex.: prova de competição), usar question_rules.selected_question_ids
+        if not test_questions_list and getattr(test, "question_rules", None) and isinstance(test.question_rules, dict):
+            question_ids = list(test.question_rules.get("selected_question_ids") or [])
+        else:
+            question_ids = [tq.question_id for tq in test_questions_list]
+
+        # Carregar Question: competição (test em public) tem questões no tenant; senão usar schema atual
+        schema_for_questions = search_path_result[0]
+        if question_ids and current_search_path == "public" and schema_for_questions == "public":
+            user = get_current_user_from_token()
+            if user:
+                user_obj = User.query.get(user.get("id") or user.get("user_id"))
+                if user_obj and getattr(user_obj, "city_id", None):
+                    schema_for_questions = city_id_to_schema_name(str(user_obj.city_id))
+                else:
+                    ctx = get_current_tenant_context()
+                    if ctx and getattr(ctx, "has_tenant_context", False) and ctx.schema:
+                        schema_for_questions = ctx.schema
+        if not question_ids:
+            ordered_questions = []
+        else:
+            db.session.execute(text(f"SET search_path TO {schema_for_questions}"))
+            questions_loaded = Question.query.filter(Question.id.in_(question_ids)).options(
+                jl(Question.subject),
+                jl(Question.grade),
+                jl(Question.education_stage),
+                jl(Question.creator),
+                jl(Question.last_modifier)
+            ).all()
+            questions_dict = {str(q.id): q for q in questions_loaded}
+            if test_questions_list:
+                ordered_questions = [questions_dict[str(tq.question_id)] for tq in test_questions_list if str(tq.question_id) in questions_dict]
+            else:
+                ordered_questions = [questions_dict[str(qid)] for qid in question_ids if str(qid) in questions_dict]
+
+        db.session.execute(text(f"SET search_path TO {search_path_result[0]}"))
+
+        data = format_test_response(test, questions=ordered_questions)
+        # Aluno abrindo olimpíada: garantir type OLIMPIADA quando aplicado via StudentTestOlimpics
+        user = get_current_user_from_token()
+        if user and user.get('role') == 'aluno':
+            if not data.get('type') or (isinstance(data.get('type'), str) and data.get('type', '').strip().upper() != 'OLIMPIADA'):
+                from app.models.student import Student
+                student = Student.query.filter_by(user_id=user.get('id')).first()
+                if student:
+                    try:
+                        ctx = get_current_tenant_context()
+                        tenant_schema = (ctx.schema if (ctx and getattr(ctx, 'has_tenant_context', False)) else None) or None
+                        if tenant_schema and current_search_path != tenant_schema:
+                            db.session.execute(text(f"SET search_path TO {tenant_schema}"))
+                        has_olympics = StudentTestOlimpics.query.filter_by(
+                            test_id=str(test_id),
+                            student_id=str(student.id)
+                        ).first() is not None
+                        db.session.execute(text(f"SET search_path TO {search_path_result[0]}"))
+                        if has_olympics:
+                            data['type'] = 'OLIMPIADA'
+                    except Exception:
+                        db.session.execute(text(f"SET search_path TO {search_path_result[0]}"))
+
+        return jsonify(data), 200
 
     except Exception as e:
         logging.error(f"Error getting test: {str(e)}", exc_info=True)
@@ -839,12 +980,41 @@ def get_test_details(test_id):
 
 @bp.route('/<string:test_id>', methods=['PUT'])
 @jwt_required()
-@role_required("admin", "professor", "coordenador", "diretor")
+@role_required("admin", "professor", "coordenador", "diretor", "tecadm")
 def atualizar_avaliacao(test_id):
     try:
+        # Obter usuário logado
+        user = get_current_user_from_token()
+        if not user:
+            return jsonify({"error": "User not authenticated"}), 401
+        
         test = Test.query.get(test_id)
         if not test:
             return jsonify({"error": "Test not found"}), 404
+
+        # VERIFICAR PERMISSÕES: Permitir edição se:
+        # 1. Usuário é admin (sem restrições)
+        # 2. Usuário é o criador da avaliação
+        # 3. Usuário é do mesmo município que o criador da avaliação
+        user_role = user.get('role')
+        user_id = user.get('id')
+        user_city_id = user.get('tenant_id') or user.get('city_id')
+        
+        can_edit = False
+        
+        if user_role == 'admin':
+            # Admin pode editar qualquer avaliação
+            can_edit = True
+        elif test.created_by == user_id:
+            # Criador pode editar sua própria avaliação
+            can_edit = True
+        elif user_city_id and test.creator and test.creator.city_id == user_city_id:
+            # Usuários do mesmo município podem editar
+            can_edit = True
+        
+        if not can_edit:
+            logging.warning(f"Acesso negado: user {user_id} ({user_role}) tentou editar test {test_id} criado por {test.created_by}")
+            return jsonify({"erro": "Acesso negado. Você não tem permissão para editar esta avaliação."}), 403
 
         data = request.get_json()
         if not data:
@@ -934,7 +1104,98 @@ def atualizar_avaliacao(test_id):
                     else:
                         logging.warning(f"Questão com ID {question_data['id']} não encontrada")
                 else:
-                    logging.warning(f"Questão na posição {index} não possui ID válido")
+                    # Criar nova questão (mesmo padrão da rota de criação)
+                    logging.info(f"Criando nova questão na posição {index}")
+                    
+                    # Extrai o ID do grade se for um objeto
+                    grade_level = question_data.get('grade')
+                    if isinstance(grade_level, dict) and 'id' in grade_level:
+                        grade_level = grade_level['id']
+                    
+                    # Processa imagens
+                    images = []
+                    if question_data.get('formattedText'):
+                        from app.routes.question_routes import extract_images_from_html
+                        images.extend(extract_images_from_html(question_data['formattedText']))
+                    
+                    if question_data.get('formattedSolution'):
+                        from app.routes.question_routes import extract_images_from_html
+                        images.extend(extract_images_from_html(question_data['formattedSolution']))
+                    
+                    # Normalizar skills
+                    skills_input = question_data.get('skills')
+                    skill_value = None
+                    if skills_input:
+                        if isinstance(skills_input, list):
+                            skill_value = skills_input[0] if skills_input else None
+                        else:
+                            skill_value = skills_input
+                    
+                    # Definir scope_type e owner baseado na role do usuário que está atualizando
+                    scope_type = None
+                    owner_city_id = None
+                    owner_user_id = None
+                    
+                    if user_role == 'admin':
+                        scope_type = 'GLOBAL'
+                        owner_city_id = None
+                        owner_user_id = None
+                    elif user_role == 'tecadm':
+                        scope_type = 'CITY'
+                        owner_city_id = user_city_id
+                        owner_user_id = None
+                    else:  # professor, coordenador, diretor
+                        scope_type = 'PRIVATE'
+                        owner_city_id = None
+                        owner_user_id = user_id
+                    
+                    question = Question(
+                        number=question_data.get('number'),
+                        text=question_data.get('text'),
+                        formatted_text=question_data.get('formattedText'),
+                        secondstatement=question_data.get('secondStatement'),
+                        images=images,
+                        subject_id=question_data.get('subjectId') or question_data.get('subject_id'),
+                        title=question_data.get('title'),
+                        description=question_data.get('description'),
+                        command=question_data.get('command'),
+                        subtitle=question_data.get('subtitle'),
+                        alternatives=question_data.get('options'),
+                        skill=skill_value,
+                        grade_level=grade_level,
+                        difficulty_level=question_data.get('difficulty'),
+                        correct_answer=question_data.get('solution'),
+                        formatted_solution=question_data.get('formattedSolution'),
+                        question_type=question_data.get('type'),
+                        value=question_data.get('value'),
+                        topics=question_data.get('topics'),
+                        education_stage_id=question_data.get('educationStageId'),
+                        created_by=question_data.get('created_by') or user_id,
+                        last_modified_by=question_data.get('lastModifiedBy') or user_id,
+                        scope_type=scope_type,
+                        owner_city_id=owner_city_id,
+                        owner_user_id=owner_user_id
+                    )
+                    
+                    # Salvar questão em public.question (forçar search_path)
+                    current_search_path = db.session.execute(text("SHOW search_path")).fetchone()[0]
+                    db.session.execute(text("SET search_path TO public"))
+                    
+                    db.session.add(question)
+                    db.session.flush()  # Para obter o ID da questão
+                    
+                    # Restaurar search_path original
+                    db.session.execute(text(f"SET search_path TO {current_search_path}"))
+                    
+                    # Criar associação
+                    order = question_data.get('number', index + 1)
+                    test_question = TestQuestion(
+                        test_id=test.id,
+                        question_id=question.id,
+                        order=order
+                    )
+                    db.session.add(test_question)
+                    logging.info(f"Nova questão criada e associada à avaliação com ordem {order}")
 
         db.session.commit()
         return jsonify({'message': 'Test updated successfully'}), 200
@@ -985,16 +1246,30 @@ def bulk_delete_tests():
         permission_errors = []
         valid_tests = []
         
+        user_city_id = user.get('tenant_id') or user.get('city_id')
+        
         for test in tests_to_delete:
-            if user['role'] == 'professor' and test.created_by != user['id']:
-                permission_errors.append(f"Test {test.id} (created by {test.created_by})")
-            else:
+            can_delete = False
+            
+            if user['role'] == 'admin':
+                # Admin pode deletar qualquer avaliação
+                can_delete = True
+            elif test.created_by == user['id']:
+                # Criador pode deletar sua própria avaliação
+                can_delete = True
+            elif user_city_id and test.creator and test.creator.city_id == user_city_id:
+                # Usuários do mesmo município podem deletar
+                can_delete = True
+            
+            if can_delete:
                 valid_tests.append(test)
+            else:
+                permission_errors.append(f"Test {test.id} (created by {test.created_by})")
         
         if permission_errors:
             logging.error(f"❌ Erros de permissão: {permission_errors}")
             return jsonify({
-                "error": "You can only delete tests you created",
+                "error": "You can only delete tests you created or from your municipality",
                 "details": f"Permission denied for: {', '.join(permission_errors)}"
             }), 403
 
@@ -1090,6 +1365,33 @@ def bulk_delete_tests():
                 # Apenas remove a associação, NÃO a questão
                 db.session.delete(test_question)
             logging.info(f"🗑️ Removidas {len(test_questions)} associações de questões para teste {test.id} (questões preservadas)")
+
+            # 7.1 Excluir gabaritos e resultados de cartões resposta ligados a este teste
+            # (evita FK violation ao deletar `test`, ex.: answer_sheet_gabaritos_test_id_fkey)
+            from app.models.answerSheetGabarito import AnswerSheetGabarito
+            from app.models.answerSheetResult import AnswerSheetResult
+
+            gabaritos_subq = (
+                AnswerSheetGabarito.query.with_entities(AnswerSheetGabarito.id)
+                .filter(AnswerSheetGabarito.test_id == str(test.id))
+                .subquery()
+            )
+
+            deleted_answer_sheet_results = AnswerSheetResult.query.filter(
+                AnswerSheetResult.gabarito_id.in_(gabaritos_subq)
+            ).delete(synchronize_session=False)
+            if deleted_answer_sheet_results:
+                logging.info(
+                    f"🗑️ Excluídas {deleted_answer_sheet_results} answer_sheet_results para teste {test.id}"
+                )
+
+            deleted_answer_sheet_gabaritos = AnswerSheetGabarito.query.filter(
+                AnswerSheetGabarito.test_id == str(test.id)
+            ).delete(synchronize_session=False)
+            if deleted_answer_sheet_gabaritos:
+                logging.info(
+                    f"🗑️ Excluídos {deleted_answer_sheet_gabaritos} answer_sheet_gabaritos para teste {test.id}"
+                )
             
             # 8. Finalmente, excluir o teste
             db.session.delete(test)
@@ -1220,6 +1522,33 @@ def deletar_avaliacao(test_id):
             # Apenas remove a associação, NÃO a questão
             db.session.delete(test_question)
         logging.info(f"🗑️ Removidas {len(test_questions)} associações de questões (questões preservadas)")
+
+        # 7.1 Excluir gabaritos e resultados de cartões resposta ligados a este teste
+        # (evita FK violation ao deletar `test`, ex.: answer_sheet_gabaritos_test_id_fkey)
+        from app.models.answerSheetGabarito import AnswerSheetGabarito
+        from app.models.answerSheetResult import AnswerSheetResult
+
+        gabaritos_subq = (
+            AnswerSheetGabarito.query.with_entities(AnswerSheetGabarito.id)
+            .filter(AnswerSheetGabarito.test_id == str(test_id))
+            .subquery()
+        )
+
+        deleted_answer_sheet_results = AnswerSheetResult.query.filter(
+            AnswerSheetResult.gabarito_id.in_(gabaritos_subq)
+        ).delete(synchronize_session=False)
+        if deleted_answer_sheet_results:
+            logging.info(
+                f"🗑️ Excluídas {deleted_answer_sheet_results} answer_sheet_results para teste {test_id}"
+            )
+
+        deleted_answer_sheet_gabaritos = AnswerSheetGabarito.query.filter(
+            AnswerSheetGabarito.test_id == str(test_id)
+        ).delete(synchronize_session=False)
+        if deleted_answer_sheet_gabaritos:
+            logging.info(
+                f"🗑️ Excluídos {deleted_answer_sheet_gabaritos} answer_sheet_gabaritos para teste {test_id}"
+            )
         
         # 8. Finalmente, excluir o teste
         db.session.delete(test)
@@ -1393,13 +1722,22 @@ def aplicar_avaliacao_classe(test_id):
 @jwt_required()
 @role_required("admin", "professor", "coordenador", "diretor", "tecadm")
 def aplicar_avaliacao_olympics(test_id):
-    """Aplica uma avaliação a um aluno específico (olimpíadas)."""
+    """Aplica uma avaliação a um aluno específico (olimpíadas). StudentTestOlimpics fica no tenant."""
     try:
+        ctx = get_current_tenant_context()
+        tenant_schema = (ctx.schema if (ctx and getattr(ctx, 'has_tenant_context', False)) else None) or None
+        if tenant_schema:
+            set_search_path(tenant_schema)
         data = request.get_json()
         if not data:
             return jsonify({"error": "No data provided"}), 400
 
         test = Test.query.get(test_id)
+        if not test and tenant_schema and tenant_schema != 'public':
+            set_search_path('public')
+            test = Test.query.get(test_id)
+            if tenant_schema:
+                set_search_path(tenant_schema)
         if not test:
             return jsonify({"error": "Test not found"}), 404
 
@@ -1505,8 +1843,12 @@ def aplicar_avaliacao_olympics(test_id):
 @jwt_required()
 @role_required("admin", "professor", "coordenador", "diretor", "tecadm")
 def remover_aplicacao_olympics(test_id, student_id):
-    """Remove a aplicação olímpica de uma avaliação para um aluno específico."""
+    """Remove a aplicação olímpica de uma avaliação para um aluno específico. StudentTestOlimpics no tenant."""
     try:
+        ctx = get_current_tenant_context()
+        tenant_schema = (ctx.schema if (ctx and getattr(ctx, 'has_tenant_context', False)) else None) or None
+        if tenant_schema:
+            set_search_path(tenant_schema)
         olympics = StudentTestOlimpics.query.filter_by(
             test_id=str(test_id),
             student_id=str(student_id).strip()
@@ -1528,23 +1870,50 @@ def remover_aplicacao_olympics(test_id, student_id):
 
 @bp.route('/<string:test_id>/applied-students', methods=['GET'])
 @jwt_required()
-@role_required("admin", "professor", "coordenador", "diretor", "tecadm")
+@role_required("admin", "professor", "coordenador", "diretor", "tecadm", "aluno")
 def listar_alunos_aplicados_individualmente(test_id):
     """
     Retorna os IDs dos alunos que tiveram a olimpíada aplicada individualmente
     (via apply-olympics / student_test_olimpics) para o test_id informado.
 
-    Resposta aceita pelo front:
-    - Objeto com array students: { "students": ["uuid-1", "uuid-2"] }
+    - Admin/professor/coordenador/diretor/tecadm: lista todos os alunos aplicados.
+    - Aluno: retorna apenas o próprio aluno na lista se tiver aplicação, senão [].
+
+    Resposta: { "students": ["uuid-1", "uuid-2"] }
     """
     try:
+        user = get_current_user_from_token()
+        if not user:
+            return jsonify({"error": "Usuário não autenticado"}), 401
+
+        ctx = get_current_tenant_context()
+        tenant_schema = (ctx.schema if (ctx and getattr(ctx, 'has_tenant_context', False)) else None) or None
+        if tenant_schema:
+            set_search_path(tenant_schema)
         test = Test.query.get(test_id)
+        if not test and tenant_schema and tenant_schema != 'public':
+            set_search_path('public')
+            test = Test.query.get(test_id)
+            if tenant_schema:
+                set_search_path(tenant_schema)
         if not test:
             return jsonify({"error": "Avaliação não encontrada"}), 404
 
+        # Aluno: retornar apenas se o próprio aluno está aplicado (não listar outros)
+        if user.get('role') == 'aluno':
+            from app.models.student import Student
+            student = Student.query.filter_by(user_id=user.get('id')).first()
+            if not student:
+                return jsonify({"students": []}), 200
+            record = StudentTestOlimpics.query.filter_by(
+                test_id=str(test_id),
+                student_id=str(student.id)
+            ).first()
+            student_ids = [str(student.id)] if record else []
+            return jsonify({"students": student_ids}), 200
+
         records = StudentTestOlimpics.query.filter_by(test_id=str(test_id)).all()
         student_ids = [r.student_id for r in records]
-
         return jsonify({"students": student_ids}), 200
 
     except Exception as e:
@@ -2208,8 +2577,9 @@ def listar_avaliacoes_por_classe(class_id):
 @bp.route('/my-class/tests', methods=['GET'])
 @jwt_required()
 @role_required("aluno")
+@requires_city_context
 def listar_avaliacoes_minha_classe():
-    """Lista todas as avaliações aplicadas na classe do aluno autenticado."""
+    """Lista todas as avaliações aplicadas na classe do aluno autenticado. Requer contexto de tenant (schema) para acessar Student."""
     try:
         user = get_current_user_from_token()
         if not user:
@@ -2266,11 +2636,12 @@ def listar_avaliacoes_minha_classe():
         # Combinar IDs de ambos os tipos (união de sets - ambos são incluídos)
         all_test_ids = list(set(class_test_map.keys()) | set(olympics_map.keys()))
 
+        # Lista leve: não carregar questões (Question), só test_questions para contar total
         tests = Test.query.options(
             joinedload(Test.creator),
             joinedload(Test.subject_rel),
             joinedload(Test.grade),
-            subqueryload(Test.test_questions).subqueryload(TestQuestion.question)
+            subqueryload(Test.test_questions)
         ).filter(Test.id.in_(all_test_ids)).all()
 
         def app_record_for(test_id):
@@ -2298,6 +2669,23 @@ def listar_avaliacoes_minha_classe():
         ).all()
         sessions_dict = {session.test_id: session for session in sessions}
 
+        # Cache de current_time por timezone (evita pytz/timezone por teste)
+        _current_time_cache = {}
+        def _current_time_for_tz(tz_str):
+            if tz_str not in _current_time_cache:
+                if tz_str:
+                    try:
+                        import pytz
+                        target_tz = pytz.timezone(tz_str)
+                        _current_time_cache[tz_str] = datetime.now(target_tz)
+                    except Exception:
+                        from app.utils.timezone_utils import get_local_time
+                        _current_time_cache[tz_str] = get_local_time()
+                else:
+                    from app.utils.timezone_utils import get_local_time
+                    _current_time_cache[tz_str] = get_local_time()
+            return _current_time_cache[tz_str]
+
         for test in tests:
             app_record, app_source = app_record_for(test.id)
             session = sessions_dict.get(test.id)
@@ -2321,27 +2709,11 @@ def listar_avaliacoes_minha_classe():
                 score = session.score
                 grade = session.grade
                 
-                # Verificar se há respostas salvas
-                has_answers = StudentAnswer.query.filter_by(
-                    student_id=student.id,
-                    test_id=test.id
-                ).first() is not None
-                
-                can_start = session.status == 'nao_iniciada' or (session.status == 'em_andamento' and not has_answers)
+                # Pode iniciar (nao_iniciada) ou continuar (em_andamento) a prova
+                can_start = session.status == 'nao_iniciada' or session.status == 'em_andamento'
             
-            # ✅ REGRA 4: Obter tempo atual no timezone da aplicação (sempre definir)
-            current_time = None
-            if app_record.timezone:
-                import pytz
-                try:
-                    target_tz = pytz.timezone(app_record.timezone)
-                    current_time = datetime.now(target_tz)
-                except pytz.exceptions.UnknownTimeZoneError:
-                    from app.utils.timezone_utils import get_local_time
-                    current_time = get_local_time()
-            else:
-                from app.utils.timezone_utils import get_local_time
-                current_time = get_local_time()
+            # ✅ Tempo atual no timezone da aplicação (com cache por timezone)
+            current_time = _current_time_for_tz(app_record.timezone if app_record else None)
 
             # ✅ REGRA 4: Verificar disponibilidade considerando status global, se já completou, data de aplicação E data de expiração
             if test.status == 'agendada' or test.status == 'em_andamento':
@@ -2351,48 +2723,22 @@ def listar_avaliacoes_minha_classe():
                     is_available_now = False
                     if app_record.application and app_record.application is not None:
                         try:
-                            if app_record.timezone:
-                                import pytz
-                                try:
-                                    target_tz = pytz.timezone(app_record.timezone)
-                                    application_dt = dateutil.parser.parse(app_record.application)
-                                    if application_dt.tzinfo is None:
-                                        application_dt = application_dt.replace(tzinfo=target_tz)
-                                    is_available_now = current_time >= application_dt
-                                except pytz.exceptions.UnknownTimeZoneError:
-                                    logging.warning(f"Timezone inválido: {app_record.timezone}, usando fallback")
-                                    raise Exception(f"Timezone inválido: {app_record.timezone}")
-                            else:
-                                application_dt = dateutil.parser.parse(app_record.application)
-                                if application_dt.tzinfo is None:
-                                    application_dt = application_dt.replace(tzinfo=current_time.tzinfo)
-                                is_available_now = current_time >= application_dt
+                            application_dt = dateutil.parser.parse(app_record.application)
+                            if application_dt.tzinfo is None and getattr(current_time, 'tzinfo', None):
+                                application_dt = application_dt.replace(tzinfo=current_time.tzinfo)
+                            is_available_now = current_time >= application_dt
                         except Exception as e:
                             logging.error(f"Erro ao converter data de aplicação para teste {test.id}: {str(e)}")
                             is_available_now = False
-                    else:
-                        is_available_now = False
 
                     # Verificar se a avaliação não expirou (data de expiração)
                     is_expired = False
                     if app_record.expiration and app_record.expiration is not None:
                         try:
-                            if app_record.timezone:
-                                import pytz
-                                try:
-                                    target_tz = pytz.timezone(app_record.timezone)
-                                    expiration_dt = dateutil.parser.parse(app_record.expiration)
-                                    if expiration_dt.tzinfo is None:
-                                        expiration_dt = expiration_dt.replace(tzinfo=target_tz)
-                                    is_expired = current_time > expiration_dt
-                                except pytz.exceptions.UnknownTimeZoneError:
-                                    logging.warning(f"Timezone inválido: {app_record.timezone}, usando fallback")
-                                    raise Exception(f"Timezone inválido: {app_record.timezone}")
-                            else:
-                                expiration_dt = dateutil.parser.parse(app_record.expiration)
-                                if expiration_dt.tzinfo is None:
-                                    expiration_dt = expiration_dt.replace(tzinfo=current_time.tzinfo)
-                                is_expired = current_time > expiration_dt
+                            expiration_dt = dateutil.parser.parse(app_record.expiration)
+                            if expiration_dt.tzinfo is None and getattr(current_time, 'tzinfo', None):
+                                expiration_dt = expiration_dt.replace(tzinfo=current_time.tzinfo)
+                            is_expired = current_time > expiration_dt
                         except Exception as e:
                             logging.error(f"Erro ao converter data de expiração para teste {test.id}: {str(e)}")
                             is_expired = False
@@ -2418,6 +2764,9 @@ def listar_avaliacoes_minha_classe():
             # Preparar subjects usando a função auxiliar
             subjects = process_subjects_for_test(test)
             
+            duration_min = getattr(test, 'duration', None)
+            if duration_min is not None:
+                duration_min = int(duration_min)
             test_info = {
                 "test_id": test.id,
                 "title": test.title,
@@ -2432,7 +2781,8 @@ def listar_avaliacoes_minha_classe():
                 "intructions": test.intructions,
                 "max_score": test.max_score,
                 "time_limit": test.time_limit.isoformat() if test.time_limit else None,
-                "duration": test.duration,  # Duração em minutos
+                "duration": duration_min,  # Duração da prova em minutos (usar para o timer)
+                "duration_minutes": duration_min,  # Explícito para o front usar no cronômetro
                 "course": test.course,
                 "model": test.model,
                 "subjects_info": subjects,  # Retornar a lista de subjects com nomes
@@ -2441,7 +2791,7 @@ def listar_avaliacoes_minha_classe():
                     "id": test.creator.id,
                     "name": test.creator.name
                 } if test.creator else None,
-                "total_questions": len(test.questions),
+                "total_questions": len(test.test_questions),
                 "application_info": {
                     "class_test_id": app_record.id if app_source == "class" else None,
                     "student_test_olimpics_id": app_record.id if app_source == "olympics" else None,
@@ -2517,37 +2867,111 @@ def start_test_session(test_id):
         if not student:
             return jsonify({"error": "Dados do aluno não encontrados"}), 404
         
-        # Verificar se o teste existe
+        # Verificar se o teste existe: schema atual, depois public, depois tenant (prova pode estar em qualquer um)
         test = Test.query.get(test_id)
+        test_schema = None
+        try:
+            current_schema = db.session.execute(text("SELECT current_schema()")).scalar() or "public"
+            if test:
+                test_schema = current_schema
+        except Exception:
+            current_schema = "public"
+        if not test:
+            try:
+                set_search_path("public")
+                test = Test.query.get(test_id)
+                if test:
+                    test_schema = "public"
+            except Exception:
+                pass
+        if not test:
+            ctx = get_current_tenant_context()
+            tenant_schema = (ctx.schema if (ctx and ctx.has_tenant_context) else None) or None
+            if tenant_schema and tenant_schema != current_schema and tenant_schema != "public":
+                try:
+                    set_search_path(tenant_schema)
+                    test = Test.query.get(test_id)
+                    if test:
+                        test_schema = tenant_schema
+                except Exception:
+                    pass
         if not test:
             return jsonify({"error": "Teste não encontrado"}), 404
+        if test_schema:
+            set_search_path(test_schema)
         
         # Verificar se o teste está aplicado: turma (ClassTest) e/ou olimpíada (StudentTestOlimpics)
-        # Ambos funcionam simultaneamente - não há exclusão mútua
-        class_test = ClassTest.query.filter_by(
-            class_id=student.class_id,
-            test_id=test_id
-        ).first()
+        # Em public essas tabelas podem não existir; consultar no tenant nesse caso
+        class_test = None
         olympics = None
+        try:
+            class_test = ClassTest.query.filter_by(
+                class_id=student.class_id,
+                test_id=test_id
+            ).first()
+        except (SQLAlchemyError, Exception) as e:
+            err_lower = str(e).lower()
+            if 'class_test' in err_lower and ('does not exist' in err_lower or 'undefinedtable' in err_lower):
+                if test_schema == "public":
+                    ctx = get_current_tenant_context()
+                    tenant_schema = (ctx.schema if (ctx and ctx.has_tenant_context) else None) or None
+                    if tenant_schema and tenant_schema != "public":
+                        try:
+                            set_search_path(tenant_schema)
+                            class_test = ClassTest.query.filter_by(
+                                class_id=student.class_id,
+                                test_id=test_id
+                            ).first()
+                        finally:
+                            set_search_path(test_schema or "public")
+            else:
+                logging.warning(f"ClassTest query failed: {e}")
         try:
             olympics = StudentTestOlimpics.query.filter_by(
                 student_id=student.id,
                 test_id=str(test_id)
             ).first()
         except (SQLAlchemyError, Exception) as e:
-            # Se a tabela não existir, continuar apenas com ClassTest
             error_str = str(e).lower()
             if 'student_test_olimpics' in error_str or 'does not exist' in error_str or 'undefinedtable' in error_str:
-                logging.warning(f"Tabela student_test_olimpics não encontrada, continuando apenas com ClassTest: {str(e)}")
-                olympics = None
+                if test_schema == "public":
+                    ctx = get_current_tenant_context()
+                    tenant_schema = (ctx.schema if (ctx and ctx.has_tenant_context) else None) or None
+                    if tenant_schema and tenant_schema != "public":
+                        try:
+                            set_search_path(tenant_schema)
+                            olympics = StudentTestOlimpics.query.filter_by(
+                                student_id=student.id,
+                                test_id=str(test_id)
+                            ).first()
+                        finally:
+                            set_search_path(test_schema or "public")
             else:
-                logging.warning(f"Erro ao buscar StudentTestOlimpics, continuando apenas com ClassTest: {str(e)}")
-                olympics = None
+                logging.warning(f"StudentTestOlimpics query failed: {e}")
 
         # Priorizar StudentTestOlimpics se ambos existirem (mais específico para o aluno)
         # Ambos funcionam simultaneamente - não há exclusão mútua
         app_record = olympics if olympics else class_test
-        if not app_record:
+        if not app_record and test_schema != "public":
+            return jsonify({"error": "Avaliação não está aplicada na sua classe"}), 404
+        # Prova de competição (test em public): pode não ter ClassTest/StudentTestOlimpics no tenant; permitir se já existir sessão
+        if not app_record and test_schema == "public":
+            existing_for_test = TestSession.query.filter_by(
+                student_id=student.id,
+                test_id=test_id,
+                status='em_andamento',
+            ).first()
+            if existing_for_test:
+                dur = getattr(test, 'duration', None)
+                dur = int(dur) if dur is not None else existing_for_test.time_limit_minutes
+                return jsonify({
+                    "message": "Sessão já iniciada",
+                    "session_id": existing_for_test.id,
+                    "started_at": existing_for_test.started_at.isoformat() if existing_for_test.started_at else None,
+                    "time_limit_minutes": existing_for_test.time_limit_minutes,
+                    "duration_minutes": dur,
+                    "duration": dur,
+                }), 200
             return jsonify({"error": "Avaliação não está aplicada na sua classe"}), 404
 
         # Se for prova de competição (StudentTestOlimpics) e já existir sessão em andamento,
@@ -2559,11 +2983,15 @@ def start_test_session(test_id):
                 status='em_andamento',
             ).first()
             if existing_for_test:
+                dur = getattr(test, 'duration', None)
+                dur = int(dur) if dur is not None else existing_for_test.time_limit_minutes
                 return jsonify({
                     "message": "Sessão já iniciada",
                     "session_id": existing_for_test.id,
                     "started_at": existing_for_test.started_at.isoformat() if existing_for_test.started_at else None,
                     "time_limit_minutes": existing_for_test.time_limit_minutes,
+                    "duration_minutes": dur,
+                    "duration": dur,
                 }), 200
 
         # ✅ REGRA 4: Verificar se a avaliação está disponível (data de aplicação) e não expirou (data de expiração)
@@ -2616,11 +3044,15 @@ def start_test_session(test_id):
         ).first()
         
         if existing_session:
+            dur = getattr(test, 'duration', None)
+            dur = int(dur) if dur is not None else existing_session.time_limit_minutes
             return jsonify({
                 "message": "Sessão já iniciada",
                 "session_id": existing_session.id,
                 "started_at": existing_session.started_at.isoformat() if existing_session.started_at else None,
-                "time_limit_minutes": existing_session.time_limit_minutes
+                "time_limit_minutes": existing_session.time_limit_minutes,
+                "duration_minutes": dur,
+                "duration": dur,
             }), 200
         
         # Verificar se há sessão ativa em qualquer teste para este aluno
@@ -2630,28 +3062,46 @@ def start_test_session(test_id):
         ).first()
         
         if active_session_any_test:
+            test_other = Test.query.get(active_session_any_test.test_id)
+            dur = getattr(test_other, 'duration', None) if test_other else None
+            dur = int(dur) if dur is not None else active_session_any_test.time_limit_minutes
             return jsonify({
                 "message": "Sessão já iniciada",
                 "session_id": active_session_any_test.id,
                 "test_id": active_session_any_test.test_id,
                 "started_at": active_session_any_test.started_at.isoformat() if active_session_any_test.started_at else None,
-                "time_limit_minutes": active_session_any_test.time_limit_minutes
+                "time_limit_minutes": active_session_any_test.time_limit_minutes,
+                "duration_minutes": dur,
+                "duration": dur,
             }), 200
         
-        # Criar nova sessão (sem calcular time_limit automaticamente)
-        session = TestSession(
-            student_id=student.id,
-            test_id=test_id,
-            time_limit_minutes=None,  # Frontend gerencia o timer
-            ip_address=request.remote_addr,
-            user_agent=request.headers.get('User-Agent')
-        )
-        
-        # Iniciar a sessão (definir started_at)
-        session.start_session()
-        
-        # Se for a primeira sessão iniciada para esta avaliação, mudar status para 'em_andamento' se estiver 'agendada'
-        if test.status == 'agendada':
+        # Duração da prova em minutos (test.duration = tempo que o aluno tem para responder, ex.: 20 min).
+        duration_minutes = getattr(test, 'duration', None)
+        if duration_minutes is not None:
+            duration_minutes = int(duration_minutes) if duration_minutes else None
+
+        # Atualizar status do teste no schema onde está (só em public; em tenant fazemos depois)
+        if test.status == 'agendada' and test_schema == "public":
+            active_sessions = TestSession.query.filter_by(
+                test_id=test_id,
+                status='em_andamento'
+            ).count()
+            if active_sessions == 0:
+                test.status = 'em_andamento'
+            db.session.commit()
+
+        # Olimpíada (teste em public): criar sessão no schema do tenant para GET active-session/with-answers
+        # (com city context) encontrar a sessão no primeiro lookup.
+        if test_schema == "public":
+            ctx = get_current_tenant_context()
+            tenant_schema = (ctx.schema if (ctx and getattr(ctx, 'has_tenant_context', False)) else None) or None
+            if tenant_schema and tenant_schema != "public":
+                try:
+                    set_search_path(tenant_schema)
+                    test_schema = tenant_schema
+                except Exception:
+                    pass
+        elif test.status == 'agendada':
             active_sessions = TestSession.query.filter_by(
                 test_id=test_id,
                 status='em_andamento'
@@ -2659,6 +3109,15 @@ def start_test_session(test_id):
             if active_sessions == 0:
                 test.status = 'em_andamento'
 
+        # Criar nova sessão no schema atual (tenant para olimpíada com city context, senão onde está o teste)
+        session = TestSession(
+            student_id=student.id,
+            test_id=test_id,
+            time_limit_minutes=duration_minutes,
+            ip_address=request.remote_addr,
+            user_agent=request.headers.get('User-Agent')
+        )
+        session.start_session()
         db.session.add(session)
         db.session.commit()
         
@@ -2666,7 +3125,9 @@ def start_test_session(test_id):
             "message": "Sessão iniciada com sucesso",
             "session_id": session.id,
             "started_at": session.started_at.isoformat() if session.started_at else None,
-            "time_limit_minutes": session.time_limit_minutes
+            "time_limit_minutes": session.time_limit_minutes,
+            "duration_minutes": duration_minutes,
+            "duration": duration_minutes,
         }), 201
         
     except Exception as e:
@@ -2677,6 +3138,7 @@ def start_test_session(test_id):
 @bp.route('/<string:test_id>/session-info', methods=['GET'])
 @jwt_required()
 @role_required("aluno")
+@requires_city_context
 def get_session_info(test_id):
     """
     Retorna informações da sessão para o frontend calcular o tempo
@@ -2694,32 +3156,66 @@ def get_session_info(test_id):
         if not student:
             return jsonify({"error": "Dados do aluno não encontrados"}), 404
         
-        # Buscar sessão ativa
+        # Buscar sessão ativa: schema atual, depois public, depois tenant (prova de competição pode estar em qualquer um)
         session = TestSession.query.filter_by(
             student_id=student.id,
             test_id=test_id,
             status='em_andamento'
         ).first()
-        
+        if not session:
+            try:
+                set_search_path("public")
+                session = TestSession.query.filter_by(
+                    student_id=student.id,
+                    test_id=test_id,
+                    status='em_andamento'
+                ).first()
+            except Exception:
+                pass
+        if not session:
+            ctx = get_current_tenant_context()
+            tenant_schema = (ctx.schema if (ctx and ctx.has_tenant_context) else None) or None
+            if tenant_schema and tenant_schema != "public":
+                try:
+                    set_search_path(tenant_schema)
+                    session = TestSession.query.filter_by(
+                        student_id=student.id,
+                        test_id=test_id,
+                        status='em_andamento'
+                    ).first()
+                except Exception:
+                    pass
         if not session:
             return jsonify({
                 "message": "Nenhuma sessão ativa encontrada",
-                "session_exists": False
-            }), 404
+                "session_exists": False,
+                "test_id": test_id
+            }), 200
+
+        # Usar duração da prova (test.duration) se a sessão não tiver time_limit_minutes (ex.: sessões antigas)
+        time_limit_minutes = session.time_limit_minutes
+        if time_limit_minutes is None:
+            test = Test.query.get(session.test_id)
+            if test and getattr(test, 'duration', None) is not None:
+                time_limit_minutes = int(test.duration)
         
         # Calcular tempo decorrido e restante
         elapsed_minutes = 0
-        remaining_minutes = session.time_limit_minutes
+        remaining_minutes = time_limit_minutes
         
         if session.started_at:
             # ✅ REGRA 4: Obter tempo atual no timezone da aplicação (se disponível)
             current_time = None
-            # Tentar obter timezone da aplicação se disponível
-            from app.models.classTest import ClassTest
-            class_test = ClassTest.query.filter_by(
-                class_id=session.student.class_id,
-                test_id=session.test_id
-            ).first()
+            class_test = None
+            try:
+                from app.models.classTest import ClassTest
+                class_test = ClassTest.query.filter_by(
+                    class_id=student.class_id,
+                    test_id=session.test_id
+                ).first()
+            except Exception as e:
+                if 'class_test' not in str(e).lower() or ('does not exist' not in str(e).lower() and 'undefinedtable' not in str(e).lower()):
+                    logging.warning("ClassTest em get_session_info: %s", e)
             
             if class_test and class_test.timezone:
                 import pytz
@@ -2745,18 +3241,27 @@ def get_session_info(test_id):
             
             # ✅ REGRA 4: Comparar diretamente no mesmo timezone
             elapsed_minutes = int((current_time - started_at_dt).total_seconds() / 60)
-            if session.time_limit_minutes:
-                remaining_minutes = max(0, session.time_limit_minutes - elapsed_minutes)
+            if time_limit_minutes is not None:
+                remaining_minutes = max(0, time_limit_minutes - elapsed_minutes)
         
         # Verificar se expirou (apenas se time_limit_minutes não for None)
         is_expired = False
-        if session.time_limit_minutes is not None and remaining_minutes is not None:
+        if time_limit_minutes is not None and remaining_minutes is not None:
             is_expired = remaining_minutes <= 0
-        
+
+        # Duração total da prova em minutos (mesmo valor do time_limit; front usa para exibir "X min")
+        duration_min = time_limit_minutes
+        if duration_min is None and session:
+            test = Test.query.get(session.test_id)
+            if test and getattr(test, 'duration', None) is not None:
+                duration_min = int(test.duration)
+
         return jsonify({
             "session_id": session.id,
             "started_at": session.started_at.isoformat() if session.started_at else None,
-            "time_limit_minutes": session.time_limit_minutes,
+            "time_limit_minutes": time_limit_minutes,
+            "duration_minutes": duration_min,
+            "duration": duration_min,
             "elapsed_minutes": elapsed_minutes,
             "remaining_minutes": remaining_minutes,
             "is_expired": is_expired,
@@ -3284,35 +3789,69 @@ def comparar_avaliacoes():
         # Verificar permissões do usuário para todas as avaliações
         perm_start = time.time()
         if user['role'] == 'professor':
-            # Professor pode comparar avaliações aplicadas nas suas turmas específicas
-            from app.routes.evaluation_results_routes import professor_pode_ver_avaliacao_turmas
-            
+            # Professor pode comparar avaliações aplicadas em alguma escola onde está vinculado (SchoolTeacher)
+            from app.models.teacher import Teacher
+            from app.models.schoolTeacher import SchoolTeacher
+            from app.utils.uuid_helpers import uuid_to_str
+
+            teacher = Teacher.query.filter_by(user_id=user['id']).first()
+            if not teacher:
+                return jsonify({"error": "Professor não encontrado"}), 404
+            school_teachers = SchoolTeacher.query.filter_by(teacher_id=teacher.id).all()
+            professor_school_ids = [uuid_to_str(st.school_id) for st in school_teachers if st.school_id]
+            professor_school_ids = [s for s in professor_school_ids if s]
+            if not professor_school_ids:
+                return jsonify({"error": "Professor não está vinculado a nenhuma escola"}), 400
+
             unauthorized_tests = []
             for test in tests:
-                if not professor_pode_ver_avaliacao_turmas(user['id'], test.id):
+                class_tests = ClassTest.query.filter_by(test_id=str(test.id)).all()
+                class_ids = [ct.class_id for ct in class_tests]
+                if not class_ids:
                     unauthorized_tests.append(test)
-            
+                    continue
+                turma_da_sua_escola = Class.query.filter(
+                    Class.id.in_(class_ids),
+                    Class.school_id.in_(professor_school_ids)
+                ).first()
+                if not turma_da_sua_escola:
+                    unauthorized_tests.append(test)
+
             if unauthorized_tests:
-                unauthorized_ids = [test.id for test in unauthorized_tests]
-                return jsonify({"error": f"Você só pode comparar avaliações aplicadas nas suas turmas. IDs não autorizados: {unauthorized_ids}"}), 403
-        
+                unauthorized_ids = [str(t.id) for t in unauthorized_tests]
+                return jsonify({"error": f"Você só pode comparar avaliações aplicadas nas suas escolas. IDs não autorizados: {unauthorized_ids}"}), 403
+
         elif user['role'] in ['diretor', 'coordenador']:
-            # Diretor e coordenador podem comparar avaliações aplicadas na sua escola
+            # Diretor e coordenador podem comparar avaliações aplicadas na sua escola (via Manager, não Professor)
             from app.models.manager import Manager
-            from app.routes.evaluation_results_routes import professor_pode_ver_avaliacao
-            
+            from app.utils.uuid_helpers import uuid_to_str
+
             manager = Manager.query.filter_by(user_id=user['id']).first()
             if not manager or not manager.school_id:
                 return jsonify({"error": "Diretor/Coordenador não encontrado ou não vinculado a uma escola"}), 404
-            
-            # Verificar se as avaliações foram aplicadas na escola do diretor/coordenador
+
+            manager_school_id_str = uuid_to_str(manager.school_id)
+            if not manager_school_id_str:
+                return jsonify({"error": "Diretor/Coordenador não vinculado a uma escola"}), 400
+
+            # Verificar se cada avaliação foi aplicada em alguma turma da escola do diretor/coordenador
             unauthorized_tests = []
             for test in tests:
-                if not professor_pode_ver_avaliacao(user['id'], test.id):
+                class_tests = ClassTest.query.filter_by(test_id=str(test.id)).all()
+                class_ids = [ct.class_id for ct in class_tests]
+                if not class_ids:
                     unauthorized_tests.append(test)
-            
+                    continue
+                # Há alguma turma dessa avaliação que pertence à escola do manager?
+                turma_da_escola = Class.query.filter(
+                    Class.id.in_(class_ids),
+                    Class.school_id == manager_school_id_str
+                ).first()
+                if not turma_da_escola:
+                    unauthorized_tests.append(test)
+
             if unauthorized_tests:
-                unauthorized_ids = [test.id for test in unauthorized_tests]
+                unauthorized_ids = [str(t.id) for t in unauthorized_tests]
                 return jsonify({"error": f"Você só pode comparar avaliações aplicadas na sua escola. IDs não autorizados: {unauthorized_ids}"}), 403
         
         perm_time = time.time() - perm_start
@@ -3444,6 +3983,7 @@ def export_evolution_excel():
 @bp.route('/student/compare', methods=['POST'])
 @jwt_required()
 @role_required("aluno")
+@requires_city_context
 def comparar_avaliacoes_aluno_proprio():
     """
     Compara múltiplas avaliações de um aluno específico e mostra a evolução sequencial entre elas.
@@ -3497,33 +4037,34 @@ def comparar_avaliacoes_aluno_proprio():
         if not student:
             return jsonify({"error": "Aluno não encontrado"}), 404
         
-        # Buscar todas as avaliações para verificar se existem
+        # Buscar todas as avaliações (uma query)
         tests = Test.query.filter(Test.id.in_(test_ids)).all()
         found_test_ids = {test.id for test in tests}
         missing_test_ids = set(test_ids) - found_test_ids
-        
         if missing_test_ids:
             return jsonify({"error": f"Avaliações não encontradas: {list(missing_test_ids)}"}), 404
         
-        # Verificar se as avaliações foram aplicadas na turma do aluno
+        # Verificar se as avaliações foram aplicadas na turma (só as test_ids pedidas)
         from app.models.classTest import ClassTest
-        class_tests = ClassTest.query.filter_by(class_id=student.class_id).all()
+        class_tests = ClassTest.query.filter(
+            ClassTest.class_id == student.class_id,
+            ClassTest.test_id.in_(test_ids)
+        ).all()
         applied_test_ids = {ct.test_id for ct in class_tests}
-        
         not_applied_tests = set(test_ids) - applied_test_ids
         if not_applied_tests:
             return jsonify({"error": f"Avaliações não foram aplicadas na sua turma: {list(not_applied_tests)}"}), 403
         
-        # Verificar se o aluno completou todas as avaliações
+        # Verificar se o aluno completou todas (uma query em vez de N)
         from app.models.evaluationResult import EvaluationResult
-        for test_id in test_ids:
-            result = EvaluationResult.query.filter_by(
-                test_id=test_id, 
-                student_id=student.id
-            ).first()
-            
-            if not result:
-                return jsonify({"error": f"Você não completou a avaliação {test_id}"}), 400
+        results_exist = EvaluationResult.query.filter(
+            EvaluationResult.student_id == student.id,
+            EvaluationResult.test_id.in_(test_ids)
+        ).with_entities(EvaluationResult.test_id).all()
+        completed_test_ids = {r.test_id for r in results_exist}
+        missing_completed = set(test_ids) - completed_test_ids
+        if missing_completed:
+            return jsonify({"error": f"Você não completou a avaliação {next(iter(missing_completed))}"}), 400
         
         # Executar comparação usando o método específico para alunos
         comparison_result = EvaluationComparisonService.compare_student_evaluations_multiple(student_id, test_ids)
@@ -3543,6 +4084,7 @@ def comparar_avaliacoes_aluno_proprio():
 @bp.route('/student/completed', methods=['GET'])
 @jwt_required()
 @role_required("aluno")
+@requires_city_context
 def listar_avaliacoes_completadas_aluno():
     """
     Lista todas as avaliações que o aluno completou e tem resultados.
@@ -3577,47 +4119,44 @@ def listar_avaliacoes_completadas_aluno():
         
         # Aplicar filtro por disciplina se fornecido
         if subject_filter and subject_filter != 'all':
-            # Buscar testes que têm a disciplina especificada
+            # Buscar apenas IDs de testes com a disciplina (evita carregar objetos completos)
             tests_with_subject = Test.query.filter(
                 Test.subjects_info.contains([{"id": subject_filter}])
-            ).all()
-            test_ids = [test.id for test in tests_with_subject]
-            if test_ids:
-                query = query.filter(EvaluationResult.test_id.in_(test_ids))
+            ).with_entities(Test.id).all()
+            test_ids_filter = [r.id for r in tests_with_subject]
+            if test_ids_filter:
+                query = query.filter(EvaluationResult.test_id.in_(test_ids_filter))
             else:
-                # Se não encontrou testes com essa disciplina, retornar lista vazia
                 return jsonify({
-                    "student": {
-                        "id": student.id,
-                        "name": student.name,
-                        "user_id": student.user_id
-                    },
+                    "student": {"id": student.id, "name": student.name, "user_id": student.user_id},
                     "total_completed": 0,
                     "evaluations": []
                 }), 200
         
-        # Ordenar por data de cálculo (mais recente primeiro)
+        # Ordenar por data de cálculo (mais recente primeiro) — uma query paginada
         results = query.order_by(EvaluationResult.calculated_at.desc()).limit(limit).offset(offset).all()
         
         if not results:
             return jsonify({
-                "student": {
-                    "id": student.id,
-                    "name": student.name,
-                    "user_id": student.user_id
-                },
+                "student": {"id": student.id, "name": student.name, "user_id": student.user_id},
                 "total_completed": 0,
                 "evaluations": []
             }), 200
         
-        # Buscar informações dos testes
         test_ids = [result.test_id for result in results]
-        tests = Test.query.filter(Test.id.in_(test_ids)).all()
+        # Uma query com eager load para evitar N+1 ao acessar subject_rel e grade
+        tests = Test.query.options(
+            joinedload(Test.subject_rel),
+            joinedload(Test.grade)
+        ).filter(Test.id.in_(test_ids)).all()
         tests_dict = {test.id: test for test in tests}
         
-        # Buscar informações das turmas para obter datas de aplicação
+        # Só ClassTests dos testes retornados (evita carregar toda a turma)
         from app.models.classTest import ClassTest
-        class_tests = ClassTest.query.filter_by(class_id=student.class_id).all()
+        class_tests = ClassTest.query.filter(
+            ClassTest.class_id == student.class_id,
+            ClassTest.test_id.in_(test_ids)
+        ).all()
         class_test_dict = {ct.test_id: ct for ct in class_tests}
         
         # Preparar lista de avaliações completadas
@@ -3682,6 +4221,44 @@ def listar_avaliacoes_completadas_aluno():
     except Exception as e:
         logging.error(f"Erro ao listar avaliações completadas do aluno {user['id'] if 'user' in locals() else 'N/A'}: {str(e)}", exc_info=True)
         return jsonify({"error": "Erro ao listar suas avaliações completadas", "details": str(e)}), 500
+
+
+@bp.route('/student/result/<string:test_id>', methods=['GET'])
+@jwt_required()
+@role_required("aluno")
+@requires_city_context
+def resultado_aluno_acertos_por_disciplina(test_id: str):
+    """
+    Retorna acertos por disciplina do aluno logado em uma avaliação específica.
+    Usado pelo gráfico "Acertos por disciplina" no painel de desempenho do aluno.
+
+    Endpoint: GET /test/student/result/<test_id>
+
+    Returns:
+        - test_id, test_title
+        - acertos_por_disciplina: [{ subject_id, subject_name, correct_answers, total_questions }]
+        - geral: { correct_answers, total_questions }
+    """
+    try:
+        from app.services.evaluation_comparison_service import EvaluationComparisonService
+
+        user = get_current_user_from_token()
+        if not user:
+            return jsonify({"error": "Usuário não encontrado"}), 401
+
+        student = Student.query.filter_by(user_id=user["id"]).first()
+        if not student:
+            return jsonify({"error": "Aluno não encontrado"}), 404
+
+        test_id = test_id.strip()
+        data = EvaluationComparisonService.get_student_acertos_por_disciplina(test_id, student.id)
+        if not data:
+            return jsonify({"error": "Avaliação não encontrada ou você ainda não tem resultado nesta avaliação"}), 404
+
+        return jsonify(data), 200
+    except Exception as e:
+        logging.error(f"Erro ao obter acertos por disciplina para avaliação {test_id}: {str(e)}", exc_info=True)
+        return jsonify({"error": "Erro ao obter resultado", "details": str(e)}), 500
 
 
 @bp.route('/debug/comparison/<string:test_id_1>/vs/<string:test_id_2>', methods=['GET'])

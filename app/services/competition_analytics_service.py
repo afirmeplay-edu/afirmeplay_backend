@@ -2,12 +2,15 @@
 """
 Serviço de Analytics de Competições (Etapa 7).
 Calcula métricas estatísticas para relatórios administrativos.
+Student, TestSession, CompetitionEnrollment ficam no tenant; Competition pode estar em public.
 """
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 from sqlalchemy import func
 
 from app import db
 from app.competitions.models import Competition, CompetitionEnrollment, CompetitionResult
+from app.competitions.schema_resolution import get_competition_schema
+from app.utils.tenant_middleware import set_search_path, get_current_tenant_context
 from app.models.testSession import TestSession
 from app.models.student import Student
 from app.services.competition_ranking_service import CompetitionRankingService
@@ -28,13 +31,28 @@ class CompetitionAnalyticsService:
         - Top 10 alunos
         - Comparação com competições anteriores (opcional)
         """
-        competition = Competition.query.get(competition_id)
-        if not competition:
+        ctx = get_current_tenant_context()
+        tenant_schema = (ctx.schema if (ctx and getattr(ctx, "has_tenant_context", False)) else None) or None
+        if not tenant_schema or tenant_schema == "public":
+            raise ValueError(
+                "É necessário informar o município (header X-City-ID ou usuário vinculado à cidade) para calcular analytics."
+            )
+        competition_schema = get_competition_schema(competition_id, tenant_schema=tenant_schema)
+        if not competition_schema:
             raise ValueError(f"Competição {competition_id} não encontrada")
+        set_search_path(competition_schema)
+        try:
+            competition = Competition.query.get(competition_id)
+            if not competition:
+                raise ValueError(f"Competição {competition_id} não encontrada")
+        finally:
+            set_search_path(tenant_schema)
 
         eligible_count = CompetitionAnalyticsService._get_eligible_students_count(competition)
         enrolled_count = CompetitionAnalyticsService._get_enrolled_count(competition_id)
-        participated_count = CompetitionAnalyticsService._get_participated_count(competition_id)
+        participated_count = CompetitionAnalyticsService._get_participated_count(
+            competition_id, competition_schema=competition_schema, tenant_schema=tenant_schema
+        )
 
         # Estruturas detalhadas usadas internamente
         enrollment_summary = {
@@ -49,9 +67,14 @@ class CompetitionAnalyticsService:
             "rate": round((participated_count / enrolled_count * 100) if enrolled_count > 0 else 0.0, 2),
         }
 
-        averages = CompetitionAnalyticsService._calculate_averages(competition_id)
-        grade_distribution = CompetitionAnalyticsService._get_grade_distribution(competition_id)
-        top_10 = CompetitionAnalyticsService._get_top_10(competition_id)
+        # Médias, distribuição e top 10 precisam ler Competition/TestSession/CompetitionResult no schema da competição
+        set_search_path(competition_schema)
+        try:
+            averages = CompetitionAnalyticsService._calculate_averages(competition_id)
+            grade_distribution = CompetitionAnalyticsService._get_grade_distribution(competition_id)
+            top_10 = CompetitionAnalyticsService._get_top_10(competition_id)
+        finally:
+            set_search_path(tenant_schema)
 
         result = {
             "competition_id": competition_id,
@@ -110,21 +133,41 @@ class CompetitionAnalyticsService:
         ).count()
 
     @staticmethod
-    def _get_participated_count(competition_id: str) -> int:
+    def _get_participated_count(
+        competition_id: str,
+        competition_schema: Optional[str] = None,
+        tenant_schema: Optional[str] = None,
+    ) -> int:
         """
         Conta alunos que entregaram a prova (TestSession finalizadas).
         Filtra por escopo da competição.
+        Em competição em public, TestSession fica em public; Student no tenant.
+        Por isso é necessário usar competition_schema para sessões e tenant_schema para alunos.
         """
-        competition = Competition.query.get(competition_id)
-        if not competition or not competition.test_id:
-            return 0
+        if competition_schema is None or tenant_schema is None:
+            ctx = get_current_tenant_context()
+            _tenant = (ctx.schema if (ctx and getattr(ctx, "has_tenant_context", False)) else None) or None
+            if tenant_schema is None:
+                tenant_schema = _tenant
+            if competition_schema is None:
+                competition_schema = get_competition_schema(competition_id, tenant_schema=tenant_schema)
+        # Buscar competição e sessões no schema da competição (public ou city)
+        if competition_schema:
+            set_search_path(competition_schema)
+        try:
+            competition = Competition.query.get(competition_id)
+            if not competition or not competition.test_id:
+                return 0
 
-        sessions = TestSession.query.filter(
-            TestSession.test_id == competition.test_id,
-            TestSession.status.in_(['finalizada', 'expirada', 'corrigida', 'revisada']),
-        ).all()
+            sessions = TestSession.query.filter(
+                TestSession.test_id == competition.test_id,
+                TestSession.status.in_(['finalizada', 'expirada', 'corrigida', 'revisada']),
+            ).all()
+        finally:
+            if tenant_schema:
+                set_search_path(tenant_schema)
 
-        # Filtrar por escopo
+        # Filtrar por escopo: Student está no tenant (path já em tenant_schema após o finally acima)
         from app.competitions.services.competition_service import _student_in_scope
         participated_student_ids = set()
         for session in sessions:
@@ -148,6 +191,7 @@ class CompetitionAnalyticsService:
         Para competições em andamento usa CompetitionRankingService.calculate_ranking
         (que reutiliza os cálculos da avaliação).
         """
+        ranking_svc = CompetitionRankingService  # referência no início para evitar UnboundLocalError no else
         competition = Competition.query.get(competition_id)
         if not competition or not competition.test_id:
             return {
@@ -174,8 +218,7 @@ class CompetitionAnalyticsService:
                 }
 
             # Fallback: se ainda não houver snapshot (bug/estado inconsistente), reutilizar cálculo do ranking
-            from app.services.competition_ranking_service import CompetitionRankingService
-            ranking = CompetitionRankingService.calculate_ranking(competition_id)
+            ranking = ranking_svc.calculate_ranking(competition_id)
             if not ranking:
                 return {
                     "grade": 0.0,
@@ -198,7 +241,7 @@ class CompetitionAnalyticsService:
         else:
             # Para competições em andamento, reutilizar o mesmo cálculo do ranking,
             # que já enriquece cada sessão com proficiência e demais métricas.
-            ranking = CompetitionRankingService.calculate_ranking(competition_id)
+            ranking = ranking_svc.calculate_ranking(competition_id)
             if not ranking:
                 return {
                     "grade": 0.0,
@@ -241,34 +284,15 @@ class CompetitionAnalyticsService:
             if results:
                 grades = [r.grade for r in results if r.grade is not None]
             else:
-                # Fallback: se não houver snapshot, usar sessões/avaliações como em calculate_ranking
-                sessions = TestSession.query.filter(
-                    TestSession.test_id == competition.test_id,
-                    TestSession.status.in_(['finalizada', 'expirada', 'corrigida', 'revisada']),
-                ).all()
-
-                from app.competitions.services.competition_service import _student_in_scope
-                filtered_sessions = []
-                for session in sessions:
-                    student = Student.query.get(session.student_id)
-                    if student and _student_in_scope(student, competition):
-                        filtered_sessions.append(session)
-
-                grades = [s.grade for s in filtered_sessions if s.grade is not None]
+                # Fallback: usar ranking (enriquecido com EvaluationResult no schema correto)
+                ranking_svc = CompetitionRankingService
+                ranking = ranking_svc.calculate_ranking(competition_id)
+                grades = [item.get("grade") for item in ranking if item.get("grade") is not None]
         else:
-            sessions = TestSession.query.filter(
-                TestSession.test_id == competition.test_id,
-                TestSession.status.in_(['finalizada', 'expirada', 'corrigida', 'revisada']),
-            ).all()
-
-            from app.competitions.services.competition_service import _student_in_scope
-            filtered_sessions = []
-            for session in sessions:
-                student = Student.query.get(session.student_id)
-                if student and _student_in_scope(student, competition):
-                    filtered_sessions.append(session)
-
-            grades = [s.grade for s in filtered_sessions if s.grade is not None]
+            # Usar ranking (já enriquecido com EvaluationResult no schema correto) para ter as notas
+            ranking_svc = CompetitionRankingService
+            ranking = ranking_svc.calculate_ranking(competition_id)
+            grades = [item.get("grade") for item in ranking if item.get("grade") is not None]
 
         # Contar por bucket
         buckets = {

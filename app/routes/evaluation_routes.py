@@ -11,6 +11,7 @@ from app.models.test import Test
 from app.models.question import Question
 from app.models.student import Student
 from app.decorators.role_required import role_required, get_current_user_from_token
+from app.decorators import requires_city_context
 from datetime import datetime, timedelta
 import logging
 

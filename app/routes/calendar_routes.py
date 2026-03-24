@@ -1,10 +1,11 @@
 from flask import Blueprint, request, jsonify
 from app.permissions.decorators import role_required, get_current_user_from_token
 from app.permissions.rules import get_user_permission_scope
+from app.decorators import requires_city_context
 from app import db
 from app.models import CalendarEvent, CalendarEventUser, City, School, Grade, Class
 from app.services.calendar_event_service import CalendarEventService
-from sqlalchemy import cast
+from sqlalchemy import cast, String
 from sqlalchemy.dialects.postgresql import UUID as PostgresUUID
 from datetime import datetime
 from typing import List, Dict, Any
@@ -34,6 +35,7 @@ def to_fullcalendar_event(e: CalendarEvent, user_rec: CalendarEventUser = None) 
 
 @bp.route('/events', methods=['POST'])
 @role_required("admin", "professor", "coordenador", "diretor", "tecadm")
+@requires_city_context
 def create_event():
     user = get_current_user_from_token()
     data = request.get_json() or {}
@@ -58,6 +60,7 @@ def create_event():
 
 @bp.route('/events', methods=['GET'])
 @role_required("admin", "professor", "coordenador", "diretor", "tecadm")
+@requires_city_context
 def list_events():
     # Listagem administrativa (filtros opcionais)
     q = CalendarEvent.query
@@ -82,6 +85,7 @@ def list_events():
 
 @bp.route('/events/<string:event_id>', methods=['GET'])
 @role_required("admin", "professor", "coordenador", "diretor", "tecadm")
+@requires_city_context
 def get_event(event_id: str):
     e = CalendarEvent.query.get(event_id)
     if not e:
@@ -91,6 +95,7 @@ def get_event(event_id: str):
 
 @bp.route('/events/<string:event_id>', methods=['PUT'])
 @role_required("admin", "professor", "coordenador", "diretor", "tecadm")
+@requires_city_context
 def update_event(event_id: str):
     e = CalendarEvent.query.get(event_id)
     if not e:
@@ -102,6 +107,7 @@ def update_event(event_id: str):
 
 @bp.route('/events/<string:event_id>', methods=['DELETE'])
 @role_required("admin", "professor", "coordenador", "diretor", "tecadm")
+@requires_city_context
 def delete_event(event_id: str):
     e = CalendarEvent.query.get(event_id)
     if not e:
@@ -113,6 +119,7 @@ def delete_event(event_id: str):
 
 @bp.route('/events/<string:event_id>/publish', methods=['POST'])
 @role_required("admin", "professor", "coordenador", "diretor", "tecadm")
+@requires_city_context
 def publish_event(event_id: str):
     e = CalendarEvent.query.get(event_id)
     if not e:
@@ -123,6 +130,7 @@ def publish_event(event_id: str):
 
 @bp.route('/events/<string:event_id>/recipients', methods=['GET'])
 @role_required("admin", "coordenador", "diretor", "tecadm")
+@requires_city_context
 def list_recipients(event_id: str):
     page = int(request.args.get('page', 1))
     per_page = int(request.args.get('per_page', 50))
@@ -146,6 +154,7 @@ def list_recipients(event_id: str):
 
 @bp.route('/my-events', methods=['GET'])
 @role_required("admin", "professor", "coordenador", "diretor", "tecadm", "aluno")
+@requires_city_context
 def my_events():
     user = get_current_user_from_token()
     start = request.args.get('start')
@@ -170,6 +179,7 @@ def my_events():
 
 @bp.route('/events/<string:event_id>/read', methods=['POST'])
 @role_required("admin", "professor", "coordenador", "diretor", "tecadm", "aluno")
+@requires_city_context
 def mark_read(event_id: str):
     user = get_current_user_from_token()
     CalendarEventService.mark_read(event_id, user['id'])
@@ -178,6 +188,7 @@ def mark_read(event_id: str):
 
 @bp.route('/events/<string:event_id>/dismiss', methods=['POST'])
 @role_required("admin", "professor", "coordenador", "diretor", "tecadm", "aluno")
+@requires_city_context
 def mark_dismiss(event_id: str):
     user = get_current_user_from_token()
     CalendarEventService.mark_dismiss(event_id, user['id'])
@@ -186,11 +197,12 @@ def mark_dismiss(event_id: str):
 
 @bp.route('/targets/me', methods=['GET'])
 @role_required("admin", "professor", "coordenador", "diretor", "tecadm")
+@requires_city_context
 def obter_meus_targets():
     """
     Retorna os targets disponíveis para o usuário logado baseado no seu role.
     
-    - Admin: retorna municípios, escolas e turmas (todas)
+    - Admin: retorna municípios (global), escolas e turmas do município atual (contexto)
     - Tecadm: retorna escolas e turmas do município
     - Diretor/Coordenador: retorna turmas da escola
     - Professor: retorna escolas vinculadas e turmas vinculadas
@@ -208,11 +220,11 @@ def obter_meus_targets():
         response = {}
         user_role = user.get('role', '').lower()
 
-        # Admin: retorna municípios, escolas e turmas
+        # Admin: retorna municípios (global) e escolas/turmas do município atual (contexto)
         if user_role == 'admin':
             response['municipios'] = _obter_todos_municipios()
-            response['escolas'] = _obter_todas_escolas()
-            response['turmas'] = _obter_todas_turmas_formatadas()
+            response['escolas'] = _obter_todas_escolas_do_contexto()
+            response['turmas'] = _obter_todas_turmas_do_contexto()
         
         # Tecadm: retorna escolas e turmas do município
         elif user_role == 'tecadm':
@@ -253,8 +265,8 @@ def _obter_todos_municipios() -> List[Dict[str, Any]]:
     return [{"id": str(m.id), "nome": m.name, "target_type": "MUNICIPALITY"} for m in municipios]
 
 
-def _obter_todas_escolas() -> List[Dict[str, Any]]:
-    """Retorna todas as escolas com relacionamento ao município."""
+def _obter_todas_escolas_do_contexto() -> List[Dict[str, Any]]:
+    """Retorna todas as escolas do município atual (contexto) com relacionamento ao município."""
     escolas = School.query.all()
     result = []
     for escola in escolas:
@@ -269,8 +281,8 @@ def _obter_todas_escolas() -> List[Dict[str, Any]]:
     return result
 
 
-def _obter_todas_turmas_formatadas() -> List[Dict[str, Any]]:
-    """Retorna todas as turmas formatadas como 'Série - Turma'."""
+def _obter_todas_turmas_do_contexto() -> List[Dict[str, Any]]:
+    """Retorna todas as turmas do município atual (contexto) formatadas como 'Série - Turma'."""
     turmas = Class.query.join(Grade, Class.grade_id == Grade.id).all()
     result = []
     for turma in turmas:
@@ -311,7 +323,7 @@ def _obter_escolas_por_municipio(city_id: str) -> List[Dict[str, Any]]:
 
 def _obter_turmas_por_municipio_formatadas(city_id: str) -> List[Dict[str, Any]]:
     """Retorna turmas do município formatadas como 'Série - Turma'."""
-    turmas = Class.query.join(School, Class.school_id == cast(School.id, PostgresUUID))\
+    turmas = Class.query.join(School, School.id == cast(Class.school_id, String))\
                         .join(Grade, Class.grade_id == Grade.id)\
                         .filter(School.city_id == city_id).all()
     result = []

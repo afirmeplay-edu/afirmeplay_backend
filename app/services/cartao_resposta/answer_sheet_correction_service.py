@@ -114,15 +114,19 @@ class AnswerSheetCorrectionService:
             # 9. Calcular correção
             correction = self._calcular_correcao(validated_answers, gabarito)
             
-            # 10. Calcular nota, proficiência e classificação
+            # 10. Calcular nota, proficiência por disciplina e média geral
             correct_count = correction['correct']
             total_count = correction['total_questions']
             percentage = correction['score_percentage']
             grade = (correct_count / total_count * 10) if total_count > 0 else 0.0
             
-            proficiency, classification = self._calcular_proficiencia_classificacao(
-                score_percentage=percentage,
-                gabarito_obj=gabarito_obj
+            from app.services.cartao_resposta.proficiency_by_subject import calcular_proficiencia_por_disciplina
+            blocks_config = getattr(gabarito_obj, 'blocks_config', None) or {}
+            proficiency_by_subject, proficiency, classification = calcular_proficiencia_por_disciplina(
+                blocks_config=blocks_config,
+                validated_answers=validated_answers,
+                gabarito_dict=gabarito,
+                grade_name=gabarito_obj.grade_name or '',
             )
             
             # 11. Salvar resultado em AnswerSheetResult
@@ -133,7 +137,8 @@ class AnswerSheetCorrectionService:
                 correction=correction,
                 grade=grade,
                 proficiency=proficiency,
-                classification=classification
+                classification=classification,
+                proficiency_by_subject=proficiency_by_subject,
             )
             
             return {
@@ -148,6 +153,7 @@ class AnswerSheetCorrectionService:
                 "grade": grade,
                 "proficiency": proficiency,
                 "classification": classification,
+                "proficiency_by_subject": proficiency_by_subject,
                 "answer_sheet_result_id": saved_result.get('id') if saved_result else None,
                 "score_percentage": percentage,
                 "correct_answers": correct_count,
@@ -280,7 +286,8 @@ class AnswerSheetCorrectionService:
                          detected_answers: Dict[int, Optional[str]],
                          correction: Dict[str, Any],
                          grade: float, proficiency: float,
-                         classification: str) -> Optional[Dict[str, Any]]:
+                         classification: str,
+                         proficiency_by_subject: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
         """Salva resultado em AnswerSheetResult"""
         try:
             # Verificar se já existe resultado
@@ -301,10 +308,21 @@ class AnswerSheetCorrectionService:
                 existing_result.grade = grade
                 existing_result.proficiency = proficiency if proficiency > 0 else None
                 existing_result.classification = classification
+                existing_result.proficiency_by_subject = proficiency_by_subject
                 existing_result.corrected_at = datetime.utcnow()
                 existing_result.detection_method = 'geometric'
                 
                 db.session.commit()
+                try:
+                    from app.report_analysis.answer_sheet_aggregate_service import (
+                        invalidate_answer_sheet_report_cache_after_result,
+                    )
+
+                    invalidate_answer_sheet_report_cache_after_result(
+                        gabarito_id, student_id, commit=True
+                    )
+                except Exception as inv_err:
+                    self.logger.warning("Invalidate answer_sheet report cache: %s", inv_err)
                 return existing_result.to_dict()
             else:
                 # Criar novo
@@ -321,11 +339,22 @@ class AnswerSheetCorrectionService:
                     grade=grade,
                     proficiency=proficiency if proficiency > 0 else None,
                     classification=classification,
+                    proficiency_by_subject=proficiency_by_subject,
                     detection_method='geometric'
                 )
                 
                 db.session.add(result)
                 db.session.commit()
+                try:
+                    from app.report_analysis.answer_sheet_aggregate_service import (
+                        invalidate_answer_sheet_report_cache_after_result,
+                    )
+
+                    invalidate_answer_sheet_report_cache_after_result(
+                        gabarito_id, student_id, commit=True
+                    )
+                except Exception as inv_err:
+                    self.logger.warning("Invalidate answer_sheet report cache: %s", inv_err)
                 return result.to_dict()
                 
         except Exception as e:

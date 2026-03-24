@@ -1,14 +1,12 @@
-version: '3.8'
 
 services:
   # PostgreSQL Database
   postgres:
-    image: postgres:15-alpine
+    image: postgres:16-alpine
     container_name: postgres_container
     environment:
-      POSTGRES_USER: postgres_user
-      POSTGRES_PASSWORD: postgres_password
-      POSTGRES_DB: postgres_db
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: devpass
     ports:
       - "5432:5432"
     volumes:
@@ -16,25 +14,29 @@ services:
     networks:
       - innovaplay_network
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres_user -d postgres_db"]
+      test: ["CMD-SHELL", "pg_isready -U postgres -d postgres"]
       interval: 10s
       timeout: 5s
       retries: 5
     restart: unless-stopped
 
-  # Redis para Celery e cache
+  # Redis para Celery e cache (senha e URLs em .env: REDIS_PASSWORD, CELERY_BROKER_URL, CELERY_RESULT_BACKEND, REDIS_URL)
   redis:
     image: redis:7-alpine
     container_name: redis_container
-    command: redis-server --requirepass ${REDIS_PASSWORD:-redis_password} --appendonly yes
+    command: redis-server --requirepass ${REDIS_PASSWORD:-redisdev} --appendonly yes
     ports:
       - "6379:6379"
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-redisdev}
+    env_file:
+      - app/.env
     volumes:
       - redis_data:/data
     networks:
       - innovaplay_network
     healthcheck:
-      test: ["CMD", "redis-cli", "--raw", "incr", "ping"]
+      test: ["CMD-SHELL", "redis-cli -a \"$$REDIS_PASSWORD\" ping | grep -q PONG"]
       interval: 10s
       timeout: 3s
       retries: 5
@@ -101,13 +103,15 @@ services:
 
   # API Flask
   api:
+    profiles:
+      - backend
     build:
       context: .
       dockerfile: Dockerfile
     container_name: innovplay_api
     environment:
       # Database
-      DATABASE_URL: postgresql://postgres_user:postgres_password@postgres_container:5432/postgres_db
+      DATABASE_URL: postgresql://postgres:devpass@postgres_container:5432/postgres
       
       # Frontend
       FRONTEND_URL: ${FRONTEND_URL:-http://localhost:8000}
@@ -124,11 +128,11 @@ services:
       TELEGRAM_GROUP_ID: ${TELEGRAM_GROUP_ID:-}
       TELEGRAM_ALERT_ENABLED: ${TELEGRAM_ALERT_ENABLED:-false}
       
-      # Celery & Redis
-      CELERY_BROKER_URL: redis://:${REDIS_PASSWORD:-redis_password}@redis_container:6379/0
-      CELERY_RESULT_BACKEND: redis://:${REDIS_PASSWORD:-redis_password}@redis_container:6379/0
-      REDIS_URL: redis://:${REDIS_PASSWORD:-redis_password}@redis_container:6379/0
-      REDIS_PASSWORD: ${REDIS_PASSWORD:-redis_password}
+      # Celery & Redis (compatível com app/.env: CELERY_BROKER_URL, CELERY_RESULT_BACKEND, REDIS_URL, REDIS_PASSWORD)
+      CELERY_BROKER_URL: redis://:${REDIS_PASSWORD:-redisdev}@redis_container:6379/0
+      CELERY_RESULT_BACKEND: redis://:${REDIS_PASSWORD:-redisdev}@redis_container:6379/0
+      REDIS_URL: redis://:${REDIS_PASSWORD:-redisdev}@redis_container:6379/0
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-redisdev}
       
       # MinIO (MINIO_SERVER_URL = URL usada nas presigned URLs, acessível pelo browser)
       MINIO_ENDPOINT: http://minio-server:9000
@@ -154,13 +158,15 @@ services:
 
   # Celery Worker
   celery:
+    profiles:
+      - backend
     build:
       context: .
       dockerfile: Dockerfile
     container_name: innovplay_api-celery
     environment:
       # Database
-      DATABASE_URL: postgresql://postgres_user:postgres_password@postgres_container:5432/postgres_db
+      DATABASE_URL: postgresql://postgres:devpass@postgres_container:5432/postgres
       
       # Frontend
       FRONTEND_URL: ${FRONTEND_URL:-http://localhost:8000}
@@ -177,11 +183,11 @@ services:
       TELEGRAM_GROUP_ID: ${TELEGRAM_GROUP_ID:-}
       TELEGRAM_ALERT_ENABLED: ${TELEGRAM_ALERT_ENABLED:-false}
       
-      # Celery & Redis
-      CELERY_BROKER_URL: redis://:${REDIS_PASSWORD:-redis_password}@redis_container:6379/0
-      CELERY_RESULT_BACKEND: redis://:${REDIS_PASSWORD:-redis_password}@redis_container:6379/0
-      REDIS_URL: redis://:${REDIS_PASSWORD:-redis_password}@redis_container:6379/0
-      REDIS_PASSWORD: ${REDIS_PASSWORD:-redis_password}
+      # Celery & Redis (compatível com app/.env)
+      CELERY_BROKER_URL: redis://:${REDIS_PASSWORD:-redisdev}@redis_container:6379/0
+      CELERY_RESULT_BACKEND: redis://:${REDIS_PASSWORD:-redisdev}@redis_container:6379/0
+      REDIS_URL: redis://:${REDIS_PASSWORD:-redisdev}@redis_container:6379/0
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-redisdev}
       
       # MinIO (MINIO_SERVER_URL = URL usada nas presigned URLs)
       MINIO_ENDPOINT: http://minio-server:9000

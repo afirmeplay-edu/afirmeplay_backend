@@ -254,6 +254,7 @@ CREATE TABLE IF NOT EXISTS "{schema}".evaluation_results (
     grade FLOAT NOT NULL,
     proficiency FLOAT NOT NULL,
     classification VARCHAR(50) NOT NULL,
+    subject_results JSONB,
     calculated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 COMMENT ON TABLE "{schema}".evaluation_results IS 'Resultados de avaliações';
@@ -392,6 +393,7 @@ CREATE TABLE IF NOT EXISTS "{schema}".answer_sheet_results (
     grade FLOAT NOT NULL,
     proficiency FLOAT,
     classification VARCHAR(50),
+    proficiency_by_subject JSON,
     corrected_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     detection_method VARCHAR(20) DEFAULT 'geometric'
 );

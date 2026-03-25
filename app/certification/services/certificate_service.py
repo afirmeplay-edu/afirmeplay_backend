@@ -9,15 +9,142 @@ from app.models.student import Student
 from app.models.test import Test
 from app.models.studentClass import Class
 from sqlalchemy.exc import SQLAlchemyError
+import base64
 import logging
-from typing import Dict, List, Optional
+import mimetypes
+import re
+from typing import Dict, List, Optional, Tuple
+from urllib.parse import urlparse
+
+from app.services.storage.minio_service import MinIOService
 
 logger = logging.getLogger(__name__)
+
+
+def _mime_to_ext_certificate(mime: str) -> str:
+    m = (mime or "").lower()
+    if "png" in m:
+        return "png"
+    if "jpeg" in m or "jpg" in m:
+        return "jpg"
+    if "gif" in m:
+        return "gif"
+    if "webp" in m:
+        return "webp"
+    if "svg" in m:
+        return "svg"
+    return "png"
+
+
+def _data_url_to_minio_certificate_image_url(
+    evaluation_id: str, data_url: str, role: str
+) -> str:
+    """
+    Envia data URL de imagem ao MinIO e retorna URL pública armazenável em logo_url/signature_url.
+    """
+    raw = data_url.strip()
+    match = re.match(r"^data:image/([^;]+);base64,(.+)$", raw, re.DOTALL)
+    if not match:
+        raise ValueError(
+            "Formato de imagem inválido (esperado data:image/...;base64,...)"
+        )
+    mime_subtype = match.group(1).strip().lower()
+    b64 = match.group(2).strip()
+    mime_type = (
+        mime_subtype if "/" in mime_subtype else f"image/{mime_subtype}"
+    )
+    try:
+        image_bytes = base64.b64decode(b64, validate=False)
+    except Exception as e:
+        raise ValueError(f"Base64 da imagem inválido: {e}") from e
+    if not image_bytes:
+        raise ValueError("Imagem vazia após decodificação")
+    ext = _mime_to_ext_certificate(mime_type)
+    minio = MinIOService()
+    result = minio.upload_certificate_template_image(
+        evaluation_id, role, image_bytes, ext
+    )
+    if not result or not result.get("url"):
+        raise ValueError("Falha ao enviar imagem do certificado para o armazenamento")
+    url = result["url"]
+    if len(url) > 500:
+        logger.warning(
+            "URL MinIO do template de certificado tem %s caracteres; limite do banco é 500",
+            len(url),
+        )
+    return url
+
+
+def _resolve_certificate_template_image_field(
+    evaluation_id: str, value: Optional[str], role: str
+) -> Optional[str]:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        return None
+    s = value.strip()
+    if not s:
+        return None
+    if s.startswith("data:image/"):
+        return _data_url_to_minio_certificate_image_url(evaluation_id, s, role)
+    return s
+
+
+def _parse_certificate_template_minio_location(stored_url: str) -> Tuple[str, str]:
+    """
+    Extrai bucket e chave do objeto a partir da URL persistida (upload_file do MinIO).
+    """
+    path = urlparse(stored_url).path.lstrip("/")
+    bucket = MinIOService.BUCKETS["CERTIFICATE_TEMPLATES"]
+    prefix = f"{bucket}/"
+    if not path.startswith(prefix):
+        raise ValueError("URL de arquivo não pertence ao armazenamento de certificados")
+    object_name = path[len(prefix) :]
+    if not object_name:
+        raise ValueError("Caminho do objeto inválido")
+    return bucket, object_name
 
 
 class CertificateService:
     """Serviço para operações de certificados"""
     
+    @staticmethod
+    def load_template_asset(evaluation_id: str, asset_kind: str) -> Tuple[bytes, str]:
+        """
+        Baixa logo ou assinatura do MinIO para servir via proxy autenticado.
+
+        Args:
+            evaluation_id: ID da avaliação (test.id)
+            asset_kind: 'logo' ou 'signature'
+
+        Returns:
+            (bytes, content_type)
+
+        Raises:
+            LookupError: template ou arquivo ausente
+            ValueError: URL inválida ou imagem ainda em base64
+        """
+        if asset_kind not in ("logo", "signature"):
+            raise ValueError("Tipo de arquivo inválido (use logo ou signature)")
+        template = CertificateService.get_template_by_evaluation(evaluation_id)
+        if not template:
+            raise LookupError("Template não encontrado")
+        stored = (
+            template.logo_url if asset_kind == "logo" else template.signature_url
+        )
+        if not stored or not str(stored).strip():
+            raise LookupError("Imagem não disponível para este template")
+        stored = stored.strip()
+        if stored.startswith("data:image/"):
+            raise ValueError(
+                "Imagem ainda não foi enviada ao armazenamento; salve o template novamente"
+            )
+        bucket, object_name = _parse_certificate_template_minio_location(stored)
+        minio = MinIOService()
+        data = minio.download_file(bucket, object_name)
+        ctype, _ = mimetypes.guess_type(object_name)
+        return data, ctype or "application/octet-stream"
+
     @staticmethod
     def get_template_by_evaluation(evaluation_id: str) -> Optional[CertificateTemplate]:
         """
@@ -65,8 +192,13 @@ class CertificateService:
             template.background_color = template_data['background_color']
             template.text_color = template_data['text_color']
             template.accent_color = template_data['accent_color']
-            template.logo_url = template_data.get('logo_url')
-            template.signature_url = template_data.get('signature_url')
+            ev_id = template_data['evaluation_id']
+            template.logo_url = _resolve_certificate_template_image_field(
+                ev_id, template_data.get('logo_url'), 'logo'
+            )
+            template.signature_url = _resolve_certificate_template_image_field(
+                ev_id, template_data.get('signature_url'), 'signature'
+            )
             template.custom_date = template_data.get('custom_date')
             
             if not template_id:

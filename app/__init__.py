@@ -56,6 +56,9 @@ def create_app():
     app.config['JWT_TOKEN_LOCATION'] = ['headers']
     app.config['JWT_HEADER_NAME'] = 'Authorization'
     app.config['JWT_HEADER_TYPE'] = 'Bearer'
+    # Permite enviar JWT na query (?access_token=) para <img src> nas rotas que usam
+    # jwt_required(locations=['headers', 'query_string']).
+    app.config['JWT_QUERY_STRING_NAME'] = 'access_token'
     
     # Configuração do banco de dados
     app.config['SQLALCHEMY_DATABASE_URI'] = os.getenv('DATABASE_URL')

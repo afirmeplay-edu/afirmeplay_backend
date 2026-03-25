@@ -18,6 +18,8 @@ from typing import List, Dict, Any, Optional
 from PIL import Image as PILImage
 from pypdf import PdfReader, PdfWriter
 
+logger = logging.getLogger(__name__)
+
 
 class InstitutionalTestWeasyPrintGenerator:
     """
@@ -180,18 +182,19 @@ class InstitutionalTestWeasyPrintGenerator:
         output_dir: str = None
     ) -> List[Dict]:
         """
-        Architecture 4 (otimizada) com PDF Overlay para OMR:
-        - Gera 1 PDF base (capa institucional genérica + blocos + questões), uma vez.
-        - Gera 1 PDF template do cartão OMR (WeasyPrint, dados neutros), uma vez.
-        - Por aluno: gera apenas overlay PDF (ReportLab: nome, escola, turma, QR) e aplica
-          sobre o template OMR; depois mescla base + cartão OMR preenchido.
-        - WeasyPrint roda apenas 2 vezes (prova + template OMR), não N vezes por aluno.
+        Architecture 4-A OTIMIZADA:
+        1× PDF Questões (sem capa) - compartilhado
+        1× Template OMR - compartilhado
+        N× PDFs Capa (por grupo escola+série+turma)
+        M× Overlays OMR (por aluno)
         """
         if output_dir is None:
             output_dir = '/tmp/celery_pdfs/physical_tests'
         os.makedirs(output_dir, exist_ok=True)
 
-        # Preparar estrutura comum de questões (uma vez)
+        # ════════════════════════════════════════════════════════════════
+        # ETAPA 1: Preparar estrutura de questões
+        # ════════════════════════════════════════════════════════════════
         questions_by_subject = self._organize_questions_by_subject(questions_data, test_data)
         blocks_config = test_data.get('blocks_config', {})
         use_blocks = blocks_config.get('use_blocks', False)
@@ -236,7 +239,7 @@ class InstitutionalTestWeasyPrintGenerator:
                 options_list = ['A', 'B', 'C', 'D']
             questions_map[question_num] = options_list
 
-        # Inline base64 nas questões (uma vez)
+        # Inline base64 nas questões
         if questions_by_block:
             for block in questions_by_block:
                 for q in block.get('questions', []) or []:
@@ -265,11 +268,15 @@ class InstitutionalTestWeasyPrintGenerator:
                                 alt['content'] = Markup(self._inline_question_images_html(str(alt['content']), q.get('images') or []))
 
         default_logo_base64 = self._load_default_logo()
-        # Aluno genérico para a capa do base (rodapé usa fallbacks do template)
-        base_student = {'school_name': '', 'class_name': '', 'name': ''}
-        base_template_data = {
+
+        # ════════════════════════════════════════════════════════════════
+        # ETAPA 2: Gerar PDF QUESTÕES (sem capa) - 1× compartilhado
+        # ════════════════════════════════════════════════════════════════
+        logger.info(f"[ARCH4-A] Gerando PDF questões (sem capa) - 1× para todos")
+        
+        questions_template_data = {
             'test_data': test_data,
-            'student': base_student,
+            'student': {'school_name': '', 'class_name': '', 'name': ''},
             'questions_by_subject': questions_by_subject,
             'questions_by_block': questions_by_block,
             'blocks_config': blocks_config,
@@ -279,15 +286,20 @@ class InstitutionalTestWeasyPrintGenerator:
             'datetime': datetime,
             'generated_date': datetime.now().strftime('%d/%m/%Y %H:%M'),
             'default_logo': default_logo_base64,
-            'include_cover': True,
+            'include_cover': False,
             'include_questions': True,
             'include_answer_sheet': False,
         }
-        base_html = self._render_template('institutional_test_hybrid.html', base_template_data)
-        base_pdf_bytes = self._html_to_pdf_bytes(base_html)
-        base_reader = PdfReader(io.BytesIO(base_pdf_bytes))
+        questions_html = self._render_template('institutional_test_hybrid.html', questions_template_data)
+        questions_pdf_bytes = self._html_to_pdf_bytes(questions_html)
+        questions_reader = PdfReader(io.BytesIO(questions_pdf_bytes))
+        logger.info(f"[ARCH4-A] Questões: {len(questions_pdf_bytes) // 1024} kB, {len(questions_reader.pages)} pág")
 
-        # Template OMR único (WeasyPrint com dados vazios/placeholder) — uma vez
+        # ════════════════════════════════════════════════════════════════
+        # ETAPA 3: Gerar Template OMR - 1× compartilhado
+        # ════════════════════════════════════════════════════════════════
+        logger.info(f"[ARCH4-A] Gerando template OMR - 1× para todos")
+        
         omr_placeholder_student = {
             'name': '',
             'school_name': '',
@@ -315,16 +327,85 @@ class InstitutionalTestWeasyPrintGenerator:
         omr_template_reader = PdfReader(io.BytesIO(omr_template_pdf_bytes))
         if len(omr_template_reader.pages) < 1:
             raise RuntimeError("Template OMR sem páginas")
-        # Manter bytes para clonar a página por aluno (merge overlay em cima)
         del omr_template_reader
+        logger.info(f"[ARCH4-A] OMR: {len(omr_template_pdf_bytes) // 1024} kB")
 
-        # Coordenadas (uma vez)
+        # ════════════════════════════════════════════════════════════════
+        # ETAPA 4: Agrupar alunos e gerar capas por grupo
+        # ════════════════════════════════════════════════════════════════
+        logger.info(f"[ARCH4-A] Agrupando {len(students_data)} alunos...")
+        
+        groups = {}
+        for student in students_data:
+            school_name = (student.get('school_name') or '').strip()
+            class_name = (student.get('class_name') or '').strip()
+            grade_name = (test_data.get('grade_name') or '').strip()
+            
+            group_key = (school_name, grade_name, class_name)
+            
+            if group_key not in groups:
+                groups[group_key] = {
+                    'school_name': school_name,
+                    'grade_name': grade_name,
+                    'class_name': class_name,
+                    'students': []
+                }
+            groups[group_key]['students'].append(student)
+        
+        num_groups = len(groups)
+        logger.info(f"[ARCH4-A] {num_groups} grupo(s) detectado(s)")
+        
+        covers_cache = {}
+        
+        for group_idx, (group_key, group_data) in enumerate(groups.items(), 1):
+            school = group_data['school_name']
+            grade = group_data['grade_name']
+            class_n = group_data['class_name']
+            num_students = len(group_data['students'])
+            
+            logger.info(f"[ARCH4-A] Capa {group_idx}/{num_groups} ({num_students} alunos): {school or '?'} | {grade or '?'} | {class_n or '?'}")
+            
+            group_student = {
+                'school_name': school,
+                'class_name': class_n,
+                'name': ''
+            }
+            
+            test_data_group = test_data.copy()
+            test_data_group['grade_name'] = grade
+            
+            cover_template_data = {
+                'test_data': test_data_group,
+                'student': group_student,
+                'questions_by_subject': questions_by_subject,
+                'questions_by_block': questions_by_block,
+                'blocks_config': blocks_config,
+                'questions_map': questions_map,
+                'answer_sheet_image': '',
+                'total_questions': total_questions,
+                'datetime': datetime,
+                'generated_date': datetime.now().strftime('%d/%m/%Y %H:%M'),
+                'default_logo': default_logo_base64,
+                'include_cover': True,
+                'include_questions': False,
+                'include_answer_sheet': False,
+            }
+            cover_html = self._render_template('institutional_test_hybrid.html', cover_template_data)
+            cover_pdf_bytes = self._html_to_pdf_bytes(cover_html)
+            covers_cache[group_key] = cover_pdf_bytes
+            logger.info(f"[ARCH4-A] Capa {group_idx}: {len(cover_pdf_bytes) // 1024} kB")
+
+        # ════════════════════════════════════════════════════════════════
+        # ETAPA 5: Gerar PDFs por aluno (merge)
+        # ════════════════════════════════════════════════════════════════
+        logger.info(f"[ARCH4-A] Gerando {len(students_data)} PDFs individuais...")
+
         coordinates = self._map_existing_form_coordinates(questions_data)
-
         generated_files: List[Dict[str, Any]] = []
         total_students = len(students_data)
         job_id = (test_data or {}).get('job_id')
         previous_class_name = None
+        
         for idx, student in enumerate(students_data, 1):
             index_0 = idx - 1
             current_class_name = student.get('class_name') or ''
@@ -349,26 +430,46 @@ class InstitutionalTestWeasyPrintGenerator:
                     pass
             try:
                 student_id = str(student.get('id', ''))
-                # Overlay ReportLab (nome, escola, turma, QR) nas posições do template
-                overlay_bytes = self._generate_student_overlay_pdf(student, test_data)
-                if not overlay_bytes:
-                    raise RuntimeError("Falha ao gerar overlay do aluno")
-                overlay_reader = PdfReader(io.BytesIO(overlay_bytes))
-                # Clonar página do template OMR e aplicar overlay por cima
+                
+                group_key = (
+                    (student.get('school_name') or '').strip(),
+                    (test_data.get('grade_name') or '').strip(),
+                    (student.get('class_name') or '').strip()
+                )
+                
+                cover_pdf_bytes = covers_cache.get(group_key)
+                if not cover_pdf_bytes:
+                    logger.warning(f"Capa não encontrada para {group_key}, usando primeira")
+                    cover_pdf_bytes = list(covers_cache.values())[0] if covers_cache else None
+                
+                if not cover_pdf_bytes:
+                    raise RuntimeError("Nenhuma capa disponível")
+                
+                cover_reader = PdfReader(io.BytesIO(cover_pdf_bytes))
+                
+                omr_overlay_bytes = self._generate_student_overlay_pdf(student, test_data)
+                if not omr_overlay_bytes:
+                    raise RuntimeError("Falha ao gerar overlay OMR")
+                
+                omr_overlay_reader = PdfReader(io.BytesIO(omr_overlay_bytes))
                 omr_fresh = PdfReader(io.BytesIO(omr_template_pdf_bytes))
                 omr_page = omr_fresh.pages[0]
-                omr_page.merge_page(overlay_reader.pages[0])
+                omr_page.merge_page(omr_overlay_reader.pages[0])
 
-                # Merge: prova base + cartão OMR (template + overlay)
                 writer = PdfWriter()
-                for p in base_reader.pages:
-                    writer.add_page(p)
+                
+                for page in cover_reader.pages:
+                    writer.add_page(page)
+                
+                for page in questions_reader.pages:
+                    writer.add_page(page)
+                
                 writer.add_page(omr_page)
+                
                 out = io.BytesIO()
                 writer.write(out)
                 final_pdf_bytes = out.getvalue()
 
-                # Persistir em disco para o pipeline existente
                 student_name_safe = student.get('name', student.get('nome', 'aluno')).replace(' ', '_').replace('/', '_')
                 pdf_path = os.path.join(output_dir, f"prova_{student_name_safe}_{student.get('id')}.pdf")
                 with open(pdf_path, 'wb') as f:
@@ -399,11 +500,12 @@ class InstitutionalTestWeasyPrintGenerator:
                     except Exception:
                         pass
 
-                gc.collect()
-                if idx % 10 == 0 or idx == total_students:
-                    logging.debug(f"Gerados {idx}/{total_students} PDFs institucionais (arch4)")
+                if idx % 10 == 0:
+                    logger.info(f"[ARCH4-A] {idx}/{total_students} PDFs")
+                    gc.collect()
+
             except Exception as e:
-                logging.error(f"Erro ao gerar PDF institucional WeasyPrint (arch4) para aluno {student.get('id', 'N/A')}: {str(e)}", exc_info=True)
+                logger.error(f"[ARCH4-A] Erro aluno {student.get('id', 'N/A')}: {str(e)}", exc_info=True)
                 if job_id:
                     try:
                         from app.services.progress_store import update_item_error
@@ -418,6 +520,7 @@ class InstitutionalTestWeasyPrintGenerator:
                         pass
                 continue
 
+        logger.info(f"[ARCH4-A] Concluído: {len(generated_files)}/{total_students} PDFs")
         return generated_files
 
     def generate_institutional_test_pdf(self, test_data: Dict, students_data: List[Dict],

@@ -1068,20 +1068,19 @@
 				<div class="info-row">
 					<div class="info-label">ESCOLA:</div>
 					<div class="info-value">
-						{{ student.school_name or test_data.institution or
-						'E.M.E.B JOÃO PAULO II' }}
+						{{ student.school_name or test_data.institution or '' }}
 					</div>
 				</div>
 				<div class="info-row">
 					<div class="info-label">SÉRIE:</div>
 					<div class="info-value">
-						{{ test_data.grade_name or '5º Ano' }}
+						{{ test_data.grade_name or '' }}
 					</div>
 				</div>
 				<div class="info-row">
 					<div class="info-label">TURMA:</div>
 					<div class="info-value">
-						{{ student.class_name or '5º A MATUTINO' }}
+						{{ student.class_name or '' }}
 					</div>
 				</div>
 			</div>

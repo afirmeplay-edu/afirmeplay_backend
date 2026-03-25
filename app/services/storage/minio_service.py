@@ -42,6 +42,7 @@ class MinIOService:
         'MUNICIPALITY_LOGOS': 'municipality-logos',
         'SCHOOL_LOGOS': 'school-logos',
         'QUESTION_IMAGES': 'question-images',
+        'CERTIFICATE_TEMPLATES': 'certificate-templates',
         'USER_UPLOADS': 'user-uploads',
     }
     
@@ -394,4 +395,42 @@ class MinIOService:
             bucket_name=bucket_name,
             object_name=object_name,
             data=image_data
+        )
+
+    def upload_certificate_template_image(
+        self,
+        evaluation_id: str,
+        role: str,
+        image_data: bytes,
+        extension: str,
+    ) -> Optional[Dict[str, str]]:
+        """
+        Upload de imagem de template de certificado (logo ou assinatura).
+        Usa evaluation_id no path (um template por avaliação); sobrescreve
+        o mesmo arquivo ao reenviar.
+
+        Args:
+            evaluation_id: ID da avaliação (test.id)
+            role: 'logo' ou 'signature'
+            image_data: bytes da imagem
+            extension: extensão sem ponto (ex.: jpg, png)
+
+        Returns:
+            Dict com url, object_name, bucket, size ou None se falhar
+        """
+        bucket_name = self.BUCKETS['CERTIFICATE_TEMPLATES']
+        try:
+            if not self.client.bucket_exists(bucket_name):
+                self.client.make_bucket(bucket_name)
+                logger.info(f"✅ Bucket '{bucket_name}' criado automaticamente")
+        except S3Error as e:
+            logger.error(f"❌ Erro ao garantir bucket certificate-templates: {str(e)}")
+            return None
+        ext = (extension or "png").lstrip(".").lower()
+        safe_role = role if role in ("logo", "signature") else "logo"
+        object_name = f"{evaluation_id}/{safe_role}.{ext}"
+        return self.upload_file(
+            bucket_name=bucket_name,
+            object_name=object_name,
+            data=image_data,
         )

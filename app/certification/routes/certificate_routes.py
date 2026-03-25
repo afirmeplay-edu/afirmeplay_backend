@@ -2,7 +2,9 @@
 """
 Rotas para API de Certificados
 """
-from flask import Blueprint, request, jsonify
+from io import BytesIO
+
+from flask import Blueprint, request, jsonify, send_file
 from flask_jwt_extended import jwt_required
 from app import db
 from app.decorators.role_required import role_required, get_current_user_from_token
@@ -36,6 +38,52 @@ def handle_generic_error(error):
 
 
 # ==================== TEMPLATES DE CERTIFICADOS ====================
+
+@bp.route('/template/<string:evaluation_id>/logo', methods=['GET'])
+@jwt_required(locations=['headers', 'query_string'])
+@requires_city_context
+def get_template_logo(evaluation_id):
+    """Proxy autenticado: imagem do logo no MinIO (bucket privado)."""
+    try:
+        data, ctype = CertificateService.load_template_asset(evaluation_id, 'logo')
+        return send_file(
+            BytesIO(data),
+            mimetype=ctype,
+            as_attachment=False,
+            max_age=3600,
+        )
+    except LookupError as e:
+        return jsonify({"erro": str(e)}), 404
+    except ValueError as e:
+        return jsonify({"erro": str(e)}), 400
+    except Exception as e:
+        logging.error(f"Erro ao obter logo do template: {str(e)}", exc_info=True)
+        return jsonify({"erro": "Erro ao carregar imagem", "detalhes": str(e)}), 500
+
+
+@bp.route('/template/<string:evaluation_id>/signature', methods=['GET'])
+@jwt_required(locations=['headers', 'query_string'])
+@requires_city_context
+def get_template_signature(evaluation_id):
+    """Proxy autenticado: imagem da assinatura no MinIO (bucket privado)."""
+    try:
+        data, ctype = CertificateService.load_template_asset(
+            evaluation_id, 'signature'
+        )
+        return send_file(
+            BytesIO(data),
+            mimetype=ctype,
+            as_attachment=False,
+            max_age=3600,
+        )
+    except LookupError as e:
+        return jsonify({"erro": str(e)}), 404
+    except ValueError as e:
+        return jsonify({"erro": str(e)}), 400
+    except Exception as e:
+        logging.error(f"Erro ao obter assinatura do template: {str(e)}", exc_info=True)
+        return jsonify({"erro": "Erro ao carregar imagem", "detalhes": str(e)}), 500
+
 
 @bp.route('/template/<string:evaluation_id>', methods=['GET'])
 @jwt_required()

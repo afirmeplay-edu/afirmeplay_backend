@@ -87,7 +87,7 @@ def _resolve_student_id():
         if not student:
             return None, (jsonify({"error": "Estudante não vinculado ao usuário"}), 403)
         return student.id, None
-    sid = request.args.get("student_id") or (request.get_json() or {}).get("student_id")
+    sid = request.args.get("student_id") or (request.get_json(silent=True) or {}).get("student_id")
     if not sid:
         return None, (jsonify({"error": "student_id é obrigatório (query ou body)"}), 400)
     return sid, None

@@ -957,33 +957,72 @@ def get_class_teachers(class_id):
         if not class_obj:
             return jsonify({"erro": "Turma não encontrada"}), 404
 
-        # Buscar professores da turma
+        user = get_current_user_from_token()
+        if not user:
+            return jsonify({"erro": "Usuário não encontrado"}), 404
+
+        school_id_str = str(class_obj.school_id) if class_obj.school_id else None
+        school = School.query.get(school_id_str) if school_id_str else None
+        if not school:
+            return jsonify({"erro": "Escola da turma não encontrada"}), 404
+
+        if user["role"] == "admin":
+            pass
+        elif user["role"] == "professor":
+            from app.models.teacher import Teacher
+            from app.models.schoolTeacher import SchoolTeacher
+
+            teacher = Teacher.query.filter_by(user_id=user["id"]).first()
+            if not teacher:
+                return jsonify({"erro": "Professor não encontrado"}), 404
+            teacher_schools = SchoolTeacher.query.filter_by(teacher_id=teacher.id).all()
+            teacher_school_ids = [str(ts.school_id) for ts in teacher_schools]
+            if school_id_str not in teacher_school_ids:
+                return jsonify({"erro": "Você não tem permissão para visualizar professores desta turma"}), 403
+        elif user["role"] in ["diretor", "coordenador"]:
+            from app.models.manager import Manager
+
+            manager = Manager.query.filter_by(user_id=user["id"]).first()
+            if not manager:
+                return jsonify({"erro": "Diretor/Coordenador não encontrado na tabela manager"}), 404
+            if not manager.school_id or str(manager.school_id) != school_id_str:
+                return jsonify({"erro": "Você não tem permissão para visualizar professores desta turma"}), 403
+        else:
+            city_id = user.get("tenant_id") or user.get("city_id")
+            if not city_id or school.city_id != city_id:
+                return jsonify({"erro": "Você não tem permissão para visualizar professores desta turma"}), 403
+
+        # Professores via teacher_class (vínculo explícito turma) e via class_subject (disciplinas da turma)
         from app.models.teacherClass import TeacherClass
         from app.models.teacher import Teacher
         from app.models.user import User
-        
-        professores = db.session.query(
+        from app.models.classSubject import ClassSubject
+
+        professores_tc = db.session.query(
             Teacher,
             User,
             TeacherClass
-        ).join(
+        ).outerjoin(
             User, Teacher.user_id == User.id
         ).join(
             TeacherClass, Teacher.id == TeacherClass.teacher_id
         ).filter(
-            TeacherClass.class_id == class_id
+            TeacherClass.class_id == class_id_uuid
         ).all()
 
         resultado = []
-        for professor, usuario, vinculo in professores:
+        teacher_ids_vistos = set()
+
+        for professor, usuario, vinculo in professores_tc:
+            teacher_ids_vistos.add(professor.id)
             resultado.append({
                 "professor": {
                     "id": professor.id,
                     "name": professor.name,
-                    "email": usuario.email,
+                    "email": usuario.email if usuario else None,
                     "registration": professor.registration,
                     "birth_date": str(professor.birth_date) if professor.birth_date else None,
-                    "city_id": usuario.city_id
+                    "city_id": usuario.city_id if usuario else None
                 },
                 "usuario": {
                     "id": usuario.id,
@@ -991,10 +1030,52 @@ def get_class_teachers(class_id):
                     "email": usuario.email,
                     "registration": usuario.registration,
                     "role": usuario.role.value
-                },
+                } if usuario else None,
                 "vinculo_turma": {
                     "teacher_class_id": vinculo.id,
-                    "class_id": vinculo.class_id
+                    "class_id": str(vinculo.class_id) if vinculo.class_id is not None else None,
+                    "origem": "teacher_class"
+                }
+            })
+
+        # Professores alocados só em disciplinas (class_subject), sem linha em teacher_class
+        cs_professores = db.session.query(
+            ClassSubject,
+            Teacher,
+            User
+        ).join(
+            Teacher, ClassSubject.teacher_id == Teacher.id
+        ).outerjoin(
+            User, Teacher.user_id == User.id
+        ).filter(
+            ClassSubject.class_id == class_id_uuid
+        ).all()
+
+        for cs_row, professor, usuario in cs_professores:
+            if professor.id in teacher_ids_vistos:
+                continue
+            teacher_ids_vistos.add(professor.id)
+            resultado.append({
+                "professor": {
+                    "id": professor.id,
+                    "name": professor.name,
+                    "email": usuario.email if usuario else None,
+                    "registration": professor.registration,
+                    "birth_date": str(professor.birth_date) if professor.birth_date else None,
+                    "city_id": usuario.city_id if usuario else None
+                },
+                "usuario": {
+                    "id": usuario.id,
+                    "name": usuario.name,
+                    "email": usuario.email,
+                    "registration": usuario.registration,
+                    "role": usuario.role.value
+                } if usuario else None,
+                "vinculo_turma": {
+                    "teacher_class_id": None,
+                    "class_id": str(class_id_uuid),
+                    "origem": "class_subject",
+                    "class_subject_id": cs_row.id
                 }
             })
 

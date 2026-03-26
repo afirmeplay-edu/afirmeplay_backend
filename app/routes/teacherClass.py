@@ -5,19 +5,24 @@ from app.models.user import User
 from app import db
 import uuid
 import logging
-from app.decorators.role_required import role_required
+from app.decorators.role_required import role_required, get_current_user_from_token
 from flask_jwt_extended import jwt_required
+from app.utils.uuid_helpers import ensure_uuid
 
 teacher_class_bp = Blueprint('teacher_class', __name__)
 
 @teacher_class_bp.route('/teacher-class', methods=['POST'])
 @jwt_required()
-@role_required('admin', 'tecadm')
+@role_required('admin', 'tecadm', 'diretor', 'coordenador')
 def create_teacher_class():
     data = request.get_json()
     logging.info(f"Dados recebidos para vincular professor à turma: {data}")
     
     try:
+        current_user = get_current_user_from_token()
+        if not current_user:
+            return jsonify({"erro": "Usuário não encontrado"}), 404
+
         # Verificar se o professor existe
         teacher = None
         user = User.query.get(data.get('teacher_id'))
@@ -51,8 +56,12 @@ def create_teacher_class():
         from app.models.schoolTeacher import SchoolTeacher
         from app.utils.uuid_helpers import uuid_to_str
 
+        class_id_uuid = ensure_uuid(class_id)
+        if not class_id_uuid:
+            return jsonify({"erro": "ID de turma inválido"}), 400
+
         # Buscar a turma e sua escola
-        class_obj = Class.query.get(class_id)
+        class_obj = Class.query.get(class_id_uuid)
         if not class_obj:
             logging.error(f"Turma não encontrada: {class_id}")
             return jsonify({"erro": "Turma não encontrada"}), 404
@@ -60,6 +69,24 @@ def create_teacher_class():
         school_id_raw = getattr(class_obj, "_school_id", None) or getattr(class_obj, "school_id", None)
         school_id = uuid_to_str(school_id_raw) if school_id_raw else str(school_id_raw)
         logging.info(f"Turma {class_id} pertence à escola {school_id}")
+
+        if current_user["role"] in ("diretor", "coordenador"):
+            from app.models.manager import Manager
+
+            manager = Manager.query.filter_by(user_id=current_user["id"]).first()
+            if not manager or str(manager.school_id) != str(school_id):
+                return jsonify({
+                    "erro": "Você só pode vincular professores a turmas da sua escola"
+                }), 403
+        elif current_user["role"] == "tecadm":
+            from app.models.school import School
+
+            sch = School.query.get(school_id)
+            city_id = current_user.get("tenant_id") or current_user.get("city_id")
+            if not sch or not city_id or sch.city_id != city_id:
+                return jsonify({
+                    "erro": "Você só pode vincular professores a turmas de escolas do seu município"
+                }), 403
 
         teacher_id_str = uuid_to_str(teacher_id) if teacher_id else str(teacher_id)
 
@@ -86,7 +113,7 @@ def create_teacher_class():
         # Verificar se já existe o vínculo (usar ids normalizados)
         existing_vinculo = TeacherClass.query.filter_by(
             teacher_id=teacher_id_str,
-            class_id=class_id
+            class_id=class_id_uuid
         ).first()
 
         if existing_vinculo:
@@ -102,7 +129,7 @@ def create_teacher_class():
         
         teacher_class = TeacherClass(
             teacher_id=teacher_id_str,
-            class_id=class_id
+            class_id=class_id_uuid
         )
         
         logging.info(f"Criando vínculo: teacher_id={teacher_id}, class_id={class_id}")

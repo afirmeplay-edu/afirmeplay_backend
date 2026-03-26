@@ -277,13 +277,19 @@ class CompetitionService:
     @staticmethod
     def add_questions_manually(competition_id: str, question_ids: list) -> None:
         """Adiciona questões manualmente (para question_mode = 'manual')."""
-        competition = Competition.query.get_or_404(competition_id)
-        if competition.question_mode != 'manual':
-            raise ValidationError("Competição não está em modo manual")
-
         ctx = get_current_tenant_context()
         tenant_schema = (ctx.schema if (ctx and ctx.has_tenant_context) else None) or None
         competition_schema = get_competition_schema(competition_id, tenant_schema=tenant_schema)
+        if not competition_schema:
+            from flask import abort
+
+            abort(404)
+        # Após get_competition_schema (rollback na sessão), carregar competição no schema certo
+        # para evitar ObjectDeletedError ao acessar test_id com search_path do tenant.
+        set_search_path(competition_schema)
+        competition = Competition.query.get_or_404(competition_id)
+        if competition.question_mode != 'manual':
+            raise ValidationError("Competição não está em modo manual")
 
         if competition.test_id:
             # Test existe apenas no tenant; quando competition está em public, usar tenant para Test/TestQuestion
@@ -366,10 +372,13 @@ class CompetitionService:
             # Calcular e atualizar max_score após adicionar as questões
             max_score = _calculate_test_max_score(test.id)
             test.max_score = max_score
-            
-            competition.test_id = test.id
+            # Persistir UPDATE em test no schema da prova (tenant) antes de voltar a public;
+            # senão o commit emite UPDATE em public.test e dá "0 rows matched".
+            db.session.flush()
+
             if schema_for_test != competition_schema:
                 set_search_path(competition_schema)
+            competition.test_id = test.id
         db.session.commit()
 
     @staticmethod

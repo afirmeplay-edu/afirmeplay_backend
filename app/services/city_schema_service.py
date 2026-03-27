@@ -5,6 +5,7 @@ Reutiliza a mesma estrutura da migração 0001_init_city_schemas.
 import logging
 from app import db
 from app.utils.tenant_middleware import city_id_to_schema_name
+from app.services.mobile.ddl import get_mobile_tables_ddl
 
 logger = logging.getLogger(__name__)
 
@@ -35,6 +36,9 @@ def provision_city_schema(city_id: str, city_name: str, city_state: str) -> None
         # DDL das tabelas (igual à migração 0001) – um bloco por vez para compatibilidade
         ddl = _get_city_tables_ddl(schema_name)
         cursor.execute(ddl)
+
+        mobile_ddl = get_mobile_tables_ddl(schema_name)
+        cursor.execute(mobile_ddl)
 
         logger.info("Schema e tabelas criados para cidade %s (%s)", city_id, schema_name)
     except Exception as e:

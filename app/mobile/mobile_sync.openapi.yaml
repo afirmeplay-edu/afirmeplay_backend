@@ -1,0 +1,361 @@
+openapi: 3.0.3
+info:
+  title: InnovaPlay Mobile Sync API
+  description: |
+    API offline-first isolada (`/mobile/v1`). Autenticação via Flask-JWT-Extended no login mobile.
+    Multitenant por schema PostgreSQL (`city_*`). Headers de município seguem o backend principal.
+  version: 1.0.0
+
+servers:
+  - url: /
+    description: Mesma origem do backend
+
+tags:
+  - name: auth
+  - name: sync
+
+paths:
+  /mobile/v1/auth/login:
+    post:
+      tags: [auth]
+      summary: Login aplicador (JWT mobile)
+      description: |
+        Não altera o login web. Exige contexto de município via `X-City-ID`, `X-City-Slug` ou subdomínio (mesma regra do middleware).
+      parameters:
+        - $ref: '#/components/parameters/XDeviceId'
+        - $ref: '#/components/parameters/XCityId'
+        - $ref: '#/components/parameters/XCitySlug'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MobileLoginRequest'
+            example:
+              registration: aplicador@municipio.gov.br
+              password: "secret"
+      responses:
+        '200':
+          description: Token JWT (access)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MobileLoginResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /mobile/v1/sync/bundle:
+    get:
+      tags: [sync]
+      summary: Download do pacote (snapshot paginado)
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/XDeviceId'
+        - $ref: '#/components/parameters/XCityId'
+        - $ref: '#/components/parameters/XCitySlug'
+        - name: school_id
+          in: query
+          required: true
+          schema:
+            type: string
+        - name: since_bundle_version
+          in: query
+          required: false
+          schema:
+            type: integer
+            format: int64
+        - name: page
+          in: query
+          schema:
+            type: integer
+            default: 1
+            minimum: 1
+        - name: page_size
+          in: query
+          schema:
+            type: integer
+            default: 50
+            minimum: 1
+            maximum: 200
+        - name: refresh
+          in: query
+          description: Se true/1, gera novo sync_bundle_version
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Pacote ou unchanged
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SyncBundleResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /mobile/v1/sync/upload:
+    post:
+      tags: [sync]
+      summary: Upload em lote de submissões
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/XDeviceId'
+        - $ref: '#/components/parameters/XCityId'
+        - $ref: '#/components/parameters/XCitySlug'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SyncUploadRequest'
+      responses:
+        '200':
+          description: Resultado por item (HTTP 200 global; erros por item em results)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SyncUploadResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  parameters:
+    XDeviceId:
+      name: X-Device-Id
+      in: header
+      required: true
+      description: UUID v4 imutável por instalação do app
+      schema:
+        type: string
+        example: "550e8400-e29b-41d4-a716-446655440000"
+    XCityId:
+      name: X-City-ID
+      in: header
+      required: false
+      schema:
+        type: string
+    XCitySlug:
+      name: X-City-Slug
+      in: header
+      required: false
+      schema:
+        type: string
+
+  schemas:
+    MobileLoginRequest:
+      type: object
+      required: [password]
+      properties:
+        registration:
+          type: string
+        email:
+          type: string
+        password:
+          type: string
+
+    MobileLoginResponse:
+      type: object
+      properties:
+        token:
+          type: string
+        user:
+          type: object
+          properties:
+            id: { type: string }
+            name: { type: string }
+            email: { type: string }
+            registration: { type: string }
+            role: { type: string }
+            city_id: { type: string, nullable: true }
+
+    SyncBundleResponse:
+      type: object
+      properties:
+        sync_bundle_version:
+          type: integer
+          format: int64
+        bundle_valid_until:
+          type: string
+          description: ISO8601 UTC com sufixo Z
+        unchanged:
+          type: boolean
+        school_id:
+          type: string
+        page:
+          type: integer
+        page_size:
+          type: integer
+        total_students:
+          type: integer
+        total_pages:
+          type: integer
+        students:
+          type: array
+          items:
+            $ref: '#/components/schemas/StudentBundle'
+        tests:
+          type: object
+          additionalProperties: true
+        questions_by_test:
+          type: object
+          additionalProperties:
+            type: array
+        test_content_version:
+          type: object
+          additionalProperties:
+            type: string
+            description: SHA-256 hex da prova
+        student_test_links:
+          type: array
+          items:
+            $ref: '#/components/schemas/StudentTestLink'
+        includes_full_payload:
+          type: boolean
+
+    StudentBundle:
+      type: object
+      properties:
+        id: { type: string }
+        name: { type: string }
+        registration: { type: string, nullable: true }
+        user_id: { type: string, nullable: true }
+        password_hash:
+          type: string
+          nullable: true
+          description: Hash Werkzeug (pbkdf2/sha256) igual ao armazenado em public.users
+        class_id: { type: string, nullable: true }
+        grade_id: { type: string, nullable: true }
+        school_id: { type: string }
+
+    StudentTestLink:
+      type: object
+      required: [student_id, test_id]
+      properties:
+        student_id: { type: string }
+        test_id: { type: string }
+
+    SyncUploadRequest:
+      type: object
+      required: [school_id, submissions]
+      properties:
+        school_id:
+          type: string
+        submissions:
+          type: array
+          items:
+            $ref: '#/components/schemas/SubmissionItem'
+
+    SubmissionItem:
+      type: object
+      required:
+        - submission_id
+        - student_id
+        - test_id
+        - test_content_version
+        - sync_bundle_version
+        - answers
+      properties:
+        submission_id:
+          type: string
+          format: uuid
+        device_id:
+          type: string
+          description: Opcional se igual ao header X-Device-Id
+        student_id: { type: string }
+        test_id: { type: string }
+        test_content_version:
+          type: string
+        sync_bundle_version:
+          type: integer
+          format: int64
+        answers:
+          type: array
+          items:
+            type: object
+            required: [question_id, answer]
+            properties:
+              question_id: { type: string }
+              answer: { type: string }
+              answered_at: { type: string, format: date-time }
+        metadata:
+          type: object
+          properties:
+            client_started_at: { type: string }
+            client_submitted_at: { type: string }
+            attempt_number: { type: integer }
+            offline_origin: { type: boolean }
+
+    SyncUploadResponse:
+      type: object
+      properties:
+        results:
+          type: array
+          items:
+            type: object
+            properties:
+              submission_id: { type: string }
+              status:
+                type: string
+                enum: [applied, duplicate_ignored, error]
+              already_processed:
+                type: boolean
+              session_id:
+                type: string
+              message: { type: string }
+              code:
+                type: string
+                description: ex. BUNDLE_EXPIRED, TEST_VERSION_MISMATCH
+
+    ErrorBody:
+      type: object
+      properties:
+        error: { type: string }
+
+  responses:
+    BadRequest:
+      description: Requisição inválida
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorBody'
+          examples:
+            bundle_expired:
+              value:
+                error: "BUNDLE_EXPIRED"
+    Unauthorized:
+      description: Não autenticado
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorBody'
+    Forbidden:
+      description: Sem permissão
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorBody'
+    NotFound:
+      description: Recurso não encontrado
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorBody'

@@ -1006,16 +1006,29 @@
 			.no-break {
 				page-break-inside: avoid;
 			}
+
+			{% if test_data.letterhead_image_base64 %}
+			.institutional-cover.letterhead-bg,
+			.subject-cover.letterhead-bg,
+			.questions-section.letterhead-bg,
+			.answer-sheet.letterhead-bg {
+				background-image: url("data:image/png;base64,{{ test_data.letterhead_image_base64 }}");
+				background-size: 100% 100%;
+				background-repeat: no-repeat;
+				background-position: center top;
+			}
+			{% endif %}
 		</style>
 	</head>
 	<body>
 		{% set include_cover = include_cover|default(True) %}
 		{% set include_questions = include_questions|default(True) %}
 		{% set include_answer_sheet = include_answer_sheet|default(True) %}
+		{% set lh = test_data.letterhead_image_base64 if test_data and test_data.letterhead_image_base64 else None %}
 
 		<!-- Capa Institucional -->
 		{% if include_cover %}
-		<div class="institutional-cover">
+		<div class="institutional-cover{% if lh %} letterhead-bg{% endif %}">
 			<div class="cover-header">
 				<div class="municipality-logo">
 					{% if test_data.municipality_logo %}
@@ -1090,7 +1103,7 @@
 		<!-- Disciplinas e Questões -->
 		{% if include_questions %}
 		{% if questions_by_block %} {% for block in questions_by_block %}
-		<div class="subject-cover">
+		<div class="subject-cover{% if lh %} letterhead-bg{% endif %}">
 			<div class="block-number">
 				BLOCO {{ "%02d"|format(block.block_number) }}
 			</div>
@@ -1116,7 +1129,7 @@
 			</div>
 		</div>
 
-		<div class="questions-section">
+		<div class="questions-section{% if lh %} letterhead-bg{% endif %}">
 			{% for question in block.questions %}
 			<div class="question no-break">
 				<div class="question-header">
@@ -1159,7 +1172,7 @@
 		</div>
 		{% endfor %} {% else %} {% for subject_name, subject_questions in
 		questions_by_subject.items() %}
-		<div class="subject-cover">
+		<div class="subject-cover{% if lh %} letterhead-bg{% endif %}">
 			<div class="block-number">BLOCO 0{{ loop.index }}</div>
 			<div class="subject-name">{{ subject_name }}</div>
 
@@ -1176,7 +1189,7 @@
 			</div>
 		</div>
 
-		<div class="questions-section">
+		<div class="questions-section{% if lh %} letterhead-bg{% endif %}">
 			{% for question in subject_questions %}
 			<div class="question no-break">
 				<div class="question-header">
@@ -1222,7 +1235,7 @@
 
 		<!-- Formulário de Respostas com Marcadores Geométricos -->
 		{% if include_answer_sheet %}
-		<div class="answer-sheet">
+		<div class="answer-sheet{% if lh %} letterhead-bg{% endif %}">
 			<!-- ÂNCORAS DA PÁGINA A4 (dentro do .answer-sheet com position: relative) -->
 			<div class="a4-anchor-square anchor-top-left">
 				<svg width="20" height="20" xmlns="http://www.w3.org/2000/svg">

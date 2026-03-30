@@ -12,6 +12,7 @@ ROTAS USADAS PELOS RELATÓRIOS:
   GET /evaluation-results/avaliacoes
     → retorna tabela detalhada com alunos por disciplina (tabela_detalhada)
     → chamada por getEvaluationsList() no frontend
+    → query opcional periodo=YYYY-MM (ClassTest.application); ignorado com report_entity_type=answer_sheet
   GET /evaluation-results/opcoes-filtros
     → retorna opções hierárquicas dos dropdowns de filtro
       (Estado → Município → Avaliação → Escola → Série → Turma)
@@ -77,10 +78,11 @@ from app.routes.answer_sheet_evaluation_listing import (
 )
 from app import db
 import logging
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Tuple, Set
 from collections import defaultdict
 from sqlalchemy import func, case
 from datetime import datetime
+from calendar import monthrange
 from sqlalchemy.orm import joinedload
 import dateutil.parser
 import re
@@ -584,6 +586,7 @@ def listar_avaliacoes():
     - escola (opcional): ID da escola ou 'all' para todas as escolas
     - serie (opcional): ID da série ou 'all' para todas as séries
     - turma (opcional): ID da turma ou 'all' para todas as turmas
+    - periodo (opcional): YYYY-MM; restringe ClassTest por application (ignorado em report_entity_type=answer_sheet)
     - page, per_page: Parâmetros de paginação
     
     Lógica hierárquica com "all":
@@ -606,6 +609,18 @@ def listar_avaliacoes():
         user = get_current_user_from_token()
         if not user:
             return jsonify({"error": "Usuário não encontrado"}), 401
+
+        periodo_raw = request.args.get("periodo")
+        periodo_bounds: Optional[Tuple[datetime, datetime]] = None
+        if not is_answer_sheet_report_entity():
+            if periodo_raw is not None and str(periodo_raw).strip():
+                try:
+                    periodo_bounds = _parse_periodo_bounds(periodo_raw)
+                except ValueError as ve:
+                    return jsonify({
+                        "error": "Parâmetro periodo inválido. Use YYYY-MM (ex.: 2026-04).",
+                        "details": str(ve),
+                    }), 400
 
         # Extrair parâmetros de filtro
         estado = request.args.get('estado')
@@ -774,7 +789,8 @@ def listar_avaliacoes():
                     "escola": escola,
                     "serie": serie,
                     "turma": turma,
-                    "avaliacao": avaliacao
+                    "avaliacao": avaliacao,
+                    "periodo": (str(periodo_raw).strip() if periodo_raw and str(periodo_raw).strip() else None),
                 },
                 "estatisticas_gerais": {
                     "tipo": "municipio",
@@ -972,7 +988,9 @@ def listar_avaliacoes():
                 else:
                     # Se não é um professor válido, não mostrar nenhuma avaliação
                     query_base = query_base.filter(Test.created_by == user['id']).filter(Test.id == None)
-                
+
+            query_base = _apply_class_test_application_period(query_base, periodo_bounds)
+
         except Exception as e:
             logging.error(f"Erro ao aplicar filtros: {str(e)}")
             db.session.rollback()
@@ -1042,7 +1060,9 @@ def listar_avaliacoes():
                                 )
                             
                             query_base = query_base.filter(or_(*filters))
-                    
+
+                    query_base = _apply_class_test_application_period(query_base, periodo_bounds)
+
                     todas_avaliacoes_escopo = query_base.all()
                     logging.info(f"Query executada com nova sessão: {len(todas_avaliacoes_escopo)} avaliações encontradas")
                 else:
@@ -1131,7 +1151,9 @@ def listar_avaliacoes():
                         else:
                             # Se não é um professor válido, não mostrar nenhuma avaliação
                             query_base = query_base.filter(Test.created_by == user['id']).filter(Test.id == None)
-                    
+
+                    query_base = _apply_class_test_application_period(query_base, periodo_bounds)
+
                     total = query_base.count()
                     offset = (page - 1) * per_page
                     class_tests_paginados = query_base.offset(offset).limit(per_page).all()
@@ -1158,14 +1180,19 @@ def listar_avaliacoes():
         tabela_detalhada = {}
         ranking_alunos = []
         
+        restrict_class_ids: Optional[Set[Any]] = None
+        if periodo_bounds is not None and avaliacao and avaliacao.lower() != "all":
+            restrict_class_ids = {
+                ct.class_id for ct in todas_avaliacoes_escopo if str(ct.test_id) == str(avaliacao)
+            }
+
         if avaliacao and avaliacao.lower() != 'all':
             tabela_detalhada = _gerar_tabela_detalhada_por_disciplina(
-                avaliacao, scope_info, nivel_granularidade, user
+                avaliacao, scope_info, nivel_granularidade, user, restrict_class_ids
             )
-            
-            # Calcular ranking global dos alunos
+
             ranking_alunos = _calcular_ranking_global_alunos(
-                avaliacao, scope_info, nivel_granularidade, user
+                avaliacao, scope_info, nivel_granularidade, user, restrict_class_ids
             )
         
         return jsonify({
@@ -1176,7 +1203,8 @@ def listar_avaliacoes():
                 "escola": escola,
                 "serie": serie,
                 "turma": turma,
-                "avaliacao": avaliacao
+                "avaliacao": avaliacao,
+                "periodo": (str(periodo_raw).strip() if periodo_raw and str(periodo_raw).strip() else None),
             },
             "estatisticas_gerais": estatisticas_consolidadas,
             "resultados_por_disciplina": resultados_por_disciplina,
@@ -1209,10 +1237,18 @@ def listar_avaliacoes():
         return jsonify({"error": "Erro ao listar avaliações", "details": str(e)}), 500
 
 
-def _gerar_tabela_detalhada_por_disciplina(avaliacao_id: str, scope_info: Dict, nivel_granularidade: str, user: Dict) -> Dict[str, Any]:
+def _gerar_tabela_detalhada_por_disciplina(
+    avaliacao_id: str,
+    scope_info: Dict,
+    nivel_granularidade: str,
+    user: Dict,
+    restrict_class_ids: Optional[Set[Any]] = None,
+) -> Dict[str, Any]:
     """
     Gera tabela detalhada organizada por disciplina com dados dos alunos
     CORRIGIDA: Agora mostra TODOS os alunos em TODAS as disciplinas com TODAS as questões
+
+    restrict_class_ids: quando definido (ex.: filtro periodo em GET /avaliacoes), só alunos dessas turmas.
     """
     try:
         from app.models.question import Question
@@ -1324,6 +1360,12 @@ def _gerar_tabela_detalhada_por_disciplina(avaliacao_id: str, scope_info: Dict, 
                 all_students = _buscar_alunos_por_escopo(escopo_calculo)
         else:
             all_students = _buscar_alunos_por_escopo(escopo_calculo)
+
+        if restrict_class_ids is not None:
+            if not restrict_class_ids:
+                all_students = []
+            else:
+                all_students = [s for s in all_students if s.class_id in restrict_class_ids]
         
         if not all_students:
             logging.warning("Nenhum aluno encontrado para o escopo especificado")
@@ -5195,16 +5237,23 @@ def _obter_municipios_por_estado(estado: str, user: dict, permissao: dict) -> Li
     return [{"id": str(m.id), "nome": m.name} for m in municipios]
 
 
-def _obter_avaliacoes_por_municipio(municipio_id: str, user: dict, permissao: dict, escola_param: str = 'all') -> List[Dict[str, Any]]:
+def _obter_avaliacoes_por_municipio(
+    municipio_id: str,
+    user: dict,
+    permissao: dict,
+    escola_param: str = "all",
+    periodo_bounds: Optional[Tuple[datetime, datetime]] = None,
+) -> List[Dict[str, Any]]:
     """
     Retorna avaliações aplicadas em um município específico, respeitando permissões.
-    
+
     Args:
         municipio_id: ID do município
         user: Dicionário com informações do usuário
         permissao: Dicionário com informações de permissão
         escola_param: Parâmetro de escola ('all' ou ID específico)
-        
+        periodo_bounds: Se definido, só inclui provas com ClassTest.application no mês (ver _parse_periodo_bounds).
+
     Returns:
         Lista de avaliações no formato [{"id": "...", "titulo": "..."}]
     """
@@ -5228,7 +5277,8 @@ def _obter_avaliacoes_por_municipio(municipio_id: str, user: dict, permissao: di
         test_query = test_query.join(School, School.id == cast(Class.school_id, String))
         test_query = test_query.join(City, School.city_id == City.id)
         test_query = test_query.filter(City.id == city.id, excluir_olimpiada)
-        
+        test_query = _apply_class_test_application_period(test_query, periodo_bounds)
+
         avaliacoes = test_query.distinct().all()
     else:
         # Para admin e tecadm, aplicar filtro por município
@@ -5239,22 +5289,30 @@ def _obter_avaliacoes_por_municipio(municipio_id: str, user: dict, permissao: di
                             .join(City, School.city_id == City.id)\
                             .filter(City.id == city.id)\
                             .filter(excluir_olimpiada)
-        
+        query_avaliacoes = _apply_class_test_application_period(query_avaliacoes, periodo_bounds)
+
         avaliacoes = query_avaliacoes.distinct().all()
     
     return [{"id": str(a[0]), "titulo": a[1]} for a in avaliacoes]
 
 
-def _obter_escolas_por_avaliacao(avaliacao_id: str, municipio_id: str, user: dict, permissao: dict) -> List[Dict[str, Any]]:
+def _obter_escolas_por_avaliacao(
+    avaliacao_id: str,
+    municipio_id: str,
+    user: dict,
+    permissao: dict,
+    periodo_bounds: Optional[Tuple[datetime, datetime]] = None,
+) -> List[Dict[str, Any]]:
     """
     Retorna escolas onde uma avaliação foi aplicada, respeitando permissões.
-    
+
     Args:
         avaliacao_id: ID da avaliação
         municipio_id: ID do município
         user: Dicionário com informações do usuário
         permissao: Dicionário com informações de permissão
-        
+        periodo_bounds: Se definido, só escolas com aplicação no mês (ClassTest.application).
+
     Returns:
         Lista de escolas no formato [{"id": "...", "nome": "..."}]
     """
@@ -5274,7 +5332,8 @@ def _obter_escolas_por_avaliacao(avaliacao_id: str, municipio_id: str, user: dic
                            .join(City, School.city_id == City.id)\
                            .filter(Test.id == avaliacao_id)\
                            .filter(City.id == city.id)
-    
+    query_escolas = _apply_class_test_application_period(query_escolas, periodo_bounds)
+
     # Aplicar filtros baseados no papel do usuário
     if permissao['scope'] == 'escola':
         if user.get('role') in ['diretor', 'coordenador']:
@@ -5306,17 +5365,25 @@ def _obter_escolas_por_avaliacao(avaliacao_id: str, municipio_id: str, user: dic
     return [{"id": str(e[0]), "nome": e[1]} for e in escolas]
 
 
-def _obter_series_por_escola(avaliacao_id: str, escola_id: str, municipio_id: str, user: dict, permissao: dict) -> List[Dict[str, Any]]:
+def _obter_series_por_escola(
+    avaliacao_id: str,
+    escola_id: str,
+    municipio_id: str,
+    user: dict,
+    permissao: dict,
+    periodo_bounds: Optional[Tuple[datetime, datetime]] = None,
+) -> List[Dict[str, Any]]:
     """
     Retorna séries onde uma avaliação foi aplicada em uma escola específica.
-    
+
     Args:
         avaliacao_id: ID da avaliação
         escola_id: ID da escola
         municipio_id: ID do município
         user: Dicionário com informações do usuário
         permissao: Dicionário com informações de permissão
-        
+        periodo_bounds: Se definido, só séries com aplicação no mês (ClassTest.application).
+
     Returns:
         Lista de séries no formato [{"id": "...", "nome": "..."}]
     """
@@ -5338,12 +5405,21 @@ def _obter_series_por_escola(avaliacao_id: str, escola_id: str, municipio_id: st
                          .filter(Test.id == avaliacao_id)\
                          .filter(School.id == escola_id)\
                          .filter(City.id == city.id)
-    
+    query_series = _apply_class_test_application_period(query_series, periodo_bounds)
+
     series = query_series.distinct().all()
     return [{"id": str(s[0]), "nome": s[1]} for s in series]
 
 
-def _obter_turmas_por_serie(avaliacao_id: str, escola_id: str, serie_id: str, municipio_id: str, user: dict, permissao: dict) -> List[Dict[str, Any]]:
+def _obter_turmas_por_serie(
+    avaliacao_id: str,
+    escola_id: str,
+    serie_id: str,
+    municipio_id: str,
+    user: dict,
+    permissao: dict,
+    periodo_bounds: Optional[Tuple[datetime, datetime]] = None,
+) -> List[Dict[str, Any]]:
     """
     Retorna turmas onde uma avaliação foi aplicada em uma escola e série específicas.
     
@@ -5354,7 +5430,8 @@ def _obter_turmas_por_serie(avaliacao_id: str, escola_id: str, serie_id: str, mu
         municipio_id: ID do município
         user: Dicionário com informações do usuário
         permissao: Dicionário com informações de permissão
-        
+        periodo_bounds: Se definido, só turmas com aplicação no mês (ClassTest.application).
+
     Returns:
         Lista de turmas no formato [{"id": "...", "nome": "..."}]
     """
@@ -5377,7 +5454,8 @@ def _obter_turmas_por_serie(avaliacao_id: str, escola_id: str, serie_id: str, mu
                          .filter(School.id == escola_id)\
                          .filter(Grade.id == serie_id)\
                          .filter(City.id == city.id)
-    
+    query_turmas = _apply_class_test_application_period(query_turmas, periodo_bounds)
+
     # Aplicar filtros específicos para professores
     if permissao['scope'] == 'escola' and user['role'] == 'professor':
         from app.models.teacher import Teacher
@@ -5571,6 +5649,35 @@ def _parse_data_filtro(value: Optional[str]):
         return dateutil.parser.parse(value)
     except (ValueError, TypeError):
         return None
+
+
+def _parse_periodo_bounds(periodo: str) -> Tuple[datetime, datetime]:
+    """
+    periodo no formato YYYY-MM → primeiro e último dia do mês (datetime date-only).
+    Usado com o mesmo critério lexicográfico de ClassTest.application que a Evolução.
+    """
+    s = str(periodo).strip()
+    m = re.match(r"^(\d{4})-(\d{2})$", s)
+    if not m:
+        raise ValueError("Use o formato YYYY-MM (ex.: 2026-04).")
+    year, month = int(m.group(1)), int(m.group(2))
+    if month < 1 or month > 12:
+        raise ValueError("Mês deve estar entre 01 e 12.")
+    last = monthrange(year, month)[1]
+    return datetime(year, month, 1), datetime(year, month, last)
+
+
+def _apply_class_test_application_period(
+    query,
+    bounds: Optional[Tuple[datetime, datetime]],
+):
+    if bounds is None:
+        return query
+    dt_inicio, dt_fim = bounds
+    return query.filter(
+        ClassTest.application >= dt_inicio.strftime("%Y-%m-%d"),
+        ClassTest.application <= dt_fim.strftime("%Y-%m-%d") + "T23:59:59.999",
+    )
 
 
 def _formatar_data_para_evolucao(val) -> Optional[str]:
@@ -6406,7 +6513,8 @@ def obter_opcoes_filtros():
     - escola: Escola selecionada (requer avaliacao)
     - serie: Série selecionada (requer escola)
     - turma: Turma selecionada (requer serie)
-    
+    - periodo: Opcional, YYYY-MM; filtra por ClassTest.application no mês (só relatório de avaliação, não cartão-resposta).
+
     Exemplos:
     - GET /opcoes-filtros → Retorna apenas estados
     - GET /opcoes-filtros?estado=SP → Retorna estados + municípios de SP
@@ -6421,6 +6529,18 @@ def obter_opcoes_filtros():
         permissao = verificar_permissao_filtros(user)
         if not permissao['permitted']:
             return jsonify({"error": permissao['error']}), 403
+
+        periodo_raw = request.args.get("periodo")
+        periodo_bounds = None
+        if not is_answer_sheet_report_entity():
+            if periodo_raw is not None and str(periodo_raw).strip():
+                try:
+                    periodo_bounds = _parse_periodo_bounds(periodo_raw)
+                except ValueError as ve:
+                    return jsonify({
+                        "error": "Parâmetro periodo inválido. Use YYYY-MM (ex.: 2026-04).",
+                        "details": str(ve),
+                    }), 400
 
         # Extrair parâmetros (todos opcionais)
         estado = request.args.get('estado')
@@ -6462,19 +6582,19 @@ def obter_opcoes_filtros():
                                 )
                 else:
                     response["avaliacoes"] = _obter_avaliacoes_por_municipio(
-                        municipio, user, permissao, escola_param
+                        municipio, user, permissao, escola_param, periodo_bounds
                     )
                     if avaliacao:
                         response["escolas"] = _obter_escolas_por_avaliacao(
-                            avaliacao, municipio, user, permissao
+                            avaliacao, municipio, user, permissao, periodo_bounds
                         )
                         if escola:
                             response["series"] = _obter_series_por_escola(
-                                avaliacao, escola, municipio, user, permissao
+                                avaliacao, escola, municipio, user, permissao, periodo_bounds
                             )
                             if serie:
                                 response["turmas"] = _obter_turmas_por_serie(
-                                    avaliacao, escola, serie, municipio, user, permissao
+                                    avaliacao, escola, serie, municipio, user, permissao, periodo_bounds
                                 )
         
         return jsonify(response), 200
@@ -6758,17 +6878,19 @@ def _buscar_alunos_por_escopo(escopo_calculo: dict) -> List[Student]:
 
 # ==================== ENDPOINT 1: GET /avaliacoes ====================
 
-def _calcular_ranking_global_alunos(avaliacao_id: str, scope_info: Dict, nivel_granularidade: str, user: Dict) -> List[Dict]:
+def _calcular_ranking_global_alunos(
+    avaliacao_id: str,
+    scope_info: Dict,
+    nivel_granularidade: str,
+    user: Dict,
+    restrict_class_ids: Optional[Set[Any]] = None,
+) -> List[Dict]:
     """
     Calcula o ranking global dos alunos baseado em nota e acertos totais
     para o nível de granularidade especificado
-    
-    Args:
-        avaliacao_id: ID da avaliação
-        scope_info: Informações do escopo de busca
-        nivel_granularidade: Nível de granularidade atual
-        user: Informações do usuário logado
-    
+
+    restrict_class_ids: quando definido (ex.: filtro periodo em GET /avaliacoes), só alunos dessas turmas.
+
     Returns:
         Lista de alunos ordenados por ranking com formato: "Aluno X, Acertos X, Nota X"
     """
@@ -6814,6 +6936,12 @@ def _calcular_ranking_global_alunos(avaliacao_id: str, scope_info: Dict, nivel_g
                 all_students = []
         else:
             all_students = _buscar_alunos_por_escopo(escopo_calculo)
+
+        if restrict_class_ids is not None:
+            if not restrict_class_ids:
+                all_students = []
+            else:
+                all_students = [s for s in all_students if s.class_id in restrict_class_ids]
         
         if not all_students:
             return []

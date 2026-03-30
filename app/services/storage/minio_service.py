@@ -434,3 +434,41 @@ class MinIOService:
             object_name=object_name,
             data=image_data,
         )
+
+    def ensure_municipality_logos_bucket(self) -> bool:
+        """Garante que o bucket de logos/branding municipal existe."""
+        bucket_name = self.BUCKETS['MUNICIPALITY_LOGOS']
+        try:
+            if not self.client.bucket_exists(bucket_name):
+                self.client.make_bucket(bucket_name)
+                logger.info(f"✅ Bucket '{bucket_name}' criado automaticamente")
+            return True
+        except S3Error as e:
+            logger.error(f"❌ Erro ao garantir bucket municipality-logos: {str(e)}")
+            return False
+
+    def upload_city_branding_file(
+        self,
+        city_id: str,
+        relative_object_name: str,
+        data: bytes,
+        content_type: Optional[str] = None,
+    ) -> Optional[Dict[str, str]]:
+        """
+        Upload de arquivo de branding municipal sob cities/{city_id}/...
+
+        Args:
+            city_id: UUID do município
+            relative_object_name: caminho sem prefixo de cidade, ex. 'logo.png' ou 'letterhead.pdf'
+            data: bytes do arquivo
+            content_type: opcional
+        """
+        if not self.ensure_municipality_logos_bucket():
+            return None
+        object_name = f"cities/{city_id}/{relative_object_name.lstrip('/')}"
+        return self.upload_file(
+            bucket_name=self.BUCKETS['MUNICIPALITY_LOGOS'],
+            object_name=object_name,
+            data=data,
+            content_type=content_type,
+        )

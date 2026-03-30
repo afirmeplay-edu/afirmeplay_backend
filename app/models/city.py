@@ -10,4 +10,9 @@ class City(db.Model):
     slug = db.Column(db.String(100), unique=True, nullable=False)
     created_at = db.Column(db.TIMESTAMP, server_default=db.func.now())
 
+    # Chaves de objeto no bucket MUNICIPALITY_LOGOS (ex.: cities/<id>/logo.png)
+    logo_url = db.Column(db.Text, nullable=True)
+    letterhead_image_url = db.Column(db.Text, nullable=True)
+    letterhead_pdf_url = db.Column(db.Text, nullable=True)
+
     schools = db.relationship("School", backref="city")

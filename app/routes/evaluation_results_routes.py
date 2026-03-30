@@ -56,7 +56,7 @@ from app.models.grades import Grade
 from app.models.evaluationResult import EvaluationResult
 from app.utils.uuid_helpers import ensure_uuid, ensure_uuid_list
 from app.utils.decimal_helpers import round_to_two_decimals
-from sqlalchemy import cast, String
+from sqlalchemy import cast, String, or_
 from sqlalchemy.dialects.postgresql import UUID as PostgresUUID
 from app.models.classTest import ClassTest
 from app.models.studentTestOlimpics import StudentTestOlimpics
@@ -5216,7 +5216,8 @@ def _obter_avaliacoes_por_municipio(municipio_id: str, user: dict, permissao: di
     if permissao['scope'] != 'all' and user.get('city_id') != city.id:
         return []
     
-    # Para educadores (professor, diretor, coordenador), retornar avaliações que criaram
+    # Exclui fluxo de olimpíada (StudentTestOlimpics); competições (COMPETICAO) permanecem listadas
+    excluir_olimpiada = or_(Test.type.is_(None), func.upper(Test.type) != 'OLIMPIADA')
     if permissao['scope'] == 'escola':
         test_query = Test.query.with_entities(Test.id, Test.title)
         test_query = filter_tests_by_user(test_query, user, escola_param, require_school=False)
@@ -5226,7 +5227,7 @@ def _obter_avaliacoes_por_municipio(municipio_id: str, user: dict, permissao: di
         test_query = test_query.join(Class, ClassTest.class_id == Class.id)
         test_query = test_query.join(School, School.id == cast(Class.school_id, String))
         test_query = test_query.join(City, School.city_id == City.id)
-        test_query = test_query.filter(City.id == city.id)
+        test_query = test_query.filter(City.id == city.id, excluir_olimpiada)
         
         avaliacoes = test_query.distinct().all()
     else:
@@ -5236,7 +5237,8 @@ def _obter_avaliacoes_por_municipio(municipio_id: str, user: dict, permissao: di
                             .join(Class, ClassTest.class_id == Class.id)\
                             .join(School, School.id == cast(Class.school_id, String))\
                             .join(City, School.city_id == City.id)\
-                            .filter(City.id == city.id)
+                            .filter(City.id == city.id)\
+                            .filter(excluir_olimpiada)
         
         avaliacoes = query_avaliacoes.distinct().all()
     

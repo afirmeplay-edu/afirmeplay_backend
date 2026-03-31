@@ -244,6 +244,17 @@ def get_user_from_token():
         return None
 
 
+def _resolve_mobile_offline_pack_redeem_preflight():
+    """
+    POST /offline-pack/redeem: começa em public para consultar mobile_offline_pack_registry
+    pelo hash; a rota depois fixa o tenant via bind_tenant_context_for_redeem.
+    """
+    ctx = TenantContext()
+    ctx.schema = "public"
+    ctx.has_tenant_context = False
+    return ctx
+
+
 def _resolve_mobile_login_tenant_context():
     """
     Login mobile sem JWT: exige X-City-ID, X-City-Slug ou subdomínio do município.
@@ -293,6 +304,8 @@ def resolve_tenant_context():
     path = request.path.rstrip("/")
     if path.endswith("/mobile/v1/auth/login") and request.method in ("POST", "OPTIONS"):
         return _resolve_mobile_login_tenant_context()
+    if path.endswith("/mobile/v1/offline-pack/redeem") and request.method == "POST":
+        return _resolve_mobile_offline_pack_redeem_preflight()
 
     context = TenantContext()
     

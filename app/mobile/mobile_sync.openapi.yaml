@@ -2,9 +2,16 @@ openapi: 3.0.3
 info:
   title: InnovaPlay Mobile Sync API
   description: |
-    API offline-first isolada (`/mobile/v1`). Autenticação via Flask-JWT-Extended no login mobile.
-    Multitenant por schema PostgreSQL (`city_*`). Headers de município seguem o backend principal.
-  version: 1.0.0
+    API offline-first isolada em `/mobile/v1`.
+
+    - **Auth aplicador:** `POST /auth/login` — JWT (Flask-JWT-Extended); contexto de município via `X-City-ID`, `X-City-Slug` ou subdomínio.
+    - **Sync:** `GET /sync/bundle`, `POST /sync/upload` — Bearer JWT mobile + `X-Device-Id`.
+    - **Pacote offline (código web):** `POST /offline-pack/register` (JWT do **login web** + tenant); `POST /offline-pack/redeem` (só `X-Device-Id` + corpo, com resolução de município via `public.mobile_offline_pack_registry` quando o código existe lá).
+
+    Contrato normativo detalhado do **redeem** e alunos: **`OFFLINE_PACK_API_CONTRACT.md`** (campo `api_contract_version` na resposta do redeem, atualmente `"1.0"`).
+
+    Multitenant: schemas PostgreSQL `city_*` + `public`.
+  version: 1.1.0
 
 servers:
   - url: /
@@ -12,7 +19,11 @@ servers:
 
 tags:
   - name: auth
+    description: Login aplicador (JWT mobile)
   - name: sync
+    description: Download de bundle e upload de submissões
+  - name: offline-pack
+    description: Geração e resgate de código de pacote offline
 
 paths:
   /mobile/v1/auth/login:
@@ -47,6 +58,81 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '403':
           $ref: '#/components/responses/Forbidden'
+
+  /mobile/v1/offline-pack/register:
+    post:
+      tags: [offline-pack]
+      summary: Gerar código de ativação (painel web)
+      description: |
+        Autenticação com **JWT do login web** (`Authorization: Bearer`), não o JWT mobile.
+
+        Exige contexto de município (`requires_city_context`): para admin, usar `X-City-ID` ou subdomínio quando o host não resolver o tenant.
+
+        Papéis permitidos: `admin`, `tecadm`, `diretor`, `coordenador`.
+
+        Preflight CORS (`OPTIONS`) responde 200 sem passar pelos decoradores de tenant.
+      security:
+        - bearerAuthWeb: []
+      parameters:
+        - $ref: '#/components/parameters/XCityId'
+        - $ref: '#/components/parameters/XCitySlug'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/OfflinePackRegisterRequest'
+      responses:
+        '200':
+          description: Código gerado e metadados
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OfflinePackRegisterResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /mobile/v1/offline-pack/redeem:
+    post:
+      tags: [offline-pack]
+      summary: Resgatar código e baixar pacote (app)
+      description: |
+        **Sem** Bearer JWT. Obrigatório `X-Device-Id` (UUID v4).
+
+        Se o código existir em `public.mobile_offline_pack_registry`, o município é resolvido automaticamente (não exige `X-City-ID`).
+
+        Códigos antigos (sem linha no registry): mesmo critério de município que `auth/login`.
+
+        O campo `code` é obrigatório em **todas** as páginas; na página 1 recomenda-se gravar `offline_pack_id` e `city_id` para as seguintes requisições e para login mobile posterior.
+
+        Resposta alinhada a `OFFLINE_PACK_API_CONTRACT.md` (`api_contract_version` **1.0**).
+      parameters:
+        - $ref: '#/components/parameters/XDeviceId'
+        - $ref: '#/components/parameters/XCityId'
+        - $ref: '#/components/parameters/XCitySlug'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/OfflinePackRedeemRequest'
+      responses:
+        '200':
+          description: Uma página do pacote
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OfflinePackRedeemResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
 
   /mobile/v1/sync/bundle:
     get:
@@ -137,6 +223,12 @@ components:
       type: http
       scheme: bearer
       bearerFormat: JWT
+      description: JWT emitido por `POST /mobile/v1/auth/login`
+    bearerAuthWeb:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: JWT emitido por `POST /login/` (painel web, PyJWT)
 
   parameters:
     XDeviceId:
@@ -164,6 +256,8 @@ components:
     MobileLoginRequest:
       type: object
       required: [password]
+      description: |
+        Enviar **matrícula** em `registration` e/ou **e-mail** em `email` (o backend usa `registration || email` como identificador).
       properties:
         registration:
           type: string
@@ -186,6 +280,140 @@ components:
             registration: { type: string }
             role: { type: string }
             city_id: { type: string, nullable: true }
+
+    OfflinePackRegisterRequest:
+      type: object
+      required: [scope]
+      properties:
+        scope:
+          type: object
+          description: |
+            `type`: `municipality` | `custom`. Em `custom`, opcionalmente `school_ids`, `test_ids`, `class_ids`, `student_ids` (listas de strings).
+          additionalProperties: true
+          example:
+            type: municipality
+        ttl_hours:
+          type: integer
+          minimum: 1
+          maximum: 336
+          default: 48
+        max_redemptions:
+          type: integer
+          minimum: 1
+          maximum: 10000
+          default: 50
+
+    OfflinePackRegisterResponse:
+      type: object
+      required: [code, offline_pack_id, expires_at, max_redemptions, scope]
+      properties:
+        code:
+          type: string
+          description: Código 12 caracteres em grupos (ex. XXXX-XXXX-XXXX)
+        offline_pack_id:
+          type: string
+          format: uuid
+        expires_at:
+          type: string
+          description: ISO8601 UTC com sufixo Z
+        max_redemptions:
+          type: integer
+        scope:
+          type: object
+          additionalProperties: true
+
+    OfflinePackRedeemRequest:
+      type: object
+      required: [code]
+      properties:
+        code:
+          type: string
+          description: Código com ou sem hífens; normalizado para 12 caracteres
+        page:
+          type: integer
+          minimum: 1
+          default: 1
+        page_size:
+          type: integer
+          minimum: 1
+          maximum: 200
+          default: 50
+        offline_pack_id:
+          type: string
+          format: uuid
+          description: Recomendado nas páginas > 1; deve coincidir com o retornado na página 1
+
+    OfflinePackRedeemResponse:
+      type: object
+      description: |
+        Página 1 inclui `tests`, `questions_by_test`, `test_content_version` e `student_test_links` completos.
+        Páginas > 1 devolvem listas/objetos vazios nesses campos e `includes_full_payload: false`.
+      required:
+        - api_contract_version
+        - city_id
+        - offline_pack_id
+        - bundle_valid_until
+        - sync_bundle_version_by_school
+        - sync_bundle_version
+        - page
+        - page_size
+        - total_students
+        - total_pages
+        - unchanged
+        - students
+        - student_test_links
+        - tests
+        - questions_by_test
+        - test_content_version
+      properties:
+        api_contract_version:
+          type: string
+          example: "1.0"
+        city_id:
+          type: string
+        offline_pack_id:
+          type: string
+        bundle_valid_until:
+          type: string
+          description: ISO8601 UTC com sufixo Z
+        sync_bundle_version_by_school:
+          type: object
+          additionalProperties:
+            type: integer
+            format: int64
+          description: Por escola — usar em cada item do upload conforme `school_id`
+        sync_bundle_version:
+          type: integer
+          format: int64
+          nullable: true
+          description: Preenchido só se houver exatamente uma escola no mapa; senão null
+        page: { type: integer }
+        page_size: { type: integer }
+        total_students: { type: integer }
+        total_pages: { type: integer }
+        unchanged: { type: boolean }
+        students:
+          type: array
+          items:
+            $ref: '#/components/schemas/StudentBundle'
+        student_test_links:
+          type: array
+          items:
+            $ref: '#/components/schemas/StudentTestLink'
+        tests:
+          type: object
+          additionalProperties: true
+        questions_by_test:
+          type: object
+          additionalProperties:
+            type: array
+        test_content_version:
+          type: object
+          additionalProperties:
+            type: string
+        includes_full_payload:
+          type: boolean
+          description: Presente e false quando page > 1
 
     SyncBundleResponse:
       type: object
@@ -223,7 +451,7 @@ components:
           type: object
           additionalProperties:
             type: string
-            description: SHA-256 hex da prova
+            description: SHA-256 hex do conteúdo da prova
         student_test_links:
           type: array
           items:
@@ -233,15 +461,30 @@ components:
 
     StudentBundle:
       type: object
+      required:
+        - id
+        - name
+        - registration
+        - email
+        - user_id
+        - password_hash
+        - class_id
+        - grade_id
+        - school_id
       properties:
         id: { type: string }
         name: { type: string }
         registration: { type: string, nullable: true }
+        email:
+          type: string
+          nullable: true
+          description: E-mail de `public.users` (login web); null se ausente
         user_id: { type: string, nullable: true }
         password_hash:
           type: string
           nullable: true
-          description: Hash Werkzeug (pbkdf2/sha256) igual ao armazenado em public.users
+          description: |
+            Cópia literal de `users.password_hash` (Werkzeug). Pode ser `pbkdf2:sha256`, `scrypt`, etc., conforme versão/parametrização do servidor.
         class_id: { type: string, nullable: true }
         grade_id: { type: string, nullable: true }
         school_id: { type: string }
@@ -287,6 +530,7 @@ components:
         sync_bundle_version:
           type: integer
           format: int64
+          description: Deve corresponder a `sync_bundle_version_by_school[school_id]` do pacote offline, ou ao `sync_bundle_version` do GET bundle (uma escola)
         answers:
           type: array
           items:

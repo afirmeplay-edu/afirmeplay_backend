@@ -1,6 +1,10 @@
 """
-Cria tabelas mobile (mobile_device, mobile_sync_submission, mobile_sync_bundle_generation)
-em todos os schemas city_* existentes no PostgreSQL.
+Cria tabelas mobile em todos os schemas city_* existentes no PostgreSQL.
+
+Inclui: mobile_device, mobile_sync_submission, mobile_sync_bundle_generation,
+mobile_offline_pack_code, mobile_offline_pack_redeem_device (mesmo DDL de
+app.services.mobile.ddl.get_mobile_tables_ddl, também aplicado em novos
+municípios via app.services.city_schema_service.provision_city_schema).
 
 Idempotente: CREATE TABLE IF NOT EXISTS / CREATE INDEX IF NOT EXISTS.
 

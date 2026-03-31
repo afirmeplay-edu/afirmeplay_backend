@@ -44,7 +44,8 @@ def create_app():
                 "Content-Type", 
                 "Authorization",
                 "X-City-ID",      # Header para admin especificar cidade por UUID
-                "X-City-Slug"     # Header para admin especificar cidade por slug
+                "X-City-Slug",   # Header para admin especificar cidade por slug
+                "X-Device-Id",   # API mobile offline-first
             ],
             "expose_headers": ["Authorization"],
             "supports_credentials": True
@@ -56,6 +57,9 @@ def create_app():
     app.config['JWT_TOKEN_LOCATION'] = ['headers']
     app.config['JWT_HEADER_NAME'] = 'Authorization'
     app.config['JWT_HEADER_TYPE'] = 'Bearer'
+    # Permite enviar JWT na query (?access_token=) para <img src> nas rotas que usam
+    # jwt_required(locations=['headers', 'query_string']).
+    app.config['JWT_QUERY_STRING_NAME'] = 'access_token'
     
     # Configuração do banco de dados
     app.config['SQLALCHEMY_DATABASE_URI'] = os.getenv('DATABASE_URL')
@@ -255,6 +259,9 @@ def create_app():
     app.register_blueprint(ideb_meta_bp)
     app.register_blueprint(store_bp)
 
+    from app.routes.mobile import mobile_bp
+    app.register_blueprint(mobile_bp)
+
     # ========================================================================
     # THREAD DE FINALIZAÇÃO DE COMPETIÇÕES REMOVIDA (multitenant + Gunicorn)
     # Thread interna + Gunicorn = arquitetura inválida: SIGKILL/timeout não
@@ -365,6 +372,14 @@ def create_app():
     @app.route('/swagger.yaml')
     def serve_swagger_yaml():
         return send_from_directory(os.path.dirname(app.root_path), 'swagger.yaml')
+
+    @app.route('/mobile/mobile_sync.openapi.yaml')
+    def serve_mobile_openapi_yaml():
+        return send_from_directory(
+            os.path.join(os.path.dirname(app.root_path), 'app', 'mobile'),
+            'mobile_sync.openapi.yaml',
+            mimetype='application/yaml',
+        )
     
     # Rota para disponibilizar a documentação via Redoc
     @app.route('/')

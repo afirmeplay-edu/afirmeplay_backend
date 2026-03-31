@@ -154,6 +154,7 @@ class PhysicalTestFormService:
             # Buscar município e estado através da escola do primeiro aluno
             municipality_name = None
             state_name = None
+            city_obj = None
             if students:
                 first_student = students[0]
                 if first_student.class_id:
@@ -230,6 +231,8 @@ class PhysicalTestFormService:
                 base_test_data['blocks_config'] = merged_blocks_config
             
             test_data = base_test_data
+            from app.services.city_branding_service import apply_city_branding_to_test_data
+            test_data = apply_city_branding_to_test_data(test_data, city_obj)
             
             questions_data = [self._format_question_data(q) for q in questions]
 

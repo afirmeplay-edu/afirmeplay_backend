@@ -9,6 +9,7 @@ from app import db
 import uuid
 import logging
 from flask_jwt_extended import jwt_required, get_jwt_identity
+from app.utils.uuid_helpers import ensure_uuid, uuid_to_str
 
 school_teacher_bp = Blueprint('school_teacher', __name__)
 
@@ -34,7 +35,7 @@ def create_school_teacher():
         elif current_user['role'] in ['diretor', 'coordenador']:
             # Diretor/coordenador só pode vincular professores à sua escola
             manager = Manager.query.filter_by(user_id=current_user['id']).first()
-            if not manager or manager.school_id != school_id:
+            if not manager or str(manager.school_id) != str(school_id):
                 return jsonify({"erro": "Você só pode vincular professores à sua escola"}), 403
         
         # Verificar se o professor existe
@@ -89,10 +90,49 @@ def create_school_teacher():
         
         logging.info(f"Criando vínculo: teacher_id={teacher_id}, school_id={school_id}, registration={registration}")
         db.session.add(school_teacher)
+
+        # Opcional: vincular à(s) turma(s) na mesma transação (GET /classes/<id>/teachers usa teacher_class)
+        raw_class_ids = []
+        if data.get("class_id"):
+            raw_class_ids.append(data["class_id"])
+        if data.get("class_ids"):
+            raw_class_ids.extend(data["class_ids"])
+        seen_c = set()
+        class_uuids = []
+        for cid in raw_class_ids:
+            cu = ensure_uuid(cid)
+            if cu and str(cu) not in seen_c:
+                seen_c.add(str(cu))
+                class_uuids.append(cu)
+
+        teacher_id_str = uuid_to_str(teacher_id) if teacher_id else str(teacher_id)
+        turmas_vinculadas = []
+        if class_uuids:
+            from app.models.studentClass import Class
+            from app.models.teacherClass import TeacherClass
+
+            for cu in class_uuids:
+                class_obj = Class.query.get(cu)
+                if not class_obj:
+                    db.session.rollback()
+                    return jsonify({"erro": f"Turma não encontrada: {cu}"}), 404
+                if str(class_obj.school_id) != str(school_id):
+                    db.session.rollback()
+                    return jsonify({
+                        "erro": "Uma ou mais turmas não pertencem à escola informada em school_id"
+                    }), 400
+                exists_tc = TeacherClass.query.filter_by(
+                    teacher_id=teacher_id_str,
+                    class_id=cu
+                ).first()
+                if not exists_tc:
+                    db.session.add(TeacherClass(teacher_id=teacher_id_str, class_id=cu))
+                turmas_vinculadas.append(str(cu))
+
         db.session.commit()
         logging.info(f"Vínculo criado com sucesso. ID: {school_teacher.id}")
         
-        return jsonify({
+        payload = {
             'message': 'Professor vinculado à escola com sucesso',
             'school_teacher': {
                 'id': school_teacher.id,
@@ -100,7 +140,13 @@ def create_school_teacher():
                 'school_id': school_teacher.school_id,
                 'teacher_id': str(school_teacher.teacher_id)
             }
-        }), 201
+        }
+        if turmas_vinculadas:
+            payload['turmas_vinculadas_ids'] = turmas_vinculadas
+            payload['message'] = (
+                'Professor vinculado à escola e à(s) turma(s) indicada(s) com sucesso'
+            )
+        return jsonify(payload), 201
         
     except Exception as e:
         db.session.rollback()

@@ -68,6 +68,7 @@ from reportlab.lib.units import mm, inch
 from reportlab.lib import colors
 from reportlab.lib.enums import TA_CENTER, TA_LEFT, TA_RIGHT
 from reportlab.pdfgen.canvas import Canvas
+from reportlab.lib.utils import ImageReader
 from io import BytesIO
 from app.services.ai_analysis_service import AIAnalysisService
 from app.services.evaluation_result_service import EvaluationResultService
@@ -2252,6 +2253,54 @@ def _gerar_pdf_com_reportlab(test: Test, total_alunos: Dict, niveis_aprendizagem
     """Gera arquivo PDF usando reportlab com layout do template DOCX"""
     
     try:
+        from app.services.city_branding_service import CityBrandingService, resolve_city_for_report_pdf
+
+        letterhead_ir = None
+        logo_ir = None
+        report_city = resolve_city_for_report_pdf(test)
+        if report_city:
+            branding_svc = CityBrandingService()
+            if report_city.letterhead_image_url:
+                try:
+                    lh = branding_svc.minio.download_file(
+                        branding_svc.bucket, report_city.letterhead_image_url
+                    )
+                    if lh:
+                        letterhead_ir = ImageReader(BytesIO(lh))
+                except Exception as e:
+                    logging.warning("Timbrado municipal não carregado no PDF: %s", e)
+            if report_city.logo_url:
+                try:
+                    lg = branding_svc.minio.download_file(
+                        branding_svc.bucket, report_city.logo_url
+                    )
+                    if lg:
+                        logo_ir = ImageReader(BytesIO(lg))
+                except Exception as e:
+                    logging.warning("Logo municipal não carregado no PDF: %s", e)
+
+        def _report_on_page(canvas_obj: Canvas, doc_obj):
+            """Fundo timbrado + logo opcional por página; conteúdo do frame por cima."""
+            if letterhead_ir is not None:
+                canvas_obj.saveState()
+                canvas_obj.drawImage(
+                    letterhead_ir, 0, 0, width=A4[0], height=A4[1], preserveAspectRatio=False, mask="auto"
+                )
+                canvas_obj.restoreState()
+            if logo_ir is not None:
+                canvas_obj.saveState()
+                logo_w, logo_h = 72, 72
+                canvas_obj.drawImage(
+                    logo_ir,
+                    doc_obj.leftMargin,
+                    A4[1] - doc_obj.topMargin - logo_h + 5,
+                    width=logo_w,
+                    height=logo_h,
+                    preserveAspectRatio=True,
+                    mask="auto",
+                )
+                canvas_obj.restoreState()
+            _header(canvas_obj, doc_obj)
       
         # Criar buffer para o PDF
         buffer = BytesIO()
@@ -2268,7 +2317,7 @@ def _gerar_pdf_com_reportlab(test: Test, total_alunos: Dict, niveis_aprendizagem
         
         # Criar template de página
         frame = Frame(doc.leftMargin, doc.bottomMargin, doc.width, doc.height, id='normal')
-        page_template = PageTemplate('normal', [frame], onPage=_header)
+        page_template = PageTemplate('normal', [frame], onPage=_report_on_page)
         doc.addPageTemplates([page_template])
         
         # Obter informações da escola e município

@@ -3,8 +3,20 @@
 Modelo para templates de certificados
 """
 from app import db
+from app.services.storage.minio_service import MinIOService
 import uuid
 from datetime import datetime
+from typing import Optional
+
+
+def _certificate_asset_proxy_path_if_minio(raw_url: Optional[str], evaluation_id: str, kind: str):
+    if not raw_url:
+        return None
+    marker = f"{MinIOService.BUCKETS['CERTIFICATE_TEMPLATES']}/"
+    if marker in raw_url:
+        return f"/certificates/template/{evaluation_id}/{kind}"
+    return raw_url
+
 
 class CertificateTemplate(db.Model):
     __tablename__ = 'certificate_templates'
@@ -39,8 +51,12 @@ class CertificateTemplate(db.Model):
             'background_color': self.background_color,
             'text_color': self.text_color,
             'accent_color': self.accent_color,
-            'logo_url': self.logo_url,
-            'signature_url': self.signature_url,
+            'logo_url': _certificate_asset_proxy_path_if_minio(
+                self.logo_url, self.evaluation_id, 'logo'
+            ),
+            'signature_url': _certificate_asset_proxy_path_if_minio(
+                self.signature_url, self.evaluation_id, 'signature'
+            ),
             'custom_date': self.custom_date,
             'created_at': self.created_at.isoformat() if self.created_at else None,
             'updated_at': self.updated_at.isoformat() if self.updated_at else None

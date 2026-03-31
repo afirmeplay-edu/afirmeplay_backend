@@ -5,7 +5,7 @@ Endpoints básicos para filtros e dropdowns do frontend
 from flask import Blueprint, jsonify, request
 from flask_jwt_extended import jwt_required
 from app.decorators.role_required import role_required
-from app.decorators import requires_city_context
+from app.decorators import requires_city_context, get_current_tenant_context
 from app.models.educationStage import EducationStage
 from app.models.subject import Subject
 from app.models.studentClass import Class
@@ -17,12 +17,11 @@ from app.models.studentAnswer import StudentAnswer
 from app.models.testSession import TestSession
 from app.utils.uuid_helpers import ensure_uuid, ensure_uuid_list
 from app import db
-from sqlalchemy import func, cast, String
+from sqlalchemy import func, cast, String, text
 from datetime import datetime, timedelta
 import logging
 from app.models.question import Question
 from app.models.classTest import ClassTest
-from app.models.testQuestion import TestQuestion
 from app.models.schoolTeacher import SchoolTeacher
 from app.decorators.role_required import get_current_tenant_id
 from app.decorators.role_required import get_current_user_from_token
@@ -520,13 +519,15 @@ def comprehensive_dashboard_stats():
 def evaluations_stats():
     """
     Retorna estatísticas específicas de avaliações de forma robusta
-    
+
+    total_questions: quantidade de questões do banco municipal (Question com
+    scope_type CITY e owner_city_id = município do contexto da requisição).
+
     Returns:
         {
             "total": int,
             "this_month": int,
             "total_questions": int,
-            "average_questions": float,
             "virtual_evaluations": int,
             "physical_evaluations": int,
             "by_type": {...},
@@ -540,9 +541,31 @@ def evaluations_stats():
         if not current_user:
             return jsonify({"erro": "Usuário não encontrado"}), 404
 
+        tenant_ctx = get_current_tenant_context()
+        ctx_city_id = getattr(tenant_ctx, "city_id", None) if tenant_ctx else None
+        if not ctx_city_id:
+            return jsonify({"erro": "Contexto de cidade necessário"}), 400
+        city_id_str = str(ctx_city_id)
+
+        total_questions = 0
+        try:
+            path_row = db.session.execute(text("SHOW search_path")).fetchone()
+            path_before = (path_row[0] if path_row else "public").strip()
+            db.session.execute(text("SET search_path TO public"))
+            try:
+                total_questions = (
+                    Question.query.filter(
+                        Question.scope_type == "CITY",
+                        Question.owner_city_id == city_id_str,
+                    ).count()
+                )
+            finally:
+                db.session.execute(text(f"SET search_path TO {path_before}"))
+        except Exception as e:
+            logging.debug("total_questions (banco municipal CITY): %s", e)
+
         # Base queries
         test_query = Test.query
-        question_query = Question.query
         # Filtro por tipos (ex: types=AVALIACAO,SIMULADO)
         types_param = request.args.get('types')
         if types_param:
@@ -581,8 +604,7 @@ def evaluations_stats():
                     return jsonify({
                         "total": 0,
                         "this_month": 0,
-                        "total_questions": 0,
-                        "average_questions": 0.0,
+                        "total_questions": total_questions,
                         "virtual_evaluations": 0,
                         "physical_evaluations": 0,
                         "by_type": {},
@@ -591,16 +613,12 @@ def evaluations_stats():
                         "last_sync": datetime.now().isoformat()
                     }), 200
 
-                # Filtrar questões por cidade (se tiver city_id)
-                if hasattr(Question, 'city_id'):
-                    question_query = question_query.filter_by(city_id=city_id)
             else:
                 # Se não há escolas na cidade, retornar zeros
                 return jsonify({
                     "total": 0,
                     "this_month": 0,
-                    "total_questions": 0,
-                    "average_questions": 0.0,
+                    "total_questions": total_questions,
                     "virtual_evaluations": 0,
                     "physical_evaluations": 0,
                     "by_type": {},
@@ -641,8 +659,7 @@ def evaluations_stats():
                 return jsonify({
                     "total": 0,
                     "this_month": 0,
-                    "total_questions": 0,
-                    "average_questions": 0.0,
+                    "total_questions": total_questions,
                     "virtual_evaluations": 0,
                     "physical_evaluations": 0,
                     "by_type": {},
@@ -651,9 +668,6 @@ def evaluations_stats():
                     "last_sync": datetime.now().isoformat()
                 }), 200
 
-            # Filtrar questões por cidade da escola (se tiver city_id)
-            if hasattr(Question, 'city_id'):
-                question_query = question_query.filter_by(city_id=school.city_id)
         elif current_user['role'] == "professor":
             # Professor vê apenas estatísticas do seu município
             city_id = current_user.get('city_id')
@@ -681,8 +695,7 @@ def evaluations_stats():
                     return jsonify({
                         "total": 0,
                         "this_month": 0,
-                        "total_questions": 0,
-                        "average_questions": 0.0,
+                        "total_questions": total_questions,
                         "virtual_evaluations": 0,
                         "physical_evaluations": 0,
                         "by_type": {},
@@ -691,16 +704,12 @@ def evaluations_stats():
                         "last_sync": datetime.now().isoformat()
                     }), 200
 
-                # Filtrar questões por cidade (se tiver city_id)
-                if hasattr(Question, 'city_id'):
-                    question_query = question_query.filter_by(city_id=city_id)
             else:
                 # Se não há escolas na cidade, retornar zeros
                 return jsonify({
                     "total": 0,
                     "this_month": 0,
-                    "total_questions": 0,
-                    "average_questions": 0.0,
+                    "total_questions": total_questions,
                     "virtual_evaluations": 0,
                     "physical_evaluations": 0,
                     "by_type": {},
@@ -722,45 +731,6 @@ def evaluations_stats():
                 Test.created_at < datetime(current_year, current_month + 1, 1) if current_month < 12 else datetime(current_year + 1, 1, 1)
             )
         ).count()
-
-        # Total e média de questões: JOIN test + test_questions no schema atual (evita 0 multi-tenant)
-        total_questions_in_tests = 0
-        questions_per_evaluation = 0
-        try:
-            # 1) Contagem por JOIN no mesmo schema (uma query só)
-            total_questions_in_tests = db.session.query(db.func.count(TestQuestion.id)).join(
-                Test, Test.id == TestQuestion.test_id
-            ).filter(Test.id.in_(test_ids_subq)).scalar() or 0
-            # 2) Fallback: materializar IDs e contar (alguns drivers falham com subquery)
-            if total_questions_in_tests == 0 and total_evaluations > 0:
-                test_ids_list = [r[0] for r in test_query.with_entities(Test.id).all()]
-                if test_ids_list:
-                    total_questions_in_tests = db.session.query(db.func.count(TestQuestion.id)).filter(
-                        TestQuestion.test_id.in_(test_ids_list)
-                    ).scalar() or 0
-            # 3) Se ainda 0, tentar schema public (testes podem estar em public para admin)
-            if total_questions_in_tests == 0 and total_evaluations > 0:
-                from sqlalchemy import text
-                from app.utils.tenant_middleware import set_search_path
-                r = db.session.execute(text("SHOW search_path")).fetchone()
-                path_before = (r[0] or "public").strip()
-                first_schema = path_before.split(",")[0].strip()
-                if first_schema != "public":
-                    try:
-                        set_search_path("public")
-                        test_ids_public = [x[0] for x in test_query.with_entities(Test.id).all()]
-                        if test_ids_public:
-                            total_questions_in_tests = db.session.query(db.func.count(TestQuestion.id)).filter(
-                                TestQuestion.test_id.in_(test_ids_public)
-                            ).scalar() or 0
-                    finally:
-                        db.session.execute(text(f"SET search_path TO {path_before}"))
-            questions_per_evaluation = total_questions_in_tests / total_evaluations if total_evaluations else 0
-        except Exception as e:
-            logging.debug("Total/média de questões (TestQuestion): %s", e)
-
-        # Alias para compatibilidade; resposta usa total_questions_in_tests
-        total_questions_result = total_questions_in_tests
 
         by_type = {}
         try:
@@ -800,8 +770,7 @@ def evaluations_stats():
         result = {
             "total": total_evaluations,
             "this_month": this_month_evaluations,
-            "total_questions": total_questions_in_tests,
-            "average_questions": round(float(questions_per_evaluation), 2),
+            "total_questions": total_questions,
             "virtual_evaluations": virtual_evaluations,
             "physical_evaluations": physical_evaluations,
             "by_type": by_type,
@@ -818,7 +787,6 @@ def evaluations_stats():
             "total": 0,
             "this_month": 0,
             "total_questions": 0,
-            "average_questions": 0.0,
             "virtual_evaluations": 0,
             "physical_evaluations": 0,
             "by_type": {},

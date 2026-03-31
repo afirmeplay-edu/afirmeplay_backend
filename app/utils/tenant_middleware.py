@@ -56,8 +56,6 @@ from app.models.user import User, RoleEnum
 SECRET_KEY = os.getenv("JWT_SECRET_KEY")
 # Ambiente da aplicação: "production", "development", etc.
 APP_ENV = os.getenv("APP_ENV", "development").lower()
-SUBDOMAIN_MODE = os.getenv("SUBDOMAIN_MODE", "standard").strip().lower()
-DEMO_SUBDOMAIN_SUFFIX = "-demo"
 
 # Domínios que devem ser ignorados na resolução de subdomínio
 IGNORED_HOSTS = [
@@ -92,32 +90,6 @@ def city_id_to_schema_name(city_id):
     if not city_id:
         return 'public'
     return f"city_{str(city_id).replace('-', '_')}"
-
-
-def normalize_city_slug_from_subdomain(slug):
-    """
-    Normaliza o slug extraído do host para o slug real salvo em public.city.
-
-    Modos:
-        - standard: usa slug como está (ex: city)
-        - demo_suffix: exige sufixo '-demo' e remove para buscar cidade (ex: city-demo -> city)
-    """
-    if not slug or not isinstance(slug, str):
-        return None
-
-    slug = slug.strip().lower()
-    if not re.match(r'^[a-z0-9-]+$', slug):
-        return None
-
-    if SUBDOMAIN_MODE == "demo_suffix":
-        if not slug.endswith(DEMO_SUBDOMAIN_SUFFIX):
-            return None
-        base_slug = slug[:-len(DEMO_SUBDOMAIN_SUFFIX)]
-        if not base_slug or not re.match(r'^[a-z0-9-]+$', base_slug):
-            return None
-        return base_slug
-
-    return slug
 
 
 def extract_subdomain(host):
@@ -163,8 +135,8 @@ def extract_subdomain(host):
         parts = host.split('.')
         # Exemplo válido: jiparana.afirmeplay.com.br
         if len(parts) > 3:
-            slug = normalize_city_slug_from_subdomain(parts[0])
-            if slug:
+            slug = parts[0]
+            if re.match(r'^[a-z0-9-]+$', slug):
                 return slug
         
         return None
@@ -178,8 +150,8 @@ def extract_subdomain(host):
     if 'afirmeplay.com.br' in host:
         parts = host.split('.')
         if len(parts) > 3:
-            slug = normalize_city_slug_from_subdomain(parts[0])
-            if slug:
+            slug = parts[0]
+            if re.match(r'^[a-z0-9-]+$', slug):
                 return slug
     
     # 2) Suporte a subdomínios em localhost: ex: jiparana.localhost, jaru.localhost
@@ -187,8 +159,8 @@ def extract_subdomain(host):
         parts = host.split('.')
         # Ex: ["jiparana", "localhost"]
         if len(parts) >= 2:
-            slug = normalize_city_slug_from_subdomain(parts[0])
-            if slug:
+            slug = parts[0]
+            if re.match(r'^[a-z0-9-]+$', slug):
                 return slug
     
     return None
@@ -272,6 +244,37 @@ def get_user_from_token():
         return None
 
 
+def _resolve_mobile_login_tenant_context():
+    """
+    Login mobile sem JWT: exige X-City-ID, X-City-Slug ou subdomínio do município.
+    Isolado de fluxos web; usado apenas para POST/OPTIONS em /mobile/v1/auth/login.
+    """
+    context = TenantContext()
+    city = None
+    city_id_header = request.headers.get("X-City-ID")
+    city_slug_header = request.headers.get("X-City-Slug")
+    if city_id_header:
+        city = resolve_city_from_id(city_id_header)
+    elif city_slug_header:
+        city = resolve_city_from_slug(city_slug_header)
+    if not city:
+        host = request.headers.get("Host")
+        slug = extract_subdomain(host)
+        if not slug and APP_ENV != "production":
+            slug = extract_subdomain(request.headers.get("Origin"))
+        if slug:
+            city = resolve_city_from_slug(slug)
+    if not city:
+        raise Exception(
+            "Para login mobile informe X-City-ID ou X-City-Slug ou acesse via subdomínio do município."
+        )
+    context.city_id = city.id
+    context.city_slug = city.slug
+    context.schema = city_id_to_schema_name(city.id)
+    context.has_tenant_context = True
+    return context
+
+
 def resolve_tenant_context():
     """
     Resolve o contexto do tenant para o request atual.
@@ -287,6 +290,10 @@ def resolve_tenant_context():
         403: Usuário tentando acessar município não autorizado
         404: Município não encontrado
     """
+    path = request.path.rstrip("/")
+    if path.endswith("/mobile/v1/auth/login") and request.method in ("POST", "OPTIONS"):
+        return _resolve_mobile_login_tenant_context()
+
     context = TenantContext()
     
     # 1. Extrair informações do token JWT
@@ -355,6 +362,18 @@ def resolve_tenant_context():
                 else:
                     # Subdomínio inválido
                     raise Exception(f"Município não encontrado para o slug: {slug}")
+
+            # 3.2b. Rotas /mobile/v1/*: JWT emitido no login mobile traz city_id em tenant_id
+            if request.path.startswith('/mobile/v1/'):
+                tid = user_info.get('tenant_id')
+                if tid:
+                    city = resolve_city_from_id(tid)
+                    if city:
+                        context.city_id = city.id
+                        context.city_slug = city.slug
+                        context.schema = city_id_to_schema_name(city.id)
+                        context.has_tenant_context = True
+                        return context
             
             # 3.3. Admin sem contexto - usa apenas public
             context.schema = 'public'
@@ -476,6 +495,14 @@ def tenant_middleware():
         404: Município não encontrado
     """
     try:
+        if request.method == 'OPTIONS' and request.path.startswith('/mobile/v1/'):
+            ctx = TenantContext()
+            ctx.schema = 'public'
+            ctx.has_tenant_context = False
+            g.tenant_context = ctx
+            set_search_path('public')
+            return None
+
         # Resolver contexto do tenant
         context = resolve_tenant_context()
         

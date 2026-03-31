@@ -12,8 +12,39 @@ from flask_jwt_extended import jwt_required
 from app.decorators.role_required import role_required, get_current_user_from_token
 from app.decorators.role_required import get_current_tenant_id
 from app.services.city_schema_service import provision_city_schema
+from app.services.city_branding_service import CityBrandingService
 
 bp = Blueprint('city', __name__, url_prefix='/city')
+
+
+def _ensure_municipio_access(user: dict, municipio_id: str):
+    """
+    Admin: qualquer município. tecadm/professor: city_id do token.
+    diretor/coordenador: escola do manager no município.
+    Retorna (jsonify, status) se negado; None se permitido.
+    """
+    role = (user.get("role") or "").strip().lower()
+    if role == "admin":
+        return None
+    if role == "tecadm":
+        uid = user.get("tenant_id") or user.get("city_id")
+        if uid != municipio_id:
+            return jsonify({"erro": "Sem permissão para este município"}), 403
+        return None
+    if role in ("diretor", "coordenador"):
+        manager = Manager.query.filter_by(user_id=user.get("id")).first()
+        if not manager or not manager.school_id:
+            return jsonify({"erro": "Usuário não está vinculado a nenhuma escola"}), 400
+        school = School.query.get(manager.school_id)
+        if not school or school.city_id != municipio_id:
+            return jsonify({"erro": "Sem permissão para este município"}), 403
+        return None
+    if role == "professor":
+        uid = user.get("tenant_id") or user.get("city_id")
+        if uid != municipio_id:
+            return jsonify({"erro": "Sem permissão para este município"}), 403
+        return None
+    return jsonify({"erro": "Acesso negado"}), 403
 
 # Slug: apenas letras minúsculas, números e hífen ([a-z0-9-]+), máx 100 caracteres
 SLUG_PATTERN = re.compile(r"^[a-z0-9-]+$")
@@ -182,6 +213,137 @@ def listar_usuarios_municipio(municipio_id):
         })
     except Exception as e:
         return jsonify({"erro": "Erro ao listar usuários do município", "detalhes": str(e)}), 500
+
+
+# --- Branding municipal (logo + timbrado) ---------------------------------
+
+@bp.route("<string:municipio_id>/branding", methods=["GET"])
+@jwt_required()
+@role_required("admin", "diretor", "coordenador", "professor", "tecadm")
+def obter_branding_municipio(municipio_id):
+    user = get_current_user_from_token()
+    denied = _ensure_municipio_access(user, municipio_id)
+    if denied:
+        return denied
+    municipio = City.query.get(municipio_id)
+    if not municipio:
+        return jsonify({"erro": "Município não encontrado"}), 404
+    svc = CityBrandingService()
+    presigned = svc.presigned_urls(municipio, expires_hours=1)
+    return jsonify({
+        "city_id": municipio.id,
+        "logo_object_key": municipio.logo_url,
+        "letterhead_image_object_key": municipio.letterhead_image_url,
+        "letterhead_pdf_object_key": municipio.letterhead_pdf_url,
+        "presigned": presigned,
+    })
+
+
+@bp.route("<string:municipio_id>/branding/logo", methods=["POST"])
+@jwt_required()
+@role_required("admin", "diretor", "coordenador", "tecadm")
+def upload_branding_logo_municipio(municipio_id):
+    user = get_current_user_from_token()
+    denied = _ensure_municipio_access(user, municipio_id)
+    if denied:
+        return denied
+    municipio = City.query.get(municipio_id)
+    if not municipio:
+        return jsonify({"erro": "Município não encontrado"}), 404
+
+    replace = request.args.get("replace", "false").lower() in ("1", "true", "yes")
+    if "file" not in request.files:
+        return jsonify({"erro": "Campo multipart 'file' obrigatório"}), 400
+    f = request.files["file"]
+    raw = f.read()
+    try:
+        svc = CityBrandingService()
+        svc.upload_logo(municipio, raw, replace=replace)
+        db.session.commit()
+    except ValueError as e:
+        db.session.rollback()
+        return jsonify({"erro": str(e)}), 409 if "replace" in str(e).lower() or "Já existe" in str(e) else 400
+    except RuntimeError as e:
+        db.session.rollback()
+        return jsonify({"erro": str(e)}), 500
+
+    presigned = CityBrandingService().presigned_urls(municipio, expires_hours=1)
+    return jsonify({
+        "mensagem": "Logo atualizado",
+        "logo_object_key": municipio.logo_url,
+        "presigned": presigned.get("logo_url"),
+    })
+
+
+@bp.route("<string:municipio_id>/branding/letterhead", methods=["POST"])
+@jwt_required()
+@role_required("admin", "diretor", "coordenador", "tecadm")
+def upload_branding_letterhead_municipio(municipio_id):
+    user = get_current_user_from_token()
+    denied = _ensure_municipio_access(user, municipio_id)
+    if denied:
+        return denied
+    municipio = City.query.get(municipio_id)
+    if not municipio:
+        return jsonify({"erro": "Município não encontrado"}), 404
+
+    replace = request.args.get("replace", "false").lower() in ("1", "true", "yes")
+    store_pdf = request.args.get("store_pdf", "true").lower() in ("1", "true", "yes")
+    if "file" not in request.files:
+        return jsonify({"erro": "Campo multipart 'file' obrigatório"}), 400
+    f = request.files["file"]
+    raw = f.read()
+    try:
+        svc = CityBrandingService()
+        svc.upload_letterhead_pdf(municipio, raw, replace=replace, store_pdf=store_pdf)
+        db.session.commit()
+    except ValueError as e:
+        db.session.rollback()
+        msg = str(e)
+        code = 409 if "replace" in msg.lower() or "Já existe" in msg else 400
+        return jsonify({"erro": msg}), code
+    except RuntimeError as e:
+        db.session.rollback()
+        msg = str(e).lower()
+        code = 503 if "poppler" in msg or "pdf2image" in msg else 500
+        return jsonify({"erro": str(e)}), code
+
+    svc = CityBrandingService()
+    presigned = svc.presigned_urls(municipio, expires_hours=1)
+    return jsonify({
+        "mensagem": "Timbrado atualizado (PNG gerado a partir da primeira página)",
+        "letterhead_image_object_key": municipio.letterhead_image_url,
+        "letterhead_pdf_object_key": municipio.letterhead_pdf_url,
+        "presigned": {
+            "letterhead_image_url": presigned.get("letterhead_image_url"),
+            "letterhead_pdf_url": presigned.get("letterhead_pdf_url"),
+        },
+    })
+
+
+@bp.route("<string:municipio_id>/branding", methods=["DELETE"])
+@jwt_required()
+@role_required("admin", "diretor", "coordenador", "tecadm")
+def remover_branding_municipio(municipio_id):
+    user = get_current_user_from_token()
+    denied = _ensure_municipio_access(user, municipio_id)
+    if denied:
+        return denied
+    municipio = City.query.get(municipio_id)
+    if not municipio:
+        return jsonify({"erro": "Município não encontrado"}), 404
+
+    logo = request.args.get("logo", "false").lower() in ("1", "true", "yes")
+    letterhead = request.args.get("letterhead", "false").lower() in ("1", "true", "yes")
+    if not logo and not letterhead:
+        return jsonify({"erro": "Informe logo=true e/ou letterhead=true"}), 400
+    try:
+        CityBrandingService().delete_assets(municipio, logo=logo, letterhead=letterhead)
+        db.session.commit()
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({"erro": str(e)}), 500
+    return jsonify({"mensagem": "Branding removido", "city_id": municipio.id})
 
 
 # GET - Buscar município específico

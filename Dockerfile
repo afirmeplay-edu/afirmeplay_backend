@@ -1,6 +1,5 @@
-FROM python:3.12-slim
+FROM python:3.11-bullseye
 
-# Dependências de sistema para WeasyPrint + Pillow + OpenCV (se houver)
 RUN apt-get update && apt-get install -y \
     build-essential \
     gcc \
@@ -25,7 +24,6 @@ RUN apt-get update && apt-get install -y \
     libxcb1-dev \
     libgl1 \
     libzbar0 \
-    libzbar-dev \
     libglib2.0-0 \
     fonts-dejavu-core \
     librsvg2-common \
@@ -33,14 +31,12 @@ RUN apt-get update && apt-get install -y \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
-# Timezone
 ENV TZ=UTC
 RUN ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone
 
 WORKDIR /code
 COPY requirements.txt .
 
-# Instalar dependências Python
 RUN pip install --no-cache-dir --upgrade pip && \
     pip install --no-cache-dir -r requirements.txt
 
@@ -48,5 +44,4 @@ COPY . .
 
 EXPOSE 5000
 
-# Rodar Flask com Gunicorn
 CMD ["gunicorn","--bind", "0.0.0.0:5000","--workers", "2","--threads", "2","--timeout", "120","--graceful-timeout", "30","--max-requests", "500","--max-requests-jitter", "50","--preload","run:app"]

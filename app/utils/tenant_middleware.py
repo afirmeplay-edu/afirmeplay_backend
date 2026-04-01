@@ -29,6 +29,7 @@ Regras de Resolução:
        - Extrai slug do Host header
        - Resolve city_id via public.city.slug
        - Define schema tenant
+       - Produção: *.afirmeplay.com.br | Homologação: *.afirmeplay.com
 
 Prioridade de Resolução:
     1. Token JWT city_id (usuário comum)
@@ -54,8 +55,14 @@ from app.models.city import City
 from app.models.user import User, RoleEnum
 
 SECRET_KEY = os.getenv("JWT_SECRET_KEY")
-# Ambiente da aplicação: "production", "development", etc.
+# Ambiente: development (local), homolog (*.afirmeplay.com), production (*.afirmeplay.com.br)
 APP_ENV = os.getenv("APP_ENV", "development").lower()
+
+
+def _allow_subdomain_from_origin_when_host_has_no_slug():
+    """Só em desenvolvimento local: Host sem slug (ex.: API em localhost) e slug no Origin."""
+    return APP_ENV == "development"
+
 
 # Domínios que devem ser ignorados na resolução de subdomínio
 IGNORED_HOSTS = [
@@ -63,6 +70,10 @@ IGNORED_HOSTS = [
     'www.afirmeplay.com.br',
     'api.afirmeplay.com.br',
     'files.afirmeplay.com.br',
+    'afirmeplay.com',
+    'www.afirmeplay.com',
+    'api.afirmeplay.com',
+    'files.afirmeplay.com',
     'localhost',
     '127.0.0.1'
 ]
@@ -105,6 +116,8 @@ def extract_subdomain(host):
     Examples:
         >>> extract_subdomain('jiparana.afirmeplay.com.br')
         'jiparana'
+        >>> extract_subdomain('jiparana.afirmeplay.com')  # com APP_ENV=homolog
+        'jiparana'
         >>> extract_subdomain('afirmeplay.com.br')
         None
         >>> extract_subdomain('api.afirmeplay.com.br')
@@ -142,14 +155,39 @@ def extract_subdomain(host):
         return None
     
     # ================================
+    # Ambiente de HOMOLOGAÇÃO (*.afirmeplay.com)
+    # ================================
+    # Mesmo comportamento que produção quanto a Host/Origin; domínio base .com (sem .br).
+    if APP_ENV == "homolog":
+        if host.endswith(".afirmeplay.com.br"):
+            return None
+        if not host.endswith(".afirmeplay.com"):
+            return None
+        parts = host.split(".")
+        # slug.afirmeplay.com → ex.: jaru.afirmeplay.com
+        if len(parts) == 3 and parts[1] == "afirmeplay" and parts[2] == "com":
+            slug = parts[0]
+            if re.match(r"^[a-z0-9-]+$", slug):
+                return slug
+        return None
+    
+    # ================================
     # Ambiente de DESENVOLVIMENTO
     # ================================
-    # Em desenvolvimento, aceitamos tanto afirmeplay.com.br quanto *.localhost
+    # Em desenvolvimento, aceitamos afirmeplay.com.br, afirmeplay.com e *.localhost
     
     # 1) Regra original para afirmeplay.com.br (para testes locais apontando para esse domínio)
     if 'afirmeplay.com.br' in host:
         parts = host.split('.')
         if len(parts) > 3:
+            slug = parts[0]
+            if re.match(r'^[a-z0-9-]+$', slug):
+                return slug
+    
+    # 1b) *.afirmeplay.com (paridade com homolog em testes locais / hosts)
+    if host.endswith('.afirmeplay.com') and not host.endswith('.afirmeplay.com.br'):
+        parts = host.split('.')
+        if len(parts) == 3 and parts[1] == 'afirmeplay' and parts[2] == 'com':
             slug = parts[0]
             if re.match(r'^[a-z0-9-]+$', slug):
                 return slug
@@ -271,7 +309,7 @@ def _resolve_mobile_login_tenant_context():
     if not city:
         host = request.headers.get("Host")
         slug = extract_subdomain(host)
-        if not slug and APP_ENV != "production":
+        if not slug and _allow_subdomain_from_origin_when_host_has_no_slug():
             slug = extract_subdomain(request.headers.get("Origin"))
         if slug:
             city = resolve_city_from_slug(slug)
@@ -360,7 +398,7 @@ def resolve_tenant_context():
             
             # Em desenvolvimento, se o backend estiver em localhost (sem subdomínio),
             # usar o Origin do frontend para extrair o slug (ex: jaru.localhost)
-            if not slug and APP_ENV != "production":
+            if not slug and _allow_subdomain_from_origin_when_host_has_no_slug():
                 origin = request.headers.get('Origin')
                 slug = extract_subdomain(origin)
             
@@ -399,7 +437,7 @@ def resolve_tenant_context():
     
     # Em desenvolvimento, se o backend estiver em localhost (sem subdomínio),
     # usar o Origin do frontend para extrair o slug (ex: jaru.localhost)
-    if not slug and APP_ENV != "production":
+    if not slug and _allow_subdomain_from_origin_when_host_has_no_slug():
         origin = request.headers.get('Origin')
         slug = extract_subdomain(origin)
     

@@ -560,7 +560,6 @@ def generate_answer_sheets():
                 'state': state_for_pdf,
                 'grade_name': grade_name_for_pdf,
                 'department': data.get('test_data', {}).get('department', ''),
-                'municipality_logo': data.get('test_data', {}).get('municipality_logo'),
                 'institution': gabarito.institution or '',
             }
             # Extrair questions_options do blocks_config do gabarito (topology.blocks[].questions[].q + alternatives)
@@ -852,7 +851,6 @@ def generate_answer_sheets():
             'state': state_for_gabarito,
             'grade_name': grade_name_for_gabarito,  # ✅ Adicionar grade_name
             'department': test_data.get('department', ''),
-            'municipality_logo': test_data.get('municipality_logo'),
             'institution': test_data.get('institution', ''),
             'grade_name': test_data.get('grade_name', '')
         }

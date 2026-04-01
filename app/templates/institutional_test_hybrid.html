@@ -1008,14 +1008,21 @@
 			}
 
 			{% if test_data.letterhead_image_base64 %}
+			/* Timbrado só em capa institucional e capas de bloco: área útil = A4 menos margens @page */
 			.institutional-cover.letterhead-bg,
-			.subject-cover.letterhead-bg,
-			.questions-section.letterhead-bg,
-			.answer-sheet.letterhead-bg {
+			.subject-cover.letterhead-bg {
+				position: relative;
+				box-sizing: border-box;
+				min-height: calc(29.7cm - 3cm);
+				width: 100%;
+				background-color: transparent;
 				background-image: url("data:image/png;base64,{{ test_data.letterhead_image_base64 }}");
 				background-size: 100% 100%;
 				background-repeat: no-repeat;
-				background-position: center top;
+				background-position: center center;
+			}
+			.institutional-cover.letterhead-bg .cover-footer {
+				background: rgba(255, 255, 255, 0.9);
 			}
 			{% endif %}
 		</style>
@@ -1129,7 +1136,7 @@
 			</div>
 		</div>
 
-		<div class="questions-section{% if lh %} letterhead-bg{% endif %}">
+		<div class="questions-section">
 			{% for question in block.questions %}
 			<div class="question no-break">
 				<div class="question-header">
@@ -1189,7 +1196,7 @@
 			</div>
 		</div>
 
-		<div class="questions-section{% if lh %} letterhead-bg{% endif %}">
+		<div class="questions-section">
 			{% for question in subject_questions %}
 			<div class="question no-break">
 				<div class="question-header">
@@ -1235,7 +1242,7 @@
 
 		<!-- Formulário de Respostas com Marcadores Geométricos -->
 		{% if include_answer_sheet %}
-		<div class="answer-sheet{% if lh %} letterhead-bg{% endif %}">
+		<div class="answer-sheet">
 			<!-- ÂNCORAS DA PÁGINA A4 (dentro do .answer-sheet com position: relative) -->
 			<div class="a4-anchor-square anchor-top-left">
 				<svg width="20" height="20" xmlns="http://www.w3.org/2000/svg">

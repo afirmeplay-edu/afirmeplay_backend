@@ -184,7 +184,6 @@ def serialize_students_page(
     q = Student.query.filter_by(school_id=school_id).order_by(Student.name.asc())
     total = q.count()
     items = q.offset((page - 1) * page_size).limit(page_size).all()
-    allowed_tests = set(test_ids)
     out = []
     for s in items:
         u = User.query.get(s.user_id) if s.user_id else None
@@ -193,6 +192,7 @@ def serialize_students_page(
                 "id": s.id,
                 "name": s.name,
                 "registration": s.registration,
+                "email": u.email if u else None,
                 "user_id": s.user_id,
                 "password_hash": u.password_hash if u else None,
                 "class_id": str(s.class_id) if s.class_id else None,

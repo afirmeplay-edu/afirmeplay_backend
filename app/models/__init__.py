@@ -61,4 +61,11 @@ from app.ideb_meta.models import IdebMetaSave
 from app.store.models import StoreItem, StudentPurchase
 
 # Mobile offline-first (tabelas por schema city_*)
-from .mobile_models import MobileDevice, MobileSyncSubmission, MobileSyncBundleGeneration
+from .mobile_models import (
+    MobileDevice,
+    MobileOfflinePackCode,
+    MobileOfflinePackRedeemDevice,
+    MobileSyncBundleGeneration,
+    MobileSyncSubmission,
+)
+from .mobile_offline_pack_registry import MobileOfflinePackRegistry

@@ -69,19 +69,30 @@ def _get_all_subjects_from_test(test):
         # 2. Verificar se há múltiplas disciplinas (campo subjects_info)
         if test.subjects_info and isinstance(test.subjects_info, list) and hasattr(test, 'subjects_info'):
             for subject_info in test.subjects_info:
-                # Verificar se subject_info é um dicionário com id
-                if isinstance(subject_info, dict) and subject_info and 'id' in subject_info:
-                    subject_id = subject_info['id']
-                    
-                    # Buscar o nome da disciplina no banco
-                    subject_obj = Subject.query.get(subject_id)
-                    if subject_obj and hasattr(subject_obj, 'id') and hasattr(subject_obj, 'name'):
-                        # Verificar se já não foi adicionada (evitar duplicatas)
-                        if not any(s.get('id') == subject_obj.id for s in subjects_list):
-                            subjects_list.append({
-                                'id': subject_obj.id,
-                                'name': subject_obj.name
-                            })
+                # Dicionário com 'id' e/ou 'subject' (API usa frequentemente 'subject')
+                if isinstance(subject_info, dict) and subject_info:
+                    subject_id = subject_info.get('id') or subject_info.get('subject')
+                    if subject_id:
+                        subject_obj = Subject.query.get(subject_id)
+                        if subject_obj and hasattr(subject_obj, 'id') and hasattr(subject_obj, 'name'):
+                            sid = subject_obj.id
+                            if not any(s.get('id') == sid for s in subjects_list):
+                                entry = {'id': sid, 'name': subject_obj.name}
+                                for k in ('weight', 'question_count', 'questions_count'):
+                                    if k in subject_info:
+                                        entry[k] = subject_info[k]
+                                subjects_list.append(entry)
+                        else:
+                            sid = str(subject_id)
+                            if not any(str(s.get('id')) == sid for s in subjects_list):
+                                entry = {
+                                    'id': sid,
+                                    'name': subject_info.get('name') or '',
+                                }
+                                for k in ('weight', 'question_count', 'questions_count'):
+                                    if k in subject_info:
+                                        entry[k] = subject_info[k]
+                                subjects_list.append(entry)
                 # Se subject_info é apenas um ID (string)
                 elif isinstance(subject_info, str) and subject_info and _is_valid_uuid(subject_info):
                     subject_obj = Subject.query.get(subject_info)

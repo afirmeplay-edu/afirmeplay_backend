@@ -17,6 +17,7 @@ from app.models.user import User
 from app.models.mobile_models import MobileSyncBundleGeneration
 
 from app.services.mobile.content_hash import compute_test_content_version, question_to_canon
+from app.utils.response_formatters import _get_all_subjects_from_test
 
 
 def _ttl_hours() -> int:
@@ -165,6 +166,7 @@ def build_tests_questions_payload(
             "duration": test.duration,
             "evaluation_mode": test.evaluation_mode,
             "subject": test.subject,
+            "subjects_info": _get_all_subjects_from_test(test),
             "grade_id": str(test.grade_id) if test.grade_id else None,
             "status": test.status,
         }

@@ -57,7 +57,7 @@ from app.models.grades import Grade
 from app.models.evaluationResult import EvaluationResult
 from app.utils.uuid_helpers import ensure_uuid, ensure_uuid_list
 from app.utils.decimal_helpers import round_to_two_decimals
-from sqlalchemy import cast, String, or_
+from sqlalchemy import cast, String, or_, and_, not_
 from sqlalchemy.dialects.postgresql import UUID as PostgresUUID
 from app.models.classTest import ClassTest
 from app.models.studentTestOlimpics import StudentTestOlimpics
@@ -5802,10 +5802,25 @@ def _apply_class_test_application_period(
     if bounds is None:
         return query
     dt_inicio, dt_fim = bounds
-    return query.filter(
-        ClassTest.application >= dt_inicio.strftime("%Y-%m-%d"),
-        ClassTest.application <= dt_fim.strftime("%Y-%m-%d") + "T23:59:59.999",
+    d0 = dt_inicio.strftime("%Y-%m-%d")
+    d1 = dt_fim.strftime("%Y-%m-%d")
+    # Comparação lexicográfica no ISO completo falha no fim do mês (ex.: microssegundos
+    # ou sufixo de timezone após 23:59:59.999). Quando os 10 primeiros caracteres são
+    # YYYY-MM-DD, filtramos pelo dia civil; caso contrário mantém o critério antigo.
+    app_text = cast(ClassTest.application, String)
+    iso_date_prefix = func.substring(app_text, 1, 10)
+    matches_iso_date = iso_date_prefix.op("~")(r"^\d{4}-\d{2}-\d{2}$")
+    cond_by_calendar_day = and_(
+        matches_iso_date,
+        iso_date_prefix >= d0,
+        iso_date_prefix <= d1,
     )
+    cond_lex_legacy = and_(
+        not_(matches_iso_date),
+        ClassTest.application >= d0,
+        ClassTest.application <= d1 + "T23:59:59.999",
+    )
+    return query.filter(or_(cond_by_calendar_day, cond_lex_legacy))
 
 
 def _formatar_data_para_evolucao(val) -> Optional[str]:
@@ -6482,6 +6497,24 @@ def obter_estatisticas_por_disciplina(test_id: str):
         return jsonify({"error": "Erro ao obter estatísticas por disciplina", "details": str(e)}), 500
 
 
+def _filtrar_alunos_mapa_digital_por_periodo_aplicacao(
+    students: List[Student],
+    avaliacao_id: str,
+    periodo_bounds: Optional[Tuple[datetime, datetime]],
+) -> List[Student]:
+    """Restringe alunos às turmas com ClassTest da avaliação aplicada no mês (periodo YYYY-MM)."""
+    if periodo_bounds is None or not students:
+        return students
+    q = ClassTest.query.filter(ClassTest.test_id == str(avaliacao_id))
+    q = _apply_class_test_application_period(q, periodo_bounds)
+    allowed_class_ids = {str(ct.class_id) for ct in q.all()}
+    return [
+        s
+        for s in students
+        if getattr(s, "class_id", None) and str(s.class_id) in allowed_class_ids
+    ]
+
+
 @bp.route("/mapa-habilidades", methods=["GET"])
 @jwt_required()
 @role_required("admin", "professor", "coordenador", "diretor", "tecadm")
@@ -6489,6 +6522,7 @@ def mapa_habilidades_avaliacao_online():
     """
     Mapa de habilidades para avaliação online (Test): % de acertos agregados por habilidade em faixas.
     Filtros: estado, municipio, avaliacao (obrigatória), escola, serie, turma, disciplina (id ou all).
+    Query opcional: periodo=YYYY-MM (ClassTest.application no mês).
     """
     try:
         user = get_current_user_from_token()
@@ -6502,6 +6536,18 @@ def mapa_habilidades_avaliacao_online():
         turma = request.args.get("turma")
         avaliacao = request.args.get("avaliacao")
         disciplina = request.args.get("disciplina") or "all"
+        periodo_raw = request.args.get("periodo")
+        periodo_bounds: Optional[Tuple[datetime, datetime]] = None
+        if periodo_raw is not None and str(periodo_raw).strip():
+            try:
+                periodo_bounds = _parse_periodo_bounds(periodo_raw)
+            except ValueError as ve:
+                return jsonify(
+                    {
+                        "error": "Parâmetro periodo inválido. Use YYYY-MM (ex.: 2026-04).",
+                        "details": str(ve),
+                    }
+                ), 400
 
         if not estado or str(estado).lower() == "all":
             return jsonify({"error": "Estado é obrigatório e não pode ser 'all'"}), 400
@@ -6568,6 +6614,9 @@ def mapa_habilidades_avaliacao_online():
         all_students = _obter_alunos_para_mapa_habilidades_test(
             scope_info, nivel_granularidade, user, escopo_calculo
         )
+        all_students = _filtrar_alunos_mapa_digital_por_periodo_aplicacao(
+            all_students, str(avaliacao), periodo_bounds
+        )
 
         subject_filter = (
             None if str(disciplina).strip().lower() == "all" else str(disciplina).strip()
@@ -6591,6 +6640,11 @@ def mapa_habilidades_avaliacao_online():
                     "turma": turma,
                     "avaliacao": avaliacao,
                     "disciplina": disciplina,
+                    "periodo": (
+                        str(periodo_raw).strip()
+                        if periodo_raw and str(periodo_raw).strip()
+                        else None
+                    ),
                 },
                 "total_alunos_escopo": len(all_students),
             }
@@ -6621,6 +6675,18 @@ def mapa_habilidades_avaliacao_online_erros():
         turma = request.args.get("turma")
         avaliacao = request.args.get("avaliacao")
         disciplina = request.args.get("disciplina") or "all"
+        periodo_raw = request.args.get("periodo")
+        periodo_bounds_erros: Optional[Tuple[datetime, datetime]] = None
+        if periodo_raw is not None and str(periodo_raw).strip():
+            try:
+                periodo_bounds_erros = _parse_periodo_bounds(periodo_raw)
+            except ValueError as ve:
+                return jsonify(
+                    {
+                        "error": "Parâmetro periodo inválido. Use YYYY-MM (ex.: 2026-04).",
+                        "details": str(ve),
+                    }
+                ), 400
 
         if not estado or str(estado).lower() == "all":
             return jsonify({"error": "Estado é obrigatório e não pode ser 'all'"}), 400
@@ -6684,6 +6750,9 @@ def mapa_habilidades_avaliacao_online_erros():
         all_students = _obter_alunos_para_mapa_habilidades_test(
             scope_info, nivel_granularidade, user, escopo_calculo
         )
+        all_students = _filtrar_alunos_mapa_digital_por_periodo_aplicacao(
+            all_students, str(avaliacao), periodo_bounds_erros
+        )
 
         subject_filter = (
             None if str(disciplina).strip().lower() == "all" else str(disciplina).strip()
@@ -6727,6 +6796,11 @@ def mapa_habilidades_avaliacao_online_erros():
                     "avaliacao": avaliacao,
                     "disciplina": disciplina,
                     "skill_id": str(skill_id).strip(),
+                    "periodo": (
+                        str(periodo_raw).strip()
+                        if periodo_raw and str(periodo_raw).strip()
+                        else None
+                    ),
                 },
             }
         ), 200

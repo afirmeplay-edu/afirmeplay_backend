@@ -34,7 +34,7 @@ from app.models.city import City
 from app.models.test import Test
 from app.models.skill import Skill
 from app.utils.decimal_helpers import round_to_two_decimals
-from typing import Dict, Optional, List, Any
+from typing import Dict, Optional, List, Any, Tuple
 from collections import defaultdict
 from sqlalchemy import cast, String, desc
 from app.services.cartao_resposta.answer_sheet_gabarito_generation import (
@@ -52,8 +52,9 @@ import tempfile
 import threading
 import uuid
 from io import BytesIO
-from datetime import datetime
+from datetime import datetime, timedelta
 from urllib.parse import urlencode
+from calendar import monthrange
 
 bp = Blueprint('answer_sheets', __name__, url_prefix='/answer-sheets')
 
@@ -2304,7 +2305,62 @@ def _is_valid_filter(value):
     return value and str(value).strip().lower() != 'all'
 
 
-def _determinar_escopo_busca_cartao(estado, municipio, escola, serie, turma, gabarito, user=None):
+def _parse_cartao_periodo_bounds(periodo: str) -> Tuple[datetime, datetime]:
+    """periodo no formato YYYY-MM → primeiro e último dia do mês (datetime 00:00)."""
+    s = str(periodo).strip()
+    m = re.match(r"^(\d{4})-(\d{2})$", s)
+    if not m:
+        raise ValueError("Use o formato YYYY-MM (ex.: 2026-04).")
+    year, month = int(m.group(1)), int(m.group(2))
+    if month < 1 or month > 12:
+        raise ValueError("Mês deve estar entre 01 e 12.")
+    last = monthrange(year, month)[1]
+    return datetime(year, month, 1), datetime(year, month, last)
+
+
+def _apply_answer_sheet_result_period_filter(query, periodo_bounds: Optional[Tuple[datetime, datetime]]):
+    """Restringe a correções com corrected_at no mês (exclusivo no fim do mês)."""
+    if periodo_bounds is None:
+        return query
+    dt_inicio, dt_fim = periodo_bounds
+    end_exclusive = dt_fim + timedelta(days=1)
+    return query.filter(
+        AnswerSheetResult.corrected_at.isnot(None),
+        AnswerSheetResult.corrected_at >= dt_inicio,
+        AnswerSheetResult.corrected_at < end_exclusive,
+    )
+
+
+def _school_ids_com_correcao_cartao_no_periodo(
+    gabarito_id: str, school_ids: List[str], periodo_bounds: Tuple[datetime, datetime]
+) -> set:
+    """IDs de escolas (como string) com pelo menos uma correção do gabarito no período."""
+    if not school_ids:
+        return set()
+    class_ids = [c.id for c in Class.query.filter(Class.school_id.in_(school_ids)).all()]
+    if not class_ids:
+        return set()
+    stu = [s.id for s in Student.query.filter(Student.class_id.in_(class_ids)).all()]
+    if not stu:
+        return set()
+    _rq = AnswerSheetResult.query.filter(
+        AnswerSheetResult.gabarito_id == gabarito_id,
+        AnswerSheetResult.student_id.in_(stu),
+    )
+    _rq = _apply_answer_sheet_result_period_filter(_rq, periodo_bounds)
+    hit_students = {row[0] for row in _rq.with_entities(AnswerSheetResult.student_id).distinct().all()}
+    if not hit_students:
+        return set()
+    classes_hit = Student.query.filter(Student.id.in_(hit_students)).with_entities(Student.class_id).distinct().all()
+    cids = [c[0] for c in classes_hit if c[0]]
+    if not cids:
+        return set()
+    return {str(c.school_id) for c in Class.query.filter(Class.id.in_(cids)).all() if c.school_id}
+
+
+def _determinar_escopo_busca_cartao(
+    estado, municipio, escola, serie, turma, gabarito, user=None, periodo_bounds=None
+):
     """
     Determina o escopo de busca para resultados agregados de cartões resposta.
     Escolas = escolas do município que têm pelo menos um resultado do gabarito (quando gabarito selecionado).
@@ -2346,8 +2402,10 @@ def _determinar_escopo_busca_cartao(estado, municipio, escola, serie, turma, gab
                 g = AnswerSheetGabarito.query.get(gabarito_id)
                 if not g:
                     return None
-            # Turmas que têm pelo menos um resultado deste gabarito
-            results = AnswerSheetResult.query.filter_by(gabarito_id=gabarito_id).all()
+            # Turmas que têm pelo menos um resultado deste gabarito (opcionalmente no mês de corrected_at)
+            _rq = AnswerSheetResult.query.filter_by(gabarito_id=gabarito_id)
+            _rq = _apply_answer_sheet_result_period_filter(_rq, periodo_bounds)
+            results = _rq.all()
             student_ids = list({r.student_id for r in results})
             if not student_ids:
                 return {'municipio_id': municipio_id, 'city_data': city_data, 'escolas': [], 'estado': estado, 'municipio': municipio, 'escola': escola, 'serie': serie, 'turma': turma, 'gabarito': gabarito}
@@ -2484,11 +2542,13 @@ def _determinar_escopo_calculo_cartao(scope_info, nivel_granularidade):
     return escopo
 
 
-def _obter_class_ids_com_resultado_cartao(gabarito_id, escopo):
+def _obter_class_ids_com_resultado_cartao(gabarito_id, escopo, periodo_bounds=None):
     """Retorna class_ids no escopo que têm pelo menos um resultado do gabarito."""
     if not gabarito_id:
         return []
-    results = AnswerSheetResult.query.filter_by(gabarito_id=gabarito_id).all()
+    _rq = AnswerSheetResult.query.filter_by(gabarito_id=gabarito_id)
+    _rq = _apply_answer_sheet_result_period_filter(_rq, periodo_bounds)
+    results = _rq.all()
     student_ids = list({r.student_id for r in results})
     if not student_ids:
         return []
@@ -2510,10 +2570,10 @@ def _obter_class_ids_com_resultado_cartao(gabarito_id, escopo):
     return [c.id for c in q.all()]
 
 
-def _calcular_estatisticas_consolidadas_cartao(scope_info, nivel_granularidade, gabarito_id, user):
+def _calcular_estatisticas_consolidadas_cartao(scope_info, nivel_granularidade, gabarito_id, user, periodo_bounds=None):
     try:
         escopo = _determinar_escopo_calculo_cartao(scope_info, nivel_granularidade)
-        class_ids = _obter_class_ids_com_resultado_cartao(gabarito_id, escopo)
+        class_ids = _obter_class_ids_com_resultado_cartao(gabarito_id, escopo, periodo_bounds)
         if not class_ids:
             return _get_empty_statistics_gerais_cartao(scope_info, nivel_granularidade)
 
@@ -2523,10 +2583,12 @@ def _calcular_estatisticas_consolidadas_cartao(scope_info, nivel_granularidade, 
         if not gabarito_id:
             resultados = []
         else:
-            resultados = AnswerSheetResult.query.filter(
+            _rq = AnswerSheetResult.query.filter(
                 AnswerSheetResult.gabarito_id == gabarito_id,
-                AnswerSheetResult.student_id.in_(student_ids)
-            ).all()
+                AnswerSheetResult.student_id.in_(student_ids),
+            )
+            _rq = _apply_answer_sheet_result_period_filter(_rq, periodo_bounds)
+            resultados = _rq.all()
         alunos_participantes = len(resultados)
         media_nota = sum(r.grade for r in resultados) / len(resultados) if resultados else 0.0
         media_prof = sum(r.proficiency or 0 for r in resultados) / len(resultados) if resultados else 0.0
@@ -2601,14 +2663,16 @@ def _calcular_estatisticas_consolidadas_cartao(scope_info, nivel_granularidade, 
         return _get_empty_statistics_gerais_cartao(scope_info, nivel_granularidade)
 
 
-def _calcular_estatisticas_grupo_cartao(class_ids, gabarito_id):
+def _calcular_estatisticas_grupo_cartao(class_ids, gabarito_id, periodo_bounds=None):
     """Estatísticas para um grupo de turmas (usado em resultados_detalhados)."""
     if not class_ids or not gabarito_id:
         return {'total_alunos': 0, 'alunos_participantes': 0, 'alunos_pendentes': 0, 'media_nota': 0.0, 'media_proficiencia': 0.0, 'distribuicao_classificacao': {'abaixo_do_basico': 0, 'basico': 0, 'adequado': 0, 'avancado': 0}}
     alunos = Student.query.filter(Student.class_id.in_(class_ids)).all()
     total_alunos = len(alunos)
     sid_list = [a.id for a in alunos]
-    resultados = AnswerSheetResult.query.filter(AnswerSheetResult.gabarito_id == gabarito_id, AnswerSheetResult.student_id.in_(sid_list)).all()
+    _rq = AnswerSheetResult.query.filter(AnswerSheetResult.gabarito_id == gabarito_id, AnswerSheetResult.student_id.in_(sid_list))
+    _rq = _apply_answer_sheet_result_period_filter(_rq, periodo_bounds)
+    resultados = _rq.all()
     participantes = len(resultados)
     media_nota = sum(r.grade for r in resultados) / len(resultados) if resultados else 0.0
     media_prof = sum(r.proficiency or 0 for r in resultados) / len(resultados) if resultados else 0.0
@@ -2626,13 +2690,13 @@ def _calcular_estatisticas_grupo_cartao(class_ids, gabarito_id):
     return {'total_alunos': total_alunos, 'alunos_participantes': participantes, 'alunos_pendentes': total_alunos - participantes, 'media_nota': round(media_nota, 2), 'media_proficiencia': round(media_prof, 2), 'distribuicao_classificacao': dist}
 
 
-def _gerar_resultados_detalhados_por_granularidade_cartao(scope_info, nivel_granularidade, gabarito_id):
+def _gerar_resultados_detalhados_por_granularidade_cartao(scope_info, nivel_granularidade, gabarito_id, periodo_bounds=None):
     """Gera lista agregada por escola / série / turma."""
     gabarito_id = str(gabarito_id).strip() if gabarito_id else None
     if not gabarito_id:
         return []
     escopo_base = _determinar_escopo_calculo_cartao(scope_info, nivel_granularidade)
-    class_ids = _obter_class_ids_com_resultado_cartao(gabarito_id, escopo_base)
+    class_ids = _obter_class_ids_com_resultado_cartao(gabarito_id, escopo_base, periodo_bounds)
     if not class_ids:
         return []
     classes = Class.query.filter(Class.id.in_(class_ids)).all()
@@ -2652,7 +2716,7 @@ def _gerar_resultados_detalhados_por_granularidade_cartao(scope_info, nivel_gran
             by_school[sid].append(c.id)
         for sid, cids in by_school.items():
             school = School.query.get(sid)
-            stats = _calcular_estatisticas_grupo_cartao(cids, gabarito_id)
+            stats = _calcular_estatisticas_grupo_cartao(cids, gabarito_id, periodo_bounds)
             resultados_detalhados.append({
                 "id": f"escola_{sid}",
                 "titulo": f"{titulo_gabarito} - {school.name if school else sid}",
@@ -2680,7 +2744,7 @@ def _gerar_resultados_detalhados_por_granularidade_cartao(scope_info, nivel_gran
         escola_nome = school.name if school else "N/A"
         for gid, cids in by_grade.items():
             grade = Grade.query.get(gid)
-            stats = _calcular_estatisticas_grupo_cartao(cids, gabarito_id)
+            stats = _calcular_estatisticas_grupo_cartao(cids, gabarito_id, periodo_bounds)
             resultados_detalhados.append({
                 "id": f"serie_{gid}",
                 "titulo": f"{titulo_gabarito} - {grade.name if grade else gid}",
@@ -2701,7 +2765,7 @@ def _gerar_resultados_detalhados_por_granularidade_cartao(scope_info, nivel_gran
         for c in classes:
             grade = Grade.query.get(c.grade_id) if c.grade_id else None
             school = School.query.get(c.school_id) if c.school_id else None
-            stats = _calcular_estatisticas_grupo_cartao([c.id], gabarito_id)
+            stats = _calcular_estatisticas_grupo_cartao([c.id], gabarito_id, periodo_bounds)
             resultados_detalhados.append({
                 "id": f"turma_{c.id}",
                 "titulo": f"{titulo_gabarito} - {c.name or f'Turma {c.id}'}",
@@ -2736,19 +2800,21 @@ def _extrair_blocos_por_disciplina_cartao(blocks_config):
     return list(by_subject.values())
 
 
-def _calcular_resultados_por_disciplina_cartao(scope_info, nivel_granularidade, gabarito_id):
+def _calcular_resultados_por_disciplina_cartao(scope_info, nivel_granularidade, gabarito_id, periodo_bounds=None):
     """Retorna lista no mesmo formato de evaluation_results: resultados_por_disciplina."""
     if not gabarito_id:
         return []
     escopo = _determinar_escopo_calculo_cartao(scope_info, nivel_granularidade)
-    class_ids = _obter_class_ids_com_resultado_cartao(gabarito_id, escopo)
+    class_ids = _obter_class_ids_com_resultado_cartao(gabarito_id, escopo, periodo_bounds)
     if not class_ids:
         return []
     student_ids = [s.id for s in Student.query.filter(Student.class_id.in_(class_ids)).all()]
-    results = AnswerSheetResult.query.filter(
+    _rq = AnswerSheetResult.query.filter(
         AnswerSheetResult.gabarito_id == gabarito_id,
-        AnswerSheetResult.student_id.in_(student_ids)
-    ).all()
+        AnswerSheetResult.student_id.in_(student_ids),
+    )
+    _rq = _apply_answer_sheet_result_period_filter(_rq, periodo_bounds)
+    results = _rq.all()
     if not results:
         return []
     gabarito = AnswerSheetGabarito.query.get(gabarito_id)
@@ -2812,11 +2878,11 @@ def _calcular_resultados_por_disciplina_cartao(scope_info, nivel_granularidade, 
     return out
 
 
-def _gerar_tabela_detalhada_cartao(scope_info, nivel_granularidade, gabarito_id, user):
+def _gerar_tabela_detalhada_cartao(scope_info, nivel_granularidade, gabarito_id, user, periodo_bounds=None):
     """Tabela detalhada no mesmo formato de evaluation_results: disciplinas (com questões e alunos com respostas_por_questao) e geral (alunos com totais e proficiência geral)."""
     import json
     escopo = _determinar_escopo_calculo_cartao(scope_info, nivel_granularidade)
-    class_ids = _obter_class_ids_com_resultado_cartao(gabarito_id, escopo)
+    class_ids = _obter_class_ids_com_resultado_cartao(gabarito_id, escopo, periodo_bounds)
     if not class_ids or not gabarito_id:
         return {"disciplinas": [], "geral": {"alunos": []}}
     gabarito = AnswerSheetGabarito.query.get(gabarito_id)
@@ -2836,10 +2902,12 @@ def _gerar_tabela_detalhada_cartao(scope_info, nivel_granularidade, gabarito_id,
     if not disciplinas_config:
         disciplinas_config = [{'id': 'geral', 'nome': 'Geral', 'question_numbers': list(gabarito_dict.keys())}]
     student_ids = [s.id for s in Student.query.filter(Student.class_id.in_(class_ids)).all()]
-    results = AnswerSheetResult.query.filter(
+    _rq = AnswerSheetResult.query.filter(
         AnswerSheetResult.gabarito_id == gabarito_id,
-        AnswerSheetResult.student_id.in_(student_ids)
-    ).all()
+        AnswerSheetResult.student_id.in_(student_ids),
+    )
+    _rq = _apply_answer_sheet_result_period_filter(_rq, periodo_bounds)
+    results = _rq.all()
     result_by_student = {r.student_id: r for r in results}
     classes_by_id = {c.id: c for c in Class.query.filter(Class.id.in_(class_ids)).all()}
     schools_by_id = {}
@@ -3006,14 +3074,19 @@ def _calcular_dados_gerais_alunos_cartao(disciplinas_out, grade_name):
     return {"alunos": alunos_gerais}
 
 
-def _calcular_ranking_cartao(scope_info, nivel_granularidade, gabarito_id, user):
+def _calcular_ranking_cartao(scope_info, nivel_granularidade, gabarito_id, user, periodo_bounds=None):
     """Ranking de alunos por nota no gabarito."""
     escopo = _determinar_escopo_calculo_cartao(scope_info, nivel_granularidade)
-    class_ids = _obter_class_ids_com_resultado_cartao(gabarito_id, escopo)
+    class_ids = _obter_class_ids_com_resultado_cartao(gabarito_id, escopo, periodo_bounds)
     if not class_ids or not gabarito_id:
         return []
     student_ids = [s.id for s in Student.query.filter(Student.class_id.in_(class_ids)).all()]
-    results = AnswerSheetResult.query.filter(AnswerSheetResult.gabarito_id == gabarito_id, AnswerSheetResult.student_id.in_(student_ids)).all()
+    _rq = AnswerSheetResult.query.filter(
+        AnswerSheetResult.gabarito_id == gabarito_id,
+        AnswerSheetResult.student_id.in_(student_ids),
+    )
+    _rq = _apply_answer_sheet_result_period_filter(_rq, periodo_bounds)
+    results = _rq.all()
     sorted_results = sorted(results, key=lambda x: (x.grade or 0, x.proficiency or 0), reverse=True)
     ranking = []
     for pos, r in enumerate(sorted_results, 1):
@@ -3030,7 +3103,7 @@ def _calcular_ranking_cartao(scope_info, nivel_granularidade, gabarito_id, user)
     return ranking
 
 
-def _gerar_opcoes_proximos_filtros_cartao(scope_info, nivel_granularidade, user):
+def _gerar_opcoes_proximos_filtros_cartao(scope_info, nivel_granularidade, user, periodo_bounds=None):
     """Opções para próximos filtros (gabaritos, escolas, séries, turmas)."""
     from app.permissions import get_user_permission_scope
     opcoes = {"gabaritos": [], "escolas": [], "series": [], "turmas": []}
@@ -3041,12 +3114,19 @@ def _gerar_opcoes_proximos_filtros_cartao(scope_info, nivel_granularidade, user)
     if nivel_granularidade in ["estado", "municipio", "escola"] and municipio_id:
         q = AnswerSheetGabarito.query.with_entities(AnswerSheetGabarito.id, AnswerSheetGabarito.title).filter(AnswerSheetGabarito.created_by == str(user['id'])) if user and user.get('role') == 'professor' else AnswerSheetGabarito.query.with_entities(AnswerSheetGabarito.id, AnswerSheetGabarito.title)
         gabaritos = q.distinct().all()
-        results_for_city = AnswerSheetResult.query.join(Student).join(Class).join(School, School.id == cast(Class.school_id, String)).filter(School.city_id == municipio_id).with_entities(AnswerSheetResult.gabarito_id).distinct().all()
+        _rq = AnswerSheetResult.query.join(Student).join(Class).join(School, School.id == cast(Class.school_id, String)).filter(School.city_id == municipio_id)
+        _rq = _apply_answer_sheet_result_period_filter(_rq, periodo_bounds)
+        results_for_city = _rq.with_entities(AnswerSheetResult.gabarito_id).distinct().all()
         gabarito_ids_city = list({r[0] for r in results_for_city})
-        opcoes["gabaritos"] = [{"id": str(g[0]), "titulo": g[1]} for g in gabaritos if g[0] in gabarito_ids_city or not gabarito_ids_city]
+        if periodo_bounds is not None:
+            opcoes["gabaritos"] = [{"id": str(g[0]), "titulo": g[1]} for g in gabaritos if g[0] in gabarito_ids_city]
+        else:
+            opcoes["gabaritos"] = [{"id": str(g[0]), "titulo": g[1]} for g in gabaritos if g[0] in gabarito_ids_city or not gabarito_ids_city]
 
     if gabarito_id and municipio_id and nivel_granularidade in ["estado", "municipio", "escola"]:
-        results = AnswerSheetResult.query.filter_by(gabarito_id=gabarito_id).all()
+        _rq = AnswerSheetResult.query.filter_by(gabarito_id=gabarito_id)
+        _rq = _apply_answer_sheet_result_period_filter(_rq, periodo_bounds)
+        results = _rq.all()
         student_ids = list({r.student_id for r in results})
         students = Student.query.filter(Student.id.in_(student_ids)).filter(Student.class_id.isnot(None)).all()
         class_ids = list({s.class_id for s in students})
@@ -3074,14 +3154,18 @@ def _gerar_opcoes_proximos_filtros_cartao(scope_info, nivel_granularidade, user)
         for s in schools.distinct().all():
             opcoes["escolas"].append({"id": str(s.id), "name": s.name})
     if gabarito_id and scope_info.get('escola') and _is_valid_filter(scope_info.get('escola')):
-        results = AnswerSheetResult.query.filter_by(gabarito_id=gabarito_id).all()
+        _rq = AnswerSheetResult.query.filter_by(gabarito_id=gabarito_id)
+        _rq = _apply_answer_sheet_result_period_filter(_rq, periodo_bounds)
+        results = _rq.all()
         student_ids = list({r.student_id for r in results})
         students = Student.query.filter(Student.id.in_(student_ids)).filter(Student.class_id.isnot(None)).all()
         class_ids = list({s.class_id for s in students})
         grades = Grade.query.join(Class, Class.grade_id == Grade.id).filter(Class.id.in_(class_ids), Class.school_id == scope_info['escola']).with_entities(Grade.id, Grade.name).distinct().all()
         opcoes["series"] = [{"id": str(g[0]), "name": g[1]} for g in grades]
     if gabarito_id and scope_info.get('serie') and _is_valid_filter(scope_info.get('serie')):
-        results = AnswerSheetResult.query.filter_by(gabarito_id=gabarito_id).all()
+        _rq = AnswerSheetResult.query.filter_by(gabarito_id=gabarito_id)
+        _rq = _apply_answer_sheet_result_period_filter(_rq, periodo_bounds)
+        results = _rq.all()
         student_ids = list({r.student_id for r in results})
         students = Student.query.filter(Student.id.in_(student_ids)).filter(Student.class_id.isnot(None)).all()
         class_ids = list({s.class_id for s in students})
@@ -3116,7 +3200,9 @@ def _obter_municipios_por_estado_cartao(estado: str, user: dict, permissao: dict
     return [{"id": str(m.id), "nome": m.name} for m in municipios]
 
 
-def _obter_gabaritos_por_municipio_cartao(municipio_id: str, user: dict, permissao: dict) -> List[Dict[str, Any]]:
+def _obter_gabaritos_por_municipio_cartao(
+    municipio_id: str, user: dict, permissao: dict, periodo_bounds: Optional[Tuple[datetime, datetime]] = None
+) -> List[Dict[str, Any]]:
     """Gabaritos criados para o município (por school_id, class_id ou municipality/state), mesmo sem correções."""
     from sqlalchemy import or_, and_
     city = City.query.get(municipio_id)
@@ -3188,7 +3274,28 @@ def _obter_gabaritos_por_municipio_cartao(municipio_id: str, user: dict, permiss
         if g[0] not in seen:
             seen.add(g[0])
             out.append({"id": str(g[0]), "titulo": g[1] or "Gabarito"})
-    return out
+    if not periodo_bounds or not out:
+        return out
+    school_ids_city = [s.id for s in School.query.filter(School.city_id == municipio_id).all()]
+    if not school_ids_city:
+        return []
+    class_ids_city = [c.id for c in Class.query.filter(Class.school_id.in_(school_ids_city)).all()]
+    if not class_ids_city:
+        return []
+    student_ids_city = [s.id for s in Student.query.filter(Student.class_id.in_(class_ids_city)).all()]
+    if not student_ids_city:
+        return []
+    kept_ids = set()
+    for item in out:
+        gid = item["id"]
+        _rq = AnswerSheetResult.query.filter(
+            AnswerSheetResult.gabarito_id == gid,
+            AnswerSheetResult.student_id.in_(student_ids_city),
+        )
+        _rq = _apply_answer_sheet_result_period_filter(_rq, periodo_bounds)
+        if _rq.first():
+            kept_ids.add(gid)
+    return [g for g in out if g["id"] in kept_ids]
 
 
 def _gabarito_eh_somente_cartao_resposta(gabarito_id: str) -> bool:
@@ -3205,7 +3312,13 @@ def _gabarito_eh_somente_cartao_resposta(gabarito_id: str) -> bool:
     return mode == 'physical'
 
 
-def _obter_escolas_por_gabarito_cartao(gabarito_id: str, municipio_id: str, user: dict, permissao: dict) -> List[Dict[str, Any]]:
+def _obter_escolas_por_gabarito_cartao(
+    gabarito_id: str,
+    municipio_id: str,
+    user: dict,
+    permissao: dict,
+    periodo_bounds: Optional[Tuple[datetime, datetime]] = None,
+) -> List[Dict[str, Any]]:
     """Escolas onde o gabarito foi gerado (pelo school_id do gabarito ou todas do município se escopo city)."""
     city = City.query.get(municipio_id)
     if not city:
@@ -3249,10 +3362,22 @@ def _obter_escolas_por_gabarito_cartao(gabarito_id: str, municipio_id: str, user
             else:
                 return []
     escolas = query.order_by(School.name).all()
-    return [{"id": str(e[0]), "nome": e[1]} for e in escolas]
+    out = [{"id": str(e[0]), "nome": e[1]} for e in escolas]
+    if periodo_bounds:
+        sids = [e["id"] for e in out]
+        hit = _school_ids_com_correcao_cartao_no_periodo(str(gabarito_id), sids, periodo_bounds)
+        out = [e for e in out if e["id"] in hit]
+    return out
 
 
-def _obter_series_por_escola_cartao(gabarito_id: str, escola_id: str, municipio_id: str, user: dict, permissao: dict) -> List[Dict[str, Any]]:
+def _obter_series_por_escola_cartao(
+    gabarito_id: str,
+    escola_id: str,
+    municipio_id: str,
+    user: dict,
+    permissao: dict,
+    periodo_bounds: Optional[Tuple[datetime, datetime]] = None,
+) -> List[Dict[str, Any]]:
     """Séries (grades) que existem na escola selecionada (onde o gabarito pode ter sido gerado)."""
     city = City.query.get(municipio_id)
     if not city:
@@ -3276,10 +3401,36 @@ def _obter_series_por_escola_cartao(gabarito_id: str, escola_id: str, municipio_
         else:
             return []
     series = query.distinct().order_by(Grade.name).all()
-    return [{"id": str(s[0]), "nome": s[1]} for s in series]
+    out = [{"id": str(s[0]), "nome": s[1]} for s in series]
+    if not periodo_bounds:
+        return out
+    filtered = []
+    for item in out:
+        cids = [c.id for c in Class.query.filter(Class.school_id == escola_id, Class.grade_id == item["id"]).all()]
+        if not cids:
+            continue
+        stu = [s.id for s in Student.query.filter(Student.class_id.in_(cids)).all()]
+        if not stu:
+            continue
+        _rq = AnswerSheetResult.query.filter(
+            AnswerSheetResult.gabarito_id == gabarito_id,
+            AnswerSheetResult.student_id.in_(stu),
+        )
+        _rq = _apply_answer_sheet_result_period_filter(_rq, periodo_bounds)
+        if _rq.first():
+            filtered.append(item)
+    return filtered
 
 
-def _obter_turmas_por_serie_cartao(gabarito_id: str, escola_id: str, serie_id: str, municipio_id: str, user: dict, permissao: dict) -> List[Dict[str, Any]]:
+def _obter_turmas_por_serie_cartao(
+    gabarito_id: str,
+    escola_id: str,
+    serie_id: str,
+    municipio_id: str,
+    user: dict,
+    permissao: dict,
+    periodo_bounds: Optional[Tuple[datetime, datetime]] = None,
+) -> List[Dict[str, Any]]:
     """Turmas (classes) da escola e série selecionadas (onde o gabarito pode ter sido gerado)."""
     city = City.query.get(municipio_id)
     if not city:
@@ -3303,7 +3454,23 @@ def _obter_turmas_por_serie_cartao(gabarito_id: str, escola_id: str, serie_id: s
         else:
             return []
     turmas = query.order_by(Class.name).all()
-    return [{"id": str(t[0]), "nome": t[1] or f"Turma {t[0]}"} for t in turmas]
+    out = [{"id": str(t[0]), "nome": t[1] or f"Turma {t[0]}"} for t in turmas]
+    if not periodo_bounds:
+        return out
+    filtered = []
+    for item in out:
+        cid = item["id"]
+        stu = [s.id for s in Student.query.filter(Student.class_id == cid).all()]
+        if not stu:
+            continue
+        _rq = AnswerSheetResult.query.filter(
+            AnswerSheetResult.gabarito_id == gabarito_id,
+            AnswerSheetResult.student_id.in_(stu),
+        )
+        _rq = _apply_answer_sheet_result_period_filter(_rq, periodo_bounds)
+        if _rq.first():
+            filtered.append(item)
+    return filtered
 
 
 @bp.route('/opcoes-filtros-results', methods=['GET'])
@@ -3314,7 +3481,7 @@ def obter_opcoes_filtros_cartao():
     Retorna opções hierárquicas de filtros para resultados de cartões resposta.
     Mesmo padrão de GET /evaluation-results/opcoes-filtros.
     Hierarquia: Estado → Município → Cartão resposta (gabarito) → Escola → Série → Turma.
-    Query params (todos opcionais): estado, municipio, gabarito, escola, serie, turma.
+    Query params (todos opcionais): estado, municipio, gabarito, escola, serie, turma, periodo (YYYY-MM).
     Ex.: GET /opcoes-filtros-results → estados; ?estado=SP → estados + municipios; ?estado=SP&municipio=id → + gabaritos; etc.
     """
     try:
@@ -3332,6 +3499,13 @@ def obter_opcoes_filtros_cartao():
         escola = request.args.get('escola')
         serie = request.args.get('serie')
         turma = request.args.get('turma')
+        periodo_raw = request.args.get('periodo')
+        periodo_bounds = None
+        if periodo_raw and str(periodo_raw).strip():
+            try:
+                periodo_bounds = _parse_cartao_periodo_bounds(str(periodo_raw).strip())
+            except ValueError:
+                return jsonify({"error": "Parâmetro periodo inválido. Use YYYY-MM (ex.: 2026-04)."}), 400
 
         response = {}
         response["estados"] = _obter_estados_disponiveis_cartao(user, permissao)
@@ -3343,14 +3517,20 @@ def obter_opcoes_filtros_cartao():
                 # Gabaritos, escolas, turmas e classes ficam no schema do tenant do município
                 set_search_path(city_id_to_schema_name(municipio_str))
                 response["gabaritos"] = _obter_gabaritos_por_municipio_cartao(
-                    municipio_str, user, permissao
+                    municipio_str, user, permissao, periodo_bounds
                 )
                 if gabarito:
-                    response["escolas"] = _obter_escolas_por_gabarito_cartao(gabarito, municipio, user, permissao)
+                    response["escolas"] = _obter_escolas_por_gabarito_cartao(
+                        gabarito, municipio, user, permissao, periodo_bounds
+                    )
                     if escola:
-                        response["series"] = _obter_series_por_escola_cartao(gabarito, escola, municipio, user, permissao)
+                        response["series"] = _obter_series_por_escola_cartao(
+                            gabarito, escola, municipio, user, permissao, periodo_bounds
+                        )
                         if serie:
-                            response["turmas"] = _obter_turmas_por_serie_cartao(gabarito, escola, serie, municipio, user, permissao)
+                            response["turmas"] = _obter_turmas_por_serie_cartao(
+                                gabarito, escola, serie, municipio, user, permissao, periodo_bounds
+                            )
 
         return jsonify(response), 200
     except Exception as e:
@@ -3365,6 +3545,7 @@ def get_resultados_agregados():
     """
     Resultados agregados de cartões resposta (semelhante a GET /evaluation-results/avaliacoes).
     Filtros hierárquicos: estado, municipio, escola, serie, turma, gabarito.
+    Query opcional: periodo=YYYY-MM (filtra por mês de corrected_at do AnswerSheetResult).
     Retorna estatísticas gerais, resultados por escola/série/turma, tabela de alunos e ranking.
     """
     try:
@@ -3377,25 +3558,54 @@ def get_resultados_agregados():
         serie = request.args.get('serie')
         turma = request.args.get('turma')
         gabarito = request.args.get('gabarito')
+        periodo_raw = request.args.get('periodo')
+        periodo_bounds = None
+        if periodo_raw and str(periodo_raw).strip():
+            try:
+                periodo_bounds = _parse_cartao_periodo_bounds(str(periodo_raw).strip())
+            except ValueError:
+                return jsonify({"error": "Parâmetro periodo inválido. Use YYYY-MM (ex.: 2026-04)."}), 400
 
         if not _is_valid_filter(estado):
             return jsonify({"error": "Estado é obrigatório e não pode ser 'all'"}), 400
         if not _is_valid_filter(municipio):
             return jsonify({"error": "Município é obrigatório"}), 400
 
-        scope_info = _determinar_escopo_busca_cartao(estado, municipio, escola, serie, turma, gabarito, user)
+        scope_info = _determinar_escopo_busca_cartao(
+            estado, municipio, escola, serie, turma, gabarito, user, periodo_bounds
+        )
         if not scope_info:
             return jsonify({"error": "Não foi possível determinar o escopo de busca"}), 400
 
         nivel_granularidade = _determinar_nivel_granularidade_cartao(estado, municipio, escola, serie, turma, gabarito)
         gabarito_id = str(gabarito).strip() if _is_valid_filter(gabarito) else None
 
-        estatisticas_gerais = _calcular_estatisticas_consolidadas_cartao(scope_info, nivel_granularidade, gabarito_id, user)
-        resultados_por_disciplina = _calcular_resultados_por_disciplina_cartao(scope_info, nivel_granularidade, gabarito_id) if gabarito_id else []
-        resultados_detalhados = _gerar_resultados_detalhados_por_granularidade_cartao(scope_info, nivel_granularidade, gabarito_id) if gabarito_id else []
-        tabela_detalhada = _gerar_tabela_detalhada_cartao(scope_info, nivel_granularidade, gabarito_id, user) if gabarito_id else {"disciplinas": [], "geral": {"alunos": []}}
-        ranking = _calcular_ranking_cartao(scope_info, nivel_granularidade, gabarito_id, user) if gabarito_id else []
-        opcoes_proximos_filtros = _gerar_opcoes_proximos_filtros_cartao(scope_info, nivel_granularidade, user)
+        estatisticas_gerais = _calcular_estatisticas_consolidadas_cartao(
+            scope_info, nivel_granularidade, gabarito_id, user, periodo_bounds
+        )
+        resultados_por_disciplina = (
+            _calcular_resultados_por_disciplina_cartao(scope_info, nivel_granularidade, gabarito_id, periodo_bounds)
+            if gabarito_id
+            else []
+        )
+        resultados_detalhados = (
+            _gerar_resultados_detalhados_por_granularidade_cartao(scope_info, nivel_granularidade, gabarito_id, periodo_bounds)
+            if gabarito_id
+            else []
+        )
+        tabela_detalhada = (
+            _gerar_tabela_detalhada_cartao(scope_info, nivel_granularidade, gabarito_id, user, periodo_bounds)
+            if gabarito_id
+            else {"disciplinas": [], "geral": {"alunos": []}}
+        )
+        ranking = (
+            _calcular_ranking_cartao(scope_info, nivel_granularidade, gabarito_id, user, periodo_bounds)
+            if gabarito_id
+            else []
+        )
+        opcoes_proximos_filtros = _gerar_opcoes_proximos_filtros_cartao(
+            scope_info, nivel_granularidade, user, periodo_bounds
+        )
 
         return jsonify({
             "nivel_granularidade": nivel_granularidade,
@@ -3405,7 +3615,8 @@ def get_resultados_agregados():
                 "escola": escola,
                 "serie": serie,
                 "turma": turma,
-                "gabarito": gabarito
+                "gabarito": gabarito,
+                "periodo": (str(periodo_raw).strip() if periodo_raw and str(periodo_raw).strip() else None),
             },
             "estatisticas_gerais": estatisticas_gerais,
             "resultados_por_disciplina": resultados_por_disciplina,
@@ -3429,6 +3640,7 @@ def mapa_habilidades_cartao():
     """
     Mapa de habilidades para cartão-resposta (gabarito).
     Query: estado, municipio, gabarito (obrigatório), escola, serie, turma, disciplina (id do bloco ou all).
+    Query opcional: periodo=YYYY-MM (filtra correções por corrected_at).
     """
     try:
         user = get_current_user_from_token()
@@ -3442,6 +3654,13 @@ def mapa_habilidades_cartao():
         turma = request.args.get("turma")
         gabarito = request.args.get("gabarito")
         disciplina = request.args.get("disciplina") or "all"
+        periodo_raw = request.args.get("periodo")
+        periodo_bounds = None
+        if periodo_raw and str(periodo_raw).strip():
+            try:
+                periodo_bounds = _parse_cartao_periodo_bounds(str(periodo_raw).strip())
+            except ValueError:
+                return jsonify({"error": "Parâmetro periodo inválido. Use YYYY-MM (ex.: 2026-04)."}), 400
 
         if not _is_valid_filter(estado):
             return jsonify({"error": "Estado é obrigatório e não pode ser 'all'"}), 400
@@ -3473,7 +3692,7 @@ def mapa_habilidades_cartao():
         )
 
         escopo = _determinar_escopo_calculo_cartao(scope_info, nivel_granularidade)
-        class_ids = _obter_class_ids_com_resultado_cartao(gabarito_id, escopo)
+        class_ids = _obter_class_ids_com_resultado_cartao(gabarito_id, escopo, periodo_bounds)
         if not class_ids:
             return jsonify(
                 {
@@ -3494,6 +3713,7 @@ def mapa_habilidades_cartao():
                         "turma": turma,
                         "gabarito": gabarito,
                         "disciplina": disciplina,
+                        "periodo": str(periodo_raw).strip() if periodo_raw and str(periodo_raw).strip() else None,
                     },
                     "total_alunos_escopo": 0,
                 }
@@ -3521,6 +3741,7 @@ def mapa_habilidades_cartao():
                     "turma": turma,
                     "gabarito": gabarito,
                     "disciplina": disciplina,
+                    "periodo": str(periodo_raw).strip() if periodo_raw and str(periodo_raw).strip() else None,
                 },
                 "total_alunos_escopo": len(students),
             }
@@ -3550,6 +3771,13 @@ def mapa_habilidades_cartao_erros():
         turma = request.args.get("turma")
         gabarito = request.args.get("gabarito")
         disciplina = request.args.get("disciplina") or "all"
+        periodo_raw_erros = request.args.get("periodo")
+        periodo_bounds_erros = None
+        if periodo_raw_erros and str(periodo_raw_erros).strip():
+            try:
+                periodo_bounds_erros = _parse_cartao_periodo_bounds(str(periodo_raw_erros).strip())
+            except ValueError:
+                return jsonify({"error": "Parâmetro periodo inválido. Use YYYY-MM (ex.: 2026-04)."}), 400
 
         if not _is_valid_filter(estado):
             return jsonify({"error": "Estado é obrigatório e não pode ser 'all'"}), 400
@@ -3581,7 +3809,7 @@ def mapa_habilidades_cartao_erros():
         )
 
         escopo = _determinar_escopo_calculo_cartao(scope_info, nivel_granularidade)
-        class_ids = _obter_class_ids_com_resultado_cartao(gabarito_id, escopo)
+        class_ids = _obter_class_ids_com_resultado_cartao(gabarito_id, escopo, periodo_bounds_erros)
 
         disc_filt = None if str(disciplina).strip().lower() == "all" else str(disciplina).strip()
 
@@ -3630,6 +3858,11 @@ def mapa_habilidades_cartao_erros():
                     "disciplina": disciplina,
                     "skill_id": str(skill_id).strip(),
                     "bloco_disciplina": str(bloco_disciplina).strip() if bloco_disciplina else None,
+                    "periodo": (
+                        str(periodo_raw_erros).strip()
+                        if periodo_raw_erros and str(periodo_raw_erros).strip()
+                        else None
+                    ),
                 },
             }
         ), 200

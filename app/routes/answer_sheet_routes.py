@@ -7,7 +7,7 @@ from flask import Blueprint, request, jsonify, send_file, redirect, url_for
 from flask_jwt_extended import jwt_required, get_jwt_identity
 from app.decorators.role_required import role_required, get_current_user_from_token
 from app.decorators import requires_city_context
-from app.utils.tenant_middleware import get_current_tenant_context, set_search_path
+from app.utils.tenant_middleware import get_current_tenant_context, set_search_path, city_id_to_schema_name
 from app import db
 from app.models.answerSheetGabarito import AnswerSheetGabarito
 from app.models.answerSheetGenerationJob import AnswerSheetGenerationJob
@@ -31,7 +31,9 @@ from app.services.answer_sheet_job_store import (
 from app.models.school import School
 from app.models.grades import Grade
 from app.models.city import City
+from app.models.test import Test
 from app.models.skill import Skill
+from app.utils.decimal_helpers import round_to_two_decimals
 from typing import Dict, Optional, List, Any
 from collections import defaultdict
 from sqlalchemy import cast, String, desc
@@ -3147,6 +3149,13 @@ def _obter_gabaritos_por_municipio_cartao(municipio_id: str, user: dict, permiss
     if not conditions:
         return []
     q = q.filter(or_(*conditions))
+    # Só cartão-resposta: não listar gabaritos vinculados a prova online (avaliação virtual)
+    q = q.outerjoin(Test, AnswerSheetGabarito.test_id == Test.id).filter(
+        or_(
+            AnswerSheetGabarito.test_id.is_(None),
+            Test.evaluation_mode == 'physical',
+        )
+    )
     # Admin (scope 'all') vê todos os gabaritos do município; demais usuários só os que criaram
     if permissao.get('scope') != 'all':
         q = q.filter(AnswerSheetGabarito.created_by == str(user['id']))
@@ -3180,6 +3189,20 @@ def _obter_gabaritos_por_municipio_cartao(municipio_id: str, user: dict, permiss
             seen.add(g[0])
             out.append({"id": str(g[0]), "titulo": g[1] or "Gabarito"})
     return out
+
+
+def _gabarito_eh_somente_cartao_resposta(gabarito_id: str) -> bool:
+    """Gabarito elegível para fluxo cartão-resposta (não ligado a teste online/virtual)."""
+    g = AnswerSheetGabarito.query.get(gabarito_id)
+    if not g:
+        return False
+    if not g.test_id:
+        return True
+    t = Test.query.get(g.test_id)
+    if not t:
+        return True
+    mode = (getattr(t, 'evaluation_mode', None) or 'virtual')
+    return mode == 'physical'
 
 
 def _obter_escolas_por_gabarito_cartao(gabarito_id: str, municipio_id: str, user: dict, permissao: dict) -> List[Dict[str, Any]]:
@@ -3316,7 +3339,12 @@ def obter_opcoes_filtros_cartao():
         if estado:
             response["municipios"] = _obter_municipios_por_estado_cartao(estado, user, permissao)
             if municipio:
-                response["gabaritos"] = _obter_gabaritos_por_municipio_cartao(municipio, user, permissao)
+                municipio_str = str(municipio).strip()
+                # Gabaritos, escolas, turmas e classes ficam no schema do tenant do município
+                set_search_path(city_id_to_schema_name(municipio_str))
+                response["gabaritos"] = _obter_gabaritos_por_municipio_cartao(
+                    municipio_str, user, permissao
+                )
                 if gabarito:
                     response["escolas"] = _obter_escolas_por_gabarito_cartao(gabarito, municipio, user, permissao)
                     if escola:
@@ -3392,6 +3420,222 @@ def get_resultados_agregados():
     except Exception as e:
         logging.error(f"Erro ao obter resultados agregados: {str(e)}", exc_info=True)
         return jsonify({"error": "Erro ao obter resultados agregados", "details": str(e)}), 500
+
+
+@bp.route("/mapa-habilidades", methods=["GET"])
+@jwt_required()
+@role_required("admin", "professor", "coordenador", "diretor", "tecadm")
+def mapa_habilidades_cartao():
+    """
+    Mapa de habilidades para cartão-resposta (gabarito).
+    Query: estado, municipio, gabarito (obrigatório), escola, serie, turma, disciplina (id do bloco ou all).
+    """
+    try:
+        user = get_current_user_from_token()
+        if not user:
+            return jsonify({"error": "Usuário não encontrado"}), 401
+
+        estado = request.args.get("estado")
+        municipio = request.args.get("municipio")
+        escola = request.args.get("escola")
+        serie = request.args.get("serie")
+        turma = request.args.get("turma")
+        gabarito = request.args.get("gabarito")
+        disciplina = request.args.get("disciplina") or "all"
+
+        if not _is_valid_filter(estado):
+            return jsonify({"error": "Estado é obrigatório e não pode ser 'all'"}), 400
+        if not _is_valid_filter(municipio):
+            return jsonify({"error": "Município é obrigatório"}), 400
+        if not _is_valid_filter(gabarito):
+            return jsonify({"error": "Gabarito é obrigatório para o mapa de habilidades"}), 400
+
+        municipio_str = str(municipio).strip()
+        set_search_path(city_id_to_schema_name(municipio_str))
+
+        gabarito_id = str(gabarito).strip()
+        if not _gabarito_eh_somente_cartao_resposta(gabarito_id):
+            return jsonify(
+                {
+                    "error": "Gabarito inválido",
+                    "details": "Use apenas gabaritos de cartão-resposta. Avaliações online aparecem na outra aba.",
+                }
+            ), 400
+
+        scope_info = _determinar_escopo_busca_cartao(
+            estado, municipio, escola, serie, turma, gabarito, user
+        )
+        if not scope_info:
+            return jsonify({"error": "Não foi possível determinar o escopo de busca"}), 400
+
+        nivel_granularidade = _determinar_nivel_granularidade_cartao(
+            estado, municipio, escola, serie, turma, gabarito
+        )
+
+        escopo = _determinar_escopo_calculo_cartao(scope_info, nivel_granularidade)
+        class_ids = _obter_class_ids_com_resultado_cartao(gabarito_id, escopo)
+        if not class_ids:
+            return jsonify(
+                {
+                    "nivel_granularidade": nivel_granularidade,
+                    "disciplinas_disponiveis": [],
+                    "habilidades": [],
+                    "por_faixa": {
+                        "abaixo_do_basico": [],
+                        "basico": [],
+                        "adequado": [],
+                        "avancado": [],
+                    },
+                    "filtros_aplicados": {
+                        "estado": estado,
+                        "municipio": municipio,
+                        "escola": escola,
+                        "serie": serie,
+                        "turma": turma,
+                        "gabarito": gabarito,
+                        "disciplina": disciplina,
+                    },
+                    "total_alunos_escopo": 0,
+                }
+            ), 200
+
+        disc_filt = None if str(disciplina).strip().lower() == "all" else str(disciplina).strip()
+
+        from app.services.skills_map_service import build_skills_map_answer_sheet
+
+        raw = build_skills_map_answer_sheet(gabarito_id, [str(c) for c in class_ids], disc_filt)
+        students = raw.pop("_students_snapshot", []) or []
+        raw.pop("_failed_by_skill", None)
+
+        return jsonify(
+            {
+                "nivel_granularidade": nivel_granularidade,
+                "disciplinas_disponiveis": raw.get("disciplinas_disponiveis", []),
+                "habilidades": raw.get("habilidades", []),
+                "por_faixa": raw.get("por_faixa", {}),
+                "filtros_aplicados": {
+                    "estado": estado,
+                    "municipio": municipio,
+                    "escola": escola,
+                    "serie": serie,
+                    "turma": turma,
+                    "gabarito": gabarito,
+                    "disciplina": disciplina,
+                },
+                "total_alunos_escopo": len(students),
+            }
+        ), 200
+    except Exception as e:
+        logging.error("Erro mapa habilidades (cartão): %s", e, exc_info=True)
+        return jsonify({"error": "Erro ao obter mapa de habilidades", "details": str(e)}), 500
+
+
+@bp.route("/mapa-habilidades/erros", methods=["GET"])
+@jwt_required()
+@role_required("admin", "professor", "coordenador", "diretor", "tecadm")
+def mapa_habilidades_cartao_erros():
+    try:
+        user = get_current_user_from_token()
+        if not user:
+            return jsonify({"error": "Usuário não encontrado"}), 401
+
+        skill_id = request.args.get("skill_id")
+        if not skill_id or not str(skill_id).strip():
+            return jsonify({"error": "skill_id é obrigatório"}), 400
+
+        estado = request.args.get("estado")
+        municipio = request.args.get("municipio")
+        escola = request.args.get("escola")
+        serie = request.args.get("serie")
+        turma = request.args.get("turma")
+        gabarito = request.args.get("gabarito")
+        disciplina = request.args.get("disciplina") or "all"
+
+        if not _is_valid_filter(estado):
+            return jsonify({"error": "Estado é obrigatório e não pode ser 'all'"}), 400
+        if not _is_valid_filter(municipio):
+            return jsonify({"error": "Município é obrigatório"}), 400
+        if not _is_valid_filter(gabarito):
+            return jsonify({"error": "Gabarito é obrigatório"}), 400
+
+        municipio_str = str(municipio).strip()
+        set_search_path(city_id_to_schema_name(municipio_str))
+
+        gabarito_id = str(gabarito).strip()
+        if not _gabarito_eh_somente_cartao_resposta(gabarito_id):
+            return jsonify(
+                {
+                    "error": "Gabarito inválido",
+                    "details": "Use apenas gabaritos de cartão-resposta. Avaliações online aparecem na outra aba.",
+                }
+            ), 400
+
+        scope_info = _determinar_escopo_busca_cartao(
+            estado, municipio, escola, serie, turma, gabarito, user
+        )
+        if not scope_info:
+            return jsonify({"error": "Não foi possível determinar o escopo de busca"}), 400
+
+        nivel_granularidade = _determinar_nivel_granularidade_cartao(
+            estado, municipio, escola, serie, turma, gabarito
+        )
+
+        escopo = _determinar_escopo_calculo_cartao(scope_info, nivel_granularidade)
+        class_ids = _obter_class_ids_com_resultado_cartao(gabarito_id, escopo)
+
+        disc_filt = None if str(disciplina).strip().lower() == "all" else str(disciplina).strip()
+
+        from app.services.skills_map_service import (
+            answer_sheet_students_who_failed,
+            build_skills_map_answer_sheet,
+        )
+
+        raw = build_skills_map_answer_sheet(gabarito_id, [str(c) for c in class_ids], disc_filt)
+        students = raw.get("_students_snapshot") or []
+        failed_by_skill = raw.get("_failed_by_skill") or {}
+
+        school_ids = list(
+            {s.class_.school_id for s in students if s.class_ and getattr(s.class_, "school_id", None)}
+        )
+        school_by_id = (
+            {s.id: s for s in School.query.filter(School.id.in_(school_ids)).all()}
+            if school_ids
+            else {}
+        )
+
+        bloco_disciplina = request.args.get("bloco_disciplina") or request.args.get("subject_id")
+
+        alunos, n_err, n_tot = answer_sheet_students_who_failed(
+            students,
+            str(skill_id).strip(),
+            failed_by_skill,
+            school_by_id,
+            bloco_disciplina=str(bloco_disciplina).strip() if bloco_disciplina else None,
+        )
+        pct_err = round_to_two_decimals((n_err / n_tot * 100.0) if n_tot else 0.0)
+
+        return jsonify(
+            {
+                "percentual_erros": pct_err,
+                "total_alunos_escopo": n_tot,
+                "total_alunos_que_erraram": n_err,
+                "alunos": alunos,
+                "filtros_aplicados": {
+                    "estado": estado,
+                    "municipio": municipio,
+                    "escola": escola,
+                    "serie": serie,
+                    "turma": turma,
+                    "gabarito": gabarito,
+                    "disciplina": disciplina,
+                    "skill_id": str(skill_id).strip(),
+                    "bloco_disciplina": str(bloco_disciplina).strip() if bloco_disciplina else None,
+                },
+            }
+        ), 200
+    except Exception as e:
+        logging.error("Erro mapa habilidades erros (cartão): %s", e, exc_info=True)
+        return jsonify({"error": "Erro ao obter alunos que erraram", "details": str(e)}), 500
 
 
 # ============================================================================

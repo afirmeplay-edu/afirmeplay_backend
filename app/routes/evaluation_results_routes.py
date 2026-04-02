@@ -74,7 +74,9 @@ from app.routes.answer_sheet_evaluation_listing import (
     obter_escolas_por_gabarito,
     obter_gabaritos_por_municipio,
     obter_series_por_gabarito_escola,
+    obter_series_por_gabarito_municipio,
     obter_turmas_por_gabarito_escola_serie,
+    obter_turmas_por_gabarito_serie_municipio,
 )
 from app import db
 import logging
@@ -5477,6 +5479,132 @@ def _obter_turmas_por_serie(
     return [{"id": str(t[0]), "nome": t[1] or f"Turma {t[0]}"} for t in turmas]
 
 
+def _escola_param_eh_especifica(escola: Optional[str]) -> bool:
+    return bool(escola and str(escola).strip().lower() not in ("all", ""))
+
+
+def _serie_param_eh_especifica(serie: Optional[str]) -> bool:
+    return bool(serie and str(serie).strip().lower() not in ("all", ""))
+
+
+def _obter_series_por_avaliacao_municipio(
+    avaliacao_id: str,
+    municipio_id: str,
+    user: dict,
+    permissao: dict,
+    periodo_bounds: Optional[Tuple[datetime, datetime]] = None,
+) -> List[Dict[str, Any]]:
+    """
+    Séries distintas onde a avaliação foi aplicada em qualquer escola do município
+    (uso quando o filtro de escola está em «todas»).
+    """
+    city = City.query.get(municipio_id)
+    if not city:
+        return []
+
+    if permissao["scope"] != "all" and user.get("city_id") != city.id:
+        return []
+
+    query_series = (
+        Grade.query.with_entities(Grade.id, Grade.name)
+        .join(Class, Grade.id == Class.grade_id)
+        .join(ClassTest, Class.id == ClassTest.class_id)
+        .join(Test, ClassTest.test_id == Test.id)
+        .join(School, School.id == cast(Class.school_id, String))
+        .join(City, School.city_id == City.id)
+        .filter(Test.id == avaliacao_id)
+        .filter(City.id == city.id)
+    )
+    query_series = _apply_class_test_application_period(query_series, periodo_bounds)
+
+    if permissao["scope"] == "escola" and user.get("role") in ["diretor", "coordenador"]:
+        from app.models.manager import Manager
+
+        manager = Manager.query.filter_by(user_id=user["id"]).first()
+        if manager and manager.school_id:
+            query_series = query_series.filter(School.id == manager.school_id)
+        else:
+            return []
+
+    if permissao["scope"] == "escola" and user.get("role") == "professor":
+        from app.models.teacher import Teacher
+        from app.models.teacherClass import TeacherClass
+
+        teacher = Teacher.query.filter_by(user_id=user["id"]).first()
+        if teacher:
+            teacher_classes = TeacherClass.query.filter_by(teacher_id=teacher.id).all()
+            teacher_class_ids = [tc.class_id for tc in teacher_classes]
+            if teacher_class_ids:
+                query_series = query_series.filter(Class.id.in_(teacher_class_ids))
+            else:
+                return []
+        else:
+            return []
+
+    series = query_series.distinct().all()
+    return [{"id": str(s[0]), "nome": s[1]} for s in series]
+
+
+def _obter_turmas_por_serie_municipio(
+    avaliacao_id: str,
+    serie_id: str,
+    municipio_id: str,
+    user: dict,
+    permissao: dict,
+    periodo_bounds: Optional[Tuple[datetime, datetime]] = None,
+) -> List[Dict[str, Any]]:
+    """
+    Turmas onde a avaliação foi aplicada, para a série, em qualquer escola do município
+    (quando escola = todas).
+    """
+    city = City.query.get(municipio_id)
+    if not city:
+        return []
+
+    if permissao["scope"] != "all" and user.get("city_id") != city.id:
+        return []
+
+    query_turmas = (
+        Class.query.with_entities(Class.id, Class.name)
+        .join(ClassTest, Class.id == ClassTest.class_id)
+        .join(Test, ClassTest.test_id == Test.id)
+        .join(School, School.id == cast(Class.school_id, String))
+        .join(City, School.city_id == City.id)
+        .join(Grade, Class.grade_id == Grade.id)
+        .filter(Test.id == avaliacao_id)
+        .filter(Grade.id == serie_id)
+        .filter(City.id == city.id)
+    )
+    query_turmas = _apply_class_test_application_period(query_turmas, periodo_bounds)
+
+    if permissao["scope"] == "escola" and user.get("role") in ["diretor", "coordenador"]:
+        from app.models.manager import Manager
+
+        manager = Manager.query.filter_by(user_id=user["id"]).first()
+        if manager and manager.school_id:
+            query_turmas = query_turmas.filter(School.id == manager.school_id)
+        else:
+            return []
+
+    if permissao["scope"] == "escola" and user.get("role") == "professor":
+        from app.models.teacher import Teacher
+        from app.models.teacherClass import TeacherClass
+
+        teacher = Teacher.query.filter_by(user_id=user["id"]).first()
+        if teacher:
+            teacher_classes = TeacherClass.query.filter_by(teacher_id=teacher.id).all()
+            teacher_class_ids = [tc.class_id for tc in teacher_classes]
+            if teacher_class_ids:
+                query_turmas = query_turmas.filter(Class.id.in_(teacher_class_ids))
+            else:
+                return []
+        else:
+            return []
+
+    turmas = query_turmas.distinct().all()
+    return [{"id": str(t[0]), "nome": t[1] or f"Turma {t[0]}"} for t in turmas]
+
+
 # ==================== OPÇÕES DE FILTRO PARA EVOLUÇÃO (Estado → Município → Escola → Série → Turma) ====================
 
 def _user_city_id(user: dict) -> str:
@@ -6353,6 +6481,260 @@ def obter_estatisticas_por_disciplina(test_id: str):
         logging.error(f"Erro ao obter estatísticas por disciplina para avaliação {test_id}: {str(e)}", exc_info=True)
         return jsonify({"error": "Erro ao obter estatísticas por disciplina", "details": str(e)}), 500
 
+
+@bp.route("/mapa-habilidades", methods=["GET"])
+@jwt_required()
+@role_required("admin", "professor", "coordenador", "diretor", "tecadm")
+def mapa_habilidades_avaliacao_online():
+    """
+    Mapa de habilidades para avaliação online (Test): % de acertos agregados por habilidade em faixas.
+    Filtros: estado, municipio, avaliacao (obrigatória), escola, serie, turma, disciplina (id ou all).
+    """
+    try:
+        user = get_current_user_from_token()
+        if not user:
+            return jsonify({"error": "Usuário não encontrado"}), 401
+
+        estado = request.args.get("estado")
+        municipio = request.args.get("municipio")
+        escola = request.args.get("escola")
+        serie = request.args.get("serie")
+        turma = request.args.get("turma")
+        avaliacao = request.args.get("avaliacao")
+        disciplina = request.args.get("disciplina") or "all"
+
+        if not estado or str(estado).lower() == "all":
+            return jsonify({"error": "Estado é obrigatório e não pode ser 'all'"}), 400
+        if not municipio:
+            return jsonify({"error": "Município é obrigatório"}), 400
+        if not avaliacao or str(avaliacao).lower() == "all":
+            return jsonify({"error": "Avaliação é obrigatória para o mapa de habilidades"}), 400
+
+        def _is_valid_filtro_mapa(value):
+            return value and str(value).lower() != "all"
+
+        filtros_aplicados = sum(
+            [
+                bool(estado and str(estado).lower() != "all"),
+                bool(municipio and str(municipio).lower() != "all"),
+                bool(escola and str(escola).lower() != "all"),
+                bool(serie and str(serie).lower() != "all"),
+                bool(turma and str(turma).lower() != "all"),
+                bool(avaliacao and str(avaliacao).lower() != "all"),
+            ]
+        )
+        if filtros_aplicados < 2:
+            return jsonify(
+                {"error": "É necessário aplicar pelo menos 2 filtros válidos (excluindo 'all')"}
+            ), 400
+
+        scope_info = _determinar_escopo_busca(estado, municipio, escola, serie, turma, avaliacao, user)
+        if not scope_info:
+            return jsonify({"error": "Não foi possível determinar o escopo de busca"}), 400
+
+        if scope_info.get("escola") and not escola:
+            escola = scope_info.get("escola")
+
+        permissao = verificar_permissao_filtros(user)
+        if not permissao["permitted"]:
+            return jsonify({"error": permissao["error"]}), 403
+
+        from app.permissions import validate_professor_school_selection, validate_manager_school_selection
+
+        escola_param = request.args.get("escola", "all")
+        if user.get("role") == "professor":
+            validation_result = validate_professor_school_selection(user, escola_param, require_school=False)
+        elif user.get("role") in ["diretor", "coordenador"]:
+            validation_result = validate_manager_school_selection(user, escola_param, require_school=False)
+        else:
+            validation_result = {"valid": True, "school_id": escola_param}
+
+        if not validation_result["valid"]:
+            return jsonify(
+                {"error": validation_result["error"], "code": "SCHOOL_ACCESS_DENIED"}
+            ), 403
+
+        escola_id_validada = validation_result.get("school_id")
+        if escola_id_validada:
+            escola = escola_id_validada
+
+        municipio_str = str(municipio).strip()
+        set_search_path(city_id_to_schema_name(municipio_str))
+
+        nivel_granularidade = _determinar_nivel_granularidade(
+            estado, municipio, escola, serie, turma, avaliacao, user
+        )
+        escopo_calculo = _determinar_escopo_calculo(scope_info, nivel_granularidade)
+        all_students = _obter_alunos_para_mapa_habilidades_test(
+            scope_info, nivel_granularidade, user, escopo_calculo
+        )
+
+        subject_filter = (
+            None if str(disciplina).strip().lower() == "all" else str(disciplina).strip()
+        )
+
+        from app.services.skills_map_service import compute_digital_aggregate
+
+        data = compute_digital_aggregate(str(avaliacao), all_students, subject_filter)
+
+        return jsonify(
+            {
+                "nivel_granularidade": nivel_granularidade,
+                "disciplinas_disponiveis": data["disciplinas_disponiveis"],
+                "habilidades": data["habilidades"],
+                "por_faixa": data["por_faixa"],
+                "filtros_aplicados": {
+                    "estado": estado,
+                    "municipio": municipio,
+                    "escola": escola,
+                    "serie": serie,
+                    "turma": turma,
+                    "avaliacao": avaliacao,
+                    "disciplina": disciplina,
+                },
+                "total_alunos_escopo": len(all_students),
+            }
+        ), 200
+    except Exception as e:
+        logging.error("Erro ao obter mapa de habilidades: %s", e, exc_info=True)
+        return jsonify({"error": "Erro ao obter mapa de habilidades", "details": str(e)}), 500
+
+
+@bp.route("/mapa-habilidades/erros", methods=["GET"])
+@jwt_required()
+@role_required("admin", "professor", "coordenador", "diretor", "tecadm")
+def mapa_habilidades_avaliacao_online_erros():
+    """Lista alunos que erraram ao menos uma questão da habilidade e % de erros sobre o escopo."""
+    try:
+        user = get_current_user_from_token()
+        if not user:
+            return jsonify({"error": "Usuário não encontrado"}), 401
+
+        skill_id = request.args.get("skill_id")
+        if not skill_id or not str(skill_id).strip():
+            return jsonify({"error": "skill_id é obrigatório"}), 400
+
+        estado = request.args.get("estado")
+        municipio = request.args.get("municipio")
+        escola = request.args.get("escola")
+        serie = request.args.get("serie")
+        turma = request.args.get("turma")
+        avaliacao = request.args.get("avaliacao")
+        disciplina = request.args.get("disciplina") or "all"
+
+        if not estado or str(estado).lower() == "all":
+            return jsonify({"error": "Estado é obrigatório e não pode ser 'all'"}), 400
+        if not municipio:
+            return jsonify({"error": "Município é obrigatório"}), 400
+        if not avaliacao or str(avaliacao).lower() == "all":
+            return jsonify({"error": "Avaliação é obrigatória"}), 400
+
+        filtros_aplicados = sum(
+            [
+                bool(estado and str(estado).lower() != "all"),
+                bool(municipio and str(municipio).lower() != "all"),
+                bool(escola and str(escola).lower() != "all"),
+                bool(serie and str(serie).lower() != "all"),
+                bool(turma and str(turma).lower() != "all"),
+                bool(avaliacao and str(avaliacao).lower() != "all"),
+            ]
+        )
+        if filtros_aplicados < 2:
+            return jsonify(
+                {"error": "É necessário aplicar pelo menos 2 filtros válidos (excluindo 'all')"}
+            ), 400
+
+        scope_info = _determinar_escopo_busca(estado, municipio, escola, serie, turma, avaliacao, user)
+        if not scope_info:
+            return jsonify({"error": "Não foi possível determinar o escopo de busca"}), 400
+
+        if scope_info.get("escola") and not escola:
+            escola = scope_info.get("escola")
+
+        permissao = verificar_permissao_filtros(user)
+        if not permissao["permitted"]:
+            return jsonify({"error": permissao["error"]}), 403
+
+        from app.permissions import validate_professor_school_selection, validate_manager_school_selection
+
+        escola_param = request.args.get("escola", "all")
+        if user.get("role") == "professor":
+            validation_result = validate_professor_school_selection(user, escola_param, require_school=False)
+        elif user.get("role") in ["diretor", "coordenador"]:
+            validation_result = validate_manager_school_selection(user, escola_param, require_school=False)
+        else:
+            validation_result = {"valid": True, "school_id": escola_param}
+
+        if not validation_result["valid"]:
+            return jsonify(
+                {"error": validation_result["error"], "code": "SCHOOL_ACCESS_DENIED"}
+            ), 403
+
+        escola_id_validada = validation_result.get("school_id")
+        if escola_id_validada:
+            escola = escola_id_validada
+
+        municipio_str = str(municipio).strip()
+        set_search_path(city_id_to_schema_name(municipio_str))
+
+        nivel_granularidade = _determinar_nivel_granularidade(
+            estado, municipio, escola, serie, turma, avaliacao, user
+        )
+        escopo_calculo = _determinar_escopo_calculo(scope_info, nivel_granularidade)
+        all_students = _obter_alunos_para_mapa_habilidades_test(
+            scope_info, nivel_granularidade, user, escopo_calculo
+        )
+
+        subject_filter = (
+            None if str(disciplina).strip().lower() == "all" else str(disciplina).strip()
+        )
+
+        from app.services.skills_map_service import compute_digital_aggregate, digital_students_who_failed_skill
+
+        data = compute_digital_aggregate(str(avaliacao), all_students, subject_filter)
+        failed_by_skill = data.get("_failed_by_skill") or {}
+
+        school_ids = list(
+            {
+                s.class_.school_id
+                for s in all_students
+                if s.class_ and getattr(s.class_, "school_id", None)
+            }
+        )
+        school_by_id = (
+            {s.id: s for s in School.query.filter(School.id.in_(school_ids)).all()}
+            if school_ids
+            else {}
+        )
+
+        alunos, n_err, n_tot = digital_students_who_failed_skill(
+            all_students, skill_id, failed_by_skill, school_by_id
+        )
+        pct_err = round_to_two_decimals((n_err / n_tot * 100.0) if n_tot else 0.0)
+
+        return jsonify(
+            {
+                "percentual_erros": pct_err,
+                "total_alunos_escopo": n_tot,
+                "total_alunos_que_erraram": n_err,
+                "alunos": alunos,
+                "filtros_aplicados": {
+                    "estado": estado,
+                    "municipio": municipio,
+                    "escola": escola,
+                    "serie": serie,
+                    "turma": turma,
+                    "avaliacao": avaliacao,
+                    "disciplina": disciplina,
+                    "skill_id": str(skill_id).strip(),
+                },
+            }
+        ), 200
+    except Exception as e:
+        logging.error("Erro ao obter erros por habilidade: %s", e, exc_info=True)
+        return jsonify({"error": "Erro ao obter alunos que erraram", "details": str(e)}), 500
+
+
 # ==================== ENDPOINT EVOLUÇÃO: OPÇÕES DE FILTROS (Estado → Município → Escola → Série → Turma) ====================
 
 @bp.route('/evolucao/opcoes-filtros', methods=['GET'])
@@ -6572,13 +6954,21 @@ def obter_opcoes_filtros():
                         response["escolas"] = obter_escolas_por_gabarito(
                             avaliacao, municipio_str, user, permissao
                         )
-                        if escola:
+                        if _escola_param_eh_especifica(escola):
                             response["series"] = obter_series_por_gabarito_escola(
                                 avaliacao, escola, municipio_str, user, permissao
                             )
-                            if serie:
+                            if _serie_param_eh_especifica(serie):
                                 response["turmas"] = obter_turmas_por_gabarito_escola_serie(
                                     avaliacao, escola, serie, municipio_str, user, permissao
+                                )
+                        else:
+                            response["series"] = obter_series_por_gabarito_municipio(
+                                avaliacao, municipio_str, user, permissao
+                            )
+                            if _serie_param_eh_especifica(serie):
+                                response["turmas"] = obter_turmas_por_gabarito_serie_municipio(
+                                    avaliacao, serie, municipio_str, user, permissao
                                 )
                 else:
                     response["avaliacoes"] = _obter_avaliacoes_por_municipio(
@@ -6588,13 +6978,21 @@ def obter_opcoes_filtros():
                         response["escolas"] = _obter_escolas_por_avaliacao(
                             avaliacao, municipio, user, permissao, periodo_bounds
                         )
-                        if escola:
+                        if _escola_param_eh_especifica(escola):
                             response["series"] = _obter_series_por_escola(
                                 avaliacao, escola, municipio, user, permissao, periodo_bounds
                             )
-                            if serie:
+                            if _serie_param_eh_especifica(serie):
                                 response["turmas"] = _obter_turmas_por_serie(
                                     avaliacao, escola, serie, municipio, user, permissao, periodo_bounds
+                                )
+                        else:
+                            response["series"] = _obter_series_por_avaliacao_municipio(
+                                avaliacao, municipio, user, permissao, periodo_bounds
+                            )
+                            if _serie_param_eh_especifica(serie):
+                                response["turmas"] = _obter_turmas_por_serie_municipio(
+                                    avaliacao, serie, municipio, user, permissao, periodo_bounds
                                 )
         
         return jsonify(response), 200
@@ -6874,6 +7272,53 @@ def _buscar_alunos_por_escopo(escopo_calculo: dict) -> List[Student]:
     except Exception as e:
         logging.error(f"Erro ao buscar alunos por escopo: {str(e)}")
         return []
+
+
+def _obter_alunos_para_mapa_habilidades_test(
+    scope_info: Dict,
+    nivel_granularidade: str,
+    user: Dict,
+    escopo_calculo: Dict,
+) -> List[Student]:
+    """Mesma lógica de escopo de alunos que a tabela detalhada por disciplina."""
+    if nivel_granularidade == "escola" and user:
+        if user.get("role") == "professor":
+            from app.models.teacher import Teacher
+            from app.models.teacherClass import TeacherClass
+
+            teacher = Teacher.query.filter_by(user_id=user["id"]).first()
+            if teacher:
+                teacher_classes = TeacherClass.query.filter_by(teacher_id=teacher.id).all()
+                teacher_class_ids = [tc.class_id for tc in teacher_classes]
+                if teacher_class_ids:
+                    all_students = Student.query.filter(Student.class_id.in_(teacher_class_ids)).all()
+                else:
+                    all_students = []
+            else:
+                all_students = []
+        elif user.get("role") in ["diretor", "coordenador"]:
+            from app.models.manager import Manager
+
+            manager = Manager.query.filter_by(user_id=user["id"]).first()
+            if manager and manager.school_id:
+                turmas_escola = Class.query.filter(Class.school_id == manager.school_id).all()
+                turma_ids_escola = [t.id for t in turmas_escola]
+                all_students = Student.query.filter(Student.class_id.in_(turma_ids_escola)).all()
+            else:
+                all_students = []
+        else:
+            all_students = _buscar_alunos_por_escopo(escopo_calculo)
+    else:
+        all_students = _buscar_alunos_por_escopo(escopo_calculo)
+
+    if not all_students:
+        return []
+
+    return (
+        Student.query.options(joinedload(Student.class_).joinedload(Class.grade))
+        .filter(Student.id.in_([s.id for s in all_students]))
+        .all()
+    )
 
 
 # ==================== ENDPOINT 1: GET /avaliacoes ====================

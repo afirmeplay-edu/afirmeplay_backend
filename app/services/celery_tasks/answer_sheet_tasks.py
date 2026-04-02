@@ -348,11 +348,7 @@ def generate_answer_sheets_batch_async(
         logger.info(f"[CELERY-BATCH] ✅ {len(gabaritos)} gabarito(s) encontrado(s)")
         logger.info(f"[CELERY-BATCH] 📝 Total de questões: {num_questions}")
 
-        from app.services.city_branding_service import apply_city_branding_to_test_data
-
-        test_data = apply_city_branding_to_test_data(
-            dict(test_data) if test_data else {}, city
-        )
+        test_data = dict(test_data) if test_data else {}
         
         # Criar diretório temporário para ZIP
         temp_dir = tempfile.mkdtemp()
@@ -964,11 +960,7 @@ def generate_answer_sheets_single_class_async(
         city_schema = f"city_{city.id.replace('-', '_')}"
         db.session.execute(text(f'SET search_path TO "{city_schema}", public'))
 
-        from app.services.city_branding_service import apply_city_branding_to_test_data
-
-        test_data_merged = apply_city_branding_to_test_data(
-            dict(test_data) if test_data else {}, city
-        )
+        test_data_merged = dict(test_data) if test_data else {}
 
         generator = AnswerSheetGenerator()
         result = generator.generate_class_answer_sheets(

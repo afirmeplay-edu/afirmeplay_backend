@@ -14,6 +14,7 @@ from sqlalchemy.orm import joinedload
 from app import db
 from app.models.answerSheetGabarito import AnswerSheetGabarito
 from app.models.answerSheetResult import AnswerSheetResult
+from app.models.test import Test
 from app.models.city import City
 from app.models.manager import Manager
 from app.models.school import School
@@ -71,6 +72,12 @@ def obter_gabaritos_por_municipio(
         AnswerSheetGabarito.id.in_(gab_ids_from_results),
     ]
     q = AnswerSheetGabarito.query.filter(or_(*conds))
+    q = q.outerjoin(Test, AnswerSheetGabarito.test_id == Test.id).filter(
+        or_(
+            AnswerSheetGabarito.test_id.is_(None),
+            Test.evaluation_mode == "physical",
+        )
+    )
 
     if escola_param and escola_param.lower() != "all":
         eid = escola_param
@@ -232,6 +239,54 @@ def obter_turmas_por_gabarito_escola_serie(
         for c in classes
         if str(c.school_id) == str(escola_id) and str(c.grade_id) == str(serie_id)
     ]
+    turmas.sort(key=lambda c: (c.name or "") or str(c.id))
+    return [{"id": str(t.id), "name": t.name or f"Turma {t.id}"} for t in turmas]
+
+
+def obter_series_por_gabarito_municipio(
+    gabarito_id: str, municipio_id: str, user: dict, permissao: dict
+) -> List[Dict[str, Any]]:
+    """Séries distintas entre todas as escolas do município onde o gabarito tem turmas visíveis ao usuário."""
+    from app.models.grades import Grade
+
+    city = City.query.get(municipio_id)
+    if not city:
+        return []
+    if permissao["scope"] != "all" and user.get("city_id") != city.id:
+        return []
+
+    gab = AnswerSheetGabarito.query.get(gabarito_id)
+    if not gab:
+        return []
+
+    classes = answer_sheet_target_classes_visible_for_user(gab, user, permissao, municipio_id)
+    grade_ids = {c.grade_id for c in classes if getattr(c, "grade_id", None)}
+    if not grade_ids:
+        return []
+    rows = Grade.query.filter(Grade.id.in_(grade_ids)).order_by(Grade.name).all()
+    return [{"id": str(s.id), "name": s.name} for s in rows]
+
+
+def obter_turmas_por_gabarito_serie_municipio(
+    gabarito_id: str,
+    serie_id: str,
+    municipio_id: str,
+    user: dict,
+    permissao: dict,
+) -> List[Dict[str, Any]]:
+    """Turmas (todas as escolas do escopo) com o gabarito aplicado e a série informada."""
+    city = City.query.get(municipio_id)
+    if not city:
+        return []
+    if permissao["scope"] != "all" and user.get("city_id") != city.id:
+        return []
+
+    gab = AnswerSheetGabarito.query.get(gabarito_id)
+    if not gab:
+        return []
+
+    classes = answer_sheet_target_classes_visible_for_user(gab, user, permissao, municipio_id)
+    turmas = [c for c in classes if str(c.grade_id) == str(serie_id)]
     turmas.sort(key=lambda c: (c.name or "") or str(c.id))
     return [{"id": str(t.id), "name": t.name or f"Turma {t.id}"} for t in turmas]
 

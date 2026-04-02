@@ -314,6 +314,13 @@ def _resolve_mobile_login_tenant_context():
         if slug:
             city = resolve_city_from_slug(slug)
     if not city:
+        print(
+            "[mobile/v1/auth/login] Falha ao resolver município — "
+            f"X-City-ID={request.headers.get('X-City-ID')!r} "
+            f"X-City-Slug={request.headers.get('X-City-Slug')!r} "
+            f"Host={request.headers.get('Host')!r} "
+            f"Origin={request.headers.get('Origin')!r}"
+        )
         raise Exception(
             "Para login mobile informe X-City-ID ou X-City-Slug ou acesse via subdomínio do município."
         )
@@ -565,11 +572,18 @@ def tenant_middleware():
         
     except Exception as e:
         error_message = str(e)
-        
+        is_mobile = request.path.startswith("/mobile/v1/")
+
         if "não encontrado" in error_message.lower():
-            return jsonify({"erro": error_message}), 404
-        else:
-            return jsonify({"erro": f"Erro ao resolver contexto do tenant: {error_message}"}), 400
+            key = "error" if is_mobile else "erro"
+            return jsonify({key: error_message}), 404
+
+        if is_mobile:
+            return jsonify({"error": error_message}), 400
+
+        return jsonify(
+            {"erro": f"Erro ao resolver contexto do tenant: {error_message}"}
+        ), 400
 
 
 def get_current_tenant_context():

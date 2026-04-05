@@ -1,5 +1,5 @@
 from flask import Blueprint, request, jsonify
-from werkzeug.security import generate_password_hash
+from app.utils.auth import hash_password
 from app.models.user import User
 from app.models.user import RoleEnum
 from app import db
@@ -43,7 +43,7 @@ def criar_usuario():
         name=name,
         email=email,
         city_id=city_id,
-        password_hash=generate_password_hash(password),
+        password_hash=hash_password(password),
         role=RoleEnum(role),
         registration=registration,  # Matrícula é opcional
     )

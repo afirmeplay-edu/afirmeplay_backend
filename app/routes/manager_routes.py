@@ -6,7 +6,7 @@ from app.models.city import City
 from app.decorators.role_required import role_required, get_current_user_from_token
 from app import db
 from flask_jwt_extended import jwt_required
-from werkzeug.security import generate_password_hash
+from app.utils.auth import hash_password
 from sqlalchemy.exc import SQLAlchemyError, IntegrityError
 from sqlalchemy import text
 import logging
@@ -149,7 +149,7 @@ def create_manager():
         novo_usuario = User(
             name=data["name"],
             email=data["email"],
-            password_hash=generate_password_hash(data["password"]),
+            password_hash=hash_password(data["password"]),
             registration=data.get("registration"),
             role=RoleEnum(data["role"]),
             city_id=city_id

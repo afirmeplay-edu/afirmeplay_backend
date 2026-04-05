@@ -6,7 +6,8 @@ from flask_jwt_extended import jwt_required
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy import func, text
 import logging
-from werkzeug.security import generate_password_hash, check_password_hash
+from werkzeug.security import check_password_hash
+from app.utils.auth import hash_password
 from app import db
 from app.models.student import Student
 from app.models.school import School
@@ -279,7 +280,7 @@ def create_user():
         novo_usuario = User(
             name=data["name"],
             email=data["email"],
-            password_hash=generate_password_hash(data["password"]),
+            password_hash=hash_password(data["password"]),
             registration=data.get("registration"),
             role=RoleEnum(data.get("role")),
             city_id=city_id  # Adicionando city_id
@@ -626,7 +627,7 @@ def reset_password():
             return jsonify({"erro": "Token expirado. Solicite um novo link de redefinição."}), 400
         
         # Atualizar senha
-        user.password_hash = generate_password_hash(new_password)
+        user.password_hash = hash_password(new_password)
         user.reset_token = None
         user.reset_token_expires = None
         user.updated_at = datetime.utcnow()
@@ -687,7 +688,7 @@ def change_password():
             return jsonify({"erro": "A nova senha deve ser diferente da senha atual"}), 400
         
         # Atualizar senha
-        user.password_hash = generate_password_hash(new_password)
+        user.password_hash = hash_password(new_password)
         user.updated_at = datetime.utcnow()
         db.session.commit()
         
@@ -837,7 +838,7 @@ def update_user(user_id):
         if password is not None:
             if not isinstance(password, str) or len(password) < 8:
                 return jsonify({"erro": "password deve conter ao menos 8 caracteres"}), 400
-            user.password_hash = generate_password_hash(password)
+            user.password_hash = hash_password(password)
 
         registration = data.get('registration')
         if registration is not None:
@@ -1588,7 +1589,7 @@ def bulk_upload_students():
                     id=str(uuid.uuid4()),
                     name=str(row.get('nome', '')).strip(),
                     email=email,
-                    password_hash=generate_password_hash(senha),
+                    password_hash=hash_password(senha),
                     registration=None,  # matrícula apenas em Student (por cidade)
                     role=RoleEnum.ALUNO,
                     city_id=escola.city_id

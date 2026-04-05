@@ -11,7 +11,7 @@ from app.decorators.role_required import get_current_tenant_id
 from datetime import datetime
 from app import db
 from flask_jwt_extended import jwt_required
-from werkzeug.security import generate_password_hash
+from app.utils.auth import hash_password
 from marshmallow import ValidationError
 from app.models.studentAnswer import StudentAnswer
 from app.models.studentClass import Class
@@ -113,7 +113,7 @@ def criar_usuario_e_aluno():
             usuario = User(
                 name=data["name"],
                 email=data["email"],
-                password_hash=generate_password_hash(data["password"]),
+                password_hash=hash_password(data["password"]),
                 registration=data.get("registration"),
                 role=RoleEnum("aluno"),
                 city_id=city_id

@@ -111,34 +111,17 @@ def offline_pack_redeem():
         if not pack or pack.code_hash != h:
             return jsonify({"error": "código não encontrado"}), 404
     else:
-        # Códigos gerados antes do índice public: exige o mesmo critério de cidade do login mobile.
-        try:
-            from app.utils.tenant_middleware import (
-                _resolve_mobile_login_tenant_context,
-                set_search_path,
-            )
-
-            legacy_ctx = _resolve_mobile_login_tenant_context()
-            g.tenant_context = legacy_ctx
-            set_search_path(legacy_ctx.schema)
-        except Exception as e:
-            return jsonify({"error": str(e)}), 400
-        if not legacy_ctx.has_tenant_context or not legacy_ctx.city_id:
-            return jsonify(
+        return (
+            jsonify(
                 {
                     "error": (
-                        "código não encontrado no índice global; para códigos antigos informe "
-                        "X-City-ID, X-City-Slug ou use o subdomínio do município"
+                        "código não encontrado: este pacote não está registado para resgate. "
+                        "Confira o código ou peça um novo ao aplicador."
                     )
                 }
-            ), 404
-        hdr_city = request.headers.get("X-City-ID")
-        if hdr_city and str(hdr_city) != str(legacy_ctx.city_id):
-            return jsonify({"error": "X-City-ID não corresponde ao contexto"}), 400
-        try:
-            pack = pack_svc.find_pack_by_code_normalized(normalized)
-        except ValueError as e:
-            return jsonify({"error": str(e)}), 404
+            ),
+            404,
+        )
 
     try:
         page = int(body.get("page", 1))

@@ -1008,21 +1008,39 @@
 			}
 
 			{% if test_data.letterhead_image_base64 %}
-			/* Timbrado só em capa institucional e capas de bloco: área útil = A4 menos margens @page */
+			/* Timbrado full-page (A4 inteira) apenas em capa institucional e capas de bloco */
 			.institutional-cover.letterhead-bg,
 			.subject-cover.letterhead-bg {
 				position: relative;
 				box-sizing: border-box;
-				min-height: calc(29.7cm - 3cm);
-				width: 100%;
-				background-color: transparent;
+				isolation: isolate;
+				background: transparent;
+			}
+			.institutional-cover.letterhead-bg::before,
+			.subject-cover.letterhead-bg::before {
+				content: "";
+				position: absolute;
+				/* Expande do box útil para cobrir a página inteira (incluindo margens @page) */
+				top: -1.5cm;
+				left: -2cm;
+				width: 21cm;
+				height: 29.7cm;
 				background-image: url("data:image/png;base64,{{ test_data.letterhead_image_base64 }}");
 				background-size: 100% 100%;
 				background-repeat: no-repeat;
 				background-position: center center;
+				z-index: -1;
+				pointer-events: none;
 			}
 			.institutional-cover.letterhead-bg .cover-footer {
 				background: rgba(255, 255, 255, 0.9);
+			}
+			/* Quando há timbrado, desce o primeiro conteúdo para não cobrir o logo */
+			.institutional-cover.letterhead-bg .cover-header {
+				margin-top: 10cm;
+			}
+			.subject-cover.letterhead-bg .block-number {
+				margin-top: 10cm;
 			}
 			{% endif %}
 		</style>
@@ -1037,6 +1055,9 @@
 		{% if include_cover %}
 		<div class="institutional-cover{% if lh %} letterhead-bg{% endif %}">
 			<div class="cover-header">
+				{# Logo da capa desativado temporariamente.
+				   Mantido comentado para reativação futura. #}
+				{#
 				<div class="municipality-logo">
 					{% if test_data.municipality_logo %}
 					<img
@@ -1061,6 +1082,7 @@
 					</svg>
 					{% endif %}
 				</div>
+				#}
 				<div class="header-titles">
 					<div class="municipality-name">
 						{{ test_data.municipality or 'SÃO MIGUEL DOS CAMPOS' }}

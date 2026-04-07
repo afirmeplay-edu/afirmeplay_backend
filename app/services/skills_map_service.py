@@ -154,10 +154,16 @@ def compute_digital_aggregate(
             answers_by_student[a.student_id] = {}
         answers_by_student[a.student_id][a.question_id] = a
 
+    # Exclui alunos faltosos (sem nenhuma resposta registrada para a prova).
+    # Alunos ausentes não têm StudentAnswer → não devem entrar no cálculo de % acertos
+    # nem aparecer no drill-down "quem errou", assim como ocorre com o cartão-resposta
+    # (que filtra via _participating_answer_sheet_result).
+    participating_students = [s for s in students if s.id in answers_by_student]
+
     stats: Dict[str, Dict[str, Any]] = defaultdict(lambda: {"correct": 0, "total": 0})
     failed_by_skill: Dict[str, Set[str]] = defaultdict(set)
 
-    for student in students:
+    for student in participating_students:
         sid = student.id
         for q, skill_key in questoes_com_habilidade:
             sk = _norm_skill_key(skill_key)
@@ -228,6 +234,7 @@ def compute_digital_aggregate(
         "por_faixa": por_faixa,
         "_failed_by_skill": {k: v for k, v in failed_by_skill.items()},
         "_skill_to_question_ids": {k: list(v) for k, v in skill_to_question_ids.items()},
+        "_students_snapshot": participating_students,
     }
 
 

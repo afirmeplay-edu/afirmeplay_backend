@@ -6625,6 +6625,8 @@ def mapa_habilidades_avaliacao_online():
         from app.services.skills_map_service import compute_digital_aggregate
 
         data = compute_digital_aggregate(str(avaliacao), all_students, subject_filter)
+        # participating_students = alunos que realmente responderam (sem faltosos)
+        participating_students = data.get("_students_snapshot", all_students)
 
         return jsonify(
             {
@@ -6646,7 +6648,7 @@ def mapa_habilidades_avaliacao_online():
                         else None
                     ),
                 },
-                "total_alunos_escopo": len(all_students),
+                "total_alunos_escopo": len(participating_students),
             }
         ), 200
     except Exception as e:
@@ -6762,11 +6764,12 @@ def mapa_habilidades_avaliacao_online_erros():
 
         data = compute_digital_aggregate(str(avaliacao), all_students, subject_filter)
         failed_by_skill = data.get("_failed_by_skill") or {}
+        participating_students = data.get("_students_snapshot", all_students)
 
         school_ids = list(
             {
                 s.class_.school_id
-                for s in all_students
+                for s in participating_students
                 if s.class_ and getattr(s.class_, "school_id", None)
             }
         )
@@ -6777,7 +6780,7 @@ def mapa_habilidades_avaliacao_online_erros():
         )
 
         alunos, n_err, n_tot = digital_students_who_failed_skill(
-            all_students, skill_id, failed_by_skill, school_by_id
+            participating_students, skill_id, failed_by_skill, school_by_id
         )
         pct_err = round_to_two_decimals((n_err / n_tot * 100.0) if n_tot else 0.0)
 

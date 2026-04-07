@@ -50,6 +50,25 @@ def mobile_auth_login():
         print(f"[mobile/v1/auth/login] 401 — credenciais inválidas para ident={ident!r}")
         return jsonify({"error": "Credenciais inválidas"}), 401
 
+    if usuario.role == RoleEnum.ALUNO:
+        print(
+            f"[mobile/v1/auth/login] 403 — aluno tentou login online (use pacote offline): "
+            f"user_id={usuario.id}"
+        )
+        return (
+            jsonify(
+                {
+                    "error": (
+                        "Esta conta é de aluno: o login online do aplicador não se aplica. "
+                        "Baixe o pacote offline ou solicite o código ao aplicador se o aluno "
+                        "não constar no dispositivo."
+                    ),
+                    "error_code": "MOBILE_LOGIN_STUDENT_USE_OFFLINE_PACK",
+                }
+            ),
+            403,
+        )
+
     if usuario.role not in _MOBILE_LOGIN_ROLES:
         print(
             f"[mobile/v1/auth/login] 403 — role não permitido: {usuario.role!r} user_id={usuario.id}"

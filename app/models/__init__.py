@@ -42,7 +42,7 @@ from .calendar_event_user import CalendarEventUser
 
 # Formulários Socioeconômicos, Play TV e Plantão Online
 from app.socioeconomic_forms.models import Form, FormQuestion, FormRecipient, FormResponse
-from app.play_tv.models import PlayTvVideo, PlayTvVideoSchool
+from app.play_tv.models import PlayTvVideo, PlayTvVideoSchool, PlayTvVideoResource
 from app.plantao_online.models import PlantaoOnline, PlantaoOnlineSchool
 
 # Certificados

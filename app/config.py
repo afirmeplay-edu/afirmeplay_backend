@@ -22,4 +22,7 @@ class Config:
     
     # Configurações de reset de senha
     PASSWORD_RESET_TOKEN_EXPIRY = 3600  # 1 hora em segundos
-    
+
+    # OMR / cartão-resposta: salva imagens em debug_corrections_new/ quando True
+    # export OMR_DEBUG=1  (ou true, yes, on)
+    OMR_DEBUG = os.getenv("OMR_DEBUG", "").strip().lower() in ("1", "true", "yes", "on")

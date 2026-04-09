@@ -393,9 +393,11 @@ class AnswerSheetCorrection:
                 existing_result.corrected_at = datetime.utcnow()
                 existing_result.detection_method = 'geometric'
                 
+                db.session.flush()
+                payload = existing_result.to_dict()
                 db.session.commit()
                 
-                return existing_result.to_dict()
+                return payload
             else:
                 # Criar novo resultado
                 result = AnswerSheetResult(
@@ -415,9 +417,11 @@ class AnswerSheetCorrection:
                 )
                 
                 db.session.add(result)
+                db.session.flush()
+                payload = result.to_dict()
                 db.session.commit()
                 
-                return result.to_dict()
+                return payload
                 
         except Exception as e:
             db.session.rollback()

@@ -96,8 +96,9 @@ class AnswerSheetCorrectionNewGrid:
             import os
             if not os.path.exists(self.debug_dir):
                 os.makedirs(self.debug_dir)
-            self.debug_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            self.logger.info(f"🐛 Debug ativado - timestamp: {self.debug_timestamp}")
+            self.debug_timestamp = ""
+            abspath = os.path.abspath(self.debug_dir)
+            self.logger.info(f"🐛 Debug OMR ativado — imagens em: {abspath}")
         
         self.logger.info("✅ Pipeline OMR Robusto inicializado")
     
@@ -1803,6 +1804,13 @@ class AnswerSheetCorrectionNewGrid:
             Resultado completo com estatísticas
         """
         try:
+            if self.debug:
+                import os
+                if not os.path.exists(self.debug_dir):
+                    os.makedirs(self.debug_dir)
+                self.debug_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+                self.logger.info(f"🐛 Debug: run_id={self.debug_timestamp}")
+
             # Carregar imagem
             if image_path:
                 self.logger.info(f"🎯 Iniciando correção: {image_path}")
@@ -2284,11 +2292,12 @@ class AnswerSheetCorrectionNewGrid:
                 submitted_at=datetime.utcnow()
             )
             
+            session_id = session.id
             db.session.add(session)
             db.session.commit()
             
-            self.logger.info(f"✅ Sessão mínima criada: {session.id}")
-            return session.id
+            self.logger.info(f"✅ Sessão mínima criada: {session_id}")
+            return session_id
             
         except Exception as e:
             db.session.rollback()
@@ -2327,8 +2336,10 @@ class AnswerSheetCorrectionNewGrid:
                 existing_result.corrected_at = datetime.utcnow()
                 existing_result.detection_method = 'new_grid'
                 
+                db.session.flush()
+                payload = existing_result.to_dict()
                 db.session.commit()
-                self.logger.info(f"✅ AnswerSheetResult atualizado: {existing_result.id}")
+                self.logger.info(f"✅ AnswerSheetResult atualizado: {payload['id']}")
                 try:
                     from app.report_analysis.answer_sheet_aggregate_service import (
                         invalidate_answer_sheet_report_cache_after_result,
@@ -2339,7 +2350,7 @@ class AnswerSheetCorrectionNewGrid:
                     )
                 except Exception as inv_err:
                     self.logger.warning("Invalidate answer_sheet report cache: %s", inv_err)
-                return existing_result.to_dict()
+                return payload
             else:
                 # Criar novo
                 result = AnswerSheetResult(
@@ -2360,8 +2371,10 @@ class AnswerSheetCorrectionNewGrid:
                 )
                 
                 db.session.add(result)
+                db.session.flush()
+                payload = result.to_dict()
                 db.session.commit()
-                self.logger.info(f"✅ AnswerSheetResult criado: {result.id}")
+                self.logger.info(f"✅ AnswerSheetResult criado: {payload['id']}")
                 try:
                     from app.report_analysis.answer_sheet_aggregate_service import (
                         invalidate_answer_sheet_report_cache_after_result,
@@ -2372,7 +2385,7 @@ class AnswerSheetCorrectionNewGrid:
                     )
                 except Exception as inv_err:
                     self.logger.warning("Invalidate answer_sheet report cache: %s", inv_err)
-                return result.to_dict()
+                return payload
                 
         except Exception as e:
             db.session.rollback()

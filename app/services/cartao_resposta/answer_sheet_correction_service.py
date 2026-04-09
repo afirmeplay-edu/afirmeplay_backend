@@ -312,6 +312,8 @@ class AnswerSheetCorrectionService:
                 existing_result.corrected_at = datetime.utcnow()
                 existing_result.detection_method = 'geometric'
                 
+                db.session.flush()
+                payload = existing_result.to_dict()
                 db.session.commit()
                 try:
                     from app.report_analysis.answer_sheet_aggregate_service import (
@@ -323,7 +325,7 @@ class AnswerSheetCorrectionService:
                     )
                 except Exception as inv_err:
                     self.logger.warning("Invalidate answer_sheet report cache: %s", inv_err)
-                return existing_result.to_dict()
+                return payload
             else:
                 # Criar novo
                 result = AnswerSheetResult(
@@ -344,6 +346,8 @@ class AnswerSheetCorrectionService:
                 )
                 
                 db.session.add(result)
+                db.session.flush()
+                payload = result.to_dict()
                 db.session.commit()
                 try:
                     from app.report_analysis.answer_sheet_aggregate_service import (
@@ -355,7 +359,7 @@ class AnswerSheetCorrectionService:
                     )
                 except Exception as inv_err:
                     self.logger.warning("Invalidate answer_sheet report cache: %s", inv_err)
-                return result.to_dict()
+                return payload
                 
         except Exception as e:
             db.session.rollback()

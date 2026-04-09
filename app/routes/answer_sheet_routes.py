@@ -18,6 +18,7 @@ from app.models.user import User
 from app.services.cartao_resposta.answer_sheet_generator import AnswerSheetGenerator
 from app.services.cartao_resposta.answer_sheet_correction_service import AnswerSheetCorrectionService
 from app.services.cartao_resposta.correction_new_grid import AnswerSheetCorrectionNewGrid
+from app.config import Config
 from app.services.progress_store import (
     create_job, update_item_processing, update_item_done,
     update_item_error, complete_job, get_job, purge_answer_sheet_job_keys,
@@ -1053,7 +1054,7 @@ def process_answer_sheet_batch_in_background(job_id: str, images: list = None, t
             if tenant_schema:
                 set_search_path(tenant_schema)
 
-            correction_service = AnswerSheetCorrectionNewGrid(debug=False)
+            correction_service = AnswerSheetCorrectionNewGrid(debug=Config.OMR_DEBUG)
             
             for i, image_base64 in enumerate(images):
                 try:
@@ -1925,7 +1926,7 @@ def correct_answer_sheet_new_pipeline():
             return jsonify({"error": "Imagem não fornecida"}), 400
         
         # Processar com NOVO pipeline (detecção automática de QR code)
-        corrector = AnswerSheetCorrectionNewGrid(debug=False)
+        corrector = AnswerSheetCorrectionNewGrid(debug=Config.OMR_DEBUG)
         
         result = corrector.corrigir_cartao_resposta(
             image_data=image_data,

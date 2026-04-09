@@ -72,6 +72,74 @@ COMMENT ON TABLE "{schema}".play_tv_video_classes IS 'Vídeos do Play TV disponi
 """
 
 
+def get_calendar_tables_ddl(schema: str) -> str:
+    """DDL idempotente para estruturas do Calendar em schemas city_*."""
+    return f"""
+CREATE TABLE IF NOT EXISTS "{schema}".calendar_event_resources (
+    id VARCHAR PRIMARY KEY,
+    event_id VARCHAR REFERENCES "{schema}".calendar_events(id) ON DELETE CASCADE,
+    resource_type VARCHAR(20) NOT NULL,
+    title VARCHAR(200) NOT NULL,
+    url VARCHAR(2000),
+    minio_bucket VARCHAR(100),
+    minio_object_name VARCHAR(500),
+    original_filename VARCHAR(500),
+    content_type VARCHAR(200),
+    size_bytes BIGINT,
+    sort_order INTEGER NOT NULL DEFAULT 0,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT chk_calendar_event_resource_type CHECK (resource_type IN ('link', 'file'))
+);
+CREATE INDEX IF NOT EXISTS ix_calendar_event_resources_event_id ON "{schema}".calendar_event_resources(event_id);
+
+ALTER TABLE "{schema}".calendar_event_targets
+    ADD COLUMN IF NOT EXISTS target_filters JSON;
+
+DO $$
+BEGIN
+    BEGIN
+        ALTER TABLE "{schema}".calendar_event_targets
+            ALTER COLUMN target_id DROP NOT NULL;
+    EXCEPTION WHEN others THEN
+        NULL;
+    END;
+END $$;
+
+DO $$
+BEGIN
+    IF EXISTS (
+        SELECT 1
+        FROM information_schema.columns
+        WHERE table_schema = '{schema}'
+          AND table_name = 'calendar_event_targets'
+          AND column_name = 'target_type'
+    ) THEN
+        -- Permite ALL sem impor enum para compatibilidade entre ambientes.
+        -- Mantemos como VARCHAR e dados validados na aplicação.
+        NULL;
+    END IF;
+END $$;
+"""
+
+
+def provision_calendar_for_city_schema(schema_name: str) -> None:
+    """Aplica somente DDL do Calendar em um schema city_* existente (idempotente)."""
+    if not schema_name.replace("_", "").isalnum() or not schema_name.startswith("city_"):
+        raise ValueError(f"Nome de schema inválido: {schema_name}")
+
+    raw_conn = db.engine.raw_connection()
+    try:
+        raw_conn.set_isolation_level(0)
+        cursor = raw_conn.cursor()
+        cursor.execute(get_calendar_tables_ddl(schema_name))
+        logger.info("Calendar DDL aplicado em schema %s", schema_name)
+    except Exception as e:
+        logger.exception("Falha ao aplicar Calendar em %s: %s", schema_name, e)
+        raise
+    finally:
+        raw_conn.close()
+
+
 def provision_play_tv_for_city_schema(schema_name: str) -> None:
     """
     Aplica apenas o bloco DDL Play TV em um schema city_* já existente (idempotente).
@@ -788,10 +856,29 @@ CREATE TABLE IF NOT EXISTS "{schema}".calendar_event_targets (
     id VARCHAR PRIMARY KEY,
     event_id VARCHAR REFERENCES "{schema}".calendar_events(id),
     target_type VARCHAR NOT NULL,
-    target_id VARCHAR NOT NULL,
+    target_id VARCHAR,
+    target_filters JSON,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 COMMENT ON TABLE "{schema}".calendar_event_targets IS 'Alvos de eventos de calendário';
+
+CREATE TABLE IF NOT EXISTS "{schema}".calendar_event_resources (
+    id VARCHAR PRIMARY KEY,
+    event_id VARCHAR REFERENCES "{schema}".calendar_events(id) ON DELETE CASCADE,
+    resource_type VARCHAR(20) NOT NULL,
+    title VARCHAR(200) NOT NULL,
+    url VARCHAR(2000),
+    minio_bucket VARCHAR(100),
+    minio_object_name VARCHAR(500),
+    original_filename VARCHAR(500),
+    content_type VARCHAR(200),
+    size_bytes BIGINT,
+    sort_order INTEGER NOT NULL DEFAULT 0,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT chk_calendar_event_resource_type CHECK (resource_type IN ('link', 'file'))
+);
+CREATE INDEX IF NOT EXISTS ix_calendar_event_resources_event_id ON "{schema}".calendar_event_resources(event_id);
+COMMENT ON TABLE "{schema}".calendar_event_resources IS 'Links e arquivos anexados a eventos do calendário';
 
 CREATE TABLE IF NOT EXISTS "{schema}".calendar_event_users (
     id VARCHAR PRIMARY KEY,

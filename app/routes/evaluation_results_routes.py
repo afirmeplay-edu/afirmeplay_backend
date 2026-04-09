@@ -6627,6 +6627,8 @@ def mapa_habilidades_avaliacao_online():
         data = compute_digital_aggregate(str(avaliacao), all_students, subject_filter)
         # participating_students = alunos que realmente responderam (sem faltosos)
         participating_students = data.get("_students_snapshot", all_students)
+        n_turma = len(all_students)
+        n_part = len(participating_students)
 
         return jsonify(
             {
@@ -6648,7 +6650,9 @@ def mapa_habilidades_avaliacao_online():
                         else None
                     ),
                 },
-                "total_alunos_escopo": len(participating_students),
+                "total_alunos_escopo_turma": n_turma,
+                "total_alunos_participantes": n_part,
+                "total_alunos_escopo": n_part,
             }
         ), 200
     except Exception as e:
@@ -6760,7 +6764,11 @@ def mapa_habilidades_avaliacao_online_erros():
             None if str(disciplina).strip().lower() == "all" else str(disciplina).strip()
         )
 
-        from app.services.skills_map_service import compute_digital_aggregate, digital_students_who_failed_skill
+        from app.services.skills_map_service import (
+            compute_digital_aggregate,
+            digital_students_passed_vs_failed_for_bucket,
+            _norm_skill_key,
+        )
 
         data = compute_digital_aggregate(str(avaliacao), all_students, subject_filter)
         failed_by_skill = data.get("_failed_by_skill") or {}
@@ -6779,17 +6787,23 @@ def mapa_habilidades_avaliacao_online_erros():
             else {}
         )
 
-        alunos, n_err, n_tot = digital_students_who_failed_skill(
-            participating_students, skill_id, failed_by_skill, school_by_id
+        bucket_key = _norm_skill_key(str(skill_id).strip())
+        alunos_err, alunos_ok, n_err, n_ok, n_tot = digital_students_passed_vs_failed_for_bucket(
+            participating_students, failed_by_skill, bucket_key, school_by_id
         )
         pct_err = round_to_two_decimals((n_err / n_tot * 100.0) if n_tot else 0.0)
+        pct_ok = round_to_two_decimals((n_ok / n_tot * 100.0) if n_tot else 0.0)
 
         return jsonify(
             {
                 "percentual_erros": pct_err,
+                "percentual_acertos": pct_ok,
                 "total_alunos_escopo": n_tot,
                 "total_alunos_que_erraram": n_err,
-                "alunos": alunos,
+                "total_alunos_que_acertaram": n_ok,
+                "alunos_que_erraram": alunos_err,
+                "alunos_que_acertaram": alunos_ok,
+                "alunos": alunos_err,
                 "filtros_aplicados": {
                     "estado": estado,
                     "municipio": municipio,

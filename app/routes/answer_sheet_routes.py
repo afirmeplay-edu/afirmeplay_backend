@@ -3782,6 +3782,8 @@ def mapa_habilidades_cartao():
                         "disciplina": disciplina,
                         "periodo": str(periodo_raw).strip() if periodo_raw and str(periodo_raw).strip() else None,
                     },
+                    "total_alunos_escopo_turma": 0,
+                    "total_alunos_participantes": 0,
                     "total_alunos_escopo": 0,
                 }
             ), 200
@@ -3793,6 +3795,8 @@ def mapa_habilidades_cartao():
         raw = build_skills_map_answer_sheet(gabarito_id, [str(c) for c in class_ids], disc_filt)
         students = raw.pop("_students_snapshot", []) or []
         raw.pop("_failed_by_skill", None)
+        n_turma = int(raw.pop("_students_all_count", len(students)) or 0)
+        n_part = len(students)
 
         return jsonify(
             {
@@ -3810,7 +3814,9 @@ def mapa_habilidades_cartao():
                     "disciplina": disciplina,
                     "periodo": str(periodo_raw).strip() if periodo_raw and str(periodo_raw).strip() else None,
                 },
-                "total_alunos_escopo": len(students),
+                "total_alunos_escopo_turma": n_turma,
+                "total_alunos_participantes": n_part,
+                "total_alunos_escopo": n_part,
             }
         ), 200
     except Exception as e:
@@ -3881,7 +3887,7 @@ def mapa_habilidades_cartao_erros():
         disc_filt = None if str(disciplina).strip().lower() == "all" else str(disciplina).strip()
 
         from app.services.skills_map_service import (
-            answer_sheet_students_who_failed,
+            answer_sheet_students_passed_vs_failed,
             build_skills_map_answer_sheet,
         )
 
@@ -3900,7 +3906,7 @@ def mapa_habilidades_cartao_erros():
 
         bloco_disciplina = request.args.get("bloco_disciplina") or request.args.get("subject_id")
 
-        alunos, n_err, n_tot = answer_sheet_students_who_failed(
+        alunos_err, alunos_ok, n_err, n_ok, n_tot = answer_sheet_students_passed_vs_failed(
             students,
             str(skill_id).strip(),
             failed_by_skill,
@@ -3908,13 +3914,18 @@ def mapa_habilidades_cartao_erros():
             bloco_disciplina=str(bloco_disciplina).strip() if bloco_disciplina else None,
         )
         pct_err = round_to_two_decimals((n_err / n_tot * 100.0) if n_tot else 0.0)
+        pct_ok = round_to_two_decimals((n_ok / n_tot * 100.0) if n_tot else 0.0)
 
         return jsonify(
             {
                 "percentual_erros": pct_err,
+                "percentual_acertos": pct_ok,
                 "total_alunos_escopo": n_tot,
                 "total_alunos_que_erraram": n_err,
-                "alunos": alunos,
+                "total_alunos_que_acertaram": n_ok,
+                "alunos_que_erraram": alunos_err,
+                "alunos_que_acertaram": alunos_ok,
+                "alunos": alunos_err,
                 "filtros_aplicados": {
                     "estado": estado,
                     "municipio": municipio,

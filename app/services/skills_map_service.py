@@ -89,6 +89,80 @@ def _fetch_skills_batch(skill_ids: Set[str]) -> Dict[str, Skill]:
     return {str(s.id): s for s in rows}
 
 
+def _extract_skill_ids_from_question_field(raw_skill: Any) -> List[str]:
+    """Extrai IDs/códigos de habilidade do campo `Question.skill` (string/lista/json)."""
+    if raw_skill is None:
+        return []
+
+    values: List[str] = []
+    if isinstance(raw_skill, list):
+        values = [str(x) for x in raw_skill if x]
+    else:
+        s = str(raw_skill).strip()
+        if not s:
+            return []
+        if s.startswith("[") and s.endswith("]"):
+            try:
+                parsed = json.loads(s)
+                if isinstance(parsed, list):
+                    values = [str(x) for x in parsed if x]
+                else:
+                    values = [s]
+            except Exception:
+                values = [s]
+        else:
+            # Historicamente pode vir "id1,id2" ou único valor.
+            values = [p.strip() for p in s.split(",") if p and p.strip()]
+
+    out: List[str] = []
+    seen: Set[str] = set()
+    for v in values:
+        clean = _clean_skill_id(v)
+        if not clean:
+            continue
+        if clean not in seen:
+            out.append(clean)
+            seen.add(clean)
+    return out
+
+
+def _fallback_question_skills_from_test(
+    test_id: Optional[str], allowed_qn: Set[int]
+) -> Dict[int, List[str]]:
+    """Fallback para mapa de questões→habilidades via prova vinculada ao gabarito."""
+    if not test_id:
+        return {}
+
+    test_questions = (
+        TestQuestion.query.filter_by(test_id=test_id)
+        .join(Question)
+        .options(joinedload(TestQuestion.question))
+        .order_by(TestQuestion.order)
+        .all()
+    )
+    if not test_questions:
+        return {}
+
+    out: Dict[int, List[str]] = {}
+    for idx, tq in enumerate(test_questions, start=1):
+        qn = idx
+        try:
+            if tq.order is not None:
+                qn = int(tq.order)
+        except (TypeError, ValueError):
+            qn = idx
+
+        if allowed_qn and qn not in allowed_qn:
+            continue
+        q = tq.question
+        if not q:
+            continue
+        sids = _extract_skill_ids_from_question_field(getattr(q, "skill", None))
+        if sids:
+            out[qn] = sids
+    return out
+
+
 def build_disciplinas_e_questoes_digital(
     test_id: str,
     subject_id_filter: Optional[str],
@@ -238,6 +312,66 @@ def compute_digital_aggregate(
     }
 
 
+def _student_row_dict(st: Student, school_by_id: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    turma_nome = "N/A"
+    serie_nome = "N/A"
+    escola_nome = "N/A"
+    if st.class_:
+        turma_nome = st.class_.name or "N/A"
+        if st.class_.grade:
+            serie_nome = st.class_.grade.name or "N/A"
+        scid = getattr(st.class_, "school_id", None)
+        if scid and school_by_id and scid in school_by_id:
+            escola_nome = school_by_id[scid].name or "N/A"
+    return {
+        "id": str(st.id),
+        "nome": st.name or "N/A",
+        "escola": escola_nome,
+        "serie": serie_nome,
+        "turma": turma_nome,
+    }
+
+
+def digital_students_passed_vs_failed_for_bucket(
+    students: List[Student],
+    failed_by_skill: Dict[str, Set[str]],
+    bucket_key: str,
+    school_by_id: Optional[Dict[str, Any]] = None,
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], int, int, int]:
+    """
+    Participantes no escopo vs quem errou ao menos uma questão da habilidade (bucket)
+    vs quem acertou todas as questões dessa habilidade no escopo.
+    bucket_key: chave em failed_by_skill (skill normalizada no online; skill||bloco no cartão).
+    """
+    failed_ids = failed_by_skill.get(bucket_key, set())
+    student_by_id = {s.id: s for s in students}
+    all_ids = set(student_by_id.keys())
+    passed_ids = all_ids - failed_ids
+    n_tot = len(students)
+    n_err = len(failed_ids)
+    n_ok = len(passed_ids)
+
+    def _sort_key(sid: str) -> str:
+        st = student_by_id.get(sid)
+        return (st.name or "") if st else ""
+
+    alunos_err: List[Dict[str, Any]] = []
+    for fid in sorted(failed_ids, key=_sort_key):
+        st = student_by_id.get(fid)
+        if not st:
+            continue
+        alunos_err.append(_student_row_dict(st, school_by_id))
+
+    alunos_ok: List[Dict[str, Any]] = []
+    for pid in sorted(passed_ids, key=_sort_key):
+        st = student_by_id.get(pid)
+        if not st:
+            continue
+        alunos_ok.append(_student_row_dict(st, school_by_id))
+
+    return alunos_err, alunos_ok, n_err, n_ok, n_tot
+
+
 def digital_students_who_failed_skill(
     students: List[Student],
     skill_id: str,
@@ -245,41 +379,10 @@ def digital_students_who_failed_skill(
     school_by_id: Optional[Dict[str, Any]] = None,
 ) -> Tuple[List[Dict[str, Any]], int, int]:
     sk = _norm_skill_key(skill_id)
-    failed_ids = failed_by_skill.get(sk, set())
-    total_escopo = len(students)
-    if total_escopo == 0:
-        return [], 0, 0
-    pct_err = round_to_two_decimals(len(failed_ids) / total_escopo * 100.0)
-
-    student_by_id = {s.id: s for s in students}
-    alunos_out: List[Dict[str, Any]] = []
-    for fid in sorted(
-        failed_ids,
-        key=lambda x: (student_by_id.get(x).name or "") if student_by_id.get(x) else "",
-    ):
-        st = student_by_id.get(fid)
-        if not st:
-            continue
-        turma_nome = "N/A"
-        serie_nome = "N/A"
-        escola_nome = "N/A"
-        if st.class_:
-            turma_nome = st.class_.name or "N/A"
-            if st.class_.grade:
-                serie_nome = st.class_.grade.name or "N/A"
-            scid = getattr(st.class_, "school_id", None)
-            if scid and school_by_id and scid in school_by_id:
-                escola_nome = school_by_id[scid].name or "N/A"
-        alunos_out.append(
-            {
-                "id": str(st.id),
-                "nome": st.name or "N/A",
-                "escola": escola_nome,
-                "serie": serie_nome,
-                "turma": turma_nome,
-            }
-        )
-    return alunos_out, len(failed_ids), total_escopo
+    alunos_err, _, n_err, _, n_tot = digital_students_passed_vs_failed_for_bucket(
+        students, failed_by_skill, sk, school_by_id
+    )
+    return alunos_err, n_err, n_tot
 
 
 def _gabarito_answer_map(gabarito: AnswerSheetGabarito) -> Dict[int, str]:
@@ -329,8 +432,15 @@ def _question_num_to_subject_id(
 
 
 def _participating_answer_sheet_result(r: AnswerSheetResult) -> bool:
-    """Aluno com cartão corrigido e ao menos uma resposta detectada (exclui faltantes / folha em branco)."""
+    """Aluno com cartão corrigido e ao menos um sinal de participação.
+
+    Regra principal: excluir faltantes/folha em branco, mas evitar falso-negativo quando o pipeline
+    grava `classification/grade/proficiency` sem preencher `answered_questions/detected_answers`.
+    """
     if not r:
+        return False
+    # Se não há correção registrada, não considerar participante.
+    if getattr(r, "corrected_at", None) is None:
         return False
     if (r.answered_questions or 0) > 0:
         return True
@@ -340,6 +450,14 @@ def _participating_answer_sheet_result(r: AnswerSheetResult) -> bool:
             continue
         if str(v).strip():
             return True
+    # Fallback: alguns fluxos podem persistir apenas nota/classificação/proficiência.
+    if getattr(r, "classification", None):
+        if str(getattr(r, "classification", "")).strip():
+            return True
+    if getattr(r, "grade", None) is not None:
+        return True
+    if getattr(r, "proficiency", None) is not None:
+        return True
     return False
 
 
@@ -398,6 +516,7 @@ def build_skills_map_answer_sheet(
             "habilidades": [],
             "por_faixa": {FAIXA_ABAIXO: [], FAIXA_BASICO: [], FAIXA_ADEQUADO: [], FAIXA_AVANCADO: []},
             "_failed_by_skill": {},
+            "_students_all_count": 0,
         }
 
     blocks_config = getattr(gabarito, "blocks_config", None) or {}
@@ -435,6 +554,11 @@ def build_skills_map_answer_sheet(
                 except (TypeError, ValueError):
                     continue
 
+    # Fallback: quando o gabarito/topologia não trouxe "skills" por questão,
+    # tenta reaproveitar skills da prova vinculada (test_id) para não zerar o mapa.
+    if not any((q_skills.get(qn) or []) for qn in allowed_qn):
+        q_skills = _fallback_question_skills_from_test(getattr(gabarito, "test_id", None), allowed_qn)
+
     question_nums = sorted(allowed_qn & (set(q_skills.keys()) | set(gab_map.keys())))
     if not question_nums:
         question_nums = sorted(allowed_qn)
@@ -452,6 +576,7 @@ def build_skills_map_answer_sheet(
             "habilidades": [],
             "por_faixa": {FAIXA_ABAIXO: [], FAIXA_BASICO: [], FAIXA_ADEQUADO: [], FAIXA_AVANCADO: []},
             "_failed_by_skill": {},
+            "_students_all_count": 0,
         }
 
     students_all = (
@@ -541,6 +666,7 @@ def build_skills_map_answer_sheet(
         "por_faixa": por_faixa,
         "_failed_by_skill": {k: set(v) for k, v in failed_by_skill.items()},
         "_students_snapshot": students,
+        "_students_all_count": len(students_all),
     }
 
 
@@ -554,3 +680,16 @@ def answer_sheet_students_who_failed(
     key = _resolve_failed_bucket_key(failed_by_skill, skill_id, bloco_disciplina)
     adapted: Dict[str, Set[str]] = {key: failed_by_skill.get(key, set())}
     return digital_students_who_failed_skill(students, key, adapted, school_by_id)
+
+
+def answer_sheet_students_passed_vs_failed(
+    students: List[Student],
+    skill_id: str,
+    failed_by_skill: Dict[str, Set[str]],
+    school_by_id: Optional[Dict[str, Any]] = None,
+    bloco_disciplina: Optional[str] = None,
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], int, int, int]:
+    key = _resolve_failed_bucket_key(failed_by_skill, skill_id, bloco_disciplina)
+    return digital_students_passed_vs_failed_for_bucket(
+        students, failed_by_skill, key, school_by_id
+    )

@@ -14,6 +14,342 @@ from app.services.mobile.ddl import get_mobile_tables_ddl
 logger = logging.getLogger(__name__)
 
 
+def get_play_tv_tables_ddl(schema: str) -> str:
+    """
+    DDL idempotente das tabelas Play TV no schema city_xxx.
+    Usado por provision_city_schema, provision_play_tv_for_city_schema e scripts de manutenção.
+    """
+    return f"""
+CREATE TABLE IF NOT EXISTS "{schema}".play_tv_videos (
+    id VARCHAR PRIMARY KEY,
+    url VARCHAR NOT NULL,
+    title VARCHAR(100),
+    grade_id UUID NOT NULL REFERENCES public.grade(id),
+    subject_id VARCHAR NOT NULL REFERENCES public.subject(id),
+    created_by VARCHAR NOT NULL REFERENCES public.users(id),
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    entire_municipality BOOLEAN NOT NULL DEFAULT false
+);
+CREATE INDEX IF NOT EXISTS ix_play_tv_videos_grade_id ON "{schema}".play_tv_videos(grade_id);
+CREATE INDEX IF NOT EXISTS ix_play_tv_videos_subject_id ON "{schema}".play_tv_videos(subject_id);
+CREATE INDEX IF NOT EXISTS ix_play_tv_videos_created_by ON "{schema}".play_tv_videos(created_by);
+COMMENT ON TABLE "{schema}".play_tv_videos IS 'Play TV: vídeos do município (schema tenant)';
+
+CREATE TABLE IF NOT EXISTS "{schema}".play_tv_video_resources (
+    id VARCHAR PRIMARY KEY,
+    video_id VARCHAR NOT NULL REFERENCES "{schema}".play_tv_videos(id) ON DELETE CASCADE,
+    resource_type VARCHAR(20) NOT NULL,
+    title VARCHAR(200) NOT NULL,
+    url VARCHAR(2000),
+    minio_bucket VARCHAR(100),
+    minio_object_name VARCHAR(500),
+    original_filename VARCHAR(500),
+    content_type VARCHAR(200),
+    size_bytes BIGINT,
+    sort_order INTEGER NOT NULL DEFAULT 0,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT chk_play_tv_resource_type CHECK (resource_type IN ('link', 'file'))
+);
+CREATE INDEX IF NOT EXISTS ix_play_tv_video_resources_video_id ON "{schema}".play_tv_video_resources(video_id);
+COMMENT ON TABLE "{schema}".play_tv_video_resources IS 'Play TV: links e arquivos anexados ao vídeo';
+
+CREATE TABLE IF NOT EXISTS "{schema}".play_tv_video_schools (
+    id VARCHAR PRIMARY KEY,
+    video_id VARCHAR NOT NULL REFERENCES "{schema}".play_tv_videos(id) ON DELETE CASCADE,
+    school_id VARCHAR(36) REFERENCES "{schema}".school(id),
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+COMMENT ON TABLE "{schema}".play_tv_video_schools IS 'Vídeos do Play TV disponibilizados para escolas';
+
+CREATE TABLE IF NOT EXISTS "{schema}".play_tv_video_classes (
+    id VARCHAR PRIMARY KEY,
+    video_id VARCHAR NOT NULL REFERENCES "{schema}".play_tv_videos(id) ON DELETE CASCADE,
+    class_id UUID REFERENCES "{schema}".class(id),
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+COMMENT ON TABLE "{schema}".play_tv_video_classes IS 'Vídeos do Play TV disponibilizados para turmas';
+"""
+
+
+def get_calendar_tables_ddl(schema: str) -> str:
+    """DDL idempotente para estruturas do Calendar em schemas city_*."""
+    return f"""
+CREATE TABLE IF NOT EXISTS "{schema}".calendar_event_resources (
+    id VARCHAR PRIMARY KEY,
+    event_id VARCHAR REFERENCES "{schema}".calendar_events(id) ON DELETE CASCADE,
+    resource_type VARCHAR(20) NOT NULL,
+    title VARCHAR(200) NOT NULL,
+    url VARCHAR(2000),
+    minio_bucket VARCHAR(100),
+    minio_object_name VARCHAR(500),
+    original_filename VARCHAR(500),
+    content_type VARCHAR(200),
+    size_bytes BIGINT,
+    sort_order INTEGER NOT NULL DEFAULT 0,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT chk_calendar_event_resource_type CHECK (resource_type IN ('link', 'file'))
+);
+CREATE INDEX IF NOT EXISTS ix_calendar_event_resources_event_id ON "{schema}".calendar_event_resources(event_id);
+
+ALTER TABLE "{schema}".calendar_event_targets
+    ADD COLUMN IF NOT EXISTS target_filters JSON;
+
+DO $$
+BEGIN
+    BEGIN
+        ALTER TABLE "{schema}".calendar_event_targets
+            ALTER COLUMN target_id DROP NOT NULL;
+    EXCEPTION WHEN others THEN
+        NULL;
+    END;
+END $$;
+
+DO $$
+BEGIN
+    IF EXISTS (
+        SELECT 1
+        FROM information_schema.columns
+        WHERE table_schema = '{schema}'
+          AND table_name = 'calendar_event_targets'
+          AND column_name = 'target_type'
+    ) THEN
+        -- Permite ALL sem impor enum para compatibilidade entre ambientes.
+        -- Mantemos como VARCHAR e dados validados na aplicação.
+        NULL;
+    END IF;
+END $$;
+"""
+
+
+def provision_calendar_for_city_schema(schema_name: str) -> None:
+    """Aplica somente DDL do Calendar em um schema city_* existente (idempotente)."""
+    if not schema_name.replace("_", "").isalnum() or not schema_name.startswith("city_"):
+        raise ValueError(f"Nome de schema inválido: {schema_name}")
+
+    raw_conn = db.engine.raw_connection()
+    try:
+        raw_conn.set_isolation_level(0)
+        cursor = raw_conn.cursor()
+        cursor.execute(get_calendar_tables_ddl(schema_name))
+        logger.info("Calendar DDL aplicado em schema %s", schema_name)
+    except Exception as e:
+        logger.exception("Falha ao aplicar Calendar em %s: %s", schema_name, e)
+        raise
+    finally:
+        raw_conn.close()
+
+
+def provision_play_tv_for_city_schema(schema_name: str) -> None:
+    """
+    Aplica apenas o bloco DDL Play TV em um schema city_* já existente (idempotente).
+    Não altera public. Para realinhar FKs legadas de public.play_tv_videos, use
+    migrate_play_tv_fk_from_public_to_schema após copiar os dados necessários.
+    """
+    if not schema_name.replace("_", "").isalnum() or not schema_name.startswith("city_"):
+        raise ValueError(f"Nome de schema inválido: {schema_name}")
+
+    raw_conn = db.engine.raw_connection()
+    try:
+        raw_conn.set_isolation_level(0)
+        cursor = raw_conn.cursor()
+        cursor.execute(get_play_tv_tables_ddl(schema_name))
+        logger.info("Play TV DDL aplicado em schema %s", schema_name)
+    except Exception as e:
+        logger.exception("Falha ao aplicar Play TV em %s: %s", schema_name, e)
+        raise
+    finally:
+        raw_conn.close()
+
+
+def _play_tv_table_exists(cursor, schema: str, table: str) -> bool:
+    cursor.execute(
+        """
+        SELECT 1 FROM information_schema.tables
+        WHERE table_schema = %s AND table_name = %s
+        """,
+        (schema, table),
+    )
+    return cursor.fetchone() is not None
+
+
+def _play_tv_drop_public_video_fks(cursor, schema: str, table: str) -> int:
+    cursor.execute(
+        """
+        SELECT c.conname
+        FROM pg_constraint c
+        JOIN pg_class rel ON rel.oid = c.conrelid
+        JOIN pg_namespace n ON n.oid = rel.relnamespace
+        JOIN pg_class ref ON ref.oid = c.confrelid
+        JOIN pg_namespace rn ON rn.oid = ref.relnamespace
+        WHERE n.nspname = %s AND rel.relname = %s
+          AND c.contype = 'f'
+          AND ref.relname = 'play_tv_videos'
+          AND rn.nspname = 'public'
+        """,
+        (schema, table),
+    )
+    names = [row[0] for row in cursor.fetchall()]
+    for conname in names:
+        cursor.execute(
+            f'ALTER TABLE "{schema}"."{table}" DROP CONSTRAINT IF EXISTS "{conname}"'
+        )
+    return len(names)
+
+
+def migrate_play_tv_from_public_to_city_schema(schema_name: str) -> dict:
+    """
+    Para tenants com play_tv_video_schools/classes ainda referenciando public.play_tv_videos:
+    copia os vídeos usados para o schema local e recria FKs apontando para city_xxx.play_tv_videos.
+
+    Idempotente: se não houver FK para public, não altera linhas.
+    """
+    if not schema_name.replace("_", "").isalnum() or not schema_name.startswith("city_"):
+        raise ValueError(f"Nome de schema inválido: {schema_name}")
+
+    summary = {
+        "schema": schema_name,
+        "fks_dropped": 0,
+        "videos_copied": 0,
+        "fks_recreated": 0,
+        "skipped": False,
+    }
+
+    raw_conn = db.engine.raw_connection()
+    try:
+        raw_conn.set_isolation_level(0)
+        cursor = raw_conn.cursor()
+
+        if not _play_tv_table_exists(cursor, "public", "play_tv_videos"):
+            summary["skipped"] = True
+            summary["note"] = "public.play_tv_videos inexistente"
+            return summary
+
+        if not _play_tv_table_exists(cursor, schema_name, "play_tv_video_schools"):
+            summary["skipped"] = True
+            summary["note"] = "play_tv_video_schools inexistente neste schema"
+            return summary
+
+        try:
+            cursor.execute(
+                """
+                DO $$ BEGIN
+                    ALTER TABLE public.play_tv_videos
+                    ADD COLUMN entire_municipality BOOLEAN NOT NULL DEFAULT false;
+                EXCEPTION
+                    WHEN duplicate_column THEN NULL;
+                END $$;
+                """
+            )
+        except Exception:
+            logger.debug("Coluna entire_municipality em public.play_tv_videos já existe ou erro ignorado")
+
+        cursor.execute(
+            f"""
+            SELECT 1 FROM pg_constraint c
+            JOIN pg_class rel ON rel.oid = c.conrelid
+            JOIN pg_namespace n ON n.oid = rel.relnamespace
+            JOIN pg_class ref ON ref.oid = c.confrelid
+            JOIN pg_namespace rn ON rn.oid = ref.relnamespace
+            WHERE n.nspname = %s AND rel.relname = 'play_tv_video_schools'
+              AND c.contype = 'f' AND ref.relname = 'play_tv_videos'
+              AND rn.nspname = %s
+            LIMIT 1
+            """,
+            (schema_name, schema_name),
+        )
+        if cursor.fetchone():
+            summary["skipped"] = True
+            summary["note"] = "FKs já apontam para o schema local"
+            return summary
+
+        cursor.execute(
+            f"""
+            SELECT 1 FROM pg_constraint c
+            JOIN pg_class rel ON rel.oid = c.conrelid
+            JOIN pg_namespace n ON n.oid = rel.relnamespace
+            JOIN pg_class ref ON ref.oid = c.confrelid
+            JOIN pg_namespace rn ON rn.oid = ref.relnamespace
+            WHERE n.nspname = %s AND rel.relname = 'play_tv_video_schools'
+              AND c.contype = 'f' AND ref.relname = 'play_tv_videos'
+              AND rn.nspname = 'public'
+            LIMIT 1
+            """,
+            (schema_name,),
+        )
+        if not cursor.fetchone():
+            summary["skipped"] = True
+            summary["note"] = "Sem FK legada para public.play_tv_videos; nada a migrar"
+            return summary
+
+        dropped = 0
+        for tbl in ("play_tv_video_schools", "play_tv_video_classes"):
+            if _play_tv_table_exists(cursor, schema_name, tbl):
+                dropped += _play_tv_drop_public_video_fks(cursor, schema_name, tbl)
+        summary["fks_dropped"] = dropped
+        if dropped == 0:
+            raise RuntimeError(
+                f"Esperava FK para public.play_tv_videos em {schema_name} mas nenhuma constraint foi removida"
+            )
+
+        cursor.execute(
+            """
+            SELECT 1 FROM information_schema.columns
+            WHERE table_schema = 'public' AND table_name = 'play_tv_videos'
+              AND column_name = 'entire_municipality'
+            """
+        )
+        has_em = cursor.fetchone() is not None
+        em_expr = "COALESCE(v.entire_municipality, false)" if has_em else "false"
+
+        vid_union = f'SELECT video_id FROM "{schema_name}".play_tv_video_schools'
+        if _play_tv_table_exists(cursor, schema_name, "play_tv_video_classes"):
+            vid_union += f' UNION SELECT video_id FROM "{schema_name}".play_tv_video_classes'
+
+        insert_sql = f"""
+            INSERT INTO "{schema_name}".play_tv_videos (
+                id, url, title, grade_id, subject_id, created_by,
+                created_at, updated_at, entire_municipality
+            )
+            SELECT v.id, v.url, v.title, v.grade_id, v.subject_id, v.created_by,
+                   v.created_at, v.updated_at, {em_expr}
+            FROM public.play_tv_videos v
+            WHERE v.id IN ({vid_union})
+            ON CONFLICT (id) DO NOTHING
+        """
+        cursor.execute(insert_sql)
+        summary["videos_copied"] = cursor.rowcount
+
+        for tbl in ("play_tv_video_schools", "play_tv_video_classes"):
+            if not _play_tv_table_exists(cursor, schema_name, tbl):
+                continue
+            try:
+                cursor.execute(
+                    f"""
+                    ALTER TABLE "{schema_name}"."{tbl}"
+                    ADD CONSTRAINT {tbl}_video_id_fkey
+                    FOREIGN KEY (video_id)
+                    REFERENCES "{schema_name}".play_tv_videos(id)
+                    ON DELETE CASCADE
+                    """
+                )
+                summary["fks_recreated"] += 1
+            except Exception as ex:
+                err = str(ex).lower()
+                if "already exists" in err or "duplicate" in err:
+                    logger.info("Constraint %s_video_id_fkey já existe em %s", tbl, schema_name)
+                else:
+                    raise
+
+        logger.info("Play TV migrado public→%s: %s", schema_name, summary)
+        return summary
+    except Exception as e:
+        logger.exception("migrate_play_tv_from_public %s: %s", schema_name, e)
+        raise
+    finally:
+        raw_conn.close()
+
+
 def provision_city_schema(city_id: str, city_name: str, city_state: str) -> None:
     """
     Cria o schema city_<id> e todas as tabelas operacionais para o município.
@@ -55,6 +391,7 @@ def provision_city_schema(city_id: str, city_name: str, city_state: str) -> None
 
 def _get_city_tables_ddl(schema: str) -> str:
     """Retorna o SQL de criação das tabelas do schema city (mesmo conteúdo da migração 0001)."""
+    play_tv_block = get_play_tv_tables_ddl(schema)
     # Uso de {schema} único; literais JSON como '{{}}' para .format()
     return f"""
 CREATE TABLE IF NOT EXISTS "{schema}".school (
@@ -519,10 +856,29 @@ CREATE TABLE IF NOT EXISTS "{schema}".calendar_event_targets (
     id VARCHAR PRIMARY KEY,
     event_id VARCHAR REFERENCES "{schema}".calendar_events(id),
     target_type VARCHAR NOT NULL,
-    target_id VARCHAR NOT NULL,
+    target_id VARCHAR,
+    target_filters JSON,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 COMMENT ON TABLE "{schema}".calendar_event_targets IS 'Alvos de eventos de calendário';
+
+CREATE TABLE IF NOT EXISTS "{schema}".calendar_event_resources (
+    id VARCHAR PRIMARY KEY,
+    event_id VARCHAR REFERENCES "{schema}".calendar_events(id) ON DELETE CASCADE,
+    resource_type VARCHAR(20) NOT NULL,
+    title VARCHAR(200) NOT NULL,
+    url VARCHAR(2000),
+    minio_bucket VARCHAR(100),
+    minio_object_name VARCHAR(500),
+    original_filename VARCHAR(500),
+    content_type VARCHAR(200),
+    size_bytes BIGINT,
+    sort_order INTEGER NOT NULL DEFAULT 0,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT chk_calendar_event_resource_type CHECK (resource_type IN ('link', 'file'))
+);
+CREATE INDEX IF NOT EXISTS ix_calendar_event_resources_event_id ON "{schema}".calendar_event_resources(event_id);
+COMMENT ON TABLE "{schema}".calendar_event_resources IS 'Links e arquivos anexados a eventos do calendário';
 
 CREATE TABLE IF NOT EXISTS "{schema}".calendar_event_users (
     id VARCHAR PRIMARY KEY,
@@ -707,23 +1063,7 @@ CREATE TABLE IF NOT EXISTS "{schema}".form_result_cache (
 COMMENT ON TABLE "{schema}".form_result_cache IS 'Cache de resultados de formulários';
 CREATE INDEX IF NOT EXISTS idx_form_result_cache_form_type ON "{schema}".form_result_cache(form_id, report_type);
 CREATE INDEX IF NOT EXISTS idx_form_result_cache_dirty ON "{schema}".form_result_cache(is_dirty);
-
-CREATE TABLE IF NOT EXISTS "{schema}".play_tv_video_schools (
-    id VARCHAR PRIMARY KEY,
-    video_id VARCHAR REFERENCES public.play_tv_videos(id),
-    school_id VARCHAR(36) REFERENCES "{schema}".school(id),
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-);
-COMMENT ON TABLE "{schema}".play_tv_video_schools IS 'Vídeos do Play TV disponibilizados para escolas';
-
-CREATE TABLE IF NOT EXISTS "{schema}".play_tv_video_classes (
-    id VARCHAR PRIMARY KEY,
-    video_id VARCHAR REFERENCES public.play_tv_videos(id),
-    class_id UUID REFERENCES "{schema}".class(id),
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-);
-COMMENT ON TABLE "{schema}".play_tv_video_classes IS 'Vídeos do Play TV disponibilizados para turmas';
-
+""" + play_tv_block + f"""
 CREATE TABLE IF NOT EXISTS "{schema}".plantao_schools (
     id VARCHAR PRIMARY KEY,
     plantao_id VARCHAR REFERENCES public.plantao_online(id),

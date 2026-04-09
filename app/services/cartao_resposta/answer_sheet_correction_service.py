@@ -306,12 +306,14 @@ class AnswerSheetCorrectionService:
                 existing_result.answered_questions = correction.get('answered', 0)
                 existing_result.score_percentage = correction.get('score_percentage', 0.0)
                 existing_result.grade = grade
-                existing_result.proficiency = proficiency if proficiency > 0 else None
+                existing_result.proficiency = proficiency
                 existing_result.classification = classification
                 existing_result.proficiency_by_subject = proficiency_by_subject
                 existing_result.corrected_at = datetime.utcnow()
                 existing_result.detection_method = 'geometric'
                 
+                db.session.flush()
+                payload = existing_result.to_dict()
                 db.session.commit()
                 try:
                     from app.report_analysis.answer_sheet_aggregate_service import (
@@ -323,7 +325,7 @@ class AnswerSheetCorrectionService:
                     )
                 except Exception as inv_err:
                     self.logger.warning("Invalidate answer_sheet report cache: %s", inv_err)
-                return existing_result.to_dict()
+                return payload
             else:
                 # Criar novo
                 result = AnswerSheetResult(
@@ -337,13 +339,15 @@ class AnswerSheetCorrectionService:
                     answered_questions=correction.get('answered', 0),
                     score_percentage=correction.get('score_percentage', 0.0),
                     grade=grade,
-                    proficiency=proficiency if proficiency > 0 else None,
+                    proficiency=proficiency,
                     classification=classification,
                     proficiency_by_subject=proficiency_by_subject,
                     detection_method='geometric'
                 )
                 
                 db.session.add(result)
+                db.session.flush()
+                payload = result.to_dict()
                 db.session.commit()
                 try:
                     from app.report_analysis.answer_sheet_aggregate_service import (
@@ -355,7 +359,7 @@ class AnswerSheetCorrectionService:
                     )
                 except Exception as inv_err:
                     self.logger.warning("Invalidate answer_sheet report cache: %s", inv_err)
-                return result.to_dict()
+                return payload
                 
         except Exception as e:
             db.session.rollback()

@@ -147,6 +147,68 @@ def _question_skills_map_from_gabarito(gabarito: AnswerSheetGabarito) -> Dict[in
     return out
 
 
+def question_skills_map_for_answer_sheet(gabarito: AnswerSheetGabarito) -> Dict[int, List[str]]:
+    """
+    Mapa questão (1..N) -> IDs de habilidade (UUID em public.skills).
+    Usa topologia do gabarito; para questões sem skills na topologia, preenche pela ordem
+    das questões da prova vinculada (test_id), campo skill (UUID ou código BNCC).
+    """
+    from uuid import UUID
+
+    from app.models.skill import Skill
+    from app.utils.question_helpers import get_questions_from_test
+
+    out: Dict[int, List[str]] = {k: list(v) for k, v in _question_skills_map_from_gabarito(gabarito).items()}
+    tid = getattr(gabarito, "test_id", None)
+    if not tid:
+        return out
+
+    questions = get_questions_from_test(str(tid), order_by_test_question=True)
+    if not questions:
+        return out
+
+    qnums = ordered_question_numbers_for_gabarito(gabarito)
+    if not qnums:
+        qnums = list(range(1, len(questions) + 1))
+
+    def skill_field_to_uuid_list(raw: Any) -> List[str]:
+        if raw is None:
+            return []
+        s = str(raw).strip()
+        if not s:
+            return []
+        result: List[str] = []
+        seen: Set[str] = set()
+        for part in s.split(","):
+            token = part.strip().replace("{", "").replace("}", "")
+            if not token:
+                continue
+            try:
+                uid = str(UUID(token))
+            except ValueError:
+                sk = Skill.query.filter(Skill.code == token).first()
+                if not sk:
+                    sk = Skill.query.filter(
+                        func.lower(Skill.code) == (token.lower() if token else "")
+                    ).first()
+                uid = str(sk.id) if sk else ""
+            if uid and uid not in seen:
+                seen.add(uid)
+                result.append(uid)
+        return result
+
+    for qn in qnums:
+        if out.get(qn):
+            continue
+        idx = qn - 1
+        if 0 <= idx < len(questions):
+            ids = skill_field_to_uuid_list(getattr(questions[idx], "skill", None))
+            if ids:
+                out[qn] = ids
+
+    return out
+
+
 def _fetch_results_scoped(
     gabarito_id: str, scope_type: str, scope_ref_id: Optional[str]
 ) -> List[AnswerSheetResult]:
@@ -817,7 +879,7 @@ def _build_proficiencia_nota(
 
 def empty_answer_sheet_payload(gabarito: AnswerSheetGabarito, scope_type: str, scope_ref_id: Optional[str]) -> Dict[str, Any]:
     """Payload mínimo quando não há resultados no escopo (relatório vazio)."""
-    q_skills = _question_skills_map_from_gabarito(gabarito)
+    q_skills = question_skills_map_for_answer_sheet(gabarito)
     acertos_empty = _build_acertos_por_habilidade([], gabarito, q_skills)
     avaliacao_data = {
         "id": str(gabarito.id),
@@ -880,7 +942,7 @@ def build_answer_sheet_report_payload(
             school_ids.add(str(st.class_.school_id))
     school_names = _school_name_map_from_ids(school_ids)
 
-    q_skills = _question_skills_map_from_gabarito(gab)
+    q_skills = question_skills_map_for_answer_sheet(gab)
     acertos = _build_acertos_por_habilidade(results or [], gab, q_skills)
     total_alunos = _build_total_alunos(results, school_names, target_classes, counts)
     niveis = _build_niveis(results, school_names, target_classes)

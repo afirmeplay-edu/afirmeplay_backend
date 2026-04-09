@@ -5435,13 +5435,15 @@ class AnswerSheetCorrectionN:
                 existing_result.answered_questions = correction.get('answered', 0)
                 existing_result.score_percentage = correction.get('score_percentage', 0.0)
                 existing_result.grade = grade
-                existing_result.proficiency = proficiency if proficiency > 0 else None
+                existing_result.proficiency = proficiency
                 existing_result.classification = classification
                 existing_result.corrected_at = datetime.utcnow()
                 existing_result.detection_method = 'geometric_n'
                 
+                db.session.flush()
+                payload = existing_result.to_dict()
                 db.session.commit()
-                return existing_result.to_dict()
+                return payload
             else:
                 # Criar novo
                 result = AnswerSheetResult(
@@ -5455,14 +5457,16 @@ class AnswerSheetCorrectionN:
                     answered_questions=correction.get('answered', 0),
                     score_percentage=correction.get('score_percentage', 0.0),
                     grade=grade,
-                    proficiency=proficiency if proficiency > 0 else None,
+                    proficiency=proficiency,
                     classification=classification,
                     detection_method='geometric_n'
                 )
                 
                 db.session.add(result)
+                db.session.flush()
+                payload = result.to_dict()
                 db.session.commit()
-                return result.to_dict()
+                return payload
                 
         except Exception as e:
             db.session.rollback()

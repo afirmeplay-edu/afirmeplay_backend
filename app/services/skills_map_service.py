@@ -20,7 +20,7 @@ from app.models.student import Student
 from app.models.studentAnswer import StudentAnswer
 from app.models.studentClass import Class
 from app.models.testQuestion import TestQuestion
-from app.report_analysis.answer_sheet_report_builder import _question_skills_map_from_gabarito
+from app.report_analysis.answer_sheet_report_builder import question_skills_map_for_answer_sheet
 from app.services.cartao_resposta.proficiency_by_subject import _extract_blocks_with_questions
 from app.services.evaluation_result_service import EvaluationResultService
 from app.utils.decimal_helpers import round_to_two_decimals
@@ -413,7 +413,7 @@ def build_skills_map_answer_sheet(
     ]
     nome_por_disciplina = {str(b["id"]): (b.get("nome") or "Outras") for b in disciplinas_config}
 
-    q_skills = _question_skills_map_from_gabarito(gabarito)
+    q_skills = question_skills_map_for_answer_sheet(gabarito)
     question_to_subject = _question_num_to_subject_id(disciplinas_config, gab_map)
 
     allowed_qn: Set[int] = set()

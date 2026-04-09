@@ -2879,6 +2879,64 @@ def _calcular_resultados_por_disciplina_cartao(scope_info, nivel_granularidade, 
     return out
 
 
+def _build_question_skill_lookup_for_detailed_table(
+    gabarito: AnswerSheetGabarito,
+) -> Tuple[Dict[int, List[str]], Dict[str, Dict[str, str]]]:
+    """
+    Mapa questão -> lista de UUIDs (topology + fallback test_id) e
+    UUID normalizado -> {id, code} para a tabela detalhada de resultados agregados.
+    """
+    from app.report_analysis.answer_sheet_report_builder import question_skills_map_for_answer_sheet
+
+    q_map = question_skills_map_for_answer_sheet(gabarito)
+    uuids_ordered = []
+    seen = set()
+    for lst in q_map.values():
+        for sid in lst or []:
+            t = str(sid).strip()
+            if not t:
+                continue
+            try:
+                u = uuid.UUID(t)
+            except ValueError:
+                continue
+            us = str(u)
+            if us not in seen:
+                seen.add(us)
+                uuids_ordered.append(u)
+    skill_by_uuid: Dict[str, Dict[str, str]] = {}
+    if uuids_ordered:
+        rows = Skill.query.filter(Skill.id.in_(uuids_ordered)).all()
+        for sk in rows:
+            skill_by_uuid[str(sk.id)] = {
+                "id": str(sk.id),
+                "code": (sk.code or "").strip() or "N/A",
+            }
+    return q_map, skill_by_uuid
+
+
+def _skills_payload_for_question_number(
+    q_num: int,
+    q_map: Dict[int, List[str]],
+    skill_by_uuid: Dict[str, Dict[str, str]],
+) -> List[Dict[str, str]]:
+    """Lista de {id, code} por questão; N/A se token inválido ou habilidade inexistente no banco."""
+    na = {"id": "N/A", "code": "N/A"}
+    out: List[Dict[str, str]] = []
+    for raw in q_map.get(q_num) or []:
+        t = str(raw).strip()
+        if not t:
+            continue
+        try:
+            uid = str(uuid.UUID(t))
+        except ValueError:
+            out.append(na.copy())
+            continue
+        row = skill_by_uuid.get(uid)
+        out.append(dict(row) if row else na.copy())
+    return out
+
+
 def _gerar_tabela_detalhada_cartao(scope_info, nivel_granularidade, gabarito_id, user, periodo_bounds=None):
     """Tabela detalhada no mesmo formato de evaluation_results: disciplinas (com questões e alunos com respostas_por_questao) e geral (alunos com totais e proficiência geral)."""
     import json
@@ -2917,6 +2975,7 @@ def _gerar_tabela_detalhada_cartao(scope_info, nivel_granularidade, gabarito_id,
             schools_by_id[c.school_id] = School.query.get(c.school_id)
     students = Student.query.filter(Student.id.in_(student_ids)).all()
     grade_name = gabarito.grade_name or ''
+    q_skills_map, skill_by_uuid = _build_question_skill_lookup_for_detailed_table(gabarito)
 
     def build_respostas_por_questao(question_numbers, detected_answers):
         respostas = []
@@ -2928,7 +2987,8 @@ def _gerar_tabela_detalhada_cartao(scope_info, nivel_granularidade, gabarito_id,
                 "questao": q_num,
                 "acertou": acertou,
                 "respondeu": resp is not None,
-                "resposta": str(resp) if resp is not None else None
+                "resposta": str(resp) if resp is not None else None,
+                "skills": _skills_payload_for_question_number(q_num, q_skills_map, skill_by_uuid),
             })
         return respostas
 
@@ -2937,7 +2997,13 @@ def _gerar_tabela_detalhada_cartao(scope_info, nivel_granularidade, gabarito_id,
         subject_id = disc_cfg.get('id', '')
         subject_name = disc_cfg.get('nome', 'Outras')
         q_numbers = disc_cfg.get('question_numbers', [])
-        questoes = [{"numero": q} for q in sorted(q_numbers)]
+        questoes = [
+            {
+                "numero": q,
+                "skills": _skills_payload_for_question_number(q, q_skills_map, skill_by_uuid),
+            }
+            for q in sorted(q_numbers)
+        ]
         alunos_disciplina = []
         for s in students:
             r = result_by_student.get(s.id)

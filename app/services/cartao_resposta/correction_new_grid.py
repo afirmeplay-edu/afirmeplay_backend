@@ -2330,7 +2330,7 @@ class AnswerSheetCorrectionNewGrid:
                 existing_result.answered_questions = correction.get('total_questions', 0) - correction.get('blank_answers', 0)
                 existing_result.score_percentage = correction.get('score', 0.0)
                 existing_result.grade = grade
-                existing_result.proficiency = proficiency if proficiency > 0 else None
+                existing_result.proficiency = proficiency
                 existing_result.classification = classification
                 existing_result.proficiency_by_subject = proficiency_by_subject
                 existing_result.corrected_at = datetime.utcnow()
@@ -2364,7 +2364,7 @@ class AnswerSheetCorrectionNewGrid:
                     answered_questions=correction.get('total_questions', 0) - correction.get('blank_answers', 0),
                     score_percentage=correction.get('score', 0.0),
                     grade=grade,
-                    proficiency=proficiency if proficiency > 0 else None,
+                    proficiency=proficiency,
                     classification=classification,
                     proficiency_by_subject=proficiency_by_subject,
                     detection_method='new_grid'

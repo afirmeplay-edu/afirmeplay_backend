@@ -29,6 +29,7 @@ from app.report_analysis.answer_sheet_report_builder import (
     answer_sheet_total_question_count,
     get_answer_sheet_target_classes_for_report,
     ordered_question_numbers_for_gabarito,
+    question_skills_map_for_answer_sheet,
 )
 
 REPORT_ENTITY_ANSWER_SHEET = "answer_sheet"
@@ -813,7 +814,7 @@ def build_answer_sheet_relatorio_detalhado_json(
     from app.models.skill import Skill
     from app.models.test import Test
 
-    q_skills = _question_skills_map_from_gabarito(gab)
+    q_skills = question_skills_map_for_answer_sheet(gab)
     correct_json = gab.correct_answers or {}
     if isinstance(correct_json, str):
         import json
@@ -1023,24 +1024,13 @@ def collect_skill_ids_from_gabarito_topology(gab: AnswerSheetGabarito) -> List[s
 
 def collect_skill_ids_for_answer_sheet_gabarito(gab: AnswerSheetGabarito) -> List[str]:
     """
-    Habilidades do cartão: primeiro topology (blocks_config), depois questões da prova vinculada (test_id).
-    Muitos gabaritos não repetem skills em cada questão da topology; a prova costuma ser a fonte.
+    IDs de habilidade (UUID) para o gabarito: topologia + fallback pela prova (test_id),
+    alinhado ao mapa usado em relatórios.
     """
-    ids = collect_skill_ids_from_gabarito_topology(gab)
-    if ids:
-        return ids
-    tid = getattr(gab, "test_id", None)
-    if not tid:
-        return []
-    from app.utils.question_helpers import get_questions_from_test
-
-    skills_set: Set[str] = set()
-    for question in get_questions_from_test(str(tid), order_by_test_question=True):
-        raw = getattr(question, "skill", None) or ""
-        if not raw:
-            continue
-        for part in str(raw).split(","):
-            code = part.strip().replace("{", "").replace("}", "")
-            if code:
-                skills_set.add(code)
-    return sorted(skills_set)
+    m = question_skills_map_for_answer_sheet(gab)
+    ids: Set[str] = set()
+    for lst in m.values():
+        for sid in lst or []:
+            if sid:
+                ids.add(str(sid).strip())
+    return sorted(ids)

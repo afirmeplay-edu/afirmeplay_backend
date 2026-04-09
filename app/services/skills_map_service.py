@@ -89,6 +89,80 @@ def _fetch_skills_batch(skill_ids: Set[str]) -> Dict[str, Skill]:
     return {str(s.id): s for s in rows}
 
 
+def _extract_skill_ids_from_question_field(raw_skill: Any) -> List[str]:
+    """Extrai IDs/códigos de habilidade do campo `Question.skill` (string/lista/json)."""
+    if raw_skill is None:
+        return []
+
+    values: List[str] = []
+    if isinstance(raw_skill, list):
+        values = [str(x) for x in raw_skill if x]
+    else:
+        s = str(raw_skill).strip()
+        if not s:
+            return []
+        if s.startswith("[") and s.endswith("]"):
+            try:
+                parsed = json.loads(s)
+                if isinstance(parsed, list):
+                    values = [str(x) for x in parsed if x]
+                else:
+                    values = [s]
+            except Exception:
+                values = [s]
+        else:
+            # Historicamente pode vir "id1,id2" ou único valor.
+            values = [p.strip() for p in s.split(",") if p and p.strip()]
+
+    out: List[str] = []
+    seen: Set[str] = set()
+    for v in values:
+        clean = _clean_skill_id(v)
+        if not clean:
+            continue
+        if clean not in seen:
+            out.append(clean)
+            seen.add(clean)
+    return out
+
+
+def _fallback_question_skills_from_test(
+    test_id: Optional[str], allowed_qn: Set[int]
+) -> Dict[int, List[str]]:
+    """Fallback para mapa de questões→habilidades via prova vinculada ao gabarito."""
+    if not test_id:
+        return {}
+
+    test_questions = (
+        TestQuestion.query.filter_by(test_id=test_id)
+        .join(Question)
+        .options(joinedload(TestQuestion.question))
+        .order_by(TestQuestion.order)
+        .all()
+    )
+    if not test_questions:
+        return {}
+
+    out: Dict[int, List[str]] = {}
+    for idx, tq in enumerate(test_questions, start=1):
+        qn = idx
+        try:
+            if tq.order is not None:
+                qn = int(tq.order)
+        except (TypeError, ValueError):
+            qn = idx
+
+        if allowed_qn and qn not in allowed_qn:
+            continue
+        q = tq.question
+        if not q:
+            continue
+        sids = _extract_skill_ids_from_question_field(getattr(q, "skill", None))
+        if sids:
+            out[qn] = sids
+    return out
+
+
 def build_disciplinas_e_questoes_digital(
     test_id: str,
     subject_id_filter: Optional[str],
@@ -358,8 +432,15 @@ def _question_num_to_subject_id(
 
 
 def _participating_answer_sheet_result(r: AnswerSheetResult) -> bool:
-    """Aluno com cartão corrigido e ao menos uma resposta detectada (exclui faltantes / folha em branco)."""
+    """Aluno com cartão corrigido e ao menos um sinal de participação.
+
+    Regra principal: excluir faltantes/folha em branco, mas evitar falso-negativo quando o pipeline
+    grava `classification/grade/proficiency` sem preencher `answered_questions/detected_answers`.
+    """
     if not r:
+        return False
+    # Se não há correção registrada, não considerar participante.
+    if getattr(r, "corrected_at", None) is None:
         return False
     if (r.answered_questions or 0) > 0:
         return True
@@ -369,6 +450,14 @@ def _participating_answer_sheet_result(r: AnswerSheetResult) -> bool:
             continue
         if str(v).strip():
             return True
+    # Fallback: alguns fluxos podem persistir apenas nota/classificação/proficiência.
+    if getattr(r, "classification", None):
+        if str(getattr(r, "classification", "")).strip():
+            return True
+    if getattr(r, "grade", None) is not None:
+        return True
+    if getattr(r, "proficiency", None) is not None:
+        return True
     return False
 
 
@@ -464,6 +553,11 @@ def build_skills_map_answer_sheet(
                     allowed_qn.add(int(x))
                 except (TypeError, ValueError):
                     continue
+
+    # Fallback: quando o gabarito/topologia não trouxe "skills" por questão,
+    # tenta reaproveitar skills da prova vinculada (test_id) para não zerar o mapa.
+    if not any((q_skills.get(qn) or []) for qn in allowed_qn):
+        q_skills = _fallback_question_skills_from_test(getattr(gabarito, "test_id", None), allowed_qn)
 
     question_nums = sorted(allowed_qn & (set(q_skills.keys()) | set(gab_map.keys())))
     if not question_nums:

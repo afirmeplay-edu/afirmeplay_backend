@@ -7,26 +7,16 @@ e calcular proficiência e classificação por disciplina e média geral.
 
 import logging
 from typing import Dict, List, Any, Tuple, Optional
+from app.services.cartao_resposta.course_name_resolver import infer_course_name_from_grade
 
 logger = logging.getLogger(__name__)
 
 
 def _get_course_name_from_grade(grade_name: str) -> str:
-    """Inferir nome do curso a partir do grade_name do gabarito."""
-    grade_lower = (grade_name or '').lower()
-    if any(x in grade_lower for x in ['infantil', 'pré', 'pre']):
-        return 'Educação Infantil'
-    if any(x in grade_lower for x in ['1º', '2º', '3º', '4º', '5º', 'anos iniciais']):
-        return 'Anos Iniciais'
-    if any(x in grade_lower for x in ['6º', '7º', '8º', '9º', 'anos finais']):
-        return 'Anos Finais'
-    if any(x in grade_lower for x in ['1º médio', '2º médio', '3º médio', 'ensino médio']):
-        return 'Ensino Médio'
-    if 'especial' in grade_lower:
-        return 'Educação Especial'
-    if 'eja' in grade_lower:
-        return 'EJA'
-    return 'Anos Iniciais'
+    """
+    Compatibilidade retroativa: mantém API antiga usada por rotas.
+    """
+    return infer_course_name_from_grade(grade_name)
 
 
 def _resolve_subject_name(subject_id: str, subject_name: Optional[str]) -> str:
@@ -66,7 +56,7 @@ def calcular_proficiencia_por_disciplina(
     """
     from app.services.evaluation_calculator import EvaluationCalculator
 
-    course_name = _get_course_name_from_grade(grade_name)
+    course_name = infer_course_name_from_grade(grade_name)
     proficiency_by_subject = {}
     blocks = _extract_blocks_with_questions(blocks_config)
     if not blocks:
@@ -84,7 +74,7 @@ def calcular_proficiencia_por_disciplina(
             )
             grade = EvaluationCalculator.calculate_grade(
                 prof, course_name, subject_name,
-                use_simple_calculation=True, correct_answers=correct, total_questions=total
+                use_simple_calculation=False
             )
             proficiency_by_subject['geral'] = {
                 'subject_name': subject_name,
@@ -129,7 +119,7 @@ def calcular_proficiencia_por_disciplina(
         )
         grade = EvaluationCalculator.calculate_grade(
             proficiency, course_name, subject_name,
-            use_simple_calculation=True, correct_answers=correct, total_questions=total
+            use_simple_calculation=False
         )
         proficiency_by_subject[subject_id] = {
             'subject_name': subject_name,

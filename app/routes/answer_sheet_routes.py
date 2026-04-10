@@ -544,7 +544,7 @@ def generate_answer_sheets():
 
             municipality_for_pdf = gabarito.municipality or ''
             state_for_pdf = gabarito.state or ''
-            grade_name_for_pdf = gabarito.grade_name or ''
+            grade_name_for_pdf = gabarito.grade_name or gabarito.title or ''
             if not municipality_for_pdf or not state_for_pdf:
                 city_obj = City.query.get(city_id_scope)
                 if city_obj:
@@ -1454,7 +1454,7 @@ def list_gabaritos():
                 "class_id": str(gabarito.class_id) if gabarito.class_id else None,
                 "class_name": class_name,
                 "grade_id": str(gabarito.grade_id) if gabarito.grade_id else None,
-                "grade_name": grade_name or gabarito.grade_name or "",
+                "grade_name": grade_name or gabarito.grade_name or gabarito.title or "",
                 "num_questions": gabarito.num_questions,
                 "use_blocks": gabarito.use_blocks,
                 "title": gabarito.title,
@@ -2819,7 +2819,7 @@ def _calcular_resultados_por_disciplina_cartao(scope_info, nivel_granularidade, 
     if not results:
         return []
     gabarito = AnswerSheetGabarito.query.get(gabarito_id)
-    grade_name = (gabarito.grade_name or '') if gabarito else ''
+    grade_name = (gabarito.grade_name or gabarito.title or '') if gabarito else ''
     from app.services.cartao_resposta.proficiency_by_subject import _get_course_name_from_grade
     course_name = _get_course_name_from_grade(grade_name)
     # Agregar por disciplina a partir de proficiency_by_subject
@@ -2974,7 +2974,10 @@ def _gerar_tabela_detalhada_cartao(scope_info, nivel_granularidade, gabarito_id,
         if c.school_id and c.school_id not in schools_by_id:
             schools_by_id[c.school_id] = School.query.get(c.school_id)
     students = Student.query.filter(Student.id.in_(student_ids)).all()
-    grade_name = gabarito.grade_name or ''
+    grade_name = gabarito.grade_name or gabarito.title or ''
+    from app.services.cartao_resposta.proficiency_by_subject import _get_course_name_from_grade
+    from app.services.evaluation_calculator import EvaluationCalculator
+    course_name = _get_course_name_from_grade(grade_name)
     q_skills_map, skill_by_uuid = _build_question_skill_lookup_for_detailed_table(gabarito)
 
     def build_respostas_por_questao(question_numbers, detected_answers):
@@ -3032,11 +3035,13 @@ def _gerar_tabela_detalhada_cartao(scope_info, nivel_granularidade, gabarito_id,
             disc_data = (pbs or {}).get(str(subject_id), pbs.get(subject_id, {}))
             disciplina_proficiencia = disc_data.get('proficiency') if isinstance(disc_data, dict) else (r.proficiency if r else 0)
             disciplina_classificacao = disc_data.get('classification') if isinstance(disc_data, dict) else (r.classification if r else None)
-            # Nota por disciplina: calcular a partir dos acertos do bloco (mesma base de respostas_por_questao).
-            # proficiency_by_subject.grade às vezes foi gravado com a nota geral — não priorizar o JSON.
-            nq = len(q_numbers)
-            if nq > 0:
-                disciplina_nota = (total_acertos / nq) * 10.0
+            if isinstance(disc_data, dict) and disc_data.get('proficiency') is not None:
+                disciplina_nota = EvaluationCalculator.calculate_grade(
+                    proficiency=float(disc_data['proficiency']),
+                    course_name=course_name,
+                    subject_name=subject_name,
+                    use_simple_calculation=False,
+                )
             elif isinstance(disc_data, dict) and disc_data.get('grade') is not None:
                 disciplina_nota = float(disc_data['grade'])
             else:

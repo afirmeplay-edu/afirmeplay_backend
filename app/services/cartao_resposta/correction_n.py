@@ -492,7 +492,7 @@ class AnswerSheetCorrectionN:
                 'municipality': gabarito_obj.municipality or '',
                 'state': gabarito_obj.state or '',
                 'institution': gabarito_obj.institution or '',
-                'grade_name': gabarito_obj.grade_name or ''
+                'grade_name': gabarito_obj.grade_name or gabarito_obj.title or ''
             }
             
             # Configuração de blocos
@@ -1209,12 +1209,22 @@ class AnswerSheetCorrectionN:
             correct_count = correction['correct']
             total_count = correction['total_questions']
             percentage = correction['score_percentage']
-            grade = (correct_count / total_count * 10) if total_count > 0 else 0.0
+            grade = 0.0
             
             proficiency, classification = self._calcular_proficiencia_classificacao(
                 correct_answers=correct_count,
                 total_questions=total_count,
                 gabarito_obj=gabarito_obj
+            )
+            from app.services.cartao_resposta.course_name_resolver import infer_course_name_from_grade
+            from app.services.evaluation_calculator import EvaluationCalculator
+            grade_name = gabarito_obj.grade_name or gabarito_obj.title or ''
+            course_name = infer_course_name_from_grade(grade_name)
+            grade = EvaluationCalculator.calculate_grade(
+                proficiency=proficiency,
+                course_name=course_name,
+                subject_name='GERAL',
+                use_simple_calculation=False,
             )
             
             # 13. Salvar resultado (detecta automaticamente o tipo)
@@ -1279,12 +1289,22 @@ class AnswerSheetCorrectionN:
             correct_count = correction['correct']
             total_count = correction['total_questions']
             percentage = correction['score_percentage']
-            grade = (correct_count / total_count * 10) if total_count > 0 else 0.0
+            grade = 0.0
             
             proficiency, classification = self._calcular_proficiencia_classificacao(
                 correct_answers=correct_count,
                 total_questions=total_count,
                 gabarito_obj=gabarito_obj
+            )
+            from app.services.cartao_resposta.course_name_resolver import infer_course_name_from_grade
+            from app.services.evaluation_calculator import EvaluationCalculator
+            grade_name = gabarito_obj.grade_name or gabarito_obj.title or ''
+            course_name = infer_course_name_from_grade(grade_name)
+            grade = EvaluationCalculator.calculate_grade(
+                proficiency=proficiency,
+                course_name=course_name,
+                subject_name='GERAL',
+                use_simple_calculation=False,
             )
             
             # 11. Salvar resultado
@@ -4500,12 +4520,22 @@ class AnswerSheetCorrectionN:
             correct_count = correction['correct']
             total_count = correction['total_questions']
             percentage = correction['score_percentage']
-            grade = (correct_count / total_count * 10) if total_count > 0 else 0.0
+            grade = 0.0
             
             proficiency, classification = self._calcular_proficiencia_classificacao(
                 correct_answers=correct_count,
                 total_questions=total_count,
                 gabarito_obj=gabarito_obj
+            )
+            from app.services.cartao_resposta.course_name_resolver import infer_course_name_from_grade
+            from app.services.evaluation_calculator import EvaluationCalculator
+            grade_name = gabarito_obj.grade_name or gabarito_obj.title or ''
+            course_name = infer_course_name_from_grade(grade_name)
+            grade = EvaluationCalculator.calculate_grade(
+                proficiency=proficiency,
+                course_name=course_name,
+                subject_name='GERAL',
+                use_simple_calculation=False,
             )
             
             saved_result = self._salvar_resultado(
@@ -5192,23 +5222,11 @@ class AnswerSheetCorrectionN:
         """
         try:
             from app.services.evaluation_calculator import EvaluationCalculator
+            from app.services.cartao_resposta.course_name_resolver import infer_course_name_from_grade
             
             # Inferir nome do curso (string) baseado no grade_name
-            grade_name = gabarito_obj.grade_name or ''
-            course_name = 'Anos Iniciais'  # Padrão
-            
-            if any(x in grade_name.lower() for x in ['infantil', 'pré', 'pre']):
-                course_name = 'Educação Infantil'
-            elif any(x in grade_name.lower() for x in ['1º', '2º', '3º', '4º', '5º', 'anos iniciais']):
-                course_name = 'Anos Iniciais'
-            elif any(x in grade_name.lower() for x in ['6º', '7º', '8º', '9º', 'anos finais']):
-                course_name = 'Anos Finais'
-            elif any(x in grade_name.lower() for x in ['1º médio', '2º médio', '3º médio', 'ensino médio']):
-                course_name = 'Ensino Médio'
-            elif 'especial' in grade_name.lower():
-                course_name = 'Educação Especial'
-            elif 'eja' in grade_name.lower():
-                course_name = 'EJA'
+            grade_name = gabarito_obj.grade_name or gabarito_obj.title or ''
+            course_name = infer_course_name_from_grade(grade_name)
             
             # Inferir nome da disciplina (string) baseado no title
             title = gabarito_obj.title or ''

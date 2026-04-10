@@ -242,7 +242,7 @@ def _recalculate_gabarito(
     for result in results:
         detected_map = _parse_answer_map(result.detected_answers)
         stats = _build_correction_stats(detected_map, correct_map)
-        pbs, prof_media, class_geral = calcular_proficiencia_por_disciplina(
+        pbs, prof_media, class_geral, has_matematica = calcular_proficiencia_por_disciplina(
             blocks_config=blocks_config,
             validated_answers=detected_map,
             gabarito_dict=correct_map,
@@ -253,6 +253,7 @@ def _recalculate_gabarito(
             course_name=course_name,
             subject_name="GERAL",
             use_simple_calculation=False,
+            has_matematica=has_matematica,
         )
 
         old_tuple = (

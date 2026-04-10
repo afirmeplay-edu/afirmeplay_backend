@@ -218,36 +218,19 @@ class EvaluationResultService:
                     proficiency_geral = sum(proficiencies) / len(proficiencies) if proficiencies else 0.0
                     grade_geral = sum(grades) / len(grades) if grades else 0.0
                     
-                    # Determinar classificação geral baseada na proficiência média
-                    # Usar faixas específicas para média geral
-                    if "finais" in course_name.lower() or "médio" in course_name.lower() or "medio" in course_name.lower():
-                        # Média Geral (Anos Finais/Ensino Médio):
-                        # - Abaixo do Básico: 0-212.49
-                        # - Básico: 212,50-289.99
-                        # - Adequado: 290-339.99
-                        # - Avançado: 340-425
-                        if proficiency_geral >= 340:
-                            classification_geral = "Avançado"
-                        elif proficiency_geral >= 290:
-                            classification_geral = "Adequado"
-                        elif proficiency_geral >= 212.50:
-                            classification_geral = "Básico"
-                        else:
-                            classification_geral = "Abaixo do Básico"
-                    else:
-                        # Média Geral (Educação Infantil/Anos Iniciais/EJA):
-                        # - Abaixo do Básico: 0-162
-                        # - Básico: 163-212
-                        # - Adequado: 213-262
-                        # - Avançado: 263-375
-                        if proficiency_geral >= 263:
-                            classification_geral = "Avançado"
-                        elif proficiency_geral >= 213:
-                            classification_geral = "Adequado"
-                        elif proficiency_geral >= 163:
-                            classification_geral = "Básico"
-                        else:
-                            classification_geral = "Abaixo do Básico"
+                    # Determinar se a avaliação tem Matemática (para regra do GERAL)
+                    has_matematica = any(
+                        (sr.get('subject_name') and 'matem' in str(sr.get('subject_name')).lower())
+                        for sr in subject_results
+                    )
+
+                    # Classificação geral baseada na proficiência média, alinhada à disciplina efetiva do GERAL
+                    classification_geral = EvaluationCalculator.determine_classification(
+                        proficiency_geral,
+                        course_name,
+                        "GERAL",
+                        has_matematica=has_matematica,
+                    )
                     
                     result = {
                         'proficiency': round_to_two_decimals(proficiency_geral),

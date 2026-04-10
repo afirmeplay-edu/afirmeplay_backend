@@ -1220,11 +1220,27 @@ class AnswerSheetCorrectionN:
             from app.services.evaluation_calculator import EvaluationCalculator
             grade_name = gabarito_obj.grade_name or gabarito_obj.title or ''
             course_name = infer_course_name_from_grade(grade_name)
+            # Inferir se há Matemática no gabarito para alinhar regra do GERAL
+            has_matematica = False
+            try:
+                from app.services.cartao_resposta.proficiency_by_subject import (
+                    infer_has_matematica_from_blocks_config,
+                )
+                blocks_config = getattr(gabarito_obj, 'blocks_config', None)
+                if isinstance(blocks_config, str):
+                    import json
+                    blocks_config = json.loads(blocks_config)
+                has_matematica = infer_has_matematica_from_blocks_config(blocks_config or {})
+            except Exception:
+                title = (getattr(gabarito_obj, 'title', '') or '')
+                has_matematica = 'matem' in title.lower()
+
             grade = EvaluationCalculator.calculate_grade(
                 proficiency=proficiency,
                 course_name=course_name,
                 subject_name='GERAL',
                 use_simple_calculation=False,
+                has_matematica=has_matematica,
             )
             
             # 13. Salvar resultado (detecta automaticamente o tipo)
@@ -1300,11 +1316,27 @@ class AnswerSheetCorrectionN:
             from app.services.evaluation_calculator import EvaluationCalculator
             grade_name = gabarito_obj.grade_name or gabarito_obj.title or ''
             course_name = infer_course_name_from_grade(grade_name)
+            # Inferir se há Matemática no gabarito para alinhar regra do GERAL
+            has_matematica = False
+            try:
+                from app.services.cartao_resposta.proficiency_by_subject import (
+                    infer_has_matematica_from_blocks_config,
+                )
+                blocks_config = getattr(gabarito_obj, 'blocks_config', None)
+                if isinstance(blocks_config, str):
+                    import json
+                    blocks_config = json.loads(blocks_config)
+                has_matematica = infer_has_matematica_from_blocks_config(blocks_config or {})
+            except Exception:
+                title = (getattr(gabarito_obj, 'title', '') or '')
+                has_matematica = 'matem' in title.lower()
+
             grade = EvaluationCalculator.calculate_grade(
                 proficiency=proficiency,
                 course_name=course_name,
                 subject_name='GERAL',
                 use_simple_calculation=False,
+                has_matematica=has_matematica,
             )
             
             # 11. Salvar resultado

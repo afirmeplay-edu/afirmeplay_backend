@@ -1081,9 +1081,16 @@ def listar_avaliacoes():
         
         # Calcular estatísticas consolidadas baseadas no escopo dos filtros
         estatisticas_consolidadas = _calcular_estatisticas_consolidadas_por_escopo(todas_avaliacoes_escopo, scope_info, nivel_granularidade, user)
+        if isinstance(estatisticas_consolidadas, dict):
+            estatisticas_consolidadas["participantes_distribuicao"] = estatisticas_consolidadas.get(
+                "alunos_participantes", 0
+            )
         
         # Calcular estatísticas por disciplina
         resultados_por_disciplina = _calcular_estatisticas_por_disciplina(todas_avaliacoes_escopo, scope_info, nivel_granularidade)
+        for disciplina in resultados_por_disciplina or []:
+            if isinstance(disciplina, dict):
+                disciplina["participantes_distribuicao"] = disciplina.get("alunos_participantes", 0)
         
         # Aplicar paginação para resultados detalhados
         try:
@@ -1197,6 +1204,8 @@ def listar_avaliacoes():
                 avaliacao, scope_info, nivel_granularidade, user, restrict_class_ids
             )
         
+        periodo_raw_clean = (str(periodo_raw).strip() if periodo_raw and str(periodo_raw).strip() else None)
+
         return jsonify({
             "nivel_granularidade": nivel_granularidade,
             "filtros_aplicados": {
@@ -1206,7 +1215,8 @@ def listar_avaliacoes():
                 "serie": serie,
                 "turma": turma,
                 "avaliacao": avaliacao,
-                "periodo": (str(periodo_raw).strip() if periodo_raw and str(periodo_raw).strip() else None),
+                "periodo": _formatar_periodo_br(periodo_raw_clean),
+                "periodo_iso": periodo_raw_clean,
             },
             "estatisticas_gerais": estatisticas_consolidadas,
             "resultados_por_disciplina": resultados_por_disciplina,
@@ -1565,15 +1575,17 @@ def _gerar_tabela_detalhada_por_disciplina(
             logging.debug("Disciplina %s: %d alunos processados", disciplina_data['nome'], len(alunos_disciplina))
 
         dados_gerais = _calcular_dados_gerais_alunos(questoes_por_disciplina, course_name)
-        
-        return {
-            "disciplinas": list(questoes_por_disciplina.values()),
-            "geral": dados_gerais
-        }
+        payload = {"disciplinas": list(questoes_por_disciplina.values())}
+        if nivel_granularidade != "turma":
+            payload["geral"] = dados_gerais
+        return payload
         
     except Exception as e:
         logging.error(f"Erro ao gerar tabela detalhada por disciplina: {str(e)}", exc_info=True)
-        return {"disciplinas": [], "geral": {"alunos": []}, "error": str(e)}
+        payload_erro = {"disciplinas": [], "error": str(e)}
+        if nivel_granularidade != "turma":
+            payload_erro["geral"] = {"alunos": []}
+        return payload_erro
 
 
 def _calcular_dados_gerais_alunos(questoes_por_disciplina: dict, course_name: str = "Anos Iniciais") -> dict:
@@ -3028,8 +3040,8 @@ def get_evaluation_by_id(evaluation_id: str):
             "serie": "N/A",
             "escola": escola_nome,
             "municipio": municipio,
-            "data_aplicacao": test.created_at.isoformat() if test.created_at else None,
-            "data_correcao": test.updated_at.isoformat() if test.updated_at else None,
+            "data_aplicacao": _formatar_data_para_evolucao(test.created_at),
+            "data_correcao": _formatar_data_para_evolucao(test.updated_at),
             "status": "concluida",
             "total_alunos": stats['total_alunos'],
             "alunos_participantes": stats['alunos_participantes'],
@@ -5795,6 +5807,21 @@ def _parse_periodo_bounds(periodo: str) -> Tuple[datetime, datetime]:
     return datetime(year, month, 1), datetime(year, month, last)
 
 
+def _formatar_periodo_br(periodo: Optional[str]) -> Optional[str]:
+    """
+    Converte período YYYY-MM para intervalo no formato brasileiro (dd/mm/aaaa - dd/mm/aaaa).
+    Retorna None quando vazio e preserva o valor original quando inválido.
+    """
+    if not periodo or not str(periodo).strip():
+        return None
+    valor = str(periodo).strip()
+    try:
+        dt_inicio, dt_fim = _parse_periodo_bounds(valor)
+        return f"{dt_inicio.strftime('%d/%m/%Y')} - {dt_fim.strftime('%d/%m/%Y')}"
+    except Exception:
+        return valor
+
+
 def _apply_class_test_application_period(
     query,
     bounds: Optional[Tuple[datetime, datetime]],
@@ -7707,7 +7734,7 @@ def _gerar_resultados_detalhados_por_granularidade(class_tests_paginados, nivel_
                     "escola": escola.name,
                     "municipio": municipio.name if municipio else "N/A",
                     "estado": municipio.state if municipio else "N/A",
-                    "data_aplicacao": evaluation.created_at.isoformat() if evaluation.created_at else None,
+                    "data_aplicacao": _formatar_data_para_evolucao(evaluation.created_at),
                     "status": "consolidado",
                     "total_alunos": stats_grupo['total_alunos'],
                     "alunos_participantes": stats_grupo['alunos_participantes'],
@@ -7733,7 +7760,7 @@ def _gerar_resultados_detalhados_por_granularidade(class_tests_paginados, nivel_
                     "escola": escola.name if escola else "N/A",
                     "municipio": municipio.name if municipio else "N/A",
                     "estado": municipio.state if municipio else "N/A",
-                    "data_aplicacao": evaluation.created_at.isoformat() if evaluation.created_at else None,
+                    "data_aplicacao": _formatar_data_para_evolucao(evaluation.created_at),
                     "status": "consolidado",
                     "total_alunos": stats_grupo['total_alunos'],
                     "alunos_participantes": stats_grupo['alunos_participantes'],
@@ -7760,7 +7787,7 @@ def _gerar_resultados_detalhados_por_granularidade(class_tests_paginados, nivel_
                     "escola": escola.name if escola else "N/A",
                     "municipio": municipio.name if municipio else "N/A",
                     "estado": municipio.state if municipio else "N/A",
-                    "data_aplicacao": evaluation.created_at.isoformat() if evaluation.created_at else None,
+                    "data_aplicacao": _formatar_data_para_evolucao(evaluation.created_at),
                     "status": class_tests_grupo[0].status if class_tests_grupo else "N/A",
                     "total_alunos": stats_grupo['total_alunos'],
                     "alunos_participantes": stats_grupo['alunos_participantes'],

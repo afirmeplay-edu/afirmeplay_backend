@@ -197,12 +197,73 @@ def _play_tv_drop_public_video_fks(cursor, schema: str, table: str) -> int:
     return len(names)
 
 
+def _play_tv_has_fk_to_public_videos(cursor, schema: str, table: str) -> bool:
+    cursor.execute(
+        """
+        SELECT 1 FROM pg_constraint c
+        JOIN pg_class rel ON rel.oid = c.conrelid
+        JOIN pg_namespace n ON n.oid = rel.relnamespace
+        JOIN pg_class ref ON ref.oid = c.confrelid
+        JOIN pg_namespace rn ON rn.oid = ref.relnamespace
+        WHERE n.nspname = %s AND rel.relname = %s
+          AND c.contype = 'f' AND ref.relname = 'play_tv_videos'
+          AND rn.nspname = 'public'
+        LIMIT 1
+        """,
+        (schema, table),
+    )
+    return cursor.fetchone() is not None
+
+
+def _backfill_play_tv_videos_from_public(cursor, schema_name: str) -> int:
+    """
+    Insere em {schema}.play_tv_videos as linhas de public.play_tv_videos cujo id aparece
+    em junções/recursos do tenant e ainda não existe localmente.
+    """
+    parts = []
+    for tbl in ("play_tv_video_schools", "play_tv_video_classes", "play_tv_video_resources"):
+        if _play_tv_table_exists(cursor, schema_name, tbl):
+            parts.append(
+                f'SELECT video_id FROM "{schema_name}"."{tbl}" WHERE video_id IS NOT NULL'
+            )
+    if not parts:
+        return 0
+
+    vid_union = " UNION ".join(parts)
+
+    cursor.execute(
+        """
+        SELECT 1 FROM information_schema.columns
+        WHERE table_schema = 'public' AND table_name = 'play_tv_videos'
+          AND column_name = 'entire_municipality'
+        """
+    )
+    has_em = cursor.fetchone() is not None
+    em_expr = "COALESCE(v.entire_municipality, false)" if has_em else "false"
+
+    insert_sql = f"""
+        INSERT INTO "{schema_name}".play_tv_videos (
+            id, url, title, grade_id, subject_id, created_by,
+            created_at, updated_at, entire_municipality
+        )
+        SELECT v.id, v.url, v.title, v.grade_id, v.subject_id, v.created_by,
+               v.created_at, v.updated_at, {em_expr}
+        FROM public.play_tv_videos v
+        WHERE v.id IN ({vid_union})
+        ON CONFLICT (id) DO NOTHING
+    """
+    cursor.execute(insert_sql)
+    return cursor.rowcount
+
+
 def migrate_play_tv_from_public_to_city_schema(schema_name: str) -> dict:
     """
-    Para tenants com play_tv_video_schools/classes ainda referenciando public.play_tv_videos:
-    copia os vídeos usados para o schema local e recria FKs apontando para city_xxx.play_tv_videos.
+    Copia vídeos referenciados de public.play_tv_videos para city_xxx.play_tv_videos
+    (backfill) e, se junções ainda tiverem FK para public.play_tv_videos, remove essas FKs
+    e recria apontando para o schema do tenant.
 
-    Idempotente: se não houver FK para public, não altera linhas.
+    Idempotente: pode ser executado várias vezes; linhas já presentes em play_tv_videos
+    local são ignoradas (ON CONFLICT DO NOTHING).
     """
     if not schema_name.replace("_", "").isalnum() or not schema_name.startswith("city_"):
         raise ValueError(f"Nome de schema inválido: {schema_name}")
@@ -225,9 +286,21 @@ def migrate_play_tv_from_public_to_city_schema(schema_name: str) -> dict:
             summary["note"] = "public.play_tv_videos inexistente"
             return summary
 
-        if not _play_tv_table_exists(cursor, schema_name, "play_tv_video_schools"):
+        if not _play_tv_table_exists(cursor, schema_name, "play_tv_videos"):
             summary["skipped"] = True
-            summary["note"] = "play_tv_video_schools inexistente neste schema"
+            summary["note"] = "play_tv_videos local inexistente (rode provision antes)"
+            return summary
+
+        junction_tables = (
+            "play_tv_video_schools",
+            "play_tv_video_classes",
+            "play_tv_video_resources",
+        )
+        if not any(
+            _play_tv_table_exists(cursor, schema_name, t) for t in junction_tables
+        ):
+            summary["skipped"] = True
+            summary["note"] = "Sem tabelas de junção/recursos Play TV neste schema"
             return summary
 
         try:
@@ -244,83 +317,35 @@ def migrate_play_tv_from_public_to_city_schema(schema_name: str) -> dict:
         except Exception:
             logger.debug("Coluna entire_municipality em public.play_tv_videos já existe ou erro ignorado")
 
-        cursor.execute(
-            f"""
-            SELECT 1 FROM pg_constraint c
-            JOIN pg_class rel ON rel.oid = c.conrelid
-            JOIN pg_namespace n ON n.oid = rel.relnamespace
-            JOIN pg_class ref ON ref.oid = c.confrelid
-            JOIN pg_namespace rn ON rn.oid = ref.relnamespace
-            WHERE n.nspname = %s AND rel.relname = 'play_tv_video_schools'
-              AND c.contype = 'f' AND ref.relname = 'play_tv_videos'
-              AND rn.nspname = %s
-            LIMIT 1
-            """,
-            (schema_name, schema_name),
-        )
-        if cursor.fetchone():
-            summary["skipped"] = True
-            summary["note"] = "FKs já apontam para o schema local"
-            return summary
+        summary["videos_copied"] = _backfill_play_tv_videos_from_public(cursor, schema_name)
 
-        cursor.execute(
-            f"""
-            SELECT 1 FROM pg_constraint c
-            JOIN pg_class rel ON rel.oid = c.conrelid
-            JOIN pg_namespace n ON n.oid = rel.relnamespace
-            JOIN pg_class ref ON ref.oid = c.confrelid
-            JOIN pg_namespace rn ON rn.oid = ref.relnamespace
-            WHERE n.nspname = %s AND rel.relname = 'play_tv_video_schools'
-              AND c.contype = 'f' AND ref.relname = 'play_tv_videos'
-              AND rn.nspname = 'public'
-            LIMIT 1
-            """,
-            (schema_name,),
-        )
-        if not cursor.fetchone():
-            summary["skipped"] = True
-            summary["note"] = "Sem FK legada para public.play_tv_videos; nada a migrar"
+        refs_public = False
+        for tbl in ("play_tv_video_schools", "play_tv_video_classes", "play_tv_video_resources"):
+            if _play_tv_table_exists(cursor, schema_name, tbl) and _play_tv_has_fk_to_public_videos(
+                cursor, schema_name, tbl
+            ):
+                refs_public = True
+                break
+
+        if not refs_public:
+            summary["note"] = (
+                "FKs já referenciam play_tv_videos local; backfill de vídeos aplicado se necessário"
+            )
+            logger.info("Play TV migrate %s: %s", schema_name, summary)
             return summary
 
         dropped = 0
-        for tbl in ("play_tv_video_schools", "play_tv_video_classes"):
+        for tbl in ("play_tv_video_schools", "play_tv_video_classes", "play_tv_video_resources"):
             if _play_tv_table_exists(cursor, schema_name, tbl):
                 dropped += _play_tv_drop_public_video_fks(cursor, schema_name, tbl)
         summary["fks_dropped"] = dropped
         if dropped == 0:
             raise RuntimeError(
-                f"Esperava FK para public.play_tv_videos em {schema_name} mas nenhuma constraint foi removida"
+                f"Detectada FK para public.play_tv_videos em {schema_name} "
+                "mas nenhuma constraint foi removida"
             )
 
-        cursor.execute(
-            """
-            SELECT 1 FROM information_schema.columns
-            WHERE table_schema = 'public' AND table_name = 'play_tv_videos'
-              AND column_name = 'entire_municipality'
-            """
-        )
-        has_em = cursor.fetchone() is not None
-        em_expr = "COALESCE(v.entire_municipality, false)" if has_em else "false"
-
-        vid_union = f'SELECT video_id FROM "{schema_name}".play_tv_video_schools'
-        if _play_tv_table_exists(cursor, schema_name, "play_tv_video_classes"):
-            vid_union += f' UNION SELECT video_id FROM "{schema_name}".play_tv_video_classes'
-
-        insert_sql = f"""
-            INSERT INTO "{schema_name}".play_tv_videos (
-                id, url, title, grade_id, subject_id, created_by,
-                created_at, updated_at, entire_municipality
-            )
-            SELECT v.id, v.url, v.title, v.grade_id, v.subject_id, v.created_by,
-                   v.created_at, v.updated_at, {em_expr}
-            FROM public.play_tv_videos v
-            WHERE v.id IN ({vid_union})
-            ON CONFLICT (id) DO NOTHING
-        """
-        cursor.execute(insert_sql)
-        summary["videos_copied"] = cursor.rowcount
-
-        for tbl in ("play_tv_video_schools", "play_tv_video_classes"):
+        for tbl in ("play_tv_video_schools", "play_tv_video_classes", "play_tv_video_resources"):
             if not _play_tv_table_exists(cursor, schema_name, tbl):
                 continue
             try:
@@ -341,6 +366,7 @@ def migrate_play_tv_from_public_to_city_schema(schema_name: str) -> dict:
                 else:
                     raise
 
+        summary["note"] = "FKs realinhadas para play_tv_videos do schema tenant"
         logger.info("Play TV migrado public→%s: %s", schema_name, summary)
         return summary
     except Exception as e:

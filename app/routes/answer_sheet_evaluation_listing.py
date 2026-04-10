@@ -682,7 +682,9 @@ def answer_sheet_results_for_detail(
     return []
 
 
-def stats_from_answer_sheet_results(results: List[AnswerSheetResult]) -> Dict[str, Any]:
+def stats_from_answer_sheet_results(
+    results: List[AnswerSheetResult], gabarito_id: Optional[str] = None
+) -> Dict[str, Any]:
     empty_dist = {
         "abaixo_do_basico": 0,
         "basico": 0,
@@ -701,21 +703,56 @@ def stats_from_answer_sheet_results(results: List[AnswerSheetResult]) -> Dict[st
         }
 
     n = len(results)
-    media_nota = sum(float(r.grade or 0) for r in results) / n
     profs = [float(r.proficiency) for r in results if r.proficiency is not None]
     media_prof = sum(profs) / len(profs) if profs else 0.0
 
     dist = empty_dist.copy()
-    for r in results:
-        cl = (r.classification or "").lower()
-        if "abaixo" in cl:
-            dist["abaixo_do_basico"] += 1
-        elif "básico" in cl or "basico" in cl:
-            dist["basico"] += 1
-        elif "adequado" in cl:
-            dist["adequado"] += 1
-        elif "avançado" in cl or "avancado" in cl:
-            dist["avancado"] += 1
+    if gabarito_id:
+        from app.services.cartao_resposta.proficiency_by_subject import (
+            course_name_and_has_matematica_for_gabarito,
+        )
+        from app.services.evaluation_calculator import EvaluationCalculator
+
+        course_name, has_matematica = course_name_and_has_matematica_for_gabarito(gabarito_id)
+        eff_grades: List[float] = []
+        for r in results:
+            prof = float(r.proficiency if r.proficiency is not None else 0.0)
+            g = EvaluationCalculator.calculate_grade(
+                prof,
+                course_name,
+                "GERAL",
+                use_simple_calculation=False,
+                has_matematica=has_matematica,
+            )
+            c = EvaluationCalculator.determine_classification(
+                prof,
+                course_name,
+                "GERAL",
+                has_matematica=has_matematica,
+            )
+            eff_grades.append(g)
+            cl = (c or "").lower()
+            if "abaixo" in cl:
+                dist["abaixo_do_basico"] += 1
+            elif "básico" in cl or "basico" in cl:
+                dist["basico"] += 1
+            elif "adequado" in cl:
+                dist["adequado"] += 1
+            elif "avançado" in cl or "avancado" in cl:
+                dist["avancado"] += 1
+        media_nota = sum(eff_grades) / n if eff_grades else 0.0
+    else:
+        media_nota = sum(float(r.grade or 0) for r in results) / n
+        for r in results:
+            cl = (r.classification or "").lower()
+            if "abaixo" in cl:
+                dist["abaixo_do_basico"] += 1
+            elif "básico" in cl or "basico" in cl:
+                dist["basico"] += 1
+            elif "adequado" in cl:
+                dist["adequado"] += 1
+            elif "avançado" in cl or "avancado" in cl:
+                dist["avancado"] += 1
 
     return {
         "total_alunos": n,
@@ -767,7 +804,7 @@ def build_answer_sheet_evaluation_by_id_json(
 ) -> Dict[str, Any]:
     from app.models.test import Test
 
-    stats = stats_from_answer_sheet_results(results)
+    stats = stats_from_answer_sheet_results(results, str(gab.id))
     nq = answer_sheet_total_question_count(gab)
     disciplina = "N/A"
     if gab.test_id:
@@ -789,8 +826,8 @@ def build_answer_sheet_evaluation_by_id_json(
         "serie": gab.grade_name or "N/A",
         "escola": gab.school_name or "N/A",
         "municipio": gab.municipality or "N/A",
-        "data_aplicacao": gab.created_at.isoformat() if gab.created_at else None,
-        "data_correcao": gab.template_generated_at.isoformat()
+        "data_aplicacao": gab.created_at.strftime("%d/%m/%Y") if gab.created_at else None,
+        "data_correcao": gab.template_generated_at.strftime("%d/%m/%Y")
         if gab.template_generated_at
         else None,
         "status": "concluida",

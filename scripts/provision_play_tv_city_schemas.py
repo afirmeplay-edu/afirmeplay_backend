@@ -19,6 +19,9 @@ Uso (raiz do projeto, venv ativado):
   python scripts/provision_play_tv_city_schemas.py --migrate-from-public
   python scripts/provision_play_tv_city_schemas.py --dry-run
 
+Todos os city_* com migração public→tenant:
+  python scripts/migrate_play_tv_public_to_all_city_schemas.py
+
 Requer: DATABASE_URL em app/.env
 """
 from __future__ import annotations

@@ -2124,23 +2124,11 @@ class AnswerSheetCorrectionNewGrid:
         """
         try:
             from app.services.evaluation_calculator import EvaluationCalculator
+            from app.services.cartao_resposta.course_name_resolver import infer_course_name_from_grade
             
             # Inferir nome do curso (string) baseado no grade_name
-            grade_name = gabarito_obj.grade_name or ''
-            course_name = 'Anos Iniciais'  # Padrão
-            
-            if any(x in grade_name.lower() for x in ['infantil', 'pré', 'pre']):
-                course_name = 'Educação Infantil'
-            elif any(x in grade_name.lower() for x in ['1º', '2º', '3º', '4º', '5º', 'anos iniciais']):
-                course_name = 'Anos Iniciais'
-            elif any(x in grade_name.lower() for x in ['6º', '7º', '8º', '9º', 'anos finais']):
-                course_name = 'Anos Finais'
-            elif any(x in grade_name.lower() for x in ['1º médio', '2º médio', '3º médio', 'ensino médio']):
-                course_name = 'Ensino Médio'
-            elif 'especial' in grade_name.lower():
-                course_name = 'Educação Especial'
-            elif 'eja' in grade_name.lower():
-                course_name = 'EJA'
+            grade_name = gabarito_obj.grade_name or gabarito_obj.title or ''
+            course_name = infer_course_name_from_grade(grade_name)
             
             # Inferir nome da disciplina (string) baseado no title
             title = gabarito_obj.title or ''
@@ -2584,8 +2572,8 @@ class AnswerSheetCorrectionNewGrid:
                     except (ValueError, TypeError):
                         continue
             
-            # Calcular grade (0-10)
-            grade = correction.get('score', 0.0) / 10.0
+            # Calcular grade (0-10) no modo complexo, alinhado às avaliações
+            grade = 0.0
             
             # Calcular proficiência por disciplina e média geral (cartão resposta)
             proficiency = 0.0
@@ -2611,11 +2599,22 @@ class AnswerSheetCorrectionNewGrid:
                     except (ValueError, TypeError):
                         pass
                 from app.services.cartao_resposta.proficiency_by_subject import calcular_proficiencia_por_disciplina
-                proficiency_by_subject, proficiency, classification = calcular_proficiencia_por_disciplina(
+                from app.services.cartao_resposta.course_name_resolver import infer_course_name_from_grade
+                from app.services.evaluation_calculator import EvaluationCalculator
+                grade_name = gabarito_obj.grade_name or gabarito_obj.title or ''
+                proficiency_by_subject, proficiency, classification, has_matematica = calcular_proficiencia_por_disciplina(
                     blocks_config=blocks_config,
                     validated_answers=detected_answers,
                     gabarito_dict=gabarito_dict,
-                    grade_name=gabarito_obj.grade_name or '',
+                    grade_name=grade_name,
+                )
+                course_name = infer_course_name_from_grade(grade_name)
+                grade = EvaluationCalculator.calculate_grade(
+                    proficiency=proficiency,
+                    course_name=course_name,
+                    subject_name='GERAL',
+                    use_simple_calculation=False,
+                    has_matematica=has_matematica,
                 )
             
             # Decidir onde salvar

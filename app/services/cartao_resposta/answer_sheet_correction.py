@@ -178,12 +178,42 @@ class AnswerSheetCorrection:
             correct_count = correction['correct']
             total_count = correction['total_questions']
             percentage = correction['score_percentage']
-            grade = (correct_count / total_count * 10) if total_count > 0 else 0.0
             
             # Calcular proficiência e classificação usando EvaluationCalculator
             proficiency, classification = self._calcular_proficiencia_classificacao(
                 score_percentage=percentage,
                 gabarito_id=gabarito_id
+            )
+            from app.services.cartao_resposta.course_name_resolver import infer_course_name_from_grade
+            from app.services.evaluation_calculator import EvaluationCalculator
+            from app.models.answerSheetGabarito import AnswerSheetGabarito
+            gabarito_obj_grade = AnswerSheetGabarito.query.get(gabarito_id)
+            grade_name = (
+                (gabarito_obj_grade.grade_name if gabarito_obj_grade else "")
+                or (gabarito_obj_grade.title if gabarito_obj_grade else "")
+            )
+            course_name = infer_course_name_from_grade(grade_name)
+            # Inferir se há Matemática no gabarito para alinhar regra do GERAL
+            has_matematica = False
+            try:
+                from app.services.cartao_resposta.proficiency_by_subject import (
+                    infer_has_matematica_from_blocks_config,
+                )
+                blocks_config = getattr(gabarito_obj_grade, 'blocks_config', None) if gabarito_obj_grade else None
+                if isinstance(blocks_config, str):
+                    import json
+                    blocks_config = json.loads(blocks_config)
+                has_matematica = infer_has_matematica_from_blocks_config(blocks_config or {})
+            except Exception:
+                title = (getattr(gabarito_obj_grade, 'title', '') if gabarito_obj_grade else '') or ''
+                has_matematica = 'matem' in title.lower()
+
+            grade = EvaluationCalculator.calculate_grade(
+                proficiency=proficiency,
+                course_name=course_name,
+                subject_name='GERAL',
+                use_simple_calculation=False,
+                has_matematica=has_matematica,
             )
             
             # 9. Salvar resultado em AnswerSheetResult
@@ -313,6 +343,7 @@ class AnswerSheetCorrection:
         """
         try:
             from app.services.evaluation_calculator import EvaluationCalculator, CourseLevel, Subject
+            from app.services.cartao_resposta.course_name_resolver import infer_course_name_from_grade
             
             # Tentar buscar informações do gabarito para inferir nível e disciplina
             course_level = CourseLevel.ANOS_INICIAIS  # Padrão
@@ -323,15 +354,20 @@ class AnswerSheetCorrection:
                 gabarito_obj = AnswerSheetGabarito.query.get(gabarito_id)
                 if gabarito_obj:
                     # Tentar inferir nível de curso do grade_name
-                    grade_name = gabarito_obj.grade_name or ''
-                    if any(x in grade_name.lower() for x in ['infantil', 'pré', 'pre']):
+                    grade_name = gabarito_obj.grade_name or gabarito_obj.title or ''
+                    course_name = infer_course_name_from_grade(grade_name)
+                    if course_name == 'Educação Infantil':
                         course_level = CourseLevel.EDUCACAO_INFANTIL
-                    elif any(x in grade_name.lower() for x in ['1º', '2º', '3º', '4º', '5º', 'anos iniciais']):
+                    elif course_name == 'Anos Iniciais':
                         course_level = CourseLevel.ANOS_INICIAIS
-                    elif any(x in grade_name.lower() for x in ['6º', '7º', '8º', '9º', 'anos finais']):
+                    elif course_name == 'Anos Finais':
                         course_level = CourseLevel.ANOS_FINAIS
-                    elif any(x in grade_name.lower() for x in ['1º médio', '2º médio', '3º médio', 'ensino médio']):
+                    elif course_name == 'Ensino Médio':
                         course_level = CourseLevel.ENSINO_MEDIO
+                    elif course_name == 'Educação Especial':
+                        course_level = CourseLevel.EDUCACAO_ESPECIAL
+                    elif course_name == 'EJA':
+                        course_level = CourseLevel.EJA
                     
                     # Tentar inferir disciplina do título
                     title = gabarito_obj.title or ''

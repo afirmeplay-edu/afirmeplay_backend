@@ -544,7 +544,7 @@ def generate_answer_sheets():
 
             municipality_for_pdf = gabarito.municipality or ''
             state_for_pdf = gabarito.state or ''
-            grade_name_for_pdf = gabarito.grade_name or ''
+            grade_name_for_pdf = gabarito.grade_name or gabarito.title or ''
             if not municipality_for_pdf or not state_for_pdf:
                 city_obj = City.query.get(city_id_scope)
                 if city_obj:
@@ -1454,7 +1454,7 @@ def list_gabaritos():
                 "class_id": str(gabarito.class_id) if gabarito.class_id else None,
                 "class_name": class_name,
                 "grade_id": str(gabarito.grade_id) if gabarito.grade_id else None,
-                "grade_name": grade_name or gabarito.grade_name or "",
+                "grade_name": grade_name or gabarito.grade_name or gabarito.title or "",
                 "num_questions": gabarito.num_questions,
                 "use_blocks": gabarito.use_blocks,
                 "title": gabarito.title,
@@ -2488,6 +2488,33 @@ def _get_nome_granularidade_cartao(nivel, scope_info, escola_nome, serie_nome):
     return "Geral"
 
 
+def _effective_geral_grade_classification_cartao(
+    proficiency: Optional[float], course_name: str, has_matematica: bool
+) -> Tuple[float, str]:
+    """
+    Recalcula nota e classificação do GERAL a partir da proficiência persistida,
+    usando a mesma regra do EvaluationCalculator (inclui has_matematica).
+    Evita resposta da API “congelada” em valores antigos do banco.
+    """
+    from app.services.evaluation_calculator import EvaluationCalculator
+
+    prof = float(proficiency if proficiency is not None else 0.0)
+    grade = EvaluationCalculator.calculate_grade(
+        prof,
+        course_name,
+        "GERAL",
+        use_simple_calculation=False,
+        has_matematica=has_matematica,
+    )
+    classification = EvaluationCalculator.determine_classification(
+        prof,
+        course_name,
+        "GERAL",
+        has_matematica=has_matematica,
+    )
+    return grade, classification
+
+
 def _get_empty_statistics_gerais_cartao(scope_info, nivel_granularidade):
     city_data = scope_info.get('city_data')
     return {
@@ -2591,21 +2618,38 @@ def _calcular_estatisticas_consolidadas_cartao(scope_info, nivel_granularidade, 
             _rq = _apply_answer_sheet_result_period_filter(_rq, periodo_bounds)
             resultados = _rq.all()
         alunos_participantes = len(resultados)
-        media_nota = sum(r.grade for r in resultados) / len(resultados) if resultados else 0.0
+        from app.services.cartao_resposta.proficiency_by_subject import (
+            course_name_and_has_matematica_for_gabarito,
+        )
+
+        course_name, has_matematica = course_name_and_has_matematica_for_gabarito(gabarito_id)
+        if resultados:
+            eff_grades = []
+            for r in resultados:
+                g, _ = _effective_geral_grade_classification_cartao(
+                    r.proficiency, course_name, has_matematica
+                )
+                eff_grades.append(g)
+            media_nota = sum(eff_grades) / len(eff_grades)
+        else:
+            media_nota = 0.0
         media_prof = sum(r.proficiency or 0 for r in resultados) / len(resultados) if resultados else 0.0
         dist = {'abaixo_do_basico': 0, 'basico': 0, 'adequado': 0, 'avancado': 0}
         for r in resultados:
-            if not r.classification:
+            _, c = _effective_geral_grade_classification_cartao(
+                r.proficiency, course_name, has_matematica
+            )
+            if not c:
                 continue
-            c = (r.classification or '').lower()
+            cl = c.lower()
             # "Básico" contém "básico": testar "abaixo" antes para não confundir com "Abaixo do Básico"
-            if 'abaixo' in c:
+            if 'abaixo' in cl:
                 dist['abaixo_do_basico'] += 1
-            elif 'básico' in c or 'basico' in c:
+            elif 'básico' in cl or 'basico' in cl:
                 dist['basico'] += 1
-            elif 'adequado' in c:
+            elif 'adequado' in cl:
                 dist['adequado'] += 1
-            elif 'avançado' in c or 'avancado' in c:
+            elif 'avançado' in cl or 'avancado' in cl:
                 dist['avancado'] += 1
 
         escolas_unicas = set()
@@ -2675,18 +2719,35 @@ def _calcular_estatisticas_grupo_cartao(class_ids, gabarito_id, periodo_bounds=N
     _rq = _apply_answer_sheet_result_period_filter(_rq, periodo_bounds)
     resultados = _rq.all()
     participantes = len(resultados)
-    media_nota = sum(r.grade for r in resultados) / len(resultados) if resultados else 0.0
+    from app.services.cartao_resposta.proficiency_by_subject import (
+        course_name_and_has_matematica_for_gabarito,
+    )
+
+    course_name, has_matematica = course_name_and_has_matematica_for_gabarito(gabarito_id)
+    if resultados:
+        eff_grades = []
+        for r in resultados:
+            g, _ = _effective_geral_grade_classification_cartao(
+                r.proficiency, course_name, has_matematica
+            )
+            eff_grades.append(g)
+        media_nota = sum(eff_grades) / len(eff_grades)
+    else:
+        media_nota = 0.0
     media_prof = sum(r.proficiency or 0 for r in resultados) / len(resultados) if resultados else 0.0
     dist = {'abaixo_do_basico': 0, 'basico': 0, 'adequado': 0, 'avancado': 0}
     for r in resultados:
-        c = (r.classification or '').lower()
-        if 'abaixo' in c:
+        _, c = _effective_geral_grade_classification_cartao(
+            r.proficiency, course_name, has_matematica
+        )
+        cl = (c or '').lower()
+        if 'abaixo' in cl:
             dist['abaixo_do_basico'] += 1
-        elif 'básico' in c or 'basico' in c:
+        elif 'básico' in cl or 'basico' in cl:
             dist['basico'] += 1
-        elif 'adequado' in c:
+        elif 'adequado' in cl:
             dist['adequado'] += 1
-        elif 'avançado' in c or 'avancado' in c:
+        elif 'avançado' in cl or 'avancado' in cl:
             dist['avancado'] += 1
     return {'total_alunos': total_alunos, 'alunos_participantes': participantes, 'alunos_pendentes': total_alunos - participantes, 'media_nota': round(media_nota, 2), 'media_proficiencia': round(media_prof, 2), 'distribuicao_classificacao': dist}
 
@@ -2819,7 +2880,7 @@ def _calcular_resultados_por_disciplina_cartao(scope_info, nivel_granularidade, 
     if not results:
         return []
     gabarito = AnswerSheetGabarito.query.get(gabarito_id)
-    grade_name = (gabarito.grade_name or '') if gabarito else ''
+    grade_name = (gabarito.grade_name or gabarito.title or '') if gabarito else ''
     from app.services.cartao_resposta.proficiency_by_subject import _get_course_name_from_grade
     course_name = _get_course_name_from_grade(grade_name)
     # Agregar por disciplina a partir de proficiency_by_subject
@@ -2974,7 +3035,10 @@ def _gerar_tabela_detalhada_cartao(scope_info, nivel_granularidade, gabarito_id,
         if c.school_id and c.school_id not in schools_by_id:
             schools_by_id[c.school_id] = School.query.get(c.school_id)
     students = Student.query.filter(Student.id.in_(student_ids)).all()
-    grade_name = gabarito.grade_name or ''
+    grade_name = gabarito.grade_name or gabarito.title or ''
+    from app.services.cartao_resposta.proficiency_by_subject import _get_course_name_from_grade
+    from app.services.evaluation_calculator import EvaluationCalculator
+    course_name = _get_course_name_from_grade(grade_name)
     q_skills_map, skill_by_uuid = _build_question_skill_lookup_for_detailed_table(gabarito)
 
     def build_respostas_por_questao(question_numbers, detected_answers):
@@ -3032,11 +3096,13 @@ def _gerar_tabela_detalhada_cartao(scope_info, nivel_granularidade, gabarito_id,
             disc_data = (pbs or {}).get(str(subject_id), pbs.get(subject_id, {}))
             disciplina_proficiencia = disc_data.get('proficiency') if isinstance(disc_data, dict) else (r.proficiency if r else 0)
             disciplina_classificacao = disc_data.get('classification') if isinstance(disc_data, dict) else (r.classification if r else None)
-            # Nota por disciplina: calcular a partir dos acertos do bloco (mesma base de respostas_por_questao).
-            # proficiency_by_subject.grade às vezes foi gravado com a nota geral — não priorizar o JSON.
-            nq = len(q_numbers)
-            if nq > 0:
-                disciplina_nota = (total_acertos / nq) * 10.0
+            if isinstance(disc_data, dict) and disc_data.get('proficiency') is not None:
+                disciplina_nota = EvaluationCalculator.calculate_grade(
+                    proficiency=float(disc_data['proficiency']),
+                    course_name=course_name,
+                    subject_name=subject_name,
+                    use_simple_calculation=False,
+                )
             elif isinstance(disc_data, dict) and disc_data.get('grade') is not None:
                 disciplina_nota = float(disc_data['grade'])
             else:
@@ -3110,6 +3176,10 @@ def _calcular_dados_gerais_alunos_cartao(disciplinas_out, grade_name):
     from app.services.cartao_resposta.proficiency_by_subject import _get_course_name_from_grade
     from app.services.evaluation_calculator import EvaluationCalculator
     course_name_geral = _get_course_name_from_grade(grade_name)
+    has_matematica = any(
+        "matem" in (disc.get("nome") or "").lower()
+        for disc in disciplinas_out
+    )
     alunos_gerais = []
     for aluno_id, dados in dados_alunos.items():
         nota_geral = sum(dados["notas_disciplinas"]) / len(dados["notas_disciplinas"]) if dados["notas_disciplinas"] else 0.0
@@ -3118,7 +3188,10 @@ def _calcular_dados_gerais_alunos_cartao(disciplinas_out, grade_name):
         cl = None
         if dados["proficiencias_disciplinas"]:
             cl = EvaluationCalculator.determine_classification(
-                proficiencia_geral, course_name_geral, "GERAL"
+                proficiencia_geral,
+                course_name_geral,
+                "GERAL",
+                has_matematica=has_matematica,
             )
         alunos_gerais.append({
             "id": dados["id"],
@@ -3154,17 +3227,32 @@ def _calcular_ranking_cartao(scope_info, nivel_granularidade, gabarito_id, user,
     )
     _rq = _apply_answer_sheet_result_period_filter(_rq, periodo_bounds)
     results = _rq.all()
-    sorted_results = sorted(results, key=lambda x: (x.grade or 0, x.proficiency or 0), reverse=True)
+    from app.services.cartao_resposta.proficiency_by_subject import (
+        course_name_and_has_matematica_for_gabarito,
+    )
+
+    course_name, has_matematica = course_name_and_has_matematica_for_gabarito(gabarito_id)
+    enriched = []
+    for r in results:
+        eff_grade, eff_cl = _effective_geral_grade_classification_cartao(
+            r.proficiency, course_name, has_matematica
+        )
+        enriched.append((r, eff_grade, eff_cl))
+    sorted_results = sorted(
+        enriched,
+        key=lambda t: (t[1], t[0].proficiency or 0),
+        reverse=True,
+    )
     ranking = []
-    for pos, r in enumerate(sorted_results, 1):
+    for pos, (r, eff_grade, eff_cl) in enumerate(sorted_results, 1):
         student = Student.query.get(r.student_id)
         ranking.append({
             "posicao": pos,
             "student_id": str(r.student_id),
             "nome": student.name if student else "N/A",
-            "grade": r.grade,
+            "grade": eff_grade,
             "proficiency": r.proficiency,
-            "classification": r.classification,
+            "classification": eff_cl,
             "score_percentage": r.score_percentage
         })
     return ranking

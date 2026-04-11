@@ -1208,41 +1208,16 @@ class AnswerSheetCorrectionN:
             # 12. Calcular nota, proficiência e classificação
             correct_count = correction['correct']
             total_count = correction['total_questions']
+            answered_count = correction['answered']
             percentage = correction['score_percentage']
-            grade = 0.0
-            
-            proficiency, classification = self._calcular_proficiencia_classificacao(
+
+            # Denominador = questões respondidas (igual às avaliações)
+            proficiency, classification, grade = self._calcular_proficiencia_classificacao(
                 correct_answers=correct_count,
-                total_questions=total_count,
+                total_questions=answered_count if answered_count > 0 else total_count,
                 gabarito_obj=gabarito_obj
             )
-            from app.services.cartao_resposta.course_name_resolver import infer_course_name_from_grade
-            from app.services.evaluation_calculator import EvaluationCalculator
-            grade_name = gabarito_obj.grade_name or gabarito_obj.title or ''
-            course_name = infer_course_name_from_grade(grade_name)
-            # Inferir se há Matemática no gabarito para alinhar regra do GERAL
-            has_matematica = False
-            try:
-                from app.services.cartao_resposta.proficiency_by_subject import (
-                    infer_has_matematica_from_blocks_config,
-                )
-                blocks_config = getattr(gabarito_obj, 'blocks_config', None)
-                if isinstance(blocks_config, str):
-                    import json
-                    blocks_config = json.loads(blocks_config)
-                has_matematica = infer_has_matematica_from_blocks_config(blocks_config or {})
-            except Exception:
-                title = (getattr(gabarito_obj, 'title', '') or '')
-                has_matematica = 'matem' in title.lower()
 
-            grade = EvaluationCalculator.calculate_grade(
-                proficiency=proficiency,
-                course_name=course_name,
-                subject_name='GERAL',
-                use_simple_calculation=False,
-                has_matematica=has_matematica,
-            )
-            
             # 13. Salvar resultado (detecta automaticamente o tipo)
             saved_result = self._salvar_resultado(
                 gabarito_id=gabarito_id,
@@ -1304,41 +1279,16 @@ class AnswerSheetCorrectionN:
             # 10. Calcular nota, proficiência e classificação
             correct_count = correction['correct']
             total_count = correction['total_questions']
+            answered_count = correction['answered']
             percentage = correction['score_percentage']
-            grade = 0.0
-            
-            proficiency, classification = self._calcular_proficiencia_classificacao(
+
+            # Denominador = questões respondidas (igual às avaliações)
+            proficiency, classification, grade = self._calcular_proficiencia_classificacao(
                 correct_answers=correct_count,
-                total_questions=total_count,
+                total_questions=answered_count if answered_count > 0 else total_count,
                 gabarito_obj=gabarito_obj
             )
-            from app.services.cartao_resposta.course_name_resolver import infer_course_name_from_grade
-            from app.services.evaluation_calculator import EvaluationCalculator
-            grade_name = gabarito_obj.grade_name or gabarito_obj.title or ''
-            course_name = infer_course_name_from_grade(grade_name)
-            # Inferir se há Matemática no gabarito para alinhar regra do GERAL
-            has_matematica = False
-            try:
-                from app.services.cartao_resposta.proficiency_by_subject import (
-                    infer_has_matematica_from_blocks_config,
-                )
-                blocks_config = getattr(gabarito_obj, 'blocks_config', None)
-                if isinstance(blocks_config, str):
-                    import json
-                    blocks_config = json.loads(blocks_config)
-                has_matematica = infer_has_matematica_from_blocks_config(blocks_config or {})
-            except Exception:
-                title = (getattr(gabarito_obj, 'title', '') or '')
-                has_matematica = 'matem' in title.lower()
 
-            grade = EvaluationCalculator.calculate_grade(
-                proficiency=proficiency,
-                course_name=course_name,
-                subject_name='GERAL',
-                use_simple_calculation=False,
-                has_matematica=has_matematica,
-            )
-            
             # 11. Salvar resultado
             saved_result = self._salvar_resultado(
                 gabarito_id=gabarito_id,
@@ -4551,25 +4501,16 @@ class AnswerSheetCorrectionN:
             correction = self._calcular_correcao(validated_answers, gabarito)
             correct_count = correction['correct']
             total_count = correction['total_questions']
+            answered_count = correction['answered']
             percentage = correction['score_percentage']
-            grade = 0.0
-            
-            proficiency, classification = self._calcular_proficiencia_classificacao(
+
+            # Denominador = questões respondidas (igual às avaliações)
+            proficiency, classification, grade = self._calcular_proficiencia_classificacao(
                 correct_answers=correct_count,
-                total_questions=total_count,
+                total_questions=answered_count if answered_count > 0 else total_count,
                 gabarito_obj=gabarito_obj
             )
-            from app.services.cartao_resposta.course_name_resolver import infer_course_name_from_grade
-            from app.services.evaluation_calculator import EvaluationCalculator
-            grade_name = gabarito_obj.grade_name or gabarito_obj.title or ''
-            course_name = infer_course_name_from_grade(grade_name)
-            grade = EvaluationCalculator.calculate_grade(
-                proficiency=proficiency,
-                course_name=course_name,
-                subject_name='GERAL',
-                use_simple_calculation=False,
-            )
-            
+
             saved_result = self._salvar_resultado(
                 gabarito_id=str(gabarito_obj.id),
                 student_id=student_id,
@@ -5240,53 +5181,53 @@ class AnswerSheetCorrectionN:
         }
     
     def _calcular_proficiencia_classificacao(self, correct_answers: int, total_questions: int,
-                                            gabarito_obj: AnswerSheetGabarito) -> Tuple[float, str]:
+                                            gabarito_obj: AnswerSheetGabarito) -> Tuple[float, str, float]:
         """
-        Calcula proficiência e classificação
-        
+        Calcula proficiência, classificação e nota por disciplina.
+
         Args:
             correct_answers: Número de acertos
-            total_questions: Total de questões
+            total_questions: Questões respondidas (denominador correto, igual às avaliações)
             gabarito_obj: Objeto AnswerSheetGabarito com informações do gabarito
-            
+
         Returns:
-            Tuple: (proficiência, classificação)
+            Tuple: (proficiência, classificação, nota)
         """
         try:
             from app.services.evaluation_calculator import EvaluationCalculator
             from app.services.cartao_resposta.course_name_resolver import infer_course_name_from_grade
-            
-            # Inferir nome do curso (string) baseado no grade_name
+
             grade_name = gabarito_obj.grade_name or gabarito_obj.title or ''
             course_name = infer_course_name_from_grade(grade_name)
-            
-            # Inferir nome da disciplina (string) baseado no title
+
             title = gabarito_obj.title or ''
-            subject_name = 'Outras'  # Padrão
-            
+            subject_name = 'Outras'
             if 'matemática' in title.lower() or 'matematica' in title.lower():
                 subject_name = 'Matemática'
-            
-            # Calcular proficiência usando os parâmetros corretos
+
             proficiency = EvaluationCalculator.calculate_proficiency(
                 correct_answers=correct_answers,
                 total_questions=total_questions,
                 course_name=course_name,
                 subject_name=subject_name
             )
-            
-            # Calcular classificação usando os parâmetros corretos
             classification = EvaluationCalculator.determine_classification(
                 proficiency=proficiency,
                 course_name=course_name,
                 subject_name=subject_name
             )
-            
-            return proficiency, classification
-            
+            grade = EvaluationCalculator.calculate_grade(
+                proficiency=proficiency,
+                course_name=course_name,
+                subject_name=subject_name,
+                use_simple_calculation=False,
+            )
+
+            return proficiency, classification, grade
+
         except Exception as e:
             self.logger.error(f"Erro ao calcular proficiência/classificação: {str(e)}", exc_info=True)
-            return 0.0, "Não calculado"
+            return 0.0, "Não calculado", 0.0
     
     def _salvar_respostas_no_banco(self, test_id: str, student_id: str,
                                   respostas_detectadas: Dict[int, Optional[str]],

@@ -107,9 +107,10 @@ def calcular_proficiencia_por_disciplina(
         grade_name: Nome da série para inferir nível do curso.
 
     Returns:
-        (proficiency_by_subject, proficiency_media, classification_geral, has_matematica)
+        (proficiency_by_subject, proficiency_media, grade_media, classification_geral, has_matematica)
         - proficiency_by_subject: { subject_id: { subject_name, proficiency, classification, correct_answers, total_questions } }
         - proficiency_media: média das proficiências por disciplina
+        - grade_media: média das notas por disciplina (igual às avaliações)
         - classification_geral: classificação para a média (usa "GERAL" no calculator)
     """
     from app.services.evaluation_calculator import EvaluationCalculator
@@ -122,8 +123,13 @@ def calcular_proficiencia_por_disciplina(
         # Fallback: um único bloco com todas as questões (sem subject_id)
         all_q = list(gabarito_dict.keys())
         if all_q:
-            correct = sum(1 for q in all_q if validated_answers.get(q) == gabarito_dict.get(q))
-            total = len(all_q)
+            # Denominador = questões respondidas (igual às avaliações)
+            answered_q = [q for q in all_q if validated_answers.get(q) is not None]
+            total = len(answered_q) if answered_q else len(all_q)
+            correct = sum(
+                1 for q in answered_q
+                if validated_answers.get(q) == gabarito_dict.get(q)
+            )
             subject_name = 'Outras'
             prof = EvaluationCalculator.calculate_proficiency(
                 correct, total, course_name, subject_name
@@ -143,8 +149,8 @@ def calcular_proficiencia_por_disciplina(
                 'correct_answers': correct,
                 'total_questions': total,
             }
-            return proficiency_by_subject, prof, classification, False
-        return {}, 0.0, 'Não calculado', False
+            return proficiency_by_subject, prof, grade, classification, False
+        return {}, 0.0, 0.0, 'Não calculado', False
 
     # Agrupar por subject_id (questões podem estar em vários blocos da mesma disciplina)
     questions_by_subject: Dict[str, List[int]] = {}
@@ -164,11 +170,13 @@ def calcular_proficiencia_por_disciplina(
     for subject_id, question_numbers in questions_by_subject.items():
         if not question_numbers:
             continue
+        # Denominador = questões respondidas pelo aluno nesta disciplina (igual às avaliações)
+        answered = [q for q in question_numbers if validated_answers.get(q) is not None]
+        total = len(answered) if answered else len(question_numbers)
         correct = sum(
-            1 for q in question_numbers
+            1 for q in answered
             if validated_answers.get(q) == gabarito_dict.get(q)
         )
-        total = len(question_numbers)
         subject_name = subject_names.get(subject_id, 'Outras')
         proficiency = EvaluationCalculator.calculate_proficiency(
             correct, total, course_name, subject_name
@@ -190,14 +198,17 @@ def calcular_proficiencia_por_disciplina(
         }
 
     if not proficiency_by_subject:
-        return {}, 0.0, 'Não calculado'
+        return {}, 0.0, 0.0, 'Não calculado', False
 
     proficiencies = [v['proficiency'] for v in proficiency_by_subject.values()]
+    grades = [v['grade'] for v in proficiency_by_subject.values()]
     proficiency_media = round(sum(proficiencies) / len(proficiencies), 2)
+    # Nota geral = média das notas por disciplina (igual às avaliações)
+    grade_media = round(sum(grades) / len(grades), 2)
     classification_geral = EvaluationCalculator.determine_classification(
         proficiency_media, course_name, 'GERAL', has_matematica=has_matematica
     )
-    return proficiency_by_subject, proficiency_media, classification_geral, has_matematica
+    return proficiency_by_subject, proficiency_media, grade_media, classification_geral, has_matematica
 
 
 def _extract_blocks_with_questions(blocks_config: Optional[Dict]) -> List[Dict]:

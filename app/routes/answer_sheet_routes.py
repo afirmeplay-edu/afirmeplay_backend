@@ -2488,33 +2488,6 @@ def _get_nome_granularidade_cartao(nivel, scope_info, escola_nome, serie_nome):
     return "Geral"
 
 
-def _effective_geral_grade_classification_cartao(
-    proficiency: Optional[float], course_name: str, has_matematica: bool
-) -> Tuple[float, str]:
-    """
-    Recalcula nota e classificação do GERAL a partir da proficiência persistida,
-    usando a mesma regra do EvaluationCalculator (inclui has_matematica).
-    Evita resposta da API “congelada” em valores antigos do banco.
-    """
-    from app.services.evaluation_calculator import EvaluationCalculator
-
-    prof = float(proficiency if proficiency is not None else 0.0)
-    grade = EvaluationCalculator.calculate_grade(
-        prof,
-        course_name,
-        "GERAL",
-        use_simple_calculation=False,
-        has_matematica=has_matematica,
-    )
-    classification = EvaluationCalculator.determine_classification(
-        prof,
-        course_name,
-        "GERAL",
-        has_matematica=has_matematica,
-    )
-    return grade, classification
-
-
 def _get_empty_statistics_gerais_cartao(scope_info, nivel_granularidade):
     city_data = scope_info.get('city_data')
     return {
@@ -2618,27 +2591,18 @@ def _calcular_estatisticas_consolidadas_cartao(scope_info, nivel_granularidade, 
             _rq = _apply_answer_sheet_result_period_filter(_rq, periodo_bounds)
             resultados = _rq.all()
         alunos_participantes = len(resultados)
-        from app.services.cartao_resposta.proficiency_by_subject import (
-            course_name_and_has_matematica_for_gabarito,
-        )
-
-        course_name, has_matematica = course_name_and_has_matematica_for_gabarito(gabarito_id)
+        # Alinhado a evaluation_results_routes._calcular_estatisticas_consolidadas_por_escopo:
+        # média de nota e proficiência a partir dos valores persistidos em AnswerSheetResult
+        # (grade = média das notas por disciplina no momento do cálculo/salvamento).
         if resultados:
-            eff_grades = []
-            for r in resultados:
-                g, _ = _effective_geral_grade_classification_cartao(
-                    r.proficiency, course_name, has_matematica
-                )
-                eff_grades.append(g)
-            media_nota = sum(eff_grades) / len(eff_grades)
+            media_nota = sum((r.grade or 0) for r in resultados) / len(resultados)
+            media_prof = sum((r.proficiency or 0) for r in resultados) / len(resultados)
         else:
             media_nota = 0.0
-        media_prof = sum(r.proficiency or 0 for r in resultados) / len(resultados) if resultados else 0.0
+            media_prof = 0.0
         dist = {'abaixo_do_basico': 0, 'basico': 0, 'adequado': 0, 'avancado': 0}
         for r in resultados:
-            _, c = _effective_geral_grade_classification_cartao(
-                r.proficiency, course_name, has_matematica
-            )
+            c = r.classification
             if not c:
                 continue
             cl = c.lower()
@@ -2719,27 +2683,16 @@ def _calcular_estatisticas_grupo_cartao(class_ids, gabarito_id, periodo_bounds=N
     _rq = _apply_answer_sheet_result_period_filter(_rq, periodo_bounds)
     resultados = _rq.all()
     participantes = len(resultados)
-    from app.services.cartao_resposta.proficiency_by_subject import (
-        course_name_and_has_matematica_for_gabarito,
-    )
-
-    course_name, has_matematica = course_name_and_has_matematica_for_gabarito(gabarito_id)
+    # Mesma lógica que evaluation_results (médias a partir do registro persistido).
     if resultados:
-        eff_grades = []
-        for r in resultados:
-            g, _ = _effective_geral_grade_classification_cartao(
-                r.proficiency, course_name, has_matematica
-            )
-            eff_grades.append(g)
-        media_nota = sum(eff_grades) / len(eff_grades)
+        media_nota = sum((r.grade or 0) for r in resultados) / len(resultados)
+        media_prof = sum((r.proficiency or 0) for r in resultados) / len(resultados)
     else:
         media_nota = 0.0
-    media_prof = sum(r.proficiency or 0 for r in resultados) / len(resultados) if resultados else 0.0
+        media_prof = 0.0
     dist = {'abaixo_do_basico': 0, 'basico': 0, 'adequado': 0, 'avancado': 0}
     for r in resultados:
-        _, c = _effective_geral_grade_classification_cartao(
-            r.proficiency, course_name, has_matematica
-        )
+        c = r.classification
         cl = (c or '').lower()
         if 'abaixo' in cl:
             dist['abaixo_do_basico'] += 1
@@ -3228,24 +3181,16 @@ def _calcular_ranking_cartao(scope_info, nivel_granularidade, gabarito_id, user,
     )
     _rq = _apply_answer_sheet_result_period_filter(_rq, periodo_bounds)
     results = _rq.all()
-    from app.services.cartao_resposta.proficiency_by_subject import (
-        course_name_and_has_matematica_for_gabarito,
-    )
-
-    course_name, has_matematica = course_name_and_has_matematica_for_gabarito(gabarito_id)
     enriched = []
     for r in results:
-        eff_grade, eff_cl = _effective_geral_grade_classification_cartao(
-            r.proficiency, course_name, has_matematica
-        )
-        enriched.append((r, eff_grade, eff_cl))
+        enriched.append((r, float(r.grade or 0), r.classification or ""))
     sorted_results = sorted(
         enriched,
         key=lambda t: (t[1], t[0].proficiency or 0),
         reverse=True,
     )
     ranking = []
-    for pos, (r, eff_grade, eff_cl) in enumerate(sorted_results, 1):
+    for pos, (r, eff_grade, _) in enumerate(sorted_results, 1):
         student = Student.query.get(r.student_id)
         ranking.append({
             "posicao": pos,
@@ -3253,7 +3198,7 @@ def _calcular_ranking_cartao(scope_info, nivel_granularidade, gabarito_id, user,
             "nome": student.name if student else "N/A",
             "grade": eff_grade,
             "proficiency": r.proficiency,
-            "classification": eff_cl,
+            "classification": r.classification,
             "score_percentage": r.score_percentage
         })
     return ranking

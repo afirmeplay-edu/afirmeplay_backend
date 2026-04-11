@@ -6700,6 +6700,7 @@ def mapa_habilidades_avaliacao_online_erros():
         skill_id = request.args.get("skill_id")
         if not skill_id or not str(skill_id).strip():
             return jsonify({"error": "skill_id é obrigatório"}), 400
+        question_ref = request.args.get("question_ref")
 
         estado = request.args.get("estado")
         municipio = request.args.get("municipio")
@@ -6815,6 +6816,8 @@ def mapa_habilidades_avaliacao_online_erros():
         )
 
         bucket_key = _norm_skill_key(str(skill_id).strip())
+        if question_ref and str(question_ref).strip():
+            bucket_key = f"{bucket_key}||q:{str(question_ref).strip()}"
         alunos_err, alunos_ok, n_err, n_ok, n_tot = digital_students_passed_vs_failed_for_bucket(
             participating_students, failed_by_skill, bucket_key, school_by_id
         )
@@ -6840,6 +6843,7 @@ def mapa_habilidades_avaliacao_online_erros():
                     "avaliacao": avaliacao,
                     "disciplina": disciplina,
                     "skill_id": str(skill_id).strip(),
+                    "question_ref": str(question_ref).strip() if question_ref else None,
                     "periodo": (
                         str(periodo_raw).strip()
                         if periodo_raw and str(periodo_raw).strip()

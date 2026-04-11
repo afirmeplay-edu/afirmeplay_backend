@@ -2981,7 +2981,7 @@ def _skills_payload_for_question_number(
     q_map: Dict[int, List[str]],
     skill_by_uuid: Dict[str, Dict[str, str]],
 ) -> List[Dict[str, str]]:
-    """Lista de {id, code} por questão; N/A se token inválido ou habilidade inexistente no banco."""
+    """Lista de {id, code} por questão; preserva token não-UUID como código de habilidade."""
     na = {"id": "N/A", "code": "N/A"}
     out: List[Dict[str, str]] = []
     for raw in q_map.get(q_num) or []:
@@ -2991,7 +2991,8 @@ def _skills_payload_for_question_number(
         try:
             uid = str(uuid.UUID(t))
         except ValueError:
-            out.append(na.copy())
+            # Token já pode ser código (ex.: EF15_D2). Não colapsar para N/A.
+            out.append({"id": t, "code": t})
             continue
         row = skill_by_uuid.get(uid)
         out.append(dict(row) if row else na.copy())
@@ -3993,6 +3994,7 @@ def mapa_habilidades_cartao_erros():
         )
 
         bloco_disciplina = request.args.get("bloco_disciplina") or request.args.get("subject_id")
+        question_ref = request.args.get("question_ref")
 
         alunos_err, alunos_ok, n_err, n_ok, n_tot = answer_sheet_students_passed_vs_failed(
             students,
@@ -4000,6 +4002,7 @@ def mapa_habilidades_cartao_erros():
             failed_by_skill,
             school_by_id,
             bloco_disciplina=str(bloco_disciplina).strip() if bloco_disciplina else None,
+            question_ref=str(question_ref).strip() if question_ref else None,
         )
         pct_err = round_to_two_decimals((n_err / n_tot * 100.0) if n_tot else 0.0)
         pct_ok = round_to_two_decimals((n_ok / n_tot * 100.0) if n_tot else 0.0)
@@ -4024,6 +4027,7 @@ def mapa_habilidades_cartao_erros():
                     "disciplina": disciplina,
                     "skill_id": str(skill_id).strip(),
                     "bloco_disciplina": str(bloco_disciplina).strip() if bloco_disciplina else None,
+                    "question_ref": str(question_ref).strip() if question_ref else None,
                     "periodo": (
                         str(periodo_raw_erros).strip()
                         if periodo_raw_erros and str(periodo_raw_erros).strip()

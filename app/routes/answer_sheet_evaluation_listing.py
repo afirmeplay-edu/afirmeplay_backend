@@ -880,16 +880,16 @@ def build_answer_sheet_relatorio_detalhado_json(
         elif t:
             disciplina = t.title or "N/A"
 
-    skill_ids: List[str] = []
+    skill_tokens: List[str] = []
     for qn in question_nums:
         for sid in q_skills.get(qn) or []:
             if sid:
-                skill_ids.append(str(sid).strip())
-    unique_skill_ids = list(dict.fromkeys(skill_ids))
+                skill_tokens.append(str(sid).strip())
+    unique_skill_tokens = list(dict.fromkeys(skill_tokens))
     code_by_id: Dict[str, str] = {}
-    if unique_skill_ids:
+    if unique_skill_tokens:
         uuids = []
-        for raw in unique_skill_ids:
+        for raw in unique_skill_tokens:
             try:
                 uuids.append(UUID(str(raw)))
             except ValueError:
@@ -897,6 +897,21 @@ def build_answer_sheet_relatorio_detalhado_json(
         if uuids:
             rows = Skill.query.filter(Skill.id.in_(uuids)).all()
             code_by_id = {str(sk.id): (sk.code or "N/A") for sk in rows}
+
+    def _resolve_skill_code(token: str) -> str:
+        t = str(token or "").strip()
+        if not t:
+            return "N/A"
+        code = code_by_id.get(t)
+        if code and str(code).strip():
+            return str(code).strip()
+        try:
+            UUID(t)
+            # UUID sem cadastro na tabela skills.
+            return "N/A"
+        except ValueError:
+            # Token já é código (ex.: EF15_D2 / D13) e deve ser preservado.
+            return t
 
     questoes_data: List[Dict[str, Any]] = []
     for i, qn in enumerate(question_nums, 1):
@@ -913,9 +928,17 @@ def build_answer_sheet_relatorio_detalhado_json(
         porcentagem_acertos = (acertos / total_respostas * 100) if total_respostas > 0 else 0.0
 
         sids = q_skills.get(qn) or []
-        first_code = "N/A"
-        if sids:
-            first_code = code_by_id.get(str(sids[0]).strip(), "N/A")
+        skills_payload = [
+            {
+                "id": str(sid).strip() if sid else "N/A",
+                "code": _resolve_skill_code(str(sid).strip() if sid else ""),
+            }
+            for sid in sids
+        ]
+        first_code = next(
+            (s.get("code") for s in skills_payload if s.get("code") and s.get("code") != "N/A"),
+            "N/A",
+        )
 
         qid = f"{gab.id}-q{qn}"
         questoes_data.append(
@@ -925,6 +948,7 @@ def build_answer_sheet_relatorio_detalhado_json(
                 "texto": f"Questão {qn}",
                 "habilidade": first_code,
                 "codigo_habilidade": first_code,
+                "skills": skills_payload,
                 "tipo": "multiple_choice",
                 "dificuldade": "Médio",
                 "porcentagem_acertos": round_to_two_decimals(porcentagem_acertos),

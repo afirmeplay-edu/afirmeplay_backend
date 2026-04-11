@@ -117,17 +117,14 @@ def _question_skills_map_from_gabarito(gabarito: AnswerSheetGabarito) -> Dict[in
     flat_index = 0
 
     def _merge_skills(qn: int, skills: List[Any]) -> None:
+        # Preservar cardinalidade por questão: não colapsar habilidades repetidas.
         skill_strs = [str(s) for s in (skills or []) if s]
         if not skill_strs:
             return
         if qn not in out:
             out[qn] = list(skill_strs)
             return
-        seen = set(out[qn])
-        for s in skill_strs:
-            if s not in seen:
-                out[qn].append(s)
-                seen.add(s)
+        out[qn].extend(skill_strs)
 
     for block in blocks:
         for q in block.get("questions") or []:
@@ -178,7 +175,6 @@ def question_skills_map_for_answer_sheet(gabarito: AnswerSheetGabarito) -> Dict[
         if not s:
             return []
         result: List[str] = []
-        seen: Set[str] = set()
         for part in s.split(","):
             token = part.strip().replace("{", "").replace("}", "")
             if not token:
@@ -191,9 +187,10 @@ def question_skills_map_for_answer_sheet(gabarito: AnswerSheetGabarito) -> Dict[
                     sk = Skill.query.filter(
                         func.lower(Skill.code) == (token.lower() if token else "")
                     ).first()
-                uid = str(sk.id) if sk else ""
-            if uid and uid not in seen:
-                seen.add(uid)
+                # Se não resolver para UUID de skill, manter o token original (código),
+                # para não perder a habilidade no relatório.
+                uid = str(sk.id) if sk else token
+            if uid:
                 result.append(uid)
         return result
 

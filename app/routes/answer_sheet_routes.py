@@ -35,7 +35,7 @@ from app.models.city import City
 from app.models.test import Test
 from app.models.skill import Skill
 from app.utils.decimal_helpers import round_to_two_decimals
-from typing import Dict, Optional, List, Any, Tuple
+from typing import Dict, Optional, List, Any, Tuple, Set
 from collections import defaultdict
 from sqlalchemy import cast, String, desc
 from app.services.cartao_resposta.answer_sheet_gabarito_generation import (
@@ -2332,6 +2332,37 @@ def _apply_answer_sheet_result_period_filter(query, periodo_bounds: Optional[Tup
     )
 
 
+def _dedupe_answer_sheet_results_latest_per_student(
+    results: List[AnswerSheetResult],
+) -> List[AnswerSheetResult]:
+    """
+    Um aluno conta uma vez por gabarito nas agregações. Se houver vários AnswerSheetResult
+    para o mesmo student_id, mantém o mais recente (corrected_at maior; desempate por id).
+    Registros sem corrected_at perdem para qualquer um com data.
+    """
+    if not results:
+        return []
+
+    def _prefer_newer(a: AnswerSheetResult, b: AnswerSheetResult) -> AnswerSheetResult:
+        ta, tb = a.corrected_at, b.corrected_at
+        if ta is not None and tb is None:
+            return a
+        if ta is None and tb is not None:
+            return b
+        if ta is not None and tb is not None and ta != tb:
+            return a if ta > tb else b
+        return a if str(a.id) >= str(b.id) else b
+
+    by_student: Dict[str, AnswerSheetResult] = {}
+    for r in results:
+        sid = str(r.student_id)
+        if sid not in by_student:
+            by_student[sid] = r
+        else:
+            by_student[sid] = _prefer_newer(r, by_student[sid])
+    return list(by_student.values())
+
+
 def _school_ids_com_correcao_cartao_no_periodo(
     gabarito_id: str, school_ids: List[str], periodo_bounds: Tuple[datetime, datetime]
 ) -> set:
@@ -2488,33 +2519,6 @@ def _get_nome_granularidade_cartao(nivel, scope_info, escola_nome, serie_nome):
     return "Geral"
 
 
-def _effective_geral_grade_classification_cartao(
-    proficiency: Optional[float], course_name: str, has_matematica: bool
-) -> Tuple[float, str]:
-    """
-    Recalcula nota e classificação do GERAL a partir da proficiência persistida,
-    usando a mesma regra do EvaluationCalculator (inclui has_matematica).
-    Evita resposta da API “congelada” em valores antigos do banco.
-    """
-    from app.services.evaluation_calculator import EvaluationCalculator
-
-    prof = float(proficiency if proficiency is not None else 0.0)
-    grade = EvaluationCalculator.calculate_grade(
-        prof,
-        course_name,
-        "GERAL",
-        use_simple_calculation=False,
-        has_matematica=has_matematica,
-    )
-    classification = EvaluationCalculator.determine_classification(
-        prof,
-        course_name,
-        "GERAL",
-        has_matematica=has_matematica,
-    )
-    return grade, classification
-
-
 def _get_empty_statistics_gerais_cartao(scope_info, nivel_granularidade):
     city_data = scope_info.get('city_data')
     return {
@@ -2598,10 +2602,94 @@ def _obter_class_ids_com_resultado_cartao(gabarito_id, escopo, periodo_bounds=No
     return [c.id for c in q.all()]
 
 
+def _class_ids_alunos_previstos_cartao(
+    gabarito_id: Optional[str],
+    scope_info: dict,
+    nivel_granularidade: str,
+    user: Optional[dict] = None,
+) -> List[Any]:
+    """
+    Turmas-alvo do cartão conforme criação do gabarito (scope_snapshot, batch, escopo legado),
+    recortadas pelo filtro da URL (município / escola / série / turma) e pela permissão.
+    Usado para total de alunos previstos em resultados agregados.
+    """
+    if not gabarito_id or not scope_info:
+        return []
+    gid = str(gabarito_id).strip()
+    gab = AnswerSheetGabarito.query.get(gid)
+    if not gab:
+        return []
+
+    from uuid import UUID
+
+    from app.report_analysis.answer_sheet_report_builder import _resolve_target_class_ids
+
+    municipio_id = scope_info.get('municipio_id')
+    escola_param = scope_info.get('escola')
+    serie_param = scope_info.get('serie')
+    turma_param = scope_info.get('turma')
+
+    if _is_valid_filter(escola_param):
+        rtype = 'school'
+        ref = str(escola_param).strip()
+    else:
+        rtype = 'city'
+        ref = str(municipio_id) if municipio_id else None
+
+    if not ref:
+        return []
+
+    raw_ids = _resolve_target_class_ids(gab, rtype, ref)
+    if not raw_ids:
+        return []
+
+    restrict_school_id = None
+    if user:
+        from app.permissions import get_user_permission_scope
+
+        perm = get_user_permission_scope(user)
+        if perm.get('scope') == 'escola' and user.get('role') in ('diretor', 'coordenador'):
+            from app.models.manager import Manager
+
+            mgr = Manager.query.filter_by(user_id=user['id']).first()
+            if mgr and mgr.school_id:
+                restrict_school_id = str(mgr.school_id)
+
+    out: List[Any] = []
+    for cid_str in raw_ids:
+        try:
+            uid = UUID(str(cid_str))
+        except ValueError:
+            continue
+        c = Class.query.get(uid)
+        if not c:
+            continue
+        if restrict_school_id and str(c.school_id) != restrict_school_id:
+            continue
+        if _is_valid_filter(turma_param):
+            if str(c.id) != str(turma_param).strip():
+                continue
+        elif _is_valid_filter(serie_param):
+            if not c.grade_id or str(c.grade_id) != str(serie_param).strip():
+                continue
+        out.append(c.id)
+
+    if user and user.get('role') == 'professor':
+        from app.models.teacher import Teacher
+        from app.models.teacherClass import TeacherClass
+
+        teacher = Teacher.query.filter_by(user_id=user['id']).first()
+        if not teacher:
+            return []
+        allowed = {tc.class_id for tc in TeacherClass.query.filter_by(teacher_id=teacher.id).all()}
+        out = [x for x in out if x in allowed]
+
+    return out
+
+
 def _calcular_estatisticas_consolidadas_cartao(scope_info, nivel_granularidade, gabarito_id, user, periodo_bounds=None):
     try:
-        escopo = _determinar_escopo_calculo_cartao(scope_info, nivel_granularidade)
-        class_ids = _obter_class_ids_com_resultado_cartao(gabarito_id, escopo, periodo_bounds)
+        class_ids = _class_ids_alunos_previstos_cartao(gabarito_id, scope_info, nivel_granularidade, user)
         if not class_ids:
             return _get_empty_statistics_gerais_cartao(scope_info, nivel_granularidade)
 
@@ -2617,28 +2705,20 @@ def _calcular_estatisticas_consolidadas_cartao(scope_info, nivel_granularidade, 
             )
             _rq = _apply_answer_sheet_result_period_filter(_rq, periodo_bounds)
             resultados = _rq.all()
+        resultados = _dedupe_answer_sheet_results_latest_per_student(resultados)
         alunos_participantes = len(resultados)
-        from app.services.cartao_resposta.proficiency_by_subject import (
-            course_name_and_has_matematica_for_gabarito,
-        )
-
-        course_name, has_matematica = course_name_and_has_matematica_for_gabarito(gabarito_id)
+        # Alinhado a evaluation_results_routes._calcular_estatisticas_consolidadas_por_escopo:
+        # média de nota e proficiência a partir dos valores persistidos em AnswerSheetResult
+        # (grade = média das notas por disciplina no momento do cálculo/salvamento).
         if resultados:
-            eff_grades = []
-            for r in resultados:
-                g, _ = _effective_geral_grade_classification_cartao(
-                    r.proficiency, course_name, has_matematica
-                )
-                eff_grades.append(g)
-            media_nota = sum(eff_grades) / len(eff_grades)
+            media_nota = sum((r.grade or 0) for r in resultados) / len(resultados)
+            media_prof = sum((r.proficiency or 0) for r in resultados) / len(resultados)
         else:
             media_nota = 0.0
-        media_prof = sum(r.proficiency or 0 for r in resultados) / len(resultados) if resultados else 0.0
+            media_prof = 0.0
         dist = {'abaixo_do_basico': 0, 'basico': 0, 'adequado': 0, 'avancado': 0}
         for r in resultados:
-            _, c = _effective_geral_grade_classification_cartao(
-                r.proficiency, course_name, has_matematica
-            )
+            c = r.classification
             if not c:
                 continue
             cl = c.lower()
@@ -2698,7 +2778,7 @@ def _calcular_estatisticas_consolidadas_cartao(scope_info, nivel_granularidade, 
             "total_alunos": total_alunos,
             "alunos_participantes": alunos_participantes,
             "alunos_pendentes": total_alunos - alunos_participantes,
-            "alunos_ausentes": 0,
+            "alunos_ausentes": max(0, total_alunos - alunos_participantes),
             "media_nota_geral": round(media_nota, 2),
             "media_proficiencia_geral": round(media_prof, 2),
             "distribuicao_classificacao_geral": dist
@@ -2717,29 +2797,18 @@ def _calcular_estatisticas_grupo_cartao(class_ids, gabarito_id, periodo_bounds=N
     sid_list = [a.id for a in alunos]
     _rq = AnswerSheetResult.query.filter(AnswerSheetResult.gabarito_id == gabarito_id, AnswerSheetResult.student_id.in_(sid_list))
     _rq = _apply_answer_sheet_result_period_filter(_rq, periodo_bounds)
-    resultados = _rq.all()
+    resultados = _dedupe_answer_sheet_results_latest_per_student(_rq.all())
     participantes = len(resultados)
-    from app.services.cartao_resposta.proficiency_by_subject import (
-        course_name_and_has_matematica_for_gabarito,
-    )
-
-    course_name, has_matematica = course_name_and_has_matematica_for_gabarito(gabarito_id)
+    # Mesma lógica que evaluation_results (médias a partir do registro persistido).
     if resultados:
-        eff_grades = []
-        for r in resultados:
-            g, _ = _effective_geral_grade_classification_cartao(
-                r.proficiency, course_name, has_matematica
-            )
-            eff_grades.append(g)
-        media_nota = sum(eff_grades) / len(eff_grades)
+        media_nota = sum((r.grade or 0) for r in resultados) / len(resultados)
+        media_prof = sum((r.proficiency or 0) for r in resultados) / len(resultados)
     else:
         media_nota = 0.0
-    media_prof = sum(r.proficiency or 0 for r in resultados) / len(resultados) if resultados else 0.0
+        media_prof = 0.0
     dist = {'abaixo_do_basico': 0, 'basico': 0, 'adequado': 0, 'avancado': 0}
     for r in resultados:
-        _, c = _effective_geral_grade_classification_cartao(
-            r.proficiency, course_name, has_matematica
-        )
+        c = r.classification
         cl = (c or '').lower()
         if 'abaixo' in cl:
             dist['abaixo_do_basico'] += 1
@@ -2752,13 +2821,14 @@ def _calcular_estatisticas_grupo_cartao(class_ids, gabarito_id, periodo_bounds=N
     return {'total_alunos': total_alunos, 'alunos_participantes': participantes, 'alunos_pendentes': total_alunos - participantes, 'media_nota': round(media_nota, 2), 'media_proficiencia': round(media_prof, 2), 'distribuicao_classificacao': dist}
 
 
-def _gerar_resultados_detalhados_por_granularidade_cartao(scope_info, nivel_granularidade, gabarito_id, periodo_bounds=None):
+def _gerar_resultados_detalhados_por_granularidade_cartao(
+    scope_info, nivel_granularidade, gabarito_id, periodo_bounds=None, user=None
+):
     """Gera lista agregada por escola / série / turma."""
     gabarito_id = str(gabarito_id).strip() if gabarito_id else None
     if not gabarito_id:
         return []
-    escopo_base = _determinar_escopo_calculo_cartao(scope_info, nivel_granularidade)
-    class_ids = _obter_class_ids_com_resultado_cartao(gabarito_id, escopo_base, periodo_bounds)
+    class_ids = _class_ids_alunos_previstos_cartao(gabarito_id, scope_info, nivel_granularidade, user)
     if not class_ids:
         return []
     classes = Class.query.filter(Class.id.in_(class_ids)).all()
@@ -2862,12 +2932,13 @@ def _extrair_blocos_por_disciplina_cartao(blocks_config):
     return list(by_subject.values())
 
 
-def _calcular_resultados_por_disciplina_cartao(scope_info, nivel_granularidade, gabarito_id, periodo_bounds=None):
+def _calcular_resultados_por_disciplina_cartao(
+    scope_info, nivel_granularidade, gabarito_id, periodo_bounds=None, user=None
+):
     """Retorna lista no mesmo formato de evaluation_results: resultados_por_disciplina."""
     if not gabarito_id:
         return []
-    escopo = _determinar_escopo_calculo_cartao(scope_info, nivel_granularidade)
-    class_ids = _obter_class_ids_com_resultado_cartao(gabarito_id, escopo, periodo_bounds)
+    class_ids = _class_ids_alunos_previstos_cartao(gabarito_id, scope_info, nivel_granularidade, user)
     if not class_ids:
         return []
     student_ids = [s.id for s in Student.query.filter(Student.class_id.in_(class_ids)).all()]
@@ -2876,7 +2947,7 @@ def _calcular_resultados_por_disciplina_cartao(scope_info, nivel_granularidade, 
         AnswerSheetResult.student_id.in_(student_ids),
     )
     _rq = _apply_answer_sheet_result_period_filter(_rq, periodo_bounds)
-    results = _rq.all()
+    results = _dedupe_answer_sheet_results_latest_per_student(_rq.all())
     if not results:
         return []
     gabarito = AnswerSheetGabarito.query.get(gabarito_id)
@@ -2932,7 +3003,7 @@ def _calcular_resultados_por_disciplina_cartao(scope_info, nivel_granularidade, 
             "total_alunos": total_alunos,
             "alunos_participantes": n,
             "alunos_pendentes": total_alunos - n,
-            "alunos_ausentes": 0,
+            "alunos_ausentes": max(0, total_alunos - n),
             "media_nota": round(agg['soma_nota'] / n, 2) if n else 0.0,
             "media_proficiencia": round(agg['soma_proficiencia'] / n, 2) if n else 0.0,
             "distribuicao_classificacao": agg['dist']
@@ -2981,7 +3052,7 @@ def _skills_payload_for_question_number(
     q_map: Dict[int, List[str]],
     skill_by_uuid: Dict[str, Dict[str, str]],
 ) -> List[Dict[str, str]]:
-    """Lista de {id, code} por questão; N/A se token inválido ou habilidade inexistente no banco."""
+    """Lista de {id, code} por questão; preserva token não-UUID como código de habilidade."""
     na = {"id": "N/A", "code": "N/A"}
     out: List[Dict[str, str]] = []
     for raw in q_map.get(q_num) or []:
@@ -2991,7 +3062,8 @@ def _skills_payload_for_question_number(
         try:
             uid = str(uuid.UUID(t))
         except ValueError:
-            out.append(na.copy())
+            # Token já pode ser código (ex.: EF15_D2). Não colapsar para N/A.
+            out.append({"id": t, "code": t})
             continue
         row = skill_by_uuid.get(uid)
         out.append(dict(row) if row else na.copy())
@@ -3001,8 +3073,7 @@ def _skills_payload_for_question_number(
 def _gerar_tabela_detalhada_cartao(scope_info, nivel_granularidade, gabarito_id, user, periodo_bounds=None):
     """Tabela detalhada no mesmo formato de evaluation_results: disciplinas (com questões e alunos com respostas_por_questao) e geral (alunos com totais e proficiência geral)."""
     import json
-    escopo = _determinar_escopo_calculo_cartao(scope_info, nivel_granularidade)
-    class_ids = _obter_class_ids_com_resultado_cartao(gabarito_id, escopo, periodo_bounds)
+    class_ids = _class_ids_alunos_previstos_cartao(gabarito_id, scope_info, nivel_granularidade, user)
     if not class_ids or not gabarito_id:
         return {"disciplinas": [], "geral": {"alunos": []}}
     gabarito = AnswerSheetGabarito.query.get(gabarito_id)
@@ -3027,7 +3098,7 @@ def _gerar_tabela_detalhada_cartao(scope_info, nivel_granularidade, gabarito_id,
         AnswerSheetResult.student_id.in_(student_ids),
     )
     _rq = _apply_answer_sheet_result_period_filter(_rq, periodo_bounds)
-    results = _rq.all()
+    results = _dedupe_answer_sheet_results_latest_per_student(_rq.all())
     result_by_student = {r.student_id: r for r in results}
     classes_by_id = {c.id: c for c in Class.query.filter(Class.id.in_(class_ids)).all()}
     schools_by_id = {}
@@ -3122,7 +3193,7 @@ def _gerar_tabela_detalhada_cartao(scope_info, nivel_granularidade, gabarito_id,
                 "nivel_proficiencia": disciplina_classificacao,
                 "nota": round(disciplina_nota, 2),
                 "proficiencia": round(disciplina_proficiencia, 2) if disciplina_proficiencia else 0.0,
-                "status": "concluida" if total_respondidas > 0 else "pendente",
+                "status": "concluida" if r else "pendente",
                 "percentual_acertos": round((total_acertos / total_respondidas * 100), 2) if total_respondidas > 0 else 0.0
             })
         disciplinas_out.append({
@@ -3132,12 +3203,16 @@ def _gerar_tabela_detalhada_cartao(scope_info, nivel_granularidade, gabarito_id,
             "alunos": alunos_disciplina
         })
 
-    dados_gerais = _calcular_dados_gerais_alunos_cartao(disciplinas_out, grade_name)
+    student_ids_com_resultado = {str(sid) for sid in result_by_student.keys()}
+    dados_gerais = _calcular_dados_gerais_alunos_cartao(disciplinas_out, grade_name, student_ids_com_resultado)
     return {"disciplinas": disciplinas_out, "geral": dados_gerais}
 
 
-def _calcular_dados_gerais_alunos_cartao(disciplinas_out, grade_name):
-    """Consolida por aluno: nota_geral, proficiencia_geral, total_acertos_geral, respostas_por_questao (todas as questões)."""
+def _calcular_dados_gerais_alunos_cartao(disciplinas_out, grade_name, student_ids_com_resultado: Set[str]):
+    """Consolida por aluno: nota_geral, proficiencia_geral, total_acertos_geral, respostas_por_questao (todas as questões).
+
+    status_geral: concluida se existe AnswerSheetResult para o aluno (mesmo sem respostas detectadas); caso contrário pendente.
+    """
     dados_alunos = {}
     for disc in disciplinas_out:
         for aluno_data in disc.get("alunos", []):
@@ -3207,7 +3282,7 @@ def _calcular_dados_gerais_alunos_cartao(disciplinas_out, grade_name):
             "total_respondidas_geral": dados["total_respondidas_geral"],
             "total_em_branco_geral": dados["total_questoes_geral"] - dados["total_respondidas_geral"],
             "percentual_acertos_geral": round(percentual, 2),
-            "status_geral": "concluida" if dados["total_respondidas_geral"] > 0 else "pendente",
+            "status_geral": "concluida" if dados["id"] in student_ids_com_resultado else "pendente",
             "respostas_por_questao": dados["respostas_por_questao_geral"]
         })
     alunos_gerais.sort(key=lambda x: x["nome"])
@@ -3216,8 +3291,7 @@ def _calcular_dados_gerais_alunos_cartao(disciplinas_out, grade_name):
 
 def _calcular_ranking_cartao(scope_info, nivel_granularidade, gabarito_id, user, periodo_bounds=None):
     """Ranking de alunos por nota no gabarito."""
-    escopo = _determinar_escopo_calculo_cartao(scope_info, nivel_granularidade)
-    class_ids = _obter_class_ids_com_resultado_cartao(gabarito_id, escopo, periodo_bounds)
+    class_ids = _class_ids_alunos_previstos_cartao(gabarito_id, scope_info, nivel_granularidade, user)
     if not class_ids or not gabarito_id:
         return []
     student_ids = [s.id for s in Student.query.filter(Student.class_id.in_(class_ids)).all()]
@@ -3226,25 +3300,17 @@ def _calcular_ranking_cartao(scope_info, nivel_granularidade, gabarito_id, user,
         AnswerSheetResult.student_id.in_(student_ids),
     )
     _rq = _apply_answer_sheet_result_period_filter(_rq, periodo_bounds)
-    results = _rq.all()
-    from app.services.cartao_resposta.proficiency_by_subject import (
-        course_name_and_has_matematica_for_gabarito,
-    )
-
-    course_name, has_matematica = course_name_and_has_matematica_for_gabarito(gabarito_id)
+    results = _dedupe_answer_sheet_results_latest_per_student(_rq.all())
     enriched = []
     for r in results:
-        eff_grade, eff_cl = _effective_geral_grade_classification_cartao(
-            r.proficiency, course_name, has_matematica
-        )
-        enriched.append((r, eff_grade, eff_cl))
+        enriched.append((r, float(r.grade or 0), r.classification or ""))
     sorted_results = sorted(
         enriched,
         key=lambda t: (t[1], t[0].proficiency or 0),
         reverse=True,
     )
     ranking = []
-    for pos, (r, eff_grade, eff_cl) in enumerate(sorted_results, 1):
+    for pos, (r, eff_grade, _) in enumerate(sorted_results, 1):
         student = Student.query.get(r.student_id)
         ranking.append({
             "posicao": pos,
@@ -3252,7 +3318,7 @@ def _calcular_ranking_cartao(scope_info, nivel_granularidade, gabarito_id, user,
             "nome": student.name if student else "N/A",
             "grade": eff_grade,
             "proficiency": r.proficiency,
-            "classification": eff_cl,
+            "classification": r.classification,
             "score_percentage": r.score_percentage
         })
     return ranking
@@ -3739,12 +3805,16 @@ def get_resultados_agregados():
             scope_info, nivel_granularidade, gabarito_id, user, periodo_bounds
         )
         resultados_por_disciplina = (
-            _calcular_resultados_por_disciplina_cartao(scope_info, nivel_granularidade, gabarito_id, periodo_bounds)
+            _calcular_resultados_por_disciplina_cartao(
+                scope_info, nivel_granularidade, gabarito_id, periodo_bounds, user
+            )
             if gabarito_id
             else []
         )
         resultados_detalhados = (
-            _gerar_resultados_detalhados_por_granularidade_cartao(scope_info, nivel_granularidade, gabarito_id, periodo_bounds)
+            _gerar_resultados_detalhados_por_granularidade_cartao(
+                scope_info, nivel_granularidade, gabarito_id, periodo_bounds, user
+            )
             if gabarito_id
             else []
         )
@@ -3846,8 +3916,7 @@ def mapa_habilidades_cartao():
             estado, municipio, escola, serie, turma, gabarito
         )
 
-        escopo = _determinar_escopo_calculo_cartao(scope_info, nivel_granularidade)
-        class_ids = _obter_class_ids_com_resultado_cartao(gabarito_id, escopo, periodo_bounds)
+        class_ids = _class_ids_alunos_previstos_cartao(gabarito_id, scope_info, nivel_granularidade, user)
         if not class_ids:
             return jsonify(
                 {
@@ -3969,8 +4038,7 @@ def mapa_habilidades_cartao_erros():
             estado, municipio, escola, serie, turma, gabarito
         )
 
-        escopo = _determinar_escopo_calculo_cartao(scope_info, nivel_granularidade)
-        class_ids = _obter_class_ids_com_resultado_cartao(gabarito_id, escopo, periodo_bounds_erros)
+        class_ids = _class_ids_alunos_previstos_cartao(gabarito_id, scope_info, nivel_granularidade, user)
 
         disc_filt = None if str(disciplina).strip().lower() == "all" else str(disciplina).strip()
 
@@ -3978,6 +4046,40 @@ def mapa_habilidades_cartao_erros():
             answer_sheet_students_passed_vs_failed,
             build_skills_map_answer_sheet,
         )
+
+        if not class_ids:
+            return jsonify(
+                {
+                    "percentual_erros": 0.0,
+                    "percentual_acertos": 0.0,
+                    "total_alunos_escopo": 0,
+                    "total_alunos_que_erraram": 0,
+                    "total_alunos_que_acertaram": 0,
+                    "alunos_que_erraram": [],
+                    "alunos_que_acertaram": [],
+                    "alunos": [],
+                    "filtros_aplicados": {
+                        "estado": estado,
+                        "municipio": municipio,
+                        "escola": escola,
+                        "serie": serie,
+                        "turma": turma,
+                        "gabarito": gabarito,
+                        "disciplina": disciplina,
+                        "skill_id": str(skill_id).strip(),
+                        "bloco_disciplina": str(
+                            request.args.get("bloco_disciplina") or request.args.get("subject_id") or ""
+                        ).strip()
+                        or None,
+                        "question_ref": str(request.args.get("question_ref") or "").strip() or None,
+                        "periodo": (
+                            str(periodo_raw_erros).strip()
+                            if periodo_raw_erros and str(periodo_raw_erros).strip()
+                            else None
+                        ),
+                    },
+                }
+            ), 200
 
         raw = build_skills_map_answer_sheet(gabarito_id, [str(c) for c in class_ids], disc_filt)
         students = raw.get("_students_snapshot") or []
@@ -3993,6 +4095,7 @@ def mapa_habilidades_cartao_erros():
         )
 
         bloco_disciplina = request.args.get("bloco_disciplina") or request.args.get("subject_id")
+        question_ref = request.args.get("question_ref")
 
         alunos_err, alunos_ok, n_err, n_ok, n_tot = answer_sheet_students_passed_vs_failed(
             students,
@@ -4000,6 +4103,7 @@ def mapa_habilidades_cartao_erros():
             failed_by_skill,
             school_by_id,
             bloco_disciplina=str(bloco_disciplina).strip() if bloco_disciplina else None,
+            question_ref=str(question_ref).strip() if question_ref else None,
         )
         pct_err = round_to_two_decimals((n_err / n_tot * 100.0) if n_tot else 0.0)
         pct_ok = round_to_two_decimals((n_ok / n_tot * 100.0) if n_tot else 0.0)
@@ -4024,6 +4128,7 @@ def mapa_habilidades_cartao_erros():
                     "disciplina": disciplina,
                     "skill_id": str(skill_id).strip(),
                     "bloco_disciplina": str(bloco_disciplina).strip() if bloco_disciplina else None,
+                    "question_ref": str(question_ref).strip() if question_ref else None,
                     "periodo": (
                         str(periodo_raw_erros).strip()
                         if periodo_raw_erros and str(periodo_raw_erros).strip()

@@ -55,6 +55,10 @@ def _norm_skill_key(sid: str) -> str:
         return str(sid).strip()
 
 
+def _digital_stat_bucket_key(skill_norm: str, question_ref: str) -> str:
+    return f"{skill_norm}||q:{str(question_ref).strip()}"
+
+
 def _habilidade_codigo_e_descricao(sk: str, obj: Optional[Skill]) -> Tuple[str, str]:
     """
     Textos para o mapa / modal: não usar UUID como código ou título.
@@ -234,13 +238,16 @@ def compute_digital_aggregate(
     # (que filtra via _participating_answer_sheet_result).
     participating_students = [s for s in students if s.id in answers_by_student]
 
-    stats: Dict[str, Dict[str, Any]] = defaultdict(lambda: {"correct": 0, "total": 0})
+    stats: Dict[str, Dict[str, Any]] = defaultdict(
+        lambda: {"correct": 0, "total": 0, "question_ref": "", "subject_id": None}
+    )
     failed_by_skill: Dict[str, Set[str]] = defaultdict(set)
 
     for student in participating_students:
         sid = student.id
         for q, skill_key in questoes_com_habilidade:
             sk = _norm_skill_key(skill_key)
+            bucket = _digital_stat_bucket_key(sk, str(q.id))
             resposta = answers_by_student.get(sid, {}).get(q.id)
             acertou = False
             if resposta:
@@ -253,11 +260,17 @@ def compute_digital_aggregate(
                         str(resposta.answer).strip().lower()
                         == str(q.correct_answer).strip().lower()
                     )
-            stats[sk]["total"] += 1
+            stats[bucket]["total"] += 1
+            if not stats[bucket]["question_ref"]:
+                stats[bucket]["question_ref"] = str(q.id)
+            if not stats[bucket]["subject_id"]:
+                stats[bucket]["subject_id"] = (
+                    str(q.subject_id) if getattr(q, "subject_id", None) else "sem_disciplina"
+                )
             if acertou:
-                stats[sk]["correct"] += 1
+                stats[bucket]["correct"] += 1
             else:
-                failed_by_skill[sk].add(sid)
+                failed_by_skill[bucket].add(sid)
 
     skill_to_question_ids: Dict[str, Set[str]] = defaultdict(set)
     for q, skill_key in questoes_com_habilidade:
@@ -266,18 +279,18 @@ def compute_digital_aggregate(
     subj_nome_por_id: Dict[str, str] = {str(d["id"]): str(d["nome"]) for d in disciplinas}
 
     habilidades: List[Dict[str, Any]] = []
-    for sk, agg in stats.items():
+    for bucket, agg in stats.items():
+        if "||q:" in bucket:
+            sk, question_ref = bucket.rsplit("||q:", 1)
+        else:
+            sk, question_ref = bucket, ""
         total = int(agg["total"])
         correct = int(agg["correct"])
         pct = round_to_two_decimals((correct / total * 100.0) if total > 0 else 0.0)
         faixa = faixa_from_percent(pct)
         obj = skills_db.get(sk)
         codigo, descricao = _habilidade_codigo_e_descricao(sk, obj)
-        subj_id = None
-        for q, sk0 in questoes_com_habilidade:
-            if _norm_skill_key(sk0) == sk:
-                subj_id = str(q.subject_id) if q.subject_id else "sem_disciplina"
-                break
+        subj_id = str(agg.get("subject_id") or "sem_disciplina")
 
         disciplina_nome = subj_nome_por_id.get(subj_id or "", "") or "Sem disciplina"
 
@@ -288,6 +301,7 @@ def compute_digital_aggregate(
                 "descricao": descricao,
                 "subject_id": subj_id,
                 "disciplina_nome": disciplina_nome,
+                "question_ref": question_ref,
                 "percentual_acertos": pct,
                 "faixa": faixa,
                 "total_tentativas": total,
@@ -295,7 +309,13 @@ def compute_digital_aggregate(
         )
 
     habilidades.sort(
-        key=lambda x: (x["faixa"], -x["percentual_acertos"], x["codigo"], x["skill_id"])
+        key=lambda x: (
+            x["faixa"],
+            str(x.get("subject_id") or ""),
+            -x["percentual_acertos"],
+            x["codigo"],
+            str(x.get("question_ref") or ""),
+        )
     )
 
     por_faixa = {FAIXA_ABAIXO: [], FAIXA_BASICO: [], FAIXA_ADEQUADO: [], FAIXA_AVANCADO: []}
@@ -479,18 +499,31 @@ def _parse_detected(detected: Any) -> Dict[int, str]:
     return out
 
 
-def _answer_sheet_stat_bucket_key(skill_norm: str, block_subject_id: str) -> str:
-    return f"{skill_norm}||{str(block_subject_id).strip()}"
+def _answer_sheet_stat_bucket_key(
+    skill_norm: str, block_subject_id: str, question_ref: Optional[str] = None
+) -> str:
+    base = f"{skill_norm}||{str(block_subject_id).strip()}"
+    if question_ref is None or str(question_ref).strip() == "":
+        return base
+    return f"{base}||q:{str(question_ref).strip()}"
 
 
 def _resolve_failed_bucket_key(
     failed_by_skill: Dict[str, Set[str]],
     skill_id: str,
     bloco_disciplina: Optional[str],
+    question_ref: Optional[str] = None,
 ) -> str:
     """Resolve a chave usada em _failed_by_skill (habilidade||disciplina)."""
     sk = _norm_skill_key(skill_id)
     b = (str(bloco_disciplina).strip() if bloco_disciplina else "")
+    qref = (str(question_ref).strip() if question_ref else "")
+    if b and b.lower() != "all":
+        return _answer_sheet_stat_bucket_key(sk, b, qref or None)
+    if qref:
+        q_matches = [k for k in failed_by_skill if k.startswith(f"{sk}||") and k.endswith(f"||q:{qref}")]
+        if len(q_matches) == 1:
+            return q_matches[0]
     if b and b.lower() != "all":
         return _answer_sheet_stat_bucket_key(sk, b)
     if sk in failed_by_skill:
@@ -614,7 +647,7 @@ def build_skills_map_answer_sheet(
                 if not raw_sid:
                     continue
                 sk = _norm_skill_key(str(raw_sid).strip())
-                bucket = _answer_sheet_stat_bucket_key(sk, block_sid)
+                bucket = _answer_sheet_stat_bucket_key(sk, block_sid, str(qn))
                 stats[bucket]["total"] += 1
                 if ok:
                     stats[bucket]["correct"] += 1
@@ -623,10 +656,17 @@ def build_skills_map_answer_sheet(
 
     habilidades: List[Dict[str, Any]] = []
     for bucket, agg in stats.items():
-        if "||" in bucket:
-            sk, block_sid = bucket.split("||", 1)
+        sk = bucket
+        block_sid = "geral"
+        question_ref = ""
+        if "||q:" in bucket:
+            left, question_ref = bucket.rsplit("||q:", 1)
         else:
-            sk, block_sid = bucket, "geral"
+            left = bucket
+        if "||" in left:
+            sk, block_sid = left.split("||", 1)
+        else:
+            sk, block_sid = left, "geral"
         total = int(agg["total"])
         correct = int(agg["correct"])
         pct = round_to_two_decimals((correct / total * 100.0) if total > 0 else 0.0)
@@ -634,6 +674,11 @@ def build_skills_map_answer_sheet(
         obj = skills_db_map.get(sk)
         codigo, descricao = _habilidade_codigo_e_descricao(sk, obj)
         dn = nome_por_disciplina.get(block_sid) or nome_por_disciplina.get(str(block_sid))
+        questao_numero = None
+        try:
+            questao_numero = int(str(question_ref))
+        except (TypeError, ValueError):
+            questao_numero = None
         habilidades.append(
             {
                 "skill_id": sk,
@@ -641,6 +686,8 @@ def build_skills_map_answer_sheet(
                 "descricao": descricao,
                 "subject_id": block_sid,
                 "disciplina_nome": dn or ("Geral" if block_sid == "geral" else "Outras"),
+                "question_ref": question_ref or None,
+                "questao_numero": questao_numero,
                 "percentual_acertos": pct,
                 "faixa": faixa,
                 "total_tentativas": total,
@@ -651,6 +698,7 @@ def build_skills_map_answer_sheet(
         key=lambda x: (
             x["faixa"],
             str(x.get("subject_id") or ""),
+            int(x.get("questao_numero")) if x.get("questao_numero") is not None else 10**9,
             -x["percentual_acertos"],
             x["codigo"],
             x["skill_id"],
@@ -676,8 +724,9 @@ def answer_sheet_students_who_failed(
     failed_by_skill: Dict[str, Set[str]],
     school_by_id: Optional[Dict[str, Any]] = None,
     bloco_disciplina: Optional[str] = None,
+    question_ref: Optional[str] = None,
 ) -> Tuple[List[Dict[str, Any]], int, int]:
-    key = _resolve_failed_bucket_key(failed_by_skill, skill_id, bloco_disciplina)
+    key = _resolve_failed_bucket_key(failed_by_skill, skill_id, bloco_disciplina, question_ref)
     adapted: Dict[str, Set[str]] = {key: failed_by_skill.get(key, set())}
     return digital_students_who_failed_skill(students, key, adapted, school_by_id)
 
@@ -688,8 +737,9 @@ def answer_sheet_students_passed_vs_failed(
     failed_by_skill: Dict[str, Set[str]],
     school_by_id: Optional[Dict[str, Any]] = None,
     bloco_disciplina: Optional[str] = None,
+    question_ref: Optional[str] = None,
 ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], int, int, int]:
-    key = _resolve_failed_bucket_key(failed_by_skill, skill_id, bloco_disciplina)
+    key = _resolve_failed_bucket_key(failed_by_skill, skill_id, bloco_disciplina, question_ref)
     return digital_students_passed_vs_failed_for_bucket(
         students, failed_by_skill, key, school_by_id
     )

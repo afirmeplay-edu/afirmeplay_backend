@@ -121,23 +121,15 @@ class AnswerSheetCorrectionService:
             
             from app.services.cartao_resposta.proficiency_by_subject import calcular_proficiencia_por_disciplina
             from app.services.cartao_resposta.course_name_resolver import infer_course_name_from_grade
-            from app.services.evaluation_calculator import EvaluationCalculator
             blocks_config = getattr(gabarito_obj, 'blocks_config', None) or {}
             grade_name = gabarito_obj.grade_name or gabarito_obj.title or ''
-            proficiency_by_subject, proficiency, classification, has_matematica = calcular_proficiencia_por_disciplina(
+            proficiency_by_subject, proficiency, grade, classification, has_matematica = calcular_proficiencia_por_disciplina(
                 blocks_config=blocks_config,
                 validated_answers=validated_answers,
                 gabarito_dict=gabarito,
                 grade_name=grade_name,
             )
             course_name = infer_course_name_from_grade(grade_name)
-            grade = EvaluationCalculator.calculate_grade(
-                proficiency=proficiency,
-                course_name=course_name,
-                subject_name='GERAL',
-                use_simple_calculation=False,
-                has_matematica=has_matematica,
-            )
             
             # 11. Salvar resultado em AnswerSheetResult
             saved_result = self._salvar_resultado(

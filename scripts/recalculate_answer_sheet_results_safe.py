@@ -45,11 +45,10 @@ from app.models.answerSheetResult import AnswerSheetResult
 from app.report_analysis.answer_sheet_aggregate_service import (
     AnswerSheetReportAggregateService,
 )
-from app.services.cartao_resposta.course_name_resolver import infer_course_name_from_grade
 from app.services.cartao_resposta.proficiency_by_subject import (
     calcular_proficiencia_por_disciplina,
 )
-from app.services.evaluation_calculator import EvaluationCalculator
+from app.utils.decimal_helpers import round_to_two_decimals
 from app.utils.tenant_middleware import city_id_to_schema_name
 
 logging.basicConfig(
@@ -213,11 +212,16 @@ def _recalculate_gabarito(
         raise ValueError(f"Gabarito não encontrado: {gabarito_id}")
 
     grade_name = (gabarito.grade_name or gabarito.title or "").strip()
-    course_name = infer_course_name_from_grade(grade_name)
     blocks_config = getattr(gabarito, "blocks_config", None) or {}
+    if isinstance(blocks_config, str):
+        try:
+            blocks_config = json.loads(blocks_config) or {}
+        except Exception:
+            blocks_config = {}
     correct_map = _parse_answer_map(gabarito.correct_answers)
     if not correct_map:
         raise ValueError("Gabarito sem respostas válidas.")
+    gabarito_dict = {k: (str(v).upper() if v else "") for k, v in correct_map.items()}
 
     results = AnswerSheetResult.query.filter_by(gabarito_id=gabarito_id).all()
     if not results:
@@ -242,19 +246,14 @@ def _recalculate_gabarito(
     for result in results:
         detected_map = _parse_answer_map(result.detected_answers)
         stats = _build_correction_stats(detected_map, correct_map)
-        pbs, prof_media, class_geral, has_matematica = calcular_proficiencia_por_disciplina(
+        pbs, prof_media, grade_geral, class_geral, _has_matematica = calcular_proficiencia_por_disciplina(
             blocks_config=blocks_config,
             validated_answers=detected_map,
-            gabarito_dict=correct_map,
+            gabarito_dict=gabarito_dict,
             grade_name=grade_name,
         )
-        grade_geral = EvaluationCalculator.calculate_grade(
-            proficiency=prof_media,
-            course_name=course_name,
-            subject_name="GERAL",
-            use_simple_calculation=False,
-            has_matematica=has_matematica,
-        )
+        grade_geral = round_to_two_decimals(float(grade_geral))
+        prof_media = round_to_two_decimals(float(prof_media)) if prof_media is not None else None
 
         old_tuple = (
             result.correct_answers,

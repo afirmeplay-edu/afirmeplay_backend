@@ -3533,12 +3533,87 @@ def _gabarito_eh_somente_cartao_resposta(gabarito_id: str) -> bool:
     return mode == 'physical'
 
 
+def _nivel_escola_por_media_proficiencia_cartao(media_prof: float, gabarito: AnswerSheetGabarito) -> Optional[str]:
+    """Um rótulo único: classificação pela média de proficiência (EvaluationCalculator, GERAL)."""
+    from app.services.cartao_resposta.proficiency_by_subject import _get_course_name_from_grade
+    from app.services.evaluation_calculator import EvaluationCalculator
+
+    grade_name = (gabarito.grade_name or gabarito.title or "") if gabarito else ""
+    course_name = _get_course_name_from_grade(grade_name)
+    has_matematica = False
+    try:
+        blocos = _extrair_blocos_por_disciplina_cartao(getattr(gabarito, "blocks_config", None) or {})
+        has_matematica = any("matem" in (b.get("nome") or "").lower() for b in blocos)
+    except Exception:
+        has_matematica = False
+    return EvaluationCalculator.determine_classification(
+        float(media_prof or 0),
+        course_name,
+        "GERAL",
+        has_matematica=has_matematica,
+    )
+
+
+def _enriquecer_escolas_estatisticas_municipio_cartao(
+    escolas: List[Dict[str, Any]],
+    gabarito_id: str,
+    gabarito: AnswerSheetGabarito,
+    municipio_id: str,
+    city: City,
+    estado_param: Optional[str],
+    user: dict,
+    periodo_bounds: Optional[Tuple[datetime, datetime]],
+) -> None:
+    """Preenche métricas por escola (mesma base que resultados-agregados com escola selecionada)."""
+    gid = str(gabarito_id).strip()
+    estado_ef = (estado_param or "").strip() or (getattr(city, "state", None) or "")
+    scope_municipio = {
+        "municipio_id": str(municipio_id),
+        "city_data": city,
+        "estado": estado_ef,
+        "municipio": str(municipio_id),
+        "escola": None,
+        "serie": None,
+        "turma": None,
+        "gabarito": gid,
+        "escolas": [],
+    }
+    mcids = _class_ids_alunos_previstos_cartao(gid, scope_municipio, "municipio", user)
+    by_school: Dict[str, List[Any]] = defaultdict(list)
+    if mcids:
+        for row in Class.query.filter(Class.id.in_(mcids)).all():
+            if row.school_id:
+                by_school[str(row.school_id)].append(row.id)
+    for item in escolas:
+        cids = by_school.get(item["id"], [])
+        st = _calcular_estatisticas_grupo_cartao(cids, gid, periodo_bounds)
+        dist = st.get("distribuicao_classificacao") or {}
+        item["total_alunos"] = st.get("total_alunos", 0)
+        item["alunos_participantes"] = st.get("alunos_participantes", 0)
+        item["alunos_pendentes"] = st.get("alunos_pendentes", 0)
+        item["media_nota"] = st.get("media_nota", 0.0)
+        item["media_proficiencia"] = st.get("media_proficiencia", 0.0)
+        item["distribuicao_classificacao"] = {
+            "abaixo_do_basico": dist.get("abaixo_do_basico", 0),
+            "basico": dist.get("basico", 0),
+            "adequado": dist.get("adequado", 0),
+            "avancado": dist.get("avancado", 0),
+        }
+        if st.get("alunos_participantes", 0):
+            item["nivel_escola"] = _nivel_escola_por_media_proficiencia_cartao(
+                float(st.get("media_proficiencia") or 0), gabarito
+            )
+        else:
+            item["nivel_escola"] = None
+
+
 def _obter_escolas_por_gabarito_cartao(
     gabarito_id: str,
     municipio_id: str,
     user: dict,
     permissao: dict,
     periodo_bounds: Optional[Tuple[datetime, datetime]] = None,
+    estado: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     """Escolas onde o gabarito foi gerado (pelo school_id do gabarito ou todas do município se escopo city)."""
     city = City.query.get(municipio_id)
@@ -3588,6 +3663,9 @@ def _obter_escolas_por_gabarito_cartao(
         sids = [e["id"] for e in out]
         hit = _school_ids_com_correcao_cartao_no_periodo(str(gabarito_id), sids, periodo_bounds)
         out = [e for e in out if e["id"] in hit]
+    _enriquecer_escolas_estatisticas_municipio_cartao(
+        out, gabarito_id, gabarito, municipio_id, city, estado, user, periodo_bounds
+    )
     return out
 
 
@@ -3742,7 +3820,7 @@ def obter_opcoes_filtros_cartao():
                 )
                 if gabarito:
                     response["escolas"] = _obter_escolas_por_gabarito_cartao(
-                        gabarito, municipio, user, permissao, periodo_bounds
+                        gabarito, municipio, user, permissao, periodo_bounds, estado
                     )
                     if escola:
                         response["series"] = _obter_series_por_escola_cartao(

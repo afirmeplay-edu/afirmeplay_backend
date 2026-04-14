@@ -2536,6 +2536,8 @@ def _get_empty_statistics_gerais_cartao(scope_info, nivel_granularidade):
         "alunos_participantes": 0,
         "alunos_pendentes": 0,
         "alunos_ausentes": 0,
+        "percentual_comparecimento": 0.0,
+        "nivel_classificacao": None,
         "media_nota_geral": 0.0,
         "media_proficiencia_geral": 0.0,
         "distribuicao_classificacao_geral": {
@@ -2764,6 +2766,13 @@ def _calcular_estatisticas_consolidadas_cartao(scope_info, nivel_granularidade, 
             g = Grade.query.get(only_gid)
             serie_nome = g.name if g else None
 
+        pct = round(100.0 * alunos_participantes / total_alunos, 2) if total_alunos else 0.0
+        nivel_classificacao_geral = None
+        if gabarito_id and alunos_participantes:
+            gab_stat = AnswerSheetGabarito.query.get(str(gabarito_id).strip())
+            if gab_stat:
+                nivel_classificacao_geral = _nivel_escola_por_media_proficiencia_cartao(media_prof, gab_stat)
+
         return {
             "tipo": nivel_granularidade,
             "nome": _get_nome_granularidade_cartao(nivel_granularidade, scope_info, escola_nome, serie_nome),
@@ -2779,6 +2788,8 @@ def _calcular_estatisticas_consolidadas_cartao(scope_info, nivel_granularidade, 
             "alunos_participantes": alunos_participantes,
             "alunos_pendentes": total_alunos - alunos_participantes,
             "alunos_ausentes": max(0, total_alunos - alunos_participantes),
+            "percentual_comparecimento": pct,
+            "nivel_classificacao": nivel_classificacao_geral,
             "media_nota_geral": round(media_nota, 2),
             "media_proficiencia_geral": round(media_prof, 2),
             "distribuicao_classificacao_geral": dist
@@ -2821,6 +2832,144 @@ def _calcular_estatisticas_grupo_cartao(class_ids, gabarito_id, periodo_bounds=N
     return {'total_alunos': total_alunos, 'alunos_participantes': participantes, 'alunos_pendentes': total_alunos - participantes, 'media_nota': round(media_nota, 2), 'media_proficiencia': round(media_prof, 2), 'distribuicao_classificacao': dist}
 
 
+def _subject_name_is_lingua_portuguesa(name: str) -> bool:
+    n = (name or "").lower()
+    return "portug" in n or "lingua" in n or "língua" in n or "lp " in n
+
+
+def _subject_name_is_matematica(name: str) -> bool:
+    return "matem" in (name or "").lower()
+
+
+def _medias_por_disciplina_de_resultados_cartao(
+    results: List[AnswerSheetResult],
+    gabarito: Optional[AnswerSheetGabarito],
+) -> Dict[str, Any]:
+    """
+    Agrega nota/proficiência por disciplina a partir de proficiency_by_subject (mesma lógica
+    de _calcular_resultados_por_disciplina_cartao, recorte = lista de resultados já filtrada).
+    """
+    import json
+
+    if not results or not gabarito:
+        return {"lista": [], "media_nota_lp": None, "media_nota_mat": None}
+    grade_name = (gabarito.grade_name or gabarito.title or "") or ""
+    from app.services.cartao_resposta.proficiency_by_subject import _get_course_name_from_grade
+    from app.services.evaluation_calculator import EvaluationCalculator
+
+    course_name = _get_course_name_from_grade(grade_name)
+    by_subject: Dict[str, Dict[str, Any]] = {}
+    for r in results:
+        pbs = r.proficiency_by_subject or {}
+        if isinstance(pbs, str):
+            try:
+                pbs = json.loads(pbs)
+            except Exception:
+                pbs = {}
+        for sid, data in (pbs or {}).items():
+            sidk = str(sid)
+            if sidk not in by_subject:
+                by_subject[sidk] = {
+                    "disciplina": (data.get("subject_name") if isinstance(data, dict) else None) or sidk,
+                    "soma_nota": 0.0,
+                    "soma_prof": 0.0,
+                    "n": 0,
+                }
+            if not isinstance(data, dict):
+                continue
+            by_subject[sidk]["n"] += 1
+            by_subject[sidk]["soma_prof"] += float(data.get("proficiency") or 0)
+            nota_disc = data.get("grade")
+            if nota_disc is None and data.get("proficiency") is not None:
+                subject_name = data.get("subject_name") or "Outras"
+                nota_disc = EvaluationCalculator.calculate_grade(
+                    data.get("proficiency"), course_name, subject_name
+                )
+            by_subject[sidk]["soma_nota"] += float(nota_disc) if nota_disc is not None else 0.0
+            if data.get("subject_name"):
+                by_subject[sidk]["disciplina"] = data.get("subject_name")
+
+    lista = []
+    notas_lp: List[float] = []
+    notas_mat: List[float] = []
+    for _sidk, agg in by_subject.items():
+        n = agg["n"]
+        if not n:
+            continue
+        nom = agg["disciplina"]
+        mn = round(agg["soma_nota"] / n, 2)
+        mp = round(agg["soma_prof"] / n, 2)
+        lista.append({"disciplina": nom, "media_nota": mn, "media_proficiencia": mp})
+        if _subject_name_is_lingua_portuguesa(nom):
+            notas_lp.append(mn)
+        if _subject_name_is_matematica(nom):
+            notas_mat.append(mn)
+
+    media_lp = round(sum(notas_lp) / len(notas_lp), 2) if notas_lp else None
+    media_mat = round(sum(notas_mat) / len(notas_mat), 2) if notas_mat else None
+    return {"lista": lista, "media_nota_lp": media_lp, "media_nota_mat": media_mat}
+
+
+def _complementar_metricas_escola_municipio_cartao(
+    stats: Dict[str, Any],
+    class_ids: List[Any],
+    gabarito_id: str,
+    periodo_bounds: Optional[Tuple[datetime, datetime]],
+    gabarito: AnswerSheetGabarito,
+) -> Dict[str, Any]:
+    """Campos extras para escopo município (comparecimento, nível, médias LP/MAT, ausentes)."""
+    total = int(stats.get("total_alunos") or 0)
+    part = int(stats.get("alunos_participantes") or 0)
+    pct = round(100.0 * part / total, 2) if total else 0.0
+    nivel = None
+    if part:
+        nivel = _nivel_escola_por_media_proficiencia_cartao(float(stats.get("media_proficiencia") or 0), gabarito)
+    alunos = Student.query.filter(Student.class_id.in_(class_ids)).all() if class_ids else []
+    sid_list = [a.id for a in alunos]
+    results: List[AnswerSheetResult] = []
+    if sid_list and gabarito_id:
+        _rq = AnswerSheetResult.query.filter(
+            AnswerSheetResult.gabarito_id == gabarito_id,
+            AnswerSheetResult.student_id.in_(sid_list),
+        )
+        _rq = _apply_answer_sheet_result_period_filter(_rq, periodo_bounds)
+        results = _dedupe_answer_sheet_results_latest_per_student(_rq.all())
+    md = _medias_por_disciplina_de_resultados_cartao(results, gabarito)
+    ausentes = max(0, total - part)
+    return {
+        "percentual_comparecimento": pct,
+        "nivel_classificacao": nivel,
+        "media_nota_lingua_portuguesa": md["media_nota_lp"],
+        "media_nota_matematica": md["media_nota_mat"],
+        "medias_por_disciplina": md["lista"],
+        "alunos_ausentes": ausentes,
+    }
+
+
+def _complementar_linha_resultado_detalhado_cartao(
+    stats: Dict[str, Any],
+    class_ids: List[Any],
+    gabarito_id: str,
+    periodo_bounds: Optional[Tuple[datetime, datetime]],
+    gab: Optional[AnswerSheetGabarito],
+) -> Dict[str, Any]:
+    """Campos extras (comparecimento, LP/MAT, disciplinas, ausentes) para cada linha de resultados_detalhados."""
+    if gab:
+        return _complementar_metricas_escola_municipio_cartao(
+            stats, class_ids, gabarito_id, periodo_bounds, gab
+        )
+    total = int(stats.get("total_alunos") or 0)
+    part = int(stats.get("alunos_participantes") or 0)
+    return {
+        "percentual_comparecimento": round(100.0 * part / total, 2) if total else 0.0,
+        "nivel_classificacao": None,
+        "media_nota_lingua_portuguesa": None,
+        "media_nota_matematica": None,
+        "medias_por_disciplina": [],
+        "alunos_ausentes": max(0, total - part),
+    }
+
+
 def _gerar_resultados_detalhados_por_granularidade_cartao(
     scope_info, nivel_granularidade, gabarito_id, periodo_bounds=None, user=None
 ):
@@ -2849,8 +2998,12 @@ def _gerar_resultados_detalhados_por_granularidade_cartao(
         for sid, cids in by_school.items():
             school = School.query.get(sid)
             stats = _calcular_estatisticas_grupo_cartao(cids, gabarito_id, periodo_bounds)
-            resultados_detalhados.append({
+            comp = _complementar_linha_resultado_detalhado_cartao(
+                stats, cids, gabarito_id, periodo_bounds, gabarito
+            )
+            row = {
                 "id": f"escola_{sid}",
+                "escola_id": str(sid),
                 "titulo": f"{titulo_gabarito} - {school.name if school else sid}",
                 "serie": "Todas as séries",
                 "turma": "Todas as turmas",
@@ -2862,8 +3015,10 @@ def _gerar_resultados_detalhados_por_granularidade_cartao(
                 "alunos_pendentes": stats['alunos_pendentes'],
                 "media_nota": stats['media_nota'],
                 "media_proficiencia": stats['media_proficiencia'],
-                "distribuicao_classificacao": stats['distribuicao_classificacao']
-            })
+                "distribuicao_classificacao": stats['distribuicao_classificacao'],
+            }
+            row.update(comp)
+            resultados_detalhados.append(row)
 
     elif nivel_granularidade == "escola":
         by_grade = {}
@@ -2874,11 +3029,19 @@ def _gerar_resultados_detalhados_por_granularidade_cartao(
             by_grade[gid].append(c.id)
         school = School.query.get(scope_info.get('escola')) if scope_info.get('escola') else None
         escola_nome = school.name if school else "N/A"
+        escola_id_scope = (
+            str(scope_info.get("escola")).strip() if scope_info and _is_valid_filter(scope_info.get("escola")) else None
+        )
         for gid, cids in by_grade.items():
             grade = Grade.query.get(gid)
             stats = _calcular_estatisticas_grupo_cartao(cids, gabarito_id, periodo_bounds)
-            resultados_detalhados.append({
+            comp = _complementar_linha_resultado_detalhado_cartao(
+                stats, cids, gabarito_id, periodo_bounds, gabarito
+            )
+            row = {
                 "id": f"serie_{gid}",
+                "escola_id": escola_id_scope,
+                "serie_id": str(gid) if gid else None,
                 "titulo": f"{titulo_gabarito} - {grade.name if grade else gid}",
                 "serie": grade.name if grade else "N/A",
                 "turma": "Todas as turmas",
@@ -2890,16 +3053,25 @@ def _gerar_resultados_detalhados_por_granularidade_cartao(
                 "alunos_pendentes": stats['alunos_pendentes'],
                 "media_nota": stats['media_nota'],
                 "media_proficiencia": stats['media_proficiencia'],
-                "distribuicao_classificacao": stats['distribuicao_classificacao']
-            })
+                "distribuicao_classificacao": stats['distribuicao_classificacao'],
+            }
+            row.update(comp)
+            resultados_detalhados.append(row)
 
     else:
         for c in classes:
             grade = Grade.query.get(c.grade_id) if c.grade_id else None
             school = School.query.get(c.school_id) if c.school_id else None
-            stats = _calcular_estatisticas_grupo_cartao([c.id], gabarito_id, periodo_bounds)
-            resultados_detalhados.append({
+            cids_one = [c.id]
+            stats = _calcular_estatisticas_grupo_cartao(cids_one, gabarito_id, periodo_bounds)
+            comp = _complementar_linha_resultado_detalhado_cartao(
+                stats, cids_one, gabarito_id, periodo_bounds, gabarito
+            )
+            row = {
                 "id": f"turma_{c.id}",
+                "escola_id": str(c.school_id) if c.school_id else None,
+                "serie_id": str(c.grade_id) if c.grade_id else None,
+                "turma_id": str(c.id),
                 "titulo": f"{titulo_gabarito} - {c.name or f'Turma {c.id}'}",
                 "serie": grade.name if grade else "N/A",
                 "turma": c.name or f"Turma {c.id}",
@@ -2911,8 +3083,10 @@ def _gerar_resultados_detalhados_por_granularidade_cartao(
                 "alunos_pendentes": stats['alunos_pendentes'],
                 "media_nota": stats['media_nota'],
                 "media_proficiencia": stats['media_proficiencia'],
-                "distribuicao_classificacao": stats['distribuicao_classificacao']
-            })
+                "distribuicao_classificacao": stats['distribuicao_classificacao'],
+            }
+            row.update(comp)
+            resultados_detalhados.append(row)
 
     return resultados_detalhados
 
@@ -3600,11 +3774,11 @@ def _enriquecer_escolas_estatisticas_municipio_cartao(
             "avancado": dist.get("avancado", 0),
         }
         if st.get("alunos_participantes", 0):
-            item["nivel_escola"] = _nivel_escola_por_media_proficiencia_cartao(
+            item["nivel_classificacao"] = _nivel_escola_por_media_proficiencia_cartao(
                 float(st.get("media_proficiencia") or 0), gabarito
             )
         else:
-            item["nivel_escola"] = None
+            item["nivel_classificacao"] = None
 
 
 def _obter_escolas_por_gabarito_cartao(

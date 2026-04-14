@@ -118,7 +118,7 @@ Faixas **exatas** estão no dicionário `CLASSIFICATION_CONFIG` no arquivo Pytho
 
 ### 3.3 Classificação **GERAL** (`subject_name == "GERAL"`)
 
-Usada na média geral do aluno, no **nível da escola** (`nivel_escola` no cartão) e onde o código passa `"GERAL"`.
+Usada na média geral do aluno, no **nível de classificação agregado** (`nivel_classificacao` nas respostas JSON do cartão) e onde o código passa `"GERAL"`.
 
 1. **`has_matematica` informado (`True` ou `False`)**  
    Usa as **mesmas faixas** de `CLASSIFICATION_CONFIG` para `(course_level, MATEMATICA)` ou `(course_level, OUTRAS)`, conforme `has_matematica`.  
@@ -154,9 +154,9 @@ Agregações (município, escola, distribuição): leitura desses campos em `eva
 - **Média geral do aluno** na tabela detalhada: média das notas/proficiências por disciplina conforme `_calcular_dados_gerais_alunos_cartao` em `answer_sheet_routes.py`.
 - **Estatísticas gerais / por escola / por disciplina**: médias e distribuições a partir dos registros deduplicados por aluno (`_dedupe_answer_sheet_results_latest_per_student`).
 
-### 4.3 Nível da escola (cartão, lista municipal)
+### 4.3 Nível de classificação (cartão, lista municipal)
 
-Em `answer-sheets/opcoes-filtros-results`, campo **`nivel_escola`**:
+Em `answer-sheets/opcoes-filtros-results` e agregações correlatas, campo **`nivel_classificacao`**:
 
 1. Média aritmética das proficiências dos **participantes** da escola (mesmo escopo de turmas do gabarito).
 2. `EvaluationCalculator.determine_classification(média, course_name_do_gabarito, "GERAL", has_matematica=...)`.

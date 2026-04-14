@@ -6,7 +6,7 @@ from __future__ import annotations
 
 from collections import OrderedDict, defaultdict
 from datetime import datetime
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 from sqlalchemy import desc, func
 from sqlalchemy.orm import joinedload
@@ -676,14 +676,57 @@ def _totais_niveis(b: Dict[str, int]) -> Dict[str, Any]:
     }
 
 
-def _build_niveis(
+def _answer_sheet_subject_names_in_order(results: List[AnswerSheetResult]) -> List[str]:
+    """Nomes de disciplina como em proficiency_by_subject (ordem de primeira aparição)."""
+    out: List[str] = []
+    seen: Set[str] = set()
+    for r in results:
+        pbs = r.proficiency_by_subject
+        if not isinstance(pbs, dict):
+            continue
+        for _sid, block in pbs.items():
+            if not isinstance(block, dict):
+                continue
+            name = (block.get("subject_name") or str(_sid) or "").strip()
+            if not name or name in seen:
+                continue
+            seen.add(name)
+            out.append(name)
+    return out
+
+
+def _classification_for_subject(r: AnswerSheetResult, subject_name: str) -> Optional[str]:
+    """Classificação INEP só para a disciplina; None se não houver bloco ou texto vazio."""
+    target = (subject_name or "").strip()
+    if not target:
+        return None
+    pbs = r.proficiency_by_subject
+    if not isinstance(pbs, dict):
+        return None
+    for _sid, block in pbs.items():
+        if not isinstance(block, dict):
+            continue
+        name = (block.get("subject_name") or str(_sid) or "").strip()
+        if name != target:
+            continue
+        raw = block.get("classification")
+        if raw is None:
+            return None
+        s = str(raw).strip()
+        return s if s else None
+    return None
+
+
+def _build_niveis_layer(
     results: List[AnswerSheetResult],
     school_name_map: Dict[str, str],
     target_classes: List[Class],
+    classification_fn: Callable[[AnswerSheetResult], Optional[str]],
+    skip_if_missing: bool,
 ) -> Dict[str, Any]:
     """
-    Mesma forma que relatório de prova: por_turma / por_escola com colunas fixas
-    e bloco geral com .total (PDF report_organized.html). Turmas sem resultado aparecem zeradas.
+    Contagens por faixa. Se skip_if_missing, ignora resultados sem classificação retornada
+    (disciplina sem bloco no cartão). Caso contrário, string vazia vira faixa via _bucket_for_classification.
     """
     by_class_results: Dict[str, List[AnswerSheetResult]] = defaultdict(list)
     for r in results:
@@ -697,7 +740,12 @@ def _build_niveis(
         lst = by_class_results.get(cid, [])
         b = _empty_nivel_buckets()
         for r in lst:
-            b[_bucket_for_classification(r.classification or "")] += 1
+            cval = classification_fn(r)
+            if skip_if_missing and cval is None:
+                continue
+            if cval is None:
+                cval = ""
+            b[_bucket_for_classification(cval)] += 1
         row = _totais_niveis(b)
         row["turma"] = c.name or "Turma"
         row["turma_id"] = cid
@@ -710,7 +758,12 @@ def _build_niveis(
     for c in target_classes:
         sid = str(c.school_id) if c.school_id else "_sem_escola"
         for r in by_class_results.get(str(c.id), []):
-            k = _bucket_for_classification(r.classification or "")
+            cval = classification_fn(r)
+            if skip_if_missing and cval is None:
+                continue
+            if cval is None:
+                cval = ""
+            k = _bucket_for_classification(cval)
             school_b[sid][k] += 1
 
     por_escola: List[Dict[str, Any]] = []
@@ -725,15 +778,50 @@ def _build_niveis(
 
     geral_b = _empty_nivel_buckets()
     for r in results:
-        geral_b[_bucket_for_classification(r.classification or "")] += 1
+        cval = classification_fn(r)
+        if skip_if_missing and cval is None:
+            continue
+        if cval is None:
+            cval = ""
+        geral_b[_bucket_for_classification(cval)] += 1
 
     return {
-        "GERAL": {
-            "por_turma": por_turma,
-            "por_escola": por_escola,
-            "geral": _totais_niveis(geral_b),
-        }
+        "por_turma": por_turma,
+        "por_escola": por_escola,
+        "geral": _totais_niveis(geral_b),
     }
+
+
+def _build_niveis(
+    results: List[AnswerSheetResult],
+    school_name_map: Dict[str, str],
+    target_classes: List[Class],
+) -> Dict[str, Any]:
+    """
+    Mesma forma que relatório de prova: por_turma / por_escola e bloco .geral (PDF report_organized.html).
+
+    Inclui uma entrada por disciplina presente em ``proficiency_by_subject`` (classificação específica)
+    e mantém ``GERAL`` com a classificação agregada do cartão (``AnswerSheetResult.classification``).
+    """
+    geral_block = _build_niveis_layer(
+        results,
+        school_name_map,
+        target_classes,
+        lambda r: (str(r.classification).strip() if r.classification is not None else ""),
+        skip_if_missing=False,
+    )
+    subjects = _answer_sheet_subject_names_in_order(results)
+    out: "OrderedDict[str, Any]" = OrderedDict()
+    for subj in subjects:
+        out[subj] = _build_niveis_layer(
+            results,
+            school_name_map,
+            target_classes,
+            lambda r, s=subj: _classification_for_subject(r, s),
+            skip_if_missing=True,
+        )
+    out["GERAL"] = geral_block
+    return dict(out)
 
 
 def _build_proficiencia_nota(

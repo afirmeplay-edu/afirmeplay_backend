@@ -6,7 +6,8 @@ Serviço para análise de relatórios usando OpenRouter AI
 import logging
 import os
 import re
-from typing import Dict, Any, Optional
+import unicodedata
+from typing import Dict, Any, Optional, Mapping
 import google.generativeai as genai
 from app.openai_config.openai_config import (
     OPENROUTER_MODEL,
@@ -14,7 +15,7 @@ from app.openai_config.openai_config import (
     OPENROUTER_TEMPERATURE,
     get_openrouter_client,
     get_openrouter_extra_headers,
-    ANALYSIS_PROMPT_BASE, 
+    ANALYSIS_PROMPT_BASE,
     CONTEXT_SETTINGS,
     PARTICIPATION_CLASSIFICATION_TABLE,
     PARTICIPATION_ANALYSIS_PROMPT_TEMPLATE,
@@ -212,6 +213,7 @@ class AIAnalysisService:
                 "{PARTICIPATION_CLASSIFICATION_TABLE}", PARTICIPATION_CLASSIFICATION_TABLE
             )
             
+            label_destaque = "Escola" if scope_type == "city" else "Turma"
             # Agora substituir os placeholders específicos (ordem importa para evitar substituições indevidas)
             prompt = prompt_base.replace(
                 "[Entidade]",
@@ -220,29 +222,29 @@ class AIAnalysisService:
                 "[Avaliação]",
                 avaliacao_titulo or "Avaliação Diagnóstica"
             ).replace(
-                "- Entidade: [Entidade: Ex. Escola Municipal X / 5º Ano Geral]",
-                f"- Entidade: {entidade}"
+                "Entidade: [Entidade: Ex. Escola Municipal X / 5º Ano Geral]",
+                f"Entidade: {entidade}"
             ).replace(
-                "- Avaliação: [Avaliação: Ex: Avaliação Diagnóstica 2025.1]",
-                f"- Avaliação: {avaliacao_titulo or 'Avaliação Diagnóstica'}"
+                "Avaliação: [Avaliação: Ex: Avaliação Diagnóstica 2025.1]",
+                f"Avaliação: {avaliacao_titulo or 'Avaliação Diagnóstica'}"
             ).replace(
-                "- Total de Alunos Matriculados: [Nº]",
-                f"- Total de Alunos Matriculados: {total_matriculados}"
+                "Total de Alunos Matriculados: [Nº]",
+                f"Total de Alunos Matriculados: {total_matriculados}"
             ).replace(
-                "- Total de Alunos Avaliados: [Nº]",
-                f"- Total de Alunos Avaliados: {total_avaliados}"
+                "Total de Alunos Avaliados: [Nº]",
+                f"Total de Alunos Avaliados: {total_avaliados}"
             ).replace(
-                "- Total de Faltosos: [Nº]",
-                f"- Total de Faltosos: {total_faltosos}"
+                "Total de Faltosos: [Nº]",
+                f"Total de Faltosos: {total_faltosos}"
             ).replace(
-                "- Taxa de Participação Geral: [__]%",
-                f"- Taxa de Participação Geral: {percentual_participacao}%"
+                "Taxa de Participação Geral: [__]%",
+                f"Taxa de Participação Geral: {percentual_participacao}%"
             ).replace(
-                "- Destaque(s) por Turma: [Ex: 5º A - M: 95% (21/22)]",
-                f"- Destaque(s) por Turma: {destaque_str}"
+                "Destaque(s) por Turma: [Ex: 5º A - M: 95% (21/22)]",
+                f"Destaque(s) por {label_destaque}: {destaque_str}"
             ).replace(
-                "- Ponto(s) de Atenção por Turma: [Ex: 5º B - M: 91% (21/23) com 2 faltosos]",
-                f"- Ponto(s) de Atenção por Turma: {atencao_str}"
+                "Ponto(s) de Atenção por Turma: [Ex: 5º B - M: 91% (21/23) com 2 faltosos]",
+                f"Ponto(s) de Atenção por {label_destaque}: {atencao_str}"
             ).replace(
                 "taxa de participação de [__]%",
                 f"taxa de participação de {percentual_participacao}%"
@@ -411,33 +413,29 @@ class AIAnalysisService:
                 "[Avaliação]",
                 avaliacao_titulo or "Avaliação Diagnóstica"
             ).replace(
-                "- Entidade/Nível: [Entidade/Nível]",
-                f"- Entidade/Nível: {entidade_nivel}"
+                "Entidade/Nível: [Entidade/Nível]",
+                f"Entidade/Nível: {entidade_nivel}"
             ).replace(
-                "- Avaliação: [AVALIAÇÃO: ex: Avaliação Diagnóstica 2025.1]",
-                f"- Avaliação: {avaliacao_titulo or 'Avaliação Diagnóstica'}"
+                "Avaliação: [AVALIAÇÃO: ex: Avaliação Diagnóstica 2025.1]",
+                f"Avaliação: {avaliacao_titulo or 'Avaliação Diagnóstica'}"
             ).replace(
-                "- Ano/Série: [Ano/Série]",
-                f"- Ano/Série: {ano_serie}"
+                "Ano/Série: [Ano/Série]",
+                f"Ano/Série: {ano_serie}"
             ).replace(
                 "{Dados por Disciplina}",
                 dados_disciplinas_str
             ).replace(
-                "- Média Geral (Todas as Disciplinas): [Média]",
-                f"- Média Geral (Todas as Disciplinas): {media_geral_total:.2f}"
+                "Média Geral (Abrangendo todos os Componentes): [Média]",
+                f"Média Geral (Abrangendo todos os Componentes): {media_geral_total:.2f}"
             ).replace(
-                "- Benchmark (Média Municipal): [Média Municipal]",
-                f"- Benchmark (Média Municipal): {media_municipal_geral:.2f}" if media_municipal_geral > 0 else "- Benchmark (Média Municipal): Não disponível"
-            ).replace(
-                "2. Análise por Disciplina e Turma",
-                f"2. Análise por Disciplina e {label_unidade}"
-            ).replace(
-                "entre disciplinas (LP vs MT) e entre turmas",
-                f"entre disciplinas (LP vs MT) e entre {label_unidade.lower()}s"
-            ).replace(
-                "onde o reforço é mais necessário",
-                "onde o reforço é mais necessário"
+                "Benchmark (Média da Rede Municipal): [Média Municipal]",
+                f"Benchmark (Média da Rede Municipal): {media_municipal_geral:.2f}" if media_municipal_geral > 0 else "Benchmark (Média da Rede Municipal): Não disponível"
             )
+            if scope_type == "city":
+                prompt = prompt.replace(
+                    "comportamento interturmas.",
+                    "comportamento entre as unidades escolares.",
+                )
             
             response = self._call_openai(prompt)
             return response.strip()
@@ -447,25 +445,154 @@ class AIAnalysisService:
             return "Análise de notas não disponível."
     
     def _obter_ano_serie(self, report_data: Dict[str, Any]) -> str:
-        """Obtém o ano/série da avaliação (5º Ano ou 9º Ano)"""
+        """
+        Resolve o rótulo de série/etapa avaliada para o parecer.
+        Prioriza listas explícitas do relatório (series_label / series), depois o nome do curso.
+        """
         try:
-            # Tentar obter do test.course se disponível
-            avaliacao = report_data.get('avaliacao', {})
-            course_name = avaliacao.get('course_name', '') or avaliacao.get('course', '')
-            
-            # Mapear nomes comuns de cursos para ano/série
-            course_name_lower = str(course_name).lower()
-            if '5' in course_name_lower or 'quinto' in course_name_lower or 'anos iniciais' in course_name_lower:
-                return "5º Ano"
-            elif '9' in course_name_lower or 'nono' in course_name_lower or 'anos finais' in course_name_lower:
-                return "9º Ano"
-            else:
-                # Padrão: assumir 9º ano se não conseguir determinar
-                return "9º Ano"
+            avaliacao = report_data.get("avaliacao") or {}
+            if isinstance(avaliacao, dict):
+                rotulo = self._rotulo_serie_de_bloco(avaliacao)
+                if rotulo:
+                    return rotulo
+                curso = (avaliacao.get("course_name") or avaliacao.get("course") or "").strip()
+                if curso:
+                    inferido = self._resolver_etapa_por_texto_curso(curso)
+                    if inferido:
+                        return inferido
+            metadados = report_data.get("metadados") or {}
+            if isinstance(metadados, dict):
+                rotulo = self._rotulo_serie_de_bloco(metadados)
+                if rotulo:
+                    return rotulo
         except Exception as e:
-            self.logger.warning(f"Erro ao obter ano/série: {str(e)}")
-            return "9º Ano"  # Padrão
-    
+            self.logger.warning("Erro ao obter ano/série: %s", e)
+        return "Série não informada"
+
+    def _rotulo_serie_de_bloco(self, bloco: Mapping[str, Any]) -> Optional[str]:
+        """Extrai série a partir de chaves padronizadas do payload de relatório."""
+        sl = bloco.get("series_label")
+        if isinstance(sl, str) and sl.strip():
+            return sl.strip()
+        series = bloco.get("series")
+        if isinstance(series, (list, tuple)) and series:
+            partes = [str(s).strip() for s in series if s is not None and str(s).strip()]
+            if partes:
+                return ", ".join(dict.fromkeys(partes))
+        for chave in ("grade_name", "serie", "série", "ano_serie", "grade_label"):
+            v = bloco.get(chave)
+            if isinstance(v, str) and v.strip():
+                return v.strip()
+        return None
+
+    def _resolver_etapa_por_texto_curso(self, course: str) -> Optional[str]:
+        """
+        Infere rótulo pedagógico a partir do nome do curso/instituição quando não há series_label.
+        Cobre anos numéricos, EJA, Educação Infantil, Especial e segmentos.
+        """
+        if not course or not str(course).strip():
+            return None
+        texto = str(course).strip()
+        low = unicodedata.normalize("NFKD", texto).encode("ASCII", "ignore").decode("ASCII").lower()
+
+        # Anos escolares explícitos: "3º Ano", "3o ano", "12 º Ano"
+        achados = re.findall(r"(\d{1,2})\s*[º°o]?\s*ano\b", low, flags=re.IGNORECASE)
+        rotulos_ano: list = []
+        for a in achados:
+            try:
+                n = int(a)
+            except ValueError:
+                continue
+            if 1 <= n <= 13:
+                rotulos_ano.append(f"{n}º Ano")
+        if rotulos_ano:
+            return ", ".join(dict.fromkeys(rotulos_ano))
+
+        # EJA: períodos
+        if "eja" in low:
+            mp = re.search(r"(\d{1,2})\s*[º°o]?\s*periodo", low)
+            if mp:
+                try:
+                    p = int(mp.group(1))
+                    if 1 <= p <= 9:
+                        return f"{p}º período (EJA)"
+                except ValueError:
+                    pass
+            if any(
+                x in low
+                for x in (
+                    "1 segmento",
+                    "primeiro segmento",
+                    "1o segmento",
+                    "primeiro seg",
+                )
+            ):
+                return "EJA – 1º Segmento"
+            if any(
+                x in low
+                for x in (
+                    "2 segmento",
+                    "segundo segmento",
+                    "2o segmento",
+                    "segundo seg",
+                )
+            ):
+                return "EJA – 2º Segmento"
+            return "EJA"
+
+        # Educação Infantil
+        if any(
+            x in low
+            for x in (
+                "infantil",
+                "creche",
+                "maternal",
+                "bercario",
+                "educacao infantil",
+                "ei ",
+                " ei",
+            )
+        ) or re.search(r"\bgrupo\s*[123]\b", low) or re.search(r"\bg\s*[123]\b", low):
+            return "Educação Infantil"
+
+        # Educação Especial / AEE
+        if re.search(r"suporte\s*[123]", low) or "aee" in low:
+            msup = re.search(r"suporte\s*([123])", low)
+            if msup:
+                return f"Educação Especial (Suporte {msup.group(1)})"
+            return "Educação Especial"
+        if "especial" in low and "ensino medio" not in low:
+            return "Educação Especial"
+
+        # Segmentos amplos (nome de etapa no banco)
+        if "anos iniciais" in low:
+            return "Anos Iniciais"
+        if "anos finais" in low:
+            return "Anos Finais"
+        if "ensino medio" in low or "ensino médio" in texto.lower():
+            return "Ensino Médio"
+
+        # Ordinais por extenso (fundamental)
+        extenso_para_ano = {
+            "primeiro": 1,
+            "segundo": 2,
+            "terceiro": 3,
+            "quarto": 4,
+            "quinto": 5,
+            "sexto": 6,
+            "setimo": 7,
+            "oitavo": 8,
+            "nono": 9,
+        }
+        for palavra, num in extenso_para_ano.items():
+            if re.search(rf"\b{palavra}\s+ano\b", low):
+                return f"{num}º Ano"
+
+        # Fallback: devolver o próprio nome do curso se for descritivo (evita perder "Magistério", etc.)
+        if len(texto) <= 120:
+            return texto
+        return texto[:117] + "..."
+
     def _mapear_disciplina_para_sigla(self, disciplina: str) -> str:
         """Mapeia nome da disciplina para sigla SAEB (LP ou MT)"""
         disciplina_lower = disciplina.lower()
@@ -649,32 +776,29 @@ class AIAnalysisService:
                     "[Avaliação]",
                     avaliacao_titulo or "Avaliação Diagnóstica"
                 ).replace(
-                    "- Ano/Série: [Ano/Série: 5º Ano ou 9º Ano]",
-                    f"- Ano/Série: {ano_serie}"
+                    "Ano/Série: [Ano/Série ex: 1º Ano, 7º Ano, etc.]",
+                    f"Ano/Série: {ano_serie}"
                 ).replace(
-                    "- Disciplina: [Disciplina: LP ou MT]",
-                    f"- Disciplina: {sigla_disc} (sigla SAEB para {disciplina})"
+                    "Disciplina: [Disciplina: LP ou MT]",
+                    f"Disciplina: {sigla_disc} (sigla SAEB para {disciplina})"
                 ).replace(
-                    "- Avaliação: [AVALIAÇÃO: ex: Avaliação 2025.1]",
-                    f"- Avaliação: {avaliacao_titulo or 'Avaliação Diagnóstica'}"
+                    "Avaliação: [AVALIAÇÃO: ex: Avaliação 2025.1]",
+                    f"Avaliação: {avaliacao_titulo or 'Avaliação Diagnóstica'}"
                 ).replace(
-                    "- Média Geral da Rede/Escola: [Média]",
-                    f"- Média Geral da Rede/Escola: {media_geral:.2f}"
+                    "Média Geral da Rede/Escola: [Média]",
+                    f"Média Geral da Rede/Escola: {media_geral:.2f}"
                 ).replace(
-                    "- Média Municipal/Benchmark (se disponível): [Média Municipal]",
-                    f"- Média Municipal/Benchmark (se disponível): {media_municipal:.2f}" if media_municipal > 0 else "- Média Municipal/Benchmark (se disponível): Não disponível"
+                    "Média Municipal/Benchmark (se disponível): [Média Municipal]",
+                    f"Média Municipal/Benchmark (se disponível): {media_municipal:.2f}" if media_municipal > 0 else "Média Municipal/Benchmark (se disponível): Não disponível"
                 ).replace(
                     "{Resultados por Turma}",
                     resultados_detalhados_str
                 ).replace(
-                    "4. ANÁLISE POR TURMA",
-                    f"4. ANÁLISE POR {label_unidade.upper()}"
+                    "Análise por Turma/Escola",
+                    f"Análise por {label_unidade}"
                 ).replace(
-                    "classificar cada uma individualmente",
-                    f"classificar cada {label_unidade.lower()} individualmente"
-                ).replace(
-                    "apontar disparidades entre elas",
-                    f"apontar disparidades entre elas"
+                    "Existindo segmentação de dados por turmas, emita breves laudos individuais",
+                    f"Existindo segmentação de dados por {label_unidade.lower()}s, emita breves laudos individuais",
                 )
                 
                 try:
@@ -739,6 +863,7 @@ class AIAnalysisService:
                 disciplina_label = "GERAL (Todas as Disciplinas)" if disciplina == 'GERAL' else disciplina
                 
                 # Preencher o template do prompt (ordem importa)
+                ano_serie_niveis = self._obter_ano_serie(report_data)
                 prompt = NIVEIS_APRENDIZAGEM_ANALYSIS_PROMPT_TEMPLATE.replace(
                     "[DISCIPLINA]",
                     disciplina_label
@@ -750,28 +875,28 @@ class AIAnalysisService:
                     disciplina_label
                 ).replace(
                     "[Série/Ano]",
-                    "9º ano"  # Pode ser ajustado dinamicamente no futuro
+                    ano_serie_niveis
                 ).replace(
-                    "- Disciplina: [PREENCHER DISCIPLINA: ex: Matemática / Língua Portuguesa]",
-                    f"- Disciplina: {disciplina_label}"
+                    "Disciplina: [PREENCHER DISCIPLINA: ex: Matemática / Língua Portuguesa]",
+                    f"Disciplina: {disciplina_label}"
                 ).replace(
-                    "- Avaliação: [AVALIAÇÃO: ex: Avaliação Diagnóstica 2025.1]",
-                    f"- Avaliação: {avaliacao_titulo or 'Avaliação Diagnóstica'}"
+                    "Avaliação: [AVALIAÇÃO: ex: Avaliação Diagnóstica 2025.1]",
+                    f"Avaliação: {avaliacao_titulo or 'Avaliação Diagnóstica'}"
                 ).replace(
-                    "- Total de alunos avaliados: [Nº]",
-                    f"- Total de alunos avaliados: {total_alunos}"
+                    "Total de alunos avaliados: [Nº]",
+                    f"Total de alunos avaliados: {total_alunos}"
                 ).replace(
-                    "- Abaixo do Básico: [Nº] alunos ([__]%)",
-                    f"- Abaixo do Básico: {abaixo_basico} alunos ({perc_abaixo:.1f}%)"
+                    "Abaixo do Básico: [Nº] alunos ([__]%)",
+                    f"Abaixo do Básico: {abaixo_basico} alunos ({perc_abaixo:.1f}%)"
                 ).replace(
-                    "- Básico: [Nº] alunos ([__]%)",
-                    f"- Básico: {basico} alunos ({perc_basico:.1f}%)"
+                    "Básico: [Nº] alunos ([__]%)",
+                    f"Básico: {basico} alunos ({perc_basico:.1f}%)"
                 ).replace(
-                    "- Adequado: [Nº] alunos ([__]%)",
-                    f"- Adequado: {adequado} alunos ({perc_adequado:.1f}%)"
+                    "Adequado: [Nº] alunos ([__]%)",
+                    f"Adequado: {adequado} alunos ({perc_adequado:.1f}%)"
                 ).replace(
-                    "- Avançado: [Nº] alunos ([__]%)",
-                    f"- Avançado: {avancado} alunos ({perc_avancado:.1f}%)"
+                    "Avançado: [Nº] alunos ([__]%)",
+                    f"Avançado: {avancado} alunos ({perc_avancado:.1f}%)"
                 )
                 
                 try:
@@ -997,10 +1122,10 @@ e recomendações práticas para a escola.
             print(f"[AIAnalysisService] call | Google AI Studio (Gemini) | model={model_name}")
 
             system_prompt = (
-                "Você é um especialista em educação e análise de dados educacionais. "
-                "Sempre gere texto humanizado e profissional, SEM usar formatação markdown "
-                "(sem #, ##, *, **, etc). Use apenas parágrafos normais e títulos em "
-                "maiúsculas seguidos de dois pontos."
+                "Você atua como um Doutor em Análise de Dados Educacionais e Especialista em "
+                "Avaliação Educacional. Gere texto humanizado e profissional, SEM formatação markdown "
+                "(sem #, ##, *, **). Use parágrafos e títulos em maiúsculas seguidos de dois pontos. "
+                "Respeite rigorosamente as regras de série, segmento e nomenclatura do prompt do usuário."
             )
 
             # Gemini 3 usa "thinking" interno: com prompt longo pode consumir todos os tokens
@@ -1244,14 +1369,19 @@ e recomendações práticas para a escola.
                 habilidades_data_str += f"  - Questão {questao.get('numero_questao', 'N/A')}: {codigo} - {descricao}\n"
                 habilidades_data_str += f"    Acertos: {acertos}/{total} ({percentual:.1f}%) | Status: {status}\n"
         
-        # Obter ano/série
+        # Obter ano/série e rótulos (fidelidade à série; series_label/series têm prioridade em _obter_ano_serie)
         ano_serie = self._obter_ano_serie(report_data)
-        
+        avaliacao_meta = report_data.get("avaliacao", {}) or {}
+        nome_curso_cadastro = (avaliacao_meta.get("course_name") or avaliacao_meta.get("course") or "").strip()
+        serie_ref = ano_serie
+
         # Formatar média municipal geral (evitar erro de formatação)
         media_municipal_geral_str = f"{media_municipal_geral:.2f}" if media_municipal_geral > 0 else "Não disponível"
-        
+
         # Construir prompt unificado
-        prompt = f"""IMPORTANTE: Você deve gerar TODAS as análises solicitadas abaixo em uma única resposta, separadas por marcadores claros.
+        prompt = f"""{ANALYSIS_PROMPT_BASE}
+
+IMPORTANTE: Você deve gerar TODAS as análises solicitadas abaixo em uma única resposta, separadas por marcadores claros.
 
 Gere APENAS texto puro, SEM formatação markdown (sem #, ##, *, **, etc). Use apenas parágrafos normais e títulos em maiúsculas seguidos de dois pontos.
 
@@ -1273,7 +1403,8 @@ DADOS DO RELATÓRIO
 ===========================================
 - Entidade: {entidade}
 - Avaliação: {avaliacao_titulo or 'Avaliação Diagnóstica'}
-- Ano/Série: {ano_serie}
+- Série / etapa (turmas avaliadas): {serie_ref}
+- Curso no cadastro da prova: {nome_curso_cadastro or 'não informado'}
 - Escopo: {scope_type}
 
 ===========================================
@@ -1292,19 +1423,7 @@ TABELA DE CLASSIFICAÇÃO DE PARTICIPAÇÃO:
 {PARTICIPATION_CLASSIFICATION_TABLE}
 
 INSTRUÇÕES PARA ANÁLISE DE PARTICIPAÇÃO:
-Gere um PARECER TÉCNICO DE PARTICIPAÇÃO seguindo este formato:
-
-PARECER TÉCNICO DE PARTICIPAÇÃO: {entidade} ({avaliacao_titulo or 'Avaliação Diagnóstica'})
-[Primeiro parágrafo mencionando a participação geral e os dados básicos. Use os números específicos fornecidos.]
-
-Classificação: [Nome da Classificação]
-[Segundo parágrafo explicando o que essa classificação significa em termos de engajamento e confiabilidade dos dados. Explique se podemos confiar nas médias de proficiência.]
-
-Destaques e Recomendações:
-[Mencione os destaques formatados como frases completas. Se não houver destaques, não mencione destaques.]
-[Mencione as recomendações práticas focadas nos pontos de atenção, especialmente alunos faltosos. Use formato de parágrafo ou lista com bullets simples (•).]
-
-Use a tabela acima para classificar a taxa de participação de {percentual_participacao}% e mencione a classificação encontrada no texto.
+Gere um PARECER TÉCNICO DE PARTICIPAÇÃO alinhado ao template de participação: panorama com números exatos, classificação segundo a tabela, confiabilidade dos dados para uso das médias de proficiência, destaques (se houver) e recomendações estratégicas para absenteísmo. Mencione a série/etapa apenas conforme a avaliação (use "{serie_ref}" quando fizer sentido). Honre as regras de série e segmento do prompt base.
 
 ===========================================
 2. ANÁLISE DE PROFICIÊNCIA POR DISCIPLINA
@@ -1317,27 +1436,12 @@ DADOS DE PROFICIÊNCIA:
 {prof_data_str}
 
 INSTRUÇÕES PARA ANÁLISE DE PROFICIÊNCIA:
-Para CADA disciplina listada acima, gere um PARECER TÉCNICO DE PROFICIÊNCIA seguindo este formato:
+Para CADA disciplina listada acima, gere um PARECER TÉCNICO DE PROFICIÊNCIA com: abertura sobre TRI e meta "Adequado"; Classificação da Média Geral; Análise de Posição (pontos de corte e municipal); Diagnóstico Pedagógico (INEP); Análise por {unidade_label} com bullets (•) quando houver dados. Use a régua do 5º ou do 9º ano conforme o segmento, sem violar as regras de nomenclatura do prompt base.
 
-PARECER TÉCNICO: PROFICIÊNCIA EM [Disciplina] ({ano_serie} - {avaliacao_titulo or 'Avaliação Diagnóstica'})
-[Primeiro parágrafo explicando o que é proficiência na escala TRI e mencionando que a meta é o nível "Adequado"]
-
-1. Classificação da Média Geral
-[Aqui classifique a média geral de acordo com a tabela de referência e mencione o valor e a classificação encontrada]
-
-2. Análise de Posição
-[Aqui descreva onde a média se encontra em relação aos pontos de corte. Se houver benchmark municipal, mencione a distância até ele.]
-
-3. Diagnóstico Pedagógico (INEP)
-[Aqui use as definições oficiais do INEP para descrever o que essa classificação significa em termos de aprendizagem, mencionando "desempenho aquém do esperado", "significativo comprometimento", "intervenções emergenciais", etc.]
-
-4. Análise por {unidade_label}
-[Se houver dados por {unidade_nome}, classifique cada uma individualmente e aponte as disparidades. Use formato de lista com bullets simples (•).]
-
-Use a tabela de referência acima para classificar a média geral de acordo com o ano/série e disciplina.
+PARECER TÉCNICO: PROFICIÊNCIA EM [Disciplina] ({serie_ref} - {avaliacao_titulo or 'Avaliação Diagnóstica'})
 
 ===========================================
-3. ANÁLISE DE NOTAS
+3. ANÁLISE DE RENDIMENTO ESCOLAR (NOTAS)
 ===========================================
 
 TABELA DE REFERÊNCIA PEDAGÓGICA:
@@ -1345,54 +1449,27 @@ TABELA DE REFERÊNCIA PEDAGÓGICA:
 
 DADOS DE NOTAS:
 {notas_data_str}
-- Média Geral (Todas as Disciplinas): {media_geral_total:.2f}
-- Benchmark (Média Municipal): {media_municipal_geral_str}
+- Média Geral (Abrangendo todos os Componentes): {media_geral_total:.2f}
+- Benchmark (Média da Rede Municipal): {media_municipal_geral_str}
 
 INSTRUÇÕES PARA ANÁLISE DE NOTAS:
-Gere um PARECER TÉCNICO DE NOTA seguindo este formato:
-
-PARECER TÉCNICO: NOTA (0-10) - {ano_serie} ({avaliacao_titulo or 'Avaliação Diagnóstica'})
-[Primeiro parágrafo explicando brevemente o que é a Nota (escala 0-10 derivada da proficiência, usada no IDEB)]
-
-1. Classificação e Comparação (Média Geral)
-[Aqui classifique a média geral usando a tabela de referência. Compare com a média municipal, com a meta e com o IDEB oficial se disponível.]
-
-2. Análise por Disciplina e {unidade_label}
-[Aqui compare o desempenho entre disciplinas (LP vs MT) e entre {unidade_label.lower()}s. Aponte disparidades e onde o reforço é mais necessário. Use formato de lista com bullets simples (•) se necessário.]
-
-3. Conclusão e Recomendação
-[Baseado apenas na análise das notas, sumarize o diagnóstico e recomende ações gerais (aulas de recuperação, avaliações formativas, metodologias ativas) para elevar o rendimento.]
-
-Use a tabela de referência acima para classificar a média geral.
+Gere um PARECER TÉCNICO: RENDIMENTO ESCOLAR (0-10) - {serie_ref} ({avaliacao_titulo or 'Avaliação Diagnóstica'}) com: Classificação e Estudo Comparativo da Média Geral; Radiografia por Disciplina e Unidade de Ensino (LP x MT e {unidade_label.lower()}s); Parecer Conclusivo e Recomendações Pedagógicas. Aplique o PRINCÍPIO INEGOCIÁVEL DA SÉRIE E RÉGUA do template de notas.
 
 ===========================================
 4. ANÁLISE DE NÍVEIS DE APRENDIZAGEM POR DISCIPLINA
 ===========================================
 
 DEFINIÇÕES DOS NÍVEIS (INEP - "Descritores de Padrões de Desempenho - 2025"):
-1. Abaixo do Básico: Indica um desempenho "aquém do esperado", com "significativo comprometimento" das habilidades. Esses alunos têm a "trajetória académica seriamente comprometida" e necessitam de "intervenções emergenciais".
-2. Básico: Indica um domínio parcial e insuficiente das habilidades. O aluno não consolidou as competências essenciais para a série e precisa de apoio para recompor a aprendizagem.
-3. Adequado (A Meta): Indica o "desempenho esperado". O aluno demonstra ter "desenvolvido as habilidades previstas" e possui "condições adequadas à continuidade" de sua trajetória.
-4. Avançado: Indica um "desempenho superior àquele esperado". O aluno domina "habilidades mais complexas" e necessita de "atividades mais desafiadoras".
+Abaixo do Básico: Reflete um desempenho "aquém do esperado", apontando "significativo comprometimento" no domínio das habilidades focais. Tais estudantes encontram-se com a "trajetória acadêmica seriamente comprometida", demandando "intervenções emergenciais" e suporte intensivo.
+Básico: Denota um desenvolvimento apenas elementar e fragmentado das habilidades aferidas. O aluno não sedimentou as competências balizares para a sua etapa, exigindo estratégias direcionadas para a recomposição das aprendizagens não consolidadas.
+Adequado (A Meta): Expressa o "desempenho esperado". Trata-se do cenário ideal, no qual o estudante atesta ter "desenvolvido as habilidades previstas", assegurando "condições adequadas à continuidade" autônoma do seu ciclo de estudos.
+Avançado: Corresponde a um "desempenho superior àquele esperado". O aluno demonstra fluência em "habilidades mais complexas", sinalizando a necessidade de enriquecimento curricular e "atividades mais desafiadoras".
 
 DADOS DE NÍVEIS DE APRENDIZAGEM:
 {niveis_data_str}
 
 INSTRUÇÕES PARA ANÁLISE DE NÍVEIS:
-Para CADA disciplina listada acima (incluindo "GERAL (Todas as Disciplinas)" se presente), gere um PARECER TÉCNICO DE NÍVEIS DE APRENDIZAGEM seguindo este formato:
-
-PARECER TÉCNICO: NÍVEIS DE APRENDIZAGEM EM [Disciplina] ({avaliacao_titulo or 'Avaliação Diagnóstica'})
-[Aqui comece o primeiro parágrafo explicando o que são os Níveis de Aprendizagem e sua importância como diagnóstico pedagógico. Em seguida, explique os 4 níveis usando as definições do INEP, deixando claro que "Adequado" é a meta esperada.]
-
-Diagnóstico e Meta ([Disciplina] - {ano_serie})
-[Segundo parágrafo apresentando os dados da avaliação e a análise do gargalo: percentual que não atingiu a meta vs percentual que atingiu a meta, com detalhamento por nível]
-
-Conclusão: [Conclusão diagnosticando onde está o maior desafio (gargalo) para esta disciplina]
-
-Calcule e apresente claramente:
-- O percentual total de alunos que NÃO ATINGIRAM A META (soma de Abaixo do Básico + Básico)
-- O percentual total de alunos que ATINGIRAM A META (soma de Adequado + Avançado)
-- Detalhe cada nível com números específicos (ex: "42% (19 alunos) estão no nível Abaixo do Básico")
+Para CADA disciplina listada acima (incluindo "GERAL (Todas as Disciplinas)" se presente), gere um PARECER TÉCNICO: NÍVEIS DE APRENDIZAGEM EM [Disciplina] ({avaliacao_titulo or 'Avaliação Diagnóstica'}) com introdução, Diagnóstico e Meta ([Disciplina] - {serie_ref}), e Conclusão sobre o gargalo. Calcule % fora da meta (Abaixo+Básico) e % na meta (Adequado+Avançado), com detalhes por nível.
 
 IMPORTANTE: Se "GERAL (Todas as Disciplinas)" estiver listado acima, você DEVE incluir uma análise para ele também. Use o nome "GERAL" ou "GERAL (Todas as Disciplinas)" no marcador [DISCIPLINA: ...].
 
@@ -1400,39 +1477,17 @@ IMPORTANTE: Se "GERAL (Todas as Disciplinas)" estiver listado acima, você DEVE 
 5. ANÁLISE DE ACERTOS POR HABILIDADE
 ===========================================
 
-Você é um Analista de Dados Educacionais e Especialista em Avaliação Diagnóstica e Formativa com profundo conhecimento em BNCC, Matrizes SAEB/CAED, Educação Especial e Andragogia (EJA).
-
 METODOLOGIA DE CLASSIFICAÇÃO (MAPA DE CALOR):
 Classifique cada habilidade/objetivo com base nos acertos:
-✅ CONCLUÍDO (Consolidação): Acertos ≥ 70%. O estudante demonstra autonomia e domínio dos processos cognitivos exigidos.
-⚠️ REVISAR (Fragilidade): Acertos entre 50% e 69%. Proficiência parcial; apresenta lacunas que demandam reforço e retomada.
-🚨 REAVALIAR (Defasagem): Acertos < 50%. Habilidade não desenvolvida; requer intervenção imediata ou remediação pedagógica.
+CONCLUÍDO: Acertos ≥ 70%.
+REVISAR: Acertos entre 50% e 69%.
+REAVALIAR: Acertos < 50%.
 
 DADOS DE ACERTOS POR HABILIDADE:
 {habilidades_data_str}
 
 INSTRUÇÕES PARA ANÁLISE DE HABILIDADES:
-Para CADA disciplina listada acima (incluindo GERAL se presente), gere um PARECER PEDAGÓGICO ANALÍTICO seguindo esta estrutura:
-
-PARECER PEDAGÓGICO: ACERTOS POR HABILIDADE EM [Disciplina] ({avaliacao_titulo or 'Avaliação Diagnóstica'})
-
-A. Mapa de Calor de Proficiência:
-Gere uma análise textual (não tabela) descrevendo o desempenho por habilidade, mencionando:
-- Código da Habilidade/Objetivo
-- Conteúdo Relacionado (descrição)
-- Percentual de acertos
-- Status (CONCLUÍDO, REVISAR ou REAVALIAR)
-
-B. Diagnóstico Cognitivo (Análise Qualitativa):
-Descreva tecnicamente a mobilização de esquemas mentais, focando em processos como inferência, dedução, análise crítica e resolução de problemas. Identifique padrões de desempenho e áreas de maior e menor domínio.
-
-C. Proposta de Intervenção (Plano de Ação):
-Para cada habilidade classificada como REVISAR ou REAVALIAR, sugira:
-- Estratégia Didática: Metodologias ativas, agrupamentos produtivos ou ensino estruturado
-- Recursos/Suportes: Gêneros textuais, simuladores, materiais manipuláveis ou tecnologia assistiva
-
-D. Síntese do Desempenho Global:
-Forneça um resumo técnico sobre a proficiência geral, tendências de aprendizagem e prioridades estratégicas para o próximo ciclo, alinhado à Matriz de Referência 2025.
+Para CADA disciplina listada acima (incluindo GERAL se presente), gere um PARECER PEDAGÓGICO: ACERTOS POR HABILIDADE EM [Disciplina] ({avaliacao_titulo or 'Avaliação Diagnóstica'}) com Mapa de Calor (texto), Diagnóstico Cognitivo, Proposta de Intervenção para REVISAR/REAVALIAR e Síntese. Considere questões anuladas se presentes nos dados globais da avaliação.
 
 IMPORTANTE: Se "GERAL (Todas as Disciplinas)" estiver listado acima, você DEVE incluir uma análise para ele também. Use o nome "GERAL" ou "GERAL (Todas as Disciplinas)" no marcador [DISCIPLINA: ...].
 
@@ -1478,7 +1533,7 @@ Sua resposta deve seguir EXATAMENTE este formato, usando os marcadores abaixo pa
 [DISCIPLINA: GERAL]
 [Se "GERAL (Todas as Disciplinas)" estiver nos dados de acertos por habilidade acima, você DEVE incluir uma análise para GERAL aqui. Use exatamente o marcador [DISCIPLINA: GERAL] ou [DISCIPLINA: GERAL (Todas as Disciplinas)].]
 
-IMPORTANTE: Use os marcadores exatos [MARCADOR: PARTICIPACAO], [MARCADOR: PROFICIENCIA], [MARCADOR: NOTAS], [MARCADOR: NIVEIS], [MARCADOR: HABILIDADES] e [DISCIPLINA: ...] para que possamos processar sua resposta corretamente. 
+IMPORTANTE: Use os marcadores exatos [MARCADOR: PARTICIPACAO], [MARCADOR: PROFICIENCIA], [MARCADOR: NOTAS], [MARCADOR: NIVEIS], [MARCADOR: HABILIDADES] e [DISCIPLINA: ...] para que possamos processar sua resposta corretamente.
 
 ATENÇÃO ESPECIAL: Se você viu "GERAL (Todas as Disciplinas)" nos dados de níveis de aprendizagem acima, você DEVE gerar uma análise para ele usando o marcador [DISCIPLINA: GERAL] ou [DISCIPLINA: GERAL (Todas as Disciplinas)]. Não pule esta análise!
 """

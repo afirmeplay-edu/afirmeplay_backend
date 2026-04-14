@@ -34,6 +34,8 @@
     "alunos_participantes": 115,
     "alunos_pendentes": 5,
     "alunos_ausentes": 0,
+    "percentual_comparecimento": 95.83,
+    "nivel_classificacao": "Adequado",
     "media_nota_geral": 7.45,
     "media_proficiencia_geral": 68.2,
     "distribuicao_classificacao_geral": {
@@ -63,7 +65,13 @@
           "basico": 15,
           "adequado": 28,
           "avancado": 13
-        }
+        },
+        "percentual_comparecimento": 96.67,
+        "nivel_classificacao": "Adequado",
+        "media_nota_lingua_portuguesa": 7.5,
+        "media_nota_matematica": 8.1,
+        "medias_por_disciplina": [],
+        "alunos_ausentes": 2
       },
       {
         "id": "serie_uuid-grade-2",
@@ -165,8 +173,8 @@
 ---
 
 - **nivel_granularidade:** `municipio` | `escola` | `serie` | `turma`, conforme os filtros.
-- **estatisticas_gerais:** totais do escopo (alunos, participantes, média, distribuição por classificação).
-- **resultados_detalhados.gabaritos:** lista agregada por escola, série ou turma (conforme o nível).
+- **estatisticas_gerais:** totais do escopo (alunos, participantes, comparecimento, `nivel_classificacao` pela média de proficiência, médias, distribuição geral).
+- **resultados_detalhados.gabaritos:** lista agregada por escola (município), por série (escola) ou por turma (série/turma), cada linha com as mesmas métricas complementares (comparecimento, `nivel_classificacao`, LP/MAT, `medias_por_disciplina`, etc.).
 - **tabela_detalhada.alunos:** um registro por aluno do escopo com resultado no gabarito.
 - **ranking:** alunos ordenados por nota (e proficiência) no gabarito.
 - **opcoes_proximos_filtros:** opções para os próximos níveis (gabaritos, escolas, séries, turmas).

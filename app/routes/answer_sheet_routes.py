@@ -2709,12 +2709,12 @@ def _calcular_estatisticas_consolidadas_cartao(scope_info, nivel_granularidade, 
             resultados = _rq.all()
         resultados = _dedupe_answer_sheet_results_latest_per_student(resultados)
         alunos_participantes = len(resultados)
-        # Alinhado a evaluation_results_routes._calcular_estatisticas_consolidadas_por_escopo:
-        # média de nota e proficiência a partir dos valores persistidos em AnswerSheetResult
-        # (grade = média das notas por disciplina no momento do cálculo/salvamento).
+        # Média de nota e proficiência: **mesmo peso por escola** (média das médias escolares),
+        # alinhado a evaluation_results_routes / regra de negócio municipal.
+        from app.utils.school_equal_weight_means import mean_grade_and_proficiency_equal_weight_by_school
+
         if resultados:
-            media_nota = sum((r.grade or 0) for r in resultados) / len(resultados)
-            media_prof = sum((r.proficiency or 0) for r in resultados) / len(resultados)
+            media_nota, media_prof = mean_grade_and_proficiency_equal_weight_by_school(resultados)
         else:
             media_nota = 0.0
             media_prof = 0.0
@@ -2810,10 +2810,10 @@ def _calcular_estatisticas_grupo_cartao(class_ids, gabarito_id, periodo_bounds=N
     _rq = _apply_answer_sheet_result_period_filter(_rq, periodo_bounds)
     resultados = _dedupe_answer_sheet_results_latest_per_student(_rq.all())
     participantes = len(resultados)
-    # Mesma lógica que evaluation_results (médias a partir do registro persistido).
+    from app.utils.school_equal_weight_means import mean_grade_and_proficiency_equal_weight_by_school
+
     if resultados:
-        media_nota = sum((r.grade or 0) for r in resultados) / len(resultados)
-        media_prof = sum((r.proficiency or 0) for r in resultados) / len(resultados)
+        media_nota, media_prof = mean_grade_and_proficiency_equal_weight_by_school(resultados)
     else:
         media_nota = 0.0
         media_prof = 0.0
@@ -2858,6 +2858,11 @@ def _medias_por_disciplina_de_resultados_cartao(
     from app.services.evaluation_calculator import EvaluationCalculator
 
     course_name = _get_course_name_from_grade(grade_name)
+    from app.utils.school_equal_weight_means import student_ids_to_school_id_map
+
+    student_ids = [r.student_id for r in results if getattr(r, "student_id", None)]
+    smap = student_ids_to_school_id_map(student_ids)
+    by_subj_school = defaultdict(lambda: defaultdict(list))
     by_subject: Dict[str, Dict[str, Any]] = {}
     for r in results:
         pbs = r.proficiency_by_subject or {}
@@ -2885,7 +2890,11 @@ def _medias_por_disciplina_de_resultados_cartao(
                 nota_disc = EvaluationCalculator.calculate_grade(
                     data.get("proficiency"), course_name, subject_name
                 )
-            by_subject[sidk]["soma_nota"] += float(nota_disc) if nota_disc is not None else 0.0
+            nf = float(nota_disc) if nota_disc is not None else 0.0
+            by_subject[sidk]["soma_nota"] += nf
+            sch = smap.get(r.student_id)
+            if sch:
+                by_subj_school[sidk][str(sch)].append((nf, float(data.get("proficiency") or 0)))
             if data.get("subject_name"):
                 by_subject[sidk]["disciplina"] = data.get("subject_name")
 
@@ -2897,8 +2906,23 @@ def _medias_por_disciplina_de_resultados_cartao(
         if not n:
             continue
         nom = agg["disciplina"]
-        mn = round(agg["soma_nota"] / n, 2)
-        mp = round(agg["soma_prof"] / n, 2)
+        per_sch = by_subj_school.get(_sidk, {})
+        if per_sch:
+            nota_escolas = [
+                sum(p[0] for p in pairs) / len(pairs) for pairs in per_sch.values() if pairs
+            ]
+            prof_escolas = [
+                sum(p[1] for p in pairs) / len(pairs) for pairs in per_sch.values() if pairs
+            ]
+            if nota_escolas:
+                mn = round(sum(nota_escolas) / len(nota_escolas), 2)
+                mp = round(sum(prof_escolas) / len(prof_escolas), 2)
+            else:
+                mn = round(agg["soma_nota"] / n, 2)
+                mp = round(agg["soma_prof"] / n, 2)
+        else:
+            mn = round(agg["soma_nota"] / n, 2)
+            mp = round(agg["soma_prof"] / n, 2)
         lista.append({"disciplina": nom, "media_nota": mn, "media_proficiencia": mp})
         if _subject_name_is_lingua_portuguesa(nom):
             notas_lp.append(mn)
@@ -3128,6 +3152,10 @@ def _calcular_resultados_por_disciplina_cartao(
     grade_name = (gabarito.grade_name or gabarito.title or '') if gabarito else ''
     from app.services.cartao_resposta.proficiency_by_subject import _get_course_name_from_grade
     course_name = _get_course_name_from_grade(grade_name)
+    from app.utils.school_equal_weight_means import student_ids_to_school_id_map
+    smap = student_ids_to_school_id_map(student_ids)
+    # Por disciplina: (escola -> lista de (nota, prof)) para média igual por escola
+    by_subj_school = defaultdict(lambda: defaultdict(list))
     # Agregar por disciplina a partir de proficiency_by_subject
     by_subject = {}
     for r in results:
@@ -3157,7 +3185,11 @@ def _calcular_resultados_por_disciplina_cartao(
                 nota_disc = EvaluationCalculator.calculate_grade(
                     data.get('proficiency'), course_name, subject_name
                 )
-            by_subject[sid]['soma_nota'] += float(nota_disc) if nota_disc is not None else 0.0
+            nf = float(nota_disc) if nota_disc is not None else 0.0
+            by_subject[sid]['soma_nota'] += nf
+            sch = smap.get(r.student_id)
+            if sch:
+                by_subj_school[sid][str(sch)].append((nf, float(data.get('proficiency') or 0)))
             cl = (data.get('classification') or '').lower()
             if 'abaixo' in cl:
                 by_subject[sid]['dist']['abaixo_do_basico'] += 1
@@ -3171,6 +3203,23 @@ def _calcular_resultados_por_disciplina_cartao(
     out = []
     for sid, agg in by_subject.items():
         n = agg['alunos_participantes']
+        per_sch = by_subj_school.get(sid, {})
+        if per_sch:
+            nota_escolas = [
+                sum(p[0] for p in pairs) / len(pairs) for pairs in per_sch.values() if pairs
+            ]
+            prof_escolas = [
+                sum(p[1] for p in pairs) / len(pairs) for pairs in per_sch.values() if pairs
+            ]
+            if nota_escolas:
+                media_nota = round(sum(nota_escolas) / len(nota_escolas), 2)
+                media_prof = round(sum(prof_escolas) / len(prof_escolas), 2)
+            else:
+                media_nota = round(agg['soma_nota'] / n, 2) if n else 0.0
+                media_prof = round(agg['soma_proficiencia'] / n, 2) if n else 0.0
+        else:
+            media_nota = round(agg['soma_nota'] / n, 2) if n else 0.0
+            media_prof = round(agg['soma_proficiencia'] / n, 2) if n else 0.0
         out.append({
             "disciplina": agg['disciplina'],
             "total_avaliacoes": 1,
@@ -3178,8 +3227,8 @@ def _calcular_resultados_por_disciplina_cartao(
             "alunos_participantes": n,
             "alunos_pendentes": total_alunos - n,
             "alunos_ausentes": max(0, total_alunos - n),
-            "media_nota": round(agg['soma_nota'] / n, 2) if n else 0.0,
-            "media_proficiencia": round(agg['soma_proficiencia'] / n, 2) if n else 0.0,
+            "media_nota": media_nota,
+            "media_proficiencia": media_prof,
             "distribuicao_classificacao": agg['dist']
         })
     return out

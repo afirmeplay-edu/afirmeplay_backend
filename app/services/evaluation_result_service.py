@@ -13,6 +13,7 @@ from app.models.studentAnswer import StudentAnswer
 from app.services.evaluation_calculator import EvaluationCalculator
 from app.report_analysis.services import ReportAggregateService
 from app.utils.decimal_helpers import round_to_two_decimals
+from app.utils.school_equal_weight_means import mean_grade_and_proficiency_equal_weight_by_school_from_subject_rows
 from datetime import datetime
 import logging
 from typing import Dict, Any, Optional, List
@@ -675,13 +676,13 @@ class EvaluationResultService:
                         })
                 
                 if subject_results:
-                    # Calcular estatísticas agregadas da disciplina (arredondar para 2 casas decimais)
+                    # Médias por disciplina: mesmo peso por escola (média das médias escolares)
                     total_students = len(subject_results)
-                    avg_proficiency = sum(sr['proficiency'] for sr in subject_results) / total_students
-                    avg_grade = sum(sr['grade'] for sr in subject_results) / total_students
-                    avg_score_percentage = sum(sr['score_percentage'] for sr in subject_results) / total_students
-                    
-                    # Arredondar médias para 2 casas decimais
+                    avg_grade, avg_proficiency, avg_score_percentage = (
+                        mean_grade_and_proficiency_equal_weight_by_school_from_subject_rows(
+                            subject_results, student_id_key="student_id"
+                        )
+                    )
                     avg_proficiency = round_to_two_decimals(avg_proficiency)
                     avg_grade = round_to_two_decimals(avg_grade)
                     avg_score_percentage = round_to_two_decimals(avg_score_percentage)

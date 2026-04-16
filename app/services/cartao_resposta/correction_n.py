@@ -5434,6 +5434,16 @@ class AnswerSheetCorrectionN:
                 db.session.flush()
                 payload = existing_result.to_dict()
                 db.session.commit()
+                try:
+                    from app.report_analysis.answer_sheet_aggregate_service import (
+                        invalidate_answer_sheet_report_cache_after_result,
+                    )
+
+                    invalidate_answer_sheet_report_cache_after_result(
+                        gabarito_id, student_id, commit=True
+                    )
+                except Exception as inv_err:
+                    self.logger.warning("Invalidate answer_sheet report cache: %s", inv_err)
                 return payload
             else:
                 # Criar novo
@@ -5457,6 +5467,16 @@ class AnswerSheetCorrectionN:
                 db.session.flush()
                 payload = result.to_dict()
                 db.session.commit()
+                try:
+                    from app.report_analysis.answer_sheet_aggregate_service import (
+                        invalidate_answer_sheet_report_cache_after_result,
+                    )
+
+                    invalidate_answer_sheet_report_cache_after_result(
+                        gabarito_id, student_id, commit=True
+                    )
+                except Exception as inv_err:
+                    self.logger.warning("Invalidate answer_sheet report cache: %s", inv_err)
                 return payload
                 
         except Exception as e:

@@ -3789,7 +3789,16 @@ def _obter_escolas_por_gabarito_cartao(
     periodo_bounds: Optional[Tuple[datetime, datetime]] = None,
     estado: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
-    """Escolas onde o gabarito foi gerado (pelo school_id do gabarito ou todas do município se escopo city)."""
+    """
+    Escolas do município ligadas ao gabarito: união das escolas das turmas em **todas** as
+    gerações (answer_sheet_generations) + batch + correções, não só o school_id denormalizado
+    no gabarito (que reflete a última geração).
+    Se não houver turma/resultado identificável, cai no fallback de todas as escolas do município.
+    """
+    from uuid import UUID
+
+    from app.report_analysis.answer_sheet_report_builder import union_target_class_ids_for_gabarito
+
     city = City.query.get(municipio_id)
     if not city:
         return []
@@ -3798,11 +3807,19 @@ def _obter_escolas_por_gabarito_cartao(
     gabarito = AnswerSheetGabarito.query.get(gabarito_id)
     if not gabarito:
         return []
-    school_ids = []
-    if gabarito.school_id and str(gabarito.school_id).strip():
-        school = School.query.filter(School.id == gabarito.school_id, School.city_id == municipio_id).first()
+    school_ids_set: Set[str] = set()
+    for cid in union_target_class_ids_for_gabarito(gabarito):
+        try:
+            uid = UUID(str(cid))
+        except ValueError:
+            continue
+        co = Class.query.get(uid)
+        if not co or not co.school_id:
+            continue
+        school = School.query.filter(School.id == co.school_id, School.city_id == municipio_id).first()
         if school:
-            school_ids.append(school.id)
+            school_ids_set.add(str(school.id))
+    school_ids = list(school_ids_set)
     if not school_ids:
         schools_in_city = School.query.filter(School.city_id == municipio_id).with_entities(School.id, School.name).all()
         school_ids = [s[0] for s in schools_in_city]

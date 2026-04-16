@@ -57,6 +57,7 @@ from app.models.grades import Grade
 from app.models.evaluationResult import EvaluationResult
 from app.utils.uuid_helpers import ensure_uuid, ensure_uuid_list
 from app.utils.decimal_helpers import round_to_two_decimals
+from app.utils.school_equal_weight_means import mean_grade_and_proficiency_equal_weight_by_school
 from sqlalchemy import cast, String, or_, and_, not_
 from sqlalchemy.dialects.postgresql import UUID as PostgresUUID
 from app.models.classTest import ClassTest
@@ -85,6 +86,7 @@ from collections import defaultdict
 from sqlalchemy import func, case
 from datetime import datetime
 from calendar import monthrange
+from types import SimpleNamespace
 from sqlalchemy.orm import joinedload
 import dateutil.parser
 import re
@@ -1766,9 +1768,8 @@ def _calculate_evaluation_stats_frontend(test_id: str) -> Dict[str, Any]:
     if total_questions == 0:
         return _empty_stats()
     
-    # Calcular resultados para cada aluno
-    notas = []
-    proficiencias = []  # CORREÇÃO: valores originais, não escala 1000
+    # Média geral: mesmo peso por escola (média das médias escolares)
+    result_rows_frontend = []
     classificacoes = {'Abaixo do Básico': 0, 'Básico': 0, 'Adequado': 0, 'Avançado': 0}
     alunos_participantes = 0
     
@@ -1817,17 +1818,26 @@ def _calculate_evaluation_stats_frontend(test_id: str) -> Dict[str, Any]:
             proficiency_original = result['proficiency']
             classification_original = result['classification']
             
-            notas.append(result['grade'])
-            proficiencias.append(proficiency_original)  # CORREÇÃO: usar valor original
+            result_rows_frontend.append(
+                SimpleNamespace(
+                    student_id=student.id,
+                    grade=result['grade'],
+                    proficiency=proficiency_original,
+                )
+            )
             classificacoes[classification_original] += 1
         else:
             # Aluno NÃO respondeu - não incluir na distribuição de classificação
             # Alunos ausentes não são classificados
             pass
     
-    # Calcular médias apenas dos alunos que participaram
-    media_nota = round_to_two_decimals(sum(notas) / len(notas)) if notas else 0.0
-    media_proficiencia = format_decimal_two_places(sum(proficiencias) / len(proficiencias)) if proficiencias else 0.0
+    if result_rows_frontend:
+        mn, mp = mean_grade_and_proficiency_equal_weight_by_school(result_rows_frontend)
+        media_nota = round_to_two_decimals(mn)
+        media_proficiencia = format_decimal_two_places(mp)
+    else:
+        media_nota = 0.0
+        media_proficiencia = 0.0
     
     return {
         'total_alunos': total_alunos,
@@ -1889,9 +1899,7 @@ def _calculate_evaluation_stats_by_class(test_id: str, class_id: str) -> Dict[st
     if total_questions == 0:
         return _empty_stats()
     
-    # Calcular resultados para cada aluno
-    notas = []
-    proficiencias = []  # CORREÇÃO: valores originais, não escala 1000
+    result_rows_by_class = []
     classificacoes = {'Abaixo do Básico': 0, 'Básico': 0, 'Adequado': 0, 'Avançado': 0}
     alunos_participantes = 0
     
@@ -1940,17 +1948,26 @@ def _calculate_evaluation_stats_by_class(test_id: str, class_id: str) -> Dict[st
             proficiency_original = result['proficiency']
             classification_original = result['classification']
             
-            notas.append(result['grade'])
-            proficiencias.append(proficiency_original)  # CORREÇÃO: usar valor original
+            result_rows_by_class.append(
+                SimpleNamespace(
+                    student_id=student.id,
+                    grade=result['grade'],
+                    proficiency=proficiency_original,
+                )
+            )
             classificacoes[classification_original] += 1
         else:
             # Aluno NÃO respondeu - não incluir na distribuição de classificação
             # Alunos ausentes não são classificados
             pass
     
-    # Calcular médias apenas dos alunos que participaram
-    media_nota = round_to_two_decimals(sum(notas) / len(notas)) if notas else 0.0
-    media_proficiencia = format_decimal_two_places(sum(proficiencias) / len(proficiencias)) if proficiencias else 0.0
+    if result_rows_by_class:
+        mn, mp = mean_grade_and_proficiency_equal_weight_by_school(result_rows_by_class)
+        media_nota = round_to_two_decimals(mn)
+        media_proficiencia = format_decimal_two_places(mp)
+    else:
+        media_nota = 0.0
+        media_proficiencia = 0.0
     
     return {
         'total_alunos': total_alunos,
@@ -2037,10 +2054,11 @@ def _calcular_estatisticas_municipio(class_tests: list, scope_info) -> Dict[str,
         todos_resultados = EvaluationResult.query.filter(EvaluationResult.test_id.in_(test_ids)).all()
         alunos_participantes = len(todos_resultados)
         
-        # Calcular médias consolidadas
+        # Calcular médias consolidadas (mesmo peso por escola)
         if todos_resultados:
-            media_nota_geral = sum(r.grade for r in todos_resultados) / len(todos_resultados)
-            media_proficiencia_geral = sum(r.proficiency for r in todos_resultados) / len(todos_resultados)
+            media_nota_geral, media_proficiencia_geral = mean_grade_and_proficiency_equal_weight_by_school(
+                todos_resultados
+            )
         else:
             media_nota_geral = 0.0
             media_proficiencia_geral = 0.0
@@ -2426,10 +2444,11 @@ def _calcular_estatisticas_gerais(class_tests: list, scope_info, nivel_granulari
         todos_resultados = EvaluationResult.query.filter(EvaluationResult.test_id.in_(test_ids)).all()
         alunos_participantes = len(todos_resultados)
         
-        # Calcular médias consolidadas
+        # Calcular médias consolidadas (mesmo peso por escola)
         if todos_resultados:
-            media_nota_geral = sum(r.grade for r in todos_resultados) / len(todos_resultados)
-            media_proficiencia_geral = sum(r.proficiency for r in todos_resultados) / len(todos_resultados)
+            media_nota_geral, media_proficiencia_geral = mean_grade_and_proficiency_equal_weight_by_school(
+                todos_resultados
+            )
         else:
             media_nota_geral = 0.0
             media_proficiencia_geral = 0.0
@@ -7184,10 +7203,9 @@ def _calcular_estatisticas_consolidadas_por_escopo(class_tests: list, scope_info
         alunos_participantes = len(resultados_escopo)
         logging.info(f"resultados_escopo: {alunos_participantes}, test_ids: {test_ids}, total_alunos: {total_alunos}")
         
-        # Calcular estatísticas consolidadas
+        # Calcular estatísticas consolidadas (mesmo peso por escola)
         if resultados_escopo:
-            media_nota = sum(r.grade for r in resultados_escopo) / len(resultados_escopo)
-            media_proficiencia = sum(r.proficiency for r in resultados_escopo) / len(resultados_escopo)
+            media_nota, media_proficiencia = mean_grade_and_proficiency_equal_weight_by_school(resultados_escopo)
         else:
             media_nota = 0.0
             media_proficiencia = 0.0
@@ -7854,10 +7872,9 @@ def _calcular_estatisticas_grupo(class_tests_grupo, evaluation):
         alunos_pendentes = total_alunos - alunos_participantes
         alunos_ausentes = 0  # Simplificado - pode ser calculado mais precisamente
         
-        # Calcular médias
+        # Calcular médias (mesmo peso por escola)
         if resultados:
-            media_nota = sum(r.grade for r in resultados) / len(resultados)
-            media_proficiencia = sum(r.proficiency for r in resultados) / len(resultados)
+            media_nota, media_proficiencia = mean_grade_and_proficiency_equal_weight_by_school(resultados)
         else:
             media_nota = 0.0
             media_proficiencia = 0.0

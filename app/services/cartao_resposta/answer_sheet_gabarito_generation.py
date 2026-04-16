@@ -7,7 +7,7 @@ Cada linha representa uma geração concluída (escopo + job + URL), sem sobresc
 import uuid
 import logging
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set
 
 from app import db
 from sqlalchemy.dialects.postgresql import JSONB, UUID
@@ -116,6 +116,28 @@ def build_class_scope_entries(class_ids: List[str]) -> List[Dict[str, str]]:
             }
         )
     return entries
+
+
+def class_ids_union_all_generations(gabarito_id: str) -> Set[str]:
+    """
+    União dos class_ids presentes em scope_snapshot de **todas** as linhas de
+    answer_sheet_generations para o gabarito (várias gerações city/grade/school).
+
+    Assim o escopo efetivo do cartão não fica preso à última geração apenas.
+    """
+    out: Set[str] = set()
+    rows = AnswerSheetGabaritoGeneration.query.filter_by(gabarito_id=str(gabarito_id)).all()
+    for row in rows:
+        snap = row.scope_snapshot
+        if not snap or not isinstance(snap, dict):
+            continue
+        raw = snap.get("class_ids") or []
+        for item in raw:
+            if isinstance(item, dict) and item.get("class_id"):
+                out.add(str(item["class_id"]))
+            elif isinstance(item, str) and item:
+                out.add(item)
+    return out
 
 
 def enrich_scope_snapshot(scope_snapshot: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:

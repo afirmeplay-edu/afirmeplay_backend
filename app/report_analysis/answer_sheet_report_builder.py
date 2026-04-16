@@ -8,7 +8,7 @@ from collections import OrderedDict, defaultdict
 from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
-from sqlalchemy import desc, func
+from sqlalchemy import func
 from sqlalchemy.orm import joinedload
 
 from app import db
@@ -251,6 +251,54 @@ def _class_ids_from_answer_sheet_results(gabarito_id: str) -> Set[str]:
     return {str(row[0]) for row in q.all() if row[0] is not None}
 
 
+def explicit_generation_scope_for_gabarito(gab: AnswerSheetGabarito) -> bool:
+    """
+    True se há histórico explícito de geração (snapshots em answer_sheet_generations
+    ou batch com class_id), sem incluir apenas resultados de correção — usado para
+    decidir se expande escopo legado pelo scope_type do gabarito.
+    """
+    from app.services.cartao_resposta.answer_sheet_gabarito_generation import (
+        class_ids_union_all_generations,
+    )
+
+    if class_ids_union_all_generations(str(gab.id)):
+        return True
+    if gab.batch_id:
+        return bool(
+            AnswerSheetGabarito.query.filter(
+                AnswerSheetGabarito.batch_id == gab.batch_id,
+                AnswerSheetGabarito.class_id.isnot(None),
+            ).first()
+        )
+    return False
+
+
+def union_target_class_ids_for_gabarito(gab: AnswerSheetGabarito) -> Set[str]:
+    """
+    União de turmas-alvo: todas as gerações registadas + batch + correções + class_id do gabarito.
+    Base para filtros por escola e relatórios quando há várias gerações (ex.: city depois grade).
+    """
+    from app.services.cartao_resposta.answer_sheet_gabarito_generation import (
+        class_ids_union_all_generations,
+    )
+
+    ids: Set[str] = set()
+    ids |= class_ids_union_all_generations(str(gab.id))
+    if gab.batch_id:
+        others = (
+            AnswerSheetGabarito.query.filter(
+                AnswerSheetGabarito.batch_id == gab.batch_id,
+                AnswerSheetGabarito.class_id.isnot(None),
+            ).all()
+        )
+        for o in others:
+            ids.add(str(o.class_id))
+    ids |= _class_ids_from_answer_sheet_results(str(gab.id))
+    if gab.class_id:
+        ids.add(str(gab.class_id))
+    return ids
+
+
 def _resolve_target_class_ids(
     gab: AnswerSheetGabarito,
     report_scope_type: str,
@@ -262,53 +310,12 @@ def _resolve_target_class_ids(
 
     Se houver escopo explícito de geração (scope_snapshot ou batch com turmas), não expande
     escola/série/cidade inteiras — apenas o que foi gerado (+ turmas com resultado).
+    Snapshots de **todas** as linhas em answer_sheet_generations são unidos, não só a última.
     Sem isso, mantém o comportamento legado (expansão por scope_type do gabarito).
     """
-    ids_snapshot: Set[str] = set()
-    try:
-        from app.services.cartao_resposta.answer_sheet_gabarito_generation import (
-            AnswerSheetGabaritoGeneration,
-        )
+    explicit_generation_scope = explicit_generation_scope_for_gabarito(gab)
 
-        row = (
-            AnswerSheetGabaritoGeneration.query.filter_by(gabarito_id=str(gab.id))
-            .order_by(desc(AnswerSheetGabaritoGeneration.created_at))
-            .first()
-        )
-        if row and row.scope_snapshot and isinstance(row.scope_snapshot, dict):
-            raw = row.scope_snapshot.get("class_ids") or []
-            for item in raw:
-                if isinstance(item, dict) and item.get("class_id"):
-                    ids_snapshot.add(str(item["class_id"]))
-                elif isinstance(item, str) and item:
-                    ids_snapshot.add(item)
-    except Exception:
-        pass
-
-    ids_batch: Set[str] = set()
-    if gab.batch_id:
-        others = (
-            AnswerSheetGabarito.query.filter(
-                AnswerSheetGabarito.batch_id == gab.batch_id,
-                AnswerSheetGabarito.class_id.isnot(None),
-            ).all()
-        )
-        for o in others:
-            ids_batch.add(str(o.class_id))
-
-    ids_results = _class_ids_from_answer_sheet_results(str(gab.id))
-
-    ids_gab: Set[str] = set()
-    if gab.class_id:
-        ids_gab.add(str(gab.class_id))
-
-    explicit_generation_scope = bool(ids_snapshot) or bool(ids_batch)
-
-    ids: Set[str] = set()
-    ids |= ids_snapshot
-    ids |= ids_batch
-    ids |= ids_results
-    ids |= ids_gab
+    ids: Set[str] = set(union_target_class_ids_for_gabarito(gab))
 
     if not explicit_generation_scope:
         st = (gab.scope_type or "").lower()

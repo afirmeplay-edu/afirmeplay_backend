@@ -2,16 +2,20 @@ from app import db
 import uuid
 from sqlalchemy.dialects.postgresql import UUID
 
+from app.models.school import School
+from app.models.studentClass import Class
+
 
 class PlayTvVideo(db.Model):
     __tablename__ = 'play_tv_videos'
+    __table_args__ = {"schema": "tenant"}
 
     id = db.Column(db.String, primary_key=True, default=lambda: str(uuid.uuid4()))
     url = db.Column(db.String, nullable=False)
     title = db.Column(db.String(100), nullable=True)
     grade_id = db.Column(UUID(as_uuid=True), db.ForeignKey('public.grade.id'), nullable=False)
-    subject_id = db.Column(db.String, db.ForeignKey('subject.id'), nullable=False)
-    created_by = db.Column(db.String, db.ForeignKey('users.id'), nullable=False)
+    subject_id = db.Column(db.String, db.ForeignKey('public.subject.id'), nullable=False)
+    created_by = db.Column(db.String, db.ForeignKey('public.users.id'), nullable=False)
     created_at = db.Column(db.TIMESTAMP, server_default=db.text('CURRENT_TIMESTAMP'))
     updated_at = db.Column(
         db.TIMESTAMP, server_default=db.text('CURRENT_TIMESTAMP'),
@@ -44,10 +48,11 @@ class PlayTvVideo(db.Model):
 
 class PlayTvVideoSchool(db.Model):
     __tablename__ = 'play_tv_video_schools'
+    __table_args__ = {"schema": "tenant"}
 
     id = db.Column(db.String, primary_key=True, default=lambda: str(uuid.uuid4()))
-    video_id = db.Column(db.String, db.ForeignKey('play_tv_videos.id'), nullable=False)
-    school_id = db.Column(db.String(36), db.ForeignKey('school.id'), nullable=False)
+    video_id = db.Column(db.String, db.ForeignKey(PlayTvVideo.__table__.c.id), nullable=False)
+    school_id = db.Column(db.String(36), db.ForeignKey(School.__table__.c.id), nullable=False)
     created_at = db.Column(db.TIMESTAMP, server_default=db.text('CURRENT_TIMESTAMP'))
 
     video = db.relationship('PlayTvVideo', back_populates='video_schools')
@@ -59,10 +64,11 @@ class PlayTvVideoSchool(db.Model):
 
 class PlayTvVideoClass(db.Model):
     __tablename__ = 'play_tv_video_classes'
+    __table_args__ = {"schema": "tenant"}
 
     id = db.Column(db.String, primary_key=True, default=lambda: str(uuid.uuid4()))
-    video_id = db.Column(db.String, db.ForeignKey('play_tv_videos.id'), nullable=False)
-    class_id = db.Column(UUID(as_uuid=True), db.ForeignKey('class.id'), nullable=False)
+    video_id = db.Column(db.String, db.ForeignKey(PlayTvVideo.__table__.c.id), nullable=False)
+    class_id = db.Column(UUID(as_uuid=True), db.ForeignKey(Class.__table__.c.id), nullable=False)
     created_at = db.Column(db.TIMESTAMP, server_default=db.text('CURRENT_TIMESTAMP'))
 
     video = db.relationship('PlayTvVideo', back_populates='video_classes')
@@ -74,9 +80,10 @@ class PlayTvVideoClass(db.Model):
 
 class PlayTvVideoResource(db.Model):
     __tablename__ = 'play_tv_video_resources'
+    __table_args__ = {"schema": "tenant"}
 
     id = db.Column(db.String, primary_key=True, default=lambda: str(uuid.uuid4()))
-    video_id = db.Column(db.String, db.ForeignKey('play_tv_videos.id'), nullable=False)
+    video_id = db.Column(db.String, db.ForeignKey(PlayTvVideo.__table__.c.id), nullable=False)
     resource_type = db.Column(db.String(20), nullable=False)
     title = db.Column(db.String(200), nullable=False)
     url = db.Column(db.String(2000), nullable=True)

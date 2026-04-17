@@ -8,17 +8,20 @@ import uuid
 from sqlalchemy.dialects.postgresql import JSON
 from datetime import datetime
 
+from .form import Form
+
 
 class FormQuestion(db.Model):
     """
     Modelo para armazenar questões de questionários socioeconômicos
     """
     __tablename__ = 'form_questions'
+    __table_args__ = {"schema": "tenant"}
 
     id = db.Column(db.String, primary_key=True, default=lambda: str(uuid.uuid4()))
     
     # Vinculação com formulário
-    form_id = db.Column(db.String, db.ForeignKey('forms.id', ondelete='CASCADE'), nullable=False)
+    form_id = db.Column(db.String, db.ForeignKey(Form.__table__.c.id, ondelete='CASCADE'), nullable=False)
     
     # Identificação da questão
     question_id = db.Column(db.String(50), nullable=False)  # ID único da questão (ex: "q1", "q5a")

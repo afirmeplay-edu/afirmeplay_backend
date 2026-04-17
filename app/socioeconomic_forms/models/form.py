@@ -24,6 +24,7 @@ class Form(db.Model):
     Modelo para armazenar questionários socioeconômicos
     """
     __tablename__ = 'forms'
+    __table_args__ = {"schema": "tenant"}
 
     id = db.Column(db.String, primary_key=True, default=lambda: str(uuid.uuid4()))
     
@@ -46,7 +47,7 @@ class Form(db.Model):
     deadline = db.Column(db.TIMESTAMP, nullable=True)
     
     # Metadados
-    created_by = db.Column(db.String, db.ForeignKey('users.id'), nullable=False)
+    created_by = db.Column(db.String, db.ForeignKey('public.users.id'), nullable=False)
     created_at = db.Column(db.TIMESTAMP, server_default=db.func.now(), nullable=False)
     updated_at = db.Column(db.TIMESTAMP, server_default=db.func.now(), onupdate=db.func.now(), nullable=False)
     

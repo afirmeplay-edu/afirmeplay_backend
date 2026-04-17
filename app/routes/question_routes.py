@@ -240,18 +240,9 @@ def create_question():
             owner_user_id=owner_user_id
         )
 
-        # MULTITENANT: Todas as questões agora vão para public.question
-        # Salvar temporariamente o search_path atual
-        current_search_path = db.session.execute(text("SHOW search_path")).fetchone()[0]
-        
-        # Mudar para public para salvar todas as questões
-        db.session.execute(text("SET search_path TO public"))
-        
+        # MULTITENANT: questões em public.question (metadata ORM)
         db.session.add(question)
         db.session.commit()
-        
-        # Restaurar search_path original
-        db.session.execute(text(f"SET search_path TO {current_search_path}"))
 
         # Enviar imagens base64 para MinIO e substituir por URL da API
         new_formatted_text = question.formatted_text
@@ -267,9 +258,7 @@ def create_question():
             question.formatted_text = new_formatted_text
             question.formatted_solution = new_formatted_solution
             question.images = images_meta
-            db.session.execute(text("SET search_path TO public"))
             db.session.commit()
-            db.session.execute(text(f"SET search_path TO {current_search_path}"))
 
         return jsonify({
             "message": "Question created successfully",
@@ -288,10 +277,10 @@ def debug_questions():
     """Endpoint de debug para verificar questões e contexto"""
     try:
         from sqlalchemy import text
+        from app.multitenant.physical_schema_binding import get_effective_tenant_physical_schema
+
         context = get_current_tenant_context()
-        
-        # Verificar search_path atual
-        search_path = db.session.execute(text("SHOW search_path")).scalar()
+        tenant_physical_schema = get_effective_tenant_physical_schema()
         
         # Contar questões sem filtro
         total_questions = db.session.execute(text("SELECT COUNT(*) FROM public.question")).scalar()
@@ -321,7 +310,7 @@ def debug_questions():
                 "has_tenant_context": context.has_tenant_context if context else False
             },
             "database": {
-                "search_path": search_path,
+                "tenant_physical_schema": tenant_physical_schema,
                 "total_questions": total_questions,
                 "global_questions": global_count,
                 "city_questions": city_count,
@@ -384,14 +373,7 @@ def list_questions():
         
         # FILTRO MULTITENANT: Aplicar escopo de questões
         context = get_current_tenant_context()
-        
-        
-        # Salvar search_path atual
-        current_search_path = db.session.execute(text("SHOW search_path")).fetchone()[0]
-        
-        # Forçar busca em public.question (todas as questões agora estão aqui)
-        db.session.execute(text("SET search_path TO public"))
-        
+
         query = Question.query.options(
             joinedload(Question.subject),
             joinedload(Question.grade),
@@ -438,11 +420,7 @@ def list_questions():
             query = query.filter(Question.created_by == created_by)
         
         questions = query.all()
-        
-        
-        # Restaurar search_path original
-        db.session.execute(text(f"SET search_path TO {current_search_path}"))
-        
+
         return jsonify([format_question_response(q) for q in questions]), 200
 
     except Exception as e:

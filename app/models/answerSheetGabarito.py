@@ -20,12 +20,13 @@ class AnswerSheetGabarito(db.Model):
     Isso elimina desalinhamento por DPI, escala e geometria.
     """
     __tablename__ = 'answer_sheet_gabaritos'
+    __table_args__ = {"schema": "tenant"}
 
     id = db.Column(db.String, primary_key=True, default=lambda: str(uuid.uuid4()))
     
     # Vinculação opcional com prova ou turma
-    test_id = db.Column(db.String, db.ForeignKey('test.id'), nullable=True)
-    class_id = db.Column(UUID(as_uuid=True), db.ForeignKey('class.id'), nullable=True)
+    test_id = db.Column(db.String, db.ForeignKey('tenant.test.id'), nullable=True)
+    class_id = db.Column(UUID(as_uuid=True), db.ForeignKey('tenant.class.id'), nullable=True)
     grade_id = db.Column(UUID(as_uuid=True), db.ForeignKey('public.grade.id'), nullable=True)
     
     # Configuração do cartão
@@ -63,11 +64,11 @@ class AnswerSheetGabarito(db.Model):
     # Metadados
     title = db.Column(db.String(200), nullable=True)  # Título do cartão resposta
     created_at = db.Column(db.TIMESTAMP, server_default=db.text('CURRENT_TIMESTAMP'))
-    created_by = db.Column(db.String, db.ForeignKey('users.id'), nullable=True)
+    created_by = db.Column(db.String, db.ForeignKey('public.users.id'), nullable=True)
     
     # Informações adicionais da avaliação (para relatórios e identificação)
     # ✅ CORRIGIDO: Explicitamente String(36) para garantir tipo correto
-    school_id = db.Column(db.String(36), db.ForeignKey('school.id'), nullable=True)
+    school_id = db.Column(db.String(36), db.ForeignKey('tenant.school.id'), nullable=True)
     school_name = db.Column(db.String(200), nullable=True)  # Nome da escola
     municipality = db.Column(db.String(200), nullable=True)  # Município
     state = db.Column(db.String(100), nullable=True)  # Estado

@@ -4,10 +4,12 @@ import uuid
 
 class StudentAnswer(db.Model):
     __tablename__ = 'student_answers'
+    __table_args__ = {"schema": "tenant"}
+
     id = db.Column(db.String, primary_key=True, default=lambda: str(uuid.uuid4()))
-    student_id = db.Column(db.String, db.ForeignKey('student.id'), nullable=False)
-    test_id = db.Column(db.String, db.ForeignKey('test.id'), nullable=False)
-    question_id = db.Column(db.String, db.ForeignKey('question.id'), nullable=False)
+    student_id = db.Column(db.String, db.ForeignKey('tenant.student.id'), nullable=False)
+    test_id = db.Column(db.String, db.ForeignKey('tenant.test.id'), nullable=False)
+    question_id = db.Column(db.String, db.ForeignKey('public.question.id'), nullable=False)
     answer = db.Column(db.Text, nullable=False)
     answered_at = db.Column(db.TIMESTAMP, default=datetime.utcnow)
     
@@ -15,7 +17,7 @@ class StudentAnswer(db.Model):
     is_correct = db.Column(db.Boolean, nullable=True)  # Se a resposta está correta
     manual_score = db.Column(db.Float, nullable=True)  # Pontuação manual atribuída pelo professor
     feedback = db.Column(db.Text, nullable=True)  # Feedback específico da questão
-    corrected_by = db.Column(db.String, db.ForeignKey('users.id'), nullable=True)  # Professor que corrigiu
+    corrected_by = db.Column(db.String, db.ForeignKey('public.users.id'), nullable=True)  # Professor que corrigiu
     corrected_at = db.Column(db.TIMESTAMP, nullable=True)  # Data da correção
     
     # Relacionamentos

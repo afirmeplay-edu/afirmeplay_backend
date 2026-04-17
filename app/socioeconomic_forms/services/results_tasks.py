@@ -8,28 +8,27 @@ Em ambiente multi-tenant, o schema deve ser passado para as tasks (search_path).
 import logging
 from typing import Dict, Any, Optional
 from celery import Task
-from sqlalchemy import text
 
 from app.report_analysis.celery_app import celery_app
 from app.socioeconomic_forms.services.results_service import ResultsService
 from app.socioeconomic_forms.services.results_cache_service import ResultsCacheService
 from app.socioeconomic_forms.models import Form
 from app import db
+from app.utils.tenant_middleware import set_search_path
 
 logger = logging.getLogger(__name__)
 
 
 def _set_tenant_schema(schema: Optional[str]) -> None:
-    """Define o search_path do PostgreSQL para a task (multi-tenant)."""
-    if not schema or schema == 'public':
-        return
+    """Define o bind do tenant para a task (schema_translate_map)."""
     try:
-        search_path = f'"{schema}", public'
-        db.session.execute(text(f"SET search_path TO {search_path}"))
-        db.session.commit()
-        logger.debug(f"[TENANT] search_path definido para schema={schema}")
+        if not schema or schema == "public":
+            set_search_path("public")
+        else:
+            set_search_path(schema)
+        logger.debug(f"[TENANT] bind tenant schema={schema}")
     except Exception as e:
-        logger.warning(f"[TENANT] Erro ao definir search_path: {e}")
+        logger.warning(f"[TENANT] Erro ao definir bind do tenant: {e}")
         db.session.rollback()
 
 

@@ -19,12 +19,13 @@ class AnswerSheetGabaritoGeneration(db.Model):
     Resolvido via search_path do tenant (mesmo padrão de AnswerSheetGabarito).
     """
     __tablename__ = 'answer_sheet_generations'
+    __table_args__ = {"schema": "tenant"}
 
     id = db.Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
 
     gabarito_id = db.Column(
         db.String(36),
-        db.ForeignKey('answer_sheet_gabaritos.id', ondelete='CASCADE'),
+        db.ForeignKey('tenant.answer_sheet_gabaritos.id', ondelete='CASCADE'),
         nullable=False,
         index=True,
     )
@@ -46,7 +47,7 @@ class AnswerSheetGabaritoGeneration(db.Model):
 
     status = db.Column(db.String(30), nullable=False, default='completed')
 
-    created_by = db.Column(db.String(36), db.ForeignKey('users.id'), nullable=True)
+    created_by = db.Column(db.String(36), db.ForeignKey('public.users.id'), nullable=True)
     created_at = db.Column(db.DateTime, nullable=False, default=datetime.utcnow)
 
     gabarito = db.relationship(

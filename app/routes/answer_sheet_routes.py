@@ -1037,7 +1037,7 @@ def get_answer_sheet_task_status(task_id):
 def process_answer_sheet_batch_in_background(job_id: str, images: list = None, tenant_schema: str = None):
     """
     Processa correção em lote de cartões resposta em background thread.
-    Multitenant: usa tenant_schema (ex: city_xxx) para SET search_path na thread.
+    Multitenant: usa tenant_schema (ex: city_xxx) via bind ORM (schema_translate_map).
 
     Args:
         job_id: ID do job para tracking

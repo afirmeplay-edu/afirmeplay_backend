@@ -6,7 +6,6 @@ UserSettings é sempre lido/escrito em public para persistir entre sessões (mul
 """
 from flask import Blueprint, request, jsonify
 from flask_jwt_extended import jwt_required
-from sqlalchemy import text
 import logging
 
 from app import db
@@ -18,19 +17,8 @@ bp = Blueprint("student_preferences", __name__, url_prefix="/student")
 
 
 def _user_settings_in_public(fn):
-    """Executa com search_path em public para ler/escrever public.user_settings."""
-    try:
-        current_search_path = db.session.execute(text("SHOW search_path")).scalar()
-    except Exception:
-        current_search_path = "public"
-    try:
-        db.session.execute(text("SET search_path TO public"))
-        return fn()
-    finally:
-        try:
-            db.session.execute(text(f"SET search_path TO {current_search_path}"))
-        except Exception:
-            pass
+    """UserSettings usa ``schema=\"public\"`` no modelo."""
+    return fn()
 
 
 def _format_settings(settings_instance):

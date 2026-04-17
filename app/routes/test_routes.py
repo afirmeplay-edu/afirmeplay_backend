@@ -15,6 +15,7 @@ from app import db
 from app.decorators.role_required import get_current_tenant_id
 from app.decorators import requires_city_context
 from app.utils.tenant_middleware import set_search_path, get_current_tenant_context, city_id_to_schema_name
+from app.multitenant.physical_schema_binding import get_effective_tenant_physical_schema
 from app.utils.uuid_helpers import ensure_uuid, ensure_uuid_list
 from flask_jwt_extended import jwt_required
 from app.decorators.role_required import role_required, get_current_user_from_token
@@ -321,15 +322,9 @@ def criar_avaliacao():
                         owner_user_id=owner_user_id
                     )
                     
-                    # Salvar questão em public.question (forçar search_path)
-                    current_search_path = db.session.execute(text("SHOW search_path")).fetchone()[0]
-                    db.session.execute(text("SET search_path TO public"))
-                    
+                    # Questões em public.question (metadata ORM)
                     db.session.add(question)
                     db.session.flush()  # Para obter o ID da questão
-                    
-                    # Restaurar search_path original
-                    db.session.execute(text(f"SET search_path TO {current_search_path}"))
                     
                     # Criar associação na tabela test_questions
                     from app.models.testQuestion import TestQuestion
@@ -859,9 +854,7 @@ def atualizar_status_avaliacao(test_id):
 @role_required("admin", "professor", "coordenador", "diretor", "aluno","tecadm")
 def obter_avaliacao(test_id):
     try:
-        from sqlalchemy import text
-        search_path_result = db.session.execute(text("SHOW search_path")).fetchone()
-        current_search_path = search_path_result[0]
+        path_initial = get_effective_tenant_physical_schema()
 
         test = Test.query.options(
             joinedload(Test.creator),
@@ -869,20 +862,17 @@ def obter_avaliacao(test_id):
             joinedload(Test.grade)
         ).get(test_id)
 
-        # Prova de competição pode ter sido criada em public (fallback); tentar public se não achar no schema atual
-        if not test and current_search_path and current_search_path != "public":
-            db.session.execute(text("SET search_path TO public"))
+        # Fallback: tentar sem override de tenant (apenas public no bind)
+        if not test and path_initial != "public":
+            set_search_path("public")
             test = Test.query.options(
                 joinedload(Test.creator),
                 joinedload(Test.subject_rel),
                 joinedload(Test.grade)
             ).get(test_id)
-            if test:
-                current_search_path = "public"
 
         if not test:
-            if current_search_path != search_path_result[0]:
-                db.session.execute(text(f"SET search_path TO {search_path_result[0]}"))
+            set_search_path(path_initial)
             return jsonify({"error": "Test not found"}), 404
 
         from app.models.testQuestion import TestQuestion
@@ -894,12 +884,11 @@ def obter_avaliacao(test_id):
             test_questions_list = TestQuestion.query.filter_by(test_id=test.id).order_by(TestQuestion.order).all()
         except Exception:
             pass
-        if not test_questions_list and current_search_path and current_search_path != "public":
+        active_physical = get_effective_tenant_physical_schema()
+        if not test_questions_list and active_physical != "public":
             try:
-                db.session.execute(text("SET search_path TO public"))
+                set_search_path("public")
                 test_questions_list = TestQuestion.query.filter_by(test_id=test.id).order_by(TestQuestion.order).all()
-                if test_questions_list:
-                    current_search_path = "public"
             except Exception:
                 pass
 
@@ -909,22 +898,10 @@ def obter_avaliacao(test_id):
         else:
             question_ids = [tq.question_id for tq in test_questions_list]
 
-        # Carregar Question: competição (test em public) tem questões no tenant; senão usar schema atual
-        schema_for_questions = search_path_result[0]
-        if question_ids and current_search_path == "public" and schema_for_questions == "public":
-            user = get_current_user_from_token()
-            if user:
-                user_obj = User.query.get(user.get("id") or user.get("user_id"))
-                if user_obj and getattr(user_obj, "city_id", None):
-                    schema_for_questions = city_id_to_schema_name(str(user_obj.city_id))
-                else:
-                    ctx = get_current_tenant_context()
-                    if ctx and getattr(ctx, "has_tenant_context", False) and ctx.schema:
-                        schema_for_questions = ctx.schema
+        # Question está em public.* (metadata)
         if not question_ids:
             ordered_questions = []
         else:
-            db.session.execute(text(f"SET search_path TO {schema_for_questions}"))
             questions_loaded = Question.query.filter(Question.id.in_(question_ids)).options(
                 jl(Question.subject),
                 jl(Question.grade),
@@ -938,7 +915,7 @@ def obter_avaliacao(test_id):
             else:
                 ordered_questions = [questions_dict[str(qid)] for qid in question_ids if str(qid) in questions_dict]
 
-        db.session.execute(text(f"SET search_path TO {search_path_result[0]}"))
+        set_search_path(path_initial)
 
         data = format_test_response(test, questions=ordered_questions)
         # Aluno abrindo olimpíada: garantir type OLIMPIADA quando aplicado via StudentTestOlimpics
@@ -951,17 +928,17 @@ def obter_avaliacao(test_id):
                     try:
                         ctx = get_current_tenant_context()
                         tenant_schema = (ctx.schema if (ctx and getattr(ctx, 'has_tenant_context', False)) else None) or None
-                        if tenant_schema and current_search_path != tenant_schema:
-                            db.session.execute(text(f"SET search_path TO {tenant_schema}"))
+                        if tenant_schema and get_effective_tenant_physical_schema() != tenant_schema:
+                            set_search_path(tenant_schema)
                         has_olympics = StudentTestOlimpics.query.filter_by(
                             test_id=str(test_id),
                             student_id=str(student.id)
                         ).first() is not None
-                        db.session.execute(text(f"SET search_path TO {search_path_result[0]}"))
+                        set_search_path(path_initial)
                         if has_olympics:
                             data['type'] = 'OLIMPIADA'
                     except Exception:
-                        db.session.execute(text(f"SET search_path TO {search_path_result[0]}"))
+                        set_search_path(path_initial)
 
         return jsonify(data), 200
 
@@ -1177,15 +1154,9 @@ def atualizar_avaliacao(test_id):
                         owner_user_id=owner_user_id
                     )
                     
-                    # Salvar questão em public.question (forçar search_path)
-                    current_search_path = db.session.execute(text("SHOW search_path")).fetchone()[0]
-                    db.session.execute(text("SET search_path TO public"))
-                    
+                    # Questões em public.question (metadata ORM)
                     db.session.add(question)
                     db.session.flush()  # Para obter o ID da questão
-                    
-                    # Restaurar search_path original
-                    db.session.execute(text(f"SET search_path TO {current_search_path}"))
                     
                     # Criar associação
                     order = question_data.get('number', index + 1)
@@ -2871,7 +2842,7 @@ def start_test_session(test_id):
         test = Test.query.get(test_id)
         test_schema = None
         try:
-            current_schema = db.session.execute(text("SELECT current_schema()")).scalar() or "public"
+            current_schema = get_effective_tenant_physical_schema()
             if test:
                 test_schema = current_schema
         except Exception:

@@ -3,6 +3,8 @@
 from app import db
 import uuid
 
+from app.models.student import Student
+
 
 class CompetitionReward(db.Model):
     __tablename__ = 'competition_rewards'
@@ -12,7 +14,7 @@ class CompetitionReward(db.Model):
     competition_id = db.Column(db.String, nullable=False)
     student_id = db.Column(
         db.String,
-        db.ForeignKey('student.id', ondelete='CASCADE'),
+        db.ForeignKey(Student.__table__.c.id, ondelete='CASCADE'),
         nullable=False,
     )
     participation_paid_at = db.Column(db.TIMESTAMP, nullable=True)

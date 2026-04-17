@@ -8,10 +8,11 @@ class PhysicalTestAnswer(db.Model):
     Cada resposta marcada pelo aluno em um formulário físico
     """
     __tablename__ = 'physical_test_answers'
+    __table_args__ = {"schema": "tenant"}
 
     id = db.Column(db.String, primary_key=True, default=lambda: str(uuid.uuid4()))
-    physical_form_id = db.Column(db.String, db.ForeignKey('physical_test_forms.id'), nullable=False)
-    question_id = db.Column(db.String, db.ForeignKey('question.id'), nullable=False)
+    physical_form_id = db.Column(db.String, db.ForeignKey('tenant.physical_test_forms.id'), nullable=False)
+    question_id = db.Column(db.String, db.ForeignKey('public.question.id'), nullable=False)
     
     # Resposta marcada pelo aluno
     marked_answer = db.Column(db.String, nullable=True)  # A, B, C, D, E ou null se não marcada

@@ -5,6 +5,8 @@ from sqlalchemy.dialects.postgresql import UUID
 
 class EducationStage(db.Model):
     __tablename__ = "education_stage"
+    __table_args__ = {"schema": "public"}
+
     id = db.Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     name = db.Column(db.String, nullable=False)
 

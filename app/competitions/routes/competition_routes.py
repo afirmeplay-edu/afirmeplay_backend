@@ -25,6 +25,7 @@ from app.competitions.scope_permissions import (
 )
 from app.competitions.schema_resolution import get_competition_schema
 from app.utils.tenant_middleware import set_search_path, get_current_tenant_context, ensure_tenant_schema_for_user
+from app.multitenant.physical_schema_binding import get_effective_tenant_physical_schema
 from app.utils.timezone_utils import get_local_time
 from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError, IntegrityError
@@ -186,7 +187,7 @@ def _get_selected_question_ids(test_id, question_rules_fallback=None):
         tenant_schema = (ctx.schema if (ctx and ctx.has_tenant_context) else None) or None
     prev = "public"
     try:
-        prev = db.session.execute(text("SELECT current_schema()")).scalar() or "public"
+        prev = get_effective_tenant_physical_schema()
         if tenant_schema and tenant_schema != "public":
             set_search_path(tenant_schema)
             rows = (
@@ -238,7 +239,7 @@ def _get_subject_name_from_current_schema(subject_id):
     if not subject_id:
         return None
     try:
-        current = db.session.execute(text("SELECT current_schema()")).scalar() or "public"
+        current = get_effective_tenant_physical_schema()
         if not current or current == "public":
             return None
         safe_schema = current.replace('"', '""')
@@ -481,7 +482,7 @@ def get_competition_details_for_student(competition_id):
     if err:
         return err[0], err[1]
     c = CompetitionService.get_competition_or_404(competition_id)
-    cur_schema = (db.session.execute(text("SELECT current_schema()")).scalar() or "public")
+    cur_schema = get_effective_tenant_physical_schema()
     cur_schema = (cur_schema.strip() if isinstance(cur_schema, str) else "public") or "public"
     ctx = get_current_tenant_context()
     tenant_schema = (ctx.schema if (ctx and ctx.has_tenant_context) else None) or None
@@ -1315,7 +1316,7 @@ def update_competition(competition_id):
     c = CompetitionService.get_competition_or_404(competition_id)
     # Guardar schema da competição: o loop abaixo pode chamar ensure_tenant_schema_for_user e trocar search_path;
     # o flush (ex.: em get_current_user_from_token) deve rodar no schema da competição para não dar StaleDataError.
-    comp_schema_at_start = (db.session.execute(text("SELECT current_schema()")).scalar() or "public")
+    comp_schema_at_start = get_effective_tenant_physical_schema()
     comp_schema_at_start = (comp_schema_at_start.strip() if isinstance(comp_schema_at_start, str) else "public") or "public"
     if c.status not in ('rascunho', 'aberta', 'em_andamento'):
         return jsonify({"error": "Só é possível editar competição em rascunho, aberta ou em andamento"}), 400
@@ -1549,7 +1550,7 @@ def add_questions(competition_id):
     CompetitionService.get_competition_or_404(competition_id)
     CompetitionService.add_questions_manually(competition_id, data['question_ids'])
     c = CompetitionService.get_competition_or_404(competition_id)
-    cur_schema = (db.session.execute(text("SELECT current_schema()")).scalar() or "public")
+    cur_schema = get_effective_tenant_physical_schema()
     cur_schema = (cur_schema.strip() if isinstance(cur_schema, str) else "public") or "public"
     ctx = get_current_tenant_context()
     tenant_schema = (ctx.schema if (ctx and ctx.has_tenant_context) else None) or None

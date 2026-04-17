@@ -6,7 +6,10 @@ from __future__ import annotations
 
 from collections import OrderedDict, defaultdict
 from datetime import datetime
+from types import SimpleNamespace
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
+
+from app.utils.school_equal_weight_means import hierarchical_mean_grade_and_proficiency
 
 from sqlalchemy import func
 from sqlalchemy.orm import joinedload
@@ -831,137 +834,157 @@ def _build_niveis(
     return dict(out)
 
 
+def _report_scope_to_hierarchical_target(scope_type: Optional[str]) -> str:
+    """Alinha médias do relatório ao rollup (município / escola / turma)."""
+    s = (scope_type or "").strip().lower()
+    if s == "city":
+        return "municipio"
+    if s == "school":
+        return "escola"
+    return "turma"
+
+
 def _build_proficiencia_nota(
     results: List[AnswerSheetResult],
     school_name_map: Dict[str, str],
     target_classes: List[Class],
+    scope_type: str = "city",
 ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     """
     Mesmo formato do relatório de prova (report_organized.html): por disciplina,
     ``media_geral``, ``por_turma`` (``proficiencia`` / ``nota``) e ``por_escola``.
     Inclui todas as turmas-alvo, com zero quando não há média.
+
+    ``media_geral`` e ``por_escola`` (escopo município) usam agregação hierárquica
+    (média das escolas; dentro de cada escola, série → turma → alunos).
     """
-    prof_by_class: Dict[str, Dict[str, List[float]]] = defaultdict(lambda: defaultdict(list))
-    prof_by_school: Dict[str, Dict[str, List[float]]] = defaultdict(lambda: defaultdict(list))
-    nota_by_class: Dict[str, Dict[str, List[float]]] = defaultdict(lambda: defaultdict(list))
-    nota_by_school: Dict[str, Dict[str, List[float]]] = defaultdict(lambda: defaultdict(list))
 
-    class_id_to_name: Dict[str, str] = {}
-    for c in target_classes:
-        class_id_to_name[str(c.id)] = c.name or "Sem turma"
-
-    for r in results:
-        st = r.student
-        cid = str(st.class_id) if st and st.class_id else "_sem_turma"
-        sid = "_sem_escola"
-        if st and st.class_:
-            class_id_to_name.setdefault(cid, st.class_.name or "Sem turma")
-            raw_sid = st.class_.school_id
-            if raw_sid:
-                sid = str(raw_sid)
-        elif st and st.class_id:
-            class_id_to_name.setdefault(cid, "Sem turma")
-
-        pbs = r.proficiency_by_subject or {}
-        if isinstance(pbs, dict):
+    def _discipline_ns_rows(res: List[AnswerSheetResult], name: str) -> List[SimpleNamespace]:
+        out: List[SimpleNamespace] = []
+        for r in res:
+            if name == "GERAL":
+                try:
+                    g = float(r.grade or 0)
+                    p = float(r.proficiency) if r.proficiency is not None else 0.0
+                except (TypeError, ValueError):
+                    continue
+                out.append(SimpleNamespace(student_id=r.student_id, grade=g, proficiency=p))
+                continue
+            pbs = r.proficiency_by_subject or {}
+            if not isinstance(pbs, dict):
+                continue
             for subj_id, block in pbs.items():
                 if not isinstance(block, dict):
                     continue
-                name = block.get("subject_name") or str(subj_id)
+                dname = block.get("subject_name") or str(subj_id)
+                if dname != name:
+                    continue
                 pr = block.get("proficiency")
-                if pr is not None:
-                    try:
-                        v = float(pr)
-                        prof_by_class[name][cid].append(v)
-                        prof_by_school[name][sid].append(v)
-                    except (TypeError, ValueError):
-                        pass
                 gr = block.get("grade")
-                if gr is not None:
-                    try:
-                        gv = float(gr)
-                        nota_by_class[name][cid].append(gv)
-                        nota_by_school[name][sid].append(gv)
-                    except (TypeError, ValueError):
-                        pass
-        if r.proficiency is not None:
-            try:
-                v = float(r.proficiency)
-                prof_by_class["GERAL"][cid].append(v)
-                prof_by_school["GERAL"][sid].append(v)
-            except (TypeError, ValueError):
-                pass
-        try:
-            gv = float(r.grade or 0)
-            nota_by_class["GERAL"][cid].append(gv)
-            nota_by_school["GERAL"][sid].append(gv)
-        except (TypeError, ValueError):
-            pass
+                if pr is None and gr is None:
+                    continue
+                try:
+                    p = float(pr) if pr is not None else 0.0
+                    g = float(gr) if gr is not None else 0.0
+                except (TypeError, ValueError):
+                    continue
+                out.append(SimpleNamespace(student_id=r.student_id, grade=g, proficiency=p))
+        return out
 
-    class_id_to_name.setdefault("_sem_turma", "Sem turma")
+    def _student_in_class(r: AnswerSheetResult, class_id: str) -> bool:
+        st = r.student
+        return bool(st and st.class_id and str(st.class_id) == str(class_id))
 
-    def _mean(vals: List[float]) -> float:
-        return round_to_two_decimals(sum(vals) / len(vals)) if vals else 0.0
+    def _school_id_for_result(r: AnswerSheetResult) -> str:
+        st = r.student
+        if not st or not st.class_:
+            return "_sem_escola"
+        raw = st.class_.school_id
+        return str(raw) if raw else "_sem_escola"
 
     def _label_escola(sc_id: str) -> str:
         if sc_id == "_sem_escola":
             return "Sem escola"
         return school_name_map.get(sc_id) or "Escola"
 
-    def _assemble_por_disciplina(
-        by_class: Dict[str, Dict[str, List[float]]],
-        by_school: Dict[str, Dict[str, List[float]]],
-        value_key: str,
-    ) -> Dict[str, Any]:
-        out: Dict[str, Any] = {}
-        all_names: Set[str] = set(by_class.keys()) | set(by_school.keys())
-        if target_classes and "GERAL" not in all_names:
-            all_names.add("GERAL")
-        for name in all_names:
-            all_vals: List[float] = []
-            for vs in by_class.get(name, {}).values():
-                all_vals.extend(vs)
-            if not all_vals and not target_classes:
-                continue
-            por_turma: List[Dict[str, Any]] = []
-            for c in target_classes:
-                cl_id = str(c.id)
-                vals = by_class.get(name, {}).get(cl_id, [])
-                por_turma.append(
-                    {
-                        "turma": c.name or "Turma",
-                        "turma_id": cl_id,
-                        value_key: _mean(vals),
-                    }
-                )
-            por_turma.sort(key=lambda x: (x.get("turma") or "").upper())
-            school_vals: Dict[str, List[float]] = defaultdict(list)
-            for c in target_classes:
-                cl_id = str(c.id)
-                sid = str(c.school_id) if c.school_id else "_sem_escola"
-                school_vals[sid].extend(by_class.get(name, {}).get(cl_id, []))
-            schools_order = sorted(
-                {str(c.school_id) if c.school_id else "_sem_escola" for c in target_classes},
-                key=lambda s: _label_escola(s),
-            )
-            por_escola: List[Dict[str, Any]] = []
-            for sc_id in schools_order:
-                vals = school_vals.get(sc_id, [])
-                por_escola.append(
-                    {"escola": _label_escola(sc_id), value_key: _mean(vals)}
-                )
-            media_geral = _mean(all_vals) if all_vals else 0.0
-            out[name] = {
-                "por_turma": por_turma,
-                "por_escola": por_escola,
-                "media_geral": media_geral,
-                "media": media_geral,
-                "alunos": len(all_vals),
-            }
-        return out
+    all_names: Set[str] = set()
+    for r in results:
+        pbs = r.proficiency_by_subject or {}
+        if isinstance(pbs, dict):
+            for subj_id, block in pbs.items():
+                if isinstance(block, dict):
+                    all_names.add(block.get("subject_name") or str(subj_id))
+    if results:
+        all_names.add("GERAL")
 
-    prof_disc = _assemble_por_disciplina(prof_by_class, prof_by_school, "proficiencia")
-    nota_disc = _assemble_por_disciplina(nota_by_class, nota_by_school, "nota")
+    level_root = _report_scope_to_hierarchical_target(scope_type)
+    prof_disc: Dict[str, Any] = {}
+    nota_disc: Dict[str, Any] = {}
+
+    for name in all_names:
+        full_rows = _discipline_ns_rows(results, name)
+        if not full_rows and not target_classes:
+            continue
+        mg, mp = hierarchical_mean_grade_and_proficiency(full_rows, level_root)
+        media_geral_n = round_to_two_decimals(mg)
+        media_geral_p = round_to_two_decimals(mp)
+
+        por_turma_p: List[Dict[str, Any]] = []
+        por_turma_n: List[Dict[str, Any]] = []
+        for c in target_classes:
+            cl_id = str(c.id)
+            sub = [r for r in results if _student_in_class(r, cl_id)]
+            rows_t = _discipline_ns_rows(sub, name)
+            tg, tp = hierarchical_mean_grade_and_proficiency(rows_t, "turma")
+            por_turma_p.append(
+                {
+                    "turma": c.name or "Turma",
+                    "turma_id": cl_id,
+                    "proficiencia": round_to_two_decimals(tp),
+                }
+            )
+            por_turma_n.append(
+                {
+                    "turma": c.name or "Turma",
+                    "turma_id": cl_id,
+                    "nota": round_to_two_decimals(tg),
+                }
+            )
+        por_turma_p.sort(key=lambda x: (x.get("turma") or "").upper())
+        por_turma_n.sort(key=lambda x: (x.get("turma") or "").upper())
+
+        schools_order = sorted(
+            {str(c.school_id) if c.school_id else "_sem_escola" for c in target_classes},
+            key=lambda s: _label_escola(s),
+        )
+        por_escola_p: List[Dict[str, Any]] = []
+        por_escola_n: List[Dict[str, Any]] = []
+        for sc_id in schools_order:
+            sub = [r for r in results if _school_id_for_result(r) == sc_id]
+            rows_s = _discipline_ns_rows(sub, name)
+            sg, sp = hierarchical_mean_grade_and_proficiency(rows_s, "escola")
+            por_escola_p.append(
+                {"escola": _label_escola(sc_id), "proficiencia": round_to_two_decimals(sp)}
+            )
+            por_escola_n.append(
+                {"escola": _label_escola(sc_id), "nota": round_to_two_decimals(sg)}
+            )
+
+        n_alunos = len(full_rows)
+        prof_disc[name] = {
+            "por_turma": por_turma_p,
+            "por_escola": por_escola_p,
+            "media_geral": media_geral_p,
+            "media": media_geral_p,
+            "alunos": n_alunos,
+        }
+        nota_disc[name] = {
+            "por_turma": por_turma_n,
+            "por_escola": por_escola_n,
+            "media_geral": media_geral_n,
+            "media": media_geral_n,
+            "alunos": n_alunos,
+        }
 
     return (
         {"por_disciplina": prof_disc, "geral": prof_disc.get("GERAL", {})},
@@ -1039,7 +1062,7 @@ def build_answer_sheet_report_payload(
     total_alunos = _build_total_alunos(results, school_names, target_classes, counts)
     niveis = _build_niveis(results, school_names, target_classes)
     proficiencia, nota_geral = _build_proficiencia_nota(
-        results, school_names, target_classes
+        results, school_names, target_classes, scope_type
     )
 
     series_ordered: List[str] = []

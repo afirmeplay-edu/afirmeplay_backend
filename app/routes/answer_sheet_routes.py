@@ -2709,12 +2709,16 @@ def _calcular_estatisticas_consolidadas_cartao(scope_info, nivel_granularidade, 
             resultados = _rq.all()
         resultados = _dedupe_answer_sheet_results_latest_per_student(resultados)
         alunos_participantes = len(resultados)
-        # Média de nota e proficiência: **mesmo peso por escola** (média das médias escolares),
-        # alinhado a evaluation_results_routes / regra de negócio municipal.
-        from app.utils.school_equal_weight_means import mean_grade_and_proficiency_equal_weight_by_school
+        # Agregação hierárquica (município = média das escolas; escola = média das séries; …)
+        from app.utils.school_equal_weight_means import (
+            granularidade_to_hierarchical_target,
+            hierarchical_mean_grade_and_proficiency,
+        )
 
         if resultados:
-            media_nota, media_prof = mean_grade_and_proficiency_equal_weight_by_school(resultados)
+            media_nota, media_prof = hierarchical_mean_grade_and_proficiency(
+                resultados, granularidade_to_hierarchical_target(nivel_granularidade)
+            )
         else:
             media_nota = 0.0
             media_prof = 0.0
@@ -2799,8 +2803,14 @@ def _calcular_estatisticas_consolidadas_cartao(scope_info, nivel_granularidade, 
         return _get_empty_statistics_gerais_cartao(scope_info, nivel_granularidade)
 
 
-def _calcular_estatisticas_grupo_cartao(class_ids, gabarito_id, periodo_bounds=None):
-    """Estatísticas para um grupo de turmas (usado em resultados_detalhados)."""
+def _calcular_estatisticas_grupo_cartao(
+    class_ids, gabarito_id, periodo_bounds=None, aggregation_level: str = "escola"
+):
+    """Estatísticas para um grupo de turmas (usado em resultados_detalhados).
+
+    ``aggregation_level``: ``escola`` (média séries→turmas→alunos), ``serie``, ``turma`` —
+    conforme o que o grupo representa (ex.: uma escola inteira vs uma série vs uma turma).
+    """
     if not class_ids or not gabarito_id:
         return {'total_alunos': 0, 'alunos_participantes': 0, 'alunos_pendentes': 0, 'media_nota': 0.0, 'media_proficiencia': 0.0, 'distribuicao_classificacao': {'abaixo_do_basico': 0, 'basico': 0, 'adequado': 0, 'avancado': 0}}
     alunos = Student.query.filter(Student.class_id.in_(class_ids)).all()
@@ -2810,10 +2820,12 @@ def _calcular_estatisticas_grupo_cartao(class_ids, gabarito_id, periodo_bounds=N
     _rq = _apply_answer_sheet_result_period_filter(_rq, periodo_bounds)
     resultados = _dedupe_answer_sheet_results_latest_per_student(_rq.all())
     participantes = len(resultados)
-    from app.utils.school_equal_weight_means import mean_grade_and_proficiency_equal_weight_by_school
+    from app.utils.school_equal_weight_means import hierarchical_mean_grade_and_proficiency
 
     if resultados:
-        media_nota, media_prof = mean_grade_and_proficiency_equal_weight_by_school(resultados)
+        media_nota, media_prof = hierarchical_mean_grade_and_proficiency(
+            resultados, aggregation_level
+        )
     else:
         media_nota = 0.0
         media_prof = 0.0
@@ -2844,6 +2856,7 @@ def _subject_name_is_matematica(name: str) -> bool:
 def _medias_por_disciplina_de_resultados_cartao(
     results: List[AnswerSheetResult],
     gabarito: Optional[AnswerSheetGabarito],
+    aggregation_level: str = "municipio",
 ) -> Dict[str, Any]:
     """
     Agrega nota/proficiência por disciplina a partir de proficiency_by_subject (mesma lógica
@@ -2858,12 +2871,10 @@ def _medias_por_disciplina_de_resultados_cartao(
     from app.services.evaluation_calculator import EvaluationCalculator
 
     course_name = _get_course_name_from_grade(grade_name)
-    from app.utils.school_equal_weight_means import student_ids_to_school_id_map
+    from app.utils.school_equal_weight_means import hierarchical_mean_from_subject_rows
 
-    student_ids = [r.student_id for r in results if getattr(r, "student_id", None)]
-    smap = student_ids_to_school_id_map(student_ids)
-    by_subj_school = defaultdict(lambda: defaultdict(list))
     by_subject: Dict[str, Dict[str, Any]] = {}
+    subject_rows: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
     for r in results:
         pbs = r.proficiency_by_subject or {}
         if isinstance(pbs, str):
@@ -2876,14 +2887,11 @@ def _medias_por_disciplina_de_resultados_cartao(
             if sidk not in by_subject:
                 by_subject[sidk] = {
                     "disciplina": (data.get("subject_name") if isinstance(data, dict) else None) or sidk,
-                    "soma_nota": 0.0,
-                    "soma_prof": 0.0,
                     "n": 0,
                 }
             if not isinstance(data, dict):
                 continue
             by_subject[sidk]["n"] += 1
-            by_subject[sidk]["soma_prof"] += float(data.get("proficiency") or 0)
             nota_disc = data.get("grade")
             if nota_disc is None and data.get("proficiency") is not None:
                 subject_name = data.get("subject_name") or "Outras"
@@ -2891,10 +2899,10 @@ def _medias_por_disciplina_de_resultados_cartao(
                     data.get("proficiency"), course_name, subject_name
                 )
             nf = float(nota_disc) if nota_disc is not None else 0.0
-            by_subject[sidk]["soma_nota"] += nf
-            sch = smap.get(r.student_id)
-            if sch:
-                by_subj_school[sidk][str(sch)].append((nf, float(data.get("proficiency") or 0)))
+            pf = float(data.get("proficiency") or 0)
+            subject_rows[sidk].append(
+                {"student_id": r.student_id, "grade": nf, "proficiency": pf}
+            )
             if data.get("subject_name"):
                 by_subject[sidk]["disciplina"] = data.get("subject_name")
 
@@ -2906,23 +2914,10 @@ def _medias_por_disciplina_de_resultados_cartao(
         if not n:
             continue
         nom = agg["disciplina"]
-        per_sch = by_subj_school.get(_sidk, {})
-        if per_sch:
-            nota_escolas = [
-                sum(p[0] for p in pairs) / len(pairs) for pairs in per_sch.values() if pairs
-            ]
-            prof_escolas = [
-                sum(p[1] for p in pairs) / len(pairs) for pairs in per_sch.values() if pairs
-            ]
-            if nota_escolas:
-                mn = round(sum(nota_escolas) / len(nota_escolas), 2)
-                mp = round(sum(prof_escolas) / len(prof_escolas), 2)
-            else:
-                mn = round(agg["soma_nota"] / n, 2)
-                mp = round(agg["soma_prof"] / n, 2)
-        else:
-            mn = round(agg["soma_nota"] / n, 2)
-            mp = round(agg["soma_prof"] / n, 2)
+        rows = subject_rows.get(_sidk) or []
+        mn, mp, _ = hierarchical_mean_from_subject_rows(rows, aggregation_level)
+        mn = round(mn, 2)
+        mp = round(mp, 2)
         lista.append({"disciplina": nom, "media_nota": mn, "media_proficiencia": mp})
         if _subject_name_is_lingua_portuguesa(nom):
             notas_lp.append(mn)
@@ -2940,6 +2935,7 @@ def _complementar_metricas_escola_municipio_cartao(
     gabarito_id: str,
     periodo_bounds: Optional[Tuple[datetime, datetime]],
     gabarito: AnswerSheetGabarito,
+    aggregation_level: str = "municipio",
 ) -> Dict[str, Any]:
     """Campos extras para escopo município (comparecimento, nível, médias LP/MAT, ausentes)."""
     total = int(stats.get("total_alunos") or 0)
@@ -2958,7 +2954,7 @@ def _complementar_metricas_escola_municipio_cartao(
         )
         _rq = _apply_answer_sheet_result_period_filter(_rq, periodo_bounds)
         results = _dedupe_answer_sheet_results_latest_per_student(_rq.all())
-    md = _medias_por_disciplina_de_resultados_cartao(results, gabarito)
+    md = _medias_por_disciplina_de_resultados_cartao(results, gabarito, aggregation_level)
     ausentes = max(0, total - part)
     return {
         "percentual_comparecimento": pct,
@@ -2976,11 +2972,12 @@ def _complementar_linha_resultado_detalhado_cartao(
     gabarito_id: str,
     periodo_bounds: Optional[Tuple[datetime, datetime]],
     gab: Optional[AnswerSheetGabarito],
+    aggregation_level: str = "escola",
 ) -> Dict[str, Any]:
     """Campos extras (comparecimento, LP/MAT, disciplinas, ausentes) para cada linha de resultados_detalhados."""
     if gab:
         return _complementar_metricas_escola_municipio_cartao(
-            stats, class_ids, gabarito_id, periodo_bounds, gab
+            stats, class_ids, gabarito_id, periodo_bounds, gab, aggregation_level
         )
     total = int(stats.get("total_alunos") or 0)
     part = int(stats.get("alunos_participantes") or 0)
@@ -3021,9 +3018,11 @@ def _gerar_resultados_detalhados_por_granularidade_cartao(
             by_school[sid].append(c.id)
         for sid, cids in by_school.items():
             school = School.query.get(sid)
-            stats = _calcular_estatisticas_grupo_cartao(cids, gabarito_id, periodo_bounds)
+            stats = _calcular_estatisticas_grupo_cartao(
+                cids, gabarito_id, periodo_bounds, aggregation_level="escola"
+            )
             comp = _complementar_linha_resultado_detalhado_cartao(
-                stats, cids, gabarito_id, periodo_bounds, gabarito
+                stats, cids, gabarito_id, periodo_bounds, gabarito, aggregation_level="escola"
             )
             row = {
                 "id": f"escola_{sid}",
@@ -3058,9 +3057,11 @@ def _gerar_resultados_detalhados_por_granularidade_cartao(
         )
         for gid, cids in by_grade.items():
             grade = Grade.query.get(gid)
-            stats = _calcular_estatisticas_grupo_cartao(cids, gabarito_id, periodo_bounds)
+            stats = _calcular_estatisticas_grupo_cartao(
+                cids, gabarito_id, periodo_bounds, aggregation_level="serie"
+            )
             comp = _complementar_linha_resultado_detalhado_cartao(
-                stats, cids, gabarito_id, periodo_bounds, gabarito
+                stats, cids, gabarito_id, periodo_bounds, gabarito, aggregation_level="serie"
             )
             row = {
                 "id": f"serie_{gid}",
@@ -3087,9 +3088,11 @@ def _gerar_resultados_detalhados_por_granularidade_cartao(
             grade = Grade.query.get(c.grade_id) if c.grade_id else None
             school = School.query.get(c.school_id) if c.school_id else None
             cids_one = [c.id]
-            stats = _calcular_estatisticas_grupo_cartao(cids_one, gabarito_id, periodo_bounds)
+            stats = _calcular_estatisticas_grupo_cartao(
+                cids_one, gabarito_id, periodo_bounds, aggregation_level="turma"
+            )
             comp = _complementar_linha_resultado_detalhado_cartao(
-                stats, cids_one, gabarito_id, periodo_bounds, gabarito
+                stats, cids_one, gabarito_id, periodo_bounds, gabarito, aggregation_level="turma"
             )
             row = {
                 "id": f"turma_{c.id}",
@@ -3152,10 +3155,13 @@ def _calcular_resultados_por_disciplina_cartao(
     grade_name = (gabarito.grade_name or gabarito.title or '') if gabarito else ''
     from app.services.cartao_resposta.proficiency_by_subject import _get_course_name_from_grade
     course_name = _get_course_name_from_grade(grade_name)
-    from app.utils.school_equal_weight_means import student_ids_to_school_id_map
-    smap = student_ids_to_school_id_map(student_ids)
-    # Por disciplina: (escola -> lista de (nota, prof)) para média igual por escola
-    by_subj_school = defaultdict(lambda: defaultdict(list))
+    from app.utils.school_equal_weight_means import (
+        granularidade_to_hierarchical_target,
+        hierarchical_mean_from_subject_rows,
+    )
+
+    tgt = granularidade_to_hierarchical_target(nivel_granularidade)
+    subject_rows: Dict[Any, List[Dict[str, Any]]] = defaultdict(list)
     # Agregar por disciplina a partir de proficiency_by_subject
     by_subject = {}
     for r in results:
@@ -3172,12 +3178,9 @@ def _calcular_resultados_por_disciplina_cartao(
                     'disciplina': data.get('subject_name', sid),
                     'total_alunos': 0,
                     'alunos_participantes': 0,
-                    'soma_proficiencia': 0.0,
-                    'soma_nota': 0.0,
                     'dist': {'abaixo_do_basico': 0, 'basico': 0, 'adequado': 0, 'avancado': 0}
                 }
             by_subject[sid]['alunos_participantes'] += 1
-            by_subject[sid]['soma_proficiencia'] += data.get('proficiency') or 0
             nota_disc = data.get('grade')
             if nota_disc is None and data.get('proficiency') is not None:
                 from app.services.evaluation_calculator import EvaluationCalculator
@@ -3186,10 +3189,10 @@ def _calcular_resultados_por_disciplina_cartao(
                     data.get('proficiency'), course_name, subject_name
                 )
             nf = float(nota_disc) if nota_disc is not None else 0.0
-            by_subject[sid]['soma_nota'] += nf
-            sch = smap.get(r.student_id)
-            if sch:
-                by_subj_school[sid][str(sch)].append((nf, float(data.get('proficiency') or 0)))
+            pf = float(data.get('proficiency') or 0)
+            subject_rows[sid].append(
+                {"student_id": r.student_id, "grade": nf, "proficiency": pf}
+            )
             cl = (data.get('classification') or '').lower()
             if 'abaixo' in cl:
                 by_subject[sid]['dist']['abaixo_do_basico'] += 1
@@ -3203,23 +3206,10 @@ def _calcular_resultados_por_disciplina_cartao(
     out = []
     for sid, agg in by_subject.items():
         n = agg['alunos_participantes']
-        per_sch = by_subj_school.get(sid, {})
-        if per_sch:
-            nota_escolas = [
-                sum(p[0] for p in pairs) / len(pairs) for pairs in per_sch.values() if pairs
-            ]
-            prof_escolas = [
-                sum(p[1] for p in pairs) / len(pairs) for pairs in per_sch.values() if pairs
-            ]
-            if nota_escolas:
-                media_nota = round(sum(nota_escolas) / len(nota_escolas), 2)
-                media_prof = round(sum(prof_escolas) / len(prof_escolas), 2)
-            else:
-                media_nota = round(agg['soma_nota'] / n, 2) if n else 0.0
-                media_prof = round(agg['soma_proficiencia'] / n, 2) if n else 0.0
-        else:
-            media_nota = round(agg['soma_nota'] / n, 2) if n else 0.0
-            media_prof = round(agg['soma_proficiencia'] / n, 2) if n else 0.0
+        rows = subject_rows.get(sid) or []
+        media_nota, media_prof, _ = hierarchical_mean_from_subject_rows(rows, tgt)
+        media_nota = round(media_nota, 2)
+        media_prof = round(media_prof, 2)
         out.append({
             "disciplina": agg['disciplina'],
             "total_avaliacoes": 1,
@@ -3809,7 +3799,9 @@ def _enriquecer_escolas_estatisticas_municipio_cartao(
                 by_school[str(row.school_id)].append(row.id)
     for item in escolas:
         cids = by_school.get(item["id"], [])
-        st = _calcular_estatisticas_grupo_cartao(cids, gid, periodo_bounds)
+        st = _calcular_estatisticas_grupo_cartao(
+            cids, gid, periodo_bounds, aggregation_level="escola"
+        )
         dist = st.get("distribuicao_classificacao") or {}
         item["total_alunos"] = st.get("total_alunos", 0)
         item["alunos_participantes"] = st.get("alunos_participantes", 0)

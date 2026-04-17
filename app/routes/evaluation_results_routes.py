@@ -57,6 +57,10 @@ from app.models.grades import Grade
 from app.models.evaluationResult import EvaluationResult
 from app.utils.uuid_helpers import ensure_uuid, ensure_uuid_list
 from app.utils.decimal_helpers import round_to_two_decimals
+from app.utils.school_equal_weight_means import (
+    granularidade_to_hierarchical_target,
+    hierarchical_mean_grade_and_proficiency,
+)
 from sqlalchemy import cast, String, or_, and_, not_
 from sqlalchemy.dialects.postgresql import UUID as PostgresUUID
 from app.models.classTest import ClassTest
@@ -1825,9 +1829,13 @@ def _calculate_evaluation_stats_frontend(test_id: str) -> Dict[str, Any]:
             # Alunos ausentes não são classificados
             pass
     
-    # Calcular médias apenas dos alunos que participaram
-    media_nota = round_to_two_decimals(sum(notas) / len(notas)) if notas else 0.0
-    media_proficiencia = format_decimal_two_places(sum(proficiencias) / len(proficiencias)) if proficiencias else 0.0
+    if result_rows_frontend:
+        mn, mp = hierarchical_mean_grade_and_proficiency(result_rows_frontend, "municipio")
+        media_nota = round_to_two_decimals(mn)
+        media_proficiencia = format_decimal_two_places(mp)
+    else:
+        media_nota = 0.0
+        media_proficiencia = 0.0
     
     return {
         'total_alunos': total_alunos,
@@ -1948,9 +1956,13 @@ def _calculate_evaluation_stats_by_class(test_id: str, class_id: str) -> Dict[st
             # Alunos ausentes não são classificados
             pass
     
-    # Calcular médias apenas dos alunos que participaram
-    media_nota = round_to_two_decimals(sum(notas) / len(notas)) if notas else 0.0
-    media_proficiencia = format_decimal_two_places(sum(proficiencias) / len(proficiencias)) if proficiencias else 0.0
+    if result_rows_by_class:
+        mn, mp = hierarchical_mean_grade_and_proficiency(result_rows_by_class, "turma")
+        media_nota = round_to_two_decimals(mn)
+        media_proficiencia = format_decimal_two_places(mp)
+    else:
+        media_nota = 0.0
+        media_proficiencia = 0.0
     
     return {
         'total_alunos': total_alunos,
@@ -2039,8 +2051,9 @@ def _calcular_estatisticas_municipio(class_tests: list, scope_info) -> Dict[str,
         
         # Calcular médias consolidadas
         if todos_resultados:
-            media_nota_geral = sum(r.grade for r in todos_resultados) / len(todos_resultados)
-            media_proficiencia_geral = sum(r.proficiency for r in todos_resultados) / len(todos_resultados)
+            media_nota_geral, media_proficiencia_geral = hierarchical_mean_grade_and_proficiency(
+                todos_resultados, "municipio"
+            )
         else:
             media_nota_geral = 0.0
             media_proficiencia_geral = 0.0
@@ -2426,10 +2439,11 @@ def _calcular_estatisticas_gerais(class_tests: list, scope_info, nivel_granulari
         todos_resultados = EvaluationResult.query.filter(EvaluationResult.test_id.in_(test_ids)).all()
         alunos_participantes = len(todos_resultados)
         
-        # Calcular médias consolidadas
+        # Calcular médias consolidadas (agregação hierárquica conforme granularidade)
         if todos_resultados:
-            media_nota_geral = sum(r.grade for r in todos_resultados) / len(todos_resultados)
-            media_proficiencia_geral = sum(r.proficiency for r in todos_resultados) / len(todos_resultados)
+            media_nota_geral, media_proficiencia_geral = hierarchical_mean_grade_and_proficiency(
+                todos_resultados, granularidade_to_hierarchical_target(nivel_granularidade)
+            )
         else:
             media_nota_geral = 0.0
             media_proficiencia_geral = 0.0
@@ -7184,10 +7198,11 @@ def _calcular_estatisticas_consolidadas_por_escopo(class_tests: list, scope_info
         alunos_participantes = len(resultados_escopo)
         logging.info(f"resultados_escopo: {alunos_participantes}, test_ids: {test_ids}, total_alunos: {total_alunos}")
         
-        # Calcular estatísticas consolidadas
+        # Calcular estatísticas consolidadas (agregação hierárquica conforme granularidade)
         if resultados_escopo:
-            media_nota = sum(r.grade for r in resultados_escopo) / len(resultados_escopo)
-            media_proficiencia = sum(r.proficiency for r in resultados_escopo) / len(resultados_escopo)
+            media_nota, media_proficiencia = hierarchical_mean_grade_and_proficiency(
+                resultados_escopo, granularidade_to_hierarchical_target(nivel_granularidade)
+            )
         else:
             media_nota = 0.0
             media_proficiencia = 0.0
@@ -7723,7 +7738,16 @@ def _gerar_resultados_detalhados_por_granularidade(class_tests_paginados, nivel_
             evaluation = grupo['evaluation']
             
             # Calcular estatísticas do grupo
-            stats_grupo = _calcular_estatisticas_grupo(class_tests_grupo, evaluation)
+            agg_level = (
+                "escola"
+                if nivel_granularidade == "municipio"
+                else "serie"
+                if nivel_granularidade == "escola"
+                else "turma"
+            )
+            stats_grupo = _calcular_estatisticas_grupo(
+                class_tests_grupo, evaluation, agg_level
+            )
             
             # Determinar informações baseadas na granularidade
             if nivel_granularidade == "municipio":
@@ -7818,9 +7842,12 @@ def _gerar_resultados_detalhados_por_granularidade(class_tests_paginados, nivel_
         return []
 
 
-def _calcular_estatisticas_grupo(class_tests_grupo, evaluation):
+def _calcular_estatisticas_grupo(class_tests_grupo, evaluation, aggregation_level: str = "municipio"):
     """
-    Calcula estatísticas consolidadas para um grupo de class_tests
+    Calcula estatísticas consolidadas para um grupo de class_tests.
+
+    ``aggregation_level``: ``escola`` (linhas do relatório municipal), ``serie`` (visão escola),
+    ``turma`` (série/turma) — ver :func:`~app.utils.school_equal_weight_means.hierarchical_mean_grade_and_proficiency`.
     """
     try:
         from app.models.evaluationResult import EvaluationResult
@@ -7861,10 +7888,11 @@ def _calcular_estatisticas_grupo(class_tests_grupo, evaluation):
         alunos_pendentes = total_alunos - alunos_participantes
         alunos_ausentes = 0  # Simplificado - pode ser calculado mais precisamente
         
-        # Calcular médias
+        # Calcular médias (agregação hierárquica no recorte do grupo)
         if resultados:
-            media_nota = sum(r.grade for r in resultados) / len(resultados)
-            media_proficiencia = sum(r.proficiency for r in resultados) / len(resultados)
+            media_nota, media_proficiencia = hierarchical_mean_grade_and_proficiency(
+                resultados, aggregation_level
+            )
         else:
             media_nota = 0.0
             media_proficiencia = 0.0

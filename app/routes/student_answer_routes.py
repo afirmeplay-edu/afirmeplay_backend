@@ -19,6 +19,7 @@ from app.models.testQuestion import TestQuestion
 from app.decorators.role_required import role_required
 from app.decorators import requires_city_context
 from app.utils.tenant_middleware import set_search_path, get_current_tenant_context
+from app.multitenant.physical_schema_binding import get_effective_tenant_physical_schema
 from datetime import datetime, timedelta
 import logging
 import dateutil.parser
@@ -317,7 +318,7 @@ def submit_answers():
         if not session:
             # Não encontrou no schema atual (tenant): tentar em public (prova de competição)
             try:
-                _prev_schema = db.session.execute(text("SELECT current_schema()")).scalar() or "public"
+                _prev_schema = get_effective_tenant_physical_schema()
                 set_search_path('public')
                 with db.session.begin_nested():
                     session = TestSession.query.get(session_id)
@@ -329,7 +330,7 @@ def submit_answers():
                 set_search_path(_prev_schema if '_prev_schema' in locals() else 'public')
         else:
             try:
-                session_schema = db.session.execute(text("SELECT current_schema()")).scalar() or None
+                session_schema = get_effective_tenant_physical_schema()
             except Exception:
                 session_schema = None
         if not session:
@@ -614,12 +615,8 @@ def submit_answers():
         
         try:
             if answers_schema and answers_schema != (session_schema or 'public'):
-                if session_schema == 'public':
-                    # public primeiro para achar Test; tenant para StudentAnswer
-                    safe_tenant = str(answers_schema).replace('"', '""')
-                    db.session.execute(text(f'SET search_path TO public, "{safe_tenant}"'))
-                else:
-                    set_search_path(answers_schema)
+                # Test usa public.* no metadata; StudentAnswer tenant.* → um bind city_* basta.
+                set_search_path(answers_schema)
             evaluation_result = EvaluationResultService.calculate_and_save_result(
                 test_id=_test_id_submit,
                 student_id=_student_id_submit,
@@ -762,7 +759,7 @@ def save_partial_answers():
                 pass
         else:
             try:
-                session_schema = db.session.execute(text("SELECT current_schema()")).scalar() or 'public'
+                session_schema = get_effective_tenant_physical_schema()
             except Exception:
                 session_schema = None
         if not session:
@@ -915,7 +912,7 @@ def save_partial_answers():
                     ctx = get_current_tenant_context()
                     other_schema = (ctx.schema if (ctx and ctx.has_tenant_context) else None) or None
                     if other_schema and other_schema != session_schema:
-                        prev_path = db.session.execute(text("SELECT current_schema()")).scalar() or "public"
+                        prev_path = get_effective_tenant_physical_schema()
                         set_search_path(other_schema)
                         try:
                             comp = Competition.query.filter_by(test_id=_test_id).first()
@@ -947,7 +944,7 @@ def save_partial_answers():
             ctx = get_current_tenant_context()
             other_schema = (ctx.schema if (ctx and ctx.has_tenant_context) else None) or None
             if other_schema and other_schema != (session_schema or ""):
-                prev_path = db.session.execute(text("SELECT current_schema()")).scalar() or "public"
+                prev_path = get_effective_tenant_physical_schema()
                 set_search_path(other_schema)
                 try:
                     with db.session.begin_nested():
@@ -1213,7 +1210,7 @@ def get_active_session_with_answers(test_id):
                     err = str(e).lower()
                     if 'student_answers' in err and ('does not exist' in err or 'undefinedtable' in err):
                         try:
-                            current = db.session.execute(text("SELECT current_schema()")).scalar() or "public"
+                            current = get_effective_tenant_physical_schema()
                             ctx = get_current_tenant_context()
                             tenant_schema = (ctx.schema if (ctx and ctx.has_tenant_context) else None) or None
                             other = "public" if (current != "public" and current) else (tenant_schema or "public")
@@ -1281,7 +1278,7 @@ def get_active_session_with_answers(test_id):
             err = str(e).lower()
             if 'student_answers' in err and ('does not exist' in err or 'undefinedtable' in err):
                 try:
-                    current = db.session.execute(text("SELECT current_schema()")).scalar() or "public"
+                    current = get_effective_tenant_physical_schema()
                     ctx = get_current_tenant_context()
                     tenant_schema = (ctx.schema if (ctx and ctx.has_tenant_context) else None) or None
                     other = "public" if (current != "public" and current) else (tenant_schema or "public")
@@ -1298,7 +1295,7 @@ def get_active_session_with_answers(test_id):
         # Sessão em public mas respostas gravadas no tenant: se veio vazio, tentar schema do tenant
         if not answers:
             try:
-                current = db.session.execute(text("SELECT current_schema()")).scalar() or "public"
+                current = get_effective_tenant_physical_schema()
                 if current == "public":
                     ctx = get_current_tenant_context()
                     tenant_schema = (ctx.schema if (ctx and ctx.has_tenant_context) else None) or None

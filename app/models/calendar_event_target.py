@@ -15,9 +15,10 @@ class CalendarTargetType(Enum):
 
 class CalendarEventTarget(db.Model):
     __tablename__ = 'calendar_event_targets'
+    __table_args__ = {"schema": "tenant"}
 
     id = db.Column(db.String, primary_key=True, default=lambda: str(uuid.uuid4()))
-    event_id = db.Column(db.String, db.ForeignKey('calendar_events.id'), nullable=False)
+    event_id = db.Column(db.String, db.ForeignKey('tenant.calendar_events.id'), nullable=False)
 
     target_type = db.Column(db.Enum(CalendarTargetType), nullable=False)
     target_id = db.Column(db.String, nullable=True)

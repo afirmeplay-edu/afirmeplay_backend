@@ -7,6 +7,10 @@ import uuid
 from datetime import datetime
 from enum import Enum
 
+from app.models.student import Student
+from app.models.test import Test
+from app.certification.models.certificate_template import CertificateTemplate
+
 class CertificateStatusEnum(Enum):
     """Status do certificado"""
     PENDING = "pending"
@@ -14,14 +18,18 @@ class CertificateStatusEnum(Enum):
 
 class Certificate(db.Model):
     __tablename__ = 'certificates'
-    
+    __table_args__ = (
+        db.UniqueConstraint('student_id', 'evaluation_id', name='uq_certificate_student_evaluation'),
+        {"schema": "tenant"},
+    )
+
     id = db.Column(db.String, primary_key=True, default=lambda: str(uuid.uuid4()))
-    student_id = db.Column(db.String, db.ForeignKey('student.id'), nullable=False)
+    student_id = db.Column(db.String, db.ForeignKey(Student.__table__.c.id), nullable=False)
     student_name = db.Column(db.String(200), nullable=False)  # Cache do nome
-    evaluation_id = db.Column(db.String, db.ForeignKey('test.id'), nullable=False)
+    evaluation_id = db.Column(db.String, db.ForeignKey(Test.__table__.c.id), nullable=False)
     evaluation_title = db.Column(db.String(200), nullable=False)  # Cache do título
     grade = db.Column(db.Float, nullable=False)
-    template_id = db.Column(db.String, db.ForeignKey('certificate_templates.id'), nullable=False)
+    template_id = db.Column(db.String, db.ForeignKey(CertificateTemplate.__table__.c.id), nullable=False)
     issued_at = db.Column(db.TIMESTAMP, server_default=db.text('CURRENT_TIMESTAMP'))
     status = db.Column(db.String(20), nullable=False, default='pending')  # 'pending' | 'approved'
     created_at = db.Column(db.TIMESTAMP, server_default=db.text('CURRENT_TIMESTAMP'))
@@ -29,10 +37,12 @@ class Certificate(db.Model):
     # Relacionamentos
     student = db.relationship('Student', foreign_keys=[student_id])
     evaluation = db.relationship('Test', foreign_keys=[evaluation_id])
-    
-    # Constraint único: um aluno só pode ter um certificado por avaliação
-    __table_args__ = (db.UniqueConstraint('student_id', 'evaluation_id', name='uq_certificate_student_evaluation'),)
-    
+    template = db.relationship(
+        'CertificateTemplate',
+        foreign_keys=[template_id],
+        back_populates='certificates',
+    )
+
     def to_dict(self, include_template=False):
         """Converte o objeto para dicionário"""
         data = {

@@ -5,12 +5,16 @@ Modelo para transações de moedas do aluno.
 from app import db
 import uuid
 
+from app.models.student import Student
+from app.models.testSession import TestSession
+
 
 class CoinTransaction(db.Model):
     __tablename__ = 'coin_transactions'
+    __table_args__ = {"schema": "tenant"}
 
     id = db.Column(db.String, primary_key=True, default=lambda: str(uuid.uuid4()))
-    student_id = db.Column(db.String, db.ForeignKey('student.id'), nullable=False)
+    student_id = db.Column(db.String, db.ForeignKey(Student.__table__.c.id), nullable=False)
     amount = db.Column(db.Integer, nullable=False)
     balance_before = db.Column(db.Integer, nullable=False)
     balance_after = db.Column(db.Integer, nullable=False)
@@ -18,7 +22,7 @@ class CoinTransaction(db.Model):
     competition_id = db.Column(db.String, nullable=True)
     test_session_id = db.Column(
         db.String,
-        db.ForeignKey('test_sessions.id', ondelete='SET NULL'),
+        db.ForeignKey(TestSession.__table__.c.id, ondelete='SET NULL'),
         nullable=True,
     )
     description = db.Column(db.Text, nullable=True)

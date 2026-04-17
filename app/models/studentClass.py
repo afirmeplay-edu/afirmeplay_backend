@@ -6,13 +6,14 @@ import uuid
 
 class Class(db.Model):
     __tablename__ = 'class'
+    __table_args__ = {"schema": "tenant"}
 
     id = db.Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     name = db.Column(db.String(100))
     # ✅ CORRIGIDO: Usar coluna privada para evitar cast automático do SQLAlchemy
     # O SQLAlchemy pode fazer cast automático de VARCHAR para UUID se detectar formato UUID
     # Usando coluna privada + hybrid_property para forçar sempre retornar string
-    _school_id = db.Column('school_id', db.String(36), db.ForeignKey('school.id'))
+    _school_id = db.Column('school_id', db.String(36), db.ForeignKey('tenant.school.id'))
     grade_id = db.Column(UUID(as_uuid=True), db.ForeignKey('public.grade.id'))
 
     # ✅ CORREÇÃO CRÍTICA: hybrid_property que sempre retorna string

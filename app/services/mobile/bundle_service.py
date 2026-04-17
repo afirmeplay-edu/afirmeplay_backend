@@ -3,7 +3,7 @@ from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 
 from flask import g
-from sqlalchemy import func, text as sql_text
+from sqlalchemy import func
 
 from app import db
 from app.models.school import School
@@ -133,18 +133,8 @@ def build_tests_questions_payload(
         )
         q_ids = [r.question_id for r in tq_rows]
 
-        ctx = getattr(g, "tenant_context", None)
-        tenant_schema = ctx.schema if ctx and getattr(ctx, "schema", None) else "public"
-        db.session.execute(sql_text("SET search_path TO public"))
-        try:
-            q_objs = Question.query.filter(Question.id.in_(q_ids)).all() if q_ids else []
-        finally:
-            if tenant_schema != "public":
-                db.session.execute(
-                    sql_text(f'SET search_path TO "{tenant_schema}", public')
-                )
-            else:
-                db.session.execute(sql_text("SET search_path TO public"))
+        # Question está em public.* (metadata); não depende de search_path.
+        q_objs = Question.query.filter(Question.id.in_(q_ids)).all() if q_ids else []
 
         q_map = {q.id: q for q in q_objs}
         ordered_payload: List[Dict[str, Any]] = []

@@ -8,7 +8,7 @@ class ReportAggregate(db.Model):
     __tablename__ = 'report_aggregates'
 
     id = db.Column(db.String, primary_key=True, default=lambda: str(uuid.uuid4()))
-    test_id = db.Column(db.String, db.ForeignKey('test.id'), nullable=False, index=True)
+    test_id = db.Column(db.String, db.ForeignKey('tenant.test.id'), nullable=False, index=True)
     scope_type = db.Column(db.String(32), nullable=False, index=True)
     scope_id = db.Column(db.String, nullable=True, index=True)
     payload = db.Column(db.JSON, nullable=False, default=dict)
@@ -31,6 +31,7 @@ class ReportAggregate(db.Model):
 
     __table_args__ = (
         db.UniqueConstraint('test_id', 'scope_type', 'scope_id', name='uq_report_aggregate_scope'),
+        {"schema": "tenant"},
     )
 
     def mark_dirty(self):

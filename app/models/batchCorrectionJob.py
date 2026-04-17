@@ -8,10 +8,11 @@ class BatchCorrectionJob(db.Model):
     Modelo para armazenar jobs de correção em lote de formulários físicos
     """
     __tablename__ = 'batch_correction_jobs'
-    
+    __table_args__ = {"schema": "tenant"}
+
     id = db.Column(db.String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
     test_id = db.Column(db.String(36), nullable=False)  # db.ForeignKey('tests.id') removido temporariamente
-    created_by = db.Column(db.String(36), nullable=False)  # db.ForeignKey('users.id') removido temporariamente
+    created_by = db.Column(db.String(36), nullable=False)  # db.ForeignKey('public.users.id') removido temporariamente
     
     # Status do job
     status = db.Column(db.String(20), nullable=False, default='pending')  # pending, processing, completed, failed, cancelled

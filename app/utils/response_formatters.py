@@ -239,22 +239,17 @@ def format_question_response(q, exclude_fields=None):
 
 def _count_test_questions_for_test(db, test):
     """
-    Conta questões do teste via SQL bruto, tentando schema atual e depois schema do tenant.
+    Conta questões do teste (ORM com tradução tenant → city_*; fallback SQL qualificado).
     Retorna 0 em caso de erro. Usado quando relationship/ORM retorna 0 em multi-tenant.
     """
     from sqlalchemy import text
+    from app.models.testQuestion import TestQuestion
+
     test_id = str(test.id) if test.id else None
     if not test_id:
         return 0
     try:
-        r = db.session.execute(text("SHOW search_path")).fetchone()
-        path_before = (r[0] or "public").strip()
-        # Tentar no schema atual
-        cur = db.session.execute(
-            text("SELECT count(*) FROM test_questions WHERE test_id = :tid"),
-            {"tid": test_id}
-        )
-        n = cur.scalar()
+        n = TestQuestion.query.filter_by(test_id=test_id).count()
         if n and int(n) > 0:
             return int(n)
         # Inferir city_id (municipalities pode ser lista de ids ou lista de {id, name})

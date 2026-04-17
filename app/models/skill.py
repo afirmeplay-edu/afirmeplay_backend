@@ -20,7 +20,7 @@ class Skill(db.Model):
     code = db.Column(db.Text, nullable=False)
     description = db.Column(db.Text, nullable=False)
 
-    subject_id = db.Column(db.Text, db.ForeignKey("subject.id"))
+    subject_id = db.Column(db.Text, db.ForeignKey("public.subject.id"))
 
     # Múltiplas grades: uma habilidade pode se enquadrar em várias turmas (ex.: compartilhada entre anos)
     grades = db.relationship(

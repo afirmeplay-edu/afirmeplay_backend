@@ -6,7 +6,8 @@ from datetime import datetime
 
 class Game(db.Model):
     __tablename__ = 'games'
-    
+    __table_args__ = {"schema": "tenant"}
+
     id = db.Column(db.String, primary_key=True, default=lambda: str(uuid.uuid4()))
     url = db.Column(db.String(500), nullable=False)
     title = db.Column(db.String(200), nullable=False)
@@ -15,7 +16,7 @@ class Game(db.Model):
     author = db.Column(db.String(200), nullable=True)
     provider = db.Column(db.String(50), nullable=False, default='wordwall')
     subject = db.Column(db.String(100), nullable=False)
-    userId = db.Column(db.String, db.ForeignKey('users.id'), nullable=False)
+    userId = db.Column(db.String, db.ForeignKey('public.users.id'), nullable=False)
     createdAt = db.Column(db.TIMESTAMP, server_default=db.func.now())
     updatedAt = db.Column(db.TIMESTAMP, server_default=db.func.now(), onupdate=db.func.now())
     
@@ -31,10 +32,11 @@ class Game(db.Model):
 
 class GameClass(db.Model):
     __tablename__ = 'game_classes'
-    
+    __table_args__ = {"schema": "tenant"}
+
     id = db.Column(db.String, primary_key=True, default=lambda: str(uuid.uuid4()))
-    game_id = db.Column(db.String, db.ForeignKey('games.id'), nullable=False)
-    class_id = db.Column(UUID(as_uuid=True), db.ForeignKey('class.id'), nullable=False)
+    game_id = db.Column(db.String, db.ForeignKey('tenant.games.id'), nullable=False)
+    class_id = db.Column(UUID(as_uuid=True), db.ForeignKey('tenant.class.id'), nullable=False)
     created_at = db.Column(db.TIMESTAMP, server_default=db.text('CURRENT_TIMESTAMP'))
     
     # Relacionamentos

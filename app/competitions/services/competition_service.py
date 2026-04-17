@@ -17,6 +17,7 @@ from app.competitions.constants import is_valid_level, student_grade_matches_lev
 from app.competitions.exceptions import ValidationError
 from app.competitions.schema_resolution import get_competition_target_schema, get_competition_schema
 from app.utils.tenant_middleware import set_search_path, get_current_tenant_context
+from app.multitenant.physical_schema_binding import get_effective_tenant_physical_schema
 from sqlalchemy import text
 from app.models.test import Test
 from app.models.testQuestion import TestQuestion
@@ -166,7 +167,7 @@ class CompetitionService:
                         except ValidationError:
                             raise e
                     # Garantir que voltamos ao target_schema após eventuais trocas
-                    current_after = db.session.execute(text("SELECT current_schema()")).scalar() or "public"
+                    current_after = get_effective_tenant_physical_schema()
                     if current_after != target_schema:
                         db.session.commit()
                         set_search_path(target_schema)
@@ -251,7 +252,7 @@ class CompetitionService:
         # Fallback: quando test_questions não existir, submit/ranking usam question_rules['selected_question_ids'] + tabela questions.
         _table_exists = False
         try:
-            current_schema = db.session.execute(text("SELECT current_schema()")).scalar() or "public"
+            current_schema = get_effective_tenant_physical_schema()
             r = db.session.execute(
                 text(
                     "SELECT 1 FROM information_schema.tables "
@@ -664,7 +665,7 @@ class CompetitionService:
         # Fallback: disciplina pode existir só no schema atual (tenant) ou no outro (public ↔ tenant)
         if subject_name is None and c.subject_id:
             try:
-                current = db.session.execute(text("SELECT current_schema()")).scalar() or "public"
+                current = get_effective_tenant_physical_schema()
                 # Tentar schema atual (se for tenant)
                 if current and current != "public":
                     safe_schema = current.replace('"', '""')

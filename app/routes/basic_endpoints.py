@@ -549,18 +549,12 @@ def evaluations_stats():
 
         total_questions = 0
         try:
-            path_row = db.session.execute(text("SHOW search_path")).fetchone()
-            path_before = (path_row[0] if path_row else "public").strip()
-            db.session.execute(text("SET search_path TO public"))
-            try:
-                total_questions = (
-                    Question.query.filter(
-                        Question.scope_type == "CITY",
-                        Question.owner_city_id == city_id_str,
-                    ).count()
-                )
-            finally:
-                db.session.execute(text(f"SET search_path TO {path_before}"))
+            total_questions = (
+                Question.query.filter(
+                    Question.scope_type == "CITY",
+                    Question.owner_city_id == city_id_str,
+                ).count()
+            )
         except Exception as e:
             logging.debug("total_questions (banco municipal CITY): %s", e)
 

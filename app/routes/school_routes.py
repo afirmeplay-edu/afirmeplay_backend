@@ -20,6 +20,8 @@ from app.models.schoolCourse import SchoolCourse
 
 import uuid
 
+from app.multitenant.flask_g import get_orm_session
+
 bp = Blueprint('school', __name__, url_prefix='/school')
 
 # POST - Criar escola
@@ -52,7 +54,7 @@ def criar_escola():
         if not isinstance(data['city_id'], str) or not data['city_id'].strip():
             return jsonify({"erro": "ID da cidade inválido"}), 400
 
-        cidade = City.query.get(data['city_id'])
+        cidade = get_orm_session().query(City).get(data['city_id'])
         if not cidade:
             return jsonify({"erro": "city_id não encontrado"}), 400
 
@@ -64,10 +66,10 @@ def criar_escola():
         )
 
         try:
-            db.session.add(nova_escola)
-            db.session.commit()
+            get_orm_session().add(nova_escola)
+            get_orm_session().commit()
         except SQLAlchemyError as e:
-            db.session.rollback()
+            get_orm_session().rollback()
             logging.error(f"Erro ao criar escola no banco de dados: {str(e)}")
             return jsonify({
                 "erro": "Erro ao salvar escola no banco de dados",
@@ -99,7 +101,7 @@ def listar_escolas():
             return jsonify({"error": "User not found"}), 404
 
         # Base query with explicit joins
-        query = db.session.query(
+        query = get_orm_session().query(
             School,
             City,
             db.func.count(Student.id).label('students_count'),
@@ -131,13 +133,13 @@ def listar_escolas():
         elif user['role'] == "professor":
             # Professor: buscar primeiro na tabela teacher e depois suas escolas vinculadas
             from app.models.teacher import Teacher
-            teacher = Teacher.query.filter_by(user_id=user['id']).first()
+            teacher = get_orm_session().query(Teacher).filter_by(user_id=user['id']).first()
             
             if not teacher:
                 return jsonify({"error": "Professor não encontrado na tabela teacher"}), 404
             
             # Buscar escolas onde o professor está vinculado
-            teacher_schools = SchoolTeacher.query.filter_by(teacher_id=teacher.id).all()
+            teacher_schools = get_orm_session().query(SchoolTeacher).filter_by(teacher_id=teacher.id).all()
             school_ids = [ts.school_id for ts in teacher_schools]
             
             if school_ids:
@@ -147,7 +149,7 @@ def listar_escolas():
         elif user['role'] in ["diretor", "coordenador"]:
             # Diretor e coordenador veem apenas sua escola
             from app.models.manager import Manager
-            manager = Manager.query.filter_by(user_id=user['id']).first()
+            manager = get_orm_session().query(Manager).filter_by(user_id=user['id']).first()
             
             if not manager:
                 return jsonify({"error": "Diretor/Coordenador não encontrado na tabela manager"}), 404
@@ -205,7 +207,7 @@ def atualizar_escola(escola_id):
         if not escola_id:
             return jsonify({"erro": "ID da escola não fornecido"}), 400
 
-        escola = School.query.get(escola_id)
+        escola = get_orm_session().query(School).get(escola_id)
         if not escola:
             return jsonify({"erro": "Escola não encontrada"}), 404
 
@@ -227,14 +229,14 @@ def atualizar_escola(escola_id):
             escola.address = data.get('address', escola.address)
             escola.city_id = data.get('city_id', escola.city_id)
 
-            db.session.commit()
+            get_orm_session().commit()
             return jsonify({
                 "mensagem": "Escola atualizada com sucesso",
                 "id": escola.id
             }), 200
 
         except SQLAlchemyError as e:
-            db.session.rollback()
+            get_orm_session().rollback()
             logging.error(f"Erro ao atualizar escola no banco de dados: {str(e)}")
             return jsonify({
                 "erro": "Erro ao atualizar escola no banco de dados",
@@ -258,7 +260,7 @@ def deletar_escola(escola_id):
         if not escola_id:
             return jsonify({"erro": "ID da escola não fornecido"}), 400
 
-        escola = School.query.get(escola_id)
+        escola = get_orm_session().query(School).get(escola_id)
         if not escola:
             return jsonify({"erro": "Escola não encontrada"}), 404
 
@@ -268,7 +270,7 @@ def deletar_escola(escola_id):
         from app.models.schoolTeacher import SchoolTeacher
         
         # Contar turmas vinculadas
-        turmas = Class.query.filter(Class._school_id == escola_id).count()
+        turmas = get_orm_session().query(Class).filter(Class._school_id == escola_id).count()
         if turmas > 0:
             return jsonify({
                 "erro": "Não é possível excluir a escola",
@@ -279,7 +281,7 @@ def deletar_escola(escola_id):
             }), 400
         
         # Contar alunos vinculados
-        alunos = Student.query.filter(Student.school_id == escola_id).count()
+        alunos = get_orm_session().query(Student).filter(Student.school_id == escola_id).count()
         if alunos > 0:
             return jsonify({
                 "erro": "Não é possível excluir a escola",
@@ -290,7 +292,7 @@ def deletar_escola(escola_id):
             }), 400
         
         # Contar professores vinculados
-        professores = SchoolTeacher.query.filter(SchoolTeacher.school_id == escola_id).count()
+        professores = get_orm_session().query(SchoolTeacher).filter(SchoolTeacher.school_id == escola_id).count()
         if professores > 0:
             return jsonify({
                 "erro": "Não é possível excluir a escola",
@@ -301,15 +303,15 @@ def deletar_escola(escola_id):
             }), 400
 
         try:
-            db.session.delete(escola)
-            db.session.commit()
+            get_orm_session().delete(escola)
+            get_orm_session().commit()
             return jsonify({
                 "mensagem": "Escola deletada com sucesso",
                 "id": escola_id
             }), 200
 
         except SQLAlchemyError as e:
-            db.session.rollback()
+            get_orm_session().rollback()
             logging.error(f"Erro ao deletar escola no banco de dados: {str(e)}")
             return jsonify({
                 "erro": "Erro ao deletar escola no banco de dados",
@@ -335,7 +337,7 @@ def buscar_escola(escola_id):
             return jsonify({"error": "User not found"}), 404
 
         # Query with explicit joins
-        result = db.session.query(
+        result = get_orm_session().query(
             School,
             City,
             db.func.count(Student.id).label('students_count'),
@@ -374,13 +376,13 @@ def buscar_escola(escola_id):
         elif user['role'] == "professor":
             # Professor: buscar primeiro na tabela teacher e depois verificar se está vinculado à escola
             from app.models.teacher import Teacher
-            teacher = Teacher.query.filter_by(user_id=user['id']).first()
+            teacher = get_orm_session().query(Teacher).filter_by(user_id=user['id']).first()
             
             if not teacher:
                 return jsonify({"error": "Professor não encontrado na tabela teacher"}), 404
             
             # Verificar se o professor está vinculado à escola específica
-            teacher_school = SchoolTeacher.query.filter_by(
+            teacher_school = get_orm_session().query(SchoolTeacher).filter_by(
                 teacher_id=teacher.id,
                 school_id=school.id
             ).first()
@@ -389,7 +391,7 @@ def buscar_escola(escola_id):
         elif user['role'] in ["diretor", "coordenador"]:
             # Diretor e coordenador só podem ver sua escola
             from app.models.manager import Manager
-            manager = Manager.query.filter_by(user_id=user['id']).first()
+            manager = get_orm_session().query(Manager).filter_by(user_id=user['id']).first()
             
             if not manager:
                 return jsonify({"error": "Diretor/Coordenador não encontrado na tabela manager"}), 404
@@ -439,7 +441,7 @@ def buscar_escolas_por_cidade(city_id):
             return jsonify({"error": "Usuário não encontrado"}), 404
 
         # Query com joins explícitos
-        query = db.session.query(
+        query = get_orm_session().query(
             School,
             City,
             db.func.count(Student.id).label('students_count'),
@@ -473,13 +475,13 @@ def buscar_escolas_por_cidade(city_id):
         elif user['role'] == "professor":
             # Professor: buscar primeiro na tabela teacher e depois suas escolas vinculadas
             from app.models.teacher import Teacher
-            teacher = Teacher.query.filter_by(user_id=user['id']).first()
+            teacher = get_orm_session().query(Teacher).filter_by(user_id=user['id']).first()
             
             if not teacher:
                 return jsonify({"error": "Professor não encontrado na tabela teacher"}), 404
             
             # Buscar escolas onde o professor está vinculado
-            teacher_schools = SchoolTeacher.query.filter_by(teacher_id=teacher.id).all()
+            teacher_schools = get_orm_session().query(SchoolTeacher).filter_by(teacher_id=teacher.id).all()
             school_ids = [ts.school_id for ts in teacher_schools]
             
             if school_ids:
@@ -541,12 +543,12 @@ def buscar_escolas_por_serie(grade_id):
 
         # Verificar se a série existe
         from app.models.grades import Grade
-        grade = Grade.query.get(grade_id)
+        grade = get_orm_session().query(Grade).get(grade_id)
         if not grade:
             return jsonify({"erro": "Série não encontrada"}), 404
 
         # Query com joins para buscar escolas que têm turmas da série específica
-        query = db.session.query(
+        query = get_orm_session().query(
             School,
             City,
             db.func.count(db.distinct(Student.id)).label('students_count'),
@@ -591,13 +593,13 @@ def buscar_escolas_por_serie(grade_id):
         elif user['role'] == "professor":
             # Professor: buscar escolas onde está vinculado
             from app.models.teacher import Teacher
-            teacher = Teacher.query.filter_by(user_id=user['id']).first()
+            teacher = get_orm_session().query(Teacher).filter_by(user_id=user['id']).first()
             
             if not teacher:
                 return jsonify({"error": "Professor não encontrado na tabela teacher"}), 404
             
             # Buscar escolas onde o professor está vinculado
-            teacher_schools = SchoolTeacher.query.filter_by(teacher_id=teacher.id).all()
+            teacher_schools = get_orm_session().query(SchoolTeacher).filter_by(teacher_id=teacher.id).all()
             school_ids = [ts.school_id for ts in teacher_schools]
             
             if school_ids:
@@ -607,7 +609,7 @@ def buscar_escolas_por_serie(grade_id):
         elif user['role'] in ["diretor", "coordenador"]:
             # Diretor e coordenador veem apenas sua escola
             from app.models.manager import Manager
-            manager = Manager.query.filter_by(user_id=user['id']).first()
+            manager = get_orm_session().query(Manager).filter_by(user_id=user['id']).first()
             
             if not manager:
                 return jsonify({"error": "Diretor/Coordenador não encontrado na tabela manager"}), 404
@@ -701,16 +703,16 @@ def adicionar_professor_escola():
         
         # Primeiro, verificar se é um user_id ou teacher_id
         teacher = None
-        user = User.query.get(data['teacher_id'])
+        user = get_orm_session().query(User).get(data['teacher_id'])
         
         if user:
             # Se encontrou um usuário, buscar o professor correspondente
-            teacher = Teacher.query.filter_by(user_id=user.id).first()
+            teacher = get_orm_session().query(Teacher).filter_by(user_id=user.id).first()
             if not teacher:
                 return jsonify({"erro": "Usuário encontrado, mas não é um professor"}), 404
         else:
             # Se não encontrou usuário, tentar buscar diretamente como teacher_id
-            teacher = Teacher.query.get(data['teacher_id'])
+            teacher = get_orm_session().query(Teacher).get(data['teacher_id'])
             if not teacher:
                 return jsonify({"erro": "Professor não encontrado"}), 404
 
@@ -718,7 +720,7 @@ def adicionar_professor_escola():
         teacher_id = teacher.id
 
         # Verificar se as escolas existem
-        schools = School.query.filter(School.id.in_(data['school_ids'])).all()
+        schools = get_orm_session().query(School).filter(School.id.in_(data['school_ids'])).all()
         if len(schools) != len(data['school_ids']):
             found_ids = [school.id for school in schools]
             missing_ids = [school_id for school_id in data['school_ids'] if school_id not in found_ids]
@@ -742,7 +744,7 @@ def adicionar_professor_escola():
                     }), 403
 
         # Verificar se já existem associações
-        existing_associations = SchoolTeacher.query.filter_by(teacher_id=teacher_id).all()
+        existing_associations = get_orm_session().query(SchoolTeacher).filter_by(teacher_id=teacher_id).all()
         existing_school_ids = [assoc.school_id for assoc in existing_associations]
         
         # Filtrar apenas escolas que ainda não estão associadas
@@ -764,10 +766,10 @@ def adicionar_professor_escola():
             novas_associacoes.append(nova_associacao)
 
         try:
-            db.session.add_all(novas_associacoes)
-            db.session.commit()
+            get_orm_session().add_all(novas_associacoes)
+            get_orm_session().commit()
         except SQLAlchemyError as e:
-            db.session.rollback()
+            get_orm_session().rollback()
             logging.error(f"Erro ao adicionar professor às escolas no banco de dados: {str(e)}")
             return jsonify({
                 "erro": "Erro ao salvar associações no banco de dados",
@@ -809,7 +811,7 @@ def buscar_cursos_por_escola(school_id):
             return jsonify({"error": "Usuário não encontrado"}), 404
         
         # Verificar se a escola existe
-        school = School.query.get(school_id)
+        school = get_orm_session().query(School).get(school_id)
         if not school:
             return jsonify({"error": "Escola não encontrada"}), 404
         
@@ -820,12 +822,12 @@ def buscar_cursos_por_escola(school_id):
         elif user['role'] == "professor":
             # Professor: verificar se está vinculado à escola
             from app.models.teacher import Teacher
-            teacher = Teacher.query.filter_by(user_id=user['id']).first()
+            teacher = get_orm_session().query(Teacher).filter_by(user_id=user['id']).first()
             
             if not teacher:
                 return jsonify({"error": "Professor não encontrado"}), 404
             
-            teacher_school = SchoolTeacher.query.filter_by(
+            teacher_school = get_orm_session().query(SchoolTeacher).filter_by(
                 teacher_id=teacher.id,
                 school_id=school.id
             ).first()
@@ -835,7 +837,7 @@ def buscar_cursos_por_escola(school_id):
         elif user['role'] in ["diretor", "coordenador"]:
             # Diretor e coordenador só podem ver sua escola
             from app.models.manager import Manager
-            manager = Manager.query.filter_by(user_id=user['id']).first()
+            manager = get_orm_session().query(Manager).filter_by(user_id=user['id']).first()
             
             if not manager:
                 return jsonify({"error": "Diretor/Coordenador não encontrado"}), 404
@@ -849,7 +851,7 @@ def buscar_cursos_por_escola(school_id):
                 return jsonify({"error": "Você não tem permissão para acessar esta escola"}), 403
         
         # Buscar cursos vinculados diretamente à escola via school_course
-        school_courses = SchoolCourse.query.filter_by(school_id=school_id).all()
+        school_courses = get_orm_session().query(SchoolCourse).filter_by(school_id=school_id).all()
         courses = [sc.education_stage for sc in school_courses]
         result = [{"id": str(c.id), "name": c.name} for c in courses]
         
@@ -917,7 +919,7 @@ def vincular_curso_escola(school_id):
             return jsonify({"error": "education_stage_ids não pode ser um array vazio"}), 400
         
         # Verificar se a escola existe
-        school = School.query.get(school_id)
+        school = get_orm_session().query(School).get(school_id)
         if not school:
             return jsonify({"error": "Escola não encontrada"}), 404
         
@@ -933,7 +935,7 @@ def vincular_curso_escola(school_id):
         elif user['role'] in ["diretor", "coordenador"]:
             # Diretor e coordenador só podem vincular cursos à sua escola
             from app.models.manager import Manager
-            manager = Manager.query.filter_by(user_id=user['id']).first()
+            manager = get_orm_session().query(Manager).filter_by(user_id=user['id']).first()
             
             if not manager:
                 return jsonify({"error": "Diretor/Coordenador não encontrado"}), 404
@@ -942,7 +944,7 @@ def vincular_curso_escola(school_id):
                 return jsonify({"error": "Você não tem permissão para vincular cursos a esta escola"}), 403
         
         # Verificar se todos os cursos existem
-        education_stages = EducationStage.query.filter(EducationStage.id.in_(education_stage_ids)).all()
+        education_stages = get_orm_session().query(EducationStage).filter(EducationStage.id.in_(education_stage_ids)).all()
         found_ids = [str(es.id) for es in education_stages]
         missing_ids = [eid for eid in education_stage_ids if eid not in found_ids]
         
@@ -953,7 +955,7 @@ def vincular_curso_escola(school_id):
             }), 404
         
         # Verificar vínculos existentes e criar novos
-        existing_links = SchoolCourse.query.filter_by(school_id=school_id).filter(
+        existing_links = get_orm_session().query(SchoolCourse).filter_by(school_id=school_id).filter(
             SchoolCourse.education_stage_id.in_(education_stage_ids)
         ).all()
         
@@ -971,8 +973,8 @@ def vincular_curso_escola(school_id):
         
         try:
             if new_links:
-                db.session.add_all(new_links)
-                db.session.commit()
+                get_orm_session().add_all(new_links)
+                get_orm_session().commit()
             
             # Preparar resposta
             all_courses = {str(es.id): es for es in education_stages}
@@ -1005,7 +1007,7 @@ def vincular_curso_escola(school_id):
             return jsonify(response), 201 if new_links else 200
             
         except SQLAlchemyError as e:
-            db.session.rollback()
+            get_orm_session().rollback()
             logging.error(f"Erro ao vincular curso à escola: {e}")
             return jsonify({"error": "Erro ao salvar vínculo no banco de dados", "details": str(e)}), 500
         
@@ -1036,12 +1038,12 @@ def desvincular_curso_escola(school_id, education_stage_id):
             return jsonify({"error": "Usuário não encontrado"}), 404
         
         # Verificar se a escola existe
-        school = School.query.get(school_id)
+        school = get_orm_session().query(School).get(school_id)
         if not school:
             return jsonify({"error": "Escola não encontrada"}), 404
         
         # Verificar se o curso existe
-        education_stage = EducationStage.query.get(education_stage_id)
+        education_stage = get_orm_session().query(EducationStage).get(education_stage_id)
         if not education_stage:
             return jsonify({"error": "Curso não encontrado"}), 404
         
@@ -1057,7 +1059,7 @@ def desvincular_curso_escola(school_id, education_stage_id):
         elif user['role'] in ["diretor", "coordenador"]:
             # Diretor e coordenador só podem desvincular cursos da sua escola
             from app.models.manager import Manager
-            manager = Manager.query.filter_by(user_id=user['id']).first()
+            manager = get_orm_session().query(Manager).filter_by(user_id=user['id']).first()
             
             if not manager:
                 return jsonify({"error": "Diretor/Coordenador não encontrado"}), 404
@@ -1066,7 +1068,7 @@ def desvincular_curso_escola(school_id, education_stage_id):
                 return jsonify({"error": "Você não tem permissão para desvincular cursos desta escola"}), 403
         
         # Buscar vínculo
-        school_course = SchoolCourse.query.filter_by(
+        school_course = get_orm_session().query(SchoolCourse).filter_by(
             school_id=school_id,
             education_stage_id=education_stage_id
         ).first()
@@ -1076,7 +1078,7 @@ def desvincular_curso_escola(school_id, education_stage_id):
         
         # Verificar se há turmas usando este curso (através de grades)
         # Se houver turmas vinculadas a grades deste curso, não permitir desvincular
-        classes_with_course = db.session.query(Class).join(
+        classes_with_course = get_orm_session().query(Class).join(
             Grade, Class.grade_id == Grade.id
         ).filter(
             Grade.education_stage_id == education_stage_id,
@@ -1090,8 +1092,8 @@ def desvincular_curso_escola(school_id, education_stage_id):
             }), 400
         
         try:
-            db.session.delete(school_course)
-            db.session.commit()
+            get_orm_session().delete(school_course)
+            get_orm_session().commit()
             
             return jsonify({
                 "message": "Curso desvinculado da escola com sucesso",
@@ -1102,7 +1104,7 @@ def desvincular_curso_escola(school_id, education_stage_id):
             }), 200
             
         except SQLAlchemyError as e:
-            db.session.rollback()
+            get_orm_session().rollback()
             logging.error(f"Erro ao desvincular curso da escola: {e}")
             return jsonify({"error": "Erro ao remover vínculo do banco de dados", "details": str(e)}), 500
         

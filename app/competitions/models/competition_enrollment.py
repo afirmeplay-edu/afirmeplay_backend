@@ -3,6 +3,8 @@
 from app import db
 import uuid
 
+from app.models.student import Student
+
 
 class CompetitionEnrollment(db.Model):
     __tablename__ = 'competition_enrollments'
@@ -12,7 +14,7 @@ class CompetitionEnrollment(db.Model):
     competition_id = db.Column(db.String, nullable=False)
     student_id = db.Column(
         db.String,
-        db.ForeignKey('student.id', ondelete='CASCADE'),
+        db.ForeignKey(Student.__table__.c.id, ondelete='CASCADE'),
         nullable=False,
     )
     enrolled_at = db.Column(

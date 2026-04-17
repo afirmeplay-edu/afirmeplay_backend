@@ -449,6 +449,8 @@
 				min-width: 0;
 			}
 
+			/* Altura mínima = 2 linhas: evita que um bloco com disciplina longa
+			   empurre o retângulo das bolhas enquanto outro bloco fica numa linha só (OMR). */
 			.block-header {
 				text-align: center;
 				font-weight: bold;
@@ -458,6 +460,11 @@
 				background: transparent; /* ✅ Sem background para ficar fora do quadrado */
 				line-height: 1.2;
 				flex-shrink: 0;
+				min-height: 2.5em;
+				display: flex;
+				align-items: flex-start;
+				justify-content: center;
+				box-sizing: border-box;
 			}
 
 			/* PASSO 5: Travar bloco para não estourar */

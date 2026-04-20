@@ -18,6 +18,9 @@ from app.models.subject import Subject
 from app.models.test import Test
 from app.models.classTest import ClassTest
 from app.models.testSession import TestSession
+from app.models.answerSheetGabarito import AnswerSheetGabarito
+from app.models.answerSheetResult import AnswerSheetResult
+from app.report_analysis.answer_sheet_report_builder import get_answer_sheet_target_classes_for_report
 from app.utils.uuid_helpers import ensure_uuid
 
 bp = Blueprint("lista_frequencia", __name__, url_prefix="/lista-frequencia")
@@ -47,8 +50,10 @@ INSTRUCOES_APLICADOR = (
 SESSION_STATUS_PRESENTE = ("finalizada", "expirada", "corrigida", "revisada")
 
 
-def _cabecalho_real(classe, tipo, test=None):
-    """Monta o cabeçalho a partir da turma (Class) e do tipo de lista. Se test for informado, usa test.title em nome_prova_ano."""
+def _cabecalho_real(classe, tipo, test=None, gabarito=None):
+    """Monta o cabeçalho a partir da turma (Class) e do tipo de lista.
+    Se test ou gabarito tiver título, usa em nome_prova_ano.
+    """
     school = classe.school
     city = school.city if school else None
     grade = classe.grade if hasattr(classe, "grade") else None
@@ -60,6 +65,9 @@ def _cabecalho_real(classe, tipo, test=None):
     ano = datetime.now().year
     if test and getattr(test, "title", None):
         nome_prova_ano = f"{test.title} – {ano}"
+        lista_presenca_curso = "LISTA DE PRESENÇA – AVALIAÇÃO"
+    elif gabarito and getattr(gabarito, "title", None) and str(gabarito.title).strip():
+        nome_prova_ano = f"{str(gabarito.title).strip()} – {ano}"
         lista_presenca_curso = "LISTA DE PRESENÇA – AVALIAÇÃO"
     else:
         titulos = {
@@ -154,15 +162,43 @@ def _status_estudante_avaliacao(student_ids, test_id):
     return resultado
 
 
-def _montar_lista_turma(classe, tipo, test, fill_status):
+def _status_estudante_cartao_resposta(student_ids, gabarito_id):
+    """
+    P = aluno com resultado de correção do cartão para o gabarito; A = sem resultado.
+    """
+    if not student_ids or not gabarito_id:
+        return {}
+    rows = (
+        AnswerSheetResult.query.filter(
+            AnswerSheetResult.gabarito_id == gabarito_id,
+            AnswerSheetResult.student_id.in_(student_ids),
+        )
+        .all()
+    )
+    com_resultado = {str(r.student_id) for r in rows}
+    return {sid: ("P" if sid in com_resultado else "A") for sid in student_ids}
+
+
+def _montar_lista_turma(classe, tipo, test, fill_status, gabarito=None):
     """Monta um item de lista (cabecalho + estudantes) para uma turma."""
-    cabecalho = _cabecalho_real(classe, tipo, test=test)
+    cabecalho = _cabecalho_real(classe, tipo, test=test, gabarito=gabarito)
     alunos = (
         Student.query.filter_by(class_id=classe.id)
         .order_by(Student.name)
         .all()
     )
-    if fill_status and test:
+    if fill_status and gabarito:
+        student_ids = [str(s.id) for s in alunos]
+        status_map = _status_estudante_cartao_resposta(student_ids, gabarito.id)
+        estudantes = [
+            {
+                "numero": idx + 1,
+                "nome_estudante": (s.name or "").strip() or None,
+                "status": status_map.get(str(s.id), "A"),
+            }
+            for idx, s in enumerate(alunos)
+        ]
+    elif fill_status and test:
         student_ids = [str(s.id) for s in alunos]
         status_map = _status_estudante_avaliacao(student_ids, test.id)
         estudantes = [
@@ -199,11 +235,72 @@ def lista_frequencia():
     - Com grade_id (e sem class_id): retorna só as turmas daquela série em { "turmas": [...] }.
     - Com class_id: retorna uma única turma (cabecalho + estudantes).
     Status P/A conforme TestSession.
+
+    Por cartão resposta (gabarito): gabarito_id + city_id (município) obrigatórios.
+    Turmas alvo via get_answer_sheet_target_classes_for_report; P/A conforme AnswerSheetResult.
     Query param opcional: tipo = avaliacao | prova_fisica | frequencia_diaria
     """
+    gabarito_id = (request.args.get("gabarito_id") or "").strip()
+    city_id = (request.args.get("city_id") or "").strip()
     test_id = request.args.get("test_id")
     class_id = request.args.get("class_id")
     grade_id = request.args.get("grade_id")
+
+    if gabarito_id:
+        if not city_id:
+            return jsonify({"erro": "Informe city_id (município) ao usar gabarito_id"}), 400
+        gab = AnswerSheetGabarito.query.get(gabarito_id)
+        if not gab:
+            return jsonify({"erro": "Gabarito não encontrado"}), 404
+        turmas_alvo = get_answer_sheet_target_classes_for_report(gab, "city", city_id)
+        if not turmas_alvo:
+            return jsonify({
+                "erro": "Nenhuma turma encontrada para este cartão neste município.",
+            }), 404
+
+        tipo = request.args.get("tipo", "avaliacao")
+        if tipo not in ("avaliacao", "prova_fisica", "frequencia_diaria"):
+            tipo = "avaliacao"
+
+        class_uuid = None
+        if class_id:
+            class_uuid = ensure_uuid(class_id)
+            if not class_uuid:
+                return jsonify({"erro": "class_id inválido"}), 400
+            turmas_filtradas = [c for c in turmas_alvo if c.id == class_uuid]
+            if not turmas_filtradas:
+                return jsonify({"erro": "Turma não está entre as turmas deste cartão"}), 404
+        elif grade_id:
+            grade_uuid = ensure_uuid(grade_id)
+            if not grade_uuid:
+                return jsonify({"erro": "grade_id inválido"}), 400
+            turmas_filtradas = [c for c in turmas_alvo if c.grade_id == grade_uuid]
+            if not turmas_filtradas:
+                return jsonify({
+                    "erro": "Nenhuma turma desta série está vinculada a este cartão.",
+                }), 404
+        else:
+            turmas_filtradas = list(turmas_alvo)
+
+        if class_id and class_uuid:
+            classe = turmas_filtradas[0]
+            item = _montar_lista_turma(classe, tipo, test=None, fill_status=True, gabarito=gab)
+            payload = {
+                "cabecalho": item["cabecalho"],
+                "estudantes": item["estudantes"],
+                "class_id": str(class_uuid),
+            }
+            return jsonify(payload), 200
+
+        lista = []
+        for c in turmas_filtradas:
+            item = _montar_lista_turma(c, tipo, test=None, fill_status=True, gabarito=gab)
+            lista.append({
+                "class_id": str(c.id),
+                "cabecalho": item["cabecalho"],
+                "estudantes": item["estudantes"],
+            })
+        return jsonify({"turmas": lista}), 200
 
     classe = None
     class_uuid = None

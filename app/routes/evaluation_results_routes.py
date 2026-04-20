@@ -89,7 +89,6 @@ from collections import defaultdict
 from sqlalchemy import func, case
 from datetime import datetime
 from calendar import monthrange
-from types import SimpleNamespace
 from sqlalchemy.orm import joinedload
 import dateutil.parser
 import re
@@ -1771,8 +1770,9 @@ def _calculate_evaluation_stats_frontend(test_id: str) -> Dict[str, Any]:
     if total_questions == 0:
         return _empty_stats()
     
-    # Média geral: mesmo peso por escola (média das médias escolares)
-    result_rows_frontend = []
+    # Calcular resultados para cada aluno
+    notas = []
+    proficiencias = []  # CORREÇÃO: valores originais, não escala 1000
     classificacoes = {'Abaixo do Básico': 0, 'Básico': 0, 'Adequado': 0, 'Avançado': 0}
     alunos_participantes = 0
     
@@ -1821,13 +1821,8 @@ def _calculate_evaluation_stats_frontend(test_id: str) -> Dict[str, Any]:
             proficiency_original = result['proficiency']
             classification_original = result['classification']
             
-            result_rows_frontend.append(
-                SimpleNamespace(
-                    student_id=student.id,
-                    grade=result['grade'],
-                    proficiency=proficiency_original,
-                )
-            )
+            notas.append(result['grade'])
+            proficiencias.append(proficiency_original)  # CORREÇÃO: usar valor original
             classificacoes[classification_original] += 1
         else:
             # Aluno NÃO respondeu - não incluir na distribuição de classificação
@@ -1902,7 +1897,9 @@ def _calculate_evaluation_stats_by_class(test_id: str, class_id: str) -> Dict[st
     if total_questions == 0:
         return _empty_stats()
     
-    result_rows_by_class = []
+    # Calcular resultados para cada aluno
+    notas = []
+    proficiencias = []  # CORREÇÃO: valores originais, não escala 1000
     classificacoes = {'Abaixo do Básico': 0, 'Básico': 0, 'Adequado': 0, 'Avançado': 0}
     alunos_participantes = 0
     
@@ -1951,13 +1948,8 @@ def _calculate_evaluation_stats_by_class(test_id: str, class_id: str) -> Dict[st
             proficiency_original = result['proficiency']
             classification_original = result['classification']
             
-            result_rows_by_class.append(
-                SimpleNamespace(
-                    student_id=student.id,
-                    grade=result['grade'],
-                    proficiency=proficiency_original,
-                )
-            )
+            notas.append(result['grade'])
+            proficiencias.append(proficiency_original)  # CORREÇÃO: usar valor original
             classificacoes[classification_original] += 1
         else:
             # Aluno NÃO respondeu - não incluir na distribuição de classificação
@@ -2057,7 +2049,7 @@ def _calcular_estatisticas_municipio(class_tests: list, scope_info) -> Dict[str,
         todos_resultados = EvaluationResult.query.filter(EvaluationResult.test_id.in_(test_ids)).all()
         alunos_participantes = len(todos_resultados)
         
-        # Calcular médias consolidadas (mesmo peso por escola)
+        # Calcular médias consolidadas
         if todos_resultados:
             media_nota_geral, media_proficiencia_geral = hierarchical_mean_grade_and_proficiency(
                 todos_resultados, "municipio"
@@ -7660,7 +7652,7 @@ def _gerar_resultados_detalhados_por_granularidade(class_tests_paginados, nivel_
     Gera resultados detalhados agregados por nível de granularidade
     
     - MUNICÍPIO: Agrega por ESCOLA (todas as turmas/séries da escola)
-    - ESCOLA: Agrega por SÉRIE (todas as turmas da série)
+    - ESCOLA: Agrega por TURMA (todas as turmas da escola)
     - SÉRIE: Agrega por TURMA (dados específicos da turma)
     - TURMA: Dados da turma específica
     """
@@ -7693,18 +7685,20 @@ def _gerar_resultados_detalhados_por_granularidade(class_tests_paginados, nivel_
                     grupos[chave]['class_tests'].append(class_test)
                     
             elif nivel_granularidade == "escola":
-                # Agrupar por série
-                if class_test.class_ and class_test.class_.grade:
-                    chave = f"serie_{class_test.class_.grade.id}"
+                # Agrupar por turma (dentro da escola)
+                if class_test.class_:
+                    chave = f"turma_{class_test.class_.id}"
                     if chave not in grupos:
                         grupos[chave] = {
-                            'serie': class_test.class_.grade,
+                            'turma': class_test.class_,
+                            'serie': class_test.class_.grade if class_test.class_.grade else None,
                             'escola': class_test.class_.school if class_test.class_.school else None,
                             'municipio': class_test.class_.school.city if class_test.class_.school and class_test.class_.school.city else None,
-                            'class_tests': [],
+                            'class_tests': [class_test],
                             'evaluation': evaluation
                         }
-                    grupos[chave]['class_tests'].append(class_test)
+                    else:
+                        grupos[chave]['class_tests'].append(class_test)
                     
             elif nivel_granularidade == "serie":
                 # Agrupar por turma
@@ -7782,22 +7776,27 @@ def _gerar_resultados_detalhados_por_granularidade(class_tests_paginados, nivel_
                 }
                 
             elif nivel_granularidade == "escola":
+                turma = grupo['turma']
                 serie = grupo['serie']
                 escola = grupo['escola']
                 municipio = grupo['municipio']
-                
+
+                serie_nome = serie.name if serie else "N/A"
+                turma_nome = turma.name if getattr(turma, "name", None) else f"Turma {turma.id}"
+                titulo_sufixo = f"{serie_nome} {turma_nome}".strip() if serie_nome != "N/A" else turma_nome
+
                 result = {
-                    "id": f"serie_{serie.id}",
-                    "titulo": f"{evaluation.title} - {serie.name}",
+                    "id": f"turma_{turma.id}",
+                    "titulo": f"{evaluation.title} - {titulo_sufixo}",
                     "disciplina": evaluation.subject_rel.name if evaluation.subject_rel else 'N/A',
                     "curso": _get_curso_nome(evaluation.course),
-                    "serie": serie.name,
-                    "turma": "Todas as turmas",
+                    "serie": serie_nome,
+                    "turma": turma_nome,
                     "escola": escola.name if escola else "N/A",
                     "municipio": municipio.name if municipio else "N/A",
                     "estado": municipio.state if municipio else "N/A",
                     "data_aplicacao": _formatar_data_para_evolucao(evaluation.created_at),
-                    "status": "consolidado",
+                    "status": class_tests_grupo[0].status if class_tests_grupo else "N/A",
                     "total_alunos": stats_grupo['total_alunos'],
                     "alunos_participantes": stats_grupo['alunos_participantes'],
                     "alunos_pendentes": stats_grupo['alunos_pendentes'],

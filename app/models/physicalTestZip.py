@@ -14,8 +14,9 @@ class PhysicalTestZip(db.Model):
     Usado pela rota GET download-all para devolver a URL pré-assinada.
     """
     __tablename__ = 'physical_test_zip'
+    __table_args__ = {"schema": "tenant"}
 
-    test_id = db.Column(db.String, db.ForeignKey('test.id'), primary_key=True)
+    test_id = db.Column(db.String, db.ForeignKey('tenant.test.id'), primary_key=True)
     minio_url = db.Column(db.String(500), nullable=True)
     minio_object_name = db.Column(db.String(200), nullable=True)
     minio_bucket = db.Column(db.String(100), nullable=True)

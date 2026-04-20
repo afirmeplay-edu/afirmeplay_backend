@@ -183,20 +183,20 @@ def generate_physical_forms_async(
         from app.models.school import School
         from app.physical_tests.form_service import PhysicalTestFormService
         from app.models.city import City
-        from sqlalchemy import text
+        from app.utils.tenant_middleware import city_id_to_schema_name, set_search_path
         
-        # MULTITENANT FIX: Configurar search_path para o schema da cidade
+        # MULTITENANT: bind do schema físico da cidade
         city = City.query.get(city_id)
         if not city:
             error_msg = f"Cidade {city_id} não encontrada"
             logger.error(f"[CELERY] ❌ {error_msg}")
             raise ValueError(error_msg)
         
-        city_schema = f"city_{city.id.replace('-', '_')}"
-        logger.info(f"[CELERY] 🌐 Configurando search_path para: {city_schema}, public")
+        city_schema = city_id_to_schema_name(str(city.id))
+        logger.info(f"[CELERY] 🌐 Schema físico do tenant: {city_schema}")
         
         from app import db
-        db.session.execute(text(f'SET search_path TO "{city_schema}", public'))
+        set_search_path(city_schema)
         
         # Verificar se a prova existe
         test = Test.query.get(test_id)

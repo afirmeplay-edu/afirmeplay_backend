@@ -7,6 +7,7 @@ Verifica e atualiza automaticamente o status de avaliações expiradas
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 from app import db
+from app.utils.tenant_middleware import city_id_to_schema_name, set_search_path
 from app.models.test import Test
 from app.models.classTest import ClassTest
 from app.models.testSession import TestSession
@@ -42,7 +43,6 @@ def check_expired_evaluations(app=None):
             app = create_app()
     
     from app.models.city import City
-    from sqlalchemy import text
 
     # Garantir que estamos dentro do contexto da aplicação
     with app.app_context():
@@ -66,8 +66,8 @@ def check_expired_evaluations(app=None):
                 city_updated = 0
                 city_sessions_expired = 0
                 try:
-                    schema = f"city_{str(city_id).replace('-', '_')}"
-                    db.session.execute(text(f'SET search_path TO "{schema}", public'))
+                    schema = city_id_to_schema_name(str(city_id))
+                    set_search_path(schema)
                 except Exception as e:
                     logging.warning("Schema %s: %s", city_id, e)
                     continue

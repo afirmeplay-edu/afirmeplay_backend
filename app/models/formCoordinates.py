@@ -10,10 +10,10 @@ class FormCoordinates(db.Model):
     __tablename__ = 'form_coordinates'
     
     id = db.Column(db.String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
-    test_id = db.Column(db.String(36), db.ForeignKey('test.id'), nullable=False)
+    test_id = db.Column(db.String(36), db.ForeignKey('tenant.test.id'), nullable=False)
     form_type = db.Column(db.String(50), nullable=False, default='physical_test')  # NOVO: tipo do formulário
     qr_code_id = db.Column(db.String(36), nullable=True)  # OPCIONAL: para formulários específicos de aluno
-    student_id = db.Column(db.String(36), db.ForeignKey('student.id'), nullable=True)  # OPCIONAL: para formulários específicos de aluno
+    student_id = db.Column(db.String(36), db.ForeignKey('tenant.student.id'), nullable=True)  # OPCIONAL: para formulários específicos de aluno
     coordinates = db.Column(db.JSON, nullable=False)  # Coordenadas mapeadas
     num_questions = db.Column(db.Integer, nullable=True)  # Número de questões no formulário
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
@@ -21,6 +21,7 @@ class FormCoordinates(db.Model):
     # NOVO: Índice único para test_id + form_type (um template por prova)
     __table_args__ = (
         db.UniqueConstraint('test_id', 'form_type', name='unique_test_form_type'),
+        {"schema": "tenant"},
     )
     
     def to_dict(self):

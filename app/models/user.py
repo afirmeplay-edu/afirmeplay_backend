@@ -15,7 +15,8 @@ class RoleEnum(Enum):
 
 class User(db.Model):
     __tablename__ = 'users'
-    
+    __table_args__ = {"schema": "public"}
+
     id = db.Column(db.String, primary_key=True, default=lambda: str(uuid.uuid4()))
     name = db.Column(db.String(100))
     email = db.Column(db.String(100), unique=True)
@@ -39,4 +40,4 @@ class User(db.Model):
 
     student = db.relationship("Student", back_populates="user", uselist=False)
     teacher = db.relationship("Teacher", backref="users", uselist=False)
-    city_id = db.Column(db.String, db.ForeignKey('city.id'), nullable=True)
+    city_id = db.Column(db.String, db.ForeignKey('public.city.id'), nullable=True)

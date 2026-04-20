@@ -3,6 +3,9 @@
 from app import db
 import uuid
 
+from app.models.student import Student
+from app.models.testSession import TestSession
+
 
 class CompetitionResult(db.Model):
     __tablename__ = 'competition_results'
@@ -12,12 +15,12 @@ class CompetitionResult(db.Model):
     competition_id = db.Column(db.String, nullable=False)
     student_id = db.Column(
         db.String,
-        db.ForeignKey('student.id', ondelete='CASCADE'),
+        db.ForeignKey(Student.__table__.c.id, ondelete='CASCADE'),
         nullable=False,
     )
     session_id = db.Column(
         db.String,
-        db.ForeignKey('test_sessions.id', ondelete='CASCADE'),
+        db.ForeignKey(TestSession.__table__.c.id, ondelete='CASCADE'),
         nullable=False,
     )
     correct_answers = db.Column(db.Integer, nullable=False)

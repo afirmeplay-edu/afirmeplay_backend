@@ -4,6 +4,7 @@ Modelo para templates de certificados
 """
 from app import db
 from app.services.storage.minio_service import MinIOService
+from app.models.test import Test
 import uuid
 from datetime import datetime
 from typing import Optional
@@ -20,9 +21,9 @@ def _certificate_asset_proxy_path_if_minio(raw_url: Optional[str], evaluation_id
 
 class CertificateTemplate(db.Model):
     __tablename__ = 'certificate_templates'
-    
+
     id = db.Column(db.String, primary_key=True, default=lambda: str(uuid.uuid4()))
-    evaluation_id = db.Column(db.String, db.ForeignKey('test.id'), nullable=False)
+    evaluation_id = db.Column(db.String, db.ForeignKey(Test.__table__.c.id), nullable=False)
     title = db.Column(db.String(255), nullable=True)
     text_content = db.Column(db.Text, nullable=False)  # Suporta {{nome_aluno}}
     background_color = db.Column(db.String(7), nullable=False)  # Hex color
@@ -36,10 +37,17 @@ class CertificateTemplate(db.Model):
     
     # Relacionamentos
     evaluation = db.relationship('Test', foreign_keys=[evaluation_id])
-    certificates = db.relationship('Certificate', backref='template', cascade='all, delete-orphan')
-    
-    # Constraint único: uma avaliação só pode ter um template
-    __table_args__ = (db.UniqueConstraint('evaluation_id', name='uq_certificate_template_evaluation'),)
+    # back_populates: Certificate já define `template`; não usar backref='template' (conflito de nome).
+    certificates = db.relationship(
+        'Certificate',
+        back_populates='template',
+        cascade='all, delete-orphan',
+    )
+
+    __table_args__ = (
+        db.UniqueConstraint('evaluation_id', name='uq_certificate_template_evaluation'),
+        {'schema': 'tenant'},
+    )
     
     def to_dict(self):
         """Converte o objeto para dicionário"""

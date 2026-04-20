@@ -18,7 +18,7 @@ def _is_valid_slug(slug):
     return bool(slug and re.match(r'^[a-z0-9-]+$', slug))
 
 
-@bp.route('/check', methods=['GET'])
+@bp.route('/check', methods=['GET', 'OPTIONS'])
 def check_subdomain():
     """
     Verifica se um subdomínio (slug de município) existe.
@@ -31,6 +31,9 @@ def check_subdomain():
         200: { "exists": false } se não existe (ou 404, conforme preferência do cliente).
         400: subdomain ausente ou formato inválido.
     """
+    if request.method == 'OPTIONS':
+        return '', 200
+
     subdomain = request.args.get('subdomain')
     if not subdomain or not subdomain.strip():
         return jsonify({"error": "Parâmetro 'subdomain' é obrigatório"}), 400

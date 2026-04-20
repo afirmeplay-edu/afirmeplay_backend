@@ -5,9 +5,10 @@ from app import db
 
 class UserSettings(db.Model):
     __tablename__ = 'user_settings'
+    __table_args__ = {"schema": "public"}
 
     id = db.Column(db.String, primary_key=True, default=lambda: str(uuid.uuid4()))
-    user_id = db.Column(db.String, db.ForeignKey('users.id'), nullable=False, unique=True)
+    user_id = db.Column(db.String, db.ForeignKey('public.users.id'), nullable=False, unique=True)
     theme = db.Column(db.String(50), nullable=True)
     font_family = db.Column(db.String(100), nullable=True)
     font_size = db.Column(db.Integer, nullable=True)

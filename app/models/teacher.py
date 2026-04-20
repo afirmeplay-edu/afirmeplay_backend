@@ -3,6 +3,7 @@ import uuid
 from sqlalchemy.dialects.postgresql import UUID
 class Teacher(db.Model):
     __tablename__ = 'teacher'
+    __table_args__ = {"schema": "tenant"}
 
     id = db.Column(db.String, primary_key=True, default=lambda: str(uuid.uuid4()))
     name = db.Column(db.String(100), nullable=False)
@@ -14,7 +15,7 @@ class Teacher(db.Model):
     # turmas = db.relationship('Turma', secondary='professor_turma', back_populates='professores')
     
     birth_date = db.Column(db.Date)
-    user_id = db.Column(db.String, db.ForeignKey('users.id'), unique=True)
+    user_id = db.Column(db.String, db.ForeignKey('public.users.id'), unique=True)
 
     school_teachers = db.relationship("SchoolTeacher", backref="teacher")
     class_subjects = db.relationship("ClassSubject", backref="teacher")

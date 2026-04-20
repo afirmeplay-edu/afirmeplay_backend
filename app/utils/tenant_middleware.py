@@ -49,10 +49,11 @@ from flask import request, jsonify, g
 import jwt
 import os
 import re
-from sqlalchemy import text
 from app import db
 from app.models.city import City
 from app.models.user import User, RoleEnum
+from app.multitenant.db_session_factory import DatabaseSessionFactory
+from app.multitenant.tenant_resolver import TenantResolver
 
 SECRET_KEY = os.getenv("JWT_SECRET_KEY")
 # Ambiente: development (local), homolog (*.afirmeplay.com), production (*.afirmeplay.com.br)
@@ -467,9 +468,9 @@ def resolve_tenant_context():
 
 def ensure_tenant_schema_for_user(user_id):
     """
-    Garante que o search_path está no schema do tenant (city_xxx) quando for
-    necessário consultar tabelas por-tenant (ex.: student). Use antes de
-    Student.query quando o path atual pode ser public (ex.: após get_competition_or_404).
+    Garante o bind ORM para o schema do tenant (city_xxx) quando for necessário
+    consultar tabelas por-tenant (ex.: student). Use antes de Student.query quando
+    o bind atual pode ser public (ex.: após get_competition_or_404).
 
     Returns:
         True se o schema foi definido ou já era tenant; False se não foi possível
@@ -492,47 +493,31 @@ def ensure_tenant_schema_for_user(user_id):
 
 def set_search_path(schema):
     """
-    Define o search_path do PostgreSQL para o request atual.
-    
-    Args:
-        schema: String com o schema ou lista de schemas
-        
-    Note:
-        - O search_path é definido por sessão/conexão e vale imediatamente.
-        - NÃO fazemos commit() aqui para que a mesma conexão (com o path setado)
-          seja usada nas próximas queries do mesmo request; commit() devolveria
-          a conexão ao pool e a próxima query poderia usar outra (com path em public).
-        - Se a transação estiver abortada (erro anterior), faz rollback e tenta novamente.
-        
-    Examples:
-        >>> set_search_path('city_123')
-        # Define: SET search_path TO city_123, public
-        
-        >>> set_search_path('public')
-        # Define: SET search_path TO public
+    Compat: antes executava ``SET search_path`` no PostgreSQL; agora ajusta apenas o
+    bind ORM via ``schema_translate_map`` (ver ``TenantAwareSession`` / ``physical_schema_binding``).
     """
-    if schema != 'public':
-        search_path = f'"{schema}", public'
-    else:
-        search_path = "public"
-    sql = text(f"SET search_path TO {search_path}")
+    from app.multitenant.physical_schema_binding import set_physical_schema_override
 
-    try:
-        db.session.execute(sql)
-    except Exception as e:
-        err_msg = str(e).lower()
-        if "aborted" in err_msg or "infailedsqltransaction" in err_msg or "current transaction" in err_msg:
-            try:
-                db.session.rollback()
-                db.session.execute(sql)
-                return
-            except Exception as retry_e:
-                print(f"Erro ao definir search_path (após rollback): {retry_e}")
-                db.session.rollback()
-                raise retry_e
-        print(f"Erro ao definir search_path: {e}")
-        db.session.rollback()
-        raise
+    s = str(schema).strip() if schema is not None else "public"
+    if s == "public":
+        set_physical_schema_override(None)
+    else:
+        set_physical_schema_override(s)
+
+
+def _register_multitenant_sessions(context: TenantContext) -> None:
+    """
+    Registra `g.request_context` e `g.public_session`.
+
+    A tradução `tenant` → schema físico (`city_*`) é feita em `TenantAwareSession`
+    (`db.session` / `Model.query`) via `schema_translate_map` no `get_bind`.
+    """
+    engine = db.engine
+
+    g.request_context = TenantResolver.request_context_from_tenant_context(context, request)
+
+    g.public_session = DatabaseSessionFactory.get_public_session(engine)
+    g.tenant_session = None
 
 
 def tenant_middleware():
@@ -544,7 +529,7 @@ def tenant_middleware():
         
     Funcionalidade:
         1. Resolve o contexto do tenant
-        2. Define o search_path no PostgreSQL
+        2. Registra g.request_context e g.public_session; tradução tenant→city_* via db.session (TenantAwareSession)
         3. Armazena contexto no flask.g
         4. Trata erros de autenticação/autorização
         
@@ -553,12 +538,30 @@ def tenant_middleware():
         404: Município não encontrado
     """
     try:
-        if request.method == 'OPTIONS' and request.path.startswith('/mobile/v1/'):
+        # Rotas públicas que só consultam public.city (ou corpo vazio no preflight):
+        # não rodar resolve_tenant_context — JWT/Origin/Host podem disparar 400/404 indevidos.
+        path_norm = request.path.rstrip('/')
+        if request.path.startswith('/mobile/v1/') and request.method == 'OPTIONS':
             ctx = TenantContext()
             ctx.schema = 'public'
             ctx.has_tenant_context = False
             g.tenant_context = ctx
-            set_search_path('public')
+            _register_multitenant_sessions(ctx)
+            return None
+        if path_norm.endswith('/subdomain/check') and request.method in ('GET', 'HEAD', 'OPTIONS'):
+            ctx = TenantContext()
+            ctx.schema = 'public'
+            ctx.has_tenant_context = False
+            g.tenant_context = ctx
+            _register_multitenant_sessions(ctx)
+            return None
+        # OPTIONS /login/ — preflight CORS; o POST de login ainda resolve tenant normalmente.
+        if path_norm.endswith('/login') and request.method == 'OPTIONS':
+            ctx = TenantContext()
+            ctx.schema = 'public'
+            ctx.has_tenant_context = False
+            g.tenant_context = ctx
+            _register_multitenant_sessions(ctx)
             return None
 
         # Resolver contexto do tenant
@@ -566,10 +569,9 @@ def tenant_middleware():
         
         # Armazenar contexto no flask.g para acesso global
         g.tenant_context = context
-        
-        # Definir search_path
-        set_search_path(context.schema)
-        
+
+        _register_multitenant_sessions(context)
+
     except Exception as e:
         error_message = str(e)
         is_mobile = request.path.startswith("/mobile/v1/")

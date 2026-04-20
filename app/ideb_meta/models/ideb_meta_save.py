@@ -15,9 +15,13 @@ class IdebMetaSave(db.Model):
     Contexto: city_id (município do sistema) + level (ex.: Anos Iniciais, Anos Finais).
     """
     __tablename__ = 'ideb_meta_saves'
+    __table_args__ = (
+        db.UniqueConstraint('city_id', 'level', name='uq_ideb_meta_saves_context'),
+        {"schema": "tenant"},
+    )
 
     id = db.Column(db.String, primary_key=True, default=lambda: str(uuid.uuid4()))
-    city_id = db.Column(db.String, db.ForeignKey('city.id'), nullable=False)
+    city_id = db.Column(db.String, db.ForeignKey('public.city.id'), nullable=False)
     level = db.Column(db.String(100), nullable=False)
     payload = db.Column(JSON, nullable=False)
     updated_at = db.Column(
@@ -28,10 +32,6 @@ class IdebMetaSave(db.Model):
     )
 
     city = db.relationship('City', backref=db.backref('ideb_meta_saves', lazy='dynamic'))
-
-    __table_args__ = (
-        db.UniqueConstraint('city_id', 'level', name='uq_ideb_meta_saves_context'),
-    )
 
     def to_dict(self):
         return {

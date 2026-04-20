@@ -5065,11 +5065,9 @@ def _obter_escolas_por_municipio(municipio_id: str, user: dict, permissao: dict)
                 return []
         elif user.get('role') == 'professor':
             # Professor: ver apenas escolas onde possui TURMA vinculada (TeacherClass → Class → School)
-            # Professor: ver apenas escolas onde possui TURMA vinculada (TeacherClass → Class → School)
             from app.models.teacher import Teacher
             from app.models.teacherClass import TeacherClass
-            from app.models.teacherClass import TeacherClass
-            
+
             teacher = Teacher.query.filter_by(user_id=user['id']).first()
             if not teacher:
                 return []
@@ -5087,25 +5085,7 @@ def _obter_escolas_por_municipio(municipio_id: str, user: dict, permissao: dict)
                 ).all()
             ]
             if not school_ids:
-            if not teacher:
                 return []
-
-            teacher_classes = TeacherClass.query.filter_by(teacher_id=teacher.id).all()
-            teacher_class_ids = [tc.class_id for tc in teacher_classes]
-            if not teacher_class_ids:
-                return []
-
-            # Buscar escolas distintas das turmas do professor neste município
-            school_ids = [
-                s[0] for s in Class.query.with_entities(Class.school_id).distinct().filter(
-                    Class.id.in_(teacher_class_ids),
-                    Class.school_id.isnot(None),
-                ).all()
-            ]
-            if not school_ids:
-                return []
-
-            query_escolas = query_escolas.filter(School.id.in_(school_ids))
 
             query_escolas = query_escolas.filter(School.id.in_(school_ids))
     
@@ -5136,11 +5116,9 @@ def _obter_series_por_escola(escola_id: str, municipio_id: str, user: dict, perm
                 return []
         elif user.get('role') == 'professor':
             # Professor: retornar apenas séries onde possui TURMA vinculada nesta escola
-            # Professor: retornar apenas séries onde possui TURMA vinculada nesta escola
             from app.models.teacher import Teacher
             from app.models.teacherClass import TeacherClass
-            from app.models.teacherClass import TeacherClass
-            
+
             teacher = Teacher.query.filter_by(user_id=user['id']).first()
             if not teacher:
                 return []
@@ -5148,12 +5126,8 @@ def _obter_series_por_escola(escola_id: str, municipio_id: str, user: dict, perm
             teacher_classes = TeacherClass.query.filter_by(teacher_id=teacher.id).all()
             teacher_class_ids = [tc.class_id for tc in teacher_classes]
             if not teacher_class_ids:
-
-            teacher_classes = TeacherClass.query.filter_by(teacher_id=teacher.id).all()
-            teacher_class_ids = [tc.class_id for tc in teacher_classes]
-            if not teacher_class_ids:
                 return []
-    
+
     # Buscar séries da escola
     query_series = db.session.query(Grade.id, Grade.name)\
                              .join(Class, Grade.id == Class.grade_id)\
@@ -5177,22 +5151,6 @@ def _obter_series_por_escola(escola_id: str, municipio_id: str, user: dict, perm
         else:
             return []
 
-    # Se professor, filtrar apenas séries derivadas das turmas vinculadas
-    if permissao['scope'] == 'escola' and user.get('role') == 'professor':
-        from app.models.teacher import Teacher
-        from app.models.teacherClass import TeacherClass
-
-        teacher = Teacher.query.filter_by(user_id=user['id']).first()
-        if not teacher:
-            return []
-
-        teacher_classes = TeacherClass.query.filter_by(teacher_id=teacher.id).all()
-        teacher_class_ids = [tc.class_id for tc in teacher_classes]
-        if teacher_class_ids:
-            query_series = query_series.filter(Class.id.in_(teacher_class_ids))
-        else:
-            return []
-    
     series = query_series.all()
     return [{"id": str(s[0]), "nome": s[1]} for s in series]
 

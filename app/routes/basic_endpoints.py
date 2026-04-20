@@ -2558,3 +2558,241 @@ def manual_check_expired():
             "error": "Erro ao executar verificação",
             "details": str(e)
         }), 500
+
+
+@bp.route('/reports/users/counts', methods=['GET'])
+@jwt_required()
+@role_required("admin", "tecadm", "diretor", "coordenador", "professor")
+@requires_city_context
+def report_users_counts():
+    """
+    Retorna contagens numéricas de usuários (sem admins), com quebras por escopo.
+
+    Query params:
+        breakdown=school,grade,class  (default: all)
+    """
+    from sqlalchemy import distinct
+    from app.models.user import User, RoleEnum
+    from app.models.teacher import Teacher
+    from app.models.manager import Manager
+    from app.models.teacherClass import TeacherClass
+
+    try:
+        current_user = get_current_user_from_token()
+        if not current_user:
+            return jsonify({"erro": "Usuário não encontrado"}), 404
+
+        breakdown_raw = (request.args.get('breakdown') or '').strip()
+        if breakdown_raw:
+            breakdown = {p.strip().lower() for p in breakdown_raw.split(',') if p.strip()}
+        else:
+            breakdown = {"school", "grade", "class"}
+
+        valid_breakdowns = {"school", "grade", "class"}
+        breakdown = breakdown.intersection(valid_breakdowns)
+
+        tenant_context = get_current_tenant_context()
+        city_id = None
+        tenant_schema = None
+        if tenant_context and getattr(tenant_context, "has_tenant_context", False):
+            city_id = tenant_context.city_id
+            tenant_schema = getattr(tenant_context, "schema", None)
+        city_id = city_id or current_user.get("tenant_id") or current_user.get("city_id")
+        tenant_schema = tenant_schema or "tenant"
+
+        def _tenant_table_exists(table_name: str) -> bool:
+            """
+            Verifica se uma tabela existe no schema tenant atual.
+            Usamos to_regclass porque alguns tenants antigos podem não ter certas tabelas.
+            """
+            try:
+                reg = f"{tenant_schema}.{table_name}"
+                exists = db.session.execute(text("SELECT to_regclass(:regname)"), {"regname": reg}).scalar()
+                return exists is not None
+            except Exception:
+                return False
+
+        has_manager_table = _tenant_table_exists("manager")
+
+        # -----------------------
+        # Geral
+        # -----------------------
+        general_students_q = db.session.query(func.count(distinct(Student.id)))
+        general_teachers_q = db.session.query(func.count(distinct(Teacher.id)))
+        if has_manager_table:
+            general_directors_q = (
+                db.session.query(func.count(distinct(User.id)))
+                .join(Manager, Manager.user_id == User.id)
+                .filter(User.role == RoleEnum.DIRETOR)
+            )
+            general_coordinators_q = (
+                db.session.query(func.count(distinct(User.id)))
+                .join(Manager, Manager.user_id == User.id)
+                .filter(User.role == RoleEnum.COORDENADOR)
+            )
+        else:
+            # Fallback: contar por city_id no schema public (não depende de manager)
+            general_directors_q = db.session.query(func.count(distinct(User.id))).filter(User.role == RoleEnum.DIRETOR)
+            general_coordinators_q = db.session.query(func.count(distinct(User.id))).filter(User.role == RoleEnum.COORDENADOR)
+            if city_id:
+                general_directors_q = general_directors_q.filter(User.city_id == city_id)
+                general_coordinators_q = general_coordinators_q.filter(User.city_id == city_id)
+
+        general = {
+            "students": int(general_students_q.scalar() or 0),
+            "teachers": int(general_teachers_q.scalar() or 0),
+            "directors": int(general_directors_q.scalar() or 0),
+            "coordinators": int(general_coordinators_q.scalar() or 0),
+            "tecadm": 0,
+        }
+
+        # Tecadm é do município (public.users): contamos dentro da cidade do contexto atual
+        if city_id:
+            general["tecadm"] = int(
+                db.session.query(func.count(distinct(User.id)))
+                .filter(User.role == RoleEnum.TECADM, User.city_id == city_id)
+                .scalar()
+                or 0
+            )
+
+        # -----------------------
+        # Por escola
+        # -----------------------
+        by_school = []
+        if "school" in breakdown:
+            schools = db.session.query(School.id, School.name).all()
+
+            # Pré-agregações
+            students_by_school = dict(
+                db.session.query(Student.school_id, func.count(distinct(Student.id)))
+                .filter(Student.school_id.isnot(None))
+                .group_by(Student.school_id)
+                .all()
+            )
+            if has_manager_table:
+                managers_directors_by_school = dict(
+                    db.session.query(Manager.school_id, func.count(distinct(User.id)))
+                    .join(User, User.id == Manager.user_id)
+                    .filter(User.role == RoleEnum.DIRETOR, Manager.school_id.isnot(None))
+                    .group_by(Manager.school_id)
+                    .all()
+                )
+                managers_coordinators_by_school = dict(
+                    db.session.query(Manager.school_id, func.count(distinct(User.id)))
+                    .join(User, User.id == Manager.user_id)
+                    .filter(User.role == RoleEnum.COORDENADOR, Manager.school_id.isnot(None))
+                    .group_by(Manager.school_id)
+                    .all()
+                )
+            else:
+                managers_directors_by_school = {}
+                managers_coordinators_by_school = {}
+
+            for school_id, school_name in schools:
+                sid = str(school_id)
+                by_school.append(
+                    {
+                        "school_id": sid,
+                        "school_name": school_name,
+                        "students": int(students_by_school.get(sid) or students_by_school.get(school_id) or 0),
+                        "directors": int(
+                            managers_directors_by_school.get(sid) or managers_directors_by_school.get(school_id) or 0
+                        ),
+                        "coordinators": int(
+                            managers_coordinators_by_school.get(sid) or managers_coordinators_by_school.get(school_id) or 0
+                        ),
+                    }
+                )
+
+        # -----------------------
+        # Por série (grade)
+        # -----------------------
+        by_grade = []
+        if "grade" in breakdown:
+            grade_rows = db.session.query(Grade.id, Grade.name).all()
+            grade_name_by_id = {gid: gname for gid, gname in grade_rows}
+            grade_ids_in_classes = {
+                row[0]
+                for row in db.session.query(Class.grade_id)
+                .filter(Class.grade_id.isnot(None))
+                .distinct()
+                .all()
+            }
+
+            students_grade_q = (
+                db.session.query(Student.grade_id, func.count(distinct(Student.id)))
+                .filter(Student.grade_id.isnot(None))
+            )
+
+            students_grade = dict(students_grade_q.group_by(Student.grade_id).all())
+
+            teachers_grade_q = (
+                db.session.query(Class.grade_id, func.count(distinct(TeacherClass.teacher_id)))
+                .join(TeacherClass, TeacherClass.class_id == Class.id)
+                .filter(Class.grade_id.isnot(None))
+            )
+
+            teachers_grade = dict(teachers_grade_q.group_by(Class.grade_id).all())
+
+            # Manter consistência com by_class: listar todas as séries que existem em turmas,
+            # mesmo se não houver usuários associados (contagens 0).
+            for grade_id in grade_ids_in_classes:
+                by_grade.append(
+                    {
+                        "grade_id": str(grade_id),
+                        "grade_name": grade_name_by_id.get(grade_id),
+                        "students": int(students_grade.get(grade_id) or 0),
+                        "teachers": int(teachers_grade.get(grade_id) or 0),
+                    }
+                )
+
+        # -----------------------
+        # Por turma (class)
+        # -----------------------
+        by_class = []
+        if "class" in breakdown:
+            classes_q = db.session.query(Class.id, Class.name, Class.school_id, Class.grade_id)
+
+            classes_rows = classes_q.all()
+            school_name_by_id = {sid: sname for sid, sname in db.session.query(School.id, School.name).all()}
+            grade_name_by_id = {gid: gname for gid, gname in db.session.query(Grade.id, Grade.name).all()}
+
+            students_class_q = (
+                db.session.query(Student.class_id, func.count(distinct(Student.id)))
+                .filter(Student.class_id.isnot(None))
+            )
+
+            students_class = dict(students_class_q.group_by(Student.class_id).all())
+
+            teachers_class_q = db.session.query(
+                TeacherClass.class_id, func.count(distinct(TeacherClass.teacher_id))
+            ).filter(TeacherClass.class_id.isnot(None))
+
+            teachers_class = dict(teachers_class_q.group_by(TeacherClass.class_id).all())
+
+            for class_id, class_name, school_id, grade_id in classes_rows:
+                by_class.append(
+                    {
+                        "class_id": str(class_id),
+                        "class_name": class_name,
+                        "school_id": str(school_id) if school_id is not None else None,
+                        "school_name": school_name_by_id.get(school_id),
+                        "grade_id": str(grade_id) if grade_id is not None else None,
+                        "grade_name": grade_name_by_id.get(grade_id),
+                        "students": int(students_class.get(class_id) or 0),
+                        "teachers": int(teachers_class.get(class_id) or 0),
+                    }
+                )
+
+        return jsonify(
+            {
+                "general": general,
+                "by_school": by_school,
+                "by_grade": by_grade,
+                "by_class": by_class,
+            }
+        ), 200
+
+    except Exception as e:
+        logging.error(f"Erro ao gerar relatório de usuários: {str(e)}", exc_info=True)
+        return jsonify({"error": "Erro ao gerar relatório de usuários", "details": str(e)}), 500

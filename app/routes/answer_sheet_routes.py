@@ -3677,9 +3677,10 @@ def _obter_gabaritos_por_municipio_cartao(
         )
     )
     # Admin (scope 'all') vê todos os gabaritos do município.
-    # Tecadm também deve ver todos do seu município (não restringir por created_by).
-    # Outros usuários (ex.: professor/diretor/coordenador) ficam restritos ao que criaram.
-    if permissao.get('scope') != 'all' and str(user.get('role')) != 'tecadm':
+    # Tecadm vê todos do seu município (não restringir por created_by).
+    # Diretor/Coordenador veem todos os gabaritos da sua escola (há filtro por school_id logo abaixo).
+    # Outros usuários (ex.: professor) ficam restritos ao que criaram.
+    if permissao.get('scope') != 'all' and str(user.get('role')) not in ('tecadm', 'diretor', 'coordenador'):
         q = q.filter(AnswerSheetGabarito.created_by == str(user['id']))
     if permissao.get('scope') == 'escola' and user.get('role') in ['diretor', 'coordenador']:
         from app.models.manager import Manager

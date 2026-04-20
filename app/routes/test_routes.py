@@ -1542,6 +1542,10 @@ def deletar_avaliacao(test_id):
 def aplicar_avaliacao_classe(test_id):
     """Aplica uma avaliação a uma ou múltiplas classes."""
     try:
+        user = get_current_user_from_token()
+        if not user:
+            return jsonify({"error": "Usuário não encontrado"}), 401
+
         data = request.get_json()
         if not data:
             return jsonify({"error": "No data provided"}), 400
@@ -1557,6 +1561,56 @@ def aplicar_avaliacao_classe(test_id):
 
         if not data['classes']:
             return jsonify({"error": "At least one class must be provided"}), 400
+
+        # Se for professor, validar vínculo com as turmas antes de aplicar.
+        # Regra: professor só pode aplicar em turmas onde está vinculado via TeacherClass.
+        if str(user.get("role", "")).lower() == "professor":
+            from app.models.teacherClass import TeacherClass
+
+            teacher = Teacher.query.filter_by(user_id=user["id"]).first()
+            if not teacher:
+                return jsonify({"error": "Professor não encontrado na tabela teacher"}), 404
+
+            class_ids_payload = []
+            invalid_class_ids = []
+            class_id_to_name = {}
+            for class_data in data["classes"]:
+                class_id = class_data.get("class_id")
+                if not class_id:
+                    invalid_class_ids.append(None)
+                    continue
+                class_id_uuid = ensure_uuid(class_id)
+                if not class_id_uuid:
+                    invalid_class_ids.append(class_id)
+                    continue
+                class_ids_payload.append(class_id_uuid)
+                class_obj = Class.query.get(class_id_uuid)
+                if class_obj and getattr(class_obj, "name", None):
+                    class_id_to_name[class_id_uuid] = class_obj.name
+
+            if invalid_class_ids:
+                return jsonify({
+                    "error": "Uma ou mais turmas possuem class_id inválido",
+                }), 400
+
+            vinculos = TeacherClass.query.filter(
+                TeacherClass.teacher_id == teacher.id,
+                TeacherClass.class_id.in_(class_ids_payload),
+            ).all()
+            vinculos_set = {v.class_id for v in vinculos}
+
+            classes_nao_vinculadas = [cid for cid in class_ids_payload if cid not in vinculos_set]
+            if classes_nao_vinculadas:
+                turmas_nao_vinculadas = [
+                    class_id_to_name.get(cid) for cid in classes_nao_vinculadas
+                    if class_id_to_name.get(cid)
+                ]
+                payload = {"error": "O professor não está vinculado a essa turma"}
+                if turmas_nao_vinculadas:
+                    payload["turmas"] = turmas_nao_vinculadas
+                return jsonify({
+                    **payload
+                }), 403
 
         applied_classes = []
         errors = []

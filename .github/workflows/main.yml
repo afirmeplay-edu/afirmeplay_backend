@@ -22,7 +22,7 @@ jobs:
             - name: Build Images
               run: |
                   docker build -t afirmeplay/afirmeplay-backend:v${{env.VERSION}} .
-                  docker built -t afirmeplay/afirmeplay-backend:latest .
+                  docker build -t afirmeplay/afirmeplay-backend:latest .
     push:
         runs-on: [self-hosted, vps-artur]
         needs: [build]

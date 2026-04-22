@@ -46,7 +46,7 @@ jobs:
 
     deploy:
         runs-on: [self-hosted, vps-artur]
-        enviroment: dev
+        environment: dev
         needs: [push]
         steps:
             - name: Checkout

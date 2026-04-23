@@ -118,16 +118,18 @@ class AnswerSheetCorrectionService:
             correct_count = correction['correct']
             total_count = correction['total_questions']
             percentage = correction['score_percentage']
-            grade = (correct_count / total_count * 10) if total_count > 0 else 0.0
             
             from app.services.cartao_resposta.proficiency_by_subject import calcular_proficiencia_por_disciplina
+            from app.services.cartao_resposta.course_name_resolver import infer_course_name_from_grade
             blocks_config = getattr(gabarito_obj, 'blocks_config', None) or {}
-            proficiency_by_subject, proficiency, classification = calcular_proficiencia_por_disciplina(
+            grade_name = gabarito_obj.grade_name or gabarito_obj.title or ''
+            proficiency_by_subject, proficiency, grade, classification, has_matematica = calcular_proficiencia_por_disciplina(
                 blocks_config=blocks_config,
                 validated_answers=validated_answers,
                 gabarito_dict=gabarito,
-                grade_name=gabarito_obj.grade_name or '',
+                grade_name=grade_name,
             )
+            course_name = infer_course_name_from_grade(grade_name)
             
             # 11. Salvar resultado em AnswerSheetResult
             saved_result = self._salvar_resultado(
@@ -245,20 +247,26 @@ class AnswerSheetCorrectionService:
         """Calcula proficiência e classificação"""
         try:
             from app.services.evaluation_calculator import EvaluationCalculator, CourseLevel, Subject
+            from app.services.cartao_resposta.course_name_resolver import infer_course_name_from_grade
             
             # Inferir nível e disciplina do gabarito
             course_level = CourseLevel.ANOS_INICIAIS
             subject = Subject.OUTRAS
             
-            grade_name = gabarito_obj.grade_name or ''
-            if any(x in grade_name.lower() for x in ['infantil', 'pré', 'pre']):
+            grade_name = gabarito_obj.grade_name or gabarito_obj.title or ''
+            course_name = infer_course_name_from_grade(grade_name)
+            if course_name == 'Educação Infantil':
                 course_level = CourseLevel.EDUCACAO_INFANTIL
-            elif any(x in grade_name.lower() for x in ['1º', '2º', '3º', '4º', '5º', 'anos iniciais']):
+            elif course_name == 'Anos Iniciais':
                 course_level = CourseLevel.ANOS_INICIAIS
-            elif any(x in grade_name.lower() for x in ['6º', '7º', '8º', '9º', 'anos finais']):
+            elif course_name == 'Anos Finais':
                 course_level = CourseLevel.ANOS_FINAIS
-            elif any(x in grade_name.lower() for x in ['1º médio', '2º médio', '3º médio', 'ensino médio']):
+            elif course_name == 'Ensino Médio':
                 course_level = CourseLevel.ENSINO_MEDIO
+            elif course_name == 'Educação Especial':
+                course_level = CourseLevel.EDUCACAO_ESPECIAL
+            elif course_name == 'EJA':
+                course_level = CourseLevel.EJA
             
             title = gabarito_obj.title or ''
             if 'matemática' in title.lower() or 'matematica' in title.lower():
@@ -306,12 +314,14 @@ class AnswerSheetCorrectionService:
                 existing_result.answered_questions = correction.get('answered', 0)
                 existing_result.score_percentage = correction.get('score_percentage', 0.0)
                 existing_result.grade = grade
-                existing_result.proficiency = proficiency if proficiency > 0 else None
+                existing_result.proficiency = proficiency
                 existing_result.classification = classification
                 existing_result.proficiency_by_subject = proficiency_by_subject
                 existing_result.corrected_at = datetime.utcnow()
                 existing_result.detection_method = 'geometric'
                 
+                db.session.flush()
+                payload = existing_result.to_dict()
                 db.session.commit()
                 try:
                     from app.report_analysis.answer_sheet_aggregate_service import (
@@ -323,7 +333,7 @@ class AnswerSheetCorrectionService:
                     )
                 except Exception as inv_err:
                     self.logger.warning("Invalidate answer_sheet report cache: %s", inv_err)
-                return existing_result.to_dict()
+                return payload
             else:
                 # Criar novo
                 result = AnswerSheetResult(
@@ -337,13 +347,15 @@ class AnswerSheetCorrectionService:
                     answered_questions=correction.get('answered', 0),
                     score_percentage=correction.get('score_percentage', 0.0),
                     grade=grade,
-                    proficiency=proficiency if proficiency > 0 else None,
+                    proficiency=proficiency,
                     classification=classification,
                     proficiency_by_subject=proficiency_by_subject,
                     detection_method='geometric'
                 )
                 
                 db.session.add(result)
+                db.session.flush()
+                payload = result.to_dict()
                 db.session.commit()
                 try:
                     from app.report_analysis.answer_sheet_aggregate_service import (
@@ -355,7 +367,7 @@ class AnswerSheetCorrectionService:
                     )
                 except Exception as inv_err:
                     self.logger.warning("Invalidate answer_sheet report cache: %s", inv_err)
-                return result.to_dict()
+                return payload
                 
         except Exception as e:
             db.session.rollback()

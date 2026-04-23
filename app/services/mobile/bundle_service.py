@@ -3,7 +3,7 @@ from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 
 from flask import g
-from sqlalchemy import func, text as sql_text
+from sqlalchemy import func
 
 from app import db
 from app.models.school import School
@@ -17,6 +17,7 @@ from app.models.user import User
 from app.models.mobile_models import MobileSyncBundleGeneration
 
 from app.services.mobile.content_hash import compute_test_content_version, question_to_canon
+from app.utils.response_formatters import _get_all_subjects_from_test
 
 
 def _ttl_hours() -> int:
@@ -132,18 +133,8 @@ def build_tests_questions_payload(
         )
         q_ids = [r.question_id for r in tq_rows]
 
-        ctx = getattr(g, "tenant_context", None)
-        tenant_schema = ctx.schema if ctx and getattr(ctx, "schema", None) else "public"
-        db.session.execute(sql_text("SET search_path TO public"))
-        try:
-            q_objs = Question.query.filter(Question.id.in_(q_ids)).all() if q_ids else []
-        finally:
-            if tenant_schema != "public":
-                db.session.execute(
-                    sql_text(f'SET search_path TO "{tenant_schema}", public')
-                )
-            else:
-                db.session.execute(sql_text("SET search_path TO public"))
+        # Question está em public.* (metadata); não depende de search_path.
+        q_objs = Question.query.filter(Question.id.in_(q_ids)).all() if q_ids else []
 
         q_map = {q.id: q for q in q_objs}
         ordered_payload: List[Dict[str, Any]] = []
@@ -165,6 +156,7 @@ def build_tests_questions_payload(
             "duration": test.duration,
             "evaluation_mode": test.evaluation_mode,
             "subject": test.subject,
+            "subjects_info": _get_all_subjects_from_test(test),
             "grade_id": str(test.grade_id) if test.grade_id else None,
             "status": test.status,
         }
@@ -184,7 +176,6 @@ def serialize_students_page(
     q = Student.query.filter_by(school_id=school_id).order_by(Student.name.asc())
     total = q.count()
     items = q.offset((page - 1) * page_size).limit(page_size).all()
-    allowed_tests = set(test_ids)
     out = []
     for s in items:
         u = User.query.get(s.user_id) if s.user_id else None
@@ -193,6 +184,7 @@ def serialize_students_page(
                 "id": s.id,
                 "name": s.name,
                 "registration": s.registration,
+                "email": u.email if u else None,
                 "user_id": s.user_id,
                 "password_hash": u.password_hash if u else None,
                 "class_id": str(s.class_id) if s.class_id else None,

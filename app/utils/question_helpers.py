@@ -2,15 +2,13 @@
 Helper functions para buscar questões considerando multitenant
 """
 from app import db
-from sqlalchemy import text
 
 
 def get_questions_from_test(test_id, order_by_test_question=True):
     """
     Busca questões de uma avaliação considerando multitenant.
     
-    As questões estão em public.question, mas o search_path pode estar em city_xxx.
-    Esta função muda temporariamente para public, busca as questões e restaura o search_path.
+    As questões estão em public.question; o ORM qualifica pelo schema do modelo.
     
     Args:
         test_id (str): ID da avaliação
@@ -33,19 +31,7 @@ def get_questions_from_test(test_id, order_by_test_question=True):
     if not question_ids:
         return []
     
-    # MULTITENANT FIX: Buscar questões em public.question
-    # Salvar search_path atual
-    current_search_path = db.session.execute(text("SHOW search_path")).fetchone()[0]
-    
-    try:
-        # Mudar para public para buscar questões
-        db.session.execute(text("SET search_path TO public"))
-        
-        questions = Question.query.filter(Question.id.in_(question_ids)).all()
-        
-    finally:
-        # Restaurar search_path original (sempre executado, mesmo se houver erro)
-        db.session.execute(text(f"SET search_path TO {current_search_path}"))
+    questions = Question.query.filter(Question.id.in_(question_ids)).all()
     
     # Se precisar ordenar, fazer aqui
     if order_by_test_question and questions:

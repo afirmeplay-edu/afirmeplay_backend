@@ -8,6 +8,9 @@ import uuid
 from sqlalchemy.dialects.postgresql import JSON
 from datetime import datetime
 
+from .form import Form
+from .form_recipient import FormRecipient
+
 
 class FormResponse(db.Model):
     """
@@ -15,13 +18,17 @@ class FormResponse(db.Model):
     Cada registro representa as respostas de um usuário a um questionário
     """
     __tablename__ = 'form_responses'
+    __table_args__ = (
+        db.UniqueConstraint('form_id', 'user_id', name='unique_form_user_response'),
+        {"schema": "tenant"},
+    )
 
     id = db.Column(db.String, primary_key=True, default=lambda: str(uuid.uuid4()))
     
     # Vinculação com formulário, usuário e destinatário
-    form_id = db.Column(db.String, db.ForeignKey('forms.id', ondelete='CASCADE'), nullable=False)
-    user_id = db.Column(db.String, db.ForeignKey('users.id', ondelete='CASCADE'), nullable=False)
-    recipient_id = db.Column(db.String, db.ForeignKey('form_recipients.id', ondelete='CASCADE'), nullable=False)
+    form_id = db.Column(db.String, db.ForeignKey(Form.__table__.c.id, ondelete='CASCADE'), nullable=False)
+    user_id = db.Column(db.String, db.ForeignKey('public.users.id', ondelete='CASCADE'), nullable=False)
+    recipient_id = db.Column(db.String, db.ForeignKey(FormRecipient.__table__.c.id, ondelete='CASCADE'), nullable=False)
     
     # Respostas e status
     status = db.Column(db.String(20), default='in_progress', nullable=False)  # in_progress, completed
@@ -36,10 +43,6 @@ class FormResponse(db.Model):
     
     # Relacionamentos
     user = db.relationship('User', foreign_keys=[user_id])
-    
-    __table_args__ = (
-        db.UniqueConstraint('form_id', 'user_id', name='unique_form_user_response'),
-    )
     
     def to_dict(self, include_responses=True):
         """Converte o objeto para dicionário"""

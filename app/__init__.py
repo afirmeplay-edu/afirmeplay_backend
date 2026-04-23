@@ -14,9 +14,12 @@ import re
 
 # Importar configuração de logging e alertas Telegram
 from .utils.logging_config import setup_logging
+from .utils.tenant_query_logging import register_tenant_query_logging
 from .utils.telegram_alert import send_telegram_alert
 
-db = SQLAlchemy()
+from app.multitenant.tenant_aware_session import TenantAwareSession
+
+db = SQLAlchemy(session_options={"class_": TenantAwareSession})
 jwt = JWTManager()
 migrate = Migrate()
 
@@ -69,7 +72,8 @@ def create_app():
     db.init_app(app)
     jwt.init_app(app)
     migrate.init_app(app, db)
-    
+    register_tenant_query_logging(app, db)
+
     # ========================================
     # MIDDLEWARE MULTI-TENANT
     # ========================================
@@ -77,7 +81,7 @@ def create_app():
     # baseado em: JWT token, headers X-City-ID/Slug, e subdomínio
     
     from .utils.tenant_middleware import tenant_middleware
-    from sqlalchemy import text
+    from app.multitenant.physical_schema_binding import clear_physical_schema_override
     
     @app.before_request
     def handle_tenant_resolution():
@@ -87,10 +91,41 @@ def create_app():
     @app.teardown_appcontext
     def reset_search_path(exception=None):
         """
-        Reseta o search_path do PostgreSQL após cada request.
-        Garante isolamento entre requests e compatibilidade com pool de conexões.
-        Se a transação estiver abortada, faz rollback antes de SET search_path.
+        Commit/rollback da sessão ORM, limpa override de schema físico e remove a sessão.
+        Fecha também `g.public_session` e `g.tenant_session` (sessões explícitas multi-tenant).
         """
+        from flask import g
+
+        def _safe_close_sessions():
+            for name in ("tenant_session", "public_session"):
+                sess = getattr(g, name, None)
+                if sess is not None:
+                    try:
+                        if exception:
+                            sess.rollback()
+                        else:
+                            try:
+                                sess.commit()
+                            except Exception as cmt_err:
+                                app.logger.warning(
+                                    "Erro ao commit em %s no teardown: %s", name, cmt_err
+                                )
+                                sess.rollback()
+                    except Exception as rb_err:
+                        app.logger.debug("Rollback em %s: %s", name, rb_err)
+                    try:
+                        sess.close()
+                    except Exception as close_err:
+                        app.logger.debug("Erro ao fechar %s: %s", name, close_err)
+                    try:
+                        delattr(g, name)
+                    except Exception:
+                        pass
+            try:
+                delattr(g, "request_context")
+            except Exception:
+                pass
+
         try:
             if exception:
                 db.session.rollback()
@@ -101,18 +136,19 @@ def create_app():
                     app.logger.warning(f"Erro ao fazer commit no teardown: {commit_error}")
                     db.session.rollback()
 
-            db.session.execute(text("SET search_path TO public"))
+            clear_physical_schema_override()
         except Exception as e:
             err_msg = str(e).lower()
             if "aborted" in err_msg or "current transaction" in err_msg:
                 try:
                     db.session.rollback()
-                    db.session.execute(text("SET search_path TO public"))
+                    clear_physical_schema_override()
                 except Exception as e2:
-                    app.logger.error(f"Erro ao resetar search_path (após rollback): {e2}")
+                    app.logger.error(f"Erro ao limpar override de schema (após rollback): {e2}")
             else:
-                app.logger.error(f"Erro ao resetar search_path: {e}")
+                app.logger.error(f"Erro no teardown de sessão: {e}")
         finally:
+            _safe_close_sessions()
             db.session.remove()
     
     # ========================================
@@ -191,6 +227,17 @@ def create_app():
         app.logger.info("Celery inicializado com sucesso")
     except Exception as e:
         app.logger.warning(f"Celery não pôde ser inicializado: {str(e)}. Processamento assíncrono desabilitado.")
+
+    # Scheduler (APScheduler): por padrão desligado em produção.
+    # Quando habilitado, usa advisory lock no Postgres para evitar múltiplas instâncias
+    # em gunicorn (vários workers) ou reloader do Flask.
+    try:
+        if (os.getenv("ENABLE_SCHEDULER") or "").strip() == "1":
+            from app.services.scheduled_tasks import start_scheduler
+
+            start_scheduler(app)
+    except Exception as e:
+        app.logger.warning("Scheduler não pôde ser iniciado: %s", e)
     
     # Importar rotas
     from .routes import school_routes, test_routes, question_routes, login, logout, admin_route, educationStage_routes, grades_routes, persistUser_routes, city_routes, student_routes, student_preferences_routes, user_routes, class_routes, schoolTeacher, teacherClass, professor_route, subject_routes, skill_routes, student_answer_routes, userQuickLinks_routes, evaluation_results_routes, basic_endpoints, evaluation_routes, game_routes, manager_routes, report_routes, student_grades_routes, calendar_routes, dashboard_routes, answer_sheet_routes, subdomain_routes, lista_frequencia_routes
@@ -239,6 +286,8 @@ def create_app():
     app.register_blueprint(report_routes.bp)
     app.register_blueprint(basic_endpoints.bp)
     app.register_blueprint(subdomain_routes.bp)
+    # Mesmas rotas sob /api/* (proxies e frontends costumam usar esse prefixo).
+    app.register_blueprint(subdomain_routes.bp, name='subdomain_api', url_prefix='/api')
     app.register_blueprint(game_routes.bp)
     app.register_blueprint(manager_routes.bp)
     app.register_blueprint(physical_test_bp)

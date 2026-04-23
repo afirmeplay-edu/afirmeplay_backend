@@ -10,6 +10,8 @@ import json
 from sqlalchemy.dialects.postgresql import JSON
 from datetime import datetime
 
+from .form import Form
+
 
 class FormResultCache(db.Model):
     """
@@ -17,11 +19,17 @@ class FormResultCache(db.Model):
     Similar ao ReportAggregate, mas específico para formulários socioeconômicos.
     """
     __tablename__ = 'form_result_cache'
+    __table_args__ = (
+        db.UniqueConstraint('form_id', 'report_type', 'filters_hash', name='uq_form_report_filters'),
+        db.Index('idx_form_result_cache_form_type', 'form_id', 'report_type'),
+        db.Index('idx_form_result_cache_dirty', 'is_dirty'),
+        {"schema": "tenant"},
+    )
 
     id = db.Column(db.String, primary_key=True, default=lambda: str(uuid.uuid4()))
     
     # Vinculação com formulário
-    form_id = db.Column(db.String, db.ForeignKey('forms.id', ondelete='CASCADE'), nullable=False)
+    form_id = db.Column(db.String, db.ForeignKey(Form.__table__.c.id, ondelete='CASCADE'), nullable=False)
     
     # Tipo de relatório
     report_type = db.Column(db.String(50), nullable=False)  # 'indices', 'profiles'
@@ -40,12 +48,6 @@ class FormResultCache(db.Model):
     # Timestamps
     created_at = db.Column(db.TIMESTAMP, server_default=db.func.now(), nullable=False)
     updated_at = db.Column(db.TIMESTAMP, nullable=True)
-    
-    __table_args__ = (
-        db.UniqueConstraint('form_id', 'report_type', 'filters_hash', name='uq_form_report_filters'),
-        db.Index('idx_form_result_cache_form_type', 'form_id', 'report_type'),
-        db.Index('idx_form_result_cache_dirty', 'is_dirty'),
-    )
     
     @staticmethod
     def generate_filters_hash(filters):

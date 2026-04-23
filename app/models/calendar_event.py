@@ -14,6 +14,7 @@ class CalendarVisibilityScope(Enum):
 
 class CalendarEvent(db.Model):
     __tablename__ = 'calendar_events'
+    __table_args__ = {"schema": "tenant"}
 
     id = db.Column(db.String, primary_key=True, default=lambda: str(uuid.uuid4()))
     title = db.Column(db.String(200), nullable=False)
@@ -31,14 +32,14 @@ class CalendarEvent(db.Model):
     created_at = db.Column(db.TIMESTAMP, server_default=db.func.now())
     updated_at = db.Column(db.TIMESTAMP, server_default=db.func.now(), onupdate=db.func.now())
 
-    created_by_user_id = db.Column(db.String, db.ForeignKey('users.id'), nullable=False)
+    created_by_user_id = db.Column(db.String, db.ForeignKey('public.users.id'), nullable=False)
     created_by_role = db.Column(db.String(32), nullable=False)
 
     visibility_scope = db.Column(db.Enum(CalendarVisibilityScope), nullable=False)
 
-    municipality_id = db.Column(db.String, db.ForeignKey('city.id'), nullable=True)
+    municipality_id = db.Column(db.String, db.ForeignKey('public.city.id'), nullable=True)
     # ✅ CORRIGIDO: Explicitamente String(36) para garantir tipo correto
-    school_id = db.Column(db.String(36), db.ForeignKey('school.id'), nullable=True)
+    school_id = db.Column(db.String(36), db.ForeignKey('tenant.school.id'), nullable=True)
 
     metadata_json = db.Column(db.JSON, nullable=True)
 

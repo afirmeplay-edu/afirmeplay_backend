@@ -130,19 +130,19 @@ def getGradesByEducationStage(education_stage_id):
             if manager_school_id_uuid:
                 query = query.filter(School.id == str(manager_school_id_uuid))
         elif user['role'] == "professor":
-            # Filtrar pelas escolas onde o professor está vinculado
+            # Professor: retornar apenas séries (grades) onde ele tem turma vinculada (TeacherClass → Class → Grade)
+            from app.models.teacherClass import TeacherClass
+
             teacher = Teacher.query.filter_by(user_id=user['id']).first()
             if not teacher:
                 return jsonify([]), 200
-            
-            teacher_schools = SchoolTeacher.query.filter_by(teacher_id=teacher.id).all()
-            school_ids = [ts.school_id for ts in teacher_schools]
-            
-            if not school_ids:
+
+            teacher_classes = TeacherClass.query.filter_by(teacher_id=teacher.id).all()
+            class_ids = [tc.class_id for tc in teacher_classes]
+            if not class_ids:
                 return jsonify([]), 200
-            school_ids_uuids = ensure_uuid_list(school_ids)
-            if school_ids_uuids:
-                query = query.filter(School.id.in_([str(sid) for sid in school_ids_uuids]))
+
+            query = query.filter(Class.id.in_(class_ids))
         
         grades = query.all()
         

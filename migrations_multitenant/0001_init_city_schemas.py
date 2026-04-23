@@ -809,12 +809,46 @@ class MultiTenantMigration:
         CREATE INDEX IF NOT EXISTS idx_form_result_cache_dirty ON {schema}.form_result_cache(is_dirty);
         
         -- ===================================================================
-        -- DISTRIBUIÇÃO DE CONTEÚDO (PUBLIC → CITY)
+        -- PLAY TV (vídeos no schema do município)
         -- ===================================================================
+        
+        CREATE TABLE IF NOT EXISTS {schema}.play_tv_videos (
+            id VARCHAR PRIMARY KEY,
+            url VARCHAR NOT NULL,
+            title VARCHAR(100),
+            grade_id UUID NOT NULL REFERENCES public.grade(id),
+            subject_id VARCHAR NOT NULL REFERENCES public.subject(id),
+            created_by VARCHAR NOT NULL REFERENCES public.users(id),
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            entire_municipality BOOLEAN NOT NULL DEFAULT false
+        );
+        CREATE INDEX IF NOT EXISTS ix_play_tv_videos_grade_id ON {schema}.play_tv_videos(grade_id);
+        CREATE INDEX IF NOT EXISTS ix_play_tv_videos_subject_id ON {schema}.play_tv_videos(subject_id);
+        CREATE INDEX IF NOT EXISTS ix_play_tv_videos_created_by ON {schema}.play_tv_videos(created_by);
+        COMMENT ON TABLE {schema}.play_tv_videos IS 'Play TV: vídeos do município';
+        
+        CREATE TABLE IF NOT EXISTS {schema}.play_tv_video_resources (
+            id VARCHAR PRIMARY KEY,
+            video_id VARCHAR NOT NULL REFERENCES {schema}.play_tv_videos(id) ON DELETE CASCADE,
+            resource_type VARCHAR(20) NOT NULL,
+            title VARCHAR(200) NOT NULL,
+            url VARCHAR(2000),
+            minio_bucket VARCHAR(100),
+            minio_object_name VARCHAR(500),
+            original_filename VARCHAR(500),
+            content_type VARCHAR(200),
+            size_bytes BIGINT,
+            sort_order INTEGER NOT NULL DEFAULT 0,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            CONSTRAINT chk_play_tv_resource_type CHECK (resource_type IN ('link', 'file'))
+        );
+        CREATE INDEX IF NOT EXISTS ix_play_tv_video_resources_video_id ON {schema}.play_tv_video_resources(video_id);
+        COMMENT ON TABLE {schema}.play_tv_video_resources IS 'Play TV: recursos (link ou arquivo)';
         
         CREATE TABLE IF NOT EXISTS {schema}.play_tv_video_schools (
             id VARCHAR PRIMARY KEY,
-            video_id VARCHAR REFERENCES public.play_tv_videos(id),
+            video_id VARCHAR NOT NULL REFERENCES {schema}.play_tv_videos(id) ON DELETE CASCADE,
             school_id VARCHAR(36) REFERENCES {schema}.school(id),
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
@@ -822,11 +856,15 @@ class MultiTenantMigration:
         
         CREATE TABLE IF NOT EXISTS {schema}.play_tv_video_classes (
             id VARCHAR PRIMARY KEY,
-            video_id VARCHAR REFERENCES public.play_tv_videos(id),
+            video_id VARCHAR NOT NULL REFERENCES {schema}.play_tv_videos(id) ON DELETE CASCADE,
             class_id UUID REFERENCES {schema}.class(id),
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
         COMMENT ON TABLE {schema}.play_tv_video_classes IS 'Vídeos do Play TV disponibilizados para turmas';
+        
+        -- ===================================================================
+        -- DISTRIBUIÇÃO DE CONTEÚDO (outros módulos PUBLIC → CITY)
+        -- ===================================================================
         
         CREATE TABLE IF NOT EXISTS {schema}.plantao_schools (
             id VARCHAR PRIMARY KEY,

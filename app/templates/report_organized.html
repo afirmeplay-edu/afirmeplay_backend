@@ -294,7 +294,7 @@
 				text-align: center;
 				font-weight: 700;
 				letter-spacing: 0.03em;
-				font-size: 10pt;
+				font-size: 12pt;
 				padding: 8px 16px;
 				text-transform: uppercase;
 			}
@@ -315,7 +315,7 @@
 			}
 			.data-table tbody td {
 				padding: 12px 16px;
-				font-size: 10pt;
+				font-size: 16pt;
 				border-top: 1px solid #f1f5f9;
 				color: #334155;
 				text-align: center;
@@ -359,10 +359,10 @@
 			/* Estilos específicos para tabela de Acertos por Habilidade */
 			.data-table.acertos-habilidade-table tbody td {
 				padding: 10px 12px;
-				font-size: 9.5pt;
+				font-size: 14pt;
 			}
 			.data-table.acertos-habilidade-table thead th {
-				font-size: 9.5pt;
+				font-size: 13pt;
 				padding: 6px 10px;
 			}
 			/* Coluna de descrição com melhor distribuição de texto - apenas para tabela de acertos */
@@ -370,7 +370,7 @@
 				text-align: left;
 				width: 32%;
 				word-wrap: break-word;
-				word-break: normal;
+				word-break: break-word;
 				hyphens: auto;
 				line-height: 1.6;
 				padding: 10px 12px;
@@ -541,14 +541,14 @@
 			.skills-horizontal-table td {
 				padding: 8px 6px;
 				text-align: center;
-				font-size: 9pt;
+				font-size: 14pt;
 				border: 1px solid #e2e8f0;
 			}
 			.skills-horizontal-table .question-number {
 				background: #1f4e79;
 				color: #ffffff;
 				font-weight: 700;
-				font-size: 9pt;
+				font-size: 14pt;
 			}
 			/* Legado: título dentro da tabela (quando não usa faixas) */
 			.skills-horizontal-table .skills-discipline-title-table {
@@ -566,19 +566,26 @@
 				background: #ffc000;
 				color: #000000;
 				font-weight: 600;
-				font-size: 9pt;
+				font-size: 14pt;
 			}
 			.skills-horizontal-table .percentage-green {
 				background: #00b050;
 				color: #ffffff;
 				font-weight: 700;
-				font-size: 9pt;
+				font-size: 14pt;
 			}
 			.skills-horizontal-table .percentage-red {
 				background: #dc2626;
 				color: #ffffff;
 				font-weight: 700;
-				font-size: 9pt;
+				font-size: 14pt;
+			}
+			.participants-counter {
+				margin-top: 6px;
+				font-size: 12pt;
+				font-weight: 700;
+				color: #1f2937;
+				text-align: center;
 			}
 			.skills-legend {
 				margin-top: 12px;
@@ -672,6 +679,8 @@
 		{% set is_school_scope = metadados.scope_type == 'school' %} {% set
 		raw_series_label = avaliacao.series_label or metadados.series_label %}
 		{% set series_label = raw_series_label if is_school_scope else None %}
+		{% set is_class_scope = is_school_scope and ((metadados.turma is defined
+		and metadados.turma) or ((total_alunos.por_turma or [])|length == 1)) %}
 		{% set general_label = metadados.general_label or ((series_label ~ ' -
 		Geral') if series_label else ('Municipal Geral' if metadados.scope_type
 		== 'city' else 'Geral')) %} {% set general_label_text = general_label or
@@ -927,7 +936,8 @@
 						<td>{{ '%.0f' % (e.percentual or 0) }}%</td>
 						<td>{{ e.faltosos }}</td>
 					</tr>
-					{% endfor %} {% endif %} {% if total_alunos.total_geral %}
+					{% endfor %} {% endif %} {% if total_alunos.total_geral and
+					not is_class_scope %}
 					<tr>
 						<th>{{ serie_geral_label }}</th>
 						<th>{{ total_alunos.total_geral.matriculados }}</th>
@@ -1002,7 +1012,8 @@
 		<div class="data-section">
 			<h2>
 				NÍVEIS DE APRENDIZAGEM POR {% if metadados.scope_type ==
-				'school' %}TURMA/GERAL{% else %}ESCOLA/GERAL{% endif %} – {{
+				'school' %}{% if is_class_scope %}TURMA{% else %}TURMA/GERAL{%
+				endif %}{% else %}ESCOLA/GERAL{% endif %} – {{
 				avaliacao.titulo or 'AVALIAÇÃO DIAGNÓSTICA' }} {{ disc_nome }}
 			</h2>
 
@@ -1038,8 +1049,9 @@
 						<td>{{ e.adequado }}</td>
 						<td>{{ e.avancado }}</td>
 					</tr>
-					{% endfor %} {% endif %} {% if bloco.geral or
-					bloco.total_geral %} {% set dados_gerais = bloco.geral if
+					{% endfor %} {% endif %} {% if (bloco.geral or
+					bloco.total_geral) and not is_class_scope %} {% set
+					dados_gerais = bloco.geral if
 					bloco.geral else bloco.total_geral %}
 					<tr>
 						<th>{{ serie_geral_label }}</th>
@@ -1071,6 +1083,9 @@
 						>{{ disc_nome }} (total de {{ total_alunos_disc }}
 						alunos avaliados)</strong
 					>
+					<div class="participants-counter">
+						Participantes no escopo: {{ total_alunos_disc }}
+					</div>
 				</div>
 				<div class="bar-chart-container">
 					<div class="bar-item">
@@ -1171,8 +1186,9 @@
 		count_municipal %} {% endif %} {% endif %} {# DADOS: Proficiência #}
 		<div class="data-section">
 			<h2>
-				PROFICIÊNCIA POR {% if metadados.scope_type == 'school'
-				%}TURMA/GERAL{% else %}ESCOLA/GERAL{% endif %} – {{
+				PROFICIÊNCIA POR {% if metadados.scope_type == 'school' %}{% if
+				is_class_scope %}TURMA{% else %}TURMA/GERAL{% endif %}{% else
+				%}ESCOLA/GERAL{% endif %} – {{
 				avaliacao.titulo or 'AVALIAÇÃO DIAGNÓSTICA' }}
 			</h2>
 
@@ -1181,7 +1197,8 @@
 					<tr>
 						<th class="table-title" colspan="5">
 							{% if metadados.scope_type == 'school' %}
-							PROFICIÊNCIA POR TURMA/GERAL – {{ avaliacao.titulo
+							PROFICIÊNCIA POR {% if is_class_scope %}TURMA{%
+							else %}TURMA/GERAL{% endif %} – {{ avaliacao.titulo
 							or 'AVALIAÇÃO DIAGNÓSTICA' }} {% else %}
 							PROFICIÊNCIA POR ESCOLA/GERAL – {{ avaliacao.titulo
 							or 'AVALIAÇÃO DIAGNÓSTICA' }} {% endif %}
@@ -1287,7 +1304,7 @@
 					set media_mat_geral = bloco_mat.media_geral if
 					bloco_mat.media_geral is not none else 0 %} {% endif %}
 
-					<tr>
+					{% if not is_class_scope %} <tr>
 						<th style="text-align: left">
 							{{ serie_geral_label }}
 						</th>
@@ -1305,6 +1322,7 @@
 							{{ ('%.1f' % media_municipal).replace('.', ',') }}
 						</th>
 					</tr>
+					{% endif %}
 				</tbody>
 			</table>
 
@@ -1325,9 +1343,10 @@
 				<div
 					class="analysis-text"
 					style="margin-top: 0; margin-bottom: 8px">
-					<strong
-						>Proficiência Geral ({{ serie_geral_label }})</strong
-					>
+					<strong>
+						{% if is_class_scope %}Proficiência da Turma{% else
+						%}Proficiência Geral ({{ serie_geral_label }}){% endif %}
+					</strong>
 				</div>
 				<div class="bar-chart-container">
 					<div class="bar-item">
@@ -1428,8 +1447,9 @@
 		{# DADOS: Notas #}
 		<div class="data-section">
 			<h2>
-				NOTA POR {% if metadados.scope_type == 'school' %}TURMA/GERAL{%
-				else %}ESCOLA/GERAL{% endif %} – {{ avaliacao.titulo or
+				NOTA POR {% if metadados.scope_type == 'school' %}{% if
+				is_class_scope %}TURMA{% else %}TURMA/GERAL{% endif %}{% else
+				%}ESCOLA/GERAL{% endif %} – {{ avaliacao.titulo or
 				'AVALIAÇÃO DIAGNÓSTICA' }}
 			</h2>
 
@@ -1438,7 +1458,8 @@
 					<tr>
 						<th class="table-title" colspan="5">
 							{% if metadados.scope_type == 'school' %} NOTA POR
-							TURMA/GERAL – {{ avaliacao.titulo or 'AVALIAÇÃO
+							{% if is_class_scope %}TURMA{% else %}TURMA/GERAL{%
+							endif %} – {{ avaliacao.titulo or 'AVALIAÇÃO
 							DIAGNÓSTICA' }} {% else %} NOTA POR ESCOLA/GERAL –
 							{{ avaliacao.titulo or 'AVALIAÇÃO DIAGNÓSTICA' }} {%
 							endif %}
@@ -1529,7 +1550,7 @@
 						{% if loop.first %} {% set count_entidades_nota =
 						lista_entidades|length %}
 						<td
-							rowspan="{{ count_entidades_nota + 1 }}"
+							rowspan="{{ count_entidades_nota if is_class_scope else count_entidades_nota + 1 }}"
 							style="vertical-align: middle; font-weight: 700">
 							{{ ('%.1f' % nota_media_municipal).replace('.', ',')
 							}}
@@ -1547,7 +1568,7 @@
 					nota_media_mat_geral = bloco_mat.media_geral if
 					bloco_mat.media_geral is not none else 0 %} {% endif %}
 
-					<tr>
+					{% if not is_class_scope %} <tr>
 						<th style="text-align: left">
 							{{ serie_geral_label }}
 						</th>
@@ -1563,6 +1584,7 @@
 							{{ ('%.1f' % nota_media_geral).replace('.', ',') }}
 						</th>
 					</tr>
+					{% endif %}
 				</tbody>
 			</table>
 
@@ -1577,7 +1599,10 @@
 				<div
 					class="analysis-text"
 					style="margin-top: 0; margin-bottom: 8px">
-					<strong>Média Geral</strong>
+					<strong
+						>{% if is_class_scope %}Média da Turma{% else %}Média
+						Geral{% endif %}</strong
+					>
 				</div>
 				<div class="bar-chart-container">
 					<div class="bar-item">

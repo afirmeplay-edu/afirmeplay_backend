@@ -25,6 +25,7 @@ from app.models.answerSheetGabarito import AnswerSheetGabarito
 from app.physical_tests.pdf_generator import PhysicalTestPDFGenerator
 from app.physical_tests.form_service import PhysicalTestFormService
 from app.services.cartao_resposta.correction_new_grid import AnswerSheetCorrectionNewGrid  # NOVO SISTEMA DE CORREÇÃO
+from app.config import Config
 from app.services.progress_store import (
     create_job, update_item_processing, update_item_done,
     update_item_error, complete_job, get_job
@@ -1100,7 +1101,7 @@ def process_batch_in_background(job_id: str, test_id: str, images: list):
     
     with app.app_context():
         try:
-            correction_service = AnswerSheetCorrectionNewGrid(debug=False)
+            correction_service = AnswerSheetCorrectionNewGrid(debug=Config.OMR_DEBUG)
             
             for i, image_base64 in enumerate(images):
                 try:
@@ -1257,7 +1258,7 @@ def process_physical_correction(test_id):
             
             # Processar com AnswerSheetCorrectionNewGrid
             # O test_id e student_id são extraídos automaticamente do QR code
-            correction_service = AnswerSheetCorrectionNewGrid(debug=False)
+            correction_service = AnswerSheetCorrectionNewGrid(debug=Config.OMR_DEBUG)
             result = correction_service.corrigir_cartao_resposta(
                 image_data=image_data,
                 auto_detect_qr=True

@@ -57,7 +57,11 @@ from app.models.grades import Grade
 from app.models.evaluationResult import EvaluationResult
 from app.utils.uuid_helpers import ensure_uuid, ensure_uuid_list
 from app.utils.decimal_helpers import round_to_two_decimals
-from sqlalchemy import cast, String, or_
+from app.utils.school_equal_weight_means import (
+    granularidade_to_hierarchical_target,
+    hierarchical_mean_grade_and_proficiency,
+)
+from sqlalchemy import cast, String, or_, and_, not_
 from sqlalchemy.dialects.postgresql import UUID as PostgresUUID
 from app.models.classTest import ClassTest
 from app.models.studentTestOlimpics import StudentTestOlimpics
@@ -74,7 +78,9 @@ from app.routes.answer_sheet_evaluation_listing import (
     obter_escolas_por_gabarito,
     obter_gabaritos_por_municipio,
     obter_series_por_gabarito_escola,
+    obter_series_por_gabarito_municipio,
     obter_turmas_por_gabarito_escola_serie,
+    obter_turmas_por_gabarito_serie_municipio,
 )
 from app import db
 import logging
@@ -1079,9 +1085,16 @@ def listar_avaliacoes():
         
         # Calcular estatísticas consolidadas baseadas no escopo dos filtros
         estatisticas_consolidadas = _calcular_estatisticas_consolidadas_por_escopo(todas_avaliacoes_escopo, scope_info, nivel_granularidade, user)
+        if isinstance(estatisticas_consolidadas, dict):
+            estatisticas_consolidadas["participantes_distribuicao"] = estatisticas_consolidadas.get(
+                "alunos_participantes", 0
+            )
         
         # Calcular estatísticas por disciplina
         resultados_por_disciplina = _calcular_estatisticas_por_disciplina(todas_avaliacoes_escopo, scope_info, nivel_granularidade)
+        for disciplina in resultados_por_disciplina or []:
+            if isinstance(disciplina, dict):
+                disciplina["participantes_distribuicao"] = disciplina.get("alunos_participantes", 0)
         
         # Aplicar paginação para resultados detalhados
         try:
@@ -1195,6 +1208,8 @@ def listar_avaliacoes():
                 avaliacao, scope_info, nivel_granularidade, user, restrict_class_ids
             )
         
+        periodo_raw_clean = (str(periodo_raw).strip() if periodo_raw and str(periodo_raw).strip() else None)
+
         return jsonify({
             "nivel_granularidade": nivel_granularidade,
             "filtros_aplicados": {
@@ -1204,7 +1219,8 @@ def listar_avaliacoes():
                 "serie": serie,
                 "turma": turma,
                 "avaliacao": avaliacao,
-                "periodo": (str(periodo_raw).strip() if periodo_raw and str(periodo_raw).strip() else None),
+                "periodo": _formatar_periodo_br(periodo_raw_clean),
+                "periodo_iso": periodo_raw_clean,
             },
             "estatisticas_gerais": estatisticas_consolidadas,
             "resultados_por_disciplina": resultados_por_disciplina,
@@ -1563,15 +1579,17 @@ def _gerar_tabela_detalhada_por_disciplina(
             logging.debug("Disciplina %s: %d alunos processados", disciplina_data['nome'], len(alunos_disciplina))
 
         dados_gerais = _calcular_dados_gerais_alunos(questoes_por_disciplina, course_name)
-        
-        return {
-            "disciplinas": list(questoes_por_disciplina.values()),
-            "geral": dados_gerais
-        }
+        payload = {"disciplinas": list(questoes_por_disciplina.values())}
+        if nivel_granularidade != "turma":
+            payload["geral"] = dados_gerais
+        return payload
         
     except Exception as e:
         logging.error(f"Erro ao gerar tabela detalhada por disciplina: {str(e)}", exc_info=True)
-        return {"disciplinas": [], "geral": {"alunos": []}, "error": str(e)}
+        payload_erro = {"disciplinas": [], "error": str(e)}
+        if nivel_granularidade != "turma":
+            payload_erro["geral"] = {"alunos": []}
+        return payload_erro
 
 
 def _calcular_dados_gerais_alunos(questoes_por_disciplina: dict, course_name: str = "Anos Iniciais") -> dict:
@@ -1811,9 +1829,13 @@ def _calculate_evaluation_stats_frontend(test_id: str) -> Dict[str, Any]:
             # Alunos ausentes não são classificados
             pass
     
-    # Calcular médias apenas dos alunos que participaram
-    media_nota = round_to_two_decimals(sum(notas) / len(notas)) if notas else 0.0
-    media_proficiencia = format_decimal_two_places(sum(proficiencias) / len(proficiencias)) if proficiencias else 0.0
+    if result_rows_frontend:
+        mn, mp = hierarchical_mean_grade_and_proficiency(result_rows_frontend, "municipio")
+        media_nota = round_to_two_decimals(mn)
+        media_proficiencia = format_decimal_two_places(mp)
+    else:
+        media_nota = 0.0
+        media_proficiencia = 0.0
     
     return {
         'total_alunos': total_alunos,
@@ -1934,9 +1956,13 @@ def _calculate_evaluation_stats_by_class(test_id: str, class_id: str) -> Dict[st
             # Alunos ausentes não são classificados
             pass
     
-    # Calcular médias apenas dos alunos que participaram
-    media_nota = round_to_two_decimals(sum(notas) / len(notas)) if notas else 0.0
-    media_proficiencia = format_decimal_two_places(sum(proficiencias) / len(proficiencias)) if proficiencias else 0.0
+    if result_rows_by_class:
+        mn, mp = hierarchical_mean_grade_and_proficiency(result_rows_by_class, "turma")
+        media_nota = round_to_two_decimals(mn)
+        media_proficiencia = format_decimal_two_places(mp)
+    else:
+        media_nota = 0.0
+        media_proficiencia = 0.0
     
     return {
         'total_alunos': total_alunos,
@@ -2025,8 +2051,9 @@ def _calcular_estatisticas_municipio(class_tests: list, scope_info) -> Dict[str,
         
         # Calcular médias consolidadas
         if todos_resultados:
-            media_nota_geral = sum(r.grade for r in todos_resultados) / len(todos_resultados)
-            media_proficiencia_geral = sum(r.proficiency for r in todos_resultados) / len(todos_resultados)
+            media_nota_geral, media_proficiencia_geral = hierarchical_mean_grade_and_proficiency(
+                todos_resultados, "municipio"
+            )
         else:
             media_nota_geral = 0.0
             media_proficiencia_geral = 0.0
@@ -2412,10 +2439,11 @@ def _calcular_estatisticas_gerais(class_tests: list, scope_info, nivel_granulari
         todos_resultados = EvaluationResult.query.filter(EvaluationResult.test_id.in_(test_ids)).all()
         alunos_participantes = len(todos_resultados)
         
-        # Calcular médias consolidadas
+        # Calcular médias consolidadas (agregação hierárquica conforme granularidade)
         if todos_resultados:
-            media_nota_geral = sum(r.grade for r in todos_resultados) / len(todos_resultados)
-            media_proficiencia_geral = sum(r.proficiency for r in todos_resultados) / len(todos_resultados)
+            media_nota_geral, media_proficiencia_geral = hierarchical_mean_grade_and_proficiency(
+                todos_resultados, granularidade_to_hierarchical_target(nivel_granularidade)
+            )
         else:
             media_nota_geral = 0.0
             media_proficiencia_geral = 0.0
@@ -3026,8 +3054,8 @@ def get_evaluation_by_id(evaluation_id: str):
             "serie": "N/A",
             "escola": escola_nome,
             "municipio": municipio,
-            "data_aplicacao": test.created_at.isoformat() if test.created_at else None,
-            "data_correcao": test.updated_at.isoformat() if test.updated_at else None,
+            "data_aplicacao": _formatar_data_para_evolucao(test.created_at),
+            "data_correcao": _formatar_data_para_evolucao(test.updated_at),
             "status": "concluida",
             "total_alunos": stats['total_alunos'],
             "alunos_participantes": stats['alunos_participantes'],
@@ -5477,6 +5505,132 @@ def _obter_turmas_por_serie(
     return [{"id": str(t[0]), "nome": t[1] or f"Turma {t[0]}"} for t in turmas]
 
 
+def _escola_param_eh_especifica(escola: Optional[str]) -> bool:
+    return bool(escola and str(escola).strip().lower() not in ("all", ""))
+
+
+def _serie_param_eh_especifica(serie: Optional[str]) -> bool:
+    return bool(serie and str(serie).strip().lower() not in ("all", ""))
+
+
+def _obter_series_por_avaliacao_municipio(
+    avaliacao_id: str,
+    municipio_id: str,
+    user: dict,
+    permissao: dict,
+    periodo_bounds: Optional[Tuple[datetime, datetime]] = None,
+) -> List[Dict[str, Any]]:
+    """
+    Séries distintas onde a avaliação foi aplicada em qualquer escola do município
+    (uso quando o filtro de escola está em «todas»).
+    """
+    city = City.query.get(municipio_id)
+    if not city:
+        return []
+
+    if permissao["scope"] != "all" and user.get("city_id") != city.id:
+        return []
+
+    query_series = (
+        Grade.query.with_entities(Grade.id, Grade.name)
+        .join(Class, Grade.id == Class.grade_id)
+        .join(ClassTest, Class.id == ClassTest.class_id)
+        .join(Test, ClassTest.test_id == Test.id)
+        .join(School, School.id == cast(Class.school_id, String))
+        .join(City, School.city_id == City.id)
+        .filter(Test.id == avaliacao_id)
+        .filter(City.id == city.id)
+    )
+    query_series = _apply_class_test_application_period(query_series, periodo_bounds)
+
+    if permissao["scope"] == "escola" and user.get("role") in ["diretor", "coordenador"]:
+        from app.models.manager import Manager
+
+        manager = Manager.query.filter_by(user_id=user["id"]).first()
+        if manager and manager.school_id:
+            query_series = query_series.filter(School.id == manager.school_id)
+        else:
+            return []
+
+    if permissao["scope"] == "escola" and user.get("role") == "professor":
+        from app.models.teacher import Teacher
+        from app.models.teacherClass import TeacherClass
+
+        teacher = Teacher.query.filter_by(user_id=user["id"]).first()
+        if teacher:
+            teacher_classes = TeacherClass.query.filter_by(teacher_id=teacher.id).all()
+            teacher_class_ids = [tc.class_id for tc in teacher_classes]
+            if teacher_class_ids:
+                query_series = query_series.filter(Class.id.in_(teacher_class_ids))
+            else:
+                return []
+        else:
+            return []
+
+    series = query_series.distinct().all()
+    return [{"id": str(s[0]), "nome": s[1]} for s in series]
+
+
+def _obter_turmas_por_serie_municipio(
+    avaliacao_id: str,
+    serie_id: str,
+    municipio_id: str,
+    user: dict,
+    permissao: dict,
+    periodo_bounds: Optional[Tuple[datetime, datetime]] = None,
+) -> List[Dict[str, Any]]:
+    """
+    Turmas onde a avaliação foi aplicada, para a série, em qualquer escola do município
+    (quando escola = todas).
+    """
+    city = City.query.get(municipio_id)
+    if not city:
+        return []
+
+    if permissao["scope"] != "all" and user.get("city_id") != city.id:
+        return []
+
+    query_turmas = (
+        Class.query.with_entities(Class.id, Class.name)
+        .join(ClassTest, Class.id == ClassTest.class_id)
+        .join(Test, ClassTest.test_id == Test.id)
+        .join(School, School.id == cast(Class.school_id, String))
+        .join(City, School.city_id == City.id)
+        .join(Grade, Class.grade_id == Grade.id)
+        .filter(Test.id == avaliacao_id)
+        .filter(Grade.id == serie_id)
+        .filter(City.id == city.id)
+    )
+    query_turmas = _apply_class_test_application_period(query_turmas, periodo_bounds)
+
+    if permissao["scope"] == "escola" and user.get("role") in ["diretor", "coordenador"]:
+        from app.models.manager import Manager
+
+        manager = Manager.query.filter_by(user_id=user["id"]).first()
+        if manager and manager.school_id:
+            query_turmas = query_turmas.filter(School.id == manager.school_id)
+        else:
+            return []
+
+    if permissao["scope"] == "escola" and user.get("role") == "professor":
+        from app.models.teacher import Teacher
+        from app.models.teacherClass import TeacherClass
+
+        teacher = Teacher.query.filter_by(user_id=user["id"]).first()
+        if teacher:
+            teacher_classes = TeacherClass.query.filter_by(teacher_id=teacher.id).all()
+            teacher_class_ids = [tc.class_id for tc in teacher_classes]
+            if teacher_class_ids:
+                query_turmas = query_turmas.filter(Class.id.in_(teacher_class_ids))
+            else:
+                return []
+        else:
+            return []
+
+    turmas = query_turmas.distinct().all()
+    return [{"id": str(t[0]), "nome": t[1] or f"Turma {t[0]}"} for t in turmas]
+
+
 # ==================== OPÇÕES DE FILTRO PARA EVOLUÇÃO (Estado → Município → Escola → Série → Turma) ====================
 
 def _user_city_id(user: dict) -> str:
@@ -5667,6 +5821,21 @@ def _parse_periodo_bounds(periodo: str) -> Tuple[datetime, datetime]:
     return datetime(year, month, 1), datetime(year, month, last)
 
 
+def _formatar_periodo_br(periodo: Optional[str]) -> Optional[str]:
+    """
+    Converte período YYYY-MM para intervalo no formato brasileiro (dd/mm/aaaa - dd/mm/aaaa).
+    Retorna None quando vazio e preserva o valor original quando inválido.
+    """
+    if not periodo or not str(periodo).strip():
+        return None
+    valor = str(periodo).strip()
+    try:
+        dt_inicio, dt_fim = _parse_periodo_bounds(valor)
+        return f"{dt_inicio.strftime('%d/%m/%Y')} - {dt_fim.strftime('%d/%m/%Y')}"
+    except Exception:
+        return valor
+
+
 def _apply_class_test_application_period(
     query,
     bounds: Optional[Tuple[datetime, datetime]],
@@ -5674,10 +5843,25 @@ def _apply_class_test_application_period(
     if bounds is None:
         return query
     dt_inicio, dt_fim = bounds
-    return query.filter(
-        ClassTest.application >= dt_inicio.strftime("%Y-%m-%d"),
-        ClassTest.application <= dt_fim.strftime("%Y-%m-%d") + "T23:59:59.999",
+    d0 = dt_inicio.strftime("%Y-%m-%d")
+    d1 = dt_fim.strftime("%Y-%m-%d")
+    # Comparação lexicográfica no ISO completo falha no fim do mês (ex.: microssegundos
+    # ou sufixo de timezone após 23:59:59.999). Quando os 10 primeiros caracteres são
+    # YYYY-MM-DD, filtramos pelo dia civil; caso contrário mantém o critério antigo.
+    app_text = cast(ClassTest.application, String)
+    iso_date_prefix = func.substring(app_text, 1, 10)
+    matches_iso_date = iso_date_prefix.op("~")(r"^\d{4}-\d{2}-\d{2}$")
+    cond_by_calendar_day = and_(
+        matches_iso_date,
+        iso_date_prefix >= d0,
+        iso_date_prefix <= d1,
     )
+    cond_lex_legacy = and_(
+        not_(matches_iso_date),
+        ClassTest.application >= d0,
+        ClassTest.application <= d1 + "T23:59:59.999",
+    )
+    return query.filter(or_(cond_by_calendar_day, cond_lex_legacy))
 
 
 def _formatar_data_para_evolucao(val) -> Optional[str]:
@@ -6353,6 +6537,340 @@ def obter_estatisticas_por_disciplina(test_id: str):
         logging.error(f"Erro ao obter estatísticas por disciplina para avaliação {test_id}: {str(e)}", exc_info=True)
         return jsonify({"error": "Erro ao obter estatísticas por disciplina", "details": str(e)}), 500
 
+
+def _filtrar_alunos_mapa_digital_por_periodo_aplicacao(
+    students: List[Student],
+    avaliacao_id: str,
+    periodo_bounds: Optional[Tuple[datetime, datetime]],
+) -> List[Student]:
+    """Restringe alunos às turmas com ClassTest da avaliação aplicada no mês (periodo YYYY-MM)."""
+    if periodo_bounds is None or not students:
+        return students
+    q = ClassTest.query.filter(ClassTest.test_id == str(avaliacao_id))
+    q = _apply_class_test_application_period(q, periodo_bounds)
+    allowed_class_ids = {str(ct.class_id) for ct in q.all()}
+    return [
+        s
+        for s in students
+        if getattr(s, "class_id", None) and str(s.class_id) in allowed_class_ids
+    ]
+
+
+@bp.route("/mapa-habilidades", methods=["GET"])
+@jwt_required()
+@role_required("admin", "professor", "coordenador", "diretor", "tecadm")
+def mapa_habilidades_avaliacao_online():
+    """
+    Mapa de habilidades para avaliação online (Test): % de acertos agregados por habilidade em faixas.
+    Filtros: estado, municipio, avaliacao (obrigatória), escola, serie, turma, disciplina (id ou all).
+    Query opcional: periodo=YYYY-MM (ClassTest.application no mês).
+    """
+    try:
+        user = get_current_user_from_token()
+        if not user:
+            return jsonify({"error": "Usuário não encontrado"}), 401
+
+        estado = request.args.get("estado")
+        municipio = request.args.get("municipio")
+        escola = request.args.get("escola")
+        serie = request.args.get("serie")
+        turma = request.args.get("turma")
+        avaliacao = request.args.get("avaliacao")
+        disciplina = request.args.get("disciplina") or "all"
+        periodo_raw = request.args.get("periodo")
+        periodo_bounds: Optional[Tuple[datetime, datetime]] = None
+        if periodo_raw is not None and str(periodo_raw).strip():
+            try:
+                periodo_bounds = _parse_periodo_bounds(periodo_raw)
+            except ValueError as ve:
+                return jsonify(
+                    {
+                        "error": "Parâmetro periodo inválido. Use YYYY-MM (ex.: 2026-04).",
+                        "details": str(ve),
+                    }
+                ), 400
+
+        if not estado or str(estado).lower() == "all":
+            return jsonify({"error": "Estado é obrigatório e não pode ser 'all'"}), 400
+        if not municipio:
+            return jsonify({"error": "Município é obrigatório"}), 400
+        if not avaliacao or str(avaliacao).lower() == "all":
+            return jsonify({"error": "Avaliação é obrigatória para o mapa de habilidades"}), 400
+
+        def _is_valid_filtro_mapa(value):
+            return value and str(value).lower() != "all"
+
+        filtros_aplicados = sum(
+            [
+                bool(estado and str(estado).lower() != "all"),
+                bool(municipio and str(municipio).lower() != "all"),
+                bool(escola and str(escola).lower() != "all"),
+                bool(serie and str(serie).lower() != "all"),
+                bool(turma and str(turma).lower() != "all"),
+                bool(avaliacao and str(avaliacao).lower() != "all"),
+            ]
+        )
+        if filtros_aplicados < 2:
+            return jsonify(
+                {"error": "É necessário aplicar pelo menos 2 filtros válidos (excluindo 'all')"}
+            ), 400
+
+        scope_info = _determinar_escopo_busca(estado, municipio, escola, serie, turma, avaliacao, user)
+        if not scope_info:
+            return jsonify({"error": "Não foi possível determinar o escopo de busca"}), 400
+
+        if scope_info.get("escola") and not escola:
+            escola = scope_info.get("escola")
+
+        permissao = verificar_permissao_filtros(user)
+        if not permissao["permitted"]:
+            return jsonify({"error": permissao["error"]}), 403
+
+        from app.permissions import validate_professor_school_selection, validate_manager_school_selection
+
+        escola_param = request.args.get("escola", "all")
+        if user.get("role") == "professor":
+            validation_result = validate_professor_school_selection(user, escola_param, require_school=False)
+        elif user.get("role") in ["diretor", "coordenador"]:
+            validation_result = validate_manager_school_selection(user, escola_param, require_school=False)
+        else:
+            validation_result = {"valid": True, "school_id": escola_param}
+
+        if not validation_result["valid"]:
+            return jsonify(
+                {"error": validation_result["error"], "code": "SCHOOL_ACCESS_DENIED"}
+            ), 403
+
+        escola_id_validada = validation_result.get("school_id")
+        if escola_id_validada:
+            escola = escola_id_validada
+
+        municipio_str = str(municipio).strip()
+        set_search_path(city_id_to_schema_name(municipio_str))
+
+        nivel_granularidade = _determinar_nivel_granularidade(
+            estado, municipio, escola, serie, turma, avaliacao, user
+        )
+        escopo_calculo = _determinar_escopo_calculo(scope_info, nivel_granularidade)
+        all_students = _obter_alunos_para_mapa_habilidades_test(
+            scope_info, nivel_granularidade, user, escopo_calculo
+        )
+        all_students = _filtrar_alunos_mapa_digital_por_periodo_aplicacao(
+            all_students, str(avaliacao), periodo_bounds
+        )
+
+        subject_filter = (
+            None if str(disciplina).strip().lower() == "all" else str(disciplina).strip()
+        )
+
+        from app.services.skills_map_service import compute_digital_aggregate
+
+        data = compute_digital_aggregate(str(avaliacao), all_students, subject_filter)
+        # participating_students = alunos que realmente responderam (sem faltosos)
+        participating_students = data.get("_students_snapshot", all_students)
+        n_turma = len(all_students)
+        n_part = len(participating_students)
+
+        return jsonify(
+            {
+                "nivel_granularidade": nivel_granularidade,
+                "disciplinas_disponiveis": data["disciplinas_disponiveis"],
+                "habilidades": data["habilidades"],
+                "por_faixa": data["por_faixa"],
+                "filtros_aplicados": {
+                    "estado": estado,
+                    "municipio": municipio,
+                    "escola": escola,
+                    "serie": serie,
+                    "turma": turma,
+                    "avaliacao": avaliacao,
+                    "disciplina": disciplina,
+                    "periodo": (
+                        str(periodo_raw).strip()
+                        if periodo_raw and str(periodo_raw).strip()
+                        else None
+                    ),
+                },
+                "total_alunos_escopo_turma": n_turma,
+                "total_alunos_participantes": n_part,
+                "total_alunos_escopo": n_part,
+            }
+        ), 200
+    except Exception as e:
+        logging.error("Erro ao obter mapa de habilidades: %s", e, exc_info=True)
+        return jsonify({"error": "Erro ao obter mapa de habilidades", "details": str(e)}), 500
+
+
+@bp.route("/mapa-habilidades/erros", methods=["GET"])
+@jwt_required()
+@role_required("admin", "professor", "coordenador", "diretor", "tecadm")
+def mapa_habilidades_avaliacao_online_erros():
+    """Lista alunos que erraram ao menos uma questão da habilidade e % de erros sobre o escopo."""
+    try:
+        user = get_current_user_from_token()
+        if not user:
+            return jsonify({"error": "Usuário não encontrado"}), 401
+
+        skill_id = request.args.get("skill_id")
+        if not skill_id or not str(skill_id).strip():
+            return jsonify({"error": "skill_id é obrigatório"}), 400
+        question_ref = request.args.get("question_ref")
+
+        estado = request.args.get("estado")
+        municipio = request.args.get("municipio")
+        escola = request.args.get("escola")
+        serie = request.args.get("serie")
+        turma = request.args.get("turma")
+        avaliacao = request.args.get("avaliacao")
+        disciplina = request.args.get("disciplina") or "all"
+        periodo_raw = request.args.get("periodo")
+        periodo_bounds_erros: Optional[Tuple[datetime, datetime]] = None
+        if periodo_raw is not None and str(periodo_raw).strip():
+            try:
+                periodo_bounds_erros = _parse_periodo_bounds(periodo_raw)
+            except ValueError as ve:
+                return jsonify(
+                    {
+                        "error": "Parâmetro periodo inválido. Use YYYY-MM (ex.: 2026-04).",
+                        "details": str(ve),
+                    }
+                ), 400
+
+        if not estado or str(estado).lower() == "all":
+            return jsonify({"error": "Estado é obrigatório e não pode ser 'all'"}), 400
+        if not municipio:
+            return jsonify({"error": "Município é obrigatório"}), 400
+        if not avaliacao or str(avaliacao).lower() == "all":
+            return jsonify({"error": "Avaliação é obrigatória"}), 400
+
+        filtros_aplicados = sum(
+            [
+                bool(estado and str(estado).lower() != "all"),
+                bool(municipio and str(municipio).lower() != "all"),
+                bool(escola and str(escola).lower() != "all"),
+                bool(serie and str(serie).lower() != "all"),
+                bool(turma and str(turma).lower() != "all"),
+                bool(avaliacao and str(avaliacao).lower() != "all"),
+            ]
+        )
+        if filtros_aplicados < 2:
+            return jsonify(
+                {"error": "É necessário aplicar pelo menos 2 filtros válidos (excluindo 'all')"}
+            ), 400
+
+        scope_info = _determinar_escopo_busca(estado, municipio, escola, serie, turma, avaliacao, user)
+        if not scope_info:
+            return jsonify({"error": "Não foi possível determinar o escopo de busca"}), 400
+
+        if scope_info.get("escola") and not escola:
+            escola = scope_info.get("escola")
+
+        permissao = verificar_permissao_filtros(user)
+        if not permissao["permitted"]:
+            return jsonify({"error": permissao["error"]}), 403
+
+        from app.permissions import validate_professor_school_selection, validate_manager_school_selection
+
+        escola_param = request.args.get("escola", "all")
+        if user.get("role") == "professor":
+            validation_result = validate_professor_school_selection(user, escola_param, require_school=False)
+        elif user.get("role") in ["diretor", "coordenador"]:
+            validation_result = validate_manager_school_selection(user, escola_param, require_school=False)
+        else:
+            validation_result = {"valid": True, "school_id": escola_param}
+
+        if not validation_result["valid"]:
+            return jsonify(
+                {"error": validation_result["error"], "code": "SCHOOL_ACCESS_DENIED"}
+            ), 403
+
+        escola_id_validada = validation_result.get("school_id")
+        if escola_id_validada:
+            escola = escola_id_validada
+
+        municipio_str = str(municipio).strip()
+        set_search_path(city_id_to_schema_name(municipio_str))
+
+        nivel_granularidade = _determinar_nivel_granularidade(
+            estado, municipio, escola, serie, turma, avaliacao, user
+        )
+        escopo_calculo = _determinar_escopo_calculo(scope_info, nivel_granularidade)
+        all_students = _obter_alunos_para_mapa_habilidades_test(
+            scope_info, nivel_granularidade, user, escopo_calculo
+        )
+        all_students = _filtrar_alunos_mapa_digital_por_periodo_aplicacao(
+            all_students, str(avaliacao), periodo_bounds_erros
+        )
+
+        subject_filter = (
+            None if str(disciplina).strip().lower() == "all" else str(disciplina).strip()
+        )
+
+        from app.services.skills_map_service import (
+            compute_digital_aggregate,
+            digital_students_passed_vs_failed_for_bucket,
+            _norm_skill_key,
+        )
+
+        data = compute_digital_aggregate(str(avaliacao), all_students, subject_filter)
+        failed_by_skill = data.get("_failed_by_skill") or {}
+        participating_students = data.get("_students_snapshot", all_students)
+
+        school_ids = list(
+            {
+                s.class_.school_id
+                for s in participating_students
+                if s.class_ and getattr(s.class_, "school_id", None)
+            }
+        )
+        school_by_id = (
+            {s.id: s for s in School.query.filter(School.id.in_(school_ids)).all()}
+            if school_ids
+            else {}
+        )
+
+        bucket_key = _norm_skill_key(str(skill_id).strip())
+        if question_ref and str(question_ref).strip():
+            bucket_key = f"{bucket_key}||q:{str(question_ref).strip()}"
+        alunos_err, alunos_ok, n_err, n_ok, n_tot = digital_students_passed_vs_failed_for_bucket(
+            participating_students, failed_by_skill, bucket_key, school_by_id
+        )
+        pct_err = round_to_two_decimals((n_err / n_tot * 100.0) if n_tot else 0.0)
+        pct_ok = round_to_two_decimals((n_ok / n_tot * 100.0) if n_tot else 0.0)
+
+        return jsonify(
+            {
+                "percentual_erros": pct_err,
+                "percentual_acertos": pct_ok,
+                "total_alunos_escopo": n_tot,
+                "total_alunos_que_erraram": n_err,
+                "total_alunos_que_acertaram": n_ok,
+                "alunos_que_erraram": alunos_err,
+                "alunos_que_acertaram": alunos_ok,
+                "alunos": alunos_err,
+                "filtros_aplicados": {
+                    "estado": estado,
+                    "municipio": municipio,
+                    "escola": escola,
+                    "serie": serie,
+                    "turma": turma,
+                    "avaliacao": avaliacao,
+                    "disciplina": disciplina,
+                    "skill_id": str(skill_id).strip(),
+                    "question_ref": str(question_ref).strip() if question_ref else None,
+                    "periodo": (
+                        str(periodo_raw).strip()
+                        if periodo_raw and str(periodo_raw).strip()
+                        else None
+                    ),
+                },
+            }
+        ), 200
+    except Exception as e:
+        logging.error("Erro ao obter erros por habilidade: %s", e, exc_info=True)
+        return jsonify({"error": "Erro ao obter alunos que erraram", "details": str(e)}), 500
+
+
 # ==================== ENDPOINT EVOLUÇÃO: OPÇÕES DE FILTROS (Estado → Município → Escola → Série → Turma) ====================
 
 @bp.route('/evolucao/opcoes-filtros', methods=['GET'])
@@ -6572,13 +7090,21 @@ def obter_opcoes_filtros():
                         response["escolas"] = obter_escolas_por_gabarito(
                             avaliacao, municipio_str, user, permissao
                         )
-                        if escola:
+                        if _escola_param_eh_especifica(escola):
                             response["series"] = obter_series_por_gabarito_escola(
                                 avaliacao, escola, municipio_str, user, permissao
                             )
-                            if serie:
+                            if _serie_param_eh_especifica(serie):
                                 response["turmas"] = obter_turmas_por_gabarito_escola_serie(
                                     avaliacao, escola, serie, municipio_str, user, permissao
+                                )
+                        else:
+                            response["series"] = obter_series_por_gabarito_municipio(
+                                avaliacao, municipio_str, user, permissao
+                            )
+                            if _serie_param_eh_especifica(serie):
+                                response["turmas"] = obter_turmas_por_gabarito_serie_municipio(
+                                    avaliacao, serie, municipio_str, user, permissao
                                 )
                 else:
                     response["avaliacoes"] = _obter_avaliacoes_por_municipio(
@@ -6588,13 +7114,21 @@ def obter_opcoes_filtros():
                         response["escolas"] = _obter_escolas_por_avaliacao(
                             avaliacao, municipio, user, permissao, periodo_bounds
                         )
-                        if escola:
+                        if _escola_param_eh_especifica(escola):
                             response["series"] = _obter_series_por_escola(
                                 avaliacao, escola, municipio, user, permissao, periodo_bounds
                             )
-                            if serie:
+                            if _serie_param_eh_especifica(serie):
                                 response["turmas"] = _obter_turmas_por_serie(
                                     avaliacao, escola, serie, municipio, user, permissao, periodo_bounds
+                                )
+                        else:
+                            response["series"] = _obter_series_por_avaliacao_municipio(
+                                avaliacao, municipio, user, permissao, periodo_bounds
+                            )
+                            if _serie_param_eh_especifica(serie):
+                                response["turmas"] = _obter_turmas_por_serie_municipio(
+                                    avaliacao, serie, municipio, user, permissao, periodo_bounds
                                 )
         
         return jsonify(response), 200
@@ -6664,10 +7198,11 @@ def _calcular_estatisticas_consolidadas_por_escopo(class_tests: list, scope_info
         alunos_participantes = len(resultados_escopo)
         logging.info(f"resultados_escopo: {alunos_participantes}, test_ids: {test_ids}, total_alunos: {total_alunos}")
         
-        # Calcular estatísticas consolidadas
+        # Calcular estatísticas consolidadas (agregação hierárquica conforme granularidade)
         if resultados_escopo:
-            media_nota = sum(r.grade for r in resultados_escopo) / len(resultados_escopo)
-            media_proficiencia = sum(r.proficiency for r in resultados_escopo) / len(resultados_escopo)
+            media_nota, media_proficiencia = hierarchical_mean_grade_and_proficiency(
+                resultados_escopo, granularidade_to_hierarchical_target(nivel_granularidade)
+            )
         else:
             media_nota = 0.0
             media_proficiencia = 0.0
@@ -6876,6 +7411,53 @@ def _buscar_alunos_por_escopo(escopo_calculo: dict) -> List[Student]:
         return []
 
 
+def _obter_alunos_para_mapa_habilidades_test(
+    scope_info: Dict,
+    nivel_granularidade: str,
+    user: Dict,
+    escopo_calculo: Dict,
+) -> List[Student]:
+    """Mesma lógica de escopo de alunos que a tabela detalhada por disciplina."""
+    if nivel_granularidade == "escola" and user:
+        if user.get("role") == "professor":
+            from app.models.teacher import Teacher
+            from app.models.teacherClass import TeacherClass
+
+            teacher = Teacher.query.filter_by(user_id=user["id"]).first()
+            if teacher:
+                teacher_classes = TeacherClass.query.filter_by(teacher_id=teacher.id).all()
+                teacher_class_ids = [tc.class_id for tc in teacher_classes]
+                if teacher_class_ids:
+                    all_students = Student.query.filter(Student.class_id.in_(teacher_class_ids)).all()
+                else:
+                    all_students = []
+            else:
+                all_students = []
+        elif user.get("role") in ["diretor", "coordenador"]:
+            from app.models.manager import Manager
+
+            manager = Manager.query.filter_by(user_id=user["id"]).first()
+            if manager and manager.school_id:
+                turmas_escola = Class.query.filter(Class.school_id == manager.school_id).all()
+                turma_ids_escola = [t.id for t in turmas_escola]
+                all_students = Student.query.filter(Student.class_id.in_(turma_ids_escola)).all()
+            else:
+                all_students = []
+        else:
+            all_students = _buscar_alunos_por_escopo(escopo_calculo)
+    else:
+        all_students = _buscar_alunos_por_escopo(escopo_calculo)
+
+    if not all_students:
+        return []
+
+    return (
+        Student.query.options(joinedload(Student.class_).joinedload(Class.grade))
+        .filter(Student.id.in_([s.id for s in all_students]))
+        .all()
+    )
+
+
 # ==================== ENDPOINT 1: GET /avaliacoes ====================
 
 def _calcular_ranking_global_alunos(
@@ -7070,7 +7652,7 @@ def _gerar_resultados_detalhados_por_granularidade(class_tests_paginados, nivel_
     Gera resultados detalhados agregados por nível de granularidade
     
     - MUNICÍPIO: Agrega por ESCOLA (todas as turmas/séries da escola)
-    - ESCOLA: Agrega por SÉRIE (todas as turmas da série)
+    - ESCOLA: Agrega por TURMA (todas as turmas da escola)
     - SÉRIE: Agrega por TURMA (dados específicos da turma)
     - TURMA: Dados da turma específica
     """
@@ -7103,18 +7685,20 @@ def _gerar_resultados_detalhados_por_granularidade(class_tests_paginados, nivel_
                     grupos[chave]['class_tests'].append(class_test)
                     
             elif nivel_granularidade == "escola":
-                # Agrupar por série
-                if class_test.class_ and class_test.class_.grade:
-                    chave = f"serie_{class_test.class_.grade.id}"
+                # Agrupar por turma (dentro da escola)
+                if class_test.class_:
+                    chave = f"turma_{class_test.class_.id}"
                     if chave not in grupos:
                         grupos[chave] = {
-                            'serie': class_test.class_.grade,
+                            'turma': class_test.class_,
+                            'serie': class_test.class_.grade if class_test.class_.grade else None,
                             'escola': class_test.class_.school if class_test.class_.school else None,
                             'municipio': class_test.class_.school.city if class_test.class_.school and class_test.class_.school.city else None,
-                            'class_tests': [],
+                            'class_tests': [class_test],
                             'evaluation': evaluation
                         }
-                    grupos[chave]['class_tests'].append(class_test)
+                    else:
+                        grupos[chave]['class_tests'].append(class_test)
                     
             elif nivel_granularidade == "serie":
                 # Agrupar por turma
@@ -7154,7 +7738,16 @@ def _gerar_resultados_detalhados_por_granularidade(class_tests_paginados, nivel_
             evaluation = grupo['evaluation']
             
             # Calcular estatísticas do grupo
-            stats_grupo = _calcular_estatisticas_grupo(class_tests_grupo, evaluation)
+            agg_level = (
+                "escola"
+                if nivel_granularidade == "municipio"
+                else "serie"
+                if nivel_granularidade == "escola"
+                else "turma"
+            )
+            stats_grupo = _calcular_estatisticas_grupo(
+                class_tests_grupo, evaluation, agg_level
+            )
             
             # Determinar informações baseadas na granularidade
             if nivel_granularidade == "municipio":
@@ -7171,7 +7764,7 @@ def _gerar_resultados_detalhados_por_granularidade(class_tests_paginados, nivel_
                     "escola": escola.name,
                     "municipio": municipio.name if municipio else "N/A",
                     "estado": municipio.state if municipio else "N/A",
-                    "data_aplicacao": evaluation.created_at.isoformat() if evaluation.created_at else None,
+                    "data_aplicacao": _formatar_data_para_evolucao(evaluation.created_at),
                     "status": "consolidado",
                     "total_alunos": stats_grupo['total_alunos'],
                     "alunos_participantes": stats_grupo['alunos_participantes'],
@@ -7183,22 +7776,27 @@ def _gerar_resultados_detalhados_por_granularidade(class_tests_paginados, nivel_
                 }
                 
             elif nivel_granularidade == "escola":
+                turma = grupo['turma']
                 serie = grupo['serie']
                 escola = grupo['escola']
                 municipio = grupo['municipio']
-                
+
+                serie_nome = serie.name if serie else "N/A"
+                turma_nome = turma.name if getattr(turma, "name", None) else f"Turma {turma.id}"
+                titulo_sufixo = f"{serie_nome} {turma_nome}".strip() if serie_nome != "N/A" else turma_nome
+
                 result = {
-                    "id": f"serie_{serie.id}",
-                    "titulo": f"{evaluation.title} - {serie.name}",
+                    "id": f"turma_{turma.id}",
+                    "titulo": f"{evaluation.title} - {titulo_sufixo}",
                     "disciplina": evaluation.subject_rel.name if evaluation.subject_rel else 'N/A',
                     "curso": _get_curso_nome(evaluation.course),
-                    "serie": serie.name,
-                    "turma": "Todas as turmas",
+                    "serie": serie_nome,
+                    "turma": turma_nome,
                     "escola": escola.name if escola else "N/A",
                     "municipio": municipio.name if municipio else "N/A",
                     "estado": municipio.state if municipio else "N/A",
-                    "data_aplicacao": evaluation.created_at.isoformat() if evaluation.created_at else None,
-                    "status": "consolidado",
+                    "data_aplicacao": _formatar_data_para_evolucao(evaluation.created_at),
+                    "status": class_tests_grupo[0].status if class_tests_grupo else "N/A",
                     "total_alunos": stats_grupo['total_alunos'],
                     "alunos_participantes": stats_grupo['alunos_participantes'],
                     "alunos_pendentes": stats_grupo['alunos_pendentes'],
@@ -7224,7 +7822,7 @@ def _gerar_resultados_detalhados_por_granularidade(class_tests_paginados, nivel_
                     "escola": escola.name if escola else "N/A",
                     "municipio": municipio.name if municipio else "N/A",
                     "estado": municipio.state if municipio else "N/A",
-                    "data_aplicacao": evaluation.created_at.isoformat() if evaluation.created_at else None,
+                    "data_aplicacao": _formatar_data_para_evolucao(evaluation.created_at),
                     "status": class_tests_grupo[0].status if class_tests_grupo else "N/A",
                     "total_alunos": stats_grupo['total_alunos'],
                     "alunos_participantes": stats_grupo['alunos_participantes'],
@@ -7244,9 +7842,12 @@ def _gerar_resultados_detalhados_por_granularidade(class_tests_paginados, nivel_
         return []
 
 
-def _calcular_estatisticas_grupo(class_tests_grupo, evaluation):
+def _calcular_estatisticas_grupo(class_tests_grupo, evaluation, aggregation_level: str = "municipio"):
     """
-    Calcula estatísticas consolidadas para um grupo de class_tests
+    Calcula estatísticas consolidadas para um grupo de class_tests.
+
+    ``aggregation_level``: ``escola`` (linhas do relatório municipal), ``serie`` (visão escola),
+    ``turma`` (série/turma) — ver :func:`~app.utils.school_equal_weight_means.hierarchical_mean_grade_and_proficiency`.
     """
     try:
         from app.models.evaluationResult import EvaluationResult
@@ -7287,10 +7888,11 @@ def _calcular_estatisticas_grupo(class_tests_grupo, evaluation):
         alunos_pendentes = total_alunos - alunos_participantes
         alunos_ausentes = 0  # Simplificado - pode ser calculado mais precisamente
         
-        # Calcular médias
+        # Calcular médias (agregação hierárquica no recorte do grupo)
         if resultados:
-            media_nota = sum(r.grade for r in resultados) / len(resultados)
-            media_proficiencia = sum(r.proficiency for r in resultados) / len(resultados)
+            media_nota, media_proficiencia = hierarchical_mean_grade_and_proficiency(
+                resultados, aggregation_level
+            )
         else:
             media_nota = 0.0
             media_proficiencia = 0.0

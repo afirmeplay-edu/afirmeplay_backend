@@ -143,7 +143,7 @@ def login():
             "tenant_id": tenant_id,
             "role": usuario.role.value,
             "city_slug": city_slug,  # Incluir slug no token para facilitar resolução
-            "exp": datetime.datetime.utcnow() + datetime.timedelta(hours=1)
+            "exp": datetime.datetime.utcnow() + datetime.timedelta(hours=3)
         }
 
         token = jwt.encode(token_payload, SECRET_KEY, algorithm='HS256')

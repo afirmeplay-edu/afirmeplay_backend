@@ -16,12 +16,13 @@ class AnswerSheetResult(db.Model):
     Cada registro representa a correção de um cartão resposta de um aluno
     """
     __tablename__ = 'answer_sheet_results'
+    __table_args__ = {"schema": "tenant"}
 
     id = db.Column(db.String, primary_key=True, default=lambda: str(uuid.uuid4()))
     
     # Vinculação com gabarito e aluno
-    gabarito_id = db.Column(db.String, db.ForeignKey('answer_sheet_gabaritos.id'), nullable=False)
-    student_id = db.Column(db.String, db.ForeignKey('student.id'), nullable=False)
+    gabarito_id = db.Column(db.String, db.ForeignKey('tenant.answer_sheet_gabaritos.id'), nullable=False)
+    student_id = db.Column(db.String, db.ForeignKey('tenant.student.id'), nullable=False)
     
     # Respostas detectadas do aluno: {1: "A", 2: "B", 3: null, ...}
     detected_answers = db.Column(JSON, nullable=False)

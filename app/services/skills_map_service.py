@@ -1,0 +1,745 @@
+# -*- coding: utf-8 -*-
+"""
+Agregação do mapa de habilidades (% acertos por faixa) e drill-down de alunos que erraram.
+Avaliação online (Test + StudentAnswer) e cartão-resposta (AnswerSheetGabarito + AnswerSheetResult).
+"""
+from __future__ import annotations
+
+import json
+from collections import defaultdict
+from typing import Any, Dict, List, Optional, Set, Tuple
+from uuid import UUID
+
+from sqlalchemy.orm import joinedload
+
+from app.models.answerSheetGabarito import AnswerSheetGabarito
+from app.models.answerSheetResult import AnswerSheetResult
+from app.models.question import Question
+from app.models.skill import Skill
+from app.models.student import Student
+from app.models.studentAnswer import StudentAnswer
+from app.models.studentClass import Class
+from app.models.testQuestion import TestQuestion
+from app.report_analysis.answer_sheet_report_builder import question_skills_map_for_answer_sheet
+from app.services.cartao_resposta.proficiency_by_subject import _extract_blocks_with_questions
+from app.services.evaluation_result_service import EvaluationResultService
+from app.utils.decimal_helpers import round_to_two_decimals
+
+FAIXA_ABAIXO = "abaixo_do_basico"
+FAIXA_BASICO = "basico"
+FAIXA_ADEQUADO = "adequado"
+FAIXA_AVANCADO = "avancado"
+
+
+def faixa_from_percent(pct: float) -> str:
+    if pct < 30:
+        return FAIXA_ABAIXO
+    if pct < 60:
+        return FAIXA_BASICO
+    if pct < 80:
+        return FAIXA_ADEQUADO
+    return FAIXA_AVANCADO
+
+
+def _clean_skill_id(raw: Optional[str]) -> Optional[str]:
+    if not raw:
+        return None
+    s = str(raw).replace("{", "").replace("}", "").strip()
+    return s or None
+
+
+def _norm_skill_key(sid: str) -> str:
+    try:
+        return str(UUID(str(sid).strip()))
+    except ValueError:
+        return str(sid).strip()
+
+
+def _digital_stat_bucket_key(skill_norm: str, question_ref: str) -> str:
+    return f"{skill_norm}||q:{str(question_ref).strip()}"
+
+
+def _habilidade_codigo_e_descricao(sk: str, obj: Optional[Skill]) -> Tuple[str, str]:
+    """
+    Textos para o mapa / modal: não usar UUID como código ou título.
+    """
+    if obj:
+        code = (getattr(obj, "code", None) or "").strip()
+        desc = (getattr(obj, "description", None) or "").strip()
+        if code:
+            return code, (desc or "—")
+        if desc:
+            short = desc if len(desc) <= 80 else f"{desc[:77]}…"
+            return short, desc
+        return "Habilidade", "—"
+    return (
+        "Habilidade (sem cadastro)",
+        "Esta habilidade não foi encontrada na base de habilidades.",
+    )
+
+
+def _fetch_skills_batch(skill_ids: Set[str]) -> Dict[str, Skill]:
+    uuids = []
+    for raw in skill_ids:
+        if not raw:
+            continue
+        try:
+            uuids.append(UUID(str(raw).strip()))
+        except ValueError:
+            continue
+    if not uuids:
+        return {}
+    rows = Skill.query.filter(Skill.id.in_(uuids)).all()
+    return {str(s.id): s for s in rows}
+
+
+def _extract_skill_ids_from_question_field(raw_skill: Any) -> List[str]:
+    """Extrai IDs/códigos de habilidade do campo `Question.skill` (string/lista/json)."""
+    if raw_skill is None:
+        return []
+
+    values: List[str] = []
+    if isinstance(raw_skill, list):
+        values = [str(x) for x in raw_skill if x]
+    else:
+        s = str(raw_skill).strip()
+        if not s:
+            return []
+        if s.startswith("[") and s.endswith("]"):
+            try:
+                parsed = json.loads(s)
+                if isinstance(parsed, list):
+                    values = [str(x) for x in parsed if x]
+                else:
+                    values = [s]
+            except Exception:
+                values = [s]
+        else:
+            # Historicamente pode vir "id1,id2" ou único valor.
+            values = [p.strip() for p in s.split(",") if p and p.strip()]
+
+    out: List[str] = []
+    seen: Set[str] = set()
+    for v in values:
+        clean = _clean_skill_id(v)
+        if not clean:
+            continue
+        if clean not in seen:
+            out.append(clean)
+            seen.add(clean)
+    return out
+
+
+def _fallback_question_skills_from_test(
+    test_id: Optional[str], allowed_qn: Set[int]
+) -> Dict[int, List[str]]:
+    """Fallback para mapa de questões→habilidades via prova vinculada ao gabarito."""
+    if not test_id:
+        return {}
+
+    test_questions = (
+        TestQuestion.query.filter_by(test_id=test_id)
+        .join(Question)
+        .options(joinedload(TestQuestion.question))
+        .order_by(TestQuestion.order)
+        .all()
+    )
+    if not test_questions:
+        return {}
+
+    out: Dict[int, List[str]] = {}
+    for idx, tq in enumerate(test_questions, start=1):
+        qn = idx
+        try:
+            if tq.order is not None:
+                qn = int(tq.order)
+        except (TypeError, ValueError):
+            qn = idx
+
+        if allowed_qn and qn not in allowed_qn:
+            continue
+        q = tq.question
+        if not q:
+            continue
+        sids = _extract_skill_ids_from_question_field(getattr(q, "skill", None))
+        if sids:
+            out[qn] = sids
+    return out
+
+
+def build_disciplinas_e_questoes_digital(
+    test_id: str,
+    subject_id_filter: Optional[str],
+) -> Tuple[List[Dict[str, str]], List[Tuple[Question, str]]]:
+    """
+    Retorna disciplinas disponíveis (id/nome) e lista (Question, clean_skill_id) respeitando filtro de disciplina.
+    subject_id_filter None ou 'all' = todas as disciplinas.
+    """
+    test_questions = (
+        TestQuestion.query.filter_by(test_id=test_id)
+        .join(Question)
+        .options(joinedload(TestQuestion.question).joinedload(Question.subject))
+        .order_by(TestQuestion.order)
+        .all()
+    )
+
+    by_subject: Dict[str, str] = {}
+    questoes_com_habilidade: List[Tuple[Question, str]] = []
+
+    for tq in test_questions:
+        q = tq.question
+        sid_subj = str(q.subject_id) if q.subject_id else "sem_disciplina"
+        nome = q.subject.name if q.subject else "Sem Disciplina"
+        by_subject[sid_subj] = nome
+
+        sk = _clean_skill_id(q.skill)
+        if not sk:
+            continue
+        if subject_id_filter and str(subject_id_filter).strip().lower() not in ("", "all"):
+            if sid_subj != str(subject_id_filter).strip():
+                continue
+        questoes_com_habilidade.append((q, sk))
+
+    disciplinas = [{"id": k, "nome": v} for k, v in sorted(by_subject.items(), key=lambda x: x[1])]
+    return disciplinas, questoes_com_habilidade
+
+
+def compute_digital_aggregate(
+    test_id: str,
+    students: List[Student],
+    subject_id_filter: Optional[str],
+) -> Dict[str, Any]:
+    disciplinas, questoes_com_habilidade = build_disciplinas_e_questoes_digital(test_id, subject_id_filter)
+    skill_ids_set = {sid for _, sid in questoes_com_habilidade}
+    skills_db = _fetch_skills_batch(skill_ids_set)
+
+    if not students:
+        return {
+            "disciplinas_disponiveis": disciplinas,
+            "habilidades": [],
+            "por_faixa": {FAIXA_ABAIXO: [], FAIXA_BASICO: [], FAIXA_ADEQUADO: [], FAIXA_AVANCADO: []},
+            "_skill_to_question_ids": {},
+        }
+
+    student_ids = [s.id for s in students]
+    answers_rows = StudentAnswer.query.filter(
+        StudentAnswer.test_id == test_id,
+        StudentAnswer.student_id.in_(student_ids),
+    ).all()
+    answers_by_student: Dict[str, Dict[str, StudentAnswer]] = {}
+    for a in answers_rows:
+        if a.student_id not in answers_by_student:
+            answers_by_student[a.student_id] = {}
+        answers_by_student[a.student_id][a.question_id] = a
+
+    # Exclui alunos faltosos (sem nenhuma resposta registrada para a prova).
+    # Alunos ausentes não têm StudentAnswer → não devem entrar no cálculo de % acertos
+    # nem aparecer no drill-down "quem errou", assim como ocorre com o cartão-resposta
+    # (que filtra via _participating_answer_sheet_result).
+    participating_students = [s for s in students if s.id in answers_by_student]
+
+    stats: Dict[str, Dict[str, Any]] = defaultdict(
+        lambda: {"correct": 0, "total": 0, "question_ref": "", "subject_id": None}
+    )
+    failed_by_skill: Dict[str, Set[str]] = defaultdict(set)
+
+    for student in participating_students:
+        sid = student.id
+        for q, skill_key in questoes_com_habilidade:
+            sk = _norm_skill_key(skill_key)
+            bucket = _digital_stat_bucket_key(sk, str(q.id))
+            resposta = answers_by_student.get(sid, {}).get(q.id)
+            acertou = False
+            if resposta:
+                if q.question_type == "multiple_choice":
+                    acertou = EvaluationResultService.check_multiple_choice_answer(
+                        resposta.answer, q.correct_answer
+                    )
+                else:
+                    acertou = (
+                        str(resposta.answer).strip().lower()
+                        == str(q.correct_answer).strip().lower()
+                    )
+            stats[bucket]["total"] += 1
+            if not stats[bucket]["question_ref"]:
+                stats[bucket]["question_ref"] = str(q.id)
+            if not stats[bucket]["subject_id"]:
+                stats[bucket]["subject_id"] = (
+                    str(q.subject_id) if getattr(q, "subject_id", None) else "sem_disciplina"
+                )
+            if acertou:
+                stats[bucket]["correct"] += 1
+            else:
+                failed_by_skill[bucket].add(sid)
+
+    skill_to_question_ids: Dict[str, Set[str]] = defaultdict(set)
+    for q, skill_key in questoes_com_habilidade:
+        skill_to_question_ids[_norm_skill_key(skill_key)].add(q.id)
+
+    subj_nome_por_id: Dict[str, str] = {str(d["id"]): str(d["nome"]) for d in disciplinas}
+
+    habilidades: List[Dict[str, Any]] = []
+    for bucket, agg in stats.items():
+        if "||q:" in bucket:
+            sk, question_ref = bucket.rsplit("||q:", 1)
+        else:
+            sk, question_ref = bucket, ""
+        total = int(agg["total"])
+        correct = int(agg["correct"])
+        pct = round_to_two_decimals((correct / total * 100.0) if total > 0 else 0.0)
+        faixa = faixa_from_percent(pct)
+        obj = skills_db.get(sk)
+        codigo, descricao = _habilidade_codigo_e_descricao(sk, obj)
+        subj_id = str(agg.get("subject_id") or "sem_disciplina")
+
+        disciplina_nome = subj_nome_por_id.get(subj_id or "", "") or "Sem disciplina"
+
+        habilidades.append(
+            {
+                "skill_id": sk,
+                "codigo": codigo,
+                "descricao": descricao,
+                "subject_id": subj_id,
+                "disciplina_nome": disciplina_nome,
+                "question_ref": question_ref,
+                "percentual_acertos": pct,
+                "faixa": faixa,
+                "total_tentativas": total,
+            }
+        )
+
+    habilidades.sort(
+        key=lambda x: (
+            x["faixa"],
+            str(x.get("subject_id") or ""),
+            -x["percentual_acertos"],
+            x["codigo"],
+            str(x.get("question_ref") or ""),
+        )
+    )
+
+    por_faixa = {FAIXA_ABAIXO: [], FAIXA_BASICO: [], FAIXA_ADEQUADO: [], FAIXA_AVANCADO: []}
+    for h in habilidades:
+        por_faixa[h["faixa"]].append(h)
+
+    return {
+        "disciplinas_disponiveis": disciplinas,
+        "habilidades": habilidades,
+        "por_faixa": por_faixa,
+        "_failed_by_skill": {k: v for k, v in failed_by_skill.items()},
+        "_skill_to_question_ids": {k: list(v) for k, v in skill_to_question_ids.items()},
+        "_students_snapshot": participating_students,
+    }
+
+
+def _student_row_dict(st: Student, school_by_id: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    turma_nome = "N/A"
+    serie_nome = "N/A"
+    escola_nome = "N/A"
+    if st.class_:
+        turma_nome = st.class_.name or "N/A"
+        if st.class_.grade:
+            serie_nome = st.class_.grade.name or "N/A"
+        scid = getattr(st.class_, "school_id", None)
+        if scid and school_by_id and scid in school_by_id:
+            escola_nome = school_by_id[scid].name or "N/A"
+    return {
+        "id": str(st.id),
+        "nome": st.name or "N/A",
+        "escola": escola_nome,
+        "serie": serie_nome,
+        "turma": turma_nome,
+    }
+
+
+def digital_students_passed_vs_failed_for_bucket(
+    students: List[Student],
+    failed_by_skill: Dict[str, Set[str]],
+    bucket_key: str,
+    school_by_id: Optional[Dict[str, Any]] = None,
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], int, int, int]:
+    """
+    Participantes no escopo vs quem errou ao menos uma questão da habilidade (bucket)
+    vs quem acertou todas as questões dessa habilidade no escopo.
+    bucket_key: chave em failed_by_skill (skill normalizada no online; skill||bloco no cartão).
+    """
+    failed_ids = failed_by_skill.get(bucket_key, set())
+    student_by_id = {s.id: s for s in students}
+    all_ids = set(student_by_id.keys())
+    passed_ids = all_ids - failed_ids
+    n_tot = len(students)
+    n_err = len(failed_ids)
+    n_ok = len(passed_ids)
+
+    def _sort_key(sid: str) -> str:
+        st = student_by_id.get(sid)
+        return (st.name or "") if st else ""
+
+    alunos_err: List[Dict[str, Any]] = []
+    for fid in sorted(failed_ids, key=_sort_key):
+        st = student_by_id.get(fid)
+        if not st:
+            continue
+        alunos_err.append(_student_row_dict(st, school_by_id))
+
+    alunos_ok: List[Dict[str, Any]] = []
+    for pid in sorted(passed_ids, key=_sort_key):
+        st = student_by_id.get(pid)
+        if not st:
+            continue
+        alunos_ok.append(_student_row_dict(st, school_by_id))
+
+    return alunos_err, alunos_ok, n_err, n_ok, n_tot
+
+
+def digital_students_who_failed_skill(
+    students: List[Student],
+    skill_id: str,
+    failed_by_skill: Dict[str, Set[str]],
+    school_by_id: Optional[Dict[str, Any]] = None,
+) -> Tuple[List[Dict[str, Any]], int, int]:
+    sk = _norm_skill_key(skill_id)
+    alunos_err, _, n_err, _, n_tot = digital_students_passed_vs_failed_for_bucket(
+        students, failed_by_skill, sk, school_by_id
+    )
+    return alunos_err, n_err, n_tot
+
+
+def _gabarito_answer_map(gabarito: AnswerSheetGabarito) -> Dict[int, str]:
+    raw = gabarito.correct_answers or {}
+    if isinstance(raw, str):
+        raw = json.loads(raw) or {}
+    out: Dict[int, str] = {}
+    for k, v in (raw or {}).items():
+        try:
+            out[int(k)] = str(v).upper() if v else ""
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
+def _disciplinas_config_from_gabarito_blocks(blocks_config: Any) -> List[Dict[str, Any]]:
+    """Mesma lógica de answer_sheet_routes._extrair_blocos_por_disciplina_cartao (sem import circular)."""
+    blocks = _extract_blocks_with_questions(blocks_config or {})
+    by_subject: Dict[str, Dict[str, Any]] = {}
+    for b in blocks:
+        sid = b.get("subject_id") or f"block_{b.get('block_id', 0)}"
+        sid = str(sid)
+        name = b.get("subject_name") or "Outras"
+        if sid not in by_subject:
+            by_subject[sid] = {"id": sid, "nome": name, "question_numbers": []}
+        by_subject[sid]["question_numbers"].extend(b.get("question_numbers", []))
+    return list(by_subject.values())
+
+
+def _question_num_to_subject_id(
+    disciplinas_config: List[Dict[str, Any]],
+    gab_map: Dict[int, str],
+) -> Dict[int, str]:
+    """Número da questão -> id do bloco/disciplina (para não misturar habilidades entre disciplinas)."""
+    out: Dict[int, str] = {}
+    for b in disciplinas_config:
+        sid = str(b["id"])
+        for x in b.get("question_numbers", []):
+            try:
+                out[int(x)] = sid
+            except (TypeError, ValueError):
+                continue
+    if not out and gab_map:
+        for qn in gab_map.keys():
+            out[int(qn)] = "geral"
+    return out
+
+
+def _participating_answer_sheet_result(r: AnswerSheetResult) -> bool:
+    """Aluno com cartão corrigido e ao menos um sinal de participação.
+
+    Regra principal: excluir faltantes/folha em branco, mas evitar falso-negativo quando o pipeline
+    grava `classification/grade/proficiency` sem preencher `answered_questions/detected_answers`.
+    """
+    if not r:
+        return False
+    # Se não há correção registrada, não considerar participante.
+    if getattr(r, "corrected_at", None) is None:
+        return False
+    if (r.answered_questions or 0) > 0:
+        return True
+    det = _parse_detected(r.detected_answers)
+    for v in det.values():
+        if v is None:
+            continue
+        if str(v).strip():
+            return True
+    # Fallback: alguns fluxos podem persistir apenas nota/classificação/proficiência.
+    if getattr(r, "classification", None):
+        if str(getattr(r, "classification", "")).strip():
+            return True
+    if getattr(r, "grade", None) is not None:
+        return True
+    if getattr(r, "proficiency", None) is not None:
+        return True
+    return False
+
+
+def _parse_detected(detected: Any) -> Dict[int, str]:
+    if not detected:
+        return {}
+    if isinstance(detected, str):
+        try:
+            detected = json.loads(detected)
+        except Exception:
+            return {}
+    out: Dict[int, str] = {}
+    for k, v in (detected or {}).items():
+        try:
+            kn = int(k)
+            out[kn] = str(v).upper() if v else ""
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
+def _answer_sheet_stat_bucket_key(
+    skill_norm: str, block_subject_id: str, question_ref: Optional[str] = None
+) -> str:
+    base = f"{skill_norm}||{str(block_subject_id).strip()}"
+    if question_ref is None or str(question_ref).strip() == "":
+        return base
+    return f"{base}||q:{str(question_ref).strip()}"
+
+
+def _resolve_failed_bucket_key(
+    failed_by_skill: Dict[str, Set[str]],
+    skill_id: str,
+    bloco_disciplina: Optional[str],
+    question_ref: Optional[str] = None,
+) -> str:
+    """Resolve a chave usada em _failed_by_skill (habilidade||disciplina)."""
+    sk = _norm_skill_key(skill_id)
+    b = (str(bloco_disciplina).strip() if bloco_disciplina else "")
+    qref = (str(question_ref).strip() if question_ref else "")
+    if b and b.lower() != "all":
+        return _answer_sheet_stat_bucket_key(sk, b, qref or None)
+    if qref:
+        q_matches = [k for k in failed_by_skill if k.startswith(f"{sk}||") and k.endswith(f"||q:{qref}")]
+        if len(q_matches) == 1:
+            return q_matches[0]
+    if b and b.lower() != "all":
+        return _answer_sheet_stat_bucket_key(sk, b)
+    if sk in failed_by_skill:
+        return sk
+    prefixed = [k for k in failed_by_skill if k.startswith(f"{sk}||")]
+    if len(prefixed) == 1:
+        return prefixed[0]
+    geral = _answer_sheet_stat_bucket_key(sk, "geral")
+    if geral in failed_by_skill:
+        return geral
+    return _answer_sheet_stat_bucket_key(sk, "geral")
+
+
+def build_skills_map_answer_sheet(
+    gabarito_id: str,
+    class_ids: List[str],
+    disciplina_block_id: Optional[str],
+) -> Dict[str, Any]:
+    gabarito = AnswerSheetGabarito.query.get(gabarito_id)
+    if not gabarito:
+        return {
+            "disciplinas_disponiveis": [],
+            "habilidades": [],
+            "por_faixa": {FAIXA_ABAIXO: [], FAIXA_BASICO: [], FAIXA_ADEQUADO: [], FAIXA_AVANCADO: []},
+            "_failed_by_skill": {},
+            "_students_all_count": 0,
+        }
+
+    blocks_config = getattr(gabarito, "blocks_config", None) or {}
+    gab_map = _gabarito_answer_map(gabarito)
+    disciplinas_config = _disciplinas_config_from_gabarito_blocks(blocks_config)
+    if not disciplinas_config:
+        disciplinas_config = [
+            {"id": "geral", "nome": "Geral", "question_numbers": sorted(gab_map.keys())}
+        ]
+
+    disciplinas_disponiveis = [
+        {"id": str(b["id"]), "nome": b.get("nome") or "Outras"} for b in disciplinas_config
+    ]
+    nome_por_disciplina = {str(b["id"]): (b.get("nome") or "Outras") for b in disciplinas_config}
+
+    q_skills = question_skills_map_for_answer_sheet(gabarito)
+    question_to_subject = _question_num_to_subject_id(disciplinas_config, gab_map)
+
+    allowed_qn: Set[int] = set()
+    filt = str(disciplina_block_id).strip().lower() if disciplina_block_id else ""
+    if filt and filt != "all":
+        for b in disciplinas_config:
+            if str(b["id"]) == str(disciplina_block_id).strip():
+                for x in b.get("question_numbers", []):
+                    try:
+                        allowed_qn.add(int(x))
+                    except (TypeError, ValueError):
+                        continue
+                break
+    else:
+        for b in disciplinas_config:
+            for x in b.get("question_numbers", []):
+                try:
+                    allowed_qn.add(int(x))
+                except (TypeError, ValueError):
+                    continue
+
+    # Fallback: quando o gabarito/topologia não trouxe "skills" por questão,
+    # tenta reaproveitar skills da prova vinculada (test_id) para não zerar o mapa.
+    if not any((q_skills.get(qn) or []) for qn in allowed_qn):
+        q_skills = _fallback_question_skills_from_test(getattr(gabarito, "test_id", None), allowed_qn)
+
+    question_nums = sorted(allowed_qn & (set(q_skills.keys()) | set(gab_map.keys())))
+    if not question_nums:
+        question_nums = sorted(allowed_qn)
+
+    skill_ids_for_norm: List[str] = []
+    for qn in question_nums:
+        for sid in q_skills.get(qn) or []:
+            if sid:
+                skill_ids_for_norm.append(str(sid).strip())
+    skills_db_map = _fetch_skills_batch({_norm_skill_key(s) for s in skill_ids_for_norm if s})
+
+    if not class_ids:
+        return {
+            "disciplinas_disponiveis": disciplinas_disponiveis,
+            "habilidades": [],
+            "por_faixa": {FAIXA_ABAIXO: [], FAIXA_BASICO: [], FAIXA_ADEQUADO: [], FAIXA_AVANCADO: []},
+            "_failed_by_skill": {},
+            "_students_all_count": 0,
+        }
+
+    students_all = (
+        Student.query.options(joinedload(Student.class_).joinedload(Class.grade))
+        .filter(Student.class_id.in_(class_ids))
+        .all()
+    )
+    student_ids_all = [s.id for s in students_all]
+    results = AnswerSheetResult.query.filter(
+        AnswerSheetResult.gabarito_id == gabarito_id,
+        AnswerSheetResult.student_id.in_(student_ids_all),
+    ).all()
+    result_by_student = {r.student_id: r for r in results}
+    students = [
+        s
+        for s in students_all
+        if s.id in result_by_student and _participating_answer_sheet_result(result_by_student[s.id])
+    ]
+
+    stats: Dict[str, Dict[str, int]] = defaultdict(lambda: {"correct": 0, "total": 0})
+    failed_by_skill: Dict[str, Set[str]] = defaultdict(set)
+
+    for st in students:
+        r = result_by_student.get(st.id)
+        detected = _parse_detected(r.detected_answers if r else None)
+        for qn in question_nums:
+            ca = gab_map.get(qn)
+            st_ans = detected.get(qn, "")
+            ok = bool(ca is not None and st_ans and st_ans == ca)
+            sids = q_skills.get(qn) or []
+            if not sids:
+                continue
+            block_sid = question_to_subject.get(qn) or "geral"
+            for raw_sid in sids:
+                if not raw_sid:
+                    continue
+                sk = _norm_skill_key(str(raw_sid).strip())
+                bucket = _answer_sheet_stat_bucket_key(sk, block_sid, str(qn))
+                stats[bucket]["total"] += 1
+                if ok:
+                    stats[bucket]["correct"] += 1
+                else:
+                    failed_by_skill[bucket].add(st.id)
+
+    habilidades: List[Dict[str, Any]] = []
+    for bucket, agg in stats.items():
+        sk = bucket
+        block_sid = "geral"
+        question_ref = ""
+        if "||q:" in bucket:
+            left, question_ref = bucket.rsplit("||q:", 1)
+        else:
+            left = bucket
+        if "||" in left:
+            sk, block_sid = left.split("||", 1)
+        else:
+            sk, block_sid = left, "geral"
+        total = int(agg["total"])
+        correct = int(agg["correct"])
+        pct = round_to_two_decimals((correct / total * 100.0) if total > 0 else 0.0)
+        faixa = faixa_from_percent(pct)
+        obj = skills_db_map.get(sk)
+        codigo, descricao = _habilidade_codigo_e_descricao(sk, obj)
+        dn = nome_por_disciplina.get(block_sid) or nome_por_disciplina.get(str(block_sid))
+        questao_numero = None
+        try:
+            questao_numero = int(str(question_ref))
+        except (TypeError, ValueError):
+            questao_numero = None
+        habilidades.append(
+            {
+                "skill_id": sk,
+                "codigo": codigo,
+                "descricao": descricao,
+                "subject_id": block_sid,
+                "disciplina_nome": dn or ("Geral" if block_sid == "geral" else "Outras"),
+                "question_ref": question_ref or None,
+                "questao_numero": questao_numero,
+                "percentual_acertos": pct,
+                "faixa": faixa,
+                "total_tentativas": total,
+            }
+        )
+
+    habilidades.sort(
+        key=lambda x: (
+            x["faixa"],
+            str(x.get("subject_id") or ""),
+            int(x.get("questao_numero")) if x.get("questao_numero") is not None else 10**9,
+            -x["percentual_acertos"],
+            x["codigo"],
+            x["skill_id"],
+        )
+    )
+    por_faixa = {FAIXA_ABAIXO: [], FAIXA_BASICO: [], FAIXA_ADEQUADO: [], FAIXA_AVANCADO: []}
+    for h in habilidades:
+        por_faixa[h["faixa"]].append(h)
+
+    return {
+        "disciplinas_disponiveis": disciplinas_disponiveis,
+        "habilidades": habilidades,
+        "por_faixa": por_faixa,
+        "_failed_by_skill": {k: set(v) for k, v in failed_by_skill.items()},
+        "_students_snapshot": students,
+        "_students_all_count": len(students_all),
+    }
+
+
+def answer_sheet_students_who_failed(
+    students: List[Student],
+    skill_id: str,
+    failed_by_skill: Dict[str, Set[str]],
+    school_by_id: Optional[Dict[str, Any]] = None,
+    bloco_disciplina: Optional[str] = None,
+    question_ref: Optional[str] = None,
+) -> Tuple[List[Dict[str, Any]], int, int]:
+    key = _resolve_failed_bucket_key(failed_by_skill, skill_id, bloco_disciplina, question_ref)
+    adapted: Dict[str, Set[str]] = {key: failed_by_skill.get(key, set())}
+    return digital_students_who_failed_skill(students, key, adapted, school_by_id)
+
+
+def answer_sheet_students_passed_vs_failed(
+    students: List[Student],
+    skill_id: str,
+    failed_by_skill: Dict[str, Set[str]],
+    school_by_id: Optional[Dict[str, Any]] = None,
+    bloco_disciplina: Optional[str] = None,
+    question_ref: Optional[str] = None,
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], int, int, int]:
+    key = _resolve_failed_bucket_key(failed_by_skill, skill_id, bloco_disciplina, question_ref)
+    return digital_students_passed_vs_failed_for_bucket(
+        students, failed_by_skill, key, school_by_id
+    )

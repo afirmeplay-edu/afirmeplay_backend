@@ -6,9 +6,10 @@ from datetime import datetime
 
 class UserQuickLinks(db.Model):
     __tablename__ = 'user_quick_links'
-    
+    __table_args__ = {"schema": "public"}
+
     id = db.Column(db.String, primary_key=True, default=lambda: str(uuid.uuid4()))
-    user_id = db.Column(db.String, db.ForeignKey('users.id'), nullable=False)
+    user_id = db.Column(db.String, db.ForeignKey('public.users.id'), nullable=False)
     quickLinks = db.Column(db.JSON, nullable=False)
     created_at = db.Column(db.TIMESTAMP, server_default=db.func.now())
     updated_at = db.Column(db.TIMESTAMP, server_default=db.func.now(), onupdate=db.func.now())

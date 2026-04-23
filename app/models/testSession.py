@@ -7,10 +7,11 @@ class TestSession(db.Model):
     Modelo para rastrear sessões de prova dos alunos
     """
     __tablename__ = 'test_sessions'
+    __table_args__ = {"schema": "tenant"}
     
     id = db.Column(db.String, primary_key=True, default=lambda: str(uuid.uuid4()))
-    student_id = db.Column(db.String, db.ForeignKey('student.id'), nullable=False)
-    test_id = db.Column(db.String, db.ForeignKey('test.id'), nullable=False)
+    student_id = db.Column(db.String, db.ForeignKey('tenant.student.id'), nullable=False)
+    test_id = db.Column(db.String, db.ForeignKey('tenant.test.id'), nullable=False)
     
     # Controle de tempo simplificado
     started_at = db.Column(db.TIMESTAMP, nullable=True)  # Quando o aluno iniciou
@@ -33,7 +34,7 @@ class TestSession(db.Model):
     
     # Campos para correção
     feedback = db.Column(db.Text, nullable=True)  # Feedback geral do professor
-    corrected_by = db.Column(db.String, db.ForeignKey('users.id'), nullable=True)  # Professor que corrigiu
+    corrected_by = db.Column(db.String, db.ForeignKey('public.users.id'), nullable=True)  # Professor que corrigiu
     corrected_at = db.Column(db.TIMESTAMP, nullable=True)  # Data da correção
     
     # Metadados

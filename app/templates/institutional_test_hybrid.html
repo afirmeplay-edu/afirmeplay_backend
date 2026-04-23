@@ -1008,14 +1008,39 @@
 			}
 
 			{% if test_data.letterhead_image_base64 %}
+			/* Timbrado full-page (A4 inteira) apenas em capa institucional e capas de bloco */
 			.institutional-cover.letterhead-bg,
-			.subject-cover.letterhead-bg,
-			.questions-section.letterhead-bg,
-			.answer-sheet.letterhead-bg {
+			.subject-cover.letterhead-bg {
+				position: relative;
+				box-sizing: border-box;
+				isolation: isolate;
+				background: transparent;
+			}
+			.institutional-cover.letterhead-bg::before,
+			.subject-cover.letterhead-bg::before {
+				content: "";
+				position: absolute;
+				/* Expande do box útil para cobrir a página inteira (incluindo margens @page) */
+				top: -1.5cm;
+				left: -2cm;
+				width: 21cm;
+				height: 29.7cm;
 				background-image: url("data:image/png;base64,{{ test_data.letterhead_image_base64 }}");
 				background-size: 100% 100%;
 				background-repeat: no-repeat;
-				background-position: center top;
+				background-position: center center;
+				z-index: -1;
+				pointer-events: none;
+			}
+			.institutional-cover.letterhead-bg .cover-footer {
+				background: rgba(255, 255, 255, 0.9);
+			}
+			/* Quando há timbrado, desce o primeiro conteúdo para não cobrir o logo */
+			.institutional-cover.letterhead-bg .cover-header {
+				margin-top: 10cm;
+			}
+			.subject-cover.letterhead-bg .block-number {
+				margin-top: 10cm;
 			}
 			{% endif %}
 		</style>
@@ -1030,6 +1055,9 @@
 		{% if include_cover %}
 		<div class="institutional-cover{% if lh %} letterhead-bg{% endif %}">
 			<div class="cover-header">
+				{# Logo da capa desativado temporariamente.
+				   Mantido comentado para reativação futura. #}
+				{#
 				<div class="municipality-logo">
 					{% if test_data.municipality_logo %}
 					<img
@@ -1054,6 +1082,7 @@
 					</svg>
 					{% endif %}
 				</div>
+				#}
 				<div class="header-titles">
 					<div class="municipality-name">
 						{{ test_data.municipality or 'SÃO MIGUEL DOS CAMPOS' }}
@@ -1129,7 +1158,7 @@
 			</div>
 		</div>
 
-		<div class="questions-section{% if lh %} letterhead-bg{% endif %}">
+		<div class="questions-section">
 			{% for question in block.questions %}
 			<div class="question no-break">
 				<div class="question-header">
@@ -1189,7 +1218,7 @@
 			</div>
 		</div>
 
-		<div class="questions-section{% if lh %} letterhead-bg{% endif %}">
+		<div class="questions-section">
 			{% for question in subject_questions %}
 			<div class="question no-break">
 				<div class="question-header">
@@ -1235,7 +1264,7 @@
 
 		<!-- Formulário de Respostas com Marcadores Geométricos -->
 		{% if include_answer_sheet %}
-		<div class="answer-sheet{% if lh %} letterhead-bg{% endif %}">
+		<div class="answer-sheet">
 			<!-- ÂNCORAS DA PÁGINA A4 (dentro do .answer-sheet com position: relative) -->
 			<div class="a4-anchor-square anchor-top-left">
 				<svg width="20" height="20" xmlns="http://www.w3.org/2000/svg">

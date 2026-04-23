@@ -10,8 +10,9 @@ from app.decorators import requires_city_context
 from app.decorators.role_required import get_current_tenant_id
 from datetime import datetime
 from app import db
+from app.multitenant.flask_g import get_orm_session
 from flask_jwt_extended import jwt_required
-from werkzeug.security import generate_password_hash
+from app.utils.auth import hash_password
 from marshmallow import ValidationError
 from app.models.studentAnswer import StudentAnswer
 from app.models.studentClass import Class
@@ -43,7 +44,7 @@ def _get_logo_path():
 
 @bp.errorhandler(SQLAlchemyError)
 def handle_db_error(error):
-    db.session.rollback()
+    get_orm_session().rollback()
     logging.error(f"Database error: {str(error)}")
     return jsonify({"error": "Database error occurred", "details": str(error)}), 500
 
@@ -77,7 +78,7 @@ def criar_usuario_e_aluno():
                 return jsonify({"error": f"Missing required field: {field}"}), 400
 
         # Buscar turma para determinar city_id (necessário tanto para usuário novo quanto existente)
-        class_obj = Class.query.get(data["class_id"])
+        class_obj = get_orm_session().query(Class).get(data["class_id"])
         if not class_obj:
             return jsonify({"error": "Class not found"}), 404
         
@@ -85,7 +86,7 @@ def criar_usuario_e_aluno():
         # ✅ CORRIGIDO: Converter para string (School.id é VARCHAR)
         from app.utils.uuid_helpers import uuid_to_str
         school_id_str = uuid_to_str(class_obj.school_id)
-        school = School.query.filter(School.id == school_id_str).first() if school_id_str else None
+        school = get_orm_session().query(School).filter(School.id == school_id_str).first() if school_id_str else None
         if not school:
             return jsonify({"error": "School not found for the specified class"}), 404
         
@@ -93,33 +94,33 @@ def criar_usuario_e_aluno():
         city_id = school.city_id
 
         # Tenta encontrar o usuário pelo email
-        usuario = User.query.filter_by(email=data["email"]).first()
+        usuario = get_orm_session().query(User).filter_by(email=data["email"]).first()
         usuario_foi_criado_agora = False  # Flag para saber se criamos o usuário agora
 
         if usuario:
             logging.info(f"Usuário existente encontrado: {usuario.email}")
             # Verificar se o usuário já é um aluno
-            if Student.query.filter_by(user_id=usuario.id).first():
+            if get_orm_session().query(Student).filter_by(user_id=usuario.id).first():
                 logging.warning(f"Usuário {usuario.email} já é um aluno.") 
                 return jsonify({"error": "User is already a student"}), 400
         else:
             logging.info("Usuário não encontrado, criando novo usuário.")
             usuario_foi_criado_agora = True  # Marcar que vamos criar o usuário agora
             # Verificar se matrícula já existe (caso fornecida) - apenas para novo usuário
-            if data.get("registration") and User.query.filter_by(registration=data["registration"]).first():
+            if data.get("registration") and get_orm_session().query(User).filter_by(registration=data["registration"]).first():
                 return jsonify({"error": "Registration number already exists"}), 400
             
             # Criar usuário (role padrão: aluno) com city_id da escola
             usuario = User(
                 name=data["name"],
                 email=data["email"],
-                password_hash=generate_password_hash(data["password"]),
+                password_hash=hash_password(data["password"]),
                 registration=data.get("registration"),
                 role=RoleEnum("aluno"),
                 city_id=city_id
             )
-            db.session.add(usuario)
-            db.session.flush() 
+            get_orm_session().add(usuario)
+            get_orm_session().flush() 
             print(usuario.id)
             logging.info(f"Novo usuário criado com sucesso. ID: {usuario.id}")
 
@@ -131,7 +132,7 @@ def criar_usuario_e_aluno():
             except ValueError:
                 # Se o usuário foi criado neste request, precisamos desfazê-lo
                 if not usuario.id:
-                    db.session.rollback()
+                    get_orm_session().rollback()
                 return jsonify({"error": "Invalid birth date format. Use YYYY-MM-DD"}), 400
 
         # Determinar grade_id (série) com fallback da turma
@@ -147,8 +148,8 @@ def criar_usuario_e_aluno():
             grade_id=grade_id,
             school_id=class_obj.school_id
         )
-        db.session.add(novo_aluno)
-        db.session.flush()  # Flush para obter o ID do aluno
+        get_orm_session().add(novo_aluno)
+        get_orm_session().flush()  # Flush para obter o ID do aluno
         
         # Salvar senha em texto plano na tabela de log apenas se criamos um novo usuário
         # (quando o usuário já existe, não temos a senha original em texto plano)
@@ -165,9 +166,9 @@ def criar_usuario_e_aluno():
                 school_id=class_obj.school_id,
                 city_id=city_id
             )
-            db.session.add(password_log)
+            get_orm_session().add(password_log)
         
-        db.session.commit()
+        get_orm_session().commit()
 
         logging.info(f"Aluno criado com sucesso para o usuário ID: {usuario.id}")
 
@@ -193,11 +194,11 @@ def criar_usuario_e_aluno():
         }), 201
 
     except SQLAlchemyError as e:
-        db.session.rollback()
+        get_orm_session().rollback()
         logging.error(f"Database error during user/student creation: {str(e)}")
         return jsonify({"error": "Database error occurred", "details": str(e)}), 500
     except Exception as e:
-        db.session.rollback()
+        get_orm_session().rollback()
         logging.error(f"Unexpected error during user/student creation: {str(e)}", exc_info=True)
         return jsonify({"error": "Unexpected error occurred", "details": str(e)}), 500
 
@@ -271,7 +272,7 @@ def listar_alunos():
             return jsonify({"message": "Usuário não encontrado"}), 404
 
         # Base query with joins - usando LEFT JOIN para incluir alunos sem escola
-        query = db.session.query(
+        query = get_orm_session().query(
             Student,
             User,
             School,
@@ -296,12 +297,12 @@ def listar_alunos():
             from app.models.teacher import Teacher
             from app.models.schoolTeacher import SchoolTeacher
             
-            teacher = Teacher.query.filter_by(user_id=user['id']).first()
+            teacher = get_orm_session().query(Teacher).filter_by(user_id=user['id']).first()
             if not teacher:
                 return jsonify({"message": "Professor não encontrado"}), 404
             
             # Buscar escolas onde o professor está vinculado
-            teacher_schools = SchoolTeacher.query.filter_by(teacher_id=teacher.id).all()
+            teacher_schools = get_orm_session().query(SchoolTeacher).filter_by(teacher_id=teacher.id).all()
             school_ids = [ts.school_id for ts in teacher_schools]
             
             if school_ids:
@@ -313,7 +314,7 @@ def listar_alunos():
             from app.models.manager import Manager
             from app.utils.uuid_helpers import uuid_to_str
 
-            manager = Manager.query.filter_by(user_id=user['id']).first()
+            manager = get_orm_session().query(Manager).filter_by(user_id=user['id']).first()
             if not manager:
                 return jsonify({"message": "Diretor/Coordenador não encontrado na tabela manager"}), 404
             school_id_str = uuid_to_str(manager.school_id) if manager.school_id else None
@@ -328,7 +329,7 @@ def listar_alunos():
                 return jsonify({"message": "ID da cidade não disponível para este usuário"}), 400
 
             # Busca todas as escolas da cidade
-            schools_in_city = School.query.filter_by(city_id=city_id).all()
+            schools_in_city = get_orm_session().query(School).filter_by(city_id=city_id).all()
             school_ids = [school.id for school in schools_in_city]
 
             # Busca alunos das escolas da cidade OU alunos sem escola mas com city_id correto
@@ -373,7 +374,7 @@ def obter_aluno_completo(student_id):
 
         # Buscar o aluno com todas as relações
         # IMPORTANTE: student_id é na verdade o user_id (ID da tabela users)
-        student = db.session.query(
+        student = get_orm_session().query(
             Student,
             User,
             School,
@@ -406,11 +407,11 @@ def obter_aluno_completo(student_id):
             from app.models.teacher import Teacher
             from app.models.schoolTeacher import SchoolTeacher
             
-            teacher = Teacher.query.filter_by(user_id=user['id']).first()
+            teacher = get_orm_session().query(Teacher).filter_by(user_id=user['id']).first()
             if not teacher:
                 return jsonify({"message": "Professor não encontrado"}), 404
             
-            teacher_schools = SchoolTeacher.query.filter_by(teacher_id=teacher.id).all()
+            teacher_schools = get_orm_session().query(SchoolTeacher).filter_by(teacher_id=teacher.id).all()
             school_ids = [ts.school_id for ts in teacher_schools]
             
             if not school_ids or (student_obj.school_id and student_obj.school_id not in school_ids):
@@ -420,7 +421,7 @@ def obter_aluno_completo(student_id):
             from app.models.manager import Manager
             from app.utils.uuid_helpers import uuid_to_str
 
-            manager = Manager.query.filter_by(user_id=user['id']).first()
+            manager = get_orm_session().query(Manager).filter_by(user_id=user['id']).first()
             if not manager:
                 return jsonify({"message": "Diretor/Coordenador não encontrado"}), 404
             manager_school_id_str = uuid_to_str(manager.school_id) if manager.school_id else None
@@ -438,17 +439,17 @@ def obter_aluno_completo(student_id):
         # Buscar município e estado através da escola
         city = None
         if school and school.city_id:
-            city = City.query.get(school.city_id)
+            city = get_orm_session().query(City).get(school.city_id)
 
         # Buscar professores vinculados à turma do aluno
         teachers_data = []
         if class_obj:
-            teacher_classes = TeacherClass.query.filter_by(class_id=class_obj.id).all()
+            teacher_classes = get_orm_session().query(TeacherClass).filter_by(class_id=class_obj.id).all()
             
             for tc in teacher_classes:
-                teacher = Teacher.query.get(tc.teacher_id)
+                teacher = get_orm_session().query(Teacher).get(tc.teacher_id)
                 if teacher:
-                    teacher_user = User.query.get(teacher.user_id)
+                    teacher_user = get_orm_session().query(User).get(teacher.user_id)
                     teachers_data.append({
                         "id": teacher.id,
                         "name": teacher.name,
@@ -516,7 +517,7 @@ def obter_aluno_completo(student_id):
 @role_required("admin", "professor", "coordenador", "diretor")
 def atualizar_aluno(student_id, class_id):
     try:
-        aluno = Student.query.filter_by(id=student_id, class_id=class_id).first()
+        aluno = get_orm_session().query(Student).filter_by(id=student_id, class_id=class_id).first()
 
         if not aluno:
             return jsonify({"error": "Student not found"}), 404
@@ -546,7 +547,7 @@ def atualizar_aluno(student_id, class_id):
             
             # Buscar nova turma
             from app.models.studentClass import Class
-            new_class = Class.query.get(new_class_id)
+            new_class = get_orm_session().query(Class).get(new_class_id)
             
             if not new_class:
                 return jsonify({"error": "Nova turma não encontrada"}), 404
@@ -561,7 +562,7 @@ def atualizar_aluno(student_id, class_id):
                 school_changed = True
                 
                 # Atualizar city_id do usuário
-                new_school = School.query.get(new_class.school_id)
+                new_school = get_orm_session().query(School).get(new_class.school_id)
                 if new_school and new_school.city_id != usuario.city_id:
                     usuario.city_id = new_school.city_id
                     logging.info(f"Aluno {student_id} movido para escola {new_class.school_id}. City_id atualizado para {new_school.city_id}")
@@ -587,12 +588,12 @@ def atualizar_aluno(student_id, class_id):
 
         # Se school_id mudou mas class_id não (caso raro), atualizar city_id
         if not class_changed and aluno.school_id:
-            school = School.query.get(aluno.school_id)
+            school = get_orm_session().query(School).get(aluno.school_id)
             if school and school.city_id != usuario.city_id:
                 usuario.city_id = school.city_id
                 logging.info(f"Atualizando city_id do aluno {usuario.id} para {school.city_id}")
 
-        db.session.commit()
+        get_orm_session().commit()
         
         # Preparar resposta detalhada
         response = {
@@ -623,10 +624,10 @@ def atualizar_aluno(student_id, class_id):
         return jsonify(response), 200
 
     except IntegrityError as e:
-        db.session.rollback()
+        get_orm_session().rollback()
         return jsonify({"error": "Database integrity error", "details": str(e)}), 400
     except Exception as e:
-        db.session.rollback()
+        get_orm_session().rollback()
         logging.error(f"Error updating student: {str(e)}", exc_info=True)
         return jsonify({"error": "Error updating student", "details": str(e)}), 500
 
@@ -635,24 +636,24 @@ def atualizar_aluno(student_id, class_id):
 @role_required("admin", "professor", "coordenador", "diretor")
 def deletar_aluno(aluno_id):
     try:
-        aluno = Student.query.filter_by(id=aluno_id).first()
+        aluno = get_orm_session().query(Student).filter_by(id=aluno_id).first()
 
         if not aluno:
             return jsonify({"error": "Student not found"}), 404
 
         # Verifica se existe usuário associado
         if aluno.user:
-            db.session.delete(aluno.user)
+            get_orm_session().delete(aluno.user)
         
-        db.session.delete(aluno)
-        db.session.commit()
+        get_orm_session().delete(aluno)
+        get_orm_session().commit()
         return jsonify({"message": "Student deleted successfully"}), 200
 
     except IntegrityError as e:
-        db.session.rollback()
+        get_orm_session().rollback()
         return jsonify({"error": "Database integrity error", "details": str(e)}), 400
     except Exception as e:
-        db.session.rollback()
+        get_orm_session().rollback()
         logging.error(f"Error deleting student: {str(e)}", exc_info=True)
         return jsonify({"error": "Error deleting student", "details": str(e)}), 500
 
@@ -670,7 +671,7 @@ def get_available_students():
 
         # Buscar TODOS os usuários com role aluno (disponíveis para alocação)
         # Isso inclui tanto usuários sem registro Student quanto com Student mas sem school_id
-        all_users_with_aluno_role = db.session.query(
+        all_users_with_aluno_role = get_orm_session().query(
             User
         ).filter(
             User.role == RoleEnum.ALUNO
@@ -683,7 +684,7 @@ def get_available_students():
         
         for user_obj in all_users_with_aluno_role:
             # Verificar se tem registro na tabela Student
-            student_record = Student.query.filter_by(user_id=user_obj.id).first()
+            student_record = get_orm_session().query(Student).filter_by(user_id=user_obj.id).first()
             
             if student_record:
                 # Se tem registro Student, só é disponível se school_id for NULL
@@ -819,7 +820,7 @@ def get_students_by_school(school_id):
             return jsonify({"message": "User not found"}), 404
 
         # Verify if the school exists
-        school = School.query.filter_by(id=school_id).first()
+        school = get_orm_session().query(School).filter_by(id=school_id).first()
         if not school:
             logging.error(f"School not found with id: {school_id}")
             return jsonify({"message": "School not found"}), 404
@@ -833,11 +834,11 @@ def get_students_by_school(school_id):
             from app.models.teacher import Teacher
             from app.models.schoolTeacher import SchoolTeacher
             
-            teacher = Teacher.query.filter_by(user_id=user['id']).first()
+            teacher = get_orm_session().query(Teacher).filter_by(user_id=user['id']).first()
             if not teacher:
                 return jsonify({"message": "Professor não encontrado"}), 404
             
-            teacher_schools = SchoolTeacher.query.filter_by(teacher_id=teacher.id).all()
+            teacher_schools = get_orm_session().query(SchoolTeacher).filter_by(teacher_id=teacher.id).all()
             teacher_school_ids = [ts.school_id for ts in teacher_schools]
             
             if school_id not in teacher_school_ids:
@@ -847,7 +848,7 @@ def get_students_by_school(school_id):
             # Director and coordinator can only see students from their school
             from app.models.manager import Manager
             
-            manager = Manager.query.filter_by(user_id=user['id']).first()
+            manager = get_orm_session().query(Manager).filter_by(user_id=user['id']).first()
             if not manager:
                 return jsonify({"message": "Diretor/Coordenador não encontrado na tabela manager"}), 404
             
@@ -863,7 +864,7 @@ def get_students_by_school(school_id):
 
         # Get all students from the school with related data using joins
         try:
-            students = db.session.query(
+            students = get_orm_session().query(
                 Student,
                 User,
                 School,
@@ -910,13 +911,13 @@ def get_students_by_class(class_id):
             return jsonify({"message": "ID de turma inválido"}), 400
         
         # Check if the class exists (optional, but good practice)
-        class_obj = Class.query.get(class_id_uuid)
+        class_obj = get_orm_session().query(Class).get(class_id_uuid)
         if not class_obj:
             logging.warning(f"Class not found with ID: {class_id}")
             return jsonify({"message": "Class not found"}), 404
 
         # Query with explicit joins to get all related data
-        students = db.session.query(
+        students = get_orm_session().query(
             Student,
             User,
             School,
@@ -956,7 +957,7 @@ def get_students_by_school_and_class(school_id, class_id):
         logging.info(f"Fetching students for school_id: {school_id} and class_id: {class_id}")
 
         # Primeiro validar se escola e turma existem
-        school = School.query.get(school_id)
+        school = get_orm_session().query(School).get(school_id)
         if not school:
             logging.warning(f"School not found with id: {school_id}")
             return jsonify({"error": "School not found"}), 404
@@ -967,7 +968,7 @@ def get_students_by_school_and_class(school_id, class_id):
         if not class_id_uuid:
             return jsonify({"error": "ID de turma inválido"}), 400
         
-        class_obj = Class.query.get(class_id_uuid)
+        class_obj = get_orm_session().query(Class).get(class_id_uuid)
         if not class_obj:
             logging.warning(f"Class not found with id: {class_id}")
             return jsonify({"error": "Class not found"}), 404
@@ -989,7 +990,7 @@ def get_students_by_school_and_class(school_id, class_id):
         if not class_id_uuid:
             return jsonify({"error": "ID de turma inválido"}), 400
         
-        students = Student.query.filter_by(
+        students = get_orm_session().query(Student).filter_by(
             school_id=school_id,
             class_id=class_id_uuid
         ).all()
@@ -1001,13 +1002,13 @@ def get_students_by_school_and_class(school_id, class_id):
         # Agora buscar os dados relacionados para cada aluno
         formatted_students = []
         for student in students:
-            user = User.query.get(student.user_id)
+            user = get_orm_session().query(User).get(student.user_id)
             # ✅ CORRIGIDO: Converter para string (School.id é VARCHAR)
             from app.utils.uuid_helpers import uuid_to_str
             school_id_str = uuid_to_str(student.school_id)
-            school = School.query.filter(School.id == school_id_str).first() if school_id_str else None
-            class_obj = Class.query.get(student.class_id)
-            grade = Grade.query.get(student.grade_id) if student.grade_id else None
+            school = get_orm_session().query(School).filter(School.id == school_id_str).first() if school_id_str else None
+            class_obj = get_orm_session().query(Class).get(student.class_id)
+            grade = get_orm_session().query(Grade).get(student.grade_id) if student.grade_id else None
             
             formatted_students.append(format_student_details(student, user, school, class_obj, grade))
         
@@ -1028,7 +1029,7 @@ def get_student_class(student_id):
         logging.info(f"Fetching class for user_id: {student_id}")
 
         # Buscar o aluno com suas relações
-        student = db.session.query(
+        student = get_orm_session().query(
             Student,
             User,
             School,
@@ -1072,7 +1073,7 @@ def get_student_class(student_id):
                 return jsonify({"message": "You don't have permission to view this student's class"}), 403
 
         # Buscar avaliações aplicadas à classe usando o relacionamento class_tests
-        class_tests = ClassTest.query.filter_by(class_id=class_obj.id).all()
+        class_tests = get_orm_session().query(ClassTest).filter_by(class_id=class_obj.id).all()
         applied_test_ids = [ct.test_id for ct in class_tests]
 
         # Formatar resposta com detalhes da classe
@@ -1132,7 +1133,7 @@ def get_current_student():
         # Garantir schema do tenant: Student está em city_xxx, não em public
         tenant_ctx = get_current_tenant_context()
         if not tenant_ctx or not getattr(tenant_ctx, "has_tenant_context", False) or tenant_ctx.schema == "public":
-            user_obj = User.query.get(user["id"])
+            user_obj = get_orm_session().query(User).get(user["id"])
             if user_obj and getattr(user_obj, "city_id", None):
                 schema = city_id_to_schema_name(str(user_obj.city_id))
                 set_search_path(schema)
@@ -1142,7 +1143,7 @@ def get_current_student():
                 }), 400
 
         # Buscar aluno pelo user_id com todas as relações
-        student = db.session.query(
+        student = get_orm_session().query(
             Student,
             User,
             School,
@@ -1168,17 +1169,17 @@ def get_current_student():
         # Buscar município e estado através da escola
         city = None
         if school and school.city_id:
-            city = City.query.get(school.city_id)
+            city = get_orm_session().query(City).get(school.city_id)
 
         # Buscar professores vinculados à turma do aluno
         teachers_data = []
         if class_obj:
-            teacher_classes = TeacherClass.query.filter_by(class_id=class_obj.id).all()
+            teacher_classes = get_orm_session().query(TeacherClass).filter_by(class_id=class_obj.id).all()
             
             for tc in teacher_classes:
-                teacher = Teacher.query.get(tc.teacher_id)
+                teacher = get_orm_session().query(Teacher).get(tc.teacher_id)
                 if teacher:
-                    teacher_user = User.query.get(teacher.user_id)
+                    teacher_user = get_orm_session().query(User).get(teacher.user_id)
                     teachers_data.append({
                         "id": teacher.id,
                         "name": teacher.name,
@@ -1266,7 +1267,7 @@ def get_password_report():
             return jsonify({"error": "Usuário não encontrado"}), 401
         
         # 2. Construir query base
-        query = db.session.query(
+        query = get_orm_session().query(
             StudentPasswordLog,
             School,
             City,
@@ -1294,7 +1295,7 @@ def get_password_report():
             query = query.filter(StudentPasswordLog.city_id == city_id)
         elif user['role'] in ["diretor", "coordenador"]:
             # Diretor e coordenador veem apenas alunos da sua escola
-            manager = Manager.query.filter_by(user_id=user['id']).first()
+            manager = get_orm_session().query(Manager).filter_by(user_id=user['id']).first()
             if not manager:
                 return jsonify({"error": "Diretor/Coordenador não encontrado na tabela manager"}), 404
             if not manager.school_id:
@@ -1302,12 +1303,12 @@ def get_password_report():
             query = query.filter(StudentPasswordLog.school_id == manager.school_id)
         elif user['role'] == "professor":
             # Professor vê apenas alunos das escolas onde está vinculado
-            teacher = Teacher.query.filter_by(user_id=user['id']).first()
+            teacher = get_orm_session().query(Teacher).filter_by(user_id=user['id']).first()
             if not teacher:
                 return jsonify({"error": "Professor não encontrado na tabela teacher"}), 404
             
             # Buscar escolas onde o professor está vinculado
-            school_teachers = SchoolTeacher.query.filter_by(teacher_id=teacher.id).all()
+            school_teachers = get_orm_session().query(SchoolTeacher).filter_by(teacher_id=teacher.id).all()
             school_ids = [st.school_id for st in school_teachers]
             
             if not school_ids:
@@ -1317,7 +1318,7 @@ def get_password_report():
             query = query.filter(StudentPasswordLog.school_id.in_(school_ids))
             
             # Buscar turmas onde o professor está vinculado
-            teacher_classes = TeacherClass.query.filter_by(teacher_id=teacher.id).all()
+            teacher_classes = get_orm_session().query(TeacherClass).filter_by(teacher_id=teacher.id).all()
             class_ids = [tc.class_id for tc in teacher_classes]
             
             # Se professor está vinculado a turmas específicas, filtrar por elas
@@ -1468,7 +1469,7 @@ def get_password_report_pdf():
             return jsonify({"error": "Usuário não encontrado"}), 401
 
         # Construir query base (mesma do Excel)
-        query = db.session.query(
+        query = get_orm_session().query(
             StudentPasswordLog,
             School,
             City,
@@ -1498,16 +1499,16 @@ def get_password_report_pdf():
             if school_id_param:
                 query = query.filter(StudentPasswordLog.school_id == school_id_param)
         elif user['role'] in ["diretor", "coordenador"]:
-            manager = Manager.query.filter_by(user_id=user['id']).first()
+            manager = get_orm_session().query(Manager).filter_by(user_id=user['id']).first()
             if not manager or not manager.school_id:
                 return jsonify({"error": "Diretor/Coordenador não está vinculado a nenhuma escola"}), 400
             query = query.filter(StudentPasswordLog.school_id == manager.school_id)
             school_id_param = str(manager.school_id)
         elif user['role'] == "professor":
-            teacher = Teacher.query.filter_by(user_id=user['id']).first()
+            teacher = get_orm_session().query(Teacher).filter_by(user_id=user['id']).first()
             if not teacher:
                 return jsonify({"error": "Professor não encontrado"}), 404
-            school_teachers = SchoolTeacher.query.filter_by(teacher_id=teacher.id).all()
+            school_teachers = get_orm_session().query(SchoolTeacher).filter_by(teacher_id=teacher.id).all()
             school_ids = [st.school_id for st in school_teachers]
             if not school_ids:
                 return jsonify({"error": "Professor não está vinculado a nenhuma escola"}), 400
@@ -1565,10 +1566,10 @@ def get_password_report_pdf():
             elif grade:
                 serie_label = grade.name
         if not escola_nome and school_id_param:
-            school_obj = School.query.get(school_id_param)
+            school_obj = get_orm_session().query(School).get(school_id_param)
             escola_nome = school_obj.name if school_obj else None
             if school_obj and school_obj.city_id:
-                city_obj = City.query.get(school_obj.city_id)
+                city_obj = get_orm_session().query(City).get(school_obj.city_id)
                 municipio_nome = city_obj.name if city_obj else None
 
         total_alunos = sum(len(t["alunos"]) for t in turmas)

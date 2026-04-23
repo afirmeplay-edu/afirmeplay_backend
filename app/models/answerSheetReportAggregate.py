@@ -13,7 +13,7 @@ class AnswerSheetReportAggregate(db.Model):
     id = db.Column(db.String, primary_key=True, default=lambda: str(uuid.uuid4()))
     gabarito_id = db.Column(
         db.String,
-        db.ForeignKey("answer_sheet_gabaritos.id"),
+        db.ForeignKey("tenant.answer_sheet_gabaritos.id"),
         nullable=False,
         index=True,
     )
@@ -43,6 +43,7 @@ class AnswerSheetReportAggregate(db.Model):
             "scope_id",
             name="uq_answer_sheet_report_aggregate_scope",
         ),
+        {"schema": "tenant"},
     )
 
     def mark_dirty(self):

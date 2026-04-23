@@ -15,6 +15,7 @@ from app import db
 from app.decorators.role_required import get_current_tenant_id
 from app.decorators import requires_city_context
 from app.utils.tenant_middleware import set_search_path, get_current_tenant_context, city_id_to_schema_name
+from app.multitenant.physical_schema_binding import get_effective_tenant_physical_schema
 from app.utils.uuid_helpers import ensure_uuid, ensure_uuid_list
 from flask_jwt_extended import jwt_required
 from app.decorators.role_required import role_required, get_current_user_from_token
@@ -321,15 +322,9 @@ def criar_avaliacao():
                         owner_user_id=owner_user_id
                     )
                     
-                    # Salvar questão em public.question (forçar search_path)
-                    current_search_path = db.session.execute(text("SHOW search_path")).fetchone()[0]
-                    db.session.execute(text("SET search_path TO public"))
-                    
+                    # Questões em public.question (metadata ORM)
                     db.session.add(question)
                     db.session.flush()  # Para obter o ID da questão
-                    
-                    # Restaurar search_path original
-                    db.session.execute(text(f"SET search_path TO {current_search_path}"))
                     
                     # Criar associação na tabela test_questions
                     from app.models.testQuestion import TestQuestion
@@ -859,9 +854,7 @@ def atualizar_status_avaliacao(test_id):
 @role_required("admin", "professor", "coordenador", "diretor", "aluno","tecadm")
 def obter_avaliacao(test_id):
     try:
-        from sqlalchemy import text
-        search_path_result = db.session.execute(text("SHOW search_path")).fetchone()
-        current_search_path = search_path_result[0]
+        path_initial = get_effective_tenant_physical_schema()
 
         test = Test.query.options(
             joinedload(Test.creator),
@@ -869,20 +862,17 @@ def obter_avaliacao(test_id):
             joinedload(Test.grade)
         ).get(test_id)
 
-        # Prova de competição pode ter sido criada em public (fallback); tentar public se não achar no schema atual
-        if not test and current_search_path and current_search_path != "public":
-            db.session.execute(text("SET search_path TO public"))
+        # Fallback: tentar sem override de tenant (apenas public no bind)
+        if not test and path_initial != "public":
+            set_search_path("public")
             test = Test.query.options(
                 joinedload(Test.creator),
                 joinedload(Test.subject_rel),
                 joinedload(Test.grade)
             ).get(test_id)
-            if test:
-                current_search_path = "public"
 
         if not test:
-            if current_search_path != search_path_result[0]:
-                db.session.execute(text(f"SET search_path TO {search_path_result[0]}"))
+            set_search_path(path_initial)
             return jsonify({"error": "Test not found"}), 404
 
         from app.models.testQuestion import TestQuestion
@@ -894,12 +884,11 @@ def obter_avaliacao(test_id):
             test_questions_list = TestQuestion.query.filter_by(test_id=test.id).order_by(TestQuestion.order).all()
         except Exception:
             pass
-        if not test_questions_list and current_search_path and current_search_path != "public":
+        active_physical = get_effective_tenant_physical_schema()
+        if not test_questions_list and active_physical != "public":
             try:
-                db.session.execute(text("SET search_path TO public"))
+                set_search_path("public")
                 test_questions_list = TestQuestion.query.filter_by(test_id=test.id).order_by(TestQuestion.order).all()
-                if test_questions_list:
-                    current_search_path = "public"
             except Exception:
                 pass
 
@@ -909,22 +898,10 @@ def obter_avaliacao(test_id):
         else:
             question_ids = [tq.question_id for tq in test_questions_list]
 
-        # Carregar Question: competição (test em public) tem questões no tenant; senão usar schema atual
-        schema_for_questions = search_path_result[0]
-        if question_ids and current_search_path == "public" and schema_for_questions == "public":
-            user = get_current_user_from_token()
-            if user:
-                user_obj = User.query.get(user.get("id") or user.get("user_id"))
-                if user_obj and getattr(user_obj, "city_id", None):
-                    schema_for_questions = city_id_to_schema_name(str(user_obj.city_id))
-                else:
-                    ctx = get_current_tenant_context()
-                    if ctx and getattr(ctx, "has_tenant_context", False) and ctx.schema:
-                        schema_for_questions = ctx.schema
+        # Question está em public.* (metadata)
         if not question_ids:
             ordered_questions = []
         else:
-            db.session.execute(text(f"SET search_path TO {schema_for_questions}"))
             questions_loaded = Question.query.filter(Question.id.in_(question_ids)).options(
                 jl(Question.subject),
                 jl(Question.grade),
@@ -938,7 +915,7 @@ def obter_avaliacao(test_id):
             else:
                 ordered_questions = [questions_dict[str(qid)] for qid in question_ids if str(qid) in questions_dict]
 
-        db.session.execute(text(f"SET search_path TO {search_path_result[0]}"))
+        set_search_path(path_initial)
 
         data = format_test_response(test, questions=ordered_questions)
         # Aluno abrindo olimpíada: garantir type OLIMPIADA quando aplicado via StudentTestOlimpics
@@ -951,17 +928,17 @@ def obter_avaliacao(test_id):
                     try:
                         ctx = get_current_tenant_context()
                         tenant_schema = (ctx.schema if (ctx and getattr(ctx, 'has_tenant_context', False)) else None) or None
-                        if tenant_schema and current_search_path != tenant_schema:
-                            db.session.execute(text(f"SET search_path TO {tenant_schema}"))
+                        if tenant_schema and get_effective_tenant_physical_schema() != tenant_schema:
+                            set_search_path(tenant_schema)
                         has_olympics = StudentTestOlimpics.query.filter_by(
                             test_id=str(test_id),
                             student_id=str(student.id)
                         ).first() is not None
-                        db.session.execute(text(f"SET search_path TO {search_path_result[0]}"))
+                        set_search_path(path_initial)
                         if has_olympics:
                             data['type'] = 'OLIMPIADA'
                     except Exception:
-                        db.session.execute(text(f"SET search_path TO {search_path_result[0]}"))
+                        set_search_path(path_initial)
 
         return jsonify(data), 200
 
@@ -1177,15 +1154,9 @@ def atualizar_avaliacao(test_id):
                         owner_user_id=owner_user_id
                     )
                     
-                    # Salvar questão em public.question (forçar search_path)
-                    current_search_path = db.session.execute(text("SHOW search_path")).fetchone()[0]
-                    db.session.execute(text("SET search_path TO public"))
-                    
+                    # Questões em public.question (metadata ORM)
                     db.session.add(question)
                     db.session.flush()  # Para obter o ID da questão
-                    
-                    # Restaurar search_path original
-                    db.session.execute(text(f"SET search_path TO {current_search_path}"))
                     
                     # Criar associação
                     order = question_data.get('number', index + 1)
@@ -1279,6 +1250,7 @@ def bulk_delete_tests():
         from app.models.studentAnswer import StudentAnswer
         from app.models.studentTestOlimpics import StudentTestOlimpics
         from app.models.testSession import TestSession
+        from app.models.publicTestSession import PublicTestSession
         from app.models.question import Question
         
         for test in valid_tests:
@@ -1571,6 +1543,10 @@ def deletar_avaliacao(test_id):
 def aplicar_avaliacao_classe(test_id):
     """Aplica uma avaliação a uma ou múltiplas classes."""
     try:
+        user = get_current_user_from_token()
+        if not user:
+            return jsonify({"error": "Usuário não encontrado"}), 401
+
         data = request.get_json()
         if not data:
             return jsonify({"error": "No data provided"}), 400
@@ -1586,6 +1562,56 @@ def aplicar_avaliacao_classe(test_id):
 
         if not data['classes']:
             return jsonify({"error": "At least one class must be provided"}), 400
+
+        # Se for professor, validar vínculo com as turmas antes de aplicar.
+        # Regra: professor só pode aplicar em turmas onde está vinculado via TeacherClass.
+        if str(user.get("role", "")).lower() == "professor":
+            from app.models.teacherClass import TeacherClass
+
+            teacher = Teacher.query.filter_by(user_id=user["id"]).first()
+            if not teacher:
+                return jsonify({"error": "Professor não encontrado na tabela teacher"}), 404
+
+            class_ids_payload = []
+            invalid_class_ids = []
+            class_id_to_name = {}
+            for class_data in data["classes"]:
+                class_id = class_data.get("class_id")
+                if not class_id:
+                    invalid_class_ids.append(None)
+                    continue
+                class_id_uuid = ensure_uuid(class_id)
+                if not class_id_uuid:
+                    invalid_class_ids.append(class_id)
+                    continue
+                class_ids_payload.append(class_id_uuid)
+                class_obj = Class.query.get(class_id_uuid)
+                if class_obj and getattr(class_obj, "name", None):
+                    class_id_to_name[class_id_uuid] = class_obj.name
+
+            if invalid_class_ids:
+                return jsonify({
+                    "error": "Uma ou mais turmas possuem class_id inválido",
+                }), 400
+
+            vinculos = TeacherClass.query.filter(
+                TeacherClass.teacher_id == teacher.id,
+                TeacherClass.class_id.in_(class_ids_payload),
+            ).all()
+            vinculos_set = {v.class_id for v in vinculos}
+
+            classes_nao_vinculadas = [cid for cid in class_ids_payload if cid not in vinculos_set]
+            if classes_nao_vinculadas:
+                turmas_nao_vinculadas = [
+                    class_id_to_name.get(cid) for cid in classes_nao_vinculadas
+                    if class_id_to_name.get(cid)
+                ]
+                payload = {"error": "O professor não está vinculado a essa turma"}
+                if turmas_nao_vinculadas:
+                    payload["turmas"] = turmas_nao_vinculadas
+                return jsonify({
+                    **payload
+                }), 403
 
         applied_classes = []
         errors = []
@@ -2871,7 +2897,7 @@ def start_test_session(test_id):
         test = Test.query.get(test_id)
         test_schema = None
         try:
-            current_schema = db.session.execute(text("SELECT current_schema()")).scalar() or "public"
+            current_schema = get_effective_tenant_physical_schema()
             if test:
                 test_schema = current_schema
         except Exception:
@@ -3156,7 +3182,7 @@ def get_session_info(test_id):
         if not student:
             return jsonify({"error": "Dados do aluno não encontrados"}), 404
         
-        # Buscar sessão ativa: schema atual, depois public, depois tenant (prova de competição pode estar em qualquer um)
+        # Buscar sessão ativa: tenant (padrão), depois public (competição/global), depois tenant_schema explícito
         session = TestSession.query.filter_by(
             student_id=student.id,
             test_id=test_id,
@@ -3164,8 +3190,7 @@ def get_session_info(test_id):
         ).first()
         if not session:
             try:
-                set_search_path("public")
-                session = TestSession.query.filter_by(
+                session = PublicTestSession.query.filter_by(
                     student_id=student.id,
                     test_id=test_id,
                     status='em_andamento'
@@ -3177,7 +3202,6 @@ def get_session_info(test_id):
             tenant_schema = (ctx.schema if (ctx and ctx.has_tenant_context) else None) or None
             if tenant_schema and tenant_schema != "public":
                 try:
-                    set_search_path(tenant_schema)
                     session = TestSession.query.filter_by(
                         student_id=student.id,
                         test_id=test_id,

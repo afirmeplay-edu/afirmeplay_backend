@@ -12,6 +12,7 @@ from app import db
 from sqlalchemy import text
 from app.models.studentAnswer import StudentAnswer
 from app.models.testSession import TestSession
+from app.models.publicTestSession import PublicTestSession
 from app.models.test import Test
 from app.models.question import Question
 from app.models.student import Student
@@ -19,6 +20,7 @@ from app.models.testQuestion import TestQuestion
 from app.decorators.role_required import role_required
 from app.decorators import requires_city_context
 from app.utils.tenant_middleware import set_search_path, get_current_tenant_context
+from app.multitenant.physical_schema_binding import get_effective_tenant_physical_schema
 from datetime import datetime, timedelta
 import logging
 import dateutil.parser
@@ -315,21 +317,17 @@ def submit_answers():
 
         session_schema = None
         if not session:
-            # Não encontrou no schema atual (tenant): tentar em public (prova de competição)
+            # Não encontrou no tenant: tentar em public (sessão de competição/global)
             try:
-                _prev_schema = db.session.execute(text("SELECT current_schema()")).scalar() or "public"
-                set_search_path('public')
                 with db.session.begin_nested():
-                    session = TestSession.query.get(session_id)
+                    session = PublicTestSession.query.get(session_id)
                 if session:
                     session_schema = 'public'
-                else:
-                    set_search_path(_prev_schema)
             except Exception:
-                set_search_path(_prev_schema if '_prev_schema' in locals() else 'public')
+                session = None
         else:
             try:
-                session_schema = db.session.execute(text("SELECT current_schema()")).scalar() or None
+                session_schema = get_effective_tenant_physical_schema()
             except Exception:
                 session_schema = None
         if not session:
@@ -614,12 +612,8 @@ def submit_answers():
         
         try:
             if answers_schema and answers_schema != (session_schema or 'public'):
-                if session_schema == 'public':
-                    # public primeiro para achar Test; tenant para StudentAnswer
-                    safe_tenant = str(answers_schema).replace('"', '""')
-                    db.session.execute(text(f'SET search_path TO public, "{safe_tenant}"'))
-                else:
-                    set_search_path(answers_schema)
+                # Test usa public.* no metadata; StudentAnswer tenant.* → um bind city_* basta.
+                set_search_path(answers_schema)
             evaluation_result = EvaluationResultService.calculate_and_save_result(
                 test_id=_test_id_submit,
                 student_id=_student_id_submit,
@@ -633,7 +627,7 @@ def submit_answers():
         
         # ip_address: re-buscar sessão para evitar ObjectDeletedError se o serviço fez rollback
         try:
-            _sess = TestSession.query.get(_session_id)
+            _sess = TestSession.query.get(_session_id) if (session_schema != 'public') else PublicTestSession.query.get(_session_id)
             if _sess and hasattr(_sess, 'ip_address'):
                 _sess.ip_address = getattr(request, 'remote_addr', None) or (
                     request.headers.get('X-Forwarded-For', '').split(',')[0].strip() or None
@@ -668,8 +662,7 @@ def submit_answers():
             set_search_path(session_schema or 'public')
 
         # Re-buscar sessão para resposta (schema da sessão = public para competição)
-        set_search_path(session_schema or 'public')
-        _sess_for_response = TestSession.query.get(_session_id)
+        _sess_for_response = TestSession.query.get(_session_id) if (session_schema != 'public') else PublicTestSession.query.get(_session_id)
         # ✅ Retornar resultados completos calculados
         if evaluation_result:
             results = {
@@ -753,16 +746,15 @@ def save_partial_answers():
         session_schema = None
         if not session:
             try:
-                set_search_path('public')
                 with db.session.begin_nested():
-                    session = TestSession.query.get(session_id)
+                    session = PublicTestSession.query.get(session_id)
                 if session:
                     session_schema = 'public'
             except Exception:
                 pass
         else:
             try:
-                session_schema = db.session.execute(text("SELECT current_schema()")).scalar() or 'public'
+                session_schema = get_effective_tenant_physical_schema()
             except Exception:
                 session_schema = None
         if not session:
@@ -884,7 +876,7 @@ def save_partial_answers():
             elapsed_minutes = int((current_time - started_at_local).total_seconds() / 60)
             if elapsed_minutes > _time_limit_minutes:
                 set_search_path(session_schema or "public")
-                _s = TestSession.query.get(session_id)
+                _s = TestSession.query.get(session_id) if (session_schema != 'public') else PublicTestSession.query.get(session_id)
                 if _s:
                     _s.status = 'expirada'
                     db.session.commit()
@@ -915,7 +907,7 @@ def save_partial_answers():
                     ctx = get_current_tenant_context()
                     other_schema = (ctx.schema if (ctx and ctx.has_tenant_context) else None) or None
                     if other_schema and other_schema != session_schema:
-                        prev_path = db.session.execute(text("SELECT current_schema()")).scalar() or "public"
+                        prev_path = get_effective_tenant_physical_schema()
                         set_search_path(other_schema)
                         try:
                             comp = Competition.query.filter_by(test_id=_test_id).first()
@@ -947,7 +939,7 @@ def save_partial_answers():
             ctx = get_current_tenant_context()
             other_schema = (ctx.schema if (ctx and ctx.has_tenant_context) else None) or None
             if other_schema and other_schema != (session_schema or ""):
-                prev_path = db.session.execute(text("SELECT current_schema()")).scalar() or "public"
+                prev_path = get_effective_tenant_physical_schema()
                 set_search_path(other_schema)
                 try:
                     with db.session.begin_nested():
@@ -1213,7 +1205,7 @@ def get_active_session_with_answers(test_id):
                     err = str(e).lower()
                     if 'student_answers' in err and ('does not exist' in err or 'undefinedtable' in err):
                         try:
-                            current = db.session.execute(text("SELECT current_schema()")).scalar() or "public"
+                            current = get_effective_tenant_physical_schema()
                             ctx = get_current_tenant_context()
                             tenant_schema = (ctx.schema if (ctx and ctx.has_tenant_context) else None) or None
                             other = "public" if (current != "public" and current) else (tenant_schema or "public")
@@ -1281,7 +1273,7 @@ def get_active_session_with_answers(test_id):
             err = str(e).lower()
             if 'student_answers' in err and ('does not exist' in err or 'undefinedtable' in err):
                 try:
-                    current = db.session.execute(text("SELECT current_schema()")).scalar() or "public"
+                    current = get_effective_tenant_physical_schema()
                     ctx = get_current_tenant_context()
                     tenant_schema = (ctx.schema if (ctx and ctx.has_tenant_context) else None) or None
                     other = "public" if (current != "public" and current) else (tenant_schema or "public")
@@ -1298,7 +1290,7 @@ def get_active_session_with_answers(test_id):
         # Sessão em public mas respostas gravadas no tenant: se veio vazio, tentar schema do tenant
         if not answers:
             try:
-                current = db.session.execute(text("SELECT current_schema()")).scalar() or "public"
+                current = get_effective_tenant_physical_schema()
                 if current == "public":
                     ctx = get_current_tenant_context()
                     tenant_schema = (ctx.schema if (ctx and ctx.has_tenant_context) else None) or None

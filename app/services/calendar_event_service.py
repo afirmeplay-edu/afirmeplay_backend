@@ -24,6 +24,135 @@ from app.models.teacherClass import TeacherClass
 
 class CalendarEventService:
     @staticmethod
+    def _extract_user_role(user: User) -> str:
+        if not user:
+            return ''
+        return user.role.value if hasattr(user.role, 'value') else str(user.role or '')
+
+    @staticmethod
+    def _get_school_ids_for_target(target_type: str, target_id: str) -> Set[str]:
+        school_ids: Set[str] = set()
+        if target_type == 'SCHOOL':
+            school_ids.add(str(target_id))
+        elif target_type == 'CLASS':
+            class_obj = Class.query.get(target_id)
+            if class_obj and class_obj.school_id:
+                school_ids.add(str(class_obj.school_id))
+        elif target_type == 'GRADE':
+            for cls in Class.query.filter_by(grade_id=target_id).all():
+                if cls.school_id:
+                    school_ids.add(str(cls.school_id))
+        elif target_type == 'USER':
+            student = Student.query.filter_by(user_id=target_id).first()
+            if student and student.school_id:
+                school_ids.add(str(student.school_id))
+            teacher = Teacher.query.filter_by(user_id=target_id).first()
+            if teacher:
+                for st in SchoolTeacher.query.filter_by(teacher_id=teacher.id).all():
+                    if st.school_id:
+                        school_ids.add(str(st.school_id))
+            manager = Manager.query.filter_by(user_id=target_id).first()
+            if manager and manager.school_id:
+                school_ids.add(str(manager.school_id))
+        return school_ids
+
+    @staticmethod
+    def _normalize_role_group_filters(filters: Dict[str, Any]) -> Dict[str, List[str]]:
+        f = filters or {}
+        school_ids = [str(x) for x in (f.get('school_ids') or []) if x]
+        grade_ids = [str(x) for x in (f.get('grade_ids') or []) if x]
+        class_ids = [str(x) for x in (f.get('class_ids') or []) if x]
+        return {
+            'school_ids': school_ids,
+            'grade_ids': grade_ids,
+            'class_ids': class_ids,
+        }
+
+    @staticmethod
+    def _matches_role_group_filters_for_user(role_group: str, user_id: str, filters: Dict[str, List[str]]) -> Tuple[bool, Tuple[str, str, str]]:
+        school_ids = set(filters.get('school_ids') or [])
+        grade_ids = set(filters.get('grade_ids') or [])
+        class_ids = set(filters.get('class_ids') or [])
+
+        if role_group == 'aluno':
+            student = Student.query.filter_by(user_id=user_id).first()
+            if not student:
+                return False, (None, None, None)
+            if school_ids and str(student.school_id) not in school_ids:
+                return False, (None, None, None)
+            if grade_ids and str(student.grade_id) not in grade_ids:
+                return False, (None, None, None)
+            if class_ids and str(student.class_id) not in class_ids:
+                return False, (None, None, None)
+            return True, (student.school_id, student.class_id, 'aluno')
+
+        if role_group == 'professor':
+            teacher = Teacher.query.filter_by(user_id=user_id).first()
+            if not teacher:
+                return False, (None, None, None)
+
+            teacher_school_ids = {str(st.school_id) for st in SchoolTeacher.query.filter_by(teacher_id=teacher.id).all() if st.school_id}
+            tc_class_ids = {str(tc.class_id) for tc in TeacherClass.query.filter_by(teacher_id=teacher.id).all() if tc.class_id}
+            cs_class_ids = {str(cs.class_id) for cs in ClassSubject.query.filter_by(teacher_id=teacher.id).all() if cs.class_id}
+            teacher_class_ids = tc_class_ids.union(cs_class_ids)
+            teacher_grade_ids: Set[str] = set()
+            if teacher_class_ids:
+                for c in Class.query.filter(Class.id.in_(list(teacher_class_ids))).all():
+                    if c.grade_id:
+                        teacher_grade_ids.add(str(c.grade_id))
+                    if c.school_id:
+                        teacher_school_ids.add(str(c.school_id))
+
+            if school_ids and teacher_school_ids.isdisjoint(school_ids):
+                return False, (None, None, None)
+            if grade_ids and teacher_grade_ids.isdisjoint(grade_ids):
+                return False, (None, None, None)
+            if class_ids and teacher_class_ids.isdisjoint(class_ids):
+                return False, (None, None, None)
+
+            ctx_school = next(iter(teacher_school_ids), None)
+            ctx_class = next(iter(teacher_class_ids), None)
+            return True, (ctx_school, ctx_class, 'professor')
+
+        if role_group in ['diretor', 'coordenador', 'tecadm']:
+            manager = Manager.query.filter_by(user_id=user_id).first()
+            if not manager:
+                return False, (None, None, None)
+
+            manager_school_id = str(manager.school_id) if manager.school_id else None
+            if school_ids and (not manager_school_id or manager_school_id not in school_ids):
+                return False, (None, None, None)
+
+            if grade_ids:
+                if not manager_school_id:
+                    return False, (None, None, None)
+                has_grade = Class.query.filter(
+                    Class.school_id == manager_school_id,
+                    Class.grade_id.in_(list(grade_ids))
+                ).first() is not None
+                if not has_grade:
+                    return False, (None, None, None)
+
+            if class_ids:
+                q = Class.query.filter(Class.id.in_(list(class_ids)))
+                if manager_school_id:
+                    q = q.filter(Class.school_id == manager_school_id)
+                has_class = q.first() is not None
+                if not has_class:
+                    return False, (None, None, None)
+
+            return True, (manager.school_id, None, role_group)
+
+        if role_group == 'admin':
+            # Admin não é tenant-table; por padrão, só filtra por city quando houver.
+            user = User.query.get(user_id)
+            if not user:
+                return False, (None, None, None)
+            return True, (None, None, 'admin')
+
+        return False, (None, None, None)
+
+    @staticmethod
     def validate_targets_by_role(creator: Dict[str, Any], targets: List[Dict[str, Any]]) -> Tuple[bool, str]:
         """
         Valida se o criador tem permissão para criar eventos para os targets especificados.
@@ -35,20 +164,43 @@ class CalendarEventService:
         Returns:
             Tuple[bool, str]: (True, '') se válido, (False, mensagem_erro) se inválido
         """
-        from app.permissions.utils import get_manager_school, get_manager_city, get_teacher_schools, get_teacher_classes
+        from app.permissions.utils import get_manager_school, get_teacher_schools
         
         creator_role = creator.get('role', '').lower()
-        
-        # Admin pode tudo
+
+        if not targets:
+            return False, 'Informe ao menos um target'
+
+        # Admin pode direcionar eventos para qualquer target no contexto do tenant.
         if creator_role == 'admin':
             return True, ''
-        
+
         for target in targets:
             target_type = target.get('target_type', '').upper()
             target_id = target.get('target_id')
+            target_filters = CalendarEventService._normalize_role_group_filters(target.get('filters') or {})
             
-            if not target_id:
+            if target_type == 'ALL':
+                if creator_role not in ['admin', 'tecadm']:
+                    return False, 'Apenas admin e tecadm podem enviar para ALL'
                 continue
+            if target_type == 'ROLE_GROUP':
+                allowed_roles = {'admin', 'tecadm', 'diretor', 'coordenador', 'professor', 'aluno'}
+                role_group = str(target_id or '').lower()
+                if role_group not in allowed_roles:
+                    return False, 'ROLE_GROUP inválido'
+                if creator_role == 'aluno':
+                    return False, 'Aluno não pode enviar para grupos de role'
+                if creator_role in ['diretor', 'coordenador'] and role_group not in ['aluno', 'professor', 'diretor', 'coordenador']:
+                    return False, 'Diretor/coordenador não podem usar esse ROLE_GROUP'
+                if creator_role == 'professor' and role_group not in ['aluno', 'professor']:
+                    return False, 'Professor não pode usar esse ROLE_GROUP'
+                if creator_role == 'tecadm' and role_group == 'admin':
+                    return False, 'Tecadm não pode usar ROLE_GROUP admin'
+                # role_group com filtros é permitido; filtros vazios também
+                continue
+            if not target_id:
+                return False, 'target_id é obrigatório'
             
             if creator_role == 'tecadm':
                 creator_city_id = creator.get('city_id') or creator.get('tenant_id')
@@ -80,6 +232,15 @@ class CalendarEventService:
                     school = School.query.get(class_obj.school_id) if class_obj.school_id else None
                     if not school or school.city_id != creator_city_id:
                         return False, 'Acesso negado à turma'
+                elif target_type == 'USER':
+                    target_user = User.query.get(target_id)
+                    if not target_user:
+                        return False, 'Usuário target não encontrado'
+                    target_city_id = getattr(target_user, 'city_id', None)
+                    if target_city_id and str(target_city_id) != str(creator_city_id):
+                        return False, 'Acesso negado ao usuário target'
+                elif target_type == 'ALL':
+                    continue
                 else:
                     return False, 'Tipo de target não permitido para tecadm'
             
@@ -89,7 +250,7 @@ class CalendarEventService:
                     return False, 'Usuário não vinculado a uma escola'
                 
                 if target_type == 'SCHOOL':
-                    if target_id != manager_school_id:
+                    if str(target_id) != str(manager_school_id):
                         return False, 'Acesso negado à escola'
                 elif target_type == 'GRADE':
                     grade = Grade.query.get(target_id)
@@ -105,19 +266,33 @@ class CalendarEventService:
                         return False, 'Turma não encontrada'
                     if class_obj.school_id != manager_school_id:
                         return False, 'Acesso negado à turma'
+                elif target_type == 'USER':
+                    school_ids = CalendarEventService._get_school_ids_for_target('USER', target_id)
+                    if school_ids and str(manager_school_id) not in {str(sid) for sid in school_ids}:
+                        return False, 'Acesso negado ao usuário target'
                 else:
                     return False, 'Tipo de target não permitido para diretor/coordenador'
             
             elif creator_role == 'professor':
-                teacher_classes = get_teacher_classes(creator['id'])
-                if not teacher_classes:
-                    return False, 'Professor não vinculado a nenhuma turma'
-                
-                if target_type == 'CLASS':
-                    if target_id not in teacher_classes:
-                        return False, 'Acesso negado à turma'
+                teacher_school_ids = {str(s) for s in get_teacher_schools(creator['id'])}
+                if not teacher_school_ids:
+                    return False, 'Professor não vinculado a nenhuma escola'
+
+                if target_type == 'SCHOOL':
+                    if str(target_id) not in teacher_school_ids:
+                        return False, 'Acesso negado à escola'
+                elif target_type in ['GRADE', 'CLASS', 'USER']:
+                    school_ids = CalendarEventService._get_school_ids_for_target(target_type, target_id)
+                    if not school_ids:
+                        return False, 'Target sem vínculo escolar válido'
+                    if not school_ids.issubset(teacher_school_ids):
+                        return False, 'Acesso negado ao target'
                 else:
-                    return False, 'Professor só pode enviar para turmas vinculadas'
+                    return False, 'Professor não pode usar esse tipo de target'
+
+            elif creator_role == 'aluno':
+                if target_type != 'USER' or str(target_id) != str(creator['id']):
+                    return False, 'Aluno só pode criar evento para si mesmo'
             
             else:
                 return False, f'Role {creator_role} não autorizado para criar eventos'
@@ -145,10 +320,15 @@ class CalendarEventService:
 
         targets = data.get('targets', [])
         for t in targets:
+            target_type = str(t['target_type']).upper()
+            target_id = t.get('target_id')
+            if target_type == 'ALL' and not target_id:
+                target_id = 'ALL'
             db.session.add(CalendarEventTarget(
                 event_id=event.id,
-                target_type=CalendarTargetType(t['target_type']),
-                target_id=str(t['target_id'])
+                target_type=CalendarTargetType(target_type),
+                target_id=str(target_id) if target_id is not None else None,
+                target_filters=CalendarEventService._normalize_role_group_filters(t.get('filters') or {})
             ))
 
         # Materializar destinatários
@@ -179,10 +359,15 @@ class CalendarEventService:
             # Replace targets
             CalendarEventTarget.query.filter_by(event_id=event.id).delete()
             for t in data['targets']:
+                target_type = str(t['target_type']).upper()
+                target_id = t.get('target_id')
+                if target_type == 'ALL' and not target_id:
+                    target_id = 'ALL'
                 db.session.add(CalendarEventTarget(
                     event_id=event.id,
-                    target_type=CalendarTargetType(t['target_type']),
-                    target_id=str(t['target_id'])
+                    target_type=CalendarTargetType(target_type),
+                    target_id=str(target_id) if target_id is not None else None,
+                    target_filters=CalendarEventService._normalize_role_group_filters(t.get('filters') or {})
                 ))
             # Re-materialize recipients
             CalendarEventUser.query.filter_by(event_id=event.id).delete()
@@ -225,8 +410,76 @@ class CalendarEventService:
         targets = CalendarEventTarget.query.filter_by(event_id=event_id).all()
 
         for tgt in targets:
-            if tgt.target_type == CalendarTargetType.USER:
+            if tgt.target_type == CalendarTargetType.ALL:
+                seen: Set[str] = set()
+                # Alunos
+                for s in Student.query.all():
+                    if s.user_id:
+                        seen.add(s.user_id)
+                        add_user(s.user_id, school_id=s.school_id, class_id=s.class_id, role_snapshot='aluno')
+                # Professores
+                for t in Teacher.query.all():
+                    if t.user_id and t.user_id not in seen:
+                        seen.add(t.user_id)
+                        school_links = SchoolTeacher.query.filter_by(teacher_id=t.id).all()
+                        school_id = school_links[0].school_id if school_links else None
+                        add_user(t.user_id, school_id=school_id, role_snapshot='professor')
+                # Gestores (diretor/coordenador/tecadm)
+                for m in Manager.query.all():
+                    if not m.user_id or m.user_id in seen:
+                        continue
+                    user = User.query.get(m.user_id)
+                    if not user:
+                        continue
+                    user_role = CalendarEventService._extract_user_role(user)
+                    if user_role in ['diretor', 'coordenador', 'tecadm', 'admin']:
+                        seen.add(m.user_id)
+                        add_user(m.user_id, school_id=m.school_id, role_snapshot=user_role)
+            elif tgt.target_type == CalendarTargetType.USER:
                 add_user(tgt.target_id)
+            elif tgt.target_type == CalendarTargetType.ROLE_GROUP:
+                role_group = str(tgt.target_id or '').lower()
+                filters = CalendarEventService._normalize_role_group_filters(tgt.target_filters or {})
+                if role_group == 'aluno':
+                    for s in Student.query.all():
+                        if not s.user_id:
+                            continue
+                        ok, ctx = CalendarEventService._matches_role_group_filters_for_user('aluno', s.user_id, filters)
+                        if ok:
+                            school_id, class_id, role_snapshot = ctx
+                            add_user(s.user_id, school_id=school_id, class_id=class_id, role_snapshot=role_snapshot)
+                elif role_group == 'professor':
+                    for t in Teacher.query.all():
+                        if not t.user_id:
+                            continue
+                        ok, ctx = CalendarEventService._matches_role_group_filters_for_user('professor', t.user_id, filters)
+                        if ok:
+                            school_id, class_id, role_snapshot = ctx
+                            add_user(t.user_id, school_id=school_id, class_id=class_id, role_snapshot=role_snapshot)
+                elif role_group in ['diretor', 'coordenador', 'tecadm']:
+                    managers = Manager.query.all()
+                    for m in managers:
+                        if not m.user_id:
+                            continue
+                        user = User.query.get(m.user_id)
+                        if not user:
+                            continue
+                        user_role = CalendarEventService._extract_user_role(user)
+                        if user_role != role_group:
+                            continue
+                        ok, ctx = CalendarEventService._matches_role_group_filters_for_user(role_group, m.user_id, filters)
+                        if ok:
+                            school_id, class_id, role_snapshot = ctx
+                            add_user(m.user_id, school_id=school_id, class_id=class_id, role_snapshot=role_snapshot)
+                elif role_group == 'admin':
+                    for u in User.query.all():
+                        user_role = CalendarEventService._extract_user_role(u)
+                        if user_role != 'admin':
+                            continue
+                        ok, ctx = CalendarEventService._matches_role_group_filters_for_user('admin', u.id, filters)
+                        if ok:
+                            school_id, class_id, role_snapshot = ctx
+                            add_user(u.id, school_id=school_id, class_id=class_id, role_snapshot=role_snapshot)
             elif tgt.target_type == CalendarTargetType.CLASS:
                 # Se criado por professor: apenas alunos da turma
                 if creator_role == 'professor':
@@ -373,18 +626,25 @@ class CalendarEventService:
 
     @staticmethod
     def list_my_events(user_id: str, start: datetime, end: datetime) -> List[CalendarEvent]:
-        q = (
+        date_clause = or_(
+            and_(CalendarEvent.start_at >= start, CalendarEvent.start_at <= end),
+            and_(CalendarEvent.end_at != None, CalendarEvent.end_at >= start, CalendarEvent.end_at <= end)
+        )
+        q_recipient = (
             db.session.query(CalendarEvent)
             .join(CalendarEventUser, CalendarEventUser.event_id == CalendarEvent.id)
             .filter(CalendarEventUser.user_id == user_id)
-            .filter(
-                or_(
-                    and_(CalendarEvent.start_at >= start, CalendarEvent.start_at <= end),
-                    and_(CalendarEvent.end_at != None, CalendarEvent.end_at >= start, CalendarEvent.end_at <= end)
-                )
-            )
+            .filter(date_clause)
         )
-        return q.all()
+        q_creator = (
+            db.session.query(CalendarEvent)
+            .filter(CalendarEvent.created_by_user_id == user_id)
+            .filter(date_clause)
+        )
+        by_id = {e.id: e for e in q_recipient.all()}
+        for ev in q_creator.all():
+            by_id[ev.id] = ev
+        return sorted(by_id.values(), key=lambda e: e.start_at, reverse=True)
 
     @staticmethod
     def mark_read(event_id: str, user_id: str) -> None:

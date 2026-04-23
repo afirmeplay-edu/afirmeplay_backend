@@ -14,6 +14,7 @@ from sqlalchemy.orm import joinedload
 from app import db
 from app.models.answerSheetGabarito import AnswerSheetGabarito
 from app.models.answerSheetResult import AnswerSheetResult
+from app.models.test import Test
 from app.models.city import City
 from app.models.manager import Manager
 from app.models.school import School
@@ -28,6 +29,7 @@ from app.report_analysis.answer_sheet_report_builder import (
     answer_sheet_total_question_count,
     get_answer_sheet_target_classes_for_report,
     ordered_question_numbers_for_gabarito,
+    question_skills_map_for_answer_sheet,
 )
 
 REPORT_ENTITY_ANSWER_SHEET = "answer_sheet"
@@ -71,6 +73,12 @@ def obter_gabaritos_por_municipio(
         AnswerSheetGabarito.id.in_(gab_ids_from_results),
     ]
     q = AnswerSheetGabarito.query.filter(or_(*conds))
+    q = q.outerjoin(Test, AnswerSheetGabarito.test_id == Test.id).filter(
+        or_(
+            AnswerSheetGabarito.test_id.is_(None),
+            Test.evaluation_mode == "physical",
+        )
+    )
 
     if escola_param and escola_param.lower() != "all":
         eid = escola_param
@@ -232,6 +240,54 @@ def obter_turmas_por_gabarito_escola_serie(
         for c in classes
         if str(c.school_id) == str(escola_id) and str(c.grade_id) == str(serie_id)
     ]
+    turmas.sort(key=lambda c: (c.name or "") or str(c.id))
+    return [{"id": str(t.id), "name": t.name or f"Turma {t.id}"} for t in turmas]
+
+
+def obter_series_por_gabarito_municipio(
+    gabarito_id: str, municipio_id: str, user: dict, permissao: dict
+) -> List[Dict[str, Any]]:
+    """Séries distintas entre todas as escolas do município onde o gabarito tem turmas visíveis ao usuário."""
+    from app.models.grades import Grade
+
+    city = City.query.get(municipio_id)
+    if not city:
+        return []
+    if permissao["scope"] != "all" and user.get("city_id") != city.id:
+        return []
+
+    gab = AnswerSheetGabarito.query.get(gabarito_id)
+    if not gab:
+        return []
+
+    classes = answer_sheet_target_classes_visible_for_user(gab, user, permissao, municipio_id)
+    grade_ids = {c.grade_id for c in classes if getattr(c, "grade_id", None)}
+    if not grade_ids:
+        return []
+    rows = Grade.query.filter(Grade.id.in_(grade_ids)).order_by(Grade.name).all()
+    return [{"id": str(s.id), "name": s.name} for s in rows]
+
+
+def obter_turmas_por_gabarito_serie_municipio(
+    gabarito_id: str,
+    serie_id: str,
+    municipio_id: str,
+    user: dict,
+    permissao: dict,
+) -> List[Dict[str, Any]]:
+    """Turmas (todas as escolas do escopo) com o gabarito aplicado e a série informada."""
+    city = City.query.get(municipio_id)
+    if not city:
+        return []
+    if permissao["scope"] != "all" and user.get("city_id") != city.id:
+        return []
+
+    gab = AnswerSheetGabarito.query.get(gabarito_id)
+    if not gab:
+        return []
+
+    classes = answer_sheet_target_classes_visible_for_user(gab, user, permissao, municipio_id)
+    turmas = [c for c in classes if str(c.grade_id) == str(serie_id)]
     turmas.sort(key=lambda c: (c.name or "") or str(c.id))
     return [{"id": str(t.id), "name": t.name or f"Turma {t.id}"} for t in turmas]
 
@@ -626,7 +682,9 @@ def answer_sheet_results_for_detail(
     return []
 
 
-def stats_from_answer_sheet_results(results: List[AnswerSheetResult]) -> Dict[str, Any]:
+def stats_from_answer_sheet_results(
+    results: List[AnswerSheetResult], gabarito_id: Optional[str] = None
+) -> Dict[str, Any]:
     empty_dist = {
         "abaixo_do_basico": 0,
         "basico": 0,
@@ -645,21 +703,56 @@ def stats_from_answer_sheet_results(results: List[AnswerSheetResult]) -> Dict[st
         }
 
     n = len(results)
-    media_nota = sum(float(r.grade or 0) for r in results) / n
     profs = [float(r.proficiency) for r in results if r.proficiency is not None]
     media_prof = sum(profs) / len(profs) if profs else 0.0
 
     dist = empty_dist.copy()
-    for r in results:
-        cl = (r.classification or "").lower()
-        if "abaixo" in cl:
-            dist["abaixo_do_basico"] += 1
-        elif "básico" in cl or "basico" in cl:
-            dist["basico"] += 1
-        elif "adequado" in cl:
-            dist["adequado"] += 1
-        elif "avançado" in cl or "avancado" in cl:
-            dist["avancado"] += 1
+    if gabarito_id:
+        from app.services.cartao_resposta.proficiency_by_subject import (
+            course_name_and_has_matematica_for_gabarito,
+        )
+        from app.services.evaluation_calculator import EvaluationCalculator
+
+        course_name, has_matematica = course_name_and_has_matematica_for_gabarito(gabarito_id)
+        eff_grades: List[float] = []
+        for r in results:
+            prof = float(r.proficiency if r.proficiency is not None else 0.0)
+            g = EvaluationCalculator.calculate_grade(
+                prof,
+                course_name,
+                "GERAL",
+                use_simple_calculation=False,
+                has_matematica=has_matematica,
+            )
+            c = EvaluationCalculator.determine_classification(
+                prof,
+                course_name,
+                "GERAL",
+                has_matematica=has_matematica,
+            )
+            eff_grades.append(g)
+            cl = (c or "").lower()
+            if "abaixo" in cl:
+                dist["abaixo_do_basico"] += 1
+            elif "básico" in cl or "basico" in cl:
+                dist["basico"] += 1
+            elif "adequado" in cl:
+                dist["adequado"] += 1
+            elif "avançado" in cl or "avancado" in cl:
+                dist["avancado"] += 1
+        media_nota = sum(eff_grades) / n if eff_grades else 0.0
+    else:
+        media_nota = sum(float(r.grade or 0) for r in results) / n
+        for r in results:
+            cl = (r.classification or "").lower()
+            if "abaixo" in cl:
+                dist["abaixo_do_basico"] += 1
+            elif "básico" in cl or "basico" in cl:
+                dist["basico"] += 1
+            elif "adequado" in cl:
+                dist["adequado"] += 1
+            elif "avançado" in cl or "avancado" in cl:
+                dist["avancado"] += 1
 
     return {
         "total_alunos": n,
@@ -711,7 +804,7 @@ def build_answer_sheet_evaluation_by_id_json(
 ) -> Dict[str, Any]:
     from app.models.test import Test
 
-    stats = stats_from_answer_sheet_results(results)
+    stats = stats_from_answer_sheet_results(results, str(gab.id))
     nq = answer_sheet_total_question_count(gab)
     disciplina = "N/A"
     if gab.test_id:
@@ -733,8 +826,8 @@ def build_answer_sheet_evaluation_by_id_json(
         "serie": gab.grade_name or "N/A",
         "escola": gab.school_name or "N/A",
         "municipio": gab.municipality or "N/A",
-        "data_aplicacao": gab.created_at.isoformat() if gab.created_at else None,
-        "data_correcao": gab.template_generated_at.isoformat()
+        "data_aplicacao": gab.created_at.strftime("%d/%m/%Y") if gab.created_at else None,
+        "data_correcao": gab.template_generated_at.strftime("%d/%m/%Y")
         if gab.template_generated_at
         else None,
         "status": "concluida",
@@ -758,7 +851,7 @@ def build_answer_sheet_relatorio_detalhado_json(
     from app.models.skill import Skill
     from app.models.test import Test
 
-    q_skills = _question_skills_map_from_gabarito(gab)
+    q_skills = question_skills_map_for_answer_sheet(gab)
     correct_json = gab.correct_answers or {}
     if isinstance(correct_json, str):
         import json
@@ -787,16 +880,16 @@ def build_answer_sheet_relatorio_detalhado_json(
         elif t:
             disciplina = t.title or "N/A"
 
-    skill_ids: List[str] = []
+    skill_tokens: List[str] = []
     for qn in question_nums:
         for sid in q_skills.get(qn) or []:
             if sid:
-                skill_ids.append(str(sid).strip())
-    unique_skill_ids = list(dict.fromkeys(skill_ids))
+                skill_tokens.append(str(sid).strip())
+    unique_skill_tokens = list(dict.fromkeys(skill_tokens))
     code_by_id: Dict[str, str] = {}
-    if unique_skill_ids:
+    if unique_skill_tokens:
         uuids = []
-        for raw in unique_skill_ids:
+        for raw in unique_skill_tokens:
             try:
                 uuids.append(UUID(str(raw)))
             except ValueError:
@@ -804,6 +897,21 @@ def build_answer_sheet_relatorio_detalhado_json(
         if uuids:
             rows = Skill.query.filter(Skill.id.in_(uuids)).all()
             code_by_id = {str(sk.id): (sk.code or "N/A") for sk in rows}
+
+    def _resolve_skill_code(token: str) -> str:
+        t = str(token or "").strip()
+        if not t:
+            return "N/A"
+        code = code_by_id.get(t)
+        if code and str(code).strip():
+            return str(code).strip()
+        try:
+            UUID(t)
+            # UUID sem cadastro na tabela skills.
+            return "N/A"
+        except ValueError:
+            # Token já é código (ex.: EF15_D2 / D13) e deve ser preservado.
+            return t
 
     questoes_data: List[Dict[str, Any]] = []
     for i, qn in enumerate(question_nums, 1):
@@ -820,9 +928,17 @@ def build_answer_sheet_relatorio_detalhado_json(
         porcentagem_acertos = (acertos / total_respostas * 100) if total_respostas > 0 else 0.0
 
         sids = q_skills.get(qn) or []
-        first_code = "N/A"
-        if sids:
-            first_code = code_by_id.get(str(sids[0]).strip(), "N/A")
+        skills_payload = [
+            {
+                "id": str(sid).strip() if sid else "N/A",
+                "code": _resolve_skill_code(str(sid).strip() if sid else ""),
+            }
+            for sid in sids
+        ]
+        first_code = next(
+            (s.get("code") for s in skills_payload if s.get("code") and s.get("code") != "N/A"),
+            "N/A",
+        )
 
         qid = f"{gab.id}-q{qn}"
         questoes_data.append(
@@ -832,6 +948,7 @@ def build_answer_sheet_relatorio_detalhado_json(
                 "texto": f"Questão {qn}",
                 "habilidade": first_code,
                 "codigo_habilidade": first_code,
+                "skills": skills_payload,
                 "tipo": "multiple_choice",
                 "dificuldade": "Médio",
                 "porcentagem_acertos": round_to_two_decimals(porcentagem_acertos),
@@ -968,24 +1085,13 @@ def collect_skill_ids_from_gabarito_topology(gab: AnswerSheetGabarito) -> List[s
 
 def collect_skill_ids_for_answer_sheet_gabarito(gab: AnswerSheetGabarito) -> List[str]:
     """
-    Habilidades do cartão: primeiro topology (blocks_config), depois questões da prova vinculada (test_id).
-    Muitos gabaritos não repetem skills em cada questão da topology; a prova costuma ser a fonte.
+    IDs de habilidade (UUID) para o gabarito: topologia + fallback pela prova (test_id),
+    alinhado ao mapa usado em relatórios.
     """
-    ids = collect_skill_ids_from_gabarito_topology(gab)
-    if ids:
-        return ids
-    tid = getattr(gab, "test_id", None)
-    if not tid:
-        return []
-    from app.utils.question_helpers import get_questions_from_test
-
-    skills_set: Set[str] = set()
-    for question in get_questions_from_test(str(tid), order_by_test_question=True):
-        raw = getattr(question, "skill", None) or ""
-        if not raw:
-            continue
-        for part in str(raw).split(","):
-            code = part.strip().replace("{", "").replace("}", "")
-            if code:
-                skills_set.add(code)
-    return sorted(skills_set)
+    m = question_skills_map_for_answer_sheet(gab)
+    ids: Set[str] = set()
+    for lst in m.values():
+        for sid in lst or []:
+            if sid:
+                ids.add(str(sid).strip())
+    return sorted(ids)

@@ -199,6 +199,20 @@ class EvaluationCalculator:
             return Subject.OUTRAS
 
     @classmethod
+    def _resolve_subject_type_for_general(cls, has_matematica: Optional[bool]) -> Optional[Subject]:
+        """
+        Resolve o tipo de disciplina para o indicador GERAL, quando o chamador informa
+        se a avaliação possui Matemática.
+
+        - has_matematica=True  -> Matemática
+        - has_matematica=False -> Outras (Português/Outras)
+        - has_matematica=None  -> Sem override (mantém comportamento legado)
+        """
+        if has_matematica is None:
+            return None
+        return Subject.MATEMATICA if has_matematica else Subject.OUTRAS
+
+    @classmethod
     def calculate_proficiency(cls, correct_answers: int, total_questions: int, 
                             course_name: str, subject_name: str) -> float:
         """
@@ -233,9 +247,16 @@ class EvaluationCalculator:
         return round_to_two_decimals(proficiency)
 
     @classmethod
-    def calculate_grade(cls, proficiency: float, course_name: str, subject_name: str, 
-                       use_simple_calculation: bool = False, correct_answers: int = None, 
-                       total_questions: int = None) -> float:
+    def calculate_grade(
+        cls,
+        proficiency: float,
+        course_name: str,
+        subject_name: str,
+        use_simple_calculation: bool = False,
+        correct_answers: int = None,
+        total_questions: int = None,
+        has_matematica: Optional[bool] = None,
+    ) -> float:
         """
         Calcula a nota baseada na proficiência usando fórmulas específicas ou cálculo simples
         
@@ -259,7 +280,11 @@ class EvaluationCalculator:
         
         # Cálculo complexo baseado na proficiência (método original)
         course_level = cls._determine_course_level(course_name)
-        subject_type = cls._determine_subject_type(subject_name)
+        if subject_name.upper() == "GERAL":
+            override_subject_type = cls._resolve_subject_type_for_general(has_matematica)
+            subject_type = override_subject_type if override_subject_type is not None else cls._determine_subject_type(subject_name)
+        else:
+            subject_type = cls._determine_subject_type(subject_name)
         
         config = cls.GRADE_CALCULATION_CONFIG.get(
             (course_level, subject_type),
@@ -275,7 +300,13 @@ class EvaluationCalculator:
         return round_to_two_decimals(grade)
 
     @classmethod
-    def determine_classification(cls, proficiency: float, course_name: str, subject_name: str) -> str:
+    def determine_classification(
+        cls,
+        proficiency: float,
+        course_name: str,
+        subject_name: str,
+        has_matematica: Optional[bool] = None,
+    ) -> str:
         """
         Determina a classificação baseada na proficiência
         
@@ -288,27 +319,42 @@ class EvaluationCalculator:
             Classificação (Abaixo do Básico, Básico, Adequado, Avançado)
         """
         course_level = cls._determine_course_level(course_name)
-        subject_type = cls._determine_subject_type(subject_name)
+        if subject_name.upper() == "GERAL":
+            override_subject_type = cls._resolve_subject_type_for_general(has_matematica)
+            subject_type = override_subject_type if override_subject_type is not None else cls._determine_subject_type(subject_name)
+        else:
+            subject_type = cls._determine_subject_type(subject_name)
         
         # Tratamento especial para classificação GERAL
         if subject_name.upper() == "GERAL":
-            # Para classificação geral, usar faixas mais amplas baseadas no curso
-            if course_level in [CourseLevel.ANOS_FINAIS, CourseLevel.ENSINO_MEDIO]:
-                # Anos Finais e Ensino Médio - faixas mais altas
-                ranges = [
-                    (0, 224.99, Classification.ABAIXO_BASICO),
-                    (225, 299.99, Classification.BASICO),
-                    (300, 349.99, Classification.ADEQUADO),
-                    (350, 425, Classification.AVANCADO)
-                ]
+            # Se o chamador passou has_matematica, alinhar o GERAL à disciplina efetiva.
+            # Caso contrário, manter comportamento legado (faixas hardcoded).
+            if has_matematica is not None:
+                ranges = cls.CLASSIFICATION_CONFIG.get(
+                    (course_level, subject_type),
+                    [
+                        (0, 149, Classification.ABAIXO_BASICO),
+                        (150, 199, Classification.BASICO),
+                        (200, 249, Classification.ADEQUADO),
+                        (250, 350, Classification.AVANCADO)
+                    ],
+                )
             else:
-                # Educação Infantil, Anos Iniciais, EJA - faixas padrão
-                ranges = [
-                    (0, 174, Classification.ABAIXO_BASICO),
-                    (175, 224, Classification.BASICO),
-                    (225, 274, Classification.ADEQUADO),
-                    (275, 375, Classification.AVANCADO)
-                ]
+                # Legado: faixas específicas para "GERAL"
+                if course_level in [CourseLevel.ANOS_FINAIS, CourseLevel.ENSINO_MEDIO]:
+                    ranges = [
+                        (0, 224.99, Classification.ABAIXO_BASICO),
+                        (225, 299.99, Classification.BASICO),
+                        (300, 349.99, Classification.ADEQUADO),
+                        (350, 425, Classification.AVANCADO)
+                    ]
+                else:
+                    ranges = [
+                        (0, 174, Classification.ABAIXO_BASICO),
+                        (175, 224, Classification.BASICO),
+                        (225, 274, Classification.ADEQUADO),
+                        (275, 375, Classification.AVANCADO)
+                    ]
         else:
             ranges = cls.CLASSIFICATION_CONFIG.get(
                 (course_level, subject_type),

@@ -39,10 +39,11 @@ from .answerSheetReportAggregate import AnswerSheetReportAggregate
 from .calendar_event import CalendarEvent, CalendarVisibilityScope
 from .calendar_event_target import CalendarEventTarget, CalendarTargetType
 from .calendar_event_user import CalendarEventUser
+from .calendar_event_resource import CalendarEventResource
 
 # Formulários Socioeconômicos, Play TV e Plantão Online
 from app.socioeconomic_forms.models import Form, FormQuestion, FormRecipient, FormResponse
-from app.play_tv.models import PlayTvVideo, PlayTvVideoSchool
+from app.play_tv.models import PlayTvVideo, PlayTvVideoSchool, PlayTvVideoResource
 from app.plantao_online.models import PlantaoOnline, PlantaoOnlineSchool
 
 # Certificados
@@ -61,4 +62,11 @@ from app.ideb_meta.models import IdebMetaSave
 from app.store.models import StoreItem, StudentPurchase
 
 # Mobile offline-first (tabelas por schema city_*)
-from .mobile_models import MobileDevice, MobileSyncSubmission, MobileSyncBundleGeneration
+from .mobile_models import (
+    MobileDevice,
+    MobileOfflinePackCode,
+    MobileOfflinePackRedeemDevice,
+    MobileSyncBundleGeneration,
+    MobileSyncSubmission,
+)
+from .mobile_offline_pack_registry import MobileOfflinePackRegistry

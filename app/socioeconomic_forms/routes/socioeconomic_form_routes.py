@@ -5,7 +5,6 @@ Rotas para API de Formulários Socioeconômicos
 
 from flask import Blueprint, request, jsonify, g
 from flask_jwt_extended import jwt_required
-from sqlalchemy import text
 from app.decorators.role_required import role_required, get_current_user_from_token
 from app.socioeconomic_forms.services.form_service import FormService
 from app.socioeconomic_forms.services.distribution_service import DistributionService
@@ -17,6 +16,7 @@ from app.models.student import Student
 from app.models.grades import Grade
 from app import db
 from app.utils.tenant_middleware import get_current_tenant_context
+from app.multitenant.physical_schema_binding import get_effective_tenant_physical_schema
 from sqlalchemy.exc import SQLAlchemyError
 from datetime import datetime
 import logging
@@ -59,17 +59,17 @@ def create_form():
         # Debug: quem está criando e em qual schema (tenant)
         tenant_ctx = get_current_tenant_context()
         try:
-            current_search_path = db.session.execute(text("SHOW search_path")).scalar()
+            tenant_physical = get_effective_tenant_physical_schema()
         except Exception:
-            current_search_path = "(erro ao ler search_path)"
-        print("[forms/create] Criador: user_id=%s email=%s role=%s | tenant: schema=%s city_id=%s has_tenant=%s | search_path atual no DB: %s" % (
+            tenant_physical = "(erro ao ler bind do tenant)"
+        print("[forms/create] Criador: user_id=%s email=%s role=%s | tenant: schema=%s city_id=%s has_tenant=%s | tenant_physical_schema: %s" % (
             user.get("id"),
             user.get("email"),
             user.get("role"),
             getattr(tenant_ctx, "schema", None) if tenant_ctx else None,
             getattr(tenant_ctx, "city_id", None) if tenant_ctx else None,
             getattr(tenant_ctx, "has_tenant_context", None) if tenant_ctx else None,
-            current_search_path,
+            tenant_physical,
         ))
         
         data = request.get_json()
@@ -146,10 +146,10 @@ def create_form():
                 db.session.commit()
                 
                 try:
-                    path_after = db.session.execute(text("SHOW search_path")).scalar()
+                    path_after = get_effective_tenant_physical_schema()
                 except Exception:
                     path_after = "(erro)"
-                print("[forms/create] form_id=%s | FormRecipient criados: %s | persistido no schema (search_path): %s" % (
+                print("[forms/create] form_id=%s | FormRecipient criados: %s | tenant_physical_schema: %s" % (
                     form.id,
                     recipients_count,
                     path_after,

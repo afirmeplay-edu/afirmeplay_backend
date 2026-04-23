@@ -4,6 +4,7 @@ from datetime import datetime
 
 class Manager(db.Model):
     __tablename__ = 'manager'
+    __table_args__ = {"schema": "tenant"}
 
     id = db.Column(db.String, primary_key=True, default=lambda: str(uuid.uuid4()))
     name = db.Column(db.String(100), nullable=False)
@@ -14,14 +15,14 @@ class Manager(db.Model):
     updated_at = db.Column(db.TIMESTAMP, server_default=db.func.now(), onupdate=db.func.now())
 
     # Relacionamento com User
-    user_id = db.Column(db.String, db.ForeignKey('users.id'), unique=True)
+    user_id = db.Column(db.String, db.ForeignKey('public.users.id'), unique=True)
     
     # Relacionamento com School (para diretores e coordenadores)
     # ✅ CORRIGIDO: Explicitamente String(36) para garantir tipo correto
-    school_id = db.Column(db.String(36), db.ForeignKey('school.id'), nullable=True)
+    school_id = db.Column(db.String(36), db.ForeignKey('tenant.school.id'), nullable=True)
     
     # Relacionamento com City (para tecadm)
-    city_id = db.Column(db.String, db.ForeignKey('city.id'), nullable=True)
+    city_id = db.Column(db.String, db.ForeignKey('public.city.id'), nullable=True)
     
     # Relacionamentos
     user = db.relationship('User', backref='manager')

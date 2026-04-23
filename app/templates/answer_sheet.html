@@ -449,6 +449,8 @@
 				min-width: 0;
 			}
 
+			/* Altura mínima = 2 linhas: evita que um bloco com disciplina longa
+			   empurre o retângulo das bolhas enquanto outro bloco fica numa linha só (OMR). */
 			.block-header {
 				text-align: center;
 				font-weight: bold;
@@ -458,6 +460,11 @@
 				background: transparent; /* ✅ Sem background para ficar fora do quadrado */
 				line-height: 1.2;
 				flex-shrink: 0;
+				min-height: 2.5em;
+				display: flex;
+				align-items: flex-start;
+				justify-content: center;
+				box-sizing: border-box;
 			}
 
 			/* PASSO 5: Travar bloco para não estourar */
@@ -548,22 +555,13 @@
 				page-break-inside: avoid;
 			}
 
-			{% if test_data and test_data.letterhead_image_base64 %}
-			.answer-sheet.letterhead-bg {
-				background-image: url("data:image/png;base64,{{ test_data.letterhead_image_base64 }}");
-				background-size: 100% 100%;
-				background-repeat: no-repeat;
-				background-position: center top;
-			}
-			{% endif %}
 		</style>
 	</head>
 	<body>
-		{% set lh = test_data.letterhead_image_base64 if test_data and test_data.letterhead_image_base64 else None %}
 		<!-- Formulário de Respostas -->
 		<!-- ✅ Loop para gerar múltiplas páginas (1 por aluno) -->
 		{% if students %} {% for student in students %}
-		<div class="answer-sheet{% if lh %} letterhead-bg{% endif %}">
+		<div class="answer-sheet">
 			<!-- ÂNCORAS DA PÁGINA A4 (dentro do .answer-sheet com position: relative) -->
 			<div class="a4-anchor-square anchor-top-left">
 				<svg width="20" height="20" xmlns="http://www.w3.org/2000/svg">
@@ -868,7 +866,7 @@
 		<div style="page-break-after: always"></div>
 		{% endif %} {% endfor %} {% else %}
 		<!-- ✅ Fallback: Modo compatibilidade com aluno único -->
-		<div class="answer-sheet{% if lh %} letterhead-bg{% endif %}">
+		<div class="answer-sheet">
 			<!-- ÂNCORAS DA PÁGINA A4 (dentro do .answer-sheet com position: relative) -->
 			<div class="a4-anchor-square anchor-top-left">
 				<svg width="20" height="20" xmlns="http://www.w3.org/2000/svg">

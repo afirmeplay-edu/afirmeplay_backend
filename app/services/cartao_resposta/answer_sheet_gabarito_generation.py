@@ -7,7 +7,7 @@ Cada linha representa uma geração concluída (escopo + job + URL), sem sobresc
 import uuid
 import logging
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set
 
 from app import db
 from sqlalchemy.dialects.postgresql import JSONB, UUID
@@ -19,12 +19,13 @@ class AnswerSheetGabaritoGeneration(db.Model):
     Resolvido via search_path do tenant (mesmo padrão de AnswerSheetGabarito).
     """
     __tablename__ = 'answer_sheet_generations'
+    __table_args__ = {"schema": "tenant"}
 
     id = db.Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
 
     gabarito_id = db.Column(
         db.String(36),
-        db.ForeignKey('answer_sheet_gabaritos.id', ondelete='CASCADE'),
+        db.ForeignKey('tenant.answer_sheet_gabaritos.id', ondelete='CASCADE'),
         nullable=False,
         index=True,
     )
@@ -46,7 +47,7 @@ class AnswerSheetGabaritoGeneration(db.Model):
 
     status = db.Column(db.String(30), nullable=False, default='completed')
 
-    created_by = db.Column(db.String(36), db.ForeignKey('users.id'), nullable=True)
+    created_by = db.Column(db.String(36), db.ForeignKey('public.users.id'), nullable=True)
     created_at = db.Column(db.DateTime, nullable=False, default=datetime.utcnow)
 
     gabarito = db.relationship(
@@ -116,6 +117,28 @@ def build_class_scope_entries(class_ids: List[str]) -> List[Dict[str, str]]:
             }
         )
     return entries
+
+
+def class_ids_union_all_generations(gabarito_id: str) -> Set[str]:
+    """
+    União dos class_ids presentes em scope_snapshot de **todas** as linhas de
+    answer_sheet_generations para o gabarito (várias gerações city/grade/school).
+
+    Assim o escopo efetivo do cartão não fica preso à última geração apenas.
+    """
+    out: Set[str] = set()
+    rows = AnswerSheetGabaritoGeneration.query.filter_by(gabarito_id=str(gabarito_id)).all()
+    for row in rows:
+        snap = row.scope_snapshot
+        if not snap or not isinstance(snap, dict):
+            continue
+        raw = snap.get("class_ids") or []
+        for item in raw:
+            if isinstance(item, dict) and item.get("class_id"):
+                out.add(str(item["class_id"]))
+            elif isinstance(item, str) and item:
+                out.add(item)
+    return out
 
 
 def enrich_scope_snapshot(scope_snapshot: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:

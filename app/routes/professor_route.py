@@ -9,7 +9,7 @@ from app.models.teacherClass import TeacherClass
 from app.models.studentClass import Class
 from app.models.grades import Grade
 from app.models.city import City
-from werkzeug.security import generate_password_hash
+from app.utils.auth import hash_password
 from datetime import datetime
 from app import db
 from flask_jwt_extended import jwt_required
@@ -88,7 +88,7 @@ def criar_professor():
             usuario = User(
                 name=dados["nome"],  # Corrigido: nome -> name
                 email=dados["email"],
-                password_hash=generate_password_hash(dados["senha"]),  # Corrigido: senha -> password
+                password_hash=hash_password(dados["senha"]),  # Corrigido: senha -> password
                 registration=dados.get("matricula"),  # Corrigido: matricula -> registration
                 role=RoleEnum("professor"),
                 city_id=city_id  # Adicionando city_id
@@ -625,7 +625,7 @@ def criar_diretor():
             usuario = User(
                 name=dados["nome"],
                 email=dados["email"],
-                password_hash=generate_password_hash(dados["senha"]),
+                password_hash=hash_password(dados["senha"]),
                 registration=dados.get("matricula"),
                 role=RoleEnum("diretor"),
                 city_id=city_id
@@ -725,7 +725,7 @@ def criar_coordenador():
             usuario = User(
                 name=dados["nome"],
                 email=dados["email"],
-                password_hash=generate_password_hash(dados["senha"]),
+                password_hash=hash_password(dados["senha"]),
                 registration=dados.get("matricula"),
                 role=RoleEnum("coordenador"),
                 city_id=city_id
@@ -799,7 +799,7 @@ def criar_tecadm():
             usuario = User(
                 name=dados["nome"],
                 email=dados["email"],
-                password_hash=generate_password_hash(dados["senha"]),
+                password_hash=hash_password(dados["senha"]),
                 registration=dados.get("matricula"),
                 role=RoleEnum("tecadm"),
                 city_id=dados["city_id"]

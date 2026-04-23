@@ -17,6 +17,7 @@ from app.services.progress_store import get_job
 from app.services.answer_sheet_job_store import update_answer_sheet_job
 from app.services.cartao_resposta.answer_sheet_generator import sanitize_filename
 from app import db
+from app.utils.tenant_middleware import city_id_to_schema_name, set_search_path
 
 logger = logging.getLogger(__name__)
 
@@ -205,19 +206,18 @@ def generate_answer_sheets_async(
         from app.services.cartao_resposta.answer_sheet_generator import AnswerSheetGenerator
         from app.models.studentClass import Class
         from app.models.city import City
-        from sqlalchemy import text
         
-        # MULTITENANT FIX: Configurar search_path para o schema da cidade
+        # MULTITENANT: bind do schema físico (schema_translate_map) para a cidade
         city = City.query.get(city_id)
         if not city:
             error_msg = f"Cidade {city_id} não encontrada"
             logger.error(f"[CELERY] ❌ {error_msg}")
             raise ValueError(error_msg)
         
-        city_schema = f"city_{city.id.replace('-', '_')}"
-        logger.info(f"[CELERY] 🌐 Configurando search_path para: {city_schema}, public")
+        city_schema = city_id_to_schema_name(str(city.id))
+        logger.info(f"[CELERY] 🌐 Schema físico do tenant: {city_schema}")
         
-        db.session.execute(text(f'SET search_path TO "{city_schema}", public'))
+        set_search_path(city_schema)
         
         # Buscar turma
         class_obj = Class.query.get(class_id)
@@ -314,24 +314,23 @@ def generate_answer_sheets_batch_async(
         from app.services.cartao_resposta.answer_sheet_generator import AnswerSheetGenerator
         from app.models.studentClass import Class
         from app.models.city import City
-        from sqlalchemy import text
         from app import db
         
-        # MULTITENANT FIX: Configurar search_path para o schema da cidade
+        # MULTITENANT: bind do schema físico para a cidade
         city = City.query.get(city_id)
         if not city:
             error_msg = f"Cidade {city_id} não encontrada"
             logger.error(f"[CELERY-BATCH] ❌ {error_msg}")
             raise ValueError(error_msg)
         
-        city_schema = f"city_{city.id.replace('-', '_')}"
-        logger.info(f"[CELERY-BATCH] 🌐 Configurando search_path para: {city_schema}, public")
+        city_schema = city_id_to_schema_name(str(city.id))
+        logger.info(f"[CELERY-BATCH] 🌐 Schema físico do tenant: {city_schema}")
         
-        db.session.execute(text(f'SET search_path TO "{city_schema}", public'))
+        set_search_path(city_schema)
 
         def _ensure_tenant_search_path():
-            """Após commit (ex.: update do job em public), o pool pode trocar a conexão sem search_path."""
-            db.session.execute(text(f'SET search_path TO "{city_schema}", public'))
+            """Após commit, reforça o bind do tenant (nova conexão do pool)."""
+            set_search_path(city_schema)
         
         # Buscar todos os gabaritos
         gabaritos = []
@@ -348,11 +347,7 @@ def generate_answer_sheets_batch_async(
         logger.info(f"[CELERY-BATCH] ✅ {len(gabaritos)} gabarito(s) encontrado(s)")
         logger.info(f"[CELERY-BATCH] 📝 Total de questões: {num_questions}")
 
-        from app.services.city_branding_service import apply_city_branding_to_test_data
-
-        test_data = apply_city_branding_to_test_data(
-            dict(test_data) if test_data else {}, city
-        )
+        test_data = dict(test_data) if test_data else {}
         
         # Criar diretório temporário para ZIP
         temp_dir = tempfile.mkdtemp()
@@ -948,27 +943,22 @@ def generate_answer_sheets_single_class_async(
 ) -> Dict[str, Any]:
     """
     Gera 1 PDF por aluno da turma e salva em base_output_dir/.../turma_{nome}/.
-    Configura search_path (multitenancy). Atualiza progresso gradual (Redis + DB) quando batch_id/total_classes são passados.
+    Configura bind do tenant (multitenancy). Atualiza progresso gradual (Redis + DB) quando batch_id/total_classes são passados.
     Retorna apenas class_id e total_students (sem paths).
     """
     try:
         from app.services.cartao_resposta.answer_sheet_generator import AnswerSheetGenerator
         from app.models.city import City
-        from sqlalchemy import text
         from app import db
         from app.services.progress_store import increment_answer_sheet_progress
 
         city = City.query.get(city_id)
         if not city:
             raise ValueError(f"Cidade {city_id} não encontrada")
-        city_schema = f"city_{city.id.replace('-', '_')}"
-        db.session.execute(text(f'SET search_path TO "{city_schema}", public'))
+        city_schema = city_id_to_schema_name(str(city.id))
+        set_search_path(city_schema)
 
-        from app.services.city_branding_service import apply_city_branding_to_test_data
-
-        test_data_merged = apply_city_branding_to_test_data(
-            dict(test_data) if test_data else {}, city
-        )
+        test_data_merged = dict(test_data) if test_data else {}
 
         generator = AnswerSheetGenerator()
         result = generator.generate_class_answer_sheets(
@@ -1040,7 +1030,6 @@ def build_zip_and_upload_answer_sheets(
         from app.models.answerSheetGabarito import AnswerSheetGabarito
         from app.models.studentClass import Class
         from app.services.storage.minio_service import MinIOService
-        from sqlalchemy import text
 
         if not os.path.isdir(base_output_dir):
             logger.warning(f"[CELERY-CHORD] base_output_dir não existe: {base_output_dir}")
@@ -1065,7 +1054,7 @@ def build_zip_and_upload_answer_sheets(
         minio_url = None
         city = City.query.get(city_id)
         if city:
-            db.session.execute(text(f'SET search_path TO "city_{city.id.replace("-", "_")}", public'))
+            set_search_path(city_id_to_schema_name(str(city.id)))
 
         try:
             minio = MinIOService()

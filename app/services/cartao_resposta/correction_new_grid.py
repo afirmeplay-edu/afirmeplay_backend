@@ -96,8 +96,9 @@ class AnswerSheetCorrectionNewGrid:
             import os
             if not os.path.exists(self.debug_dir):
                 os.makedirs(self.debug_dir)
-            self.debug_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            self.logger.info(f"🐛 Debug ativado - timestamp: {self.debug_timestamp}")
+            self.debug_timestamp = ""
+            abspath = os.path.abspath(self.debug_dir)
+            self.logger.info(f"🐛 Debug OMR ativado — imagens em: {abspath}")
         
         self.logger.info("✅ Pipeline OMR Robusto inicializado")
     
@@ -1803,6 +1804,13 @@ class AnswerSheetCorrectionNewGrid:
             Resultado completo com estatísticas
         """
         try:
+            if self.debug:
+                import os
+                if not os.path.exists(self.debug_dir):
+                    os.makedirs(self.debug_dir)
+                self.debug_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+                self.logger.info(f"🐛 Debug: run_id={self.debug_timestamp}")
+
             # Carregar imagem
             if image_path:
                 self.logger.info(f"🎯 Iniciando correção: {image_path}")
@@ -2116,23 +2124,11 @@ class AnswerSheetCorrectionNewGrid:
         """
         try:
             from app.services.evaluation_calculator import EvaluationCalculator
+            from app.services.cartao_resposta.course_name_resolver import infer_course_name_from_grade
             
             # Inferir nome do curso (string) baseado no grade_name
-            grade_name = gabarito_obj.grade_name or ''
-            course_name = 'Anos Iniciais'  # Padrão
-            
-            if any(x in grade_name.lower() for x in ['infantil', 'pré', 'pre']):
-                course_name = 'Educação Infantil'
-            elif any(x in grade_name.lower() for x in ['1º', '2º', '3º', '4º', '5º', 'anos iniciais']):
-                course_name = 'Anos Iniciais'
-            elif any(x in grade_name.lower() for x in ['6º', '7º', '8º', '9º', 'anos finais']):
-                course_name = 'Anos Finais'
-            elif any(x in grade_name.lower() for x in ['1º médio', '2º médio', '3º médio', 'ensino médio']):
-                course_name = 'Ensino Médio'
-            elif 'especial' in grade_name.lower():
-                course_name = 'Educação Especial'
-            elif 'eja' in grade_name.lower():
-                course_name = 'EJA'
+            grade_name = gabarito_obj.grade_name or gabarito_obj.title or ''
+            course_name = infer_course_name_from_grade(grade_name)
             
             # Inferir nome da disciplina (string) baseado no title
             title = gabarito_obj.title or ''
@@ -2284,11 +2280,12 @@ class AnswerSheetCorrectionNewGrid:
                 submitted_at=datetime.utcnow()
             )
             
+            session_id = session.id
             db.session.add(session)
             db.session.commit()
             
-            self.logger.info(f"✅ Sessão mínima criada: {session.id}")
-            return session.id
+            self.logger.info(f"✅ Sessão mínima criada: {session_id}")
+            return session_id
             
         except Exception as e:
             db.session.rollback()
@@ -2321,14 +2318,16 @@ class AnswerSheetCorrectionNewGrid:
                 existing_result.answered_questions = correction.get('total_questions', 0) - correction.get('blank_answers', 0)
                 existing_result.score_percentage = correction.get('score', 0.0)
                 existing_result.grade = grade
-                existing_result.proficiency = proficiency if proficiency > 0 else None
+                existing_result.proficiency = proficiency
                 existing_result.classification = classification
                 existing_result.proficiency_by_subject = proficiency_by_subject
                 existing_result.corrected_at = datetime.utcnow()
                 existing_result.detection_method = 'new_grid'
                 
+                db.session.flush()
+                payload = existing_result.to_dict()
                 db.session.commit()
-                self.logger.info(f"✅ AnswerSheetResult atualizado: {existing_result.id}")
+                self.logger.info(f"✅ AnswerSheetResult atualizado: {payload['id']}")
                 try:
                     from app.report_analysis.answer_sheet_aggregate_service import (
                         invalidate_answer_sheet_report_cache_after_result,
@@ -2339,7 +2338,7 @@ class AnswerSheetCorrectionNewGrid:
                     )
                 except Exception as inv_err:
                     self.logger.warning("Invalidate answer_sheet report cache: %s", inv_err)
-                return existing_result.to_dict()
+                return payload
             else:
                 # Criar novo
                 result = AnswerSheetResult(
@@ -2353,15 +2352,17 @@ class AnswerSheetCorrectionNewGrid:
                     answered_questions=correction.get('total_questions', 0) - correction.get('blank_answers', 0),
                     score_percentage=correction.get('score', 0.0),
                     grade=grade,
-                    proficiency=proficiency if proficiency > 0 else None,
+                    proficiency=proficiency,
                     classification=classification,
                     proficiency_by_subject=proficiency_by_subject,
                     detection_method='new_grid'
                 )
                 
                 db.session.add(result)
+                db.session.flush()
+                payload = result.to_dict()
                 db.session.commit()
-                self.logger.info(f"✅ AnswerSheetResult criado: {result.id}")
+                self.logger.info(f"✅ AnswerSheetResult criado: {payload['id']}")
                 try:
                     from app.report_analysis.answer_sheet_aggregate_service import (
                         invalidate_answer_sheet_report_cache_after_result,
@@ -2372,7 +2373,7 @@ class AnswerSheetCorrectionNewGrid:
                     )
                 except Exception as inv_err:
                     self.logger.warning("Invalidate answer_sheet report cache: %s", inv_err)
-                return result.to_dict()
+                return payload
                 
         except Exception as e:
             db.session.rollback()
@@ -2571,8 +2572,8 @@ class AnswerSheetCorrectionNewGrid:
                     except (ValueError, TypeError):
                         continue
             
-            # Calcular grade (0-10)
-            grade = correction.get('score', 0.0) / 10.0
+            # Calcular grade (0-10) no modo complexo, alinhado às avaliações
+            grade = 0.0
             
             # Calcular proficiência por disciplina e média geral (cartão resposta)
             proficiency = 0.0
@@ -2598,12 +2599,15 @@ class AnswerSheetCorrectionNewGrid:
                     except (ValueError, TypeError):
                         pass
                 from app.services.cartao_resposta.proficiency_by_subject import calcular_proficiencia_por_disciplina
-                proficiency_by_subject, proficiency, classification = calcular_proficiencia_por_disciplina(
+                from app.services.cartao_resposta.course_name_resolver import infer_course_name_from_grade
+                grade_name = gabarito_obj.grade_name or gabarito_obj.title or ''
+                proficiency_by_subject, proficiency, grade, classification, has_matematica = calcular_proficiencia_por_disciplina(
                     blocks_config=blocks_config,
                     validated_answers=detected_answers,
                     gabarito_dict=gabarito_dict,
-                    grade_name=gabarito_obj.grade_name or '',
+                    grade_name=grade_name,
                 )
+                course_name = infer_course_name_from_grade(grade_name)
             
             # Decidir onde salvar
             if gabarito_id and not test_id:

@@ -27,6 +27,7 @@ class StoreItem(db.Model):
     algo em troca (digital: moldura/selo/tema; futuro: itens físicos).
     """
     __tablename__ = 'store_items'
+    __table_args__ = {"schema": "public"}
 
     id = db.Column(db.String, primary_key=True, default=lambda: str(uuid.uuid4()))
     name = db.Column(db.String(255), nullable=False)
@@ -48,8 +49,6 @@ class StoreItem(db.Model):
     sort_order = db.Column(db.Integer, default=0, nullable=False)
     created_at = db.Column(db.TIMESTAMP, server_default=db.func.now())
     updated_at = db.Column(db.TIMESTAMP, server_default=db.func.now(), onupdate=db.func.now())
-
-    purchases = db.relationship('StudentPurchase', backref='store_item', lazy='dynamic')
 
     def to_dict(self):
         return {

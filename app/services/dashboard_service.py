@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 
-from sqlalchemy import case, distinct, func
+from sqlalchemy import case, distinct, func, or_
 from sqlalchemy.orm import aliased
 
 from app import db
@@ -26,6 +26,8 @@ from app.models.testQuestion import TestQuestion
 from app.models.testSession import TestSession
 from app.models.user import User
 from app.models.evaluationResult import EvaluationResult
+from app.models.answerSheetGabarito import AnswerSheetGabarito
+from app.models.answerSheetResult import AnswerSheetResult
 from app.utils.uuid_helpers import ensure_uuid_list, uuid_list_to_str
 from app.permissions.utils import (
     get_manager_school,
@@ -303,6 +305,9 @@ class DashboardService:
         evaluations_current, evaluations_prev = cls._period_counts(
             Test, Test.created_at, scope, cls._evaluation_scope_filter
         )
+        gabaritos_current, gabaritos_prev = cls._period_counts(
+            AnswerSheetGabarito, AnswerSheetGabarito.created_at, scope, cls._answer_sheet_gabarito_scope_filter
+        )
         sessions_current, sessions_prev = cls._period_counts(
             TestSession, TestSession.started_at, scope, cls._session_scope_filter
         )
@@ -322,8 +327,8 @@ class DashboardService:
                 "label": "Avaliações",
                 "value": cls._count_evaluations(scope),
                 "trend": {
-                    "current": evaluations_current,
-                    "previous": evaluations_prev,
+                    "current": evaluations_current + gabaritos_current,
+                    "previous": evaluations_prev + gabaritos_prev,
                 },
             },
             {
@@ -391,19 +396,97 @@ class DashboardService:
                     .distinct()
                 ) if school_ids_str else test_query.filter(False)
 
-        # Obter IDs únicos (ordenados por created_at)
-        test_ids = [row.id for row in test_query.limit(limit).all()]
-        
-        # Buscar objetos Test completos mantendo a ordem
-        # Criar um dicionário para preservar a ordem original
+        fetch_n = min(max(limit * 2, limit), 50)
+        test_rows = test_query.limit(fetch_n).all()
+        gab_query = cls._answer_sheet_gabarito_scope_filter(
+            AnswerSheetGabarito.query.with_entities(AnswerSheetGabarito.id, AnswerSheetGabarito.created_at),
+            scope,
+        ).order_by(AnswerSheetGabarito.created_at.desc().nullslast())
+        gab_rows = gab_query.limit(fetch_n).all()
+
+        merged: List[Tuple[str, str, Any]] = []
+        for row in test_rows:
+            merged.append(("test", row.id, row.created_at))
+        for row in gab_rows:
+            merged.append(("gab", row.id, row.created_at))
+        merged.sort(key=lambda x: x[2] or datetime.min, reverse=True)
+
+        ordered_keys: List[Tuple[str, str]] = []
+        seen_m = set()
+        for kind, eid, _ts in merged:
+            key = (kind, eid)
+            if key in seen_m:
+                continue
+            seen_m.add(key)
+            ordered_keys.append((kind, eid))
+            if len(ordered_keys) >= limit:
+                break
+
+        test_ids = [eid for kind, eid in ordered_keys if kind == "test"]
         if test_ids:
             tests_dict = {test.id: test for test in Test.query.filter(Test.id.in_(test_ids)).all()}
-            tests = [tests_dict[tid] for tid in test_ids if tid in tests_dict]
         else:
-            tests = []
-        results = []
+            tests_dict = {}
+        results: List[Dict[str, Any]] = []
 
-        for test in tests:
+        for kind, eid in ordered_keys:
+            if kind != "test":
+                gab = AnswerSheetGabarito.query.get(eid)
+                if not gab:
+                    continue
+                class_ids_potencial: List[Any] = []
+                if gab.class_id is not None:
+                    class_ids_potencial = [gab.class_id]
+                elif gab.school_id:
+                    sid = str(gab.school_id)
+                    class_ids_potencial = [r[0] for r in Class.query.filter(Class._school_id == sid).with_entities(Class.id).all()]
+                student_count = (
+                    Student.query.filter(Student.class_id.in_(class_ids_potencial)).count()
+                    if class_ids_potencial
+                    else 0
+                )
+                completed = (
+                    db.session.query(func.count(distinct(AnswerSheetResult.student_id)))
+                    .filter(AnswerSheetResult.gabarito_id == gab.id)
+                    .scalar()
+                    or 0
+                )
+                if student_count:
+                    progress_percentage = round((completed / student_count) * 100, 2)
+                else:
+                    progress_percentage = 0.0
+                avg_score = (
+                    db.session.query(func.avg(AnswerSheetResult.grade))
+                    .filter(AnswerSheetResult.gabarito_id == gab.id)
+                    .scalar()
+                )
+                display_status = "concluida" if student_count and completed >= student_count else "pendente"
+                class_name = None
+                if gab.class_id and gab.class_:
+                    class_name = gab.class_.name
+                results.append(
+                    {
+                        "tipo": "cartao_resposta",
+                        "evaluation_id": gab.id,
+                        "gabarito_id": gab.id,
+                        "title": gab.title or "Cartão resposta",
+                        "subject": None,
+                        "school": gab.school_name,
+                        "status": display_status,
+                        "progress_percentage": progress_percentage,
+                        "total_students": student_count,
+                        "completed_students": int(completed),
+                        "average_score": float(avg_score or 0),
+                        "start_date": None,
+                        "end_date": None,
+                        "class_name": class_name,
+                    }
+                )
+                continue
+
+            test = tests_dict.get(eid)
+            if not test:
+                continue
             class_tests = (
                 ClassTest.query.filter(ClassTest.test_id == test.id)
                 .join(Class, Class.id == ClassTest.class_id)
@@ -464,6 +547,7 @@ class DashboardService:
 
             results.append(
                 {
+                    "tipo": "prova_online",
                     "evaluation_id": test.id,
                     "title": test.title,
                     "subject": test.subject_rel.name if test.subject_rel else None,
@@ -488,9 +572,8 @@ class DashboardService:
         cls, scope: Dict[str, Any], limit: int = MAX_LIST_SIZE
     ) -> List[Dict[str, Any]]:
         """
-        Retorna avaliações recentes (Tests) com type == AVALIACAO, para card/listagem.
-        Campos: quantidade de alunos que fizeram, que vão fazer, prazo, progresso,
-        status, disciplina, escola(s).
+        Retorna avaliações recentes (Tests type AVALIACAO) e cartões-resposta (gabaritos)
+        no mesmo recorte do dashboard, ordenadas por data de criação.
         """
         test_query = (
             Test.query.filter(Test.type == cls.TYPE_AVALIACAO)
@@ -526,79 +609,154 @@ class DashboardService:
                 .distinct()
             )
 
-        test_ids = [row.id for row in test_query.limit(limit).all()]
+        fetch_n = min(max(limit * 2, limit), 50)
+        test_rows = test_query.limit(fetch_n).all()
+        gab_query = cls._answer_sheet_gabarito_scope_filter(
+            AnswerSheetGabarito.query.with_entities(AnswerSheetGabarito.id, AnswerSheetGabarito.created_at),
+            scope,
+        ).order_by(AnswerSheetGabarito.created_at.desc().nullslast())
+        gab_rows = gab_query.limit(fetch_n).all()
 
-        if not test_ids:
+        merged: List[Tuple[str, str, Any]] = []
+        for row in test_rows:
+            merged.append(("test", row.id, row.created_at))
+        for row in gab_rows:
+            merged.append(("gab", row.id, row.created_at))
+        merged.sort(key=lambda x: x[2] or datetime.min, reverse=True)
+
+        ordered_keys: List[Tuple[str, str]] = []
+        seen_merged = set()
+        for kind, eid, _ts in merged:
+            key = (kind, eid)
+            if key in seen_merged:
+                continue
+            seen_merged.add(key)
+            ordered_keys.append((kind, eid))
+            if len(ordered_keys) >= limit:
+                break
+
+        if not ordered_keys:
             return []
 
-        tests_dict = {test.id: test for test in Test.query.filter(Test.id.in_(test_ids)).all()}
-        tests = [tests_dict[tid] for tid in test_ids if tid in tests_dict]
+        test_ids = [eid for kind, eid in ordered_keys if kind == "test"]
+        tests_dict = (
+            {test.id: test for test in Test.query.filter(Test.id.in_(test_ids)).all()}
+            if test_ids
+            else {}
+        )
 
-        results = []
-        for test in tests:
-            class_tests = (
-                ClassTest.query.filter(ClassTest.test_id == test.id)
-                .join(Class, Class.id == ClassTest.class_id)
-                .all()
-            )
-            class_ids = [ct.class_id for ct in class_tests]
-            alunos_que_vao_fazer = (
-                Student.query.filter(Student.class_id.in_(class_ids)).count() if class_ids else 0
-            )
-
-            sessions_row = (
-                TestSession.query.filter(TestSession.test_id == test.id)
-                .with_entities(
-                    func.count(TestSession.id).label("total"),
-                    func.sum(case((TestSession.submitted_at.isnot(None), 1), else_=0)).label("completed"),
+        results: List[Dict[str, Any]] = []
+        for kind, eid in ordered_keys:
+            if kind == "test":
+                test = tests_dict.get(eid)
+                if not test:
+                    continue
+                class_tests = (
+                    ClassTest.query.filter(ClassTest.test_id == test.id)
+                    .join(Class, Class.id == ClassTest.class_id)
+                    .all()
                 )
-                .first()
-            )
-            alunos_que_fizeram = int(sessions_row.completed or 0) if sessions_row else 0
+                class_ids = [ct.class_id for ct in class_tests]
+                alunos_que_vao_fazer = (
+                    Student.query.filter(Student.class_id.in_(class_ids)).count() if class_ids else 0
+                )
 
-            if alunos_que_vao_fazer and alunos_que_vao_fazer > 0:
-                progresso = round((alunos_que_fizeram / alunos_que_vao_fazer) * 100, 2)
-            else:
-                progresso = 0.0
+                sessions_row = (
+                    TestSession.query.filter(TestSession.test_id == test.id)
+                    .with_entities(
+                        func.count(TestSession.id).label("total"),
+                        func.sum(case((TestSession.submitted_at.isnot(None), 1), else_=0)).label("completed"),
+                    )
+                    .first()
+                )
+                alunos_que_fizeram = int(sessions_row.completed or 0) if sessions_row else 0
 
-            # Prazo: Test.end_time (datetime) ou primeiro ClassTest.expiration (text)
-            if test.end_time:
-                prazo = test.end_time.isoformat() if hasattr(test.end_time, "isoformat") else str(test.end_time)
-            elif class_tests and class_tests[0].expiration:
-                prazo = str(class_tests[0].expiration)
+                if alunos_que_vao_fazer and alunos_que_vao_fazer > 0:
+                    progresso = round((alunos_que_fizeram / alunos_que_vao_fazer) * 100, 2)
+                else:
+                    progresso = 0.0
+
+                if test.end_time:
+                    prazo = test.end_time.isoformat() if hasattr(test.end_time, "isoformat") else str(test.end_time)
+                elif class_tests and class_tests[0].expiration:
+                    prazo = str(class_tests[0].expiration)
+                else:
+                    prazo = None
+
+                disciplina = test.subject_rel.name if test.subject_rel else None
+
+                escolas_nomes = []
+                for ct in class_tests:
+                    if ct.class_ and getattr(ct.class_, "school", None) and ct.class_.school:
+                        nome = ct.class_.school.name
+                        if nome and nome not in escolas_nomes:
+                            escolas_nomes.append(nome)
+                escola = ", ".join(escolas_nomes) if escolas_nomes else None
+
+                if alunos_que_vao_fazer and alunos_que_fizeram >= alunos_que_vao_fazer:
+                    display_status = "concluida"
+                else:
+                    display_status = test.status or "pendente"
+
+                results.append({
+                    "tipo": "prova_online",
+                    "avaliacao_id": test.id,
+                    "titulo": test.title,
+                    "quantidade_alunos_fizeram": alunos_que_fizeram,
+                    "quantidade_alunos_vao_fazer": alunos_que_vao_fazer,
+                    "prazo": prazo,
+                    "progresso": progresso,
+                    "status": display_status,
+                    "disciplina": disciplina,
+                    "escola": escola,
+                    "escolas": escolas_nomes,
+                })
             else:
+                gab = AnswerSheetGabarito.query.get(eid)
+                if not gab:
+                    continue
+                class_ids_potencial: List[Any] = []
+                if gab.class_id is not None:
+                    class_ids_potencial = [gab.class_id]
+                elif gab.school_id:
+                    sid = str(gab.school_id)
+                    class_ids_potencial = [r[0] for r in Class.query.filter(Class._school_id == sid).with_entities(Class.id).all()]
+                alunos_que_vao_fazer = (
+                    Student.query.filter(Student.class_id.in_(class_ids_potencial)).count()
+                    if class_ids_potencial
+                    else 0
+                )
+                alunos_que_fizeram = (
+                    db.session.query(func.count(distinct(AnswerSheetResult.student_id)))
+                    .filter(AnswerSheetResult.gabarito_id == gab.id)
+                    .scalar()
+                    or 0
+                )
+                if alunos_que_vao_fazer and alunos_que_vao_fazer > 0:
+                    progresso = round((alunos_que_fizeram / alunos_que_vao_fazer) * 100, 2)
+                else:
+                    progresso = 0.0
                 prazo = None
-
-            # Disciplina
-            disciplina = test.subject_rel.name if test.subject_rel else None
-
-            # Escola(s): nomes distintos das escolas das turmas aplicadas
-            escolas_nomes = []
-            for ct in class_tests:
-                if ct.class_ and getattr(ct.class_, "school", None) and ct.class_.school:
-                    nome = ct.class_.school.name
-                    if nome and nome not in escolas_nomes:
-                        escolas_nomes.append(nome)
-            escola = ", ".join(escolas_nomes) if escolas_nomes else None
-
-            # Status exibido: "concluida" quando todos os alunos que iam fazer já fizeram
-            if alunos_que_vao_fazer and alunos_que_fizeram >= alunos_que_vao_fazer:
-                display_status = "concluida"
-            else:
-                display_status = test.status or "pendente"
-
-            results.append({
-                "avaliacao_id": test.id,
-                "titulo": test.title,
-                "quantidade_alunos_fizeram": alunos_que_fizeram,
-                "quantidade_alunos_vao_fazer": alunos_que_vao_fazer,
-                "prazo": prazo,
-                "progresso": progresso,
-                "status": display_status,
-                "disciplina": disciplina,
-                "escola": escola,
-                "escolas": escolas_nomes,
-            })
+                if alunos_que_vao_fazer and alunos_que_fizeram >= alunos_que_vao_fazer:
+                    display_status = "concluida"
+                else:
+                    display_status = "pendente"
+                escola = gab.school_name
+                escolas_nomes = [escola] if escola else []
+                results.append({
+                    "tipo": "cartao_resposta",
+                    "avaliacao_id": gab.id,
+                    "gabarito_id": gab.id,
+                    "titulo": gab.title or "Cartão resposta",
+                    "quantidade_alunos_fizeram": int(alunos_que_fizeram),
+                    "quantidade_alunos_vao_fazer": alunos_que_vao_fazer,
+                    "prazo": prazo,
+                    "progresso": progresso,
+                    "status": display_status,
+                    "disciplina": None,
+                    "escola": escola,
+                    "escolas": escolas_nomes,
+                })
 
         return results
 
@@ -858,7 +1016,9 @@ class DashboardService:
             else:
                 query = query.filter(False)
 
-        return query.distinct().count()
+        tests_count = query.distinct().count()
+        gabaritos_count = cls._count_answer_sheet_gabaritos(scope)
+        return tests_count + gabaritos_count
 
     @classmethod
     def _count_games(cls, scope: Dict[str, Any]) -> int:
@@ -1196,6 +1356,41 @@ class DashboardService:
         return query
 
     @staticmethod
+    def _answer_sheet_gabarito_scope_filter(query, scope: Dict[str, Any]):
+        """Mesmo recorte organizacional de _count_evaluations para cartões-resposta (gabaritos)."""
+        if scope["scope"] == "municipio":
+            school_ids = DashboardService._extract_school_ids(scope) or []
+            if not school_ids:
+                return query.filter(False)
+            school_ids_str = uuid_list_to_str(school_ids)
+            class_ids_sq = db.session.query(Class.id).filter(Class._school_id.in_(school_ids_str))
+            return query.filter(
+                or_(
+                    AnswerSheetGabarito.class_id.in_(class_ids_sq),
+                    AnswerSheetGabarito.school_id.in_(school_ids_str),
+                )
+            )
+        if scope["scope"] == "escola":
+            school_ids = scope.get("school_ids") or []
+            if not school_ids:
+                return query.filter(False)
+            school_ids_str = uuid_list_to_str(school_ids)
+            class_ids_sq = db.session.query(Class.id).filter(Class._school_id.in_(school_ids_str))
+            return query.filter(
+                or_(
+                    AnswerSheetGabarito.class_id.in_(class_ids_sq),
+                    AnswerSheetGabarito.school_id.in_(school_ids_str),
+                )
+            )
+        return query
+
+    @classmethod
+    def _count_answer_sheet_gabaritos(cls, scope: Dict[str, Any]) -> int:
+        q = AnswerSheetGabarito.query.with_entities(AnswerSheetGabarito.id)
+        q = cls._answer_sheet_gabarito_scope_filter(q, scope)
+        return q.distinct().count()
+
+    @staticmethod
     def _session_scope_filter(query, scope: Dict[str, Any]):
         if scope["scope"] == "municipio":
             school_ids = DashboardService._extract_school_ids(scope) or []
@@ -1235,6 +1430,24 @@ class DashboardService:
         
         try:
             school_ids = cls._extract_school_ids(scope)
+            er_by_school = (
+                db.session.query(
+                    cast(Student.school_id, VARCHAR).label("school_id"),
+                    func.count(distinct(EvaluationResult.test_id)).label("cnt"),
+                )
+                .select_from(Student)
+                .join(EvaluationResult, EvaluationResult.student_id == Student.id)
+                .group_by(Student.school_id)
+            ).subquery()
+            asr_by_school = (
+                db.session.query(
+                    cast(Student.school_id, VARCHAR).label("school_id"),
+                    func.count(distinct(AnswerSheetResult.gabarito_id)).label("cnt"),
+                )
+                .select_from(Student)
+                .join(AnswerSheetResult, AnswerSheetResult.student_id == Student.id)
+                .group_by(Student.school_id)
+            ).subquery()
             query = (
                 db.session.query(
                     School.id.label("school_id"),
@@ -1242,11 +1455,15 @@ class DashboardService:
                     City.name.label("municipality"),
                     func.count(distinct(Student.id)).label("total_students"),
                     func.coalesce(func.avg(EvaluationResult.score_percentage), 0).label("average_score"),
-                    func.count(distinct(EvaluationResult.test_id)).label("total_evaluations"),
+                    (
+                        func.coalesce(er_by_school.c.cnt, 0) + func.coalesce(asr_by_school.c.cnt, 0)
+                    ).label("total_evaluations"),
                 )
                 # ✅ CORRIGIDO: Garantir que ambos sejam strings no join (School.id é VARCHAR)
                 .join(Student, cast(Student.school_id, VARCHAR) == cast(School.id, VARCHAR))
                 .outerjoin(EvaluationResult, EvaluationResult.student_id == Student.id)
+                .outerjoin(er_by_school, er_by_school.c.school_id == cast(School.id, VARCHAR))
+                .outerjoin(asr_by_school, asr_by_school.c.school_id == cast(School.id, VARCHAR))
                 .outerjoin(City, City.id == School.city_id)
             )
 
@@ -1257,7 +1474,13 @@ class DashboardService:
                 school_ids_str = uuid_list_to_str(school_ids) if school_ids else []
                 query = query.filter(School.id.in_(school_ids_str)) if school_ids_str else query.filter(False)
 
-            query = query.group_by(School.id, School.name, City.name).order_by(func.coalesce(func.avg(EvaluationResult.score_percentage), 0).desc())
+            query = query.group_by(
+                School.id,
+                School.name,
+                City.name,
+                er_by_school.c.cnt,
+                asr_by_school.c.cnt,
+            ).order_by(func.coalesce(func.avg(EvaluationResult.score_percentage), 0).desc())
 
             school_stats = query.limit(cls.MAX_LIST_SIZE).all()
 
@@ -1315,6 +1538,25 @@ class DashboardService:
                 if not school_ids_str:
                     return []
 
+            er_by_class = (
+                db.session.query(
+                    Student.class_id.label("class_id"),
+                    func.count(distinct(EvaluationResult.test_id)).label("cnt"),
+                )
+                .select_from(Student)
+                .join(EvaluationResult, EvaluationResult.student_id == Student.id)
+                .group_by(Student.class_id)
+            ).subquery()
+            asr_by_class = (
+                db.session.query(
+                    Student.class_id.label("class_id"),
+                    func.count(distinct(AnswerSheetResult.gabarito_id)).label("cnt"),
+                )
+                .select_from(Student)
+                .join(AnswerSheetResult, AnswerSheetResult.student_id == Student.id)
+                .group_by(Student.class_id)
+            ).subquery()
+
             query = (
                 db.session.query(
                     Class.id.label("class_id"),
@@ -1324,11 +1566,15 @@ class DashboardService:
                     func.coalesce(func.avg(EvaluationResult.grade), 0).label("media"),
                     func.coalesce(func.sum(EvaluationResult.correct_answers), 0).label("acerto_total"),
                     func.coalesce(func.avg(EvaluationResult.score_percentage), 0).label("acerto_percent"),
-                    func.count(distinct(EvaluationResult.test_id)).label("avaliacoes"),
+                    (
+                        func.coalesce(er_by_class.c.cnt, 0) + func.coalesce(asr_by_class.c.cnt, 0)
+                    ).label("avaliacoes"),
                 )
                 .outerjoin(Grade, Class.grade_id == Grade.id)
                 .join(Student, Student.class_id == Class.id)
                 .outerjoin(EvaluationResult, EvaluationResult.student_id == Student.id)
+                .outerjoin(er_by_class, er_by_class.c.class_id == Class.id)
+                .outerjoin(asr_by_class, asr_by_class.c.class_id == Class.id)
             )
 
             if scope["scope"] == "municipio" and scope.get("city_id"):
@@ -1339,7 +1585,13 @@ class DashboardService:
                 school_ids_str = uuid_list_to_str(school_ids) if school_ids else []
                 query = query.filter(Class._school_id.in_(school_ids_str))
 
-            query = query.group_by(Class.id, Class.name, Grade.name).order_by(
+            query = query.group_by(
+                Class.id,
+                Class.name,
+                Grade.name,
+                er_by_class.c.cnt,
+                asr_by_class.c.cnt,
+            ).order_by(
                 func.coalesce(func.avg(EvaluationResult.grade), 0).desc()
             )
 
@@ -1403,6 +1655,24 @@ class DashboardService:
 
         try:
             school_ids = cls._extract_school_ids(scope)
+            er_by_school = (
+                db.session.query(
+                    cast(Student.school_id, VARCHAR).label("school_id"),
+                    func.count(distinct(EvaluationResult.test_id)).label("cnt"),
+                )
+                .select_from(Student)
+                .join(EvaluationResult, EvaluationResult.student_id == Student.id)
+                .group_by(Student.school_id)
+            ).subquery()
+            asr_by_school = (
+                db.session.query(
+                    cast(Student.school_id, VARCHAR).label("school_id"),
+                    func.count(distinct(AnswerSheetResult.gabarito_id)).label("cnt"),
+                )
+                .select_from(Student)
+                .join(AnswerSheetResult, AnswerSheetResult.student_id == Student.id)
+                .group_by(Student.school_id)
+            ).subquery()
             query = (
                 db.session.query(
                     School.id.label("school_id"),
@@ -1411,11 +1681,15 @@ class DashboardService:
                     func.count(distinct(Student.id)).label("total_students"),
                     func.coalesce(func.avg(EvaluationResult.grade), 0).label("media"),
                     func.coalesce(func.avg(EvaluationResult.score_percentage), 0).label("media_score_percent"),
-                    func.count(distinct(EvaluationResult.test_id)).label("quantidade_avaliacoes"),
+                    (
+                        func.coalesce(er_by_school.c.cnt, 0) + func.coalesce(asr_by_school.c.cnt, 0)
+                    ).label("quantidade_avaliacoes"),
                     func.count(EvaluationResult.id).label("total_provas_entregues"),
                 )
                 .join(Student, cast(Student.school_id, VARCHAR) == cast(School.id, VARCHAR))
                 .outerjoin(EvaluationResult, EvaluationResult.student_id == Student.id)
+                .outerjoin(er_by_school, er_by_school.c.school_id == cast(School.id, VARCHAR))
+                .outerjoin(asr_by_school, asr_by_school.c.school_id == cast(School.id, VARCHAR))
                 .outerjoin(City, City.id == School.city_id)
             )
 
@@ -1425,7 +1699,13 @@ class DashboardService:
                 school_ids_str = uuid_list_to_str(school_ids) if school_ids else []
                 query = query.filter(School.id.in_(school_ids_str)) if school_ids_str else query.filter(False)
 
-            query = query.group_by(School.id, School.name, City.name).order_by(
+            query = query.group_by(
+                School.id,
+                School.name,
+                City.name,
+                er_by_school.c.cnt,
+                asr_by_school.c.cnt,
+            ).order_by(
                 func.coalesce(func.avg(EvaluationResult.grade), 0).desc()
             )
 
@@ -1515,6 +1795,25 @@ class DashboardService:
                 if not school_ids_str:
                     return {"ranking": [], "total": 0, "limit": limit, "offset": offset}
 
+            er_by_class = (
+                db.session.query(
+                    Student.class_id.label("class_id"),
+                    func.count(distinct(EvaluationResult.test_id)).label("cnt"),
+                )
+                .select_from(Student)
+                .join(EvaluationResult, EvaluationResult.student_id == Student.id)
+                .group_by(Student.class_id)
+            ).subquery()
+            asr_by_class = (
+                db.session.query(
+                    Student.class_id.label("class_id"),
+                    func.count(distinct(AnswerSheetResult.gabarito_id)).label("cnt"),
+                )
+                .select_from(Student)
+                .join(AnswerSheetResult, AnswerSheetResult.student_id == Student.id)
+                .group_by(Student.class_id)
+            ).subquery()
+
             query = (
                 db.session.query(
                     Class.id.label("class_id"),
@@ -1524,11 +1823,15 @@ class DashboardService:
                     func.coalesce(func.avg(EvaluationResult.grade), 0).label("media"),
                     func.coalesce(func.sum(EvaluationResult.correct_answers), 0).label("acerto_total"),
                     func.coalesce(func.avg(EvaluationResult.score_percentage), 0).label("acerto_percent"),
-                    func.count(distinct(EvaluationResult.test_id)).label("avaliacoes"),
+                    (
+                        func.coalesce(er_by_class.c.cnt, 0) + func.coalesce(asr_by_class.c.cnt, 0)
+                    ).label("avaliacoes"),
                 )
                 .outerjoin(Grade, Class.grade_id == Grade.id)
                 .join(Student, Student.class_id == Class.id)
                 .outerjoin(EvaluationResult, EvaluationResult.student_id == Student.id)
+                .outerjoin(er_by_class, er_by_class.c.class_id == Class.id)
+                .outerjoin(asr_by_class, asr_by_class.c.class_id == Class.id)
             )
 
             if scope["scope"] == "municipio" and scope.get("city_id"):
@@ -1539,7 +1842,13 @@ class DashboardService:
                 school_ids_str = uuid_list_to_str(school_ids) if school_ids else []
                 query = query.filter(Class._school_id.in_(school_ids_str))
 
-            query = query.group_by(Class.id, Class.name, Grade.name).order_by(
+            query = query.group_by(
+                Class.id,
+                Class.name,
+                Grade.name,
+                er_by_class.c.cnt,
+                asr_by_class.c.cnt,
+            ).order_by(
                 func.coalesce(func.avg(EvaluationResult.grade), 0).desc()
             )
 
@@ -1596,6 +1905,20 @@ class DashboardService:
 
         school_alias = aliased(School)
         class_alias = aliased(Class)
+        er_by_student = (
+            db.session.query(
+                EvaluationResult.student_id.label("student_id"),
+                func.count(distinct(EvaluationResult.test_id)).label("cnt"),
+            )
+            .group_by(EvaluationResult.student_id)
+        ).subquery()
+        asr_by_student = (
+            db.session.query(
+                AnswerSheetResult.student_id.label("student_id"),
+                func.count(distinct(AnswerSheetResult.gabarito_id)).label("cnt"),
+            )
+            .group_by(AnswerSheetResult.student_id)
+        ).subquery()
 
         query = (
             db.session.query(
@@ -1605,13 +1928,28 @@ class DashboardService:
                 class_alias.name.label("class_name"),
                 Grade.name.label("serie"),
                 func.coalesce(func.avg(EvaluationResult.grade), 0).label("average_grade"),
-                func.count(distinct(EvaluationResult.test_id)).label("completed_evaluations"),
+                (
+                    func.coalesce(er_by_student.c.cnt, 0) + func.coalesce(asr_by_student.c.cnt, 0)
+                ).label("completed_evaluations"),
             )
-            .join(EvaluationResult, EvaluationResult.student_id == Student.id)
+            .outerjoin(EvaluationResult, EvaluationResult.student_id == Student.id)
+            .outerjoin(er_by_student, er_by_student.c.student_id == Student.id)
+            .outerjoin(asr_by_student, asr_by_student.c.student_id == Student.id)
             .outerjoin(school_alias, cast(school_alias.id, VARCHAR) == cast(Student.school_id, VARCHAR))
             .outerjoin(class_alias, class_alias.id == Student.class_id)
             .outerjoin(Grade, Grade.id == Student.grade_id)
-            .group_by(Student.id, Student.name, school_alias.name, class_alias.name, Grade.name)
+            .group_by(
+                Student.id,
+                Student.name,
+                school_alias.name,
+                class_alias.name,
+                Grade.name,
+                er_by_student.c.cnt,
+                asr_by_student.c.cnt,
+            )
+            .having(
+                (func.coalesce(er_by_student.c.cnt, 0) + func.coalesce(asr_by_student.c.cnt, 0)) > 0
+            )
             .order_by(func.coalesce(func.avg(EvaluationResult.grade), 0).desc())
         )
 
@@ -1656,6 +1994,21 @@ class DashboardService:
         # Cast avatar_config (JSON) para Text no GROUP BY: PostgreSQL não tem operador de igualdade para json
         avatar_config_expr = cast(User.avatar_config, db.Text)
 
+        er_by_student = (
+            db.session.query(
+                EvaluationResult.student_id.label("student_id"),
+                func.count(distinct(EvaluationResult.test_id)).label("cnt"),
+            )
+            .group_by(EvaluationResult.student_id)
+        ).subquery()
+        asr_by_student = (
+            db.session.query(
+                AnswerSheetResult.student_id.label("student_id"),
+                func.count(distinct(AnswerSheetResult.gabarito_id)).label("cnt"),
+            )
+            .group_by(AnswerSheetResult.student_id)
+        ).subquery()
+
         # Média de proficiência (escala de pontos), alinhado ao ranking de turmas do dashboard admin.
         # outerjoin em EvaluationResult: inclui todos os alunos do escopo, mesmo sem avaliações (média 0).
         avg_proficiency = func.coalesce(func.avg(EvaluationResult.proficiency), 0)
@@ -1668,16 +2021,30 @@ class DashboardService:
                 class_alias.name.label("class_name"),
                 Grade.name.label("serie"),
                 avg_proficiency.label("average_proficiency"),
-                func.count(distinct(EvaluationResult.test_id)).label("completed_evaluations"),
+                (
+                    func.coalesce(er_by_student.c.cnt, 0) + func.coalesce(asr_by_student.c.cnt, 0)
+                ).label("completed_evaluations"),
                 Student.profile_picture.label("profile_picture"),
                 avatar_config_expr.label("avatar_config"),
             )
             .outerjoin(EvaluationResult, EvaluationResult.student_id == Student.id)
+            .outerjoin(er_by_student, er_by_student.c.student_id == Student.id)
+            .outerjoin(asr_by_student, asr_by_student.c.student_id == Student.id)
             .outerjoin(User, User.id == Student.user_id)
             .outerjoin(school_alias, cast(school_alias.id, VARCHAR) == cast(Student.school_id, VARCHAR))
             .outerjoin(class_alias, class_alias.id == Student.class_id)
             .outerjoin(Grade, Grade.id == Student.grade_id)
-            .group_by(Student.id, Student.name, school_alias.name, class_alias.name, Grade.name, Student.profile_picture, avatar_config_expr)
+            .group_by(
+                Student.id,
+                Student.name,
+                school_alias.name,
+                class_alias.name,
+                Grade.name,
+                Student.profile_picture,
+                avatar_config_expr,
+                er_by_student.c.cnt,
+                asr_by_student.c.cnt,
+            )
             .order_by(avg_proficiency.desc())
         )
 
@@ -1873,18 +2240,45 @@ class DashboardService:
     @classmethod
     def _build_teacher_ranking(cls, scope: Dict[str, Any]) -> List[Dict[str, Any]]:
         teacher_alias = aliased(Teacher)
+        er_by_teacher = (
+            db.session.query(
+                TeacherClass.teacher_id.label("teacher_id"),
+                func.count(distinct(EvaluationResult.test_id)).label("cnt"),
+            )
+            .select_from(TeacherClass)
+            .join(Class, Class.id == TeacherClass.class_id)
+            .join(Student, Student.class_id == Class.id)
+            .join(EvaluationResult, EvaluationResult.student_id == Student.id)
+            .group_by(TeacherClass.teacher_id)
+        ).subquery()
+        asr_by_teacher = (
+            db.session.query(
+                TeacherClass.teacher_id.label("teacher_id"),
+                func.count(distinct(AnswerSheetResult.gabarito_id)).label("cnt"),
+            )
+            .select_from(TeacherClass)
+            .join(Class, Class.id == TeacherClass.class_id)
+            .join(Student, Student.class_id == Class.id)
+            .join(AnswerSheetResult, AnswerSheetResult.student_id == Student.id)
+            .group_by(TeacherClass.teacher_id)
+        ).subquery()
         query = (
             db.session.query(
                 teacher_alias.id.label("teacher_id"),
                 teacher_alias.name.label("teacher_name"),
                 func.avg(EvaluationResult.grade).label("average_grade"),
-                func.count(distinct(EvaluationResult.test_id)).label("total_evaluations"),
+                (
+                    func.coalesce(er_by_teacher.c.cnt, 0) + func.coalesce(asr_by_teacher.c.cnt, 0)
+                ).label("total_evaluations"),
                 func.count(distinct(TeacherClass.class_id)).label("classes_count"),
             )
+            .select_from(teacher_alias)
             .join(TeacherClass, TeacherClass.teacher_id == teacher_alias.id)
             .join(Class, Class.id == TeacherClass.class_id)
             .join(Student, Student.class_id == Class.id)
-            .join(EvaluationResult, EvaluationResult.student_id == Student.id, isouter=True)
+            .outerjoin(EvaluationResult, EvaluationResult.student_id == Student.id)
+            .outerjoin(er_by_teacher, er_by_teacher.c.teacher_id == teacher_alias.id)
+            .outerjoin(asr_by_teacher, asr_by_teacher.c.teacher_id == teacher_alias.id)
         )
 
         school_ids = scope.get("school_ids") or []
@@ -1897,7 +2291,12 @@ class DashboardService:
         else:
             return []
 
-        query = query.group_by(teacher_alias.id, teacher_alias.name).order_by(func.avg(EvaluationResult.grade).desc())
+        query = query.group_by(
+            teacher_alias.id,
+            teacher_alias.name,
+            er_by_teacher.c.cnt,
+            asr_by_teacher.c.cnt,
+        ).order_by(func.avg(EvaluationResult.grade).desc())
 
         ranking = []
         for idx, row in enumerate(query.limit(DashboardService.MAX_LIST_SIZE).all()):
@@ -1996,13 +2395,21 @@ class DashboardService:
         class_ids = get_teacher_classes(scope["user"]["id"])
         if not class_ids:
             return 0
-        return (
+        tests_n = (
             Test.query.with_entities(Test.id)
             .join(ClassTest, ClassTest.test_id == Test.id)
             .filter(ClassTest.class_id.in_(class_ids))
             .distinct()
             .count()
         )
+        cartoes_n = (
+            db.session.query(func.count(distinct(AnswerSheetResult.gabarito_id)))
+            .join(Student, Student.id == AnswerSheetResult.student_id)
+            .filter(Student.class_id.in_(class_ids))
+            .scalar()
+            or 0
+        )
+        return int(tests_n) + int(cartoes_n)
 
     @classmethod
     def _build_professor_kpis(cls, scope: Dict[str, Any], teacher: Optional[Teacher]) -> List[Dict[str, Any]]:
@@ -2053,12 +2460,23 @@ class DashboardService:
                 "label": "Avaliações",
                 "value": evaluations_count,
                 "created_this_month": (
-                    Test.query.with_entities(Test.id)
-                    .join(ClassTest, ClassTest.test_id == Test.id)
-                    .filter(ClassTest.class_id.in_(class_ids))
-                    .filter(Test.created_at >= datetime.utcnow() - timedelta(days=30))
-                    .distinct()
-                    .count()
+                    (
+                        Test.query.with_entities(Test.id)
+                        .join(ClassTest, ClassTest.test_id == Test.id)
+                        .filter(ClassTest.class_id.in_(class_ids))
+                        .filter(Test.created_at >= datetime.utcnow() - timedelta(days=30))
+                        .distinct()
+                        .count()
+                        + (
+                            db.session.query(func.count(distinct(AnswerSheetGabarito.id)))
+                            .filter(
+                                AnswerSheetGabarito.class_id.in_(class_ids),
+                                AnswerSheetGabarito.created_at >= datetime.utcnow() - timedelta(days=30),
+                            )
+                            .scalar()
+                            or 0
+                        )
+                    )
                     if class_ids
                     else 0
                 ),
@@ -2268,7 +2686,41 @@ class DashboardService:
                 .group_by(City.state)
                 .all()
             )
+            gab_class_per_state = (
+                db.session.query(
+                    City.state,
+                    func.count(distinct(AnswerSheetGabarito.id)).label("avaliacoes"),
+                )
+                .select_from(AnswerSheetGabarito)
+                .join(Class, Class.id == AnswerSheetGabarito.class_id)
+                .join(School, cast(School.id, VARCHAR) == cast(Class._school_id, VARCHAR))
+                .join(City, City.id == School.city_id)
+                .filter(AnswerSheetGabarito.class_id.isnot(None))
+                .group_by(City.state)
+                .all()
+            )
+            gab_school_per_state = (
+                db.session.query(
+                    City.state,
+                    func.count(distinct(AnswerSheetGabarito.id)).label("avaliacoes"),
+                )
+                .select_from(AnswerSheetGabarito)
+                .join(School, cast(School.id, VARCHAR) == cast(AnswerSheetGabarito.school_id, VARCHAR))
+                .join(City, City.id == School.city_id)
+                .filter(
+                    AnswerSheetGabarito.school_id.isnot(None),
+                    AnswerSheetGabarito.class_id.is_(None),
+                )
+                .group_by(City.state)
+                .all()
+            )
             avaliacoes_por_estado = {str(r.state or "N/I"): int(r.avaliacoes or 0) for r in test_per_state}
+            for r in gab_class_per_state:
+                k = str(r.state or "N/I")
+                avaliacoes_por_estado[k] = avaliacoes_por_estado.get(k, 0) + int(r.avaliacoes or 0)
+            for r in gab_school_per_state:
+                k = str(r.state or "N/I")
+                avaliacoes_por_estado[k] = avaliacoes_por_estado.get(k, 0) + int(r.avaliacoes or 0)
             for item in por_estado:
                 item["avaliacoes"] = avaliacoes_por_estado.get(item["estado"], 0)
 
@@ -2349,6 +2801,9 @@ class DashboardService:
                 avaliacoes_mes = Test.query.filter(
                     Test.created_at >= mes_start,
                     Test.created_at <= mes_end,
+                ).count() + AnswerSheetGabarito.query.filter(
+                    AnswerSheetGabarito.created_at >= mes_start,
+                    AnswerSheetGabarito.created_at <= mes_end,
                 ).count()
                 sessoes_mes = TestSession.query.filter(
                     TestSession.started_at >= mes_start,

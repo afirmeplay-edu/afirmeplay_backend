@@ -5,6 +5,7 @@ from datetime import datetime
 
 class Test(db.Model):
     __tablename__ = 'test'
+    __table_args__ = {"schema": "tenant"}
 
     id = db.Column(db.String, primary_key=True,default=lambda: str(uuid.uuid4()))
     title = db.Column(db.String(100))
@@ -16,10 +17,10 @@ class Test(db.Model):
     end_time = db.Column(db.TIMESTAMP)
     duration = db.Column(db.Integer)  # Duração em minutos
     evaluation_mode = db.Column(db.String(20), default='virtual')  # virtual, physical
-    created_by = db.Column(db.String, db.ForeignKey('users.id'))
+    created_by = db.Column(db.String, db.ForeignKey('public.users.id'))
     created_at = db.Column(db.TIMESTAMP, server_default=db.text('CURRENT_TIMESTAMP'))
     updated_at = db.Column(db.TIMESTAMP, server_default=db.text('CURRENT_TIMESTAMP'), onupdate=db.text('CURRENT_TIMESTAMP'))
-    subject = db.Column(db.String, db.ForeignKey('subject.id'), nullable=True)
+    subject = db.Column(db.String, db.ForeignKey('public.subject.id'), nullable=True)
     grade_id = db.Column(UUID(as_uuid=True), db.ForeignKey("public.grade.id"))
     
     # Novos campos
@@ -49,7 +50,6 @@ class Test(db.Model):
         """Retorna as questões ordenadas"""
         from app.models.question import Question
         from app.models.testQuestion import TestQuestion
-        from sqlalchemy import text
         
         # Query direta para evitar problemas de relacionamento circular
         test_questions = TestQuestion.query.filter_by(test_id=self.id).order_by(TestQuestion.order).all()
@@ -58,18 +58,8 @@ class Test(db.Model):
         if not question_ids:
             return []
         
-        # MULTITENANT FIX: Buscar questões em public.question
-        # Salvar search_path atual
-        current_search_path = db.session.execute(text("SHOW search_path")).fetchone()[0]
-        
-        # Mudar para public para buscar questões globais/city
-        db.session.execute(text("SET search_path TO public"))
-        
-        # Buscar questões diretamente em public.question
+        # Question está em public.*; o ORM qualifica pelo metadata (sem search_path).
         questions = Question.query.filter(Question.id.in_(question_ids)).all()
-        
-        # Restaurar search_path original
-        db.session.execute(text(f"SET search_path TO {current_search_path}"))
         
         # Ordenar pela ordem original
         questions_dict = {q.id: q for q in questions}

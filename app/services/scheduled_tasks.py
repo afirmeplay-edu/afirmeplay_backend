@@ -7,6 +7,7 @@ Verifica e atualiza automaticamente o status de avaliações expiradas
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 from app import db
+from app.utils.tenant_middleware import city_id_to_schema_name, set_search_path
 from app.models.test import Test
 from app.models.classTest import ClassTest
 from app.models.testSession import TestSession
@@ -17,6 +18,43 @@ import logging
 
 # Instância global do scheduler
 scheduler = BackgroundScheduler()
+_SCHEDULER_LOCK_KEY = 73419211  # chave fixa p/ advisory lock (evitar múltiplos schedulers)
+_HAS_DB_LOCK = False
+
+
+def _try_acquire_scheduler_lock() -> bool:
+    """
+    Garante que apenas 1 processo (entre workers/reloaders) execute o scheduler.
+    Usa advisory lock do Postgres (escopo da conexão).
+    """
+    global _HAS_DB_LOCK
+    if _HAS_DB_LOCK:
+        return True
+    try:
+        # usa 1 conexão do pool; manter viva enquanto scheduler estiver rodando
+        conn = db.engine.raw_connection()
+        cur = conn.cursor()
+        cur.execute("SELECT pg_try_advisory_lock(%s)", (_SCHEDULER_LOCK_KEY,))
+        ok = bool(cur.fetchone()[0])
+        if ok:
+            # guardar refs para liberar no shutdown
+            _HAS_DB_LOCK = True
+            scheduler._innovaplay_lock_conn = conn  # type: ignore[attr-defined]
+            scheduler._innovaplay_lock_cur = cur  # type: ignore[attr-defined]
+            return True
+        # não pegou lock → devolver conexão ao pool
+        try:
+            cur.close()
+        except Exception:
+            pass
+        try:
+            conn.close()
+        except Exception:
+            pass
+        return False
+    except Exception as e:
+        logging.warning("Não foi possível adquirir advisory lock do scheduler: %s", e)
+        return False
 
 
 def check_expired_evaluations(app=None):
@@ -42,7 +80,6 @@ def check_expired_evaluations(app=None):
             app = create_app()
     
     from app.models.city import City
-    from sqlalchemy import text
 
     # Garantir que estamos dentro do contexto da aplicação
     with app.app_context():
@@ -66,8 +103,8 @@ def check_expired_evaluations(app=None):
                 city_updated = 0
                 city_sessions_expired = 0
                 try:
-                    schema = f"city_{str(city_id).replace('-', '_')}"
-                    db.session.execute(text(f'SET search_path TO "{schema}", public'))
+                    schema = city_id_to_schema_name(str(city_id))
+                    set_search_path(schema)
                 except Exception as e:
                     logging.warning("Schema %s: %s", city_id, e)
                     continue
@@ -172,9 +209,30 @@ def start_scheduler(app=None):
         app: Instância da aplicação Flask (opcional, mas recomendado)
     """
     try:
+        # Garantir app_context para acessar db.engine de forma segura
+        if app is not None:
+            try:
+                ctx_mgr = app.app_context()
+            except Exception:
+                ctx_mgr = None
+        else:
+            ctx_mgr = None
+
+        if ctx_mgr is not None:
+            ctx_mgr.push()
+
         # Verificar se o scheduler já está rodando
         if scheduler.running:
             logging.warning("Scheduler já está em execução")
+            if ctx_mgr is not None:
+                ctx_mgr.pop()
+            return
+
+        # Só iniciar se conseguir lock no Postgres (evita 2 schedulers em gunicorn/reloader)
+        if not _try_acquire_scheduler_lock():
+            logging.info("Scheduler não iniciado: outro processo já possui o lock.")
+            if ctx_mgr is not None:
+                ctx_mgr.pop()
             return
         
         # Criar wrapper que passa a app para a função
@@ -194,9 +252,16 @@ def start_scheduler(app=None):
         scheduler.start()
         logging.info("✅ Scheduler de tarefas agendadas iniciado com sucesso")
         logging.info("   - Verificação de avaliações expiradas: A cada 5 minutos")
+        if ctx_mgr is not None:
+            ctx_mgr.pop()
         
     except Exception as e:
         logging.error(f"Erro ao iniciar scheduler: {str(e)}", exc_info=True)
+        try:
+            if 'ctx_mgr' in locals() and ctx_mgr is not None:
+                ctx_mgr.pop()
+        except Exception:
+            pass
         raise
 
 
@@ -208,6 +273,25 @@ def stop_scheduler():
             logging.info("✅ Scheduler de tarefas agendadas parado com sucesso")
         else:
             logging.info("Scheduler não está em execução")
+
+        # liberar advisory lock (se este processo era o dono)
+        global _HAS_DB_LOCK
+        conn = getattr(scheduler, "_innovaplay_lock_conn", None)
+        cur = getattr(scheduler, "_innovaplay_lock_cur", None)
+        if conn is not None and cur is not None:
+            try:
+                cur.execute("SELECT pg_advisory_unlock(%s)", (_SCHEDULER_LOCK_KEY,))
+            except Exception:
+                pass
+            try:
+                cur.close()
+            except Exception:
+                pass
+            try:
+                conn.close()
+            except Exception:
+                pass
+        _HAS_DB_LOCK = False
     except Exception as e:
         logging.error(f"Erro ao parar scheduler: {str(e)}", exc_info=True)
 

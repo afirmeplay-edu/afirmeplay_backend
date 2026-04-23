@@ -4,13 +4,18 @@ from datetime import datetime
 import uuid
 from sqlalchemy.dialects.postgresql import JSONB
 
+from app.models.testSession import TestSession
+
 class EvaluationResult(db.Model):
     __tablename__ = 'evaluation_results'
-    
+    __table_args__ = {"schema": "tenant"}
+
     id = db.Column(db.String, primary_key=True, default=lambda: str(uuid.uuid4()))
-    test_id = db.Column(db.String, db.ForeignKey('test.id'), nullable=False)
-    student_id = db.Column(db.String, db.ForeignKey('student.id'), nullable=False)
-    session_id = db.Column(db.String, db.ForeignKey('test_sessions.id'), nullable=False)
+    test_id = db.Column(db.String, db.ForeignKey('tenant.test.id'), nullable=False)
+    student_id = db.Column(db.String, db.ForeignKey('tenant.student.id'), nullable=False)
+    # Sessões municipais ficam em `tenant.test_sessions` (traduzido para `city_*` via schema_translate_map).
+    # Usar referência direta à coluna do model evita NoReferencedTableError no metadata.
+    session_id = db.Column(db.String, db.ForeignKey(TestSession.__table__.c.id), nullable=False)
     
     # Dados de cálculo gerais
     correct_answers = db.Column(db.Integer, nullable=False)
@@ -30,7 +35,13 @@ class EvaluationResult(db.Model):
     # Relacionamentos
     test = db.relationship('Test', backref='evaluation_results')
     student = db.relationship('Student', backref='evaluation_results')
-    session = db.relationship('TestSession', backref='evaluation_results')
+    # Tabela em tenant.*; test_sessions está em public.* — o ORM não infere o join só pela FK.
+    session = db.relationship(
+        TestSession,
+        foreign_keys=[session_id],
+        primaryjoin=session_id == TestSession.id,
+        backref='evaluation_results',
+    )
     
     def __init__(self, test_id, student_id, session_id, correct_answers, total_questions, 
                  score_percentage, grade, proficiency, classification, **kwargs):

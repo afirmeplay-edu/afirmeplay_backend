@@ -7,15 +7,21 @@ import uuid
 
 
 class StudentPurchase(db.Model):
+    """
+    Catálogo em public.store_items. `student_id` não tem FK no PostgreSQL (student está em city_*).
+    Tabela criada em public (ver migration add_store_tables); pode ser replicada por município em outras fases.
+    """
+
     __tablename__ = 'student_purchases'
+    __table_args__ = {"schema": "public"}
 
     id = db.Column(db.String, primary_key=True, default=lambda: str(uuid.uuid4()))
-    student_id = db.Column(db.String, db.ForeignKey('student.id'), nullable=False)
-    store_item_id = db.Column(db.String, db.ForeignKey('store_items.id'), nullable=False)
+    student_id = db.Column(db.String, nullable=False)
+    store_item_id = db.Column(db.String, db.ForeignKey('public.store_items.id'), nullable=False)
     price_paid = db.Column(db.Integer, nullable=False)  # valor pago no momento da compra
     created_at = db.Column(db.TIMESTAMP, server_default=db.func.now())
 
-    student = db.relationship('Student', backref='store_purchases')
+    store_item = db.relationship('StoreItem', backref=db.backref('purchases', lazy='dynamic'))
 
     def to_dict(self):
         return {

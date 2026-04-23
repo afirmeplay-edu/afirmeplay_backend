@@ -26,12 +26,20 @@ def mobile_auth_login():
 
     device_id = request.headers.get("X-Device-Id")
     if not device_id or not is_valid_uuid_v4(device_id):
+        print(
+            "[mobile/v1/auth/login] 400 — X-Device-Id inválido ou ausente: "
+            f"{device_id!r} (uuid v4 válido? {is_valid_uuid_v4(device_id) if device_id else False})"
+        )
         return jsonify({"error": "X-Device-Id obrigatório (UUID v4)"}), 400
 
     data = request.get_json(silent=True) or {}
     ident = data.get("registration") or data.get("email")
     password = data.get("password")
     if not ident or not password:
+        print(
+            "[mobile/v1/auth/login] 400 — corpo JSON: "
+            f"keys={list(data.keys())} tem_ident={bool(ident)} tem_password={bool(password)}"
+        )
         return jsonify({"error": "registration/email e password obrigatórios"}), 400
 
     usuario = User.query.filter_by(registration=ident).first()
@@ -39,9 +47,32 @@ def mobile_auth_login():
         usuario = User.query.filter_by(email=ident).first()
 
     if not usuario or not authenticate_usuario(usuario, password):
+        print(f"[mobile/v1/auth/login] 401 — credenciais inválidas para ident={ident!r}")
         return jsonify({"error": "Credenciais inválidas"}), 401
 
+    if usuario.role == RoleEnum.ALUNO:
+        print(
+            f"[mobile/v1/auth/login] 403 — aluno tentou login online (use pacote offline): "
+            f"user_id={usuario.id}"
+        )
+        return (
+            jsonify(
+                {
+                    "error": (
+                        "Esta conta é de aluno: o login online do aplicador não se aplica. "
+                        "Baixe o pacote offline ou solicite o código ao aplicador se o aluno "
+                        "não constar no dispositivo."
+                    ),
+                    "error_code": "MOBILE_LOGIN_STUDENT_USE_OFFLINE_PACK",
+                }
+            ),
+            403,
+        )
+
     if usuario.role not in _MOBILE_LOGIN_ROLES:
+        print(
+            f"[mobile/v1/auth/login] 403 — role não permitido: {usuario.role!r} user_id={usuario.id}"
+        )
         return jsonify({"error": "Perfil não autorizado para API mobile"}), 403
 
     ctx = getattr(g, "tenant_context", None)
@@ -65,11 +96,16 @@ def mobile_auth_login():
         db.session.commit()
     except PermissionError as e:
         db.session.rollback()
+        print(f"[mobile/v1/auth/login] 403 — device: {e}")
         return jsonify({"error": str(e)}), 403
     except Exception:
         db.session.rollback()
         raise
 
+    print(
+        f"[mobile/v1/auth/login] 200 — user_id={usuario.id} role={usuario.role.value} "
+        f"city_id={token_city_id}"
+    )
     return jsonify(
         {
             "token": token,

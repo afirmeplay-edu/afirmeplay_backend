@@ -32,7 +32,6 @@ ARQUIVOS RELACIONADOS AO SISTEMA DE RELATÓRIOS:
 import logging
 from typing import Optional, Dict, Any
 from celery import Task
-from sqlalchemy import text
 
 from app.report_analysis.celery_app import celery_app
 from app.report_analysis.services import ReportAggregateService
@@ -53,23 +52,22 @@ from app.models.classTest import ClassTest
 from app.models.teacherClass import TeacherClass
 from app.models.school import School
 from app.models.teacher import Teacher
-from app.utils.tenant_middleware import city_id_to_schema_name
+from app.utils.tenant_middleware import city_id_to_schema_name, set_search_path
 from app import db
 
 logger = logging.getLogger(__name__)
 
 
 def _set_tenant_schema(schema: Optional[str]) -> None:
-    """Define o search_path do PostgreSQL para a task (multi-tenant)."""
-    if not schema or schema == 'public':
-        return
+    """Define o schema físico do tenant para ``db.session`` (schema_translate_map)."""
     try:
-        search_path = f'"{schema}", public'
-        db.session.execute(text(f"SET search_path TO {search_path}"))
-        db.session.commit()
-        logger.debug(f"[TENANT] search_path definido para schema={schema}")
+        if not schema or schema == "public":
+            set_search_path("public")
+        else:
+            set_search_path(schema)
+        logger.debug(f"[TENANT] bind tenant schema={schema}")
     except Exception as e:
-        logger.warning(f"[TENANT] Erro ao definir search_path: {e}")
+        logger.warning(f"[TENANT] Erro ao definir bind do tenant: {e}")
         db.session.rollback()
 
 

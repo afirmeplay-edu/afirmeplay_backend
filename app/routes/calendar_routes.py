@@ -3,18 +3,62 @@ from app.permissions.decorators import role_required, get_current_user_from_toke
 from app.permissions.rules import get_user_permission_scope
 from app.decorators import requires_city_context
 from app import db
-from app.models import CalendarEvent, CalendarEventUser, City, School, Grade, Class
+from app.models import CalendarEvent, CalendarEventUser, CalendarEventResource, City, School, Grade, Class, User
 from app.services.calendar_event_service import CalendarEventService
 from sqlalchemy import cast, String
 from sqlalchemy.dialects.postgresql import UUID as PostgresUUID
 from datetime import datetime
 from typing import List, Dict, Any
+from urllib.parse import urlparse
+from datetime import timedelta
+from app.services.storage.minio_service import MinIOService
+from app.utils.tenant_middleware import get_current_tenant_context
+import os
+import uuid
+from werkzeug.utils import secure_filename
 
 
 bp = Blueprint('calendar', __name__, url_prefix='/calendar')
+_MAX_RESOURCE_UPLOAD_BYTES = int(os.getenv('CALENDAR_MAX_UPLOAD_MB', '50')) * 1024 * 1024
+
+
+def _created_by_payload(e: CalendarEvent) -> dict:
+    u = User.query.get(e.created_by_user_id) if e.created_by_user_id else None
+    return {
+        "id": e.created_by_user_id,
+        "role": e.created_by_role,
+        "name": u.name if u else None,
+    }
+
+
+def _is_event_creator(e: CalendarEvent, user_id: str) -> bool:
+    return bool(e and e.created_by_user_id and str(e.created_by_user_id) == str(user_id))
+
+
+def _can_access_event_content(e: CalendarEvent, user_id: str) -> bool:
+    """Criador ou destinatário materializado pode ver o evento (detalhe / download)."""
+    if _is_event_creator(e, user_id):
+        return True
+    return CalendarEventUser.query.filter_by(event_id=e.id, user_id=user_id).first() is not None
 
 
 def to_fullcalendar_event(e: CalendarEvent, user_rec: CalendarEventUser = None) -> dict:
+    resources = []
+    for r in sorted(getattr(e, 'resources', []), key=lambda x: (x.sort_order or 0, x.id or "")):
+        item = {
+            "id": r.id,
+            "type": r.resource_type,
+            "title": r.title,
+            "sort_order": r.sort_order or 0,
+        }
+        if r.resource_type == "link":
+            item["url"] = r.url
+        elif r.resource_type == "file":
+            item["file_name"] = r.original_filename
+            item["mime_type"] = r.content_type
+            item["size_bytes"] = r.size_bytes
+        resources.append(item)
+
     return {
         "id": e.id,
         "title": e.title,
@@ -22,6 +66,7 @@ def to_fullcalendar_event(e: CalendarEvent, user_rec: CalendarEventUser = None) 
         "end": e.end_at.isoformat() if e.end_at else None,
         "allDay": bool(e.all_day),
         "timezone": e.timezone,
+        "created_by": _created_by_payload(e),
         "extendedProps": {
             "description": e.description,
             "location": e.location,
@@ -29,12 +74,75 @@ def to_fullcalendar_event(e: CalendarEvent, user_rec: CalendarEventUser = None) 
             "read": bool(user_rec.read_at) if user_rec else False,
             "eventId": e.id,
             "metadata": e.metadata_json or {},
+            "resources": resources,
         }
     }
 
 
+def _parse_link_resources(raw):
+    if raw is None:
+        return None, None
+    if not isinstance(raw, list):
+        return None, (jsonify({"error": "resources deve ser uma lista"}), 400)
+    out = []
+    for idx, res in enumerate(raw):
+        if not isinstance(res, dict):
+            return None, (jsonify({"error": f"Item {idx} de resources inválido"}), 400)
+        if res.get("type") != "link":
+            return None, (jsonify({"error": f"resources[{idx}] deve ser type='link'"}), 400)
+        title = (res.get("title") or "").strip()
+        if not title:
+            return None, (jsonify({"error": f"title obrigatório em resources[{idx}]"}), 400)
+        url = (res.get("url") or "").strip()
+        if not url:
+            return None, (jsonify({"error": f"url obrigatório em resources[{idx}]"}), 400)
+        parsed = urlparse(url)
+        if not parsed.scheme or parsed.scheme not in ("http", "https"):
+            return None, (jsonify({"error": f"URL inválida em resources[{idx}]"}), 400)
+        sort_order = res.get("sort_order", idx)
+        try:
+            sort_order = int(sort_order)
+        except (TypeError, ValueError):
+            sort_order = idx
+        rid = res.get("id")
+        if rid is not None:
+            rid = str(rid).strip() or None
+        out.append({"id": rid, "title": title, "url": url, "sort_order": sort_order})
+    return out, None
+
+
+def _sync_link_resources_for_event(event_id: str, items: List[Dict[str, Any]]) -> None:
+    existing_links = CalendarEventResource.query.filter_by(event_id=event_id, resource_type="link").all()
+    by_id = {r.id: r for r in existing_links}
+    incoming_ids = set()
+
+    for idx, item in enumerate(items):
+        rid = item.get("id")
+        if rid:
+            row = by_id.get(rid)
+            if not row:
+                raise ValueError(f"Recurso link id={rid} não encontrado neste evento")
+            incoming_ids.add(rid)
+            row.title = item["title"]
+            row.url = item["url"]
+            row.sort_order = item.get("sort_order", idx)
+        else:
+            db.session.add(CalendarEventResource(
+                id=str(uuid.uuid4()),
+                event_id=event_id,
+                resource_type="link",
+                title=item["title"],
+                url=item["url"],
+                sort_order=item.get("sort_order", idx),
+            ))
+
+    for row in existing_links:
+        if row.id not in incoming_ids:
+            db.session.delete(row)
+
+
 @bp.route('/events', methods=['POST'])
-@role_required("admin", "professor", "coordenador", "diretor", "tecadm")
+@role_required("admin", "professor", "coordenador", "diretor", "tecadm", "aluno")
 @requires_city_context
 def create_event():
     user = get_current_user_from_token()
@@ -54,43 +162,54 @@ def create_event():
         if not is_valid:
             return jsonify({"error": error_message}), 403
 
+    resources_plan, res_err = _parse_link_resources(data.get("resources"))
+    if res_err:
+        return res_err
+
     event = CalendarEventService.create_event(data, user)
+    if resources_plan is not None:
+        _sync_link_resources_for_event(event.id, resources_plan)
+        db.session.commit()
     return jsonify({"event": to_fullcalendar_event(event)}), 201
 
 
-@bp.route('/events', methods=['GET'])
-@role_required("admin", "professor", "coordenador", "diretor", "tecadm")
-@requires_city_context
-def list_events():
-    # Listagem administrativa (filtros opcionais)
-    q = CalendarEvent.query
-    start = request.args.get('start')
-    end = request.args.get('end')
-    if start:
-        try:
-            start_dt = datetime.fromisoformat(start)
-            q = q.filter(CalendarEvent.start_at >= start_dt)
-        except Exception:
-            pass
-    if end:
-        try:
-            end_dt = datetime.fromisoformat(end)
-            q = q.filter(CalendarEvent.start_at <= end_dt)
-        except Exception:
-            pass
-
-    events = q.order_by(CalendarEvent.start_at.desc()).all()
-    return jsonify({"events": [to_fullcalendar_event(e) for e in events]}), 200
+# GET /calendar/events — desativado: expunha todos os eventos do tenant a vários perfis.
+# Usar GET /calendar/my-events. Reative apenas com escopo/papel explícitos no produto.
+# @bp.route('/events', methods=['GET'])
+# @role_required("admin", "professor", "coordenador", "diretor", "tecadm")
+# @requires_city_context
+# def list_events():
+#     q = CalendarEvent.query
+#     start = request.args.get('start')
+#     end = request.args.get('end')
+#     if start:
+#         try:
+#             start_dt = datetime.fromisoformat(start)
+#             q = q.filter(CalendarEvent.start_at >= start_dt)
+#         except Exception:
+#             pass
+#     if end:
+#         try:
+#             end_dt = datetime.fromisoformat(end)
+#             q = q.filter(CalendarEvent.start_at <= end_dt)
+#         except Exception:
+#             pass
+#     events = q.order_by(CalendarEvent.start_at.desc()).all()
+#     return jsonify({"events": [to_fullcalendar_event(e) for e in events]}), 200
 
 
 @bp.route('/events/<string:event_id>', methods=['GET'])
-@role_required("admin", "professor", "coordenador", "diretor", "tecadm")
+@role_required("admin", "professor", "coordenador", "diretor", "tecadm", "aluno")
 @requires_city_context
 def get_event(event_id: str):
     e = CalendarEvent.query.get(event_id)
     if not e:
         return jsonify({"error": "Evento não encontrado"}), 404
-    return jsonify({"event": to_fullcalendar_event(e)}), 200
+    user = get_current_user_from_token()
+    if not _can_access_event_content(e, user['id']):
+        return jsonify({"error": "Acesso negado a este evento"}), 403
+    rec = CalendarEventUser.query.filter_by(event_id=e.id, user_id=user['id']).first()
+    return jsonify({"event": to_fullcalendar_event(e, rec)}), 200
 
 
 @bp.route('/events/<string:event_id>', methods=['PUT'])
@@ -100,8 +219,30 @@ def update_event(event_id: str):
     e = CalendarEvent.query.get(event_id)
     if not e:
         return jsonify({"error": "Evento não encontrado"}), 404
+    user = get_current_user_from_token()
+    if not _is_event_creator(e, user['id']):
+        return jsonify({"error": "Somente quem criou o evento pode alterá-lo"}), 403
     data = request.get_json() or {}
+    if 'targets' in data:
+        is_valid, error_message = CalendarEventService.validate_targets_by_role(user, data.get('targets') or [])
+        if not is_valid:
+            return jsonify({"error": error_message}), 403
+
+    if 'resources' in data:
+        resources_plan, res_err = _parse_link_resources(data.get("resources"))
+        if res_err:
+            return res_err
+    else:
+        resources_plan = None
+
     e = CalendarEventService.update_event(e, data)
+    if resources_plan is not None:
+        try:
+            _sync_link_resources_for_event(e.id, resources_plan)
+            db.session.commit()
+        except ValueError as ve:
+            db.session.rollback()
+            return jsonify({"error": str(ve)}), 400
     return jsonify({"event": to_fullcalendar_event(e)}), 200
 
 
@@ -112,7 +253,138 @@ def delete_event(event_id: str):
     e = CalendarEvent.query.get(event_id)
     if not e:
         return jsonify({"error": "Evento não encontrado"}), 404
+    user = get_current_user_from_token()
+    if not _is_event_creator(e, user['id']):
+        return jsonify({"error": "Somente quem criou o evento pode excluí-lo"}), 403
     db.session.delete(e)
+    db.session.commit()
+    return jsonify({"success": True}), 200
+
+
+@bp.route('/events/<string:event_id>/resources/file', methods=['POST'])
+@role_required("admin", "professor", "coordenador", "diretor", "tecadm", "aluno")
+@requires_city_context
+def upload_event_resource_file(event_id: str):
+    e = CalendarEvent.query.get(event_id)
+    if not e:
+        return jsonify({"error": "Evento não encontrado"}), 404
+    user = get_current_user_from_token()
+    if not _is_event_creator(e, user['id']):
+        return jsonify({"error": "Somente quem criou o evento pode anexar arquivos"}), 403
+
+    title = (request.form.get('title') or "").strip()
+    if not title or len(title) > 200:
+        return jsonify({"error": "title obrigatório (máx. 200 caracteres)"}), 400
+
+    upload = request.files.get('file')
+    if not upload or not upload.filename:
+        return jsonify({"error": "Arquivo file é obrigatório"}), 400
+
+    upload.seek(0, os.SEEK_END)
+    size = upload.tell()
+    upload.seek(0)
+    if size > _MAX_RESOURCE_UPLOAD_BYTES:
+        return jsonify({"error": "Arquivo excede o tamanho máximo permitido"}), 400
+
+    ctx = get_current_tenant_context()
+    city_part = str(ctx.city_id).replace("-", "_") if ctx and ctx.city_id else "city"
+    resource_id = str(uuid.uuid4())
+    raw_name = secure_filename(upload.filename) or "upload"
+    bucket = MinIOService.BUCKETS["USER_UPLOADS"]
+    object_name = f"calendar/{city_part}/{event_id}/{resource_id}_{raw_name}"
+
+    data = upload.read()
+    minio = MinIOService()
+    result = minio.upload_file(
+        bucket_name=bucket,
+        object_name=object_name,
+        data=data,
+        content_type=upload.content_type,
+    )
+    if not result:
+        return jsonify({"error": "Falha ao enviar arquivo para o armazenamento"}), 500
+
+    sort_order_raw = request.form.get("sort_order")
+    try:
+        sort_order = int(sort_order_raw) if sort_order_raw is not None else 0
+    except (TypeError, ValueError):
+        sort_order = 0
+
+    res = CalendarEventResource(
+        id=resource_id,
+        event_id=event_id,
+        resource_type="file",
+        title=title,
+        minio_bucket=result.get("bucket") or bucket,
+        minio_object_name=result.get("object_name"),
+        original_filename=upload.filename[:500],
+        content_type=(upload.content_type or "application/octet-stream")[:200],
+        size_bytes=size,
+        sort_order=sort_order,
+    )
+    db.session.add(res)
+    db.session.commit()
+
+    return jsonify({
+        "resource": {
+            "id": res.id,
+            "type": "file",
+            "title": res.title,
+            "file_name": res.original_filename,
+            "mime_type": res.content_type,
+            "size_bytes": res.size_bytes,
+            "sort_order": res.sort_order,
+        }
+    }), 201
+
+
+@bp.route('/events/<string:event_id>/resources/<string:resource_id>/download', methods=['GET'])
+@role_required("admin", "professor", "coordenador", "diretor", "tecadm", "aluno")
+@requires_city_context
+def download_event_resource(event_id: str, resource_id: str):
+    e = CalendarEvent.query.get(event_id)
+    if not e:
+        return jsonify({"error": "Evento não encontrado"}), 404
+    user = get_current_user_from_token()
+    if not _can_access_event_content(e, user['id']):
+        return jsonify({"error": "Acesso negado a este recurso"}), 403
+
+    res = CalendarEventResource.query.filter_by(id=resource_id, event_id=event_id).first()
+    if not res or res.resource_type != "file":
+        return jsonify({"error": "Recurso não encontrado"}), 404
+    if not res.minio_object_name:
+        return jsonify({"error": "Arquivo indisponível"}), 404
+
+    minio = MinIOService()
+    bucket = res.minio_bucket or minio.BUCKETS["USER_UPLOADS"]
+    url = minio.get_presigned_url(bucket, res.minio_object_name, expires=timedelta(hours=1))
+    return jsonify({
+        "download_url": url,
+        "expires_in_seconds": 3600,
+        "file_name": res.original_filename,
+    }), 200
+
+
+@bp.route('/events/<string:event_id>/resources/<string:resource_id>', methods=['DELETE'])
+@role_required("admin", "professor", "coordenador", "diretor", "tecadm", "aluno")
+@requires_city_context
+def delete_event_resource(event_id: str, resource_id: str):
+    e = CalendarEvent.query.get(event_id)
+    if not e:
+        return jsonify({"error": "Evento não encontrado"}), 404
+    user = get_current_user_from_token()
+    if not _is_event_creator(e, user['id']):
+        return jsonify({"error": "Somente quem criou o evento pode remover anexos"}), 403
+
+    res = CalendarEventResource.query.filter_by(id=resource_id, event_id=event_id).first()
+    if not res:
+        return jsonify({"error": "Recurso não encontrado"}), 404
+
+    if res.resource_type == "file" and res.minio_object_name:
+        m = MinIOService()
+        m.delete_file(res.minio_bucket or m.BUCKETS["USER_UPLOADS"], res.minio_object_name)
+
+    db.session.delete(res)
     db.session.commit()
     return jsonify({"success": True}), 200
 
@@ -124,6 +396,9 @@ def publish_event(event_id: str):
     e = CalendarEvent.query.get(event_id)
     if not e:
         return jsonify({"error": "Evento não encontrado"}), 404
+    user = get_current_user_from_token()
+    if not _is_event_creator(e, user['id']):
+        return jsonify({"error": "Somente quem criou o evento pode publicá-lo"}), 403
     e = CalendarEventService.publish_event(e)
     return jsonify({"event": to_fullcalendar_event(e)}), 200
 
@@ -132,6 +407,13 @@ def publish_event(event_id: str):
 @role_required("admin", "coordenador", "diretor", "tecadm")
 @requires_city_context
 def list_recipients(event_id: str):
+    e = CalendarEvent.query.get(event_id)
+    if not e:
+        return jsonify({"error": "Evento não encontrado"}), 404
+    user = get_current_user_from_token()
+    if not _is_event_creator(e, user['id']):
+        return jsonify({"error": "Somente quem criou o evento pode listar destinatários"}), 403
+
     page = int(request.args.get('page', 1))
     per_page = int(request.args.get('per_page', 50))
     q = CalendarEventUser.query.filter_by(event_id=event_id)

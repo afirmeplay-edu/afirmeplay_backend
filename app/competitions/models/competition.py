@@ -4,6 +4,8 @@ from app import db
 import uuid
 from datetime import datetime, timezone
 from app.utils.timezone_utils import get_local_time
+from app.models.subject import Subject
+from app.models.test import Test
 
 
 def _normalize_datetime_for_comparison(dt, competition_timezone=None):
@@ -50,8 +52,8 @@ class Competition(db.Model):
     id = db.Column(db.String, primary_key=True, default=lambda: str(uuid.uuid4()))
     name = db.Column(db.String, nullable=False)
     description = db.Column(db.Text, nullable=True)
-    test_id = db.Column(db.String, db.ForeignKey('test.id'), nullable=True)
-    subject_id = db.Column(db.String, db.ForeignKey('subject.id'), nullable=False)
+    test_id = db.Column(db.String, db.ForeignKey(Test.__table__.c.id), nullable=True)
+    subject_id = db.Column(db.String, db.ForeignKey(Subject.__table__.c.id), nullable=False)
     level = db.Column(db.Integer, nullable=False)
     scope = db.Column(db.String, default='individual')
     scope_filter = db.Column(db.JSON, nullable=True)
@@ -72,7 +74,7 @@ class Competition(db.Model):
     edition_number = db.Column(db.Integer, nullable=True)
     edition_series = db.Column(db.String, nullable=True)
     status = db.Column(db.String, default='rascunho')
-    created_by = db.Column(db.String, db.ForeignKey('users.id'), nullable=True)
+    created_by = db.Column(db.String, db.ForeignKey('public.users.id'), nullable=True)
     created_at = db.Column(db.TIMESTAMP, server_default=db.text('CURRENT_TIMESTAMP'))
     updated_at = db.Column(
         db.TIMESTAMP,

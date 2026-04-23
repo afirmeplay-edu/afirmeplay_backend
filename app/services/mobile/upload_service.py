@@ -1,4 +1,5 @@
 from datetime import datetime
+import logging
 from typing import Any, Dict, List, Optional, Tuple
 import uuid as uuid_lib
 
@@ -188,6 +189,32 @@ def process_one_submission(
             "status": "error",
             "message": f"erro ao persistir: {ex}",
         }
+
+    # Gravar sync antes do cálculo: calculate_and_save_result faz commit e, em erro, rollback
+    # da sessão atual — sem este commit, o rollback apagaria sessão/respostas/sync.
+    db.session.commit()
+
+    try:
+        from app.services.evaluation_result_service import EvaluationResultService
+
+        eval_out = EvaluationResultService.calculate_and_save_result(
+            str(test_id),
+            str(student_id),
+            str(session_id_created),
+        )
+        if not eval_out:
+            logging.warning(
+                "mobile sync: evaluation_result não gerado (test_id=%s student_id=%s session_id=%s)",
+                test_id,
+                student_id,
+                session_id_created,
+            )
+    except Exception:
+        logging.exception(
+            "mobile sync: exceção ao calcular evaluation_result (test_id=%s student_id=%s)",
+            test_id,
+            student_id,
+        )
 
     register_or_touch_device(user_id, device_id)
 

@@ -9,11 +9,12 @@ class PhysicalTestForm(db.Model):
     Armazena informações sobre formulários gerados para cada aluno
     """
     __tablename__ = 'physical_test_forms'
+    __table_args__ = {"schema": "tenant"}
 
     id = db.Column(db.String, primary_key=True, default=lambda: str(uuid.uuid4()))
-    test_id = db.Column(db.String, db.ForeignKey('test.id'), nullable=False)
-    student_id = db.Column(db.String, db.ForeignKey('student.id'), nullable=False)
-    class_test_id = db.Column(db.String, db.ForeignKey('class_test.id'), nullable=False)
+    test_id = db.Column(db.String, db.ForeignKey('tenant.test.id'), nullable=False)
+    student_id = db.Column(db.String, db.ForeignKey('tenant.student.id'), nullable=False)
+    class_test_id = db.Column(db.String, db.ForeignKey('tenant.class_test.id'), nullable=False)
     
     # Dados dos arquivos gerados (salvos no banco)
     form_pdf_data = db.Column(db.LargeBinary, nullable=True)  # PDF com prova + formulário (bytes)

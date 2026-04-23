@@ -30,7 +30,7 @@ def me():
         "sub": user.get("id"),
         "city_id": user.get("city_id"),
         "role": user.get("role"),
-        "exp": datetime.datetime.utcnow() + datetime.timedelta(hours=1)
+        "exp": datetime.datetime.utcnow() + datetime.timedelta(hours=3)
     }
     new_token = jwt.encode(token_payload, SECRET_KEY, algorithm='HS256')
 

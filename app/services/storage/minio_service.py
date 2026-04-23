@@ -44,6 +44,7 @@ class MinIOService:
         'QUESTION_IMAGES': 'question-images',
         'CERTIFICATE_TEMPLATES': 'certificate-templates',
         'USER_UPLOADS': 'user-uploads',
+        'PLAY_TV_RESOURCES': 'play-tv-resources',
     }
     
     def __init__(self):
@@ -107,7 +108,32 @@ class MinIOService:
         """Detecta MIME type baseado na extensão do arquivo"""
         ext = file_path.split('.')[-1].lower()
         return self.MIME_TYPES.get(ext, 'application/octet-stream')
-    
+
+    def _ensure_bucket(self, bucket_name: str) -> bool:
+        """
+        Garante que o bucket existe no MinIO (cria se necessário).
+        Usado por upload_file / upload_from_path e evita NoSuchBucket.
+        """
+        try:
+            if self.client.bucket_exists(bucket_name):
+                return True
+            self.client.make_bucket(bucket_name)
+            logger.info("✅ Bucket MinIO criado automaticamente: %s", bucket_name)
+            return True
+        except S3Error as e:
+            code = getattr(e, "code", "") or ""
+            if code in ("BucketAlreadyOwnedByYou", "BucketAlreadyExists"):
+                return True
+            if self.client.bucket_exists(bucket_name):
+                return True
+            logger.error(
+                "❌ Erro ao garantir bucket MinIO %s: %s",
+                bucket_name,
+                e,
+                exc_info=True,
+            )
+            return False
+
     def upload_file(
         self, 
         bucket_name: str, 
@@ -131,9 +157,11 @@ class MinIOService:
             NÃO lança exceção - retorna None para permitir tratamento não crítico
         """
         try:
+            if not self._ensure_bucket(bucket_name):
+                return None
             if content_type is None:
                 content_type = self._get_content_type(object_name)
-            
+
             self.client.put_object(
                 bucket_name,
                 object_name,
@@ -172,8 +200,10 @@ class MinIOService:
             NÃO lança exceção - retorna None para permitir tratamento não crítico
         """
         try:
+            if not self._ensure_bucket(bucket_name):
+                return None
             content_type = self._get_content_type(file_path)
-            
+
             self.client.fput_object(
                 bucket_name,
                 object_name,
@@ -383,13 +413,6 @@ class MinIOService:
             Dict com url, object_name, bucket, size ou None se falhar
         """
         bucket_name = self.BUCKETS['QUESTION_IMAGES']
-        try:
-            if not self.client.bucket_exists(bucket_name):
-                self.client.make_bucket(bucket_name)
-                logger.info(f"✅ Bucket '{bucket_name}' criado automaticamente")
-        except S3Error as e:
-            logger.error(f"❌ Erro ao garantir bucket question-images: {str(e)}")
-            return None
         object_name = f"{question_id}/{image_name}"
         return self.upload_file(
             bucket_name=bucket_name,
@@ -419,13 +442,6 @@ class MinIOService:
             Dict com url, object_name, bucket, size ou None se falhar
         """
         bucket_name = self.BUCKETS['CERTIFICATE_TEMPLATES']
-        try:
-            if not self.client.bucket_exists(bucket_name):
-                self.client.make_bucket(bucket_name)
-                logger.info(f"✅ Bucket '{bucket_name}' criado automaticamente")
-        except S3Error as e:
-            logger.error(f"❌ Erro ao garantir bucket certificate-templates: {str(e)}")
-            return None
         ext = (extension or "png").lstrip(".").lower()
         safe_role = role if role in ("logo", "signature") else "logo"
         object_name = f"{evaluation_id}/{safe_role}.{ext}"

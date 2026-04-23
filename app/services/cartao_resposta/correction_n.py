@@ -492,7 +492,7 @@ class AnswerSheetCorrectionN:
                 'municipality': gabarito_obj.municipality or '',
                 'state': gabarito_obj.state or '',
                 'institution': gabarito_obj.institution or '',
-                'grade_name': gabarito_obj.grade_name or ''
+                'grade_name': gabarito_obj.grade_name or gabarito_obj.title or ''
             }
             
             # Configuração de blocos
@@ -1208,15 +1208,16 @@ class AnswerSheetCorrectionN:
             # 12. Calcular nota, proficiência e classificação
             correct_count = correction['correct']
             total_count = correction['total_questions']
+            answered_count = correction['answered']
             percentage = correction['score_percentage']
-            grade = (correct_count / total_count * 10) if total_count > 0 else 0.0
-            
-            proficiency, classification = self._calcular_proficiencia_classificacao(
+
+            # Denominador = questões respondidas (igual às avaliações)
+            proficiency, classification, grade = self._calcular_proficiencia_classificacao(
                 correct_answers=correct_count,
-                total_questions=total_count,
+                total_questions=answered_count if answered_count > 0 else total_count,
                 gabarito_obj=gabarito_obj
             )
-            
+
             # 13. Salvar resultado (detecta automaticamente o tipo)
             saved_result = self._salvar_resultado(
                 gabarito_id=gabarito_id,
@@ -1278,15 +1279,16 @@ class AnswerSheetCorrectionN:
             # 10. Calcular nota, proficiência e classificação
             correct_count = correction['correct']
             total_count = correction['total_questions']
+            answered_count = correction['answered']
             percentage = correction['score_percentage']
-            grade = (correct_count / total_count * 10) if total_count > 0 else 0.0
-            
-            proficiency, classification = self._calcular_proficiencia_classificacao(
+
+            # Denominador = questões respondidas (igual às avaliações)
+            proficiency, classification, grade = self._calcular_proficiencia_classificacao(
                 correct_answers=correct_count,
-                total_questions=total_count,
+                total_questions=answered_count if answered_count > 0 else total_count,
                 gabarito_obj=gabarito_obj
             )
-            
+
             # 11. Salvar resultado
             saved_result = self._salvar_resultado(
                 gabarito_id=gabarito_id,
@@ -4499,15 +4501,16 @@ class AnswerSheetCorrectionN:
             correction = self._calcular_correcao(validated_answers, gabarito)
             correct_count = correction['correct']
             total_count = correction['total_questions']
+            answered_count = correction['answered']
             percentage = correction['score_percentage']
-            grade = (correct_count / total_count * 10) if total_count > 0 else 0.0
-            
-            proficiency, classification = self._calcular_proficiencia_classificacao(
+
+            # Denominador = questões respondidas (igual às avaliações)
+            proficiency, classification, grade = self._calcular_proficiencia_classificacao(
                 correct_answers=correct_count,
-                total_questions=total_count,
+                total_questions=answered_count if answered_count > 0 else total_count,
                 gabarito_obj=gabarito_obj
             )
-            
+
             saved_result = self._salvar_resultado(
                 gabarito_id=str(gabarito_obj.id),
                 student_id=student_id,
@@ -5178,65 +5181,53 @@ class AnswerSheetCorrectionN:
         }
     
     def _calcular_proficiencia_classificacao(self, correct_answers: int, total_questions: int,
-                                            gabarito_obj: AnswerSheetGabarito) -> Tuple[float, str]:
+                                            gabarito_obj: AnswerSheetGabarito) -> Tuple[float, str, float]:
         """
-        Calcula proficiência e classificação
-        
+        Calcula proficiência, classificação e nota por disciplina.
+
         Args:
             correct_answers: Número de acertos
-            total_questions: Total de questões
+            total_questions: Questões respondidas (denominador correto, igual às avaliações)
             gabarito_obj: Objeto AnswerSheetGabarito com informações do gabarito
-            
+
         Returns:
-            Tuple: (proficiência, classificação)
+            Tuple: (proficiência, classificação, nota)
         """
         try:
             from app.services.evaluation_calculator import EvaluationCalculator
-            
-            # Inferir nome do curso (string) baseado no grade_name
-            grade_name = gabarito_obj.grade_name or ''
-            course_name = 'Anos Iniciais'  # Padrão
-            
-            if any(x in grade_name.lower() for x in ['infantil', 'pré', 'pre']):
-                course_name = 'Educação Infantil'
-            elif any(x in grade_name.lower() for x in ['1º', '2º', '3º', '4º', '5º', 'anos iniciais']):
-                course_name = 'Anos Iniciais'
-            elif any(x in grade_name.lower() for x in ['6º', '7º', '8º', '9º', 'anos finais']):
-                course_name = 'Anos Finais'
-            elif any(x in grade_name.lower() for x in ['1º médio', '2º médio', '3º médio', 'ensino médio']):
-                course_name = 'Ensino Médio'
-            elif 'especial' in grade_name.lower():
-                course_name = 'Educação Especial'
-            elif 'eja' in grade_name.lower():
-                course_name = 'EJA'
-            
-            # Inferir nome da disciplina (string) baseado no title
+            from app.services.cartao_resposta.course_name_resolver import infer_course_name_from_grade
+
+            grade_name = gabarito_obj.grade_name or gabarito_obj.title or ''
+            course_name = infer_course_name_from_grade(grade_name)
+
             title = gabarito_obj.title or ''
-            subject_name = 'Outras'  # Padrão
-            
+            subject_name = 'Outras'
             if 'matemática' in title.lower() or 'matematica' in title.lower():
                 subject_name = 'Matemática'
-            
-            # Calcular proficiência usando os parâmetros corretos
+
             proficiency = EvaluationCalculator.calculate_proficiency(
                 correct_answers=correct_answers,
                 total_questions=total_questions,
                 course_name=course_name,
                 subject_name=subject_name
             )
-            
-            # Calcular classificação usando os parâmetros corretos
             classification = EvaluationCalculator.determine_classification(
                 proficiency=proficiency,
                 course_name=course_name,
                 subject_name=subject_name
             )
-            
-            return proficiency, classification
-            
+            grade = EvaluationCalculator.calculate_grade(
+                proficiency=proficiency,
+                course_name=course_name,
+                subject_name=subject_name,
+                use_simple_calculation=False,
+            )
+
+            return proficiency, classification, grade
+
         except Exception as e:
             self.logger.error(f"Erro ao calcular proficiência/classificação: {str(e)}", exc_info=True)
-            return 0.0, "Não calculado"
+            return 0.0, "Não calculado", 0.0
     
     def _salvar_respostas_no_banco(self, test_id: str, student_id: str,
                                   respostas_detectadas: Dict[int, Optional[str]],
@@ -5435,13 +5426,25 @@ class AnswerSheetCorrectionN:
                 existing_result.answered_questions = correction.get('answered', 0)
                 existing_result.score_percentage = correction.get('score_percentage', 0.0)
                 existing_result.grade = grade
-                existing_result.proficiency = proficiency if proficiency > 0 else None
+                existing_result.proficiency = proficiency
                 existing_result.classification = classification
                 existing_result.corrected_at = datetime.utcnow()
                 existing_result.detection_method = 'geometric_n'
                 
+                db.session.flush()
+                payload = existing_result.to_dict()
                 db.session.commit()
-                return existing_result.to_dict()
+                try:
+                    from app.report_analysis.answer_sheet_aggregate_service import (
+                        invalidate_answer_sheet_report_cache_after_result,
+                    )
+
+                    invalidate_answer_sheet_report_cache_after_result(
+                        gabarito_id, student_id, commit=True
+                    )
+                except Exception as inv_err:
+                    self.logger.warning("Invalidate answer_sheet report cache: %s", inv_err)
+                return payload
             else:
                 # Criar novo
                 result = AnswerSheetResult(
@@ -5455,14 +5458,26 @@ class AnswerSheetCorrectionN:
                     answered_questions=correction.get('answered', 0),
                     score_percentage=correction.get('score_percentage', 0.0),
                     grade=grade,
-                    proficiency=proficiency if proficiency > 0 else None,
+                    proficiency=proficiency,
                     classification=classification,
                     detection_method='geometric_n'
                 )
                 
                 db.session.add(result)
+                db.session.flush()
+                payload = result.to_dict()
                 db.session.commit()
-                return result.to_dict()
+                try:
+                    from app.report_analysis.answer_sheet_aggregate_service import (
+                        invalidate_answer_sheet_report_cache_after_result,
+                    )
+
+                    invalidate_answer_sheet_report_cache_after_result(
+                        gabarito_id, student_id, commit=True
+                    )
+                except Exception as inv_err:
+                    self.logger.warning("Invalidate answer_sheet report cache: %s", inv_err)
+                return payload
                 
         except Exception as e:
             db.session.rollback()

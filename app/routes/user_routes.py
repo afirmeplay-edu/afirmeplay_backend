@@ -6,7 +6,8 @@ from flask_jwt_extended import jwt_required
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy import func, text
 import logging
-from werkzeug.security import generate_password_hash, check_password_hash
+from werkzeug.security import check_password_hash
+from app.utils.auth import hash_password
 from app import db
 from app.models.student import Student
 from app.models.school import School
@@ -19,7 +20,7 @@ from app.models.studentPasswordLog import StudentPasswordLog
 from app.models.user_settings import UserSettings
 from sqlalchemy.orm import joinedload
 from app.utils.email_service import EmailService
-from app.utils.tenant_middleware import city_id_to_schema_name, get_current_tenant_context
+from app.utils.tenant_middleware import city_id_to_schema_name, get_current_tenant_context, set_search_path
 from datetime import datetime, timedelta, date
 from flask import current_app
 import csv
@@ -279,7 +280,7 @@ def create_user():
         novo_usuario = User(
             name=data["name"],
             email=data["email"],
-            password_hash=generate_password_hash(data["password"]),
+            password_hash=hash_password(data["password"]),
             registration=data.get("registration"),
             role=RoleEnum(data.get("role")),
             city_id=city_id  # Adicionando city_id
@@ -626,7 +627,7 @@ def reset_password():
             return jsonify({"erro": "Token expirado. Solicite um novo link de redefinição."}), 400
         
         # Atualizar senha
-        user.password_hash = generate_password_hash(new_password)
+        user.password_hash = hash_password(new_password)
         user.reset_token = None
         user.reset_token_expires = None
         user.updated_at = datetime.utcnow()
@@ -687,7 +688,7 @@ def change_password():
             return jsonify({"erro": "A nova senha deve ser diferente da senha atual"}), 400
         
         # Atualizar senha
-        user.password_hash = generate_password_hash(new_password)
+        user.password_hash = hash_password(new_password)
         user.updated_at = datetime.utcnow()
         db.session.commit()
         
@@ -837,7 +838,7 @@ def update_user(user_id):
         if password is not None:
             if not isinstance(password, str) or len(password) < 8:
                 return jsonify({"erro": "password deve conter ao menos 8 caracteres"}), 400
-            user.password_hash = generate_password_hash(password)
+            user.password_hash = hash_password(password)
 
         registration = data.get('registration')
         if registration is not None:
@@ -974,9 +975,7 @@ def delete_user(user_id):
             return jsonify({"erro": "Usuário não encontrado"}), 404
 
         if user_to_delete.city_id:
-            user_schema = city_id_to_schema_name(user_to_delete.city_id)
-            search_path = f'"{user_schema}", public'
-            db.session.execute(text(f"SET search_path TO {search_path}"))
+            set_search_path(city_id_to_schema_name(user_to_delete.city_id))
 
         if current_user['role'] == "tecadm":
             current_city_id = current_user.get('tenant_id') or current_user.get('city_id')
@@ -986,12 +985,11 @@ def delete_user(user_id):
         deleted_relations = []
 
         def _set_search_path_for_user():
-            """Volta o search_path para o schema do usuário (para manter consistência multi-tenant)."""
+            """Volta o bind ORM para o schema do usuário (para manter consistência multi-tenant)."""
             if user_to_delete.city_id:
-                schema = city_id_to_schema_name(user_to_delete.city_id)
-                db.session.execute(text(f'SET search_path TO "{schema}", public'))
+                set_search_path(city_id_to_schema_name(user_to_delete.city_id))
             else:
-                db.session.execute(text("SET search_path TO public"))
+                set_search_path("public")
 
         teacher = Teacher.query.filter_by(user_id=user_id).first()
         teacher_id = teacher.id if teacher else None
@@ -1003,28 +1001,26 @@ def delete_user(user_id):
             total_deleted = 0
             for city in all_cities:
                 city_schema = city_id_to_schema_name(city.id)
-                db.session.execute(text(f'SET search_path TO "{city_schema}", public'))
+                set_search_path(city_schema)
                 deleted = TeacherClass.query.filter_by(teacher_id=teacher_id).delete(synchronize_session=False)
                 total_deleted += deleted
             if total_deleted > 0:
                 deleted_relations.append(f"{total_deleted} vínculos com turmas")
             if user_to_delete.city_id:
-                user_schema = city_id_to_schema_name(user_to_delete.city_id)
-                db.session.execute(text(f'SET search_path TO "{user_schema}", public'))
+                set_search_path(city_id_to_schema_name(user_to_delete.city_id))
 
         if teacher_id:
             from app.models.schoolTeacher import SchoolTeacher
             total_deleted = 0
             for city in all_cities:
                 city_schema = city_id_to_schema_name(city.id)
-                db.session.execute(text(f'SET search_path TO "{city_schema}", public'))
+                set_search_path(city_schema)
                 deleted = SchoolTeacher.query.filter_by(teacher_id=teacher_id).delete(synchronize_session=False)
                 total_deleted += deleted
             if total_deleted > 0:
                 deleted_relations.append(f"{total_deleted} vínculos escolares")
             if user_to_delete.city_id:
-                user_schema = city_id_to_schema_name(user_to_delete.city_id)
-                db.session.execute(text(f'SET search_path TO "{user_schema}", public'))
+                set_search_path(city_id_to_schema_name(user_to_delete.city_id))
 
         if teacher_id:
             db.session.flush()
@@ -1064,7 +1060,7 @@ def delete_user(user_id):
 
         # Remover logs de senha do aluno no schema da cidade (evita órfãos e duplicatas ao recadastrar)
         if user_to_delete.city_id:
-            db.session.execute(text(f'SET search_path TO "{city_id_to_schema_name(user_to_delete.city_id)}", public'))
+            set_search_path(city_id_to_schema_name(user_to_delete.city_id))
             deleted_logs = StudentPasswordLog.query.filter_by(user_id=user_id).delete(synchronize_session=False)
             if deleted_logs > 0:
                 deleted_relations.append("log de senhas (student_password_log)")
@@ -1073,16 +1069,15 @@ def delete_user(user_id):
             total_deleted = 0
             for city in all_cities:
                 city_schema = city_id_to_schema_name(city.id)
-                db.session.execute(text(f'SET search_path TO "{city_schema}", public'))
+                set_search_path(city_schema)
                 deleted = Teacher.query.filter_by(user_id=user_id).delete(synchronize_session=False)
                 total_deleted += deleted
             if total_deleted > 0:
                 deleted_relations.append(f"professor ({total_deleted} schemas)")
             if user_to_delete.city_id:
-                user_schema = city_id_to_schema_name(user_to_delete.city_id)
-                db.session.execute(text(f'SET search_path TO "{user_schema}", public'))
+                set_search_path(city_id_to_schema_name(user_to_delete.city_id))
 
-        # Mesma lógica: Teacher/Professor também pode ter mudado o search_path.
+        # Mesma lógica: Teacher/Professor também pode ter mudado o bind de schema.
         _set_search_path_for_user()
 
         deleted_count = Manager.query.filter_by(user_id=user_id).delete(synchronize_session=False)
@@ -1122,15 +1117,8 @@ def delete_user(user_id):
         return jsonify({"erro": "Erro interno do servidor"}), 500
 
 def _user_settings_in_public(fn):
-    """Executa uma função com search_path em public para garantir leitura/escrita em public.user_settings (evita divergência multi-tenant)."""
-    try:
-        db.session.execute(text("SET search_path TO public"))
-        return fn()
-    finally:
-        try:
-            db.session.execute(text("SET search_path TO public"))
-        except Exception:
-            pass
+    """user_settings usa ``schema=\"public\"`` no modelo; não exige troca de bind."""
+    return fn()
 
 
 @bp.route('/user-settings/<string:user_id>', methods=['POST'])
@@ -1588,7 +1576,7 @@ def bulk_upload_students():
                     id=str(uuid.uuid4()),
                     name=str(row.get('nome', '')).strip(),
                     email=email,
-                    password_hash=generate_password_hash(senha),
+                    password_hash=hash_password(senha),
                     registration=None,  # matrícula apenas em Student (por cidade)
                     role=RoleEnum.ALUNO,
                     city_id=escola.city_id

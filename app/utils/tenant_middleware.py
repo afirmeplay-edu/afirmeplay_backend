@@ -29,6 +29,7 @@ Regras de Resolução:
        - Extrai slug do Host header
        - Resolve city_id via public.city.slug
        - Define schema tenant
+       - Produção: *.afirmeplay.com.br | Homologação: *.afirmeplay.com
 
 Prioridade de Resolução:
     1. Token JWT city_id (usuário comum)
@@ -48,14 +49,21 @@ from flask import request, jsonify, g
 import jwt
 import os
 import re
-from sqlalchemy import text
 from app import db
 from app.models.city import City
 from app.models.user import User, RoleEnum
+from app.multitenant.db_session_factory import DatabaseSessionFactory
+from app.multitenant.tenant_resolver import TenantResolver
 
 SECRET_KEY = os.getenv("JWT_SECRET_KEY")
-# Ambiente da aplicação: "production", "development", etc.
+# Ambiente: development (local), homolog (*.afirmeplay.com), production (*.afirmeplay.com.br)
 APP_ENV = os.getenv("APP_ENV", "development").lower()
+
+
+def _allow_subdomain_from_origin_when_host_has_no_slug():
+    """Só em desenvolvimento local: Host sem slug (ex.: API em localhost) e slug no Origin."""
+    return APP_ENV == "development"
+
 
 # Domínios que devem ser ignorados na resolução de subdomínio
 IGNORED_HOSTS = [
@@ -63,6 +71,10 @@ IGNORED_HOSTS = [
     'www.afirmeplay.com.br',
     'api.afirmeplay.com.br',
     'files.afirmeplay.com.br',
+    'afirmeplay.com',
+    'www.afirmeplay.com',
+    'api.afirmeplay.com',
+    'files.afirmeplay.com',
     'localhost',
     '127.0.0.1'
 ]
@@ -105,6 +117,8 @@ def extract_subdomain(host):
     Examples:
         >>> extract_subdomain('jiparana.afirmeplay.com.br')
         'jiparana'
+        >>> extract_subdomain('jiparana.afirmeplay.com')  # com APP_ENV=homolog
+        'jiparana'
         >>> extract_subdomain('afirmeplay.com.br')
         None
         >>> extract_subdomain('api.afirmeplay.com.br')
@@ -142,14 +156,39 @@ def extract_subdomain(host):
         return None
     
     # ================================
+    # Ambiente de HOMOLOGAÇÃO (*.afirmeplay.com)
+    # ================================
+    # Mesmo comportamento que produção quanto a Host/Origin; domínio base .com (sem .br).
+    if APP_ENV == "homolog":
+        if host.endswith(".afirmeplay.com.br"):
+            return None
+        if not host.endswith(".afirmeplay.com"):
+            return None
+        parts = host.split(".")
+        # slug.afirmeplay.com → ex.: jaru.afirmeplay.com
+        if len(parts) == 3 and parts[1] == "afirmeplay" and parts[2] == "com":
+            slug = parts[0]
+            if re.match(r"^[a-z0-9-]+$", slug):
+                return slug
+        return None
+    
+    # ================================
     # Ambiente de DESENVOLVIMENTO
     # ================================
-    # Em desenvolvimento, aceitamos tanto afirmeplay.com.br quanto *.localhost
+    # Em desenvolvimento, aceitamos afirmeplay.com.br, afirmeplay.com e *.localhost
     
     # 1) Regra original para afirmeplay.com.br (para testes locais apontando para esse domínio)
     if 'afirmeplay.com.br' in host:
         parts = host.split('.')
         if len(parts) > 3:
+            slug = parts[0]
+            if re.match(r'^[a-z0-9-]+$', slug):
+                return slug
+    
+    # 1b) *.afirmeplay.com (paridade com homolog em testes locais / hosts)
+    if host.endswith('.afirmeplay.com') and not host.endswith('.afirmeplay.com.br'):
+        parts = host.split('.')
+        if len(parts) == 3 and parts[1] == 'afirmeplay' and parts[2] == 'com':
             slug = parts[0]
             if re.match(r'^[a-z0-9-]+$', slug):
                 return slug
@@ -244,6 +283,17 @@ def get_user_from_token():
         return None
 
 
+def _resolve_mobile_offline_pack_redeem_preflight():
+    """
+    POST /offline-pack/redeem: começa em public para consultar mobile_offline_pack_registry
+    pelo hash; a rota depois fixa o tenant via bind_tenant_context_for_redeem.
+    """
+    ctx = TenantContext()
+    ctx.schema = "public"
+    ctx.has_tenant_context = False
+    return ctx
+
+
 def _resolve_mobile_login_tenant_context():
     """
     Login mobile sem JWT: exige X-City-ID, X-City-Slug ou subdomínio do município.
@@ -260,11 +310,18 @@ def _resolve_mobile_login_tenant_context():
     if not city:
         host = request.headers.get("Host")
         slug = extract_subdomain(host)
-        if not slug and APP_ENV != "production":
+        if not slug and _allow_subdomain_from_origin_when_host_has_no_slug():
             slug = extract_subdomain(request.headers.get("Origin"))
         if slug:
             city = resolve_city_from_slug(slug)
     if not city:
+        print(
+            "[mobile/v1/auth/login] Falha ao resolver município — "
+            f"X-City-ID={request.headers.get('X-City-ID')!r} "
+            f"X-City-Slug={request.headers.get('X-City-Slug')!r} "
+            f"Host={request.headers.get('Host')!r} "
+            f"Origin={request.headers.get('Origin')!r}"
+        )
         raise Exception(
             "Para login mobile informe X-City-ID ou X-City-Slug ou acesse via subdomínio do município."
         )
@@ -293,6 +350,8 @@ def resolve_tenant_context():
     path = request.path.rstrip("/")
     if path.endswith("/mobile/v1/auth/login") and request.method in ("POST", "OPTIONS"):
         return _resolve_mobile_login_tenant_context()
+    if path.endswith("/mobile/v1/offline-pack/redeem") and request.method == "POST":
+        return _resolve_mobile_offline_pack_redeem_preflight()
 
     context = TenantContext()
     
@@ -347,7 +406,7 @@ def resolve_tenant_context():
             
             # Em desenvolvimento, se o backend estiver em localhost (sem subdomínio),
             # usar o Origin do frontend para extrair o slug (ex: jaru.localhost)
-            if not slug and APP_ENV != "production":
+            if not slug and _allow_subdomain_from_origin_when_host_has_no_slug():
                 origin = request.headers.get('Origin')
                 slug = extract_subdomain(origin)
             
@@ -386,7 +445,7 @@ def resolve_tenant_context():
     
     # Em desenvolvimento, se o backend estiver em localhost (sem subdomínio),
     # usar o Origin do frontend para extrair o slug (ex: jaru.localhost)
-    if not slug and APP_ENV != "production":
+    if not slug and _allow_subdomain_from_origin_when_host_has_no_slug():
         origin = request.headers.get('Origin')
         slug = extract_subdomain(origin)
     
@@ -409,9 +468,9 @@ def resolve_tenant_context():
 
 def ensure_tenant_schema_for_user(user_id):
     """
-    Garante que o search_path está no schema do tenant (city_xxx) quando for
-    necessário consultar tabelas por-tenant (ex.: student). Use antes de
-    Student.query quando o path atual pode ser public (ex.: após get_competition_or_404).
+    Garante o bind ORM para o schema do tenant (city_xxx) quando for necessário
+    consultar tabelas por-tenant (ex.: student). Use antes de Student.query quando
+    o bind atual pode ser public (ex.: após get_competition_or_404).
 
     Returns:
         True se o schema foi definido ou já era tenant; False se não foi possível
@@ -434,47 +493,31 @@ def ensure_tenant_schema_for_user(user_id):
 
 def set_search_path(schema):
     """
-    Define o search_path do PostgreSQL para o request atual.
-    
-    Args:
-        schema: String com o schema ou lista de schemas
-        
-    Note:
-        - O search_path é definido por sessão/conexão e vale imediatamente.
-        - NÃO fazemos commit() aqui para que a mesma conexão (com o path setado)
-          seja usada nas próximas queries do mesmo request; commit() devolveria
-          a conexão ao pool e a próxima query poderia usar outra (com path em public).
-        - Se a transação estiver abortada (erro anterior), faz rollback e tenta novamente.
-        
-    Examples:
-        >>> set_search_path('city_123')
-        # Define: SET search_path TO city_123, public
-        
-        >>> set_search_path('public')
-        # Define: SET search_path TO public
+    Compat: antes executava ``SET search_path`` no PostgreSQL; agora ajusta apenas o
+    bind ORM via ``schema_translate_map`` (ver ``TenantAwareSession`` / ``physical_schema_binding``).
     """
-    if schema != 'public':
-        search_path = f'"{schema}", public'
-    else:
-        search_path = "public"
-    sql = text(f"SET search_path TO {search_path}")
+    from app.multitenant.physical_schema_binding import set_physical_schema_override
 
-    try:
-        db.session.execute(sql)
-    except Exception as e:
-        err_msg = str(e).lower()
-        if "aborted" in err_msg or "infailedsqltransaction" in err_msg or "current transaction" in err_msg:
-            try:
-                db.session.rollback()
-                db.session.execute(sql)
-                return
-            except Exception as retry_e:
-                print(f"Erro ao definir search_path (após rollback): {retry_e}")
-                db.session.rollback()
-                raise retry_e
-        print(f"Erro ao definir search_path: {e}")
-        db.session.rollback()
-        raise
+    s = str(schema).strip() if schema is not None else "public"
+    if s == "public":
+        set_physical_schema_override(None)
+    else:
+        set_physical_schema_override(s)
+
+
+def _register_multitenant_sessions(context: TenantContext) -> None:
+    """
+    Registra `g.request_context` e `g.public_session`.
+
+    A tradução `tenant` → schema físico (`city_*`) é feita em `TenantAwareSession`
+    (`db.session` / `Model.query`) via `schema_translate_map` no `get_bind`.
+    """
+    engine = db.engine
+
+    g.request_context = TenantResolver.request_context_from_tenant_context(context, request)
+
+    g.public_session = DatabaseSessionFactory.get_public_session(engine)
+    g.tenant_session = None
 
 
 def tenant_middleware():
@@ -486,7 +529,7 @@ def tenant_middleware():
         
     Funcionalidade:
         1. Resolve o contexto do tenant
-        2. Define o search_path no PostgreSQL
+        2. Registra g.request_context e g.public_session; tradução tenant→city_* via db.session (TenantAwareSession)
         3. Armazena contexto no flask.g
         4. Trata erros de autenticação/autorização
         
@@ -495,12 +538,30 @@ def tenant_middleware():
         404: Município não encontrado
     """
     try:
-        if request.method == 'OPTIONS' and request.path.startswith('/mobile/v1/'):
+        # Rotas públicas que só consultam public.city (ou corpo vazio no preflight):
+        # não rodar resolve_tenant_context — JWT/Origin/Host podem disparar 400/404 indevidos.
+        path_norm = request.path.rstrip('/')
+        if request.path.startswith('/mobile/v1/') and request.method == 'OPTIONS':
             ctx = TenantContext()
             ctx.schema = 'public'
             ctx.has_tenant_context = False
             g.tenant_context = ctx
-            set_search_path('public')
+            _register_multitenant_sessions(ctx)
+            return None
+        if path_norm.endswith('/subdomain/check') and request.method in ('GET', 'HEAD', 'OPTIONS'):
+            ctx = TenantContext()
+            ctx.schema = 'public'
+            ctx.has_tenant_context = False
+            g.tenant_context = ctx
+            _register_multitenant_sessions(ctx)
+            return None
+        # OPTIONS /login/ — preflight CORS; o POST de login ainda resolve tenant normalmente.
+        if path_norm.endswith('/login') and request.method == 'OPTIONS':
+            ctx = TenantContext()
+            ctx.schema = 'public'
+            ctx.has_tenant_context = False
+            g.tenant_context = ctx
+            _register_multitenant_sessions(ctx)
             return None
 
         # Resolver contexto do tenant
@@ -508,17 +569,23 @@ def tenant_middleware():
         
         # Armazenar contexto no flask.g para acesso global
         g.tenant_context = context
-        
-        # Definir search_path
-        set_search_path(context.schema)
-        
+
+        _register_multitenant_sessions(context)
+
     except Exception as e:
         error_message = str(e)
-        
+        is_mobile = request.path.startswith("/mobile/v1/")
+
         if "não encontrado" in error_message.lower():
-            return jsonify({"erro": error_message}), 404
-        else:
-            return jsonify({"erro": f"Erro ao resolver contexto do tenant: {error_message}"}), 400
+            key = "error" if is_mobile else "erro"
+            return jsonify({key: error_message}), 404
+
+        if is_mobile:
+            return jsonify({"error": error_message}), 400
+
+        return jsonify(
+            {"erro": f"Erro ao resolver contexto do tenant: {error_message}"}
+        ), 400
 
 
 def get_current_tenant_context():

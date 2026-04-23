@@ -86,7 +86,9 @@ services:
     environment:
       # Database
       DATABASE_URL: ${DATABASE_URL}
-      
+
+      # Enable Scheduler
+      ENABLE_SCHEDULER: ${ENABLE_SCHEDULER}
       # Frontend
       FRONTEND_URL: ${FRONTEND_URL}
       

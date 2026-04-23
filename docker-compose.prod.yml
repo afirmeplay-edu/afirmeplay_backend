@@ -1,0 +1,208 @@
+
+services:
+  # Redis para Celery e cache (senha e URLs em .env: REDIS_PASSWORD, CELERY_BROKER_URL, CELERY_RESULT_BACKEND, REDIS_URL)
+  redis:
+    image: redis:7-alpine
+    container_name: redis-container-prod
+    command: redis-server --requirepass ${REDIS_PASSWORD} --appendonly yes
+    ports:
+      - "6380:6379"
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD}
+    volumes:
+      - redisdata-prod:/data
+    networks:
+      - afirmeplay_network_prod
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli -a \"$$REDIS_PASSWORD\" ping | grep -q PONG"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+
+  # MinIO Object Storage
+  minio:
+    image: minio/minio:latest
+    container_name: minio-server-prod
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+      MINIO_SERVER_URL: ${MINIO_SERVER_URL}
+    ports:
+      - "9000:9000"  # API
+      - "9001:9001"  # Console
+    volumes:
+      - miniodata-prod:/data
+    networks:
+      - afirmeplay_network_prod
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 30s
+      timeout: 20s
+      retries: 3
+    restart: unless-stopped
+
+  # Script de inicialização do MinIO (cria buckets e configura permissões)
+  minio-init:
+    image: minio/mc:latest
+    container_name: minio-init-prod
+    entrypoint: /bin/sh
+    command:
+      - -c
+      - |
+        echo "Aguardando MinIO ficar pronto..."
+        until mc alias set myminio http://minio-server:9000 ${MINIO_ROOT_USER:-minioadmin} ${MINIO_ROOT_PASSWORD:-minioadmin123} 2>/dev/null; do
+          echo "Aguardando MinIO..."
+          sleep 2
+        done
+        
+        echo "Criando buckets..."
+        mc mb myminio/answer-sheets --ignore-existing || true
+        mc mb myminio/physical-tests --ignore-existing || true
+        mc mb myminio/municipality-logos --ignore-existing || true
+        mc mb myminio/school-logos --ignore-existing || true
+        mc mb myminio/question-images --ignore-existing || true
+        mc mb myminio/user-uploads --ignore-existing || true
+        
+        echo "Configurando permissões..."
+        mc anonymous set download myminio/answer-sheets || true
+        mc anonymous set download myminio/physical-tests || true
+        mc anonymous set public myminio/municipality-logos || true
+        mc anonymous set public myminio/school-logos || true
+        
+        echo "✅ MinIO inicializado com sucesso!"
+    depends_on:
+      minio:
+        condition: service_healthy
+    networks:
+      - afirmeplay_network_prod
+    restart: "no"
+
+  # API Flask
+  backend-prod:
+    image: afirmeplay/afirmeplay-backend:${VERSION}
+    container_name: afirmeplay-backend-prod
+    environment:
+      # Database
+      DATABASE_URL: ${DATABASE_URL}
+
+      # Enable Scheduler
+      ENABLE_SCHEDULER: ${ENABLE_SCHEDULER}
+      # Frontend
+      FRONTEND_URL: ${FRONTEND_URL}
+      
+      # JWT
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY}
+      
+      # SendGrid Email
+      SENDGRID_API_KEY: ${SENDGRID_API_KEY}
+      SENDGRID_FROM_EMAIL: ${SENDGRID_FROM_EMAIL}
+      
+      # Telegram Alerts
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN}
+      TELEGRAM_GROUP_ID: ${TELEGRAM_GROUP_ID}
+      TELEGRAM_ALERT_ENABLED: ${TELEGRAM_ALERT_ENABLED}
+      
+      # Celery & Redis (compatível com app/.env: CELERY_BROKER_URL, CELERY_RESULT_BACKEND, REDIS_URL, REDIS_PASSWORD)
+      CELERY_BROKER_URL: ${CELERY_BROKER_URL}
+      CELERY_RESULT_BACKEND: ${CELERY_RESULT_BACKEND}
+      REDIS_URL: ${REDIS_URL}
+      REDIS_PASSWORD: ${REDIS_PASSWORD}
+      
+      # MinIO (MINIO_SERVER_URL = URL usada nas presigned URLs, acessível pelo browser)
+      MINIO_ENDPOINT: ${MINIO_ENDPOINT}
+      MINIO_SERVER_URL: ${MINIO_SERVER_URL}
+      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY}
+      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY}
+      MINIO_SECURE: ${MINIO_SECURE}
+
+      # Google AI Studio
+      GOOGLE_AI_STUDIO_API_KEY: ${GOOGLE_AI_STUDIO_API_KEY}
+      GOOGLE_AI_STUDIO_MODEL: ${GOOGLE_AI_STUDIO_MODEL}
+
+      # App Environment
+      APP_ENV: ${APP_ENV}
+      PUBLIC_API_BASE_URL: ${PUBLIC_API_BASE_URL}
+      SUBDOMAIN_MODE: ${SUBDOMAIN_MODE}
+
+    ports:
+      - "5001:5000"
+    networks:
+      - afirmeplay_network_prod
+    depends_on:
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    restart: unless-stopped
+    command: gunicorn --bind 0.0.0.0:5000 --workers 4 --timeout 120 run:app
+
+  # Celery Worker
+  celery:
+    image: afirmeplay/afirmeplay-backend:${VERSION}
+    container_name: afirmeplay-backend-celery-prod
+    environment:
+      # Database
+      DATABASE_URL: ${DATABASE_URL}
+      
+      # Enable Scheduler
+      ENABLE_SCHEDULER: ${ENABLE_SCHEDULER}
+      # Frontend
+      FRONTEND_URL: ${FRONTEND_URL}
+      
+      # JWT
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY}
+      
+      # SendGrid Email
+      SENDGRID_API_KEY: ${SENDGRID_API_KEY}
+      SENDGRID_FROM_EMAIL: ${SENDGRID_FROM_EMAIL}
+      
+      # Telegram Alerts
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN}
+      TELEGRAM_GROUP_ID: ${TELEGRAM_GROUP_ID}
+      TELEGRAM_ALERT_ENABLED: ${TELEGRAM_ALERT_ENABLED}
+      
+      # Celery & Redis (compatível com app/.env)
+      CELERY_BROKER_URL: ${CELERY_BROKER_URL}
+      CELERY_RESULT_BACKEND: ${CELERY_RESULT_BACKEND}
+      REDIS_URL: ${REDIS_URL}
+      REDIS_PASSWORD: ${REDIS_PASSWORD}
+      
+      # MinIO (MINIO_SERVER_URL = URL usada nas presigned URLs)
+      MINIO_ENDPOINT: ${MINIO_ENDPOINT}
+      MINIO_SERVER_URL: ${MINIO_SERVER_URL}
+      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY}
+      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY}
+      MINIO_SECURE: ${MINIO_SECURE}
+
+      # Google AI Studio
+      GOOGLE_AI_STUDIO_API_KEY: ${GOOGLE_AI_STUDIO_API_KEY}
+      GOOGLE_AI_STUDIO_MODEL: ${GOOGLE_AI_STUDIO_MODEL}
+
+      # App Environment
+      APP_ENV: ${APP_ENV}
+      PUBLIC_API_BASE_URL: ${PUBLIC_API_BASE_URL}
+      SUBDOMAIN_MODE: ${SUBDOMAIN_MODE}
+    networks:
+      - afirmeplay_network_prod
+    depends_on:
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      backend-prod:
+        condition: service_started
+    restart: unless-stopped
+    command: celery -A app.report_analysis.celery_app worker --loglevel=info --concurrency=4 --prefetch-multiplier=1
+
+networks:
+  afirmeplay_network_prod :
+    name: afirmeplay_network_prod
+    external: true
+
+volumes:
+  redisdata-prod:
+    driver: local
+  miniodata-prod:
+    driver: local

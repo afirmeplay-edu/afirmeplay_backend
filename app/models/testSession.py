@@ -7,6 +7,7 @@ class TestSession(db.Model):
     Modelo para rastrear sessões de prova dos alunos
     """
     __tablename__ = 'test_sessions'
+    __table_args__ = {"schema": "tenant"}
     
     id = db.Column(db.String, primary_key=True, default=lambda: str(uuid.uuid4()))
     student_id = db.Column(db.String, db.ForeignKey('tenant.student.id'), nullable=False)

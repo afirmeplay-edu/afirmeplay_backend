@@ -30,14 +30,14 @@ services:
       MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
       MINIO_SERVER_URL: ${MINIO_SERVER_URL}
     ports:
-      - "9002:9002"  # API
+      - "9002:9000"  # API
       - "9003:9003"  # Console
     volumes:
       - miniodata-prod:/data
     networks:
       - afirmeplay_network_prod
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:9002/minio/health/live"]
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
       interval: 30s
       timeout: 20s
       retries: 3

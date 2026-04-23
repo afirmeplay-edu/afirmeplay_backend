@@ -24,7 +24,7 @@ jobs:
                   docker build -t afirmeplay/afirmeplay-backend:v${{env.VERSION}} .
                   docker build -t afirmeplay/afirmeplay-backend:latest .
     push:
-        runs-on: [self-hosted, vps-artur]
+        runs-on: [self-hosted, vps-afirme]
         needs: [build]
         steps:
             - name: Checkout
@@ -45,7 +45,7 @@ jobs:
                   docker push afirmeplay/afirmeplay-backend:latest
 
     deploy:
-        runs-on: [self-hosted, vps-artur]
+        runs-on: [self-hosted, vps-afirme]
         environment: dev
         needs: [push]
         steps:
@@ -90,5 +90,3 @@ jobs:
 
                   docker compose -f docker-compose.dev.yml pull
                   docker compose -f docker-compose.dev.yml up -d
-                  docker compose -f docker-compose.dev.yml ps
-                  docker ps -a | grep dev

@@ -227,6 +227,17 @@ def create_app():
         app.logger.info("Celery inicializado com sucesso")
     except Exception as e:
         app.logger.warning(f"Celery não pôde ser inicializado: {str(e)}. Processamento assíncrono desabilitado.")
+
+    # Scheduler (APScheduler): por padrão desligado em produção.
+    # Quando habilitado, usa advisory lock no Postgres para evitar múltiplas instâncias
+    # em gunicorn (vários workers) ou reloader do Flask.
+    try:
+        if (os.getenv("ENABLE_SCHEDULER") or "").strip() == "1":
+            from app.services.scheduled_tasks import start_scheduler
+
+            start_scheduler(app)
+    except Exception as e:
+        app.logger.warning("Scheduler não pôde ser iniciado: %s", e)
     
     # Importar rotas
     from .routes import school_routes, test_routes, question_routes, login, logout, admin_route, educationStage_routes, grades_routes, persistUser_routes, city_routes, student_routes, student_preferences_routes, user_routes, class_routes, schoolTeacher, teacherClass, professor_route, subject_routes, skill_routes, student_answer_routes, userQuickLinks_routes, evaluation_results_routes, basic_endpoints, evaluation_routes, game_routes, manager_routes, report_routes, student_grades_routes, calendar_routes, dashboard_routes, answer_sheet_routes, subdomain_routes, lista_frequencia_routes

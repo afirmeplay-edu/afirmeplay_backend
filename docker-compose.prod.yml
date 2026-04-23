@@ -30,14 +30,14 @@ services:
       MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
       MINIO_SERVER_URL: ${MINIO_SERVER_URL}
     ports:
-      - "9000:9000"  # API
-      - "9001:9001"  # Console
+      - "9001:9001"  # API
+      - "9002:9002"  # Console
     volumes:
       - miniodata-prod:/data
     networks:
       - afirmeplay_network_prod
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      test: ["CMD", "curl", "-f", "http://localhost:9001/minio/health/live"]
       interval: 30s
       timeout: 20s
       retries: 3
@@ -52,7 +52,7 @@ services:
       - -c
       - |
         echo "Aguardando MinIO ficar pronto..."
-        until mc alias set myminio http://minio-server:9000 ${MINIO_ROOT_USER:-minioadmin} ${MINIO_ROOT_PASSWORD:-minioadmin123} 2>/dev/null; do
+        until mc alias set myminio http://minio-server:9001 ${MINIO_ROOT_USER:-minioadmin} ${MINIO_ROOT_PASSWORD:-minioadmin123} 2>/dev/null; do
           echo "Aguardando MinIO..."
           sleep 2
         done
@@ -127,7 +127,7 @@ services:
       SUBDOMAIN_MODE: ${SUBDOMAIN_MODE}
 
     ports:
-      - "5001:5000"
+      - "5000:5000"
     networks:
       - afirmeplay_network_prod
     depends_on:

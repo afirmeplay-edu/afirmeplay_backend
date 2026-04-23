@@ -41,7 +41,7 @@ jobs:
                   export MINIO_SERVER_URL=${{ secrets.MINIO_SERVER_URL }}
                   export MINIO_ROOT_USER=${{ secrets.MINIO_ROOT_USER }}
                   export MINIO_ROOT_PASSWORD=${{ secrets.MINIO_ROOT_PASSWORD }}
-                  export MINIO_SECURE=${{ secrets.MINIO_SECURE }}]
+                  export MINIO_SECURE=${{ secrets.MINIO_SECURE }}
                   export MINIO_ACCESS_KEY=${{ secrets.MINIO_ACCESS_KEY }}
                   export MINIO_SECRET_KEY=${{ secrets.MINIO_SECRET_KEY }}
                   # Google AI Studio

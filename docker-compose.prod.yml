@@ -52,7 +52,7 @@ services:
       - -c
       - |
         echo "Aguardando MinIO ficar pronto..."
-        until mc alias set myminio http://minio-server:9002 ${MINIO_ROOT_USER:-minioadmin} ${MINIO_ROOT_PASSWORD:-minioadmin123} 2>/dev/null; do
+        until mc alias set myminio http://minio-server:9000 ${MINIO_ROOT_USER:-minioadmin} ${MINIO_ROOT_PASSWORD:-minioadmin123} 2>/dev/null; do
           echo "Aguardando MinIO..."
           sleep 2
         done

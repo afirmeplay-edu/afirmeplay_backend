@@ -1250,6 +1250,7 @@ def bulk_delete_tests():
         from app.models.studentAnswer import StudentAnswer
         from app.models.studentTestOlimpics import StudentTestOlimpics
         from app.models.testSession import TestSession
+        from app.models.publicTestSession import PublicTestSession
         from app.models.question import Question
         
         for test in valid_tests:
@@ -3181,7 +3182,7 @@ def get_session_info(test_id):
         if not student:
             return jsonify({"error": "Dados do aluno não encontrados"}), 404
         
-        # Buscar sessão ativa: schema atual, depois public, depois tenant (prova de competição pode estar em qualquer um)
+        # Buscar sessão ativa: tenant (padrão), depois public (competição/global), depois tenant_schema explícito
         session = TestSession.query.filter_by(
             student_id=student.id,
             test_id=test_id,
@@ -3189,8 +3190,7 @@ def get_session_info(test_id):
         ).first()
         if not session:
             try:
-                set_search_path("public")
-                session = TestSession.query.filter_by(
+                session = PublicTestSession.query.filter_by(
                     student_id=student.id,
                     test_id=test_id,
                     status='em_andamento'
@@ -3202,7 +3202,6 @@ def get_session_info(test_id):
             tenant_schema = (ctx.schema if (ctx and ctx.has_tenant_context) else None) or None
             if tenant_schema and tenant_schema != "public":
                 try:
-                    set_search_path(tenant_schema)
                     session = TestSession.query.filter_by(
                         student_id=student.id,
                         test_id=test_id,

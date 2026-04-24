@@ -442,16 +442,18 @@ def get_managers_by_school(school_id):
         if not user:
             return jsonify({"error": "Usuário não encontrado"}), 404
 
-        # Garantir search_path no schema do tenant: tabela school existe em city_xxx, não em public
+        # Garantir schema do tenant: tabela school existe em city_xxx, não em public
         ctx = get_current_tenant_context()
         if ctx and ctx.has_tenant_context and ctx.schema and ctx.schema != "public":
-            set_search_path(ctx.schema)
+            schema = ctx.schema
         else:
             # Admin sem X-City-ID ou request sem tenant: descobrir schema onde está a escola
             schema = _schema_for_school_id(school_id)
             if not schema:
                 return jsonify({"error": "Escola não encontrada"}), 404
-            set_search_path(schema)
+
+        # Aplicar o schema tenant para todas as tabelas "tenant.*" (ex.: School/Teacher/Student)
+        set_search_path(schema)
 
         # Verificar se a escola existe
         school = School.query.get(school_id)
@@ -503,43 +505,66 @@ def get_managers_by_school(school_id):
             if not city_id or school.city_id != city_id:
                 return jsonify({"error": "Você não tem permissão para visualizar managers desta escola"}), 403
 
-        # Buscar managers da escola
-        managers = db.session.query(
-            Manager,
-            User,
-            School
-        ).join(
-            User, Manager.user_id == User.id
-        ).join(
-            School, Manager.school_id == School.id
-        ).filter(
-            Manager.school_id == school_id,
-            User.role.in_([RoleEnum.DIRETOR, RoleEnum.COORDENADOR])
-        ).all()
+        # Buscar managers da escola SEMPRE no schema public.
+        # Motivo: `public.manager` é global; não existe `city_*.manager`.
+        rows = db.session.execute(
+            text(
+                f"""
+                SELECT
+                    m.id AS manager_id,
+                    m.name AS manager_name,
+                    m.profile_picture AS manager_profile_picture,
+                    m.registration AS manager_registration,
+                    m.birth_date AS manager_birth_date,
+                    m.user_id AS manager_user_id,
+                    m.school_id AS manager_school_id,
+                    u.id AS user_id,
+                    u.name AS user_name,
+                    u.email AS user_email,
+                    u.registration AS user_registration,
+                    u.role AS user_role,
+                    s.id AS school_id,
+                    s.name AS school_name
+                FROM public.manager m
+                JOIN public.users u ON m.user_id = u.id
+                JOIN "{schema}".school s ON m.school_id = s.id
+                WHERE m.school_id = :school_id
+                  AND u.role IN (:role1, :role2)
+                """
+            ),
+            {
+                "school_id": school_id,
+                # No Postgres, o enum `roleenum` usa os *nomes* (ex.: 'DIRETOR'), não os values ('diretor').
+                "role1": RoleEnum.DIRETOR.name,
+                "role2": RoleEnum.COORDENADOR.name,
+            },
+        ).mappings().all()
 
         resultado = []
-        for manager_obj, user_obj, school_obj in managers:
-            resultado.append({
-                "manager": {
-                    "id": manager_obj.id,
-                    "name": manager_obj.name,
-                    "registration": manager_obj.registration,
-                    "birth_date": str(manager_obj.birth_date) if manager_obj.birth_date else None,
-                    "profile_picture": manager_obj.profile_picture,
-                    "school_id": manager_obj.school_id
-                },
-                "user": {
-                    "id": user_obj.id,
-                    "name": user_obj.name,
-                    "email": user_obj.email,
-                    "registration": user_obj.registration,
-                    "role": user_obj.role.value
-                },
-                "school": {
-                    "id": school_obj.id,
-                    "name": school_obj.name
+        for r in rows:
+            resultado.append(
+                {
+                    "manager": {
+                        "id": r["manager_id"],
+                        "name": r["manager_name"],
+                        "registration": r["manager_registration"],
+                        "birth_date": str(r["manager_birth_date"]) if r["manager_birth_date"] else None,
+                        "profile_picture": r["manager_profile_picture"],
+                        "school_id": r["manager_school_id"],
+                    },
+                    "user": {
+                        "id": r["user_id"],
+                        "name": r["user_name"],
+                        "email": r["user_email"],
+                        "registration": r["user_registration"],
+                        "role": r["user_role"],
+                    },
+                    "school": {
+                        "id": r["school_id"],
+                        "name": r["school_name"],
+                    },
                 }
-            })
+            )
 
         return jsonify({
             "message": "Managers found successfully",

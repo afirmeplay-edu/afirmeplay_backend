@@ -4,7 +4,8 @@ from datetime import datetime
 
 class Manager(db.Model):
     __tablename__ = 'manager'
-    __table_args__ = {"schema": "tenant"}
+    # Manager é global (não-tenant): vive no schema public.
+    __table_args__ = {"schema": "public"}
 
     id = db.Column(db.String, primary_key=True, default=lambda: str(uuid.uuid4()))
     name = db.Column(db.String(100), nullable=False)
@@ -18,13 +19,13 @@ class Manager(db.Model):
     user_id = db.Column(db.String, db.ForeignKey('public.users.id'), unique=True)
     
     # Relacionamento com School (para diretores e coordenadores)
-    # ✅ CORRIGIDO: Explicitamente String(36) para garantir tipo correto
-    school_id = db.Column(db.String(36), db.ForeignKey('tenant.school.id'), nullable=True)
+    # Nota: `school` é por-tenant (`city_*`). Não existe FK estável de `public.manager.school_id`
+    # para `tenant.school.id` porque o schema físico varia por município.
+    school_id = db.Column(db.String(36), nullable=True)
     
     # Relacionamento com City (para tecadm)
     city_id = db.Column(db.String, db.ForeignKey('public.city.id'), nullable=True)
     
     # Relacionamentos
     user = db.relationship('User', backref='manager')
-    school = db.relationship('School', backref='managers')
     city = db.relationship('City', backref='managers')

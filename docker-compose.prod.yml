@@ -1,6 +1,7 @@
 
 services:
   # Redis para Celery e cache (senha e URLs em .env: REDIS_PASSWORD, CELERY_BROKER_URL, CELERY_RESULT_BACKEND, REDIS_URL)
+  # só fazer um teste para ver se a regra está funcionando
   redis:
     image: redis:7-alpine
     container_name: redis-container-prod

@@ -12,6 +12,7 @@ from app import db
 from sqlalchemy import text
 from app.models.studentAnswer import StudentAnswer
 from app.models.testSession import TestSession
+from app.models.publicTestSession import PublicTestSession
 from app.models.test import Test
 from app.models.question import Question
 from app.models.student import Student
@@ -316,18 +317,14 @@ def submit_answers():
 
         session_schema = None
         if not session:
-            # Não encontrou no schema atual (tenant): tentar em public (prova de competição)
+            # Não encontrou no tenant: tentar em public (sessão de competição/global)
             try:
-                _prev_schema = get_effective_tenant_physical_schema()
-                set_search_path('public')
                 with db.session.begin_nested():
-                    session = TestSession.query.get(session_id)
+                    session = PublicTestSession.query.get(session_id)
                 if session:
                     session_schema = 'public'
-                else:
-                    set_search_path(_prev_schema)
             except Exception:
-                set_search_path(_prev_schema if '_prev_schema' in locals() else 'public')
+                session = None
         else:
             try:
                 session_schema = get_effective_tenant_physical_schema()
@@ -630,7 +627,7 @@ def submit_answers():
         
         # ip_address: re-buscar sessão para evitar ObjectDeletedError se o serviço fez rollback
         try:
-            _sess = TestSession.query.get(_session_id)
+            _sess = TestSession.query.get(_session_id) if (session_schema != 'public') else PublicTestSession.query.get(_session_id)
             if _sess and hasattr(_sess, 'ip_address'):
                 _sess.ip_address = getattr(request, 'remote_addr', None) or (
                     request.headers.get('X-Forwarded-For', '').split(',')[0].strip() or None
@@ -665,8 +662,7 @@ def submit_answers():
             set_search_path(session_schema or 'public')
 
         # Re-buscar sessão para resposta (schema da sessão = public para competição)
-        set_search_path(session_schema or 'public')
-        _sess_for_response = TestSession.query.get(_session_id)
+        _sess_for_response = TestSession.query.get(_session_id) if (session_schema != 'public') else PublicTestSession.query.get(_session_id)
         # ✅ Retornar resultados completos calculados
         if evaluation_result:
             results = {
@@ -750,9 +746,8 @@ def save_partial_answers():
         session_schema = None
         if not session:
             try:
-                set_search_path('public')
                 with db.session.begin_nested():
-                    session = TestSession.query.get(session_id)
+                    session = PublicTestSession.query.get(session_id)
                 if session:
                     session_schema = 'public'
             except Exception:
@@ -881,7 +876,7 @@ def save_partial_answers():
             elapsed_minutes = int((current_time - started_at_local).total_seconds() / 60)
             if elapsed_minutes > _time_limit_minutes:
                 set_search_path(session_schema or "public")
-                _s = TestSession.query.get(session_id)
+                _s = TestSession.query.get(session_id) if (session_schema != 'public') else PublicTestSession.query.get(session_id)
                 if _s:
                     _s.status = 'expirada'
                     db.session.commit()

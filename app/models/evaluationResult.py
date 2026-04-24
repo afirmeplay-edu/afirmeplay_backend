@@ -13,7 +13,9 @@ class EvaluationResult(db.Model):
     id = db.Column(db.String, primary_key=True, default=lambda: str(uuid.uuid4()))
     test_id = db.Column(db.String, db.ForeignKey('tenant.test.id'), nullable=False)
     student_id = db.Column(db.String, db.ForeignKey('tenant.student.id'), nullable=False)
-    session_id = db.Column(db.String, db.ForeignKey('public.test_sessions.id'), nullable=False)
+    # Sessões municipais ficam em `tenant.test_sessions` (traduzido para `city_*` via schema_translate_map).
+    # Usar referência direta à coluna do model evita NoReferencedTableError no metadata.
+    session_id = db.Column(db.String, db.ForeignKey(TestSession.__table__.c.id), nullable=False)
     
     # Dados de cálculo gerais
     correct_answers = db.Column(db.Integer, nullable=False)

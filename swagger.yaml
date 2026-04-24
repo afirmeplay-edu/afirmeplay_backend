@@ -4596,6 +4596,75 @@ paths:
         '500':
           $ref: '#/responses/InternalServerError'
 
+  /reports/users/counts:
+    get:
+      summary: Get user counts report (no admins)
+      description: |
+        Retorna contagens numéricas de usuários por perfil (exclui admins),
+        com quebras opcionais por escola, série (grade) e turma (class).
+        O resultado é sempre GLOBAL do tenant (município/cidade do contexto atual),
+        independente do role do usuário (o role apenas controla se pode acessar a rota).
+        Requer contexto de cidade (tenant) via header/subdomínio.
+      parameters:
+        - in: query
+          name: breakdown
+          required: false
+          schema:
+            type: string
+          description: "Lista separada por vírgula: school,grade,class (default: school,grade,class)"
+      responses:
+        '200':
+          description: User counts report
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  general:
+                    type: object
+                    properties:
+                      students: { type: integer }
+                      teachers: { type: integer }
+                      directors: { type: integer }
+                      coordinators: { type: integer }
+                      tecadm: { type: integer }
+                  by_school:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        school_id: { type: string }
+                        school_name: { type: string }
+                        students: { type: integer }
+                        directors: { type: integer }
+                        coordinators: { type: integer }
+                  by_grade:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        grade_id: { type: string }
+                        grade_name: { type: string, nullable: true }
+                        students: { type: integer }
+                        teachers: { type: integer }
+                  by_class:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        class_id: { type: string }
+                        class_name: { type: string }
+                        school_id: { type: string, nullable: true }
+                        grade_id: { type: string, nullable: true }
+                        students: { type: integer }
+                        teachers: { type: integer }
+        '401':
+          $ref: '#/responses/UnauthorizedError'
+        '403':
+          $ref: '#/responses/ForbiddenError'
+        '500':
+          $ref: '#/responses/InternalServerError'
+
   /dashboard/comprehensive-stats:
     get:
       summary: Get comprehensive dashboard statistics

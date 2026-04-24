@@ -4,6 +4,7 @@ on:
     push:
         branches:
             - main
+            - dev
     workflow_dispatch:
 
 jobs:
@@ -46,14 +47,20 @@ jobs:
 
     deploy:
         runs-on: [self-hosted, vps-afirme]
-        environment: prod
+        environment: ${{ github.ref == 'refs/heads/main' && 'prod' || 'dev' }}
         needs: [push]
         steps:
             - name: Checkout
               uses: actions/checkout@v4
             - name: Deploy
               run: |
-                  export COMPOSE_PROJECT_NAME=afirmeplay_back_prod # Isso faz com que o docker compose separe os containers de produção dos de desenvolvimento
+                  if [ "${{ github.ref }}" = "refs/heads/main" ]; then
+                    export COMPOSE_PROJECT_NAME=afirmeplay_back_prod
+                    COMPOSE_FILE=docker-compose.prod.yml
+                  else
+                    export COMPOSE_PROJECT_NAME=afirmeplay_back_dev
+                    COMPOSE_FILE=docker-compose.dev.yml
+                  fi
                   export VERSION=v$(cat VERSION)
                   export DATABASE_URL=${{ secrets.DATABASE_URL }}
                   # Enable Scheduler
@@ -90,5 +97,5 @@ jobs:
                   export PUBLIC_API_BASE_URL=${{ secrets.PUBLIC_API_BASE_URL }}
                   export SUBDOMAIN_MODE=${{ secrets.SUBDOMAIN_MODE }}
 
-                  docker compose -f docker-compose.prod.yml pull
-                  docker compose -f docker-compose.prod.yml up -d
+                  docker compose -f "$COMPOSE_FILE" pull
+                  docker compose -f "$COMPOSE_FILE" up -d

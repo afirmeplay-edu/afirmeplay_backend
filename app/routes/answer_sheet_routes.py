@@ -1038,6 +1038,7 @@ def process_answer_sheet_batch_in_background(job_id: str, images: list = None, t
     """
     Processa correção em lote de cartões resposta em background thread.
     Multitenant: usa tenant_schema (ex: city_xxx) via bind ORM (schema_translate_map).
+    Multitenant: usa tenant_schema (ex: city_xxx) via bind ORM (schema_translate_map).
 
     Args:
         job_id: ID do job para tracking
@@ -5078,7 +5079,7 @@ def _obter_escolas_por_municipio(municipio_id: str, user: dict, permissao: dict)
             # Professor: ver apenas escolas onde possui TURMA vinculada (TeacherClass → Class → School)
             from app.models.teacher import Teacher
             from app.models.teacherClass import TeacherClass
-            
+
             teacher = Teacher.query.filter_by(user_id=user['id']).first()
             if not teacher:
                 return []
@@ -5129,7 +5130,7 @@ def _obter_series_por_escola(escola_id: str, municipio_id: str, user: dict, perm
             # Professor: retornar apenas séries onde possui TURMA vinculada nesta escola
             from app.models.teacher import Teacher
             from app.models.teacherClass import TeacherClass
-            
+
             teacher = Teacher.query.filter_by(user_id=user['id']).first()
             if not teacher:
                 return []
@@ -5138,7 +5139,7 @@ def _obter_series_por_escola(escola_id: str, municipio_id: str, user: dict, perm
             teacher_class_ids = [tc.class_id for tc in teacher_classes]
             if not teacher_class_ids:
                 return []
-    
+
     # Buscar séries da escola
     query_series = db.session.query(Grade.id, Grade.name)\
                              .join(Class, Grade.id == Class.grade_id)\
@@ -5161,7 +5162,7 @@ def _obter_series_por_escola(escola_id: str, municipio_id: str, user: dict, perm
             query_series = query_series.filter(Class.id.in_(teacher_class_ids))
         else:
             return []
-    
+
     series = query_series.all()
     return [{"id": str(s[0]), "nome": s[1]} for s in series]
 
@@ -5260,8 +5261,14 @@ def obter_opcoes_filtros():
             if hasattr(current_user.role, "value")
             else str(current_user.role)
         )
+        role_value = (
+            current_user.role.value
+            if hasattr(current_user.role, "value")
+            else str(current_user.role)
+        )
         permissao = get_user_permission_scope({
             'id': current_user.id,
+            'role': role_value,
             'role': role_value,
             'city_id': getattr(current_user, 'city_id', None),
             'tenant_id': getattr(current_user, 'tenant_id', None)
@@ -5272,6 +5279,7 @@ def obter_opcoes_filtros():
 
         user_dict = {
             'id': current_user.id,
+            'role': role_value,
             'role': role_value,
             'city_id': getattr(current_user, 'city_id', None)
         }

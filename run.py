@@ -17,7 +17,13 @@ if __name__ == "__main__":
         
         # Iniciar scheduler de tarefas agendadas (passar app)
         try:
-            start_scheduler(app)
+            # Em debug com reloader, evitar iniciar duas vezes (processo pai + filho).
+            # Em produção (gunicorn), o scheduler deve ser habilitado via ENABLE_SCHEDULER=1
+            # e é inicializado em create_app() com advisory lock no Postgres.
+            import os
+
+            if not app.debug or os.environ.get("WERKZEUG_RUN_MAIN") == "true":
+                start_scheduler(app)
         except Exception as e:
             logging.error("Erro ao iniciar scheduler", exc_info=True)
     

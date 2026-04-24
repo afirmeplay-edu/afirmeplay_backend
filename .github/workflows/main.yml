@@ -8,7 +8,7 @@ on:
 
 jobs:
     build:
-        runs-on: [self-hosted, vps-artur]
+        runs-on: [self-hosted, vps-afirme]
 
         steps:
             - name: Checkout
@@ -24,7 +24,7 @@ jobs:
                   docker build -t afirmeplay/afirmeplay-backend:v${{env.VERSION}} .
                   docker build -t afirmeplay/afirmeplay-backend:latest .
     push:
-        runs-on: [self-hosted, vps-artur]
+        runs-on: [self-hosted, vps-afirme]
         needs: [build]
         steps:
             - name: Checkout
@@ -45,7 +45,7 @@ jobs:
                   docker push afirmeplay/afirmeplay-backend:latest
 
     deploy:
-        runs-on: [self-hosted, vps-artur]
+        runs-on: [self-hosted, vps-afirme]
         environment: dev
         needs: [push]
         steps:
@@ -77,7 +77,7 @@ jobs:
                   export MINIO_SERVER_URL=${{ secrets.MINIO_SERVER_URL }}
                   export MINIO_ROOT_USER=${{ secrets.MINIO_ROOT_USER }}
                   export MINIO_ROOT_PASSWORD=${{ secrets.MINIO_ROOT_PASSWORD }}
-                  export MINIO_SECURE=${{ secrets.MINIO_SECURE }}]
+                  export MINIO_SECURE=${{ secrets.MINIO_SECURE }}
                   export MINIO_ACCESS_KEY=${{ secrets.MINIO_ACCESS_KEY }}
                   export MINIO_SECRET_KEY=${{ secrets.MINIO_SECRET_KEY }}
                   # Google AI Studio

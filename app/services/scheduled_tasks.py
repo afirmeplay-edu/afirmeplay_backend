@@ -15,6 +15,7 @@ from datetime import datetime
 import dateutil.parser
 import pytz
 import logging
+from app.multitenant.physical_schema_binding import clear_physical_schema_override
 
 # Instância global do scheduler
 scheduler = BackgroundScheduler()
@@ -65,6 +66,7 @@ def check_expired_evaluations(app=None):
             for (city_id,) in cities:
                 city_updated = 0
                 city_sessions_expired = 0
+                schema = None
                 try:
                     schema = city_id_to_schema_name(str(city_id))
                     set_search_path(schema)
@@ -72,83 +74,96 @@ def check_expired_evaluations(app=None):
                     logging.warning("Schema %s: %s", city_id, e)
                     continue
                 try:
-                    class_tests = ClassTest.query.filter(
-                        ClassTest.status.in_(['agendada', 'em_andamento']),
-                        ClassTest.expiration.isnot(None)
-                    ).all()
-                except ProgrammingError as e:
-                    if 'class_test' in str(e).lower() and 'does not exist' in str(e).lower():
-                        continue
-                    raise
-
-                for class_test in class_tests:
                     try:
-                        # Obter timezone da aplicação ou usar UTC como padrão
-                        if class_test.timezone:
-                            try:
-                                target_tz = pytz.timezone(class_test.timezone)
-                                current_time = datetime.now(target_tz)
-                            except pytz.exceptions.UnknownTimeZoneError:
-                                logging.warning(f"Timezone inválido: {class_test.timezone}, usando UTC")
-                                current_time = current_utc
-                        else:
-                            current_time = current_utc
+                        class_tests = ClassTest.query.filter(
+                            ClassTest.status.in_(['agendada', 'em_andamento']),
+                            ClassTest.expiration.isnot(None)
+                        ).all()
+                    except ProgrammingError as e:
+                        if 'class_test' in str(e).lower() and 'does not exist' in str(e).lower():
+                            continue
+                        raise
 
-                        # Converter expiration para datetime
-                        expiration_dt = dateutil.parser.parse(class_test.expiration)
-                        if expiration_dt.tzinfo is None:
+                    for class_test in class_tests:
+                        try:
+                            # Obter timezone da aplicação ou usar UTC como padrão
                             if class_test.timezone:
                                 try:
                                     target_tz = pytz.timezone(class_test.timezone)
-                                    expiration_dt = expiration_dt.replace(tzinfo=target_tz)
+                                    current_time = datetime.now(target_tz)
                                 except pytz.exceptions.UnknownTimeZoneError:
-                                    expiration_dt = expiration_dt.replace(tzinfo=current_time.tzinfo)
+                                    logging.warning(f"Timezone inválido: {class_test.timezone}, usando UTC")
+                                    current_time = current_utc
                             else:
-                                expiration_dt = expiration_dt.replace(tzinfo=current_time.tzinfo)
+                                current_time = current_utc
 
-                        # Verificar se expirou
-                        if current_time > expiration_dt:
-                            # Atualizar status do ClassTest
-                            if class_test.status != 'concluida':
-                                class_test.status = 'concluida'
-                                class_test.updated_at = datetime.utcnow()
-                                updated_count += 1
-                                city_updated += 1
+                            # Converter expiration para datetime
+                            expiration_dt = dateutil.parser.parse(class_test.expiration)
+                            if expiration_dt.tzinfo is None:
+                                if class_test.timezone:
+                                    try:
+                                        target_tz = pytz.timezone(class_test.timezone)
+                                        expiration_dt = expiration_dt.replace(tzinfo=target_tz)
+                                    except pytz.exceptions.UnknownTimeZoneError:
+                                        expiration_dt = expiration_dt.replace(tzinfo=current_time.tzinfo)
+                                else:
+                                    expiration_dt = expiration_dt.replace(tzinfo=current_time.tzinfo)
 
-                                logging.info(
-                                    f"Avaliação {class_test.test_id} (ClassTest {class_test.id}) expirada. "
-                                    f"Data expiração: {expiration_dt}, Data atual: {current_time}"
-                                )
+                            # Verificar se expirou
+                            if current_time > expiration_dt:
+                                # Atualizar status do ClassTest
+                                if class_test.status != 'concluida':
+                                    class_test.status = 'concluida'
+                                    class_test.updated_at = datetime.utcnow()
+                                    updated_count += 1
+                                    city_updated += 1
 
-                                # Expirar todas as sessões ativas desta avaliação
-                                active_sessions = TestSession.query.filter_by(
-                                    test_id=class_test.test_id,
-                                    status='em_andamento'
-                                ).all()
-
-                                for session in active_sessions:
-                                    session.status = 'expirada'
-                                    session.submitted_at = datetime.utcnow()
-                                    expired_sessions_count += 1
-                                    city_sessions_expired += 1
-
-                                if active_sessions:
                                     logging.info(
-                                        f"Expiradas {len(active_sessions)} sessões ativas da avaliação {class_test.test_id}"
+                                        f"Avaliação {class_test.test_id} (ClassTest {class_test.id}) expirada. "
+                                        f"Data expiração: {expiration_dt}, Data atual: {current_time}"
                                     )
-                    except Exception as e:
-                        logging.error(
-                            f"Erro ao processar ClassTest {class_test.id} (test_id: {class_test.test_id}): {str(e)}",
-                            exc_info=True
-                        )
-                        continue
 
-                if city_updated > 0 or city_sessions_expired > 0:
+                                    # Expirar todas as sessões ativas desta avaliação
+                                    active_sessions = TestSession.query.filter_by(
+                                        test_id=class_test.test_id,
+                                        status='em_andamento'
+                                    ).all()
+
+                                    for session in active_sessions:
+                                        session.status = 'expirada'
+                                        session.submitted_at = datetime.utcnow()
+                                        expired_sessions_count += 1
+                                        city_sessions_expired += 1
+
+                                    if active_sessions:
+                                        logging.info(
+                                            f"Expiradas {len(active_sessions)} sessões ativas da avaliação {class_test.test_id}"
+                                        )
+                        except Exception as e:
+                            logging.error(
+                                f"Erro ao processar ClassTest {class_test.id} (test_id: {class_test.test_id}): {str(e)}",
+                                exc_info=True
+                            )
+                            continue
+
+                    if city_updated > 0 or city_sessions_expired > 0:
+                        try:
+                            db.session.commit()
+                        except Exception as commit_err:
+                            logging.warning("Commit em %s: %s", schema, commit_err)
+                            db.session.rollback()
+                finally:
+                    # Importante fora de request: não há teardown automático.
+                    # Liberar conexão/sessão e limpar override de schema para não acumular binds por cidade.
                     try:
-                        db.session.commit()
-                    except Exception as commit_err:
-                        logging.warning("Commit em %s: %s", schema, commit_err)
-                        db.session.rollback()
+                        db.session.remove()
+                    except Exception:
+                        pass
+                    try:
+                        clear_physical_schema_override()
+                    except Exception:
+                        pass
+
                 logging.info(
                     f"✅ Verificação concluída: {updated_count} avaliações expiradas atualizadas, "
                     f"{expired_sessions_count} sessões expiradas"
@@ -162,6 +177,14 @@ def check_expired_evaluations(app=None):
                 exc_info=True
             )
             db.session.rollback()
+            try:
+                db.session.remove()
+            except Exception:
+                pass
+            try:
+                clear_physical_schema_override()
+            except Exception:
+                pass
 
 
 def start_scheduler(app=None):

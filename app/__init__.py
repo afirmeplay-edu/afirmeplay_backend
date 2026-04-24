@@ -67,6 +67,10 @@ def create_app():
     # Configuração do banco de dados
     app.config['SQLALCHEMY_DATABASE_URI'] = os.getenv('DATABASE_URL')
     app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
+    # Aplicar opções de Engine (pool/pre_ping/recycle etc.)
+    # Sem isso, o SQLAlchemy usa defaults (pool_size=5, max_overflow=10), o que pode estourar
+    # com scheduler + tráfego concorrente.
+    app.config['SQLALCHEMY_ENGINE_OPTIONS'] = getattr(Config, "SQLALCHEMY_ENGINE_OPTIONS", {})
 
     # Inicialização das extensões
     db.init_app(app)

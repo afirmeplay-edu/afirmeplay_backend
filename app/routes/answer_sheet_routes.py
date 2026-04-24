@@ -3677,9 +3677,17 @@ def _obter_gabaritos_por_municipio_cartao(
         )
     )
     # Admin (scope 'all') vê todos os gabaritos do município.
-    # Tecadm também deve ver todos do seu município (não restringir por created_by).
-    # Outros usuários (ex.: professor/diretor/coordenador) ficam restritos ao que criaram.
-    if permissao.get('scope') != 'all' and str(user.get('role')) != 'tecadm':
+    # Tecadm vê todos do seu município (sem restringir por created_by).
+    # Diretor/Coordenador com scope escola: filtro por escola abaixo; aqui não restringir por created_by.
+    # Professor: regra específica abaixo (o que criou OU escopo turmas/escolas).
+    # Demais perfis: apenas o que criaram.
+    user_role = str(user.get("role") or "").lower()
+    if permissao.get('scope') != 'all' and user_role not in (
+        'tecadm',
+        'diretor',
+        'coordenador',
+        'professor',
+    ):
         q = q.filter(AnswerSheetGabarito.created_by == str(user['id']))
     if permissao.get('scope') == 'escola' and user.get('role') in ['diretor', 'coordenador']:
         from app.models.manager import Manager
@@ -3691,6 +3699,7 @@ def _obter_gabaritos_por_municipio_cartao(
     elif permissao.get('scope') == 'escola' and user.get('role') == 'professor':
         from app.models.teacher import Teacher
         from app.models.teacherClass import TeacherClass
+        from sqlalchemy import or_
         teacher = Teacher.query.filter_by(user_id=user['id']).first()
         if not teacher:
             return []
@@ -3699,10 +3708,14 @@ def _obter_gabaritos_por_municipio_cartao(
         if not teacher_class_ids:
             return []
         teacher_school_ids = list({c.school_id for c in Class.query.filter(Class.id.in_(teacher_class_ids)).all() if c.school_id})
+        # Professor vê: (a) gabaritos que ele criou OU (b) gabaritos vinculados às suas turmas OU (c) às escolas das suas turmas.
+        # Mantemos a restrição de município já aplicada acima (conditions) e o filtro físico/online.
+        filters = [AnswerSheetGabarito.created_by == str(user["id"])]
+        if teacher_class_ids:
+            filters.append(AnswerSheetGabarito.class_id.in_(teacher_class_ids))
         if teacher_school_ids:
-            q = q.filter(AnswerSheetGabarito.school_id.in_(teacher_school_ids))
-        else:
-            return []
+            filters.append(AnswerSheetGabarito.school_id.in_(teacher_school_ids))
+        q = q.filter(or_(*filters))
     gabaritos = q.order_by(AnswerSheetGabarito.created_at.desc()).all()
     seen = set()
     out = []

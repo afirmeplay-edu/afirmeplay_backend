@@ -5,6 +5,10 @@ Tabela de pontuação INSE e faixas de nível.
 O cálculo deve consumir apenas o formato canônico (saída de inse_normalizer).
 As tabelas abaixo são por conceito semântico; não dependem de ID de pergunta
 nem do texto exato da opção.
+
+Cobertura actual do simulador: soma de escolaridade (mãe + pai) + bens (7 itens)
++ serviços (9 itens). O máximo teórico nesse subconjunto é 94; a faixa
+Nível 6 (111+ pontos) não é atingível só com estes e — ver INSE_PONTUACAO_MAXIMA_TEORICA.
 """
 
 from typing import Dict, Any, Tuple, Optional
@@ -26,6 +30,7 @@ ESCOLARIDADE_PONTOS_CANONICO = {
 }
 
 # Bens: item -> valor canônico "0"|"1"|"2"|"3+" -> pontos (ordem: geladeira..celular)
+# Geladeira: Nenhum/1/2/3+ -> 0/3/4/5 (alinhado ao template e à tabela canónica; não 1/2/5).
 BENS_PONTOS_CANONICO = {
     "geladeira": {"0": 0, "1": 3, "2": 4, "3+": 5},
     "computador": {"0": 1, "1": 4, "2": 6, "3+": 8},
@@ -49,44 +54,9 @@ SERVICOS_PONTOS_CANONICO = {
     "garagem": {False: 1, True: 4},
 }
 
-# ---------------------------------------------------------------------------
-# Legado (mantido para referência; uso via normalização + canônico)
-# ---------------------------------------------------------------------------
-
-ESCOLARIDADE_PONTOS = {
-    "Não completou a 4ª série ou o 5º ano do Ensino Fundamental": 1,
-    "Ensino Fundamental, até a 4ª série ou o 5º ano": 2,
-    "Ensino Fundamental completo": 4,
-    "Ensino Médio completo": 7,
-    "Ensino Superior completo (faculdade ou graduação)": 10,
-    "Não sei": 0,
-}
-
-Q13_PONTOS = {
-    "q13a": {"Nenhum": 0, "1": 3, "2": 4, "3 ou mais": 5},
-    "q13b": {"Nenhum": 1, "1": 4, "2": 6, "3 ou mais": 8},
-    "q13c": {"Nenhum": 0, "1": 2, "2": 4, "3 ou mais": 6},
-    "q13d": {"Nenhum": 0, "1": 2, "2": 3, "3 ou mais": 4},
-    "q13e": {"Nenhum": 0, "1": 3, "2": 5, "3 ou mais": 7},
-    "q13f": {"Nenhum": 1, "1": 5, "2": 8, "3 ou mais": 10},
-    "q13g": {"Nenhum": 0, "1": 2, "2": 3, "3 ou mais": 4},
-}
-
-Q14_PONTOS = {
-    "q14a": {"Não": 1, "Sim": 3},
-    "q14b": {"Não": 1, "Sim": 5},
-    "q14c": {"Não": 1, "Sim": 4},
-    "q14d": {"Não": 1, "Sim": 2},
-    "q14e": {"Não": 1, "Sim": 3},
-    "q14f": {"Não": 1, "Sim": 2},
-    "q14g": {"Não": 1, "Sim": 4},
-    "q14h": {"Não": 1, "Sim": 3},
-    "q14i": {"Não": 1, "Sim": 4},
-}
-
-INSE_QUESTIONS_ESCOLARIDADE = ["q9", "q10"]
-INSE_QUESTIONS_BENS = list(Q13_PONTOS.keys())
-INSE_QUESTIONS_SIM_NAO = list(Q14_PONTOS.keys())
+# Soma máxima possível com escolaridade (2×10) + bens + serviços, para documentação
+# de expectativas (faixa 111+ requer outras dimensões no futuro, se o produto o exigir).
+INSE_PONTUACAO_MAXIMA_TEORICA = 94
 
 # Faixas de pontuação total -> nível INSE (1 a 6)
 INSE_FAIXAS = [

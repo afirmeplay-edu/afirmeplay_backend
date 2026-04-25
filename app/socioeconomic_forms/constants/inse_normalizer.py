@@ -22,15 +22,18 @@ ESCOLARIDADE_MAE_KEYS = ["q8", "q9"]
 # Pai: q10 (template API) depois q9 (quando q10 é matriz em formsData, usa-se q9)
 ESCOLARIDADE_PAI_KEYS = ["q10", "q9"]
 
-# Bens (quantidade): conceito -> lista de chaves possíveis [q13a ou q12a, ...]
+# Bens (quantidade): por sufixo (a..g) tenta-se q12* antes de q13*.
+# - Formulário atual (aluno_jovem/velho): bens em q13; q12 é infra na rua (Sim/Não) —
+#   esses são ignorados e usa-se q13.
+# - Formulário legado (formsData): bens em q12, serviços em q13 — q12 vence.
 BENS_MAP = {
-    "geladeira": ["q13a", "q12a"],
-    "computador": ["q13b", "q12b"],
-    "quartos": ["q13c", "q12c"],
-    "televisao": ["q13d", "q12d"],
-    "banheiro": ["q13e", "q12e"],
-    "carro": ["q13f", "q12f"],
-    "celular": ["q13g", "q12g"],
+    "geladeira": ["q12a", "q13a"],
+    "computador": ["q12b", "q13b"],
+    "quartos": ["q12c", "q13c"],
+    "televisao": ["q12d", "q13d"],
+    "banheiro": ["q12e", "q13e"],
+    "carro": ["q12f", "q13f"],
+    "celular": ["q12g", "q13g"],
 }
 
 # Serviços (sim/não): conceito -> lista de chaves possíveis [q14a ou q13a, ...]
@@ -80,7 +83,7 @@ BENS_OPCAO_ALIAS = {
     "0": ["Nenhum", "0"],
     "1": ["1"],
     "2": ["2"],
-    "3+": ["3 ou mais", "3 ou mais"],
+    "3+": ["3 ou mais"],
 }
 
 # Sim/Não: texto -> booleano (True = Sim)
@@ -172,6 +175,22 @@ def normalizar_sim_nao(texto: Optional[str]) -> Optional[bool]:
     return None
 
 
+def _first_bem_quantidade_bruta(responses: Dict[str, Any], keys: List[str]) -> Optional[str]:
+    """
+    Primeira chave cujo valor não é Sim/Não, para não confundir q12 (ex.: itens de rua)
+    com contagem de bens. Formulário atual: bens só em q13. Legado: bens em q12.
+    """
+    for k in keys:
+        v = responses.get(k)
+        if v is None or str(v).strip() == "":
+            continue
+        s = str(v).strip()
+        if normalizar_sim_nao(s) is not None:
+            continue
+        return s
+    return None
+
+
 def normalizar_respostas(responses: Dict[str, Any]) -> Dict[str, Any]:
     """
     Transforma respostas brutas (form_responses.responses) em formato canônico.
@@ -202,7 +221,7 @@ def normalizar_respostas(responses: Dict[str, Any]) -> Dict[str, Any]:
 
     bens = {}
     for item, keys in BENS_MAP.items():
-        raw = _first_value(responses, keys)
+        raw = _first_bem_quantidade_bruta(responses, keys)
         bens[item] = normalizar_quantidade_bens(raw)
 
     servicos = {}

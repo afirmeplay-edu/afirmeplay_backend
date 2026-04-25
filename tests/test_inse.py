@@ -32,7 +32,8 @@ INSE_FAIXAS = _score.INSE_FAIXAS
 
 
 class TestInse(unittest.TestCase):
-    def test_geladeira_tabela_0345(self):
+    def test_geladeira_tabela_pdf_innovplay(self):
+        # PDF: Nenhum=0, 1=3, 2=4, 3 ou mais=5 (canônico 1/2/3+)
         self.assertEqual(BENS_PONTOS_CANONICO["geladeira"]["1"], 3)
         self.assertEqual(BENS_PONTOS_CANONICO["geladeira"]["2"], 4)
         self.assertEqual(BENS_PONTOS_CANONICO["geladeira"]["3+"], 5)
@@ -65,8 +66,16 @@ class TestInse(unittest.TestCase):
         n = normalizar_respostas(r)
         self.assertEqual(n["mae_escolaridade"], "fundamental_incompleto")
         self.assertEqual(n["pai_escolaridade"], "medio_completo")
+        # Geladeira vem de q12a=2 (4 pts no PDF), não de q13a=Sim/Não do serviço
+        self.assertEqual(n["bens"]["geladeira"], "2")
         p, _ = calcular_pontos_inse_canonico(n)
         self.assertGreater(p, 0)
+
+    def test_geladeira_string_3_mapeia_para_3_ou_mais(self):
+        # Dígito "3" sozinho: `normalizar_quantidade_bens` mapeia para "3+" (regra "3" in t).
+        n = normalizar_respostas({"q12a": "3"})
+        self.assertEqual(n["bens"]["geladeira"], "3+")
+        self.assertEqual(BENS_PONTOS_CANONICO["geladeira"]["3+"], 5)
 
     def test_template_api_mae_pai_bens(self):
         # aluno_jovem_questions: q9 mãe, q10 pai, bens q13*, serviços q14*

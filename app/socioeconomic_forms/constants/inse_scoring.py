@@ -30,7 +30,7 @@ ESCOLARIDADE_PONTOS_CANONICO = {
 }
 
 # Bens: item -> valor canônico "0"|"1"|"2"|"3+" -> pontos (ordem: geladeira..celular)
-# Geladeira: Nenhum/1/2/3+ -> 0/3/4/5 (alinhado ao template e à tabela canónica; não 1/2/5).
+# Geladeira (PDF InnovPlay / alinhado ao frontend inseScoring): Nenhum/1/2/3+ -> 0/3/4/5.
 BENS_PONTOS_CANONICO = {
     "geladeira": {"0": 0, "1": 3, "2": 4, "3+": 5},
     "computador": {"0": 1, "1": 4, "2": 6, "3+": 8},

@@ -38,6 +38,7 @@ from app.utils.decimal_helpers import round_to_two_decimals
 from typing import Dict, Optional, List, Any, Tuple, Set
 from collections import defaultdict
 from sqlalchemy import cast, String, desc
+from sqlalchemy.orm import joinedload
 from app.services.cartao_resposta.answer_sheet_gabarito_generation import (
     AnswerSheetGabaritoGeneration,
     enrich_scope_snapshot,
@@ -1809,6 +1810,120 @@ def get_gabarito(gabarito_id):
     except Exception as e:
         logging.error(f"Erro ao buscar gabarito: {str(e)}", exc_info=True)
         return jsonify({"error": f"Erro ao buscar gabarito: {str(e)}"}), 500
+
+
+@bp.route('/gabaritos/<string:gabarito_id>', methods=['PATCH'])
+@jwt_required()
+@role_required("admin", "professor", "coordenador", "diretor", "tecadm")
+@requires_city_context
+def patch_gabarito_correct_answers(gabarito_id: str):
+    """
+    Edita APENAS o gabarito (correct_answers) e dispara recálculo dos resultados.
+
+    Body:
+        { "correct_answers": { "1": "A", "2": "B", ... } }
+
+    Returns (202):
+        { job_id, gabarito_id, polling_url }
+    """
+    try:
+        user = get_current_user_from_token()
+        if not user:
+            return jsonify({"error": "Usuário não encontrado"}), 401
+
+        gabarito = AnswerSheetGabarito.query.get(gabarito_id)
+        if not gabarito:
+            return jsonify({"error": "Gabarito não encontrado"}), 404
+
+        # Permissão: apenas criador (padrão já adotado em outras rotas do módulo)
+        if gabarito.created_by and str(gabarito.created_by) != str(user.get("id")):
+            return jsonify({"error": "Você não tem permissão para editar este gabarito"}), 403
+        if not gabarito.created_by:
+            return jsonify({"error": "Gabarito sem criador definido não pode ser editado"}), 403
+
+        data = request.get_json() or {}
+        if "correct_answers" not in data:
+            return jsonify({"error": "Campo 'correct_answers' é obrigatório"}), 400
+
+        from app.services.cartao_resposta.answer_sheet_recalculation_service import (
+            validate_correct_answers_payload,
+        )
+
+        ok, err, normalized = validate_correct_answers_payload(
+            data.get("correct_answers"),
+            int(gabarito.num_questions or 0),
+        )
+        if not ok:
+            return jsonify({"error": err}), 400
+
+        gabarito.correct_answers = {str(k): v for k, v in normalized.items()}
+        db.session.commit()
+
+        # Criar job de recálculo (um item por AnswerSheetResult)
+        results = (
+            AnswerSheetResult.query.options(joinedload(AnswerSheetResult.student))
+            .filter_by(gabarito_id=gabarito_id)
+            .all()
+        )
+
+        job_id = str(uuid.uuid4())
+        items_meta = []
+        for r in results:
+            st = getattr(r, "student", None)
+            items_meta.append(
+                {
+                    "student_id": str(r.student_id) if r.student_id else None,
+                    "student_name": getattr(st, "name", "") if st else "",
+                }
+            )
+
+        create_job(
+            job_id,
+            len(items_meta),
+            gabarito_id=str(gabarito_id),
+            user_id=str(user.get("id")),
+            task_ids=[],
+            items_meta=items_meta if items_meta else None,
+            stage_message="Recalculando resultados...",
+        )
+
+        context = get_current_tenant_context()
+        city_id = str(context.city_id) if context else None
+        if not city_id:
+            return jsonify({"error": "Contexto de município não encontrado"}), 400
+
+        # Disparar task Celery
+        from app.services.celery_tasks.answer_sheet_tasks import (
+            recalculate_answer_sheet_results_for_gabarito,
+        )
+
+        task = recalculate_answer_sheet_results_for_gabarito.delay(
+            str(gabarito_id), job_id, city_id
+        )
+        # Registrar task_id no job (para depuração)
+        try:
+            from app.services.progress_store import update_job
+
+            update_job(job_id, {"task_ids": [task.id]})
+        except Exception:
+            pass
+
+        return (
+            jsonify(
+                {
+                    "status": "processing",
+                    "job_id": job_id,
+                    "task_id": task.id,
+                    "gabarito_id": str(gabarito_id),
+                    "polling_url": f"/answer-sheets/recalculate-jobs/{job_id}/status",
+                }
+            ),
+            202,
+        )
+    except Exception as e:
+        db.session.rollback()
+        logging.error("Erro ao editar gabarito %s: %s", gabarito_id, e, exc_info=True)
+        return jsonify({"error": "Erro ao editar gabarito"}), 500
 
 
 @bp.route('/<string:gabarito_id>', methods=['DELETE'])  # Rota alternativa para compatibilidade
@@ -3758,13 +3873,17 @@ def _obter_gabaritos_por_municipio_cartao(
         )
     )
     # Admin (scope 'all') vê todos os gabaritos do município.
-    # Tecadm vê todos do seu município (não restringir por created_by).
-    # Diretor/Coordenador veem todos os gabaritos da sua escola (há filtro por school_id logo abaixo).
-    # Outros usuários ficam restritos ao que criaram.
-    # EXCEÇÃO: professor deve ver o que criou OU o que está no seu escopo (turmas/escolas vinculadas),
-    # semelhante ao comportamento de avaliações.
+    # Tecadm vê todos do seu município (sem restringir por created_by).
+    # Diretor/Coordenador com scope escola: filtro por escola abaixo; aqui não restringir por created_by.
+    # Professor: regra específica abaixo (o que criou OU escopo turmas/escolas).
+    # Demais perfis: apenas o que criaram.
     user_role = str(user.get("role") or "").lower()
-    if permissao.get('scope') != 'all' and user_role not in ('tecadm', 'diretor', 'coordenador', 'professor'):
+    if permissao.get('scope') != 'all' and user_role not in (
+        'tecadm',
+        'diretor',
+        'coordenador',
+        'professor',
+    ):
         q = q.filter(AnswerSheetGabarito.created_by == str(user['id']))
     if permissao.get('scope') == 'escola' and user.get('role') in ['diretor', 'coordenador']:
         from app.models.manager import Manager
@@ -5039,6 +5158,59 @@ def get_job_status(job_id):
     except Exception as e:
         logging.error(f"Erro ao buscar status: {str(e)}", exc_info=True)
         return jsonify({"error": "Erro ao buscar status"}), 500
+
+
+@bp.route('/recalculate-jobs/<job_id>/status', methods=['GET'])
+@jwt_required()
+def get_recalculate_job_status(job_id: str):
+    """
+    Status de recálculo após edição do gabarito.
+    Retorna o job do progress_store (um item por AnswerSheetResult).
+    """
+    try:
+        current_user_id = get_jwt_identity()
+        job = get_job(job_id)
+        if not job:
+            return jsonify({"error": "Job não encontrado"}), 404
+
+        if job.get("user_id") != str(current_user_id):
+            return jsonify({"error": "Acesso negado"}), 403
+
+        total = int(job.get("total") or 0)
+        completed = int(job.get("completed") or 0)
+        pct = int(round((completed / total * 100))) if total > 0 else 0
+
+        return (
+            jsonify(
+                {
+                    "job_id": job_id,
+                    "gabarito_id": job.get("gabarito_id"),
+                    "task_id": (job.get("task_ids") or [None])[0],
+                    "status": job.get("status") or "processing",
+                    "message": job.get("stage_message") or "Processando...",
+                    "phase": job.get("phase"),
+                    "progress": {
+                        "current": completed,
+                        "total": total,
+                        "percentage": min(100, pct),
+                    },
+                    "items": job.get("items") or {},
+                    "summary": {
+                        "total_items": total,
+                        "completed_items": completed,
+                        "successful_items": int(job.get("successful") or 0),
+                        "failed_items": int(job.get("failed") or 0),
+                    },
+                    "error": job.get("error"),
+                }
+            ),
+            200,
+        )
+    except Exception as e:
+        logging.error(
+            "Erro ao buscar status do recálculo %s: %s", job_id, e, exc_info=True
+        )
+        return jsonify({"error": "Erro ao buscar status do recálculo"}), 500
 
 
 @bp.route('/jobs/<job_id>/download', methods=['GET'])

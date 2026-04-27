@@ -142,6 +142,8 @@ def update_answer_sheet_job(job_id: str, updates: Dict[str, Any]) -> Optional[Di
         job.classes_generated = updates["classes_generated"]
     if "scope_type" in updates:
         job.scope_type = updates["scope_type"]
+    if "task_ids" in updates:
+        job.task_ids = updates["task_ids"]
     db.session.commit()
     logger.debug("📝 Job %s atualizado (DB): %s", job_id, list(updates.keys()))
     if "progress_current" in updates or "progress_percentage" in updates:

@@ -2566,13 +2566,44 @@ def _get_nome_granularidade_cartao(nivel, scope_info, escola_nome, serie_nome):
 
 def _get_empty_statistics_gerais_cartao(scope_info, nivel_granularidade):
     city_data = scope_info.get('city_data')
+    escola_nome = None
+    serie_nome = None
+
+    # Mesmo sem alunos/turmas no recorte, devolver o "contexto" selecionado (UX)
+    try:
+        if scope_info.get('escola') and _is_valid_filter(scope_info.get('escola')):
+            s = School.query.get(scope_info['escola'])
+            escola_nome = s.name if s else None
+    except Exception:
+        escola_nome = None
+
+    try:
+        if scope_info.get('serie') and _is_valid_filter(scope_info.get('serie')):
+            g = Grade.query.get(scope_info['serie'])
+            serie_nome = g.name if g else None
+    except Exception:
+        serie_nome = None
+
+    # Se houver gabarito, tentar inferir a série a partir dele (ex.: gabarito por série)
+    try:
+        if serie_nome is None and scope_info.get('gabarito') and _is_valid_filter(scope_info.get('gabarito')):
+            gab = AnswerSheetGabarito.query.get(str(scope_info.get('gabarito')).strip())
+            if gab:
+                if gab.grade_name and str(gab.grade_name).strip():
+                    serie_nome = gab.grade_name.strip()
+                elif gab.grade_id:
+                    g = Grade.query.get(gab.grade_id)
+                    serie_nome = g.name if g else None
+    except Exception:
+        pass
+
     return {
         "tipo": nivel_granularidade,
-        "nome": _get_nome_granularidade_cartao(nivel_granularidade, scope_info, None, None),
+        "nome": _get_nome_granularidade_cartao(nivel_granularidade, scope_info, escola_nome, serie_nome),
         "estado": scope_info.get('estado', 'Todos os estados'),
         "municipio": city_data.name if city_data else "Todos os municípios",
-        "escola": None,
-        "serie": None,
+        "escola": escola_nome,
+        "serie": serie_nome,
         "total_escolas": 0,
         "total_series": 0,
         "total_turmas": 0,

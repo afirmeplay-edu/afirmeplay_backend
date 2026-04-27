@@ -638,6 +638,37 @@ def listar_avaliacoes():
         page = request.args.get('page', 1, type=int)
         per_page = request.args.get('per_page', 10, type=int)
         per_page = min(per_page, 100)  # Limitar máximo
+
+        # Para professor, restringir o dataset às turmas onde está vinculado (TeacherClass),
+        # respeitando também os filtros selecionados (escola/série/turma).
+        professor_allowed_class_ids: Optional[Set[Any]] = None
+        if (user.get("role") or "").lower() == "professor":
+            try:
+                from app.permissions.utils import get_teacher_classes
+                teacher_class_ids = get_teacher_classes(user["id"]) or []
+                if not teacher_class_ids:
+                    professor_allowed_class_ids = set()
+                else:
+                    allowed = set(teacher_class_ids)
+
+                    # Se o usuário selecionou uma turma específica, ela precisa estar no escopo do professor.
+                    if turma and str(turma).lower() != "all":
+                        turma_id = turma
+                        allowed = {turma_id} if turma_id in allowed else set()
+
+                    # Se selecionou escola e/ou série, restringir às turmas do professor que pertencem a esse recorte.
+                    if allowed and ((escola and str(escola).lower() != "all") or (serie and str(serie).lower() != "all")):
+                        q_classes = Class.query.with_entities(Class.id).filter(Class.id.in_(list(allowed)))
+                        if escola and str(escola).lower() != "all":
+                            q_classes = q_classes.filter(Class.school_id == escola)
+                        if serie and str(serie).lower() != "all":
+                            q_classes = q_classes.filter(Class.grade_id == serie)
+                        allowed = {row[0] for row in q_classes.all()}
+
+                    professor_allowed_class_ids = allowed
+            except Exception:
+                # Em caso de erro, ser conservador e não retornar dados fora do escopo.
+                professor_allowed_class_ids = set()
         
         # Validar filtros obrigatórios (estado e município são sempre obrigatórios)
         if not estado or estado.lower() == 'all':
@@ -683,6 +714,11 @@ def listar_avaliacoes():
         permissao = verificar_permissao_filtros(user)
         if not permissao['permitted']:
             return jsonify({"error": permissao['error']}), 403
+
+        # Para professor, propagar a restrição de turmas para todas as etapas de cálculo
+        # (estatísticas gerais, por disciplina, tabela detalhada, ranking, etc.).
+        if (user.get("role") or "").lower() == "professor":
+            scope_info["_restrict_class_ids"] = list(professor_allowed_class_ids or [])
         
         # ✅ ALTERADO: Validação flexível - só exige escola para resultados, não para listagem
         from app.permissions import validate_professor_school_selection, validate_manager_school_selection
@@ -860,6 +896,13 @@ def listar_avaliacoes():
                                            joinedload(ClassTest.class_).joinedload(Class.grade)
                                            # ❌ REMOVIDO: joinedload(ClassTest.class_).joinedload(Class.school).joinedload(School.city) - Class.school é property
                                        )
+
+            # ✅ IMPORTANTE: Professor só pode ver dados das suas turmas.
+            if (user.get("role") or "").lower() == "professor":
+                if professor_allowed_class_ids is None or not professor_allowed_class_ids:
+                    query_base = query_base.filter(ClassTest.class_id == None)  # Força vazio
+                else:
+                    query_base = query_base.filter(ClassTest.class_id.in_(list(professor_allowed_class_ids)))
             
             # ✅ ALTERADO: Aplicar filtros usando o novo módulo de permissões
             if permissao['scope'] == 'municipio':
@@ -1198,6 +1241,15 @@ def listar_avaliacoes():
             restrict_class_ids = {
                 ct.class_id for ct in todas_avaliacoes_escopo if str(ct.test_id) == str(avaliacao)
             }
+
+        # Para professor, sempre restringir a tabela/ranking às suas turmas (e ao recorte escola/série/turma).
+        if (user.get("role") or "").lower() == "professor":
+            if professor_allowed_class_ids is None:
+                professor_allowed_class_ids = set()
+            if restrict_class_ids is None:
+                restrict_class_ids = set(professor_allowed_class_ids)
+            else:
+                restrict_class_ids = set(restrict_class_ids).intersection(set(professor_allowed_class_ids))
 
         if avaliacao and avaliacao.lower() != 'all':
             tabela_detalhada = _gerar_tabela_detalhada_por_disciplina(
@@ -2700,6 +2752,20 @@ def _gerar_opcoes_proximos_filtros(scope_info, nivel_granularidade, user=None):
                                              .distinct()
                 
                 
+                # Para professor, restringir séries às turmas onde está vinculado.
+                if user and (user.get("role") == "professor" or (user.get("role") or "").lower() == "professor"):
+                    teacher = Teacher.query.filter_by(user_id=user['id']).first()
+                    if teacher:
+                        teacher_classes = TeacherClass.query.filter_by(teacher_id=teacher.id).all()
+                        teacher_class_ids = [tc.class_id for tc in teacher_classes]
+                        if teacher_class_ids:
+                            # query_series já faz join com Class acima; aqui só restringimos por turmas do professor.
+                            query_series = query_series.filter(Class.id.in_(teacher_class_ids))
+                        else:
+                            query_series = query_series.filter(Grade.id == None)
+                    else:
+                        query_series = query_series.filter(Grade.id == None)
+
                 series = query_series.all()
                 opcoes["series"] = [{"id": str(s[0]), "name": s[1]} for s in series]
         
@@ -7281,6 +7347,12 @@ def _determinar_escopo_calculo(scope_info: dict, nivel_granularidade: str) -> Di
     CORRIGIDO: Agora converte corretamente os IDs do scope_info
     """
     escopo = {}
+
+    # Restrição opcional (ex.: professor) para limitar o universo de turmas/alunos do escopo.
+    # Mantém comportamento original para admin/tecadm/diretor/coordenador quando não fornecido.
+    restrict_class_ids = scope_info.get("_restrict_class_ids") if isinstance(scope_info, dict) else None
+    if restrict_class_ids is not None:
+        escopo["restrict_class_ids"] = restrict_class_ids
     
     if nivel_granularidade == "municipio":
         # Estado + Município + Avaliação específica (dados de todas as escolas do município)
@@ -7323,11 +7395,18 @@ def _buscar_alunos_por_escopo(escopo_calculo: dict) -> List[Student]:
     """
     try:
         logging.info(f"Buscando alunos por escopo: {escopo_calculo}")
+
+        restrict_class_ids = escopo_calculo.get("restrict_class_ids")
         
         if escopo_calculo['tipo'] == "municipio":
             # Todos os alunos do município (com filtro de avaliação se especificada)
             query = Student.query.join(Class).join(School, School.id == cast(Class.school_id, String)).join(City)\
                                .filter(City.id == escopo_calculo['municipio_id'])
+
+            if restrict_class_ids is not None:
+                if not restrict_class_ids:
+                    return []
+                query = query.filter(Student.class_id.in_(restrict_class_ids))
             
             # Se há avaliação específica, filtrar apenas turmas onde foi aplicada
             if escopo_calculo.get('avaliacao_id'):
@@ -7346,6 +7425,11 @@ def _buscar_alunos_por_escopo(escopo_calculo: dict) -> List[Student]:
             # Todos os alunos da escola (com filtro de avaliação se especificada)
             query = Student.query.join(Class).join(School, School.id == cast(Class.school_id, String))\
                                .filter(School.id == escopo_calculo['escola_id'])
+
+            if restrict_class_ids is not None:
+                if not restrict_class_ids:
+                    return []
+                query = query.filter(Student.class_id.in_(restrict_class_ids))
             
             # Se há avaliação específica, filtrar apenas turmas onde foi aplicada
             if escopo_calculo.get('avaliacao_id'):
@@ -7364,6 +7448,11 @@ def _buscar_alunos_por_escopo(escopo_calculo: dict) -> List[Student]:
             # Todos os alunos da série na escola específica (com filtro de avaliação se especificada)
             query = Student.query.join(Class).join(Grade)\
                                .filter(Grade.id == escopo_calculo['serie_id'])
+
+            if restrict_class_ids is not None:
+                if not restrict_class_ids:
+                    return []
+                query = query.filter(Student.class_id.in_(restrict_class_ids))
             
             # Filtrar por escola se especificada (via Class.school_id)
             if escopo_calculo.get('escola_id'):
@@ -7385,6 +7474,13 @@ def _buscar_alunos_por_escopo(escopo_calculo: dict) -> List[Student]:
         elif escopo_calculo['tipo'] == "turma":
             # Todos os alunos da turma (sempre retornar, mesmo se não fez avaliação)
             query = Student.query.filter(Student.class_id == escopo_calculo['turma_id'])
+
+            if restrict_class_ids is not None:
+                if not restrict_class_ids:
+                    return []
+                # Se a turma específica não estiver dentro da restrição, nada a retornar.
+                if escopo_calculo["turma_id"] not in set(restrict_class_ids):
+                    return []
             
             # Se há avaliação específica, verificar se a turma aplicou a avaliação
             if escopo_calculo.get('avaliacao_id'):

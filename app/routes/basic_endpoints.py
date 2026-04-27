@@ -399,7 +399,8 @@ def comprehensive_dashboard_stats():
             student_query = student_query.filter_by(school_id=school.id)
             
             # Filtrar turmas por escola
-            class_query = class_query.filter_by(school_id=ensure_uuid(school.id))
+            # Class.school_id é VARCHAR no banco; evitar comparação VARCHAR = UUID
+            class_query = class_query.filter(cast(Class.school_id, String) == school.id)
             
             # Filtrar professores por escola através da tabela de associação
             teacher_query = teacher_query.join(SchoolTeacher).filter(SchoolTeacher.school_id == school.id)
@@ -407,7 +408,7 @@ def comprehensive_dashboard_stats():
             # Filtrar testes que têm turmas da escola
             class_tests = ClassTest.query.filter(
                 ClassTest.class_id.in_(
-                    Class.query.filter_by(school_id=ensure_uuid(school.id)).with_entities(Class.id)
+                    Class.query.filter(cast(Class.school_id, String) == school.id).with_entities(Class.id)
                 )
             ).with_entities(ClassTest.test_id).all()
             test_ids = [ct.test_id for ct in class_tests]
@@ -446,7 +447,8 @@ def comprehensive_dashboard_stats():
                 student_query = student_query.filter(Student.school_id.in_(school_ids))
                 
                 # Filtrar turmas por escolas da cidade
-                class_query = class_query.filter(Class.school_id.in_(ensure_uuid_list(school_ids)))
+                # Class.school_id é VARCHAR no banco; evitar comparação VARCHAR = UUID
+                class_query = class_query.filter(cast(Class.school_id, String).in_(school_ids))
                 
                 # Filtrar professores por escolas da cidade através da tabela de associação
                 teacher_query = teacher_query.join(SchoolTeacher).filter(SchoolTeacher.school_id.in_(school_ids))
@@ -454,7 +456,7 @@ def comprehensive_dashboard_stats():
                 # Filtrar testes que têm turmas das escolas da cidade
                 class_tests = ClassTest.query.filter(
                     ClassTest.class_id.in_(
-                        Class.query.filter(Class.school_id.in_(ensure_uuid_list(school_ids))).with_entities(Class.id)
+                        Class.query.filter(cast(Class.school_id, String).in_(school_ids)).with_entities(Class.id)
                     )
                 ).with_entities(ClassTest.test_id).all()
                 test_ids = [ct.test_id for ct in class_tests]

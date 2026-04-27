@@ -998,31 +998,22 @@ def delete_user(user_id):
 
         if teacher_id:
             from app.models.teacherClass import TeacherClass
-            total_deleted = 0
-            for city in all_cities:
-                city_schema = city_id_to_schema_name(city.id)
-                set_search_path(city_schema)
-                deleted = TeacherClass.query.filter_by(teacher_id=teacher_id).delete(synchronize_session=False)
-                total_deleted += deleted
-            if total_deleted > 0:
-                deleted_relations.append(f"{total_deleted} vínculos com turmas")
-            if user_to_delete.city_id:
-                set_search_path(city_id_to_schema_name(user_to_delete.city_id))
-
-        if teacher_id:
             from app.models.schoolTeacher import SchoolTeacher
-            total_deleted = 0
+            total_tc = total_st = total_teacher = 0
             for city in all_cities:
                 city_schema = city_id_to_schema_name(city.id)
                 set_search_path(city_schema)
-                deleted = SchoolTeacher.query.filter_by(teacher_id=teacher_id).delete(synchronize_session=False)
-                total_deleted += deleted
-            if total_deleted > 0:
-                deleted_relations.append(f"{total_deleted} vínculos escolares")
+                total_tc += TeacherClass.query.filter_by(teacher_id=teacher_id).delete(synchronize_session=False)
+                total_st += SchoolTeacher.query.filter_by(teacher_id=teacher_id).delete(synchronize_session=False)
+                total_teacher += Teacher.query.filter_by(user_id=user_id).delete(synchronize_session=False)
+            if total_tc > 0:
+                deleted_relations.append(f"{total_tc} vínculos com turmas")
+            if total_st > 0:
+                deleted_relations.append(f"{total_st} vínculos escolares")
+            if total_teacher > 0:
+                deleted_relations.append(f"professor ({total_teacher} schemas)")
             if user_to_delete.city_id:
                 set_search_path(city_id_to_schema_name(user_to_delete.city_id))
-
-        if teacher_id:
             db.session.flush()
 
         # IMPORTANTE: os loops acima mexem no search_path. Antes de deletar tabelas do usuário,
@@ -1034,9 +1025,17 @@ def delete_user(user_id):
         # a cascata do ORM não garante remoção no banco: precisamos deletar dependências antes.
         from app.models.physicalTestForm import PhysicalTestForm
         from app.models.physicalTestAnswer import PhysicalTestAnswer
+        from app.models.evaluationResult import EvaluationResult
+        from app.models.testSession import TestSession
+        from app.models.studentAnswer import StudentAnswer
+        from app.models.answerSheetResult import AnswerSheetResult
+        from app.models.studentTestOlimpics import StudentTestOlimpics
+        from app.models.formCoordinates import FormCoordinates
 
-        students_to_delete = Student.query.filter_by(user_id=user_id).all()
-        student_ids_to_delete = [s.id for s in students_to_delete]
+        student_ids_to_delete = [
+            row[0]
+            for row in Student.query.with_entities(Student.id).filter_by(user_id=user_id).all()
+        ]
         if student_ids_to_delete:
             physical_forms_subq = (
                 PhysicalTestForm.query.with_entities(PhysicalTestForm.id)
@@ -1053,10 +1052,34 @@ def delete_user(user_id):
                 PhysicalTestForm.student_id.in_(student_ids_to_delete)
             ).delete(synchronize_session=False)
 
-        for student in students_to_delete:
-            db.session.delete(student)
-        if students_to_delete:
-            deleted_relations.append("estudante")
+            # Bulk delete evita cascade do ORM em student_answers (milhares de linhas → timeout/504).
+            EvaluationResult.query.filter(
+                EvaluationResult.student_id.in_(student_ids_to_delete)
+            ).delete(synchronize_session=False)
+            TestSession.query.filter(
+                TestSession.student_id.in_(student_ids_to_delete)
+            ).delete(synchronize_session=False)
+            StudentAnswer.query.filter(
+                StudentAnswer.student_id.in_(student_ids_to_delete)
+            ).delete(synchronize_session=False)
+            AnswerSheetResult.query.filter(
+                AnswerSheetResult.student_id.in_(student_ids_to_delete)
+            ).delete(synchronize_session=False)
+            StudentTestOlimpics.query.filter(
+                StudentTestOlimpics.student_id.in_(student_ids_to_delete)
+            ).delete(synchronize_session=False)
+            FormCoordinates.query.filter(
+                FormCoordinates.student_id.in_(student_ids_to_delete)
+            ).delete(synchronize_session=False)
+            StudentPasswordLog.query.filter(
+                StudentPasswordLog.student_id.in_(student_ids_to_delete)
+            ).delete(synchronize_session=False)
+
+            deleted_students = Student.query.filter(
+                Student.id.in_(student_ids_to_delete)
+            ).delete(synchronize_session=False)
+            if deleted_students > 0:
+                deleted_relations.append("estudante")
 
         # Remover logs de senha do aluno no schema da cidade (evita órfãos e duplicatas ao recadastrar)
         if user_to_delete.city_id:
@@ -1064,18 +1087,6 @@ def delete_user(user_id):
             deleted_logs = StudentPasswordLog.query.filter_by(user_id=user_id).delete(synchronize_session=False)
             if deleted_logs > 0:
                 deleted_relations.append("log de senhas (student_password_log)")
-
-        if teacher:
-            total_deleted = 0
-            for city in all_cities:
-                city_schema = city_id_to_schema_name(city.id)
-                set_search_path(city_schema)
-                deleted = Teacher.query.filter_by(user_id=user_id).delete(synchronize_session=False)
-                total_deleted += deleted
-            if total_deleted > 0:
-                deleted_relations.append(f"professor ({total_deleted} schemas)")
-            if user_to_delete.city_id:
-                set_search_path(city_id_to_schema_name(user_to_delete.city_id))
 
         # Mesma lógica: Teacher/Professor também pode ter mudado o bind de schema.
         _set_search_path_for_user()

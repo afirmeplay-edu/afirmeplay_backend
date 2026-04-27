@@ -24,6 +24,154 @@ logger = logging.getLogger(__name__)
 
 @celery_app.task(
     bind=True,
+    name='answer_sheet_tasks.recalculate_answer_sheet_results_for_gabarito',
+    max_retries=1,
+    default_retry_delay=30,
+    time_limit=1800,
+    soft_time_limit=1740,
+)
+def recalculate_answer_sheet_results_for_gabarito(
+    self: Task,
+    gabarito_id: str,
+    job_id: str,
+    city_id: str,
+) -> Dict[str, Any]:
+    """
+    Recalcula AnswerSheetResult (tenant.answer_sheet_results) após edição do gabarito.
+    Usa progress_store para informar status item-a-item ao frontend.
+    """
+    from datetime import datetime
+
+    from app.models.answerSheetGabarito import AnswerSheetGabarito
+    from app.models.answerSheetResult import AnswerSheetResult
+    from app.models.student import Student
+    from app.services.progress_store import (
+        update_item_processing,
+        update_item_done,
+        update_item_error,
+        complete_job,
+        update_job,
+    )
+    from app.report_analysis.answer_sheet_aggregate_service import (
+        invalidate_answer_sheet_report_cache_after_result,
+    )
+    from app.services.cartao_resposta.answer_sheet_recalculation_service import (
+        recalculate_answer_sheet_result_fields,
+    )
+
+    try:
+        if not city_id:
+            raise ValueError("city_id é obrigatório para recálculo (multitenant)")
+        city_schema = city_id_to_schema_name(str(city_id))
+        set_search_path(city_schema)
+
+        gabarito = AnswerSheetGabarito.query.get(gabarito_id)
+        if not gabarito:
+            raise ValueError("Gabarito não encontrado")
+
+        results = (
+            AnswerSheetResult.query.filter_by(gabarito_id=gabarito_id)
+            .all()
+        )
+
+        update_job(job_id, {
+            "stage_message": "Recalculando resultados...",
+            "phase": "recalculating",
+        })
+
+        commit_every = 50
+        processed = 0
+        for idx, res in enumerate(results):
+            try:
+                # Search path pode se perder após commit (pool). Reforçar sempre.
+                set_search_path(city_schema)
+
+                student = Student.query.get(res.student_id) if res.student_id else None
+                extra = {
+                    "student_id": str(res.student_id) if res.student_id else None,
+                    "student_name": getattr(student, "name", None) if student else None,
+                }
+                update_item_processing(job_id, idx, extra=extra)
+
+                fields = recalculate_answer_sheet_result_fields(
+                    gabarito_obj=gabarito,
+                    detected_answers_raw=res.detected_answers,
+                )
+                for k, v in fields.items():
+                    setattr(res, k, v)
+                res.corrected_at = datetime.utcnow()
+
+                processed += 1
+                if processed % commit_every == 0:
+                    db.session.commit()
+
+                # Invalidar cache agregado e agendar rebuild (se possível)
+                try:
+                    invalidate_answer_sheet_report_cache_after_result(
+                        gabarito_id, str(res.student_id), commit=True
+                    )
+                except Exception as inv_err:
+                    logger.warning("Invalidate answer_sheet report cache: %s", inv_err)
+
+                update_item_done(job_id, idx, {
+                    "student_id": str(res.student_id) if res.student_id else None,
+                    "student_name": getattr(student, "name", None) if student else None,
+                    "correct": int(getattr(res, "correct_answers", 0) or 0),
+                    "total": int(getattr(res, "total_questions", 0) or 0),
+                    "percentage": float(getattr(res, "score_percentage", 0.0) or 0.0),
+                    "grade": float(getattr(res, "grade", 0.0) or 0.0),
+                    "classification": getattr(res, "classification", None),
+                    "proficiency": float(getattr(res, "proficiency", 0.0) or 0.0),
+                })
+            except Exception as item_err:
+                try:
+                    db.session.rollback()
+                except Exception:
+                    pass
+                update_item_error(job_id, idx, str(item_err), extra={
+                    "student_id": str(res.student_id) if res.student_id else None,
+                })
+
+        try:
+            db.session.commit()
+        except Exception:
+            db.session.rollback()
+            raise
+
+        complete_job(job_id)
+        update_job(job_id, {
+            "status": "completed",
+            "stage_message": "Concluído",
+            "phase": "done",
+        })
+
+        return {
+            "success": True,
+            "job_id": job_id,
+            "gabarito_id": gabarito_id,
+            "total": len(results),
+        }
+    except Exception as e:
+        logger.error("[CELERY-RECALC] ❌ %s", str(e), exc_info=True)
+        try:
+            db.session.rollback()
+        except Exception:
+            pass
+        try:
+            update_job(job_id, {"status": "failed", "error": str(e), "stage_message": "Falhou", "phase": "done"})
+        except Exception:
+            pass
+        try:
+            complete_job(job_id)
+        except Exception:
+            pass
+        if self.request.retries < self.max_retries:
+            raise self.retry(exc=e)
+        return {"success": False, "job_id": job_id, "gabarito_id": gabarito_id, "error": str(e)}
+
+
+@celery_app.task(
+    bind=True,
     name='answer_sheet_tasks.upload_answer_sheets_zip_async',
     max_retries=0,  # NÃO fazer retry - upload não é crítico
     time_limit=300,  # 5 minutos máximo

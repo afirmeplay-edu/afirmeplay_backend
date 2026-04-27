@@ -9,13 +9,9 @@ import logging
 from werkzeug.security import check_password_hash
 from app.utils.auth import hash_password
 from app import db
-from app.models.student import Student
 from app.models.school import School
 from app.models.studentClass import Class
 from app.models.grades import Grade
-from app.models.teacher import Teacher
-from app.models.manager import Manager
-from app.models.city import City
 from app.models.studentPasswordLog import StudentPasswordLog
 from app.models.user_settings import UserSettings
 from sqlalchemy.orm import joinedload
@@ -960,298 +956,23 @@ def update_user(user_id):
 @jwt_required()
 @role_required("admin", "tecadm")
 def delete_user(user_id):
-    """Deleta um usuário específico"""
+    """Deleta um usuário específico (lógica centralizada em service)."""
+    from app.services.deletion.user_deletion_service import UserDeletionService
+    from app.services.deletion.deletion_exceptions import EntityNotFoundError, PermissionDeniedError, DeletionError
+
     try:
         current_user = get_current_user_from_token()
-
-        if not current_user:
-            return jsonify({"erro": "Usuário não encontrado"}), 404
-
-        if current_user['id'] == user_id:
-            return jsonify({"erro": "Não é possível deletar o próprio usuário"}), 400
-
-        user_to_delete = User.query.get(user_id)
-        if not user_to_delete:
-            return jsonify({"erro": "Usuário não encontrado"}), 404
-
-        # Capturar dados necessários antes de deletes/commits (evita usar instância deletada depois)
-        user_city_id = getattr(user_to_delete, "city_id", None)
-
-        if user_city_id:
-            set_search_path(city_id_to_schema_name(user_city_id))
-
-        if current_user['role'] == "tecadm":
-            current_city_id = current_user.get('tenant_id') or current_user.get('city_id')
-            if user_city_id != current_city_id:
-                return jsonify({"erro": "Sem permissão para deletar usuário de outra cidade"}), 403
-
-        deleted_relations = []
-
-        def _set_search_path_for_user():
-            """Volta o bind ORM para o schema do usuário (para manter consistência multi-tenant)."""
-            if user_city_id:
-                set_search_path(city_id_to_schema_name(user_city_id))
-            else:
-                set_search_path("public")
-
-        teacher = Teacher.query.filter_by(user_id=user_id).first()
-        teacher_id = teacher.id if teacher else None
-
-        all_cities = City.query.all() if teacher_id else []
-
-        if teacher_id:
-            from app.models.teacherClass import TeacherClass
-            total_deleted = 0
-            for city in all_cities:
-                city_schema = city_id_to_schema_name(city.id)
-                set_search_path(city_schema)
-                deleted = TeacherClass.query.filter_by(teacher_id=teacher_id).delete(synchronize_session=False)
-                total_deleted += deleted
-            if total_deleted > 0:
-                deleted_relations.append(f"{total_deleted} vínculos com turmas")
-            if user_to_delete.city_id:
-                set_search_path(city_id_to_schema_name(user_to_delete.city_id))
-
-        if teacher_id:
-            from app.models.schoolTeacher import SchoolTeacher
-            total_deleted = 0
-            for city in all_cities:
-                city_schema = city_id_to_schema_name(city.id)
-                set_search_path(city_schema)
-                deleted = SchoolTeacher.query.filter_by(teacher_id=teacher_id).delete(synchronize_session=False)
-                total_deleted += deleted
-            if total_deleted > 0:
-                deleted_relations.append(f"{total_deleted} vínculos escolares")
-            if user_to_delete.city_id:
-                set_search_path(city_id_to_schema_name(user_to_delete.city_id))
-
-        if teacher_id:
-            db.session.flush()
-
-        # IMPORTANTE: os loops acima mexem no search_path. Antes de deletar tabelas do usuário,
-        # precisamos restaurar para o schema do usuário.
-        _set_search_path_for_user()
-
-        # Ao deletar Student por `user_id`, pode existir dependência em `physical_test_forms`
-        # (FK: physical_test_forms.student_id -> student.id). Como usamos bulk delete,
-        # a cascata do ORM não garante remoção no banco: precisamos deletar dependências antes.
-        from app.models.physicalTestForm import PhysicalTestForm
-        from app.models.physicalTestAnswer import PhysicalTestAnswer
-
-        # ===========================
-        # FASE 1 — Limpeza TENANT (schema da cidade do usuário)
-        # ===========================
-        # Observação crítica:
-        # o DELETE do `public.users` pode falhar por FK; se isso acontecer dentro da mesma transação,
-        # o rollback "revive" o student (foi exatamente o que aconteceu: student ainda existia e
-        # bloqueou o delete do users). Por isso, commitamos o tenant primeiro.
-        # Importante: evitar `db.session.delete(student)` aqui.
-        # O ORM tende a:
-        # - carregar vários relacionamentos do Student
-        # - emitir UPDATEs para "desvincular" FKs (SET NULL)
-        # - disparar muitas queries no flush/commit
-        # Isso é exatamente o que estava acontecendo após o step 9.
-        student_ids_to_delete = [
-            row[0] for row in db.session.query(Student.id).filter(Student.user_id == user_id).all()
-        ]
-
-        if student_ids_to_delete:
-            # 1) Dependências de formulários físicos
-            physical_forms_subq = (
-                PhysicalTestForm.query.with_entities(PhysicalTestForm.id)
-                .filter(PhysicalTestForm.student_id.in_(student_ids_to_delete))
-                .subquery()
-            )
-
-            PhysicalTestAnswer.query.filter(
-                PhysicalTestAnswer.physical_form_id.in_(physical_forms_subq)
-            ).delete(synchronize_session=False)
-
-            PhysicalTestForm.query.filter(
-                PhysicalTestForm.student_id.in_(student_ids_to_delete)
-            ).delete(synchronize_session=False)
-
-            # 2) Dependências "core" de prova/resposta (tenant)
-            from app.models.studentAnswer import StudentAnswer
-            from app.models.testSession import TestSession
-            from app.models.evaluationResult import EvaluationResult
-            from app.models.answerSheetResult import AnswerSheetResult
-            from app.models.studentTestOlimpics import StudentTestOlimpics
-            from app.models.formCoordinates import FormCoordinates
-            from app.models.studentPasswordLog import StudentPasswordLog
-
-            StudentAnswer.query.filter(
-                StudentAnswer.student_id.in_(student_ids_to_delete)
-            ).delete(synchronize_session=False)
-
-            # Competitions / coins / certificates
-            from app.balance.models.student_coins import StudentCoins
-            from app.balance.models.coin_transaction import CoinTransaction
-            from app.competitions.models.competition_enrollment import CompetitionEnrollment
-            from app.competitions.models.competition_result import CompetitionResult
-            from app.competitions.models.competition_reward import CompetitionReward
-            from app.competitions.models.competition_ranking_payout import CompetitionRankingPayout
-            from app.certification.models.certificate import Certificate
-
-            CompetitionEnrollment.query.filter(
-                CompetitionEnrollment.student_id.in_(student_ids_to_delete)
-            ).delete(synchronize_session=False)
-            CompetitionReward.query.filter(
-                CompetitionReward.student_id.in_(student_ids_to_delete)
-            ).delete(synchronize_session=False)
-            CompetitionRankingPayout.query.filter(
-                CompetitionRankingPayout.student_id.in_(student_ids_to_delete)
-            ).delete(synchronize_session=False)
-            CompetitionResult.query.filter(
-                CompetitionResult.student_id.in_(student_ids_to_delete)
-            ).delete(synchronize_session=False)
-
-            CoinTransaction.query.filter(
-                CoinTransaction.student_id.in_(student_ids_to_delete)
-            ).delete(synchronize_session=False)
-            StudentCoins.query.filter(
-                StudentCoins.student_id.in_(student_ids_to_delete)
-            ).delete(synchronize_session=False)
-
-            Certificate.query.filter(
-                Certificate.student_id.in_(student_ids_to_delete)
-            ).delete(synchronize_session=False)
-
-            TestSession.query.filter(
-                TestSession.student_id.in_(student_ids_to_delete)
-            ).delete(synchronize_session=False)
-            EvaluationResult.query.filter(
-                EvaluationResult.student_id.in_(student_ids_to_delete)
-            ).delete(synchronize_session=False)
-            AnswerSheetResult.query.filter(
-                AnswerSheetResult.student_id.in_(student_ids_to_delete)
-            ).delete(synchronize_session=False)
-            StudentTestOlimpics.query.filter(
-                StudentTestOlimpics.student_id.in_(student_ids_to_delete)
-            ).delete(synchronize_session=False)
-
-            # FormCoordinates é opcional por aluno.
-            FormCoordinates.query.filter(
-                FormCoordinates.student_id.in_(student_ids_to_delete)
-            ).delete(synchronize_session=False)
-
-            # Logs de senha podem ter `user_id` NULL, mas `student_id` preenchido.
-            # Precisamos apagar por student_id antes de deletar o Student (FK).
-            StudentPasswordLog.query.filter(
-                StudentPasswordLog.student_id.in_(student_ids_to_delete)
-            ).delete(synchronize_session=False)
-
-            # 3) Loja: tabela é public, mas student_id é string sem FK
-            from app.store.models.student_purchase import StudentPurchase
-            StudentPurchase.query.filter(
-                StudentPurchase.student_id.in_(student_ids_to_delete)
-            ).delete(synchronize_session=False)
-
-            # 4) Por fim, apagar o próprio Student
-            Student.query.filter(Student.id.in_(student_ids_to_delete)).delete(synchronize_session=False)
-
-            deleted_relations.append("estudante")
-
-        # Deletar entidades tenant que referenciam diretamente `public.users.id` (FK NOT NULL),
-        # ainda dentro do schema do usuário.
-        if user_city_id:
-            _set_search_path_for_user()
-            from app.models.game import Game, GameClass
-            from app.models.calendar_event_user import CalendarEventUser
-            from app.models.mobile_models import MobileDevice, MobileSyncSubmission
-
-            game_ids_subq = (
-                db.session.query(Game.id)
-                .filter(Game.userId == user_id)
-                .subquery()
-            )
-            GameClass.query.filter(GameClass.game_id.in_(game_ids_subq)).delete(synchronize_session=False)
-            Game.query.filter(Game.userId == user_id).delete(synchronize_session=False)
-
-            CalendarEventUser.query.filter(CalendarEventUser.user_id == user_id).delete(synchronize_session=False)
-            MobileSyncSubmission.query.filter(MobileSyncSubmission.user_id == user_id).delete(synchronize_session=False)
-            MobileDevice.query.filter(MobileDevice.user_id == user_id).delete(synchronize_session=False)
-
-        # Commit da FASE 1: garante que o Student saiu de verdade do tenant.
-        db.session.commit()
-
-        if teacher:
-            total_deleted = 0
-            for city in all_cities:
-                city_schema = city_id_to_schema_name(city.id)
-                set_search_path(city_schema)
-                deleted = Teacher.query.filter_by(user_id=user_id).delete(synchronize_session=False)
-                total_deleted += deleted
-            if total_deleted > 0:
-                deleted_relations.append(f"professor ({total_deleted} schemas)")
-            if user_to_delete.city_id:
-                set_search_path(city_id_to_schema_name(user_to_delete.city_id))
-
-        # Mesma lógica: Teacher/Professor também pode ter mudado o bind de schema.
-        _set_search_path_for_user()
-
-        deleted_count = Manager.query.filter_by(user_id=user_id).delete(synchronize_session=False)
-        if deleted_count > 0:
-            deleted_relations.append("manager")
-
-        from app.models.userQuickLinks import UserQuickLinks
-        deleted_count = UserQuickLinks.query.filter_by(user_id=user_id).delete(synchronize_session=False)
-        if deleted_count > 0:
-            deleted_relations.append("atalhos rápidos")
-
-        # ===========================
-        # FASE 2 — Limpeza PUBLIC + remoção do usuário
-        # ===========================
-        # user_settings (public) tem FK NOT NULL para users — precisa ser removido.
-        UserSettings.query.filter_by(user_id=user_id).delete(synchronize_session=False)
-
-        # Finalmente: remover o User sem acionar cascades/lazy-load do ORM.
-        User.query.filter_by(id=user_id).delete(synchronize_session=False)
-
-        db.session.commit()
-
-        # Limpeza best-effort de logs antigos (casos com student_id NULL, mas user_id preenchido).
-        # Rodar após o commit evita que a exclusão principal fique presa por lock/scan.
-        cleaned_logs_by_user = 0
-        try:
-            if user_city_id:
-                _set_search_path_for_user()
-                cleaned_logs_by_user = (
-                    StudentPasswordLog.query.filter(StudentPasswordLog.user_id == user_id)
-                    .delete(synchronize_session=False)
-                )
-                db.session.commit()
-                if cleaned_logs_by_user > 0:
-                    deleted_relations.append("log de senhas antigo (student_password_log por user_id)")
-        except Exception as cleanup_err:
-            try:
-                db.session.rollback()
-            except Exception:
-                pass
-            logging.warning(
-                "[delete_user] cleanup best-effort falhou user_id=%s err=%s",
-                user_id,
-                cleanup_err,
-            )
-
-        if deleted_relations:
-            relations_text = ", ".join(deleted_relations)
-            message = f"Usuário deletado com sucesso. Registros relacionados também deletados: {relations_text}"
-        else:
-            message = "Usuário deletado com sucesso"
-
-        return jsonify({
-            "mensagem": message,
-            "deleted_relations": deleted_relations
-        }), 200
-
-    except SQLAlchemyError as e:
-        db.session.rollback()
-        logging.error(f"Erro no banco de dados ao deletar usuário {user_id}: {str(e)}", exc_info=True)
+        result = UserDeletionService(db.session).execute(user_id=user_id, current_user=current_user)
+        return jsonify(result.to_dict()), 200
+    except EntityNotFoundError as e:
+        return jsonify({"erro": str(e)}), 404
+    except PermissionDeniedError as e:
+        return jsonify({"erro": str(e)}), 403
+    except DeletionError as e:
+        logging.error("Erro de deleção para user_id=%s: %s", user_id, e, exc_info=True)
         return jsonify({"erro": "Erro interno do servidor"}), 500
     except Exception as e:
-        db.session.rollback()
-        logging.error(f"Erro inesperado ao deletar usuário {user_id}: {str(e)}", exc_info=True)
+        logging.error("Erro inesperado ao deletar user_id=%s: %s", user_id, e, exc_info=True)
         return jsonify({"erro": "Erro interno do servidor"}), 500
 
 def _user_settings_in_public(fn):

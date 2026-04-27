@@ -163,6 +163,61 @@ def obter_gabaritos_por_municipio(
         .order_by(AnswerSheetGabarito.created_at.desc())
         .all()
     )
+    # Pós-filtro para professor: gabaritos city/escopos múltiplos podem não ter school_id/class_id,
+    # então o escopo real vem de answer_sheet_generations (+ batch + resultados).
+    if (user.get("role") or "").lower() == "professor":
+        try:
+            from app.permissions.utils import get_teacher_classes
+            from app.report_analysis.answer_sheet_report_builder import (
+                union_target_class_ids_for_gabarito,
+            )
+
+            allowed = {str(x) for x in (get_teacher_classes(user["id"]) or []) if x}
+            if allowed:
+                keep = []
+                for g in rows:
+                    if str(g.created_by or "") == str(user.get("id") or ""):
+                        keep.append(g)
+                        continue
+                    tgt = {str(x) for x in (union_target_class_ids_for_gabarito(g) or set()) if x}
+                    if tgt & allowed:
+                        keep.append(g)
+                rows = keep
+            else:
+                # sem turmas: manter apenas os criados pelo professor
+                rows = [g for g in rows if str(g.created_by or "") == str(user.get("id") or "")]
+        except Exception:
+            # Falha -> mantém comportamento existente (mais restritivo)
+            pass
+
+    # Pós-filtro para diretor/coordenador: gabaritos city/escopos múltiplos podem não ter school_id/class_id.
+    # Então validamos pelo escopo real (geraçōes/batch/resultados) intersectando com a escola do manager.
+    if (user.get("role") or "").lower() in ("diretor", "coordenador") and permissao.get("scope") == "escola":
+        try:
+            manager = Manager.query.filter_by(user_id=user["id"]).first()
+            mid = str(getattr(manager, "school_id", None) or "")
+            if not mid:
+                rows = []
+            else:
+                from app.report_analysis.answer_sheet_report_builder import (
+                    get_answer_sheet_target_classes_for_report,
+                )
+
+                keep = []
+                for g in rows:
+                    if str(getattr(g, "school_id", "") or "") == mid:
+                        keep.append(g)
+                        continue
+                    try:
+                        classes = get_answer_sheet_target_classes_for_report(g, "city", str(municipio_id))
+                    except Exception:
+                        classes = []
+                    if any(str(getattr(c, "school_id", "")) == mid for c in (classes or [])):
+                        keep.append(g)
+                rows = keep
+        except Exception:
+            # Em erro, mantém o filtro existente (mais restritivo).
+            pass
     return [{"id": str(r.id), "titulo": r.title or "Cartão resposta"} for r in rows]
 
 
@@ -576,9 +631,21 @@ def user_can_access_gabarito(
             if not teacher:
                 return False
             tcs = TeacherClass.query.filter_by(teacher_id=teacher.id).all()
-            cids = [tc.class_id for tc in tcs]
+            cids = [tc.class_id for tc in tcs if tc.class_id]
             if not cids:
+                # Mesmo sem turmas, ainda pode haver vinculação por escola no gabarito
                 return False
+            teacher_school_ids = list(
+                {
+                    c.school_id
+                    for c in Class.query.filter(Class.id.in_(cids)).all()
+                    if c.school_id
+                }
+            )
+            if getattr(gab, "class_id", None) in cids:
+                return True
+            if getattr(gab, "school_id", None) in teacher_school_ids:
+                return True
             return (
                 AnswerSheetResult.query.filter_by(gabarito_id=gab.id)
                 .join(Student, AnswerSheetResult.student_id == Student.id)
@@ -603,7 +670,22 @@ def user_can_access_gabarito(
         if not teacher:
             return False
         tcs = TeacherClass.query.filter_by(teacher_id=teacher.id).all()
-        allowed = {str(tc.class_id) for tc in tcs}
+        allowed = {str(tc.class_id) for tc in tcs if tc.class_id}
+        if not allowed:
+            return False
+        # Permitir também quando o gabarito está vinculado à escola do professor,
+        # mesmo que ainda não haja turmas-alvo resolvidas (ex.: sem gerações/correções).
+        teacher_school_ids = list(
+            {
+                c.school_id
+                for c in Class.query.filter(Class.id.in_([cid for cid in allowed])).all()
+                if c.school_id
+            }
+        )
+        if getattr(gab, "class_id", None) and str(getattr(gab, "class_id")) in allowed:
+            return True
+        if getattr(gab, "school_id", None) in teacher_school_ids:
+            return True
         return any(str(c.id) in allowed for c in classes)
 
     return False

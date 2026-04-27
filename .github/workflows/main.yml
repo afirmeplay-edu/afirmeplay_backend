@@ -3,7 +3,6 @@ name: Backend Pipeline
 on:
     push:
         branches:
-            - main
             - dev
     workflow_dispatch:
 
@@ -47,24 +46,16 @@ jobs:
 
     deploy:
         runs-on: [self-hosted, vps-afirme]
-        environment: ${{ github.ref == 'refs/heads/main' && 'prod' || 'dev' }}
+        environment: dev
         needs: [push]
         steps:
             - name: Checkout
               uses: actions/checkout@v4
             - name: Deploy
               run: |
-                  if [ "${{ github.ref }}" = "refs/heads/main" ]; then
-                    export COMPOSE_PROJECT_NAME=afirmeplay_back_prod
-                    COMPOSE_FILE=docker-compose.prod.yml
-                  else
-                    export COMPOSE_PROJECT_NAME=afirmeplay_back_dev
-                    COMPOSE_FILE=docker-compose.dev.yml
-                  fi
+                  export COMPOSE_PROJECT_NAME=afirmeplay_back_dev # Isso faz com que o docker compose separe os containers de produção dos de desenvolvimento
                   export VERSION=v$(cat VERSION)
                   export DATABASE_URL=${{ secrets.DATABASE_URL }}
-                  # Enable Scheduler
-                  export ENABLE_SCHEDULER=${{ secrets.ENABLE_SCHEDULER }}
                   # JWT Secret Key
                   export JWT_SECRET_KEY=${{ secrets.JWT_SECRET_KEY }}
                   # Frontend
@@ -97,5 +88,5 @@ jobs:
                   export PUBLIC_API_BASE_URL=${{ secrets.PUBLIC_API_BASE_URL }}
                   export SUBDOMAIN_MODE=${{ secrets.SUBDOMAIN_MODE }}
 
-                  docker compose -f "$COMPOSE_FILE" pull
-                  docker compose -f "$COMPOSE_FILE" up -d
+                  docker compose -f docker-compose.dev.yml pull
+                  docker compose -f docker-compose.dev.yml up -d

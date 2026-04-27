@@ -3445,8 +3445,10 @@ def _gerar_tabela_detalhada_cartao(scope_info, nivel_granularidade, gabarito_id,
             detected = {int(k): v for k, v in detected.items() if k is not None}
             respostas_por_questao = build_respostas_por_questao(q_numbers, detected)
             total_acertos = sum(1 for x in respostas_por_questao if x.get('acertou'))
-            total_erros = sum(1 for x in respostas_por_questao if x.get('respondeu') and not x.get('acertou'))
             total_respondidas = sum(1 for x in respostas_por_questao if x.get('respondeu'))
+            total_questoes_disciplina = len(q_numbers)
+            # Erros incluem: marcadas erradas, inválidas e em branco (não respondidas)
+            total_erros = max(0, total_questoes_disciplina - total_acertos)
             pbs = (r.proficiency_by_subject or {}) if r else {}
             if isinstance(pbs, str):
                 try:
@@ -3477,13 +3479,14 @@ def _gerar_tabela_detalhada_cartao(scope_info, nivel_granularidade, gabarito_id,
                 "total_acertos": total_acertos,
                 "total_erros": total_erros,
                 "total_respondidas": total_respondidas,
-                "total_questoes_disciplina": len(q_numbers),
-                "total_em_branco": len(q_numbers) - total_respondidas,
+                "total_questoes_disciplina": total_questoes_disciplina,
+                "total_em_branco": total_questoes_disciplina - total_respondidas,
                 "nivel_proficiencia": disciplina_classificacao,
                 "nota": round(disciplina_nota, 2),
                 "proficiencia": round(disciplina_proficiencia, 2) if disciplina_proficiencia else 0.0,
                 "status": "concluida" if r else "pendente",
-                "percentual_acertos": round((total_acertos / total_respondidas * 100), 2) if total_respondidas > 0 else 0.0
+                # Percentual deve considerar o total de questões da disciplina (inclui em branco como erro)
+                "percentual_acertos": round((total_acertos / total_questoes_disciplina * 100), 2) if total_questoes_disciplina > 0 else 0.0
             })
         disciplinas_out.append({
             "id": subject_id,

@@ -57,6 +57,7 @@ from io import BytesIO
 from datetime import datetime, timedelta
 from urllib.parse import urlencode
 from calendar import monthrange
+from app.services.ai_analysis_service import AIAnalysisService
 
 bp = Blueprint('answer_sheets', __name__, url_prefix='/answer-sheets')
 
@@ -4551,6 +4552,10 @@ def mapa_habilidades_cartao():
                     "total_alunos_escopo_turma": 0,
                     "total_alunos_participantes": 0,
                     "total_alunos_escopo": 0,
+                    "analise_ia": {
+                        "document_title": "ESTRATÉGIAS DE INTERVENÇÃO",
+                        "warning": "Nenhum aluno/resultado encontrado para o escopo informado.",
+                    },
                 }
             ), 200
 
@@ -4564,12 +4569,95 @@ def mapa_habilidades_cartao():
         n_turma = int(raw.pop("_students_all_count", len(students)) or 0)
         n_part = len(students)
 
+        por_faixa = raw.get("por_faixa", {}) or {}
+        habilidades_abaixo = por_faixa.get("abaixo_do_basico", []) or []
+        habilidades_basico = por_faixa.get("basico", []) or []
+        habilidades_criticas = list(habilidades_abaixo) + list(habilidades_basico)
+
+        # Resolver nome da disciplina (quando disciplina != all)
+        disciplina_nome = None
+        if disc_filt:
+            for d in raw.get("disciplinas_disponiveis", []) or []:
+                if str(d.get("id")) == str(disc_filt):
+                    disciplina_nome = d.get("nome")
+                    break
+        disciplina_label = (disciplina_nome or str(disc_filt)) if disc_filt else "all"
+
+        # Resolver referência da avaliação
+        gab = AnswerSheetGabarito.query.get(gabarito_id)
+        avaliacao_referencia = (getattr(gab, "title", None) or "Cartão-resposta").strip() if gab else "Cartão-resposta"
+
+        # Resolver série/ano
+        if serie and str(serie).strip():
+            ano_serie = str(serie).strip()
+        elif gab and getattr(gab, "grade_name", None):
+            ano_serie = str(gab.grade_name).strip()
+        else:
+            ano_serie = ""
+
+        # Montar lista de habilidades no formato do prompt
+        skills_lines: List[str] = []
+        for idx, h in enumerate(habilidades_criticas, start=1):
+            codigo = (h.get("codigo") or "").strip()
+            desc = (h.get("descricao") or "").strip()
+            if codigo and desc:
+                item = f"{codigo} - {desc}"
+            else:
+                item = codigo or desc or (h.get("skill_id") or "")
+            skills_lines.append(f"  {idx}. {item}")
+
+        prompt = (
+            "Atue como um Especialista em Avaliação Educacional e Recomposição de Aprendizagem, com profundo conhecimento "
+            "nas matrizes de referência do SAEB, SPAECE e SAVEAL.\n\n"
+            "Abaixo, fornecerei os dados de uma avaliação (Mensal ou Larga Escala) referentes a uma turma.\n\n"
+            "Sua tarefa é gerar um plano de ação estritamente focado em alunos que se encontram nos níveis de proficiência "
+            "\"ABAIXO DO BÁSICO\" e \"BÁSICO\". O plano deve ser realista, aplicável na rede pública ou privada, utilizando "
+            "recursos acessíveis de sala de aula.\n\n"
+            "Nomeie o documento final obrigatoriamente como: **ESTRATÉGIAS DE INTERVENÇÃO**.\n\n"
+            "O documento deve seguir rigorosamente a estrutura abaixo:\n\n"
+            "# ESTRATÉGIAS DE INTERVENÇÃO\n\n"
+            "## 1. Foco Analítico: Níveis Abaixo do Básico e Básico\n"
+            "[Escreva um breve parágrafo (máx 3 linhas) resumindo qual é a principal barreira cognitiva esperada para esses "
+            "alunos nas habilidades fornecidas.]\n\n"
+            "## 2. Matriz de Ação por Habilidade\n"
+            "Crie uma tabela para cada habilidade listada, contendo:\n"
+            "* **Habilidade (Código e Descrição):**\n"
+            "* **Conteúdo Estruturante:** (Qual é o conceito matemático ou linguístico fundamental que o aluno precisa dominar "
+            "para atingir essa habilidade?)\n"
+            "* **Dificuldade Mapeada (Abaixo do Básico/Básico):** (Exatamente onde o aluno trava? Ex: \"Não compreende a "
+            "conservação de quantidade\" ou \"Não localiza informação se não estiver no início do texto\").\n"
+            "* **Como Trabalhar (Passo a Passo Prático):** (3 etapas progressivas. Comece sempre do concreto/visual, vá para o "
+            "pictórico e depois para o abstrato/simbólico. Sem sugestões genéricas; dê exemplos do que o professor deve dizer "
+            "ou desenhar no quadro).\n"
+            "* **Sugestão de Atividade Curta:** (Uma atividade de no máximo 10 minutos para fixação imediata).\n\n"
+            "## 3. Dinâmica de Sala e Recomposição\n"
+            "Melhore as estratégias gerais adaptando-as EXCLUSIVAMENTE para alunos com defasagem:\n"
+            "* **Agrupamentos Produtivos Focados:** (Como juntar um aluno \"Básico\" com um \"Adequado\" sem que o Adequado faça "
+            "o trabalho todo? Dê instruções de papéis na dupla).\n"
+            "* **Avaliação Formativa de Baixo Risco (Tickets de Saída):** (Sugira 2 perguntas curtas e diretas para o professor "
+            "usar no final da aula e checar se a intervenção daquela habilidade funcionou).\n\n"
+            "---\n"
+            "DADOS PARA A ANÁLISE:\n"
+            f"- Ano/Série: {ano_serie}\n"
+            f"- Disciplina: {disciplina_label}\n"
+            f"- Avaliação Referência: {avaliacao_referencia}\n"
+            "- Habilidades Críticas a serem trabalhadas:\n"
+            f"{chr(10).join(skills_lines) if skills_lines else '  1. '}\n\n"
+            "IMPORTANTE: Sua resposta deve ser APENAS um JSON válido (objeto) e NADA além do JSON.\n"
+            "O JSON deve conter a estrutura equivalente ao documento \"ESTRATÉGIAS DE INTERVENÇÃO\", com chaves para os itens "
+            "1, 2 (lista por habilidade) e 3 (dinâmica e tickets).\n"
+        )
+
+        ai_service = AIAnalysisService()
+        analise_ia = ai_service.analyze_intervention_plan_json(prompt)
+
         return jsonify(
             {
                 "nivel_granularidade": nivel_granularidade,
                 "disciplinas_disponiveis": raw.get("disciplinas_disponiveis", []),
                 "habilidades": raw.get("habilidades", []),
                 "por_faixa": raw.get("por_faixa", {}),
+                "analise_ia": analise_ia,
                 "filtros_aplicados": {
                     "estado": estado,
                     "municipio": municipio,

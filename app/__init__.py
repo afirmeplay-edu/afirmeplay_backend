@@ -42,7 +42,7 @@ def create_app():
     CORS(app, resources={
         r"/*": {
             "origins": [os.getenv('FRONTEND_URL'), "http://localhost:8080", re.compile(r"^https?://[a-zA-Z0-9-]+\.localhost:8080$")],
-            "methods": ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+            "methods": ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
             "allow_headers": [
                 "Content-Type", 
                 "Authorization",

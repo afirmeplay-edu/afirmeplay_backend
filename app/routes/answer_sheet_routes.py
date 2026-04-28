@@ -23,6 +23,9 @@ from app.services.progress_store import (
     create_job, update_item_processing, update_item_done,
     update_item_error, complete_job, get_job, purge_answer_sheet_job_keys,
 )
+from app.report_analysis.answer_sheet_aggregate_service import (
+    any_configured_redis_tcp_unreachable,
+)
 from app.services.answer_sheet_job_store import (
     create_answer_sheet_job,
     get_answer_sheet_job,
@@ -1812,7 +1815,7 @@ def get_gabarito(gabarito_id):
         return jsonify({"error": f"Erro ao buscar gabarito: {str(e)}"}), 500
 
 
-@bp.route('/gabaritos/<string:gabarito_id>', methods=['PATCH'])
+@bp.route('/gabaritos/<string:gabarito_id>', methods=['PATCH', 'POST'])
 @jwt_required()
 @role_required("admin", "professor", "coordenador", "diretor", "tecadm")
 @requires_city_context
@@ -1823,8 +1826,17 @@ def patch_gabarito_correct_answers(gabarito_id: str):
     Body:
         { "correct_answers": { "1": "A", "2": "B", ... } }
 
-    Returns (202):
-        { job_id, gabarito_id, polling_url }
+    Métodos:
+        - PATCH: semântica REST de edição parcial.
+        - POST: mesmo corpo e comportamento; use no browser se o preflight CORS
+          do ambiente não listar PATCH em Access-Control-Allow-Methods.
+
+    Returns (202 em sucesso):
+        { status, job_id, gabarito_id, polling_url, task_id?, recalculated_sync }
+
+        Sempre **202 Accepted** quando o recálculo foi aceito/concluído com sucesso
+        (incluindo execução síncrona). O cliente usa `status` e `recalculated_sync`
+        para saber se precisa do polling; não use só o código HTTP para isso.
     """
     try:
         user = get_current_user_from_token()
@@ -1892,30 +1904,122 @@ def patch_gabarito_correct_answers(gabarito_id: str):
         if not city_id:
             return jsonify({"error": "Contexto de município não encontrado"}), 400
 
-        # Disparar task Celery
+        # Espelho em public.answer_sheet_generation_jobs: GET /recalculate-jobs/.../status
+        # em outro worker ou sem Redis ainda encontra o job (contadores/status).
+        try:
+            from app.services.answer_sheet_job_store import create_answer_sheet_job
+            from sqlalchemy.exc import IntegrityError
+
+            create_answer_sheet_job(
+                job_id,
+                len(items_meta),
+                str(gabarito_id),
+                str(user.get("id")),
+                [],
+                city_id,
+                scope_type="recalculate_gabarito",
+            )
+        except IntegrityError:
+            db.session.rollback()
+            logging.debug("Job de recálculo %s já existia na tabela (reuso)", job_id)
+        except Exception as db_job_err:
+            db.session.rollback()
+            logging.warning(
+                "Espelho DB do job de recálculo não criado (GET status pode falhar entre workers): %s",
+                db_job_err,
+            )
+
+        # Disparar task Celery (ou recálculo síncrono se broker/Redis indisponível)
         from app.services.celery_tasks.answer_sheet_tasks import (
             recalculate_answer_sheet_results_for_gabarito,
+            run_recalculate_answer_sheet_results_for_gabarito,
         )
+        from app.services.progress_store import update_job
+        from app.services.answer_sheet_job_store import update_answer_sheet_job
 
-        task = recalculate_answer_sheet_results_for_gabarito.delay(
-            str(gabarito_id), job_id, city_id
-        )
-        # Registrar task_id no job (para depuração)
-        try:
-            from app.services.progress_store import update_job
+        task_id = None
+        recalculated_sync = False
 
-            update_job(job_id, {"task_ids": [task.id]})
-        except Exception:
-            pass
+        def _run_sync_recalc() -> None:
+            run_recalculate_answer_sheet_results_for_gabarito(
+                str(gabarito_id), job_id, city_id
+            )
 
+        # Evita chamar apply_async quando algum Redis configurado não aceita TCP:
+        # o cliente tenta reconectar dezenas de vezes e segura a requisição ~20s+.
+        if any_configured_redis_tcp_unreachable():
+            logging.warning(
+                "Redis inacessível (pré-check TCP); recálculo síncrono para gabarito %s",
+                gabarito_id,
+            )
+            try:
+                _run_sync_recalc()
+                recalculated_sync = True
+            except Exception as sync_err:
+                logging.error(
+                    "Recálculo síncrono falhou para gabarito %s: %s",
+                    gabarito_id,
+                    sync_err,
+                    exc_info=True,
+                )
+                return jsonify(
+                    {
+                        "error": "Recálculo falhou (Redis inacessível e execução síncrona falhou).",
+                        "details": str(sync_err),
+                        "job_id": job_id,
+                    }
+                ), 500
+        else:
+            try:
+                # ignore_result reduz uso do result backend (Redis) ao publicar a task
+                task = recalculate_answer_sheet_results_for_gabarito.apply_async(
+                    args=[str(gabarito_id), job_id, city_id],
+                    ignore_result=True,
+                )
+                task_id = task.id
+                update_job(job_id, {"task_ids": [task.id]})
+                try:
+                    update_answer_sheet_job(job_id, {"task_ids": [task.id]})
+                except Exception as upd_db_err:
+                    logging.debug(
+                        "Não foi possível gravar task_ids no job DB %s: %s", job_id, upd_db_err
+                    )
+            except Exception as enqueue_err:
+                logging.warning(
+                    "Fila Celery indisponível (%s); executando recálculo síncrono",
+                    enqueue_err,
+                )
+                try:
+                    _run_sync_recalc()
+                    recalculated_sync = True
+                except Exception as sync_err:
+                    logging.error(
+                        "Recálculo síncrono falhou para gabarito %s: %s",
+                        gabarito_id,
+                        sync_err,
+                        exc_info=True,
+                    )
+                    return jsonify(
+                        {
+                            "error": "Recálculo falhou (Celery indisponível e execução síncrona falhou).",
+                            "details": str(sync_err),
+                            "job_id": job_id,
+                        }
+                    ), 500
+
+        payload_status = "completed" if recalculated_sync else "processing"
+
+        # Sempre 202: clientes que só aceitam 202 como “iniciou” quebravam com 200
+        # quando o recálculo rodava síncrono (Redis/Celery indisponível).
         return (
             jsonify(
                 {
-                    "status": "processing",
+                    "status": payload_status,
                     "job_id": job_id,
-                    "task_id": task.id,
+                    "task_id": task_id,
                     "gabarito_id": str(gabarito_id),
                     "polling_url": f"/answer-sheets/recalculate-jobs/{job_id}/status",
+                    "recalculated_sync": recalculated_sync,
                 }
             ),
             202,
@@ -5165,20 +5269,37 @@ def get_job_status(job_id):
 def get_recalculate_job_status(job_id: str):
     """
     Status de recálculo após edição do gabarito.
-    Retorna o job do progress_store (um item por AnswerSheetResult).
+    Usa progress_store (memória/Redis) e, se necessário, espelho em
+    public.answer_sheet_generation_jobs (scope_type=recalculate_gabarito)
+    para outro worker ou quando Redis não guarda o job.
     """
     try:
+        from app.services.answer_sheet_job_store import get_answer_sheet_job
+
         current_user_id = get_jwt_identity()
         job = get_job(job_id)
         if not job:
+            job_db = get_answer_sheet_job(job_id)
+            if job_db and job_db.get("scope_type") == "recalculate_gabarito":
+                job = dict(job_db)
+        if not job:
             return jsonify({"error": "Job não encontrado"}), 404
 
-        if job.get("user_id") != str(current_user_id):
+        uid_job = str(job.get("user_id") or "")
+        uid_req = str(current_user_id) if current_user_id is not None else ""
+        if uid_job != uid_req:
             return jsonify({"error": "Acesso negado"}), 403
 
         total = int(job.get("total") or 0)
         completed = int(job.get("completed") or 0)
         pct = int(round((completed / total * 100))) if total > 0 else 0
+        st = job.get("status") or "processing"
+        msg = job.get("stage_message") or (
+            "Concluído" if st == "completed" else "Processando..."
+        )
+        phase = job.get("phase")
+        if phase is None and st == "completed":
+            phase = "done"
 
         return (
             jsonify(
@@ -5186,9 +5307,9 @@ def get_recalculate_job_status(job_id: str):
                     "job_id": job_id,
                     "gabarito_id": job.get("gabarito_id"),
                     "task_id": (job.get("task_ids") or [None])[0],
-                    "status": job.get("status") or "processing",
-                    "message": job.get("stage_message") or "Processando...",
-                    "phase": job.get("phase"),
+                    "status": st,
+                    "message": msg,
+                    "phase": phase,
                     "progress": {
                         "current": completed,
                         "total": total,

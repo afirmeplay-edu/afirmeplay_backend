@@ -3,8 +3,11 @@
 
 from __future__ import annotations
 
+import os
+import socket
 from datetime import datetime
 from typing import Any, Dict, Optional
+from urllib.parse import urlparse
 
 import logging
 from sqlalchemy.exc import SQLAlchemyError
@@ -16,6 +19,47 @@ from app.models.student import Student
 from app.models.studentClass import Class
 
 logger = logging.getLogger(__name__)
+
+
+def any_configured_redis_tcp_unreachable(timeout_sec: float = 0.45) -> bool:
+    """
+    True se **algum** host:port vindo de URLs redis nas envs não aceitar TCP.
+
+    Importante: broker (ex. localhost) e result backend (ex. IP remoto) podem ser
+    hosts diferentes; testar só o primeiro fazia o apply_async do rebuild travar
+    ~20s quando o segundo estava fora.
+    """
+    seen: set[tuple[str, int]] = set()
+    endpoints: list[tuple[str, int]] = []
+    for key in ("CELERY_RESULT_BACKEND", "CELERY_BROKER_URL", "REDIS_URL"):
+        raw = (os.getenv(key) or "").strip()
+        if not raw or not raw.startswith(("redis://", "rediss://")):
+            continue
+        try:
+            u = urlparse(raw)
+            if not u.hostname:
+                continue
+            port = int(u.port or 6379)
+            ep = (u.hostname.lower(), port)
+            if ep not in seen:
+                seen.add(ep)
+                endpoints.append(ep)
+        except (ValueError, TypeError):
+            continue
+    if not endpoints:
+        return False
+    for host, port in endpoints:
+        try:
+            with socket.create_connection((host, port), timeout=timeout_sec):
+                pass
+        except OSError:
+            logger.debug(
+                "Redis TCP unreachable (%s:%s) — skip Celery enqueue deste host",
+                host,
+                port,
+            )
+            return True
+    return False
 
 
 class AnswerSheetReportAggregateService:
@@ -211,9 +255,52 @@ def invalidate_answer_sheet_report_cache_after_result(
         AnswerSheetReportAggregateService._safe_commit()
 
     if scope_city_id:
-        try:
-            from app.report_analysis.tasks import rebuild_answer_sheet_reports_for_gabarito
+        if any_configured_redis_tcp_unreachable():
+            logger.warning(
+                "Rebuild answer_sheet report não agendado: Redis inacessível (TCP)."
+            )
+        else:
+            try:
+                from app.report_analysis.tasks import rebuild_answer_sheet_reports_for_gabarito
 
-            rebuild_answer_sheet_reports_for_gabarito.delay(gabarito_id, str(scope_city_id))
-        except Exception as exc:
-            logger.warning("Rebuild answer_sheet report não agendado: %s", exc)
+                rebuild_answer_sheet_reports_for_gabarito.apply_async(
+                    args=[gabarito_id, str(scope_city_id)],
+                    ignore_result=True,
+                )
+            except Exception as exc:
+                logger.warning("Rebuild answer_sheet report não agendado: %s", exc)
+
+
+def invalidate_answer_sheet_reports_after_gabarito_bulk_update(
+    gabarito_id: str,
+    city_id_for_rebuild: Optional[str],
+    *,
+    commit: bool = True,
+) -> None:
+    """
+    Após alterar/recalcular vários resultados do mesmo gabarito: marca caches agregados
+    sujos **uma vez** e tenta agendar **no máximo um** rebuild.
+
+    Evita chamar `invalidate_answer_sheet_report_cache_after_result` por aluno, o que
+    repetia mark_dirty + commit + `.delay()` do rebuild e degradava muito com Redis/Celery.
+    """
+    AnswerSheetReportAggregateService.mark_all_dirty_for_gabarito(
+        gabarito_id, commit=commit
+    )
+    if not city_id_for_rebuild:
+        return
+    if any_configured_redis_tcp_unreachable():
+        logger.warning(
+            "Rebuild answer_sheet report não agendado: Redis inacessível (TCP). "
+            "Agregados marcados sujos; rebuild pode rodar depois."
+        )
+        return
+    try:
+        from app.report_analysis.tasks import rebuild_answer_sheet_reports_for_gabarito
+
+        rebuild_answer_sheet_reports_for_gabarito.apply_async(
+            args=[gabarito_id, str(city_id_for_rebuild)],
+            ignore_result=True,
+        )
+    except Exception as exc:
+        logger.warning("Rebuild answer_sheet report não agendado: %s", exc)

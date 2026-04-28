@@ -16,18 +16,24 @@ logger = logging.getLogger(__name__)
 # Mapas de chaves: múltiplas numerações (formulários antigos vs novos)
 # ---------------------------------------------------------------------------
 
-ESCOLARIDADE_MAE_KEYS = ["q9", "q8"]
+# Mãe primeiro q8, depois q9 (alinhado a Inep / formsData: q8 mãe, q9 pai; template API
+# com q8 matriz "quem mora" ignora q8 se não for string escalar).
+ESCOLARIDADE_MAE_KEYS = ["q8", "q9"]
+# Pai: q10 (template API) depois q9 (quando q10 é matriz em formsData, usa-se q9)
 ESCOLARIDADE_PAI_KEYS = ["q10", "q9"]
 
-# Bens (quantidade): conceito -> lista de chaves possíveis [q13a ou q12a, ...]
+# Bens (quantidade): por sufixo (a..g) tenta-se q12* antes de q13*.
+# - Formulário atual (aluno_jovem/velho): bens em q13; q12 é infra na rua (Sim/Não) —
+#   esses são ignorados e usa-se q13.
+# - Formulário legado (formsData): bens em q12, serviços em q13 — q12 vence.
 BENS_MAP = {
-    "geladeira": ["q13a", "q12a"],
-    "computador": ["q13b", "q12b"],
-    "quartos": ["q13c", "q12c"],
-    "televisao": ["q13d", "q12d"],
-    "banheiro": ["q13e", "q12e"],
-    "carro": ["q13f", "q12f"],
-    "celular": ["q13g", "q12g"],
+    "geladeira": ["q12a", "q13a"],
+    "computador": ["q12b", "q13b"],
+    "quartos": ["q12c", "q13c"],
+    "televisao": ["q12d", "q13d"],
+    "banheiro": ["q12e", "q13e"],
+    "carro": ["q12f", "q13f"],
+    "celular": ["q12g", "q13g"],
 }
 
 # Serviços (sim/não): conceito -> lista de chaves possíveis [q14a ou q13a, ...]
@@ -55,6 +61,7 @@ ESCOLARIDADE_ALIAS = {
     ],
     "fundamental_ate_4": [
         "Ensino Fundamental, até a 4ª série ou o 5º ano",
+        "Ensino Fundamental até o 5º ano",
     ],
     "fundamental_completo": [
         "Ensino Fundamental completo",
@@ -76,7 +83,7 @@ BENS_OPCAO_ALIAS = {
     "0": ["Nenhum", "0"],
     "1": ["1"],
     "2": ["2"],
-    "3+": ["3 ou mais", "3 ou mais"],
+    "3+": ["3 ou mais"],
 }
 
 # Sim/Não: texto -> booleano (True = Sim)
@@ -93,6 +100,37 @@ def _first_value(responses: Dict[str, Any], keys: List[str]) -> Optional[str]:
         if v is not None and str(v).strip() != "":
             return str(v).strip()
     return None
+
+
+def _first_scalar_string(responses: Dict[str, Any], keys: List[str]) -> Optional[str]:
+    """
+    Primeira chave com valor string escalar (ignora dict/list, ex. matriz).
+    Evita tratar respostas de matriz como opção de escolaridade.
+    """
+    for k in keys:
+        v = responses.get(k)
+        if v is None or isinstance(v, (dict, list)):
+            continue
+        s = str(v).strip()
+        if s:
+            return s
+    return None
+
+
+def _is_inep_two_parent_escolaridade_only(responses: Dict[str, Any]) -> bool:
+    """
+    Formulário estilo "só mãe/pai" com chaves q8 e q9, sem bloco de q10
+    (sem q10, q10a, …; template API usa q9 mãe e q10 pai em vez disso).
+    """
+    for key in responses:
+        if key.startswith("q10"):
+            return False
+    v10 = responses.get("q10")
+    if v10 is not None and not isinstance(v10, (dict, list)) and str(v10).strip():
+        return False
+    q8 = _first_scalar_string(responses, ["q8"])
+    q9 = _first_scalar_string(responses, ["q9"])
+    return bool(q8 and q9)
 
 
 def normalizar_escolaridade(texto: Optional[str]) -> str:
@@ -137,6 +175,22 @@ def normalizar_sim_nao(texto: Optional[str]) -> Optional[bool]:
     return None
 
 
+def _first_bem_quantidade_bruta(responses: Dict[str, Any], keys: List[str]) -> Optional[str]:
+    """
+    Primeira chave cujo valor não é Sim/Não, para não confundir q12 (ex.: itens de rua)
+    com contagem de bens. Formulário atual: bens só em q13. Legado: bens em q12.
+    """
+    for k in keys:
+        v = responses.get(k)
+        if v is None or str(v).strip() == "":
+            continue
+        s = str(v).strip()
+        if normalizar_sim_nao(s) is not None:
+            continue
+        return s
+    return None
+
+
 def normalizar_respostas(responses: Dict[str, Any]) -> Dict[str, Any]:
     """
     Transforma respostas brutas (form_responses.responses) em formato canônico.
@@ -156,22 +210,18 @@ def normalizar_respostas(responses: Dict[str, Any]) -> Dict[str, Any]:
             "servicos": {k: False for k in SERVICOS_MAP},
         }
 
-    # Regra especial: quando q10 está ausente ou vazio e existem q8 e q9 -> mãe = q8, pai = q9
-    q10_val = (responses.get("q10") or "").strip()
-    q8_val = _first_value(responses, ["q8"])
-    q9_val = _first_value(responses, ["q9"])
-    if not q10_val and q8_val and q9_val:
-        mae_escolaridade = normalizar_escolaridade(q8_val)
-        pai_escolaridade = normalizar_escolaridade(q9_val)
+    if _is_inep_two_parent_escolaridade_only(responses):
+        mae_escolaridade = normalizar_escolaridade(_first_scalar_string(responses, ["q8"]))
+        pai_escolaridade = normalizar_escolaridade(_first_scalar_string(responses, ["q9"]))
     else:
-        texto_mae = _first_value(responses, ESCOLARIDADE_MAE_KEYS)
-        texto_pai = _first_value(responses, ESCOLARIDADE_PAI_KEYS)
+        texto_mae = _first_scalar_string(responses, ESCOLARIDADE_MAE_KEYS)
+        texto_pai = _first_scalar_string(responses, ESCOLARIDADE_PAI_KEYS)
         mae_escolaridade = normalizar_escolaridade(texto_mae)
         pai_escolaridade = normalizar_escolaridade(texto_pai)
 
     bens = {}
     for item, keys in BENS_MAP.items():
-        raw = _first_value(responses, keys)
+        raw = _first_bem_quantidade_bruta(responses, keys)
         bens[item] = normalizar_quantidade_bens(raw)
 
     servicos = {}

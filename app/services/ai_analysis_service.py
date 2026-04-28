@@ -5,6 +5,7 @@ Serviço para análise de relatórios usando OpenRouter AI
 
 import logging
 import os
+import json
 import re
 import unicodedata
 from typing import Dict, Any, Optional, Mapping
@@ -1175,6 +1176,125 @@ e recomendações práticas para a escola.
         except Exception as e:
             self.logger.error(f"Erro ao chamar Google AI Studio: {str(e)}", exc_info=True)
             raise
+
+    def _call_openai_json(self, prompt: str) -> str:
+        """
+        Chama a API do Google AI Studio (Gemini) exigindo retorno em JSON válido.
+        Mantém o método separado para não alterar o comportamento do fluxo existente de relatórios.
+        """
+        try:
+            api_key = os.getenv("GOOGLE_AI_STUDIO_API_KEY")
+            if not api_key:
+                self.logger.error("GOOGLE_AI_STUDIO_API_KEY não configurada no ambiente")
+                raise RuntimeError("Chave da API do Google AI Studio não configurada")
+
+            genai.configure(api_key=api_key)
+
+            model_name = (os.getenv("GOOGLE_AI_STUDIO_MODEL") or "gemini-1.5-pro").strip() or "gemini-1.5-pro"
+            print(f"[AIAnalysisService] call | Google AI Studio (Gemini) | model={model_name} | json_only=1")
+
+            system_prompt = (
+                "Responda APENAS com um JSON válido (objeto). "
+                "Não use Markdown, não use blocos de código, não use texto antes ou depois do JSON. "
+                "Use apenas aspas duplas em chaves e strings. "
+                "Se algum dado estiver ausente, use null ou string vazia, mas mantenha o JSON válido."
+            )
+
+            max_tokens = OPENROUTER_MAX_TOKENS
+            if "gemini-3" in (model_name or "").lower():
+                max_tokens = int(os.getenv("GOOGLE_AI_STUDIO_MAX_OUTPUT_TOKENS", "32768"))
+                self.logger.info(
+                    "Gemini 3 detectado (json): max_output_tokens=%s", max_tokens
+                )
+
+            generation_config = {
+                "temperature": OPENROUTER_TEMPERATURE,
+                "max_output_tokens": max_tokens,
+            }
+
+            model = genai.GenerativeModel(
+                model_name,
+                system_instruction=system_prompt,
+                generation_config=generation_config,
+            )
+
+            response = model.generate_content(prompt)
+
+            candidates = getattr(response, "candidates", None) or []
+            for cand in candidates:
+                content = getattr(cand, "content", None)
+                if not content:
+                    continue
+                parts = getattr(content, "parts", None) or []
+                texts = [getattr(p, "text", "") for p in parts if getattr(p, "text", "")]
+                joined = "\n".join(texts).strip()
+                if joined:
+                    return joined
+
+            finish_reasons = [getattr(c, "finish_reason", None) for c in candidates]
+            self.logger.error(
+                "Resposta do Google AI sem Part válida (json). finish_reason(s)=%s",
+                finish_reasons,
+            )
+            raise RuntimeError("Resposta do Google AI sem conteúdo (json).")
+        except Exception as e:
+            self.logger.error(f"Erro ao chamar Google AI Studio (json): {str(e)}", exc_info=True)
+            raise
+
+    @staticmethod
+    def _extract_json_object(text: str) -> str:
+        """
+        Tenta extrair o primeiro objeto JSON do texto.
+        Suporta casos em que o modelo devolve texto extra ou envolve em ```json.
+        """
+        if not text:
+            return ""
+
+        s = text.strip()
+
+        # Remover fences comuns
+        if s.startswith("```"):
+            s = re.sub(r"^```(?:json)?\s*", "", s, flags=re.IGNORECASE)
+            s = re.sub(r"\s*```$", "", s)
+            s = s.strip()
+
+        # Se já é um objeto
+        if s.startswith("{") and s.endswith("}"):
+            return s
+
+        # Extrair primeiro objeto por heurística simples de chaves balanceadas
+        start = s.find("{")
+        if start < 0:
+            return ""
+        depth = 0
+        for i in range(start, len(s)):
+            ch = s[i]
+            if ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    return s[start : i + 1].strip()
+        return ""
+
+    def analyze_intervention_plan_json(self, prompt: str) -> Dict[str, Any]:
+        """
+        Gera um plano de intervenção seguindo o prompt do usuário e devolve JSON (dict).
+        """
+        try:
+            raw = self._call_openai_json(prompt)
+            json_str = self._extract_json_object(raw)
+            if not json_str:
+                return {
+                    "error": "IA não retornou um objeto JSON válido",
+                    "raw": raw,
+                }
+            return json.loads(json_str)
+        except Exception as e:
+            return {
+                "error": "Falha ao gerar análise em JSON",
+                "details": str(e),
+            }
     
     def _process_ai_response(self, ai_response: str) -> Dict[str, str]:
         """Processa resposta da IA e organiza em seções"""

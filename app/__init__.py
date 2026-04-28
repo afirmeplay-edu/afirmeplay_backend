@@ -79,6 +79,62 @@ def create_app():
     register_tenant_query_logging(app, db)
 
     # ========================================
+    # POSTGRES TIMEOUTS (anti "idle in transaction")
+    # ========================================
+    def _register_pg_timeouts():
+        """
+        Aplica timeouts por conexão do pool (Postgres).
+
+        Motivação:
+        - evitar sessões "idle in transaction" segurando locks indefinidamente
+        - evitar statements presos por tempo ilimitado (ex.: locks)
+        """
+        from sqlalchemy import event, text
+
+        # Valores definidos em Config (hardcoded no projeto)
+        idle_ms = int(getattr(Config, "PG_IDLE_IN_TX_SESSION_TIMEOUT_MS", 60_000))
+        stmt_ms = int(getattr(Config, "PG_STATEMENT_TIMEOUT_MS", 300_000))
+
+        def _apply(dbapi_conn, _):
+            """
+            Handler do evento SQLAlchemy 'connect'.
+
+            Observação: aqui recebemos a conexão DBAPI (psycopg2), não um objeto Connection
+            do SQLAlchemy. Portanto, usamos cursor().execute(...).
+            """
+            cur = dbapi_conn.cursor()
+            try:
+                # SET por sessão (não-local), para valer para toda a vida da conexão no pool.
+                cur.execute(f"SET idle_in_transaction_session_timeout = {idle_ms}")
+                cur.execute(f"SET statement_timeout = {stmt_ms}")
+            finally:
+                try:
+                    cur.close()
+                except Exception:
+                    pass
+
+        with app.app_context():
+            # Flask-SQLAlchemy pode gerenciar múltiplos engines (binds).
+            for eng in db.engines.values():
+                try:
+                    if getattr(eng.dialect, "name", "") != "postgresql":
+                        continue
+                except Exception:
+                    continue
+                event.listen(eng, "connect", _apply)
+
+        app.logger.info(
+            "Postgres timeouts ativos: idle_in_transaction_session_timeout=%sms, statement_timeout=%sms",
+            idle_ms,
+            stmt_ms,
+        )
+
+    try:
+        _register_pg_timeouts()
+    except Exception as e:
+        app.logger.warning("Falha ao registrar timeouts do Postgres: %s", e)
+
+    # ========================================
     # MIDDLEWARE MULTI-TENANT
     # ========================================
     # Resolução automática de schema PostgreSQL por request

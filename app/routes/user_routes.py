@@ -9,13 +9,9 @@ import logging
 from werkzeug.security import check_password_hash
 from app.utils.auth import hash_password
 from app import db
-from app.models.student import Student
 from app.models.school import School
 from app.models.studentClass import Class
 from app.models.grades import Grade
-from app.models.teacher import Teacher
-from app.models.manager import Manager
-from app.models.city import City
 from app.models.studentPasswordLog import StudentPasswordLog
 from app.models.user_settings import UserSettings
 from sqlalchemy.orm import joinedload
@@ -960,171 +956,23 @@ def update_user(user_id):
 @jwt_required()
 @role_required("admin", "tecadm")
 def delete_user(user_id):
-    """Deleta um usuário específico"""
+    """Deleta um usuário específico (lógica centralizada em service)."""
+    from app.services.deletion.user_deletion_service import UserDeletionService
+    from app.services.deletion.deletion_exceptions import EntityNotFoundError, PermissionDeniedError, DeletionError
+
     try:
         current_user = get_current_user_from_token()
-
-        if not current_user:
-            return jsonify({"erro": "Usuário não encontrado"}), 404
-
-        if current_user['id'] == user_id:
-            return jsonify({"erro": "Não é possível deletar o próprio usuário"}), 400
-
-        user_to_delete = User.query.get(user_id)
-        if not user_to_delete:
-            return jsonify({"erro": "Usuário não encontrado"}), 404
-
-        if user_to_delete.city_id:
-            set_search_path(city_id_to_schema_name(user_to_delete.city_id))
-
-        if current_user['role'] == "tecadm":
-            current_city_id = current_user.get('tenant_id') or current_user.get('city_id')
-            if user_to_delete.city_id != current_city_id:
-                return jsonify({"erro": "Sem permissão para deletar usuário de outra cidade"}), 403
-
-        deleted_relations = []
-
-        def _set_search_path_for_user():
-            """Volta o bind ORM para o schema do usuário (para manter consistência multi-tenant)."""
-            if user_to_delete.city_id:
-                set_search_path(city_id_to_schema_name(user_to_delete.city_id))
-            else:
-                set_search_path("public")
-
-        teacher = Teacher.query.filter_by(user_id=user_id).first()
-        teacher_id = teacher.id if teacher else None
-
-        all_cities = City.query.all() if teacher_id else []
-
-        if teacher_id:
-            from app.models.teacherClass import TeacherClass
-            from app.models.schoolTeacher import SchoolTeacher
-            total_tc = total_st = total_teacher = 0
-            for city in all_cities:
-                city_schema = city_id_to_schema_name(city.id)
-                set_search_path(city_schema)
-                total_tc += TeacherClass.query.filter_by(teacher_id=teacher_id).delete(synchronize_session=False)
-                total_st += SchoolTeacher.query.filter_by(teacher_id=teacher_id).delete(synchronize_session=False)
-                total_teacher += Teacher.query.filter_by(user_id=user_id).delete(synchronize_session=False)
-            if total_tc > 0:
-                deleted_relations.append(f"{total_tc} vínculos com turmas")
-            if total_st > 0:
-                deleted_relations.append(f"{total_st} vínculos escolares")
-            if total_teacher > 0:
-                deleted_relations.append(f"professor ({total_teacher} schemas)")
-            if user_to_delete.city_id:
-                set_search_path(city_id_to_schema_name(user_to_delete.city_id))
-            db.session.flush()
-
-        # IMPORTANTE: os loops acima mexem no search_path. Antes de deletar tabelas do usuário,
-        # precisamos restaurar para o schema do usuário.
-        _set_search_path_for_user()
-
-        # Ao deletar Student por `user_id`, pode existir dependência em `physical_test_forms`
-        # (FK: physical_test_forms.student_id -> student.id). Como usamos bulk delete,
-        # a cascata do ORM não garante remoção no banco: precisamos deletar dependências antes.
-        from app.models.physicalTestForm import PhysicalTestForm
-        from app.models.physicalTestAnswer import PhysicalTestAnswer
-        from app.models.evaluationResult import EvaluationResult
-        from app.models.testSession import TestSession
-        from app.models.studentAnswer import StudentAnswer
-        from app.models.answerSheetResult import AnswerSheetResult
-        from app.models.studentTestOlimpics import StudentTestOlimpics
-        from app.models.formCoordinates import FormCoordinates
-
-        student_ids_to_delete = [
-            row[0]
-            for row in Student.query.with_entities(Student.id).filter_by(user_id=user_id).all()
-        ]
-        if student_ids_to_delete:
-            physical_forms_subq = (
-                PhysicalTestForm.query.with_entities(PhysicalTestForm.id)
-                .filter(PhysicalTestForm.student_id.in_(student_ids_to_delete))
-                .subquery()
-            )
-
-            # Remove respostas (dependentes) antes de apagar os formulários físicos.
-            PhysicalTestAnswer.query.filter(
-                PhysicalTestAnswer.physical_form_id.in_(physical_forms_subq)
-            ).delete(synchronize_session=False)
-
-            PhysicalTestForm.query.filter(
-                PhysicalTestForm.student_id.in_(student_ids_to_delete)
-            ).delete(synchronize_session=False)
-
-            # Bulk delete evita cascade do ORM em student_answers (milhares de linhas → timeout/504).
-            EvaluationResult.query.filter(
-                EvaluationResult.student_id.in_(student_ids_to_delete)
-            ).delete(synchronize_session=False)
-            TestSession.query.filter(
-                TestSession.student_id.in_(student_ids_to_delete)
-            ).delete(synchronize_session=False)
-            StudentAnswer.query.filter(
-                StudentAnswer.student_id.in_(student_ids_to_delete)
-            ).delete(synchronize_session=False)
-            AnswerSheetResult.query.filter(
-                AnswerSheetResult.student_id.in_(student_ids_to_delete)
-            ).delete(synchronize_session=False)
-            StudentTestOlimpics.query.filter(
-                StudentTestOlimpics.student_id.in_(student_ids_to_delete)
-            ).delete(synchronize_session=False)
-            FormCoordinates.query.filter(
-                FormCoordinates.student_id.in_(student_ids_to_delete)
-            ).delete(synchronize_session=False)
-            StudentPasswordLog.query.filter(
-                StudentPasswordLog.student_id.in_(student_ids_to_delete)
-            ).delete(synchronize_session=False)
-
-            deleted_students = Student.query.filter(
-                Student.id.in_(student_ids_to_delete)
-            ).delete(synchronize_session=False)
-            if deleted_students > 0:
-                deleted_relations.append("estudante")
-
-        # Remover logs de senha do aluno no schema da cidade (evita órfãos e duplicatas ao recadastrar)
-        if user_to_delete.city_id:
-            set_search_path(city_id_to_schema_name(user_to_delete.city_id))
-            deleted_logs = StudentPasswordLog.query.filter_by(user_id=user_id).delete(synchronize_session=False)
-            if deleted_logs > 0:
-                deleted_relations.append("log de senhas (student_password_log)")
-
-        # Mesma lógica: Teacher/Professor também pode ter mudado o bind de schema.
-        _set_search_path_for_user()
-
-        deleted_count = Manager.query.filter_by(user_id=user_id).delete(synchronize_session=False)
-        if deleted_count > 0:
-            deleted_relations.append("manager")
-
-        from app.models.userQuickLinks import UserQuickLinks
-        deleted_count = UserQuickLinks.query.filter_by(user_id=user_id).delete(synchronize_session=False)
-        if deleted_count > 0:
-            deleted_relations.append("atalhos rápidos")
-
-        db.session.flush()
-
-        db.session.delete(user_to_delete)
-
-        db.session.commit()
-
-
-        if deleted_relations:
-            relations_text = ", ".join(deleted_relations)
-            message = f"Usuário deletado com sucesso. Registros relacionados também deletados: {relations_text}"
-        else:
-            message = "Usuário deletado com sucesso"
-
-        return jsonify({
-            "mensagem": message,
-            "deleted_relations": deleted_relations
-        }), 200
-
-    except SQLAlchemyError as e:
-        db.session.rollback()
-        logging.error(f"Erro no banco de dados ao deletar usuário {user_id}: {str(e)}", exc_info=True)
+        result = UserDeletionService(db.session).execute(user_id=user_id, current_user=current_user)
+        return jsonify(result.to_dict()), 200
+    except EntityNotFoundError as e:
+        return jsonify({"erro": str(e)}), 404
+    except PermissionDeniedError as e:
+        return jsonify({"erro": str(e)}), 403
+    except DeletionError as e:
+        logging.error("Erro de deleção para user_id=%s: %s", user_id, e, exc_info=True)
         return jsonify({"erro": "Erro interno do servidor"}), 500
     except Exception as e:
-        db.session.rollback()
-        logging.error(f"Erro inesperado ao deletar usuário {user_id}: {str(e)}", exc_info=True)
+        logging.error("Erro inesperado ao deletar user_id=%s: %s", user_id, e, exc_info=True)
         return jsonify({"erro": "Erro interno do servidor"}), 500
 
 def _user_settings_in_public(fn):

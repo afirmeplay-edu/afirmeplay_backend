@@ -123,12 +123,13 @@ def calcular_proficiencia_por_disciplina(
         # Fallback: um único bloco com todas as questões (sem subject_id)
         all_q = list(gabarito_dict.keys())
         if all_q:
-            # Denominador = questões respondidas (igual às avaliações)
-            answered_q = [q for q in all_q if validated_answers.get(q) is not None]
-            total = len(answered_q) if answered_q else len(all_q)
+            # Denominador = total de questões (em branco conta como erro)
+            total = len(all_q)
             correct = sum(
-                1 for q in answered_q
-                if validated_answers.get(q) == gabarito_dict.get(q)
+                1
+                for q in all_q
+                if validated_answers.get(q) is not None
+                and validated_answers.get(q) == gabarito_dict.get(q)
             )
             subject_name = 'Outras'
             prof = EvaluationCalculator.calculate_proficiency(
@@ -170,12 +171,13 @@ def calcular_proficiencia_por_disciplina(
     for subject_id, question_numbers in questions_by_subject.items():
         if not question_numbers:
             continue
-        # Denominador = questões respondidas pelo aluno nesta disciplina (igual às avaliações)
-        answered = [q for q in question_numbers if validated_answers.get(q) is not None]
-        total = len(answered) if answered else len(question_numbers)
+        # Denominador = total de questões da disciplina (em branco conta como erro)
+        total = len(question_numbers)
         correct = sum(
-            1 for q in answered
-            if validated_answers.get(q) == gabarito_dict.get(q)
+            1
+            for q in question_numbers
+            if validated_answers.get(q) is not None
+            and validated_answers.get(q) == gabarito_dict.get(q)
         )
         subject_name = subject_names.get(subject_id, 'Outras')
         proficiency = EvaluationCalculator.calculate_proficiency(

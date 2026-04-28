@@ -14,6 +14,17 @@ class Config:
         'max_overflow': 40  # Permitir até 40 conexões extras
     }
     JWT_SECRET_KEY = os.getenv("JWT_SECRET_key")
+
+    # Postgres: proteções contra "idle in transaction" e queries eternas.
+    #
+    # Esses timeouts são aplicados por conexão (via event listener no create_app),
+    # então também protegem jobs/scheduler/celery que usem o mesmo pool.
+    #
+    # Valores hardcoded (sem env):
+    # - idle_in_transaction_session_timeout: 60s
+    # - statement_timeout: 5min
+    PG_IDLE_IN_TX_SESSION_TIMEOUT_MS = 60_000
+    PG_STATEMENT_TIMEOUT_MS = 300_000
     
     # Configurações do SendGrid
     SENDGRID_API_KEY = os.getenv("SENDGRID_API_KEY")

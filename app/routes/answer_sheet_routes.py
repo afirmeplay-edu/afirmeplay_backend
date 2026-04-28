@@ -60,6 +60,7 @@ from io import BytesIO
 from datetime import datetime, timedelta
 from urllib.parse import urlencode
 from calendar import monthrange
+from app.services.ai_analysis_service import AIAnalysisService
 
 bp = Blueprint('answer_sheets', __name__, url_prefix='/answer-sheets')
 
@@ -2785,13 +2786,44 @@ def _get_nome_granularidade_cartao(nivel, scope_info, escola_nome, serie_nome):
 
 def _get_empty_statistics_gerais_cartao(scope_info, nivel_granularidade):
     city_data = scope_info.get('city_data')
+    escola_nome = None
+    serie_nome = None
+
+    # Mesmo sem alunos/turmas no recorte, devolver o "contexto" selecionado (UX)
+    try:
+        if scope_info.get('escola') and _is_valid_filter(scope_info.get('escola')):
+            s = School.query.get(scope_info['escola'])
+            escola_nome = s.name if s else None
+    except Exception:
+        escola_nome = None
+
+    try:
+        if scope_info.get('serie') and _is_valid_filter(scope_info.get('serie')):
+            g = Grade.query.get(scope_info['serie'])
+            serie_nome = g.name if g else None
+    except Exception:
+        serie_nome = None
+
+    # Se houver gabarito, tentar inferir a série a partir dele (ex.: gabarito por série)
+    try:
+        if serie_nome is None and scope_info.get('gabarito') and _is_valid_filter(scope_info.get('gabarito')):
+            gab = AnswerSheetGabarito.query.get(str(scope_info.get('gabarito')).strip())
+            if gab:
+                if gab.grade_name and str(gab.grade_name).strip():
+                    serie_nome = gab.grade_name.strip()
+                elif gab.grade_id:
+                    g = Grade.query.get(gab.grade_id)
+                    serie_nome = g.name if g else None
+    except Exception:
+        pass
+
     return {
         "tipo": nivel_granularidade,
-        "nome": _get_nome_granularidade_cartao(nivel_granularidade, scope_info, None, None),
+        "nome": _get_nome_granularidade_cartao(nivel_granularidade, scope_info, escola_nome, serie_nome),
         "estado": scope_info.get('estado', 'Todos os estados'),
         "municipio": city_data.name if city_data else "Todos os municípios",
-        "escola": None,
-        "serie": None,
+        "escola": escola_nome,
+        "serie": serie_nome,
         "total_escolas": 0,
         "total_series": 0,
         "total_turmas": 0,
@@ -3633,8 +3665,10 @@ def _gerar_tabela_detalhada_cartao(scope_info, nivel_granularidade, gabarito_id,
             detected = {int(k): v for k, v in detected.items() if k is not None}
             respostas_por_questao = build_respostas_por_questao(q_numbers, detected)
             total_acertos = sum(1 for x in respostas_por_questao if x.get('acertou'))
-            total_erros = sum(1 for x in respostas_por_questao if x.get('respondeu') and not x.get('acertou'))
             total_respondidas = sum(1 for x in respostas_por_questao if x.get('respondeu'))
+            total_questoes_disciplina = len(q_numbers)
+            # Erros incluem: marcadas erradas, inválidas e em branco (não respondidas)
+            total_erros = max(0, total_questoes_disciplina - total_acertos)
             pbs = (r.proficiency_by_subject or {}) if r else {}
             if isinstance(pbs, str):
                 try:
@@ -3665,13 +3699,14 @@ def _gerar_tabela_detalhada_cartao(scope_info, nivel_granularidade, gabarito_id,
                 "total_acertos": total_acertos,
                 "total_erros": total_erros,
                 "total_respondidas": total_respondidas,
-                "total_questoes_disciplina": len(q_numbers),
-                "total_em_branco": len(q_numbers) - total_respondidas,
+                "total_questoes_disciplina": total_questoes_disciplina,
+                "total_em_branco": total_questoes_disciplina - total_respondidas,
                 "nivel_proficiencia": disciplina_classificacao,
                 "nota": round(disciplina_nota, 2),
                 "proficiencia": round(disciplina_proficiencia, 2) if disciplina_proficiencia else 0.0,
                 "status": "concluida" if r else "pendente",
-                "percentual_acertos": round((total_acertos / total_respondidas * 100), 2) if total_respondidas > 0 else 0.0
+                # Percentual deve considerar o total de questões da disciplina (inclui em branco como erro)
+                "percentual_acertos": round((total_acertos / total_questoes_disciplina * 100), 2) if total_questoes_disciplina > 0 else 0.0
             })
         disciplinas_out.append({
             "id": subject_id,
@@ -3943,13 +3978,17 @@ def _obter_gabaritos_por_municipio_cartao(
         )
     )
     # Admin (scope 'all') vê todos os gabaritos do município.
-    # Tecadm vê todos do seu município (não restringir por created_by).
-    # Diretor/Coordenador veem todos os gabaritos da sua escola (há filtro por school_id logo abaixo).
-    # Outros usuários ficam restritos ao que criaram.
-    # EXCEÇÃO: professor deve ver o que criou OU o que está no seu escopo (turmas/escolas vinculadas),
-    # semelhante ao comportamento de avaliações.
+    # Tecadm vê todos do seu município (sem restringir por created_by).
+    # Diretor/Coordenador com scope escola: filtro por escola abaixo; aqui não restringir por created_by.
+    # Professor: regra específica abaixo (o que criou OU escopo turmas/escolas).
+    # Demais perfis: apenas o que criaram.
     user_role = str(user.get("role") or "").lower()
-    if permissao.get('scope') != 'all' and user_role not in ('tecadm', 'diretor', 'coordenador', 'professor'):
+    if permissao.get('scope') != 'all' and user_role not in (
+        'tecadm',
+        'diretor',
+        'coordenador',
+        'professor',
+    ):
         q = q.filter(AnswerSheetGabarito.created_by == str(user['id']))
     if permissao.get('scope') == 'escola' and user.get('role') in ['diretor', 'coordenador']:
         from app.models.manager import Manager
@@ -4617,6 +4656,10 @@ def mapa_habilidades_cartao():
                     "total_alunos_escopo_turma": 0,
                     "total_alunos_participantes": 0,
                     "total_alunos_escopo": 0,
+                    "analise_ia": {
+                        "document_title": "ESTRATÉGIAS DE INTERVENÇÃO",
+                        "warning": "Nenhum aluno/resultado encontrado para o escopo informado.",
+                    },
                 }
             ), 200
 
@@ -4630,12 +4673,95 @@ def mapa_habilidades_cartao():
         n_turma = int(raw.pop("_students_all_count", len(students)) or 0)
         n_part = len(students)
 
+        por_faixa = raw.get("por_faixa", {}) or {}
+        habilidades_abaixo = por_faixa.get("abaixo_do_basico", []) or []
+        habilidades_basico = por_faixa.get("basico", []) or []
+        habilidades_criticas = list(habilidades_abaixo) + list(habilidades_basico)
+
+        # Resolver nome da disciplina (quando disciplina != all)
+        disciplina_nome = None
+        if disc_filt:
+            for d in raw.get("disciplinas_disponiveis", []) or []:
+                if str(d.get("id")) == str(disc_filt):
+                    disciplina_nome = d.get("nome")
+                    break
+        disciplina_label = (disciplina_nome or str(disc_filt)) if disc_filt else "all"
+
+        # Resolver referência da avaliação
+        gab = AnswerSheetGabarito.query.get(gabarito_id)
+        avaliacao_referencia = (getattr(gab, "title", None) or "Cartão-resposta").strip() if gab else "Cartão-resposta"
+
+        # Resolver série/ano
+        if serie and str(serie).strip():
+            ano_serie = str(serie).strip()
+        elif gab and getattr(gab, "grade_name", None):
+            ano_serie = str(gab.grade_name).strip()
+        else:
+            ano_serie = ""
+
+        # Montar lista de habilidades no formato do prompt
+        skills_lines: List[str] = []
+        for idx, h in enumerate(habilidades_criticas, start=1):
+            codigo = (h.get("codigo") or "").strip()
+            desc = (h.get("descricao") or "").strip()
+            if codigo and desc:
+                item = f"{codigo} - {desc}"
+            else:
+                item = codigo or desc or (h.get("skill_id") or "")
+            skills_lines.append(f"  {idx}. {item}")
+
+        prompt = (
+            "Atue como um Especialista em Avaliação Educacional e Recomposição de Aprendizagem, com profundo conhecimento "
+            "nas matrizes de referência do SAEB, SPAECE e SAVEAL.\n\n"
+            "Abaixo, fornecerei os dados de uma avaliação (Mensal ou Larga Escala) referentes a uma turma.\n\n"
+            "Sua tarefa é gerar um plano de ação estritamente focado em alunos que se encontram nos níveis de proficiência "
+            "\"ABAIXO DO BÁSICO\" e \"BÁSICO\". O plano deve ser realista, aplicável na rede pública ou privada, utilizando "
+            "recursos acessíveis de sala de aula.\n\n"
+            "Nomeie o documento final obrigatoriamente como: **ESTRATÉGIAS DE INTERVENÇÃO**.\n\n"
+            "O documento deve seguir rigorosamente a estrutura abaixo:\n\n"
+            "# ESTRATÉGIAS DE INTERVENÇÃO\n\n"
+            "## 1. Foco Analítico: Níveis Abaixo do Básico e Básico\n"
+            "[Escreva um breve parágrafo (máx 3 linhas) resumindo qual é a principal barreira cognitiva esperada para esses "
+            "alunos nas habilidades fornecidas.]\n\n"
+            "## 2. Matriz de Ação por Habilidade\n"
+            "Crie uma tabela para cada habilidade listada, contendo:\n"
+            "* **Habilidade (Código e Descrição):**\n"
+            "* **Conteúdo Estruturante:** (Qual é o conceito matemático ou linguístico fundamental que o aluno precisa dominar "
+            "para atingir essa habilidade?)\n"
+            "* **Dificuldade Mapeada (Abaixo do Básico/Básico):** (Exatamente onde o aluno trava? Ex: \"Não compreende a "
+            "conservação de quantidade\" ou \"Não localiza informação se não estiver no início do texto\").\n"
+            "* **Como Trabalhar (Passo a Passo Prático):** (3 etapas progressivas. Comece sempre do concreto/visual, vá para o "
+            "pictórico e depois para o abstrato/simbólico. Sem sugestões genéricas; dê exemplos do que o professor deve dizer "
+            "ou desenhar no quadro).\n"
+            "* **Sugestão de Atividade Curta:** (Uma atividade de no máximo 10 minutos para fixação imediata).\n\n"
+            "## 3. Dinâmica de Sala e Recomposição\n"
+            "Melhore as estratégias gerais adaptando-as EXCLUSIVAMENTE para alunos com defasagem:\n"
+            "* **Agrupamentos Produtivos Focados:** (Como juntar um aluno \"Básico\" com um \"Adequado\" sem que o Adequado faça "
+            "o trabalho todo? Dê instruções de papéis na dupla).\n"
+            "* **Avaliação Formativa de Baixo Risco (Tickets de Saída):** (Sugira 2 perguntas curtas e diretas para o professor "
+            "usar no final da aula e checar se a intervenção daquela habilidade funcionou).\n\n"
+            "---\n"
+            "DADOS PARA A ANÁLISE:\n"
+            f"- Ano/Série: {ano_serie}\n"
+            f"- Disciplina: {disciplina_label}\n"
+            f"- Avaliação Referência: {avaliacao_referencia}\n"
+            "- Habilidades Críticas a serem trabalhadas:\n"
+            f"{chr(10).join(skills_lines) if skills_lines else '  1. '}\n\n"
+            "IMPORTANTE: Sua resposta deve ser APENAS um JSON válido (objeto) e NADA além do JSON.\n"
+            "O JSON deve conter a estrutura equivalente ao documento \"ESTRATÉGIAS DE INTERVENÇÃO\", com chaves para os itens "
+            "1, 2 (lista por habilidade) e 3 (dinâmica e tickets).\n"
+        )
+
+        ai_service = AIAnalysisService()
+        analise_ia = ai_service.analyze_intervention_plan_json(prompt)
+
         return jsonify(
             {
                 "nivel_granularidade": nivel_granularidade,
                 "disciplinas_disponiveis": raw.get("disciplinas_disponiveis", []),
                 "habilidades": raw.get("habilidades", []),
                 "por_faixa": raw.get("por_faixa", {}),
+                "analise_ia": analise_ia,
                 "filtros_aplicados": {
                     "estado": estado,
                     "municipio": municipio,

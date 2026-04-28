@@ -26,9 +26,8 @@ def _is_enabled(app) -> bool:
         return False
     if v in ("1", "true", "yes", "on"):
         return True
-    if os.getenv("APP_ENV", "").strip().lower() == "development":
-        return True
-    return bool(app.debug)
+    # Por padrão, não logar query por query (muito verboso). Ative apenas via TENANT_QUERY_LOG=1.
+    return False
 
 
 def register_tenant_query_logging(app, db) -> None:

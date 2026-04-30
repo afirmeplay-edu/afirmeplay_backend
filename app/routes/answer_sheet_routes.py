@@ -4597,6 +4597,412 @@ def get_resultados_agregados():
         return jsonify({"error": "Erro ao obter resultados agregados", "details": str(e)}), 500
 
 
+@bp.route("/resultados-agregados/analise-ia", methods=["GET"])
+@jwt_required()
+@role_required("admin", "professor", "coordenador", "diretor", "tecadm")
+def get_resultados_agregados_analise_ia():
+    """
+    Retorna apenas o status/resultado da análise de IA (JSON) para resultados agregados de cartão-resposta.
+    - Consulta Redis primeiro (sem recalcular agregados).
+    - Se não houver cache, calcula 1x, dispara Celery e devolve processing.
+    """
+    try:
+        user = get_current_user_from_token()
+        if not user:
+            return jsonify({"error": "Usuário não encontrado"}), 401
+
+        estado = request.args.get("estado")
+        municipio = request.args.get("municipio")
+        escola = request.args.get("escola")
+        serie = request.args.get("serie")
+        turma = request.args.get("turma")
+        gabarito = request.args.get("gabarito")
+        periodo_raw = request.args.get("periodo")
+
+        if not _is_valid_filter(estado):
+            return jsonify({"error": "Estado é obrigatório e não pode ser 'all'"}), 400
+        if not _is_valid_filter(municipio):
+            return jsonify({"error": "Município é obrigatório"}), 400
+
+        ttl_sec = int(os.getenv("AI_ANALYSIS_CACHE_TTL_SEC", "3600"))
+        prompt_version = str(os.getenv("AI_ANALYSIS_PROMPT_VERSION", "v1"))
+        user_id = str(user.get("id") or "")
+        cache_key = _ai_make_cache_key(
+            "answer_sheets_resultados_agregados",
+            user_id=user_id,
+            prompt_version=prompt_version,
+            key_parts={
+                "estado": estado,
+                "municipio": municipio,
+                "escola": escola,
+                "serie": serie,
+                "turma": turma,
+                "gabarito": gabarito,
+                "periodo": (str(periodo_raw).strip() if periodo_raw and str(periodo_raw).strip() else None),
+            },
+        )
+
+        cached = _ai_cache_get_status(cache_key)
+        if cached:
+            st = cached.get("status")
+            if st == "ready":
+                return jsonify(
+                    {
+                        "analise_ia_status": "ready",
+                        "analise_ia_cache_key": cache_key,
+                        "analise_ia": cached.get("result") or {},
+                    }
+                ), 200
+            if st == "error":
+                return jsonify(
+                    {
+                        "analise_ia_status": "error",
+                        "analise_ia_cache_key": cache_key,
+                        "error": cached.get("error") or "Falha ao gerar análise de IA",
+                        "details": cached.get("details") or "",
+                    }
+                ), 200
+            return jsonify(
+                {
+                    "analise_ia_status": "processing",
+                    "analise_ia_cache_key": cache_key,
+                }
+            ), 200
+
+        # Cache não existe: calcular dados 1x e disparar task
+        periodo_bounds = None
+        if periodo_raw and str(periodo_raw).strip():
+            try:
+                periodo_bounds = _parse_cartao_periodo_bounds(str(periodo_raw).strip())
+            except ValueError:
+                return jsonify({"error": "Parâmetro periodo inválido. Use YYYY-MM (ex.: 2026-04)."}), 400
+
+        scope_info = _determinar_escopo_busca_cartao(
+            estado, municipio, escola, serie, turma, gabarito, user, periodo_bounds
+        )
+        if not scope_info:
+            return jsonify({"error": "Não foi possível determinar o escopo de busca"}), 400
+
+        nivel_granularidade = _determinar_nivel_granularidade_cartao(
+            estado, municipio, escola, serie, turma, gabarito
+        )
+        gabarito_id = str(gabarito).strip() if _is_valid_filter(gabarito) else None
+
+        estatisticas_gerais = _calcular_estatisticas_consolidadas_cartao(
+            scope_info, nivel_granularidade, gabarito_id, user, periodo_bounds
+        )
+        resultados_por_disciplina = (
+            _calcular_resultados_por_disciplina_cartao(
+                scope_info, nivel_granularidade, gabarito_id, periodo_bounds, user
+            )
+            if gabarito_id
+            else []
+        )
+        tabela_detalhada = (
+            _gerar_tabela_detalhada_cartao(
+                scope_info, nivel_granularidade, gabarito_id, user, periodo_bounds
+            )
+            if gabarito_id
+            else {"disciplinas": [], "geral": {"alunos": []}}
+        )
+
+        # Série/Ano (prioriza filtro)
+        serie_ano = (
+            str(serie).strip()
+            if serie and str(serie).strip() and str(serie).strip().lower() != "all"
+            else ""
+        )
+        if not serie_ano:
+            alunos_geral = (((tabela_detalhada or {}).get("geral") or {}).get("alunos") or [])
+            if alunos_geral:
+                serie_ano = str(alunos_geral[0].get("serie") or "").strip()
+
+        componentes = []
+        for row in (resultados_por_disciplina or []):
+            dn = (row.get("disciplina") if isinstance(row, dict) else None) or ""
+            dn = str(dn).strip()
+            if dn:
+                componentes.append(dn)
+        componentes = list(dict.fromkeys(componentes))
+        componente_curricular = componentes[0] if len(componentes) == 1 else "all"
+
+        distrib = (estatisticas_gerais or {}).get("distribuicao_classificacao_geral") or {}
+        media_prof = (estatisticas_gerais or {}).get("media_proficiencia_geral")
+        media_nota = (estatisticas_gerais or {}).get("media_nota_geral") or (estatisticas_gerais or {}).get("media_nota")
+        niveis_proficiencia_alcancados = {
+            "media_proficiencia_geral": media_prof,
+            "media_nota_geral": media_nota,
+            "distribuicao_classificacao_geral": distrib,
+        }
+
+        habilidades_codes = []
+        for disc in ((tabela_detalhada or {}).get("disciplinas") or []):
+            for q in (disc.get("questoes") or []):
+                for sk in (q.get("skills") or []):
+                    code = (sk.get("code") if isinstance(sk, dict) else "") or ""
+                    code = str(code).strip()
+                    if code and code.upper() != "N/A":
+                        habilidades_codes.append(code)
+        habilidades_codes = list(dict.fromkeys(habilidades_codes))
+
+        gabarito_title = ""
+        try:
+            gab = AnswerSheetGabarito.query.get(str(gabarito_id)) if gabarito_id else None
+            gabarito_title = (getattr(gab, "title", None) or "").strip() if gab else ""
+        except Exception:
+            gabarito_title = ""
+
+        prompt = (
+            "Aja como um Especialista em Avaliação Educacional e Gestor Pedagógico Orientado a Dados.\n"
+            "Sua tarefa é gerar um Relatório Escolar Analítico e Reflexivo com base nos resultados de uma avaliação aplicada.\n\n"
+            "[DADOS DE ENTRADA NECESSÁRIOS]\n"
+            f"• Série/Ano Avaliado: {serie_ano}\n"
+            f"• Componente Curricular: {componente_curricular}\n"
+            f"• Níveis de Proficiência Alcançados: {niveis_proficiencia_alcancados}\n"
+            f"• Habilidades Foco da Avaliação: {habilidades_codes}\n\n"
+            "[REGRAS E DIRETRIZES ESTRITAS DE GERAÇÃO]\n"
+            "1. Adaptação de Nomenclatura de Etapa: se Anos Iniciais (1º ao 4º), use matriz de final de ciclo dos Anos Iniciais; "
+            "NUNCA mencione \"5º ano\". Se Anos Finais (6º ao 8º), use matriz de final de ciclo dos Anos Finais; NUNCA mencione \"9º ano\".\n"
+            "2. Restrição de Vocabulário: sob nenhuma circunstância utilize a sigla \"SAEB\" ou faça referência ao \"Sistema de Avaliação da Educação Básica\". "
+            "Use termos como \"avaliação aplicada\", \"instrumento avaliativo\", \"diagnóstico da rede\" ou \"a presente prova\".\n"
+            "3. Princípio da Cumulatividade: deixe claro que a escala está organizada em níveis da menor para a maior proficiência e que cada nível acumula saberes dos níveis anteriores.\n"
+            "4. Alerta para Níveis Críticos: para estudantes no Nível 0 (desempenho menor que 125), emitir alerta de \"atenção especial\".\n\n"
+            "[ESTRUTURA OBRIGATÓRIA DO RELATÓRIO]\n"
+            "I. Panorama Geral da Avaliação Aplicada\n"
+            "II. Reflexão sobre os Níveis Alcançados e Habilidades (para cada nível identificado)\n"
+            "III. Encaminhamentos e Cultura Digital (Opcional, se aplicável)\n\n"
+            "IMPORTANTE: Responda APENAS com um JSON válido (objeto) e nada além do JSON. "
+            "O JSON deve conter as chaves: panorama_geral, reflexao_niveis (lista), encaminhamentos_cultura_digital (opcional), metadados_entrada.\n"
+            f"Metadados adicionais: titulo_avaliacao={gabarito_title or 'Cartão-resposta'}.\n"
+        )
+
+        r = _get_ai_redis_client()
+        if not r:
+            ai_service = AIAnalysisService()
+            return jsonify(
+                {
+                    "analise_ia_status": "ready",
+                    "analise_ia_cache_key": cache_key,
+                    "analise_ia": ai_service.analyze_intervention_plan_json(prompt),
+                }
+            ), 200
+
+        should_enqueue = _ai_cache_set_processing(cache_key, ttl_sec=ttl_sec)
+        if should_enqueue:
+            generate_ai_analysis_json_to_redis.delay(
+                cache_key=cache_key,
+                prompt=prompt,
+                ttl_sec=ttl_sec,
+            )
+
+        return jsonify(
+            {
+                "analise_ia_status": "processing",
+                "analise_ia_cache_key": cache_key,
+            }
+        ), 200
+
+    except Exception as e:
+        logging.error("Erro analise IA resultados-agregados: %s", e, exc_info=True)
+        return jsonify({"error": "Erro ao gerar análise de IA", "details": str(e)}), 500
+
+
+@bp.route("/mapa-habilidades/analise-ia", methods=["GET"])
+@jwt_required()
+@role_required("admin", "professor", "coordenador", "diretor", "tecadm")
+def mapa_habilidades_cartao_analise_ia():
+    """
+    Retorna apenas o status/resultado da análise de IA (JSON) para o mapa de habilidades (cartão-resposta).
+    """
+    try:
+        user = get_current_user_from_token()
+        if not user:
+            return jsonify({"error": "Usuário não encontrado"}), 401
+
+        estado = request.args.get("estado")
+        municipio = request.args.get("municipio")
+        escola = request.args.get("escola")
+        serie = request.args.get("serie")
+        turma = request.args.get("turma")
+        gabarito = request.args.get("gabarito")
+        disciplina = request.args.get("disciplina") or "all"
+        periodo_raw = request.args.get("periodo")
+
+        if not _is_valid_filter(estado):
+            return jsonify({"error": "Estado é obrigatório e não pode ser 'all'"}), 400
+        if not _is_valid_filter(municipio):
+            return jsonify({"error": "Município é obrigatório"}), 400
+        if not _is_valid_filter(gabarito):
+            return jsonify({"error": "Gabarito é obrigatório"}), 400
+
+        ttl_sec = int(os.getenv("AI_ANALYSIS_CACHE_TTL_SEC", "3600"))
+        prompt_version = str(os.getenv("AI_ANALYSIS_PROMPT_VERSION", "v1"))
+        user_id = str(user.get("id") or "")
+        cache_key = _ai_make_cache_key(
+            "answer_sheets_mapa_habilidades",
+            user_id=user_id,
+            prompt_version=prompt_version,
+            key_parts={
+                "estado": estado,
+                "municipio": municipio,
+                "escola": escola,
+                "serie": serie,
+                "turma": turma,
+                "gabarito": gabarito,
+                "disciplina": disciplina,
+                "periodo": (str(periodo_raw).strip() if periodo_raw and str(periodo_raw).strip() else None),
+            },
+        )
+
+        cached = _ai_cache_get_status(cache_key)
+        if cached:
+            st = cached.get("status")
+            if st == "ready":
+                return jsonify(
+                    {
+                        "analise_ia_status": "ready",
+                        "analise_ia_cache_key": cache_key,
+                        "analise_ia": cached.get("result") or {},
+                    }
+                ), 200
+            if st == "error":
+                return jsonify(
+                    {
+                        "analise_ia_status": "error",
+                        "analise_ia_cache_key": cache_key,
+                        "error": cached.get("error") or "Falha ao gerar análise de IA",
+                        "details": cached.get("details") or "",
+                    }
+                ), 200
+            return jsonify(
+                {"analise_ia_status": "processing", "analise_ia_cache_key": cache_key}
+            ), 200
+
+        # Cache não existe: calcular mapa 1x, montar prompt e disparar task
+        periodo_bounds = None
+        if periodo_raw and str(periodo_raw).strip():
+            try:
+                periodo_bounds = _parse_cartao_periodo_bounds(str(periodo_raw).strip())
+            except ValueError:
+                return jsonify({"error": "Parâmetro periodo inválido. Use YYYY-MM (ex.: 2026-04)."}), 400
+
+        municipio_str = str(municipio).strip()
+        set_search_path(city_id_to_schema_name(municipio_str))
+
+        gabarito_id = str(gabarito).strip()
+        if not _gabarito_eh_somente_cartao_resposta(gabarito_id):
+            return jsonify(
+                {
+                    "error": "Gabarito inválido",
+                    "details": "Use apenas gabaritos de cartão-resposta. Avaliações online aparecem na outra aba.",
+                }
+            ), 400
+
+        scope_info = _determinar_escopo_busca_cartao(
+            estado, municipio, escola, serie, turma, gabarito, user
+        )
+        if not scope_info:
+            return jsonify({"error": "Não foi possível determinar o escopo de busca"}), 400
+
+        nivel_granularidade = _determinar_nivel_granularidade_cartao(
+            estado, municipio, escola, serie, turma, gabarito
+        )
+        class_ids = _class_ids_alunos_previstos_cartao(
+            gabarito_id, scope_info, nivel_granularidade, user
+        )
+        if not class_ids:
+            # Sem dados: devolve pronto com warning
+            return jsonify(
+                {
+                    "analise_ia_status": "ready",
+                    "analise_ia_cache_key": cache_key,
+                    "analise_ia": {
+                        "document_title": "ESTRATÉGIAS DE INTERVENÇÃO",
+                        "warning": "Nenhum aluno/resultado encontrado para o escopo informado.",
+                    },
+                }
+            ), 200
+
+        disc_filt = None if str(disciplina).strip().lower() == "all" else str(disciplina).strip()
+        from app.services.skills_map_service import build_skills_map_answer_sheet
+
+        raw = build_skills_map_answer_sheet(gabarito_id, [str(c) for c in class_ids], disc_filt)
+        por_faixa = raw.get("por_faixa", {}) or {}
+        habilidades_abaixo = por_faixa.get("abaixo_do_basico", []) or []
+        habilidades_basico = por_faixa.get("basico", []) or []
+        habilidades_criticas = list(habilidades_abaixo) + list(habilidades_basico)
+
+        disciplina_nome = None
+        if disc_filt:
+            for d in raw.get("disciplinas_disponiveis", []) or []:
+                if str(d.get("id")) == str(disc_filt):
+                    disciplina_nome = d.get("nome")
+                    break
+        disciplina_label = (disciplina_nome or str(disc_filt)) if disc_filt else "all"
+
+        gab = AnswerSheetGabarito.query.get(gabarito_id)
+        avaliacao_referencia = (getattr(gab, "title", None) or "Cartão-resposta").strip() if gab else "Cartão-resposta"
+
+        if serie and str(serie).strip():
+            ano_serie = str(serie).strip()
+        elif gab and getattr(gab, "grade_name", None):
+            ano_serie = str(gab.grade_name).strip()
+        else:
+            ano_serie = ""
+
+        skills_lines: List[str] = []
+        for idx, h in enumerate(habilidades_criticas, start=1):
+            codigo = (h.get("codigo") or "").strip()
+            desc = (h.get("descricao") or "").strip()
+            if codigo and desc:
+                item = f"{codigo} - {desc}"
+            else:
+                item = codigo or desc or (h.get("skill_id") or "")
+            skills_lines.append(f"  {idx}. {item}")
+
+        prompt = (
+            "Atue como um Especialista em Avaliação Educacional e Recomposição de Aprendizagem, com profundo conhecimento nas matrizes de referência do SAEB, SPAECE e SAVEAL.\n\n"
+            "Abaixo, fornecerei os dados de uma avaliação (Mensal ou Larga Escala) referentes a uma turma.\n\n"
+            "Sua tarefa é gerar um plano de ação estritamente focado em alunos que se encontram nos níveis de proficiência \"ABAIXO DO BÁSICO\" e \"BÁSICO\".\n\n"
+            "Nomeie o documento final obrigatoriamente como: **ESTRATÉGIAS DE INTERVENÇÃO**.\n\n"
+            "---\n"
+            "DADOS PARA A ANÁLISE:\n"
+            f"- Ano/Série: {ano_serie}\n"
+            f"- Disciplina: {disciplina_label}\n"
+            f"- Avaliação Referência: {avaliacao_referencia}\n"
+            "- Habilidades Críticas a serem trabalhadas:\n"
+            f"{chr(10).join(skills_lines) if skills_lines else '  1. '}\n\n"
+            "IMPORTANTE: Sua resposta deve ser APENAS um JSON válido (objeto) e NADA além do JSON.\n"
+        )
+
+        r = _get_ai_redis_client()
+        if not r:
+            ai_service = AIAnalysisService()
+            return jsonify(
+                {
+                    "analise_ia_status": "ready",
+                    "analise_ia_cache_key": cache_key,
+                    "analise_ia": ai_service.analyze_intervention_plan_json(prompt),
+                }
+            ), 200
+
+        should_enqueue = _ai_cache_set_processing(cache_key, ttl_sec=ttl_sec)
+        if should_enqueue:
+            generate_ai_analysis_json_to_redis.delay(
+                cache_key=cache_key,
+                prompt=prompt,
+                ttl_sec=ttl_sec,
+            )
+
+        return jsonify(
+            {"analise_ia_status": "processing", "analise_ia_cache_key": cache_key}
+        ), 200
+
+    except Exception as e:
+        logging.error("Erro analise IA mapa-habilidades (cartão): %s", e, exc_info=True)
+        return jsonify({"error": "Erro ao gerar análise de IA", "details": str(e)}), 500
+
+
 @bp.route("/mapa-habilidades", methods=["GET"])
 @jwt_required()
 @role_required("admin", "professor", "coordenador", "diretor", "tecadm")

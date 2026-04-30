@@ -83,6 +83,7 @@ from app.routes.answer_sheet_evaluation_listing import (
     obter_turmas_por_gabarito_serie_municipio,
 )
 from app import db
+import os
 import logging
 from typing import Dict, Any, List, Optional, Tuple, Set
 from collections import defaultdict
@@ -635,6 +636,7 @@ def listar_avaliacoes():
         serie = request.args.get('serie')
         turma = request.args.get('turma')
         avaliacao = request.args.get('avaliacao')
+        ai_analises = (request.args.get("ai_analises") or "").strip().lower() in {"1", "true", "yes"}
         page = request.args.get('page', 1, type=int)
         per_page = request.args.get('per_page', 10, type=int)
         per_page = min(per_page, 100)  # Limitar máximo
@@ -1262,7 +1264,7 @@ def listar_avaliacoes():
         
         periodo_raw_clean = (str(periodo_raw).strip() if periodo_raw and str(periodo_raw).strip() else None)
 
-        return jsonify({
+        response_payload = {
             "nivel_granularidade": nivel_granularidade,
             "filtros_aplicados": {
                 "estado": estado,
@@ -1288,7 +1290,141 @@ def listar_avaliacoes():
             "tabela_detalhada": tabela_detalhada,
             "ranking": ranking_alunos,
             "opcoes_proximos_filtros": opcoes_proximos_filtros
-        }), 200
+        }
+
+        if ai_analises:
+            try:
+                from app.services.ai_redis_cache import (
+                    get_redis_client as _get_ai_redis_client,
+                    get_status as _ai_cache_get_status,
+                    make_cache_key as _ai_make_cache_key,
+                    set_processing as _ai_cache_set_processing,
+                )
+                from app.services.celery_tasks.ai_analysis_cache_tasks import (
+                    generate_ai_analysis_json_to_redis,
+                )
+
+                ttl_sec = int(os.getenv("AI_ANALYSIS_CACHE_TTL_SEC", "3600"))
+                prompt_version = str(os.getenv("AI_ANALYSIS_PROMPT_VERSION", "v1"))
+                user_id = str(user.get("id") or "")
+
+                serie_ano = (str(serie).strip() if serie and str(serie).strip() and str(serie).strip().lower() != "all" else "")
+
+                # Componente curricular: disciplinas presentes (nomes)
+                componentes = []
+                for row in (resultados_por_disciplina or []):
+                    dn = (row.get("disciplina") if isinstance(row, dict) else None) or ""
+                    dn = str(dn).strip()
+                    if dn:
+                        componentes.append(dn)
+                componentes = list(dict.fromkeys(componentes))
+                componente_curricular = componentes[0] if len(componentes) == 1 else "all"
+
+                distrib = (estatisticas_consolidadas or {}).get("distribuicao_classificacao_geral") or {}
+                media_prof = (estatisticas_consolidadas or {}).get("media_proficiencia_geral")
+                media_nota = (estatisticas_consolidadas or {}).get("media_nota_geral")
+                niveis_proficiencia_alcancados = {
+                    "media_proficiencia_geral": media_prof,
+                    "media_nota_geral": media_nota,
+                    "distribuicao_classificacao_geral": distrib,
+                }
+
+                # Habilidades foco: usar a própria tabela detalhada (já tem código + descrição)
+                habilidades_foco = []
+                for disc in ((tabela_detalhada or {}).get("disciplinas") or []):
+                    for q in (disc.get("questoes") or []):
+                        codigo = str(q.get("codigo_habilidade") or "").strip()
+                        desc = str(q.get("habilidade") or "").strip()
+                        if codigo or desc:
+                            habilidades_foco.append({"codigo": codigo, "descricao": desc})
+                # de-duplicar preservando ordem
+                seen = set()
+                uniq = []
+                for h in habilidades_foco:
+                    k = (h.get("codigo") or "") + "||" + (h.get("descricao") or "")
+                    if k in seen:
+                        continue
+                    seen.add(k)
+                    uniq.append(h)
+                habilidades_foco = uniq
+
+                # Referência avaliação (título)
+                avaliacao_title = ""
+                try:
+                    t = Test.query.get(str(avaliacao)) if avaliacao and str(avaliacao).lower() != "all" else None
+                    avaliacao_title = (getattr(t, "title", None) or "").strip() if t else ""
+                except Exception:
+                    avaliacao_title = ""
+
+                prompt = (
+                    "Aja como um Especialista em Avaliação Educacional e Gestor Pedagógico Orientado a Dados.\n"
+                    "Sua tarefa é gerar um Relatório Escolar Analítico e Reflexivo com base nos resultados de uma avaliação aplicada.\n\n"
+                    "[DADOS DE ENTRADA NECESSÁRIOS]\n"
+                    f"• Série/Ano Avaliado: {serie_ano}\n"
+                    f"• Componente Curricular: {componente_curricular}\n"
+                    f"• Níveis de Proficiência Alcançados: {niveis_proficiencia_alcancados}\n"
+                    f"• Habilidades Foco da Avaliação: {habilidades_foco}\n\n"
+                    "[REGRAS E DIRETRIZES ESTRITAS DE GERAÇÃO]\n"
+                    "1. Adaptação de Nomenclatura de Etapa: se Anos Iniciais (1º ao 4º), use matriz de final de ciclo dos Anos Iniciais; "
+                    "NUNCA mencione \"5º ano\". Se Anos Finais (6º ao 8º), use matriz de final de ciclo dos Anos Finais; NUNCA mencione \"9º ano\".\n"
+                    "2. Restrição de Vocabulário: sob nenhuma circunstância utilize a sigla \"SAEB\" ou faça referência ao \"Sistema de Avaliação da Educação Básica\". "
+                    "Use termos como \"avaliação aplicada\", \"instrumento avaliativo\", \"diagnóstico da rede\" ou \"a presente prova\".\n"
+                    "3. Princípio da Cumulatividade: deixe claro que a escala está organizada em níveis da menor para a maior proficiência e que cada nível acumula saberes dos níveis anteriores.\n"
+                    "4. Alerta para Níveis Críticos: para estudantes no Nível 0 (desempenho menor que 125), emitir alerta de \"atenção especial\".\n\n"
+                    "[ESTRUTURA OBRIGATÓRIA DO RELATÓRIO]\n"
+                    "I. Panorama Geral da Avaliação Aplicada\n"
+                    "II. Reflexão sobre os Níveis Alcançados e Habilidades (para cada nível identificado)\n"
+                    "III. Encaminhamentos e Cultura Digital (Opcional, se aplicável)\n\n"
+                    "IMPORTANTE: Responda APENAS com um JSON válido (objeto) e nada além do JSON. "
+                    "O JSON deve conter as chaves: panorama_geral, reflexao_niveis (lista), encaminhamentos_cultura_digital (opcional), metadados_entrada.\n"
+                    f"Metadados adicionais: titulo_avaliacao={avaliacao_title or 'Avaliação aplicada'}.\n"
+                )
+
+                cache_key = _ai_make_cache_key(
+                    "evaluation_results_avaliacoes",
+                    user_id=user_id,
+                    prompt_version=prompt_version,
+                    key_parts={
+                        "estado": estado,
+                        "municipio": municipio,
+                        "escola": escola,
+                        "serie": serie,
+                        "turma": turma,
+                        "avaliacao": avaliacao,
+                        "periodo": periodo_raw_clean,
+                        "page": page,
+                        "per_page": per_page,
+                    },
+                )
+
+                cached = _ai_cache_get_status(cache_key)
+                if cached and cached.get("status") == "ready":
+                    response_payload["analise_ia"] = cached.get("result") or {}
+                    response_payload["analise_ia_status"] = "ready"
+                    response_payload["analise_ia_cache_key"] = cache_key
+                else:
+                    r = _get_ai_redis_client()
+                    if not r:
+                        from app.services.ai_analysis_service import AIAnalysisService
+
+                        ai_service = AIAnalysisService()
+                        response_payload["analise_ia"] = ai_service.analyze_intervention_plan_json(prompt)
+                        response_payload["analise_ia_status"] = "ready"
+                    else:
+                        should_enqueue = _ai_cache_set_processing(cache_key, ttl_sec=ttl_sec)
+                        if should_enqueue:
+                            generate_ai_analysis_json_to_redis.delay(
+                                cache_key=cache_key,
+                                prompt=prompt,
+                                ttl_sec=ttl_sec,
+                            )
+                        response_payload["analise_ia_status"] = (cached or {}).get("status") or "processing"
+                        response_payload["analise_ia_cache_key"] = cache_key
+            except Exception as _exc:
+                response_payload["analise_ia"] = {"error": "Falha ao gerar análise de IA", "details": str(_exc)}
+                response_payload["analise_ia_status"] = "error"
+
+        return jsonify(response_payload), 200
 
     except Exception as e:
         logging.error(f"Erro ao listar avaliações: {str(e)}", exc_info=True)
@@ -1303,6 +1439,283 @@ def listar_avaliacoes():
                 logging.error(f"Erro ao fazer rollback: {str(rollback_error)}")
         
         return jsonify({"error": "Erro ao listar avaliações", "details": str(e)}), 500
+
+
+@bp.route("/avaliacoes/analise-ia", methods=["GET"])
+@jwt_required()
+@role_required("admin", "professor", "coordenador", "diretor", "tecadm")
+def listar_avaliacoes_analise_ia():
+    """
+    Retorna apenas o status/resultado da análise de IA (JSON) para o recorte de /avaliacoes.
+    Consulta Redis primeiro; se não houver cache, calcula 1x, dispara Celery e devolve processing.
+    """
+    try:
+        user = get_current_user_from_token()
+        if not user:
+            return jsonify({"error": "Usuário não encontrado"}), 401
+
+        estado = request.args.get("estado")
+        municipio = request.args.get("municipio")
+        escola = request.args.get("escola")
+        serie = request.args.get("serie")
+        turma = request.args.get("turma")
+        avaliacao = request.args.get("avaliacao")
+        periodo_raw = request.args.get("periodo")
+
+        if not estado or str(estado).lower() == "all":
+            return jsonify({"error": "Estado é obrigatório e não pode ser 'all'"}), 400
+        if not municipio:
+            return jsonify({"error": "Município é obrigatório"}), 400
+
+        periodo_bounds: Optional[Tuple[datetime, datetime]] = None
+        if not is_answer_sheet_report_entity():
+            if periodo_raw is not None and str(periodo_raw).strip():
+                try:
+                    periodo_bounds = _parse_periodo_bounds(periodo_raw)
+                except ValueError as ve:
+                    return jsonify(
+                        {
+                            "error": "Parâmetro periodo inválido. Use YYYY-MM (ex.: 2026-04).",
+                            "details": str(ve),
+                        }
+                    ), 400
+
+        ttl_sec = int(os.getenv("AI_ANALYSIS_CACHE_TTL_SEC", "3600"))
+        prompt_version = str(os.getenv("AI_ANALYSIS_PROMPT_VERSION", "v1"))
+        user_id = str(user.get("id") or "")
+        periodo_raw_clean = (str(periodo_raw).strip() if periodo_raw and str(periodo_raw).strip() else None)
+
+        from app.services.ai_redis_cache import (
+            get_redis_client as _get_ai_redis_client,
+            get_status as _ai_cache_get_status,
+            make_cache_key as _ai_make_cache_key,
+            set_processing as _ai_cache_set_processing,
+        )
+        from app.services.celery_tasks.ai_analysis_cache_tasks import (
+            generate_ai_analysis_json_to_redis,
+        )
+
+        cache_key = _ai_make_cache_key(
+            "evaluation_results_avaliacoes",
+            user_id=user_id,
+            prompt_version=prompt_version,
+            key_parts={
+                "estado": estado,
+                "municipio": municipio,
+                "escola": escola,
+                "serie": serie,
+                "turma": turma,
+                "avaliacao": avaliacao,
+                "periodo": periodo_raw_clean,
+            },
+        )
+
+        cached = _ai_cache_get_status(cache_key)
+        if cached:
+            st = cached.get("status")
+            if st == "ready":
+                return jsonify(
+                    {
+                        "analise_ia_status": "ready",
+                        "analise_ia_cache_key": cache_key,
+                        "analise_ia": cached.get("result") or {},
+                    }
+                ), 200
+            if st == "error":
+                return jsonify(
+                    {
+                        "analise_ia_status": "error",
+                        "analise_ia_cache_key": cache_key,
+                        "error": cached.get("error") or "Falha ao gerar análise de IA",
+                        "details": cached.get("details") or "",
+                    }
+                ), 200
+            return jsonify(
+                {"analise_ia_status": "processing", "analise_ia_cache_key": cache_key}
+            ), 200
+
+        # Cache não existe: calcular dados 1x e disparar task
+        scope_info = _determinar_escopo_busca(estado, municipio, escola, serie, turma, avaliacao, user)
+        if not scope_info:
+            return jsonify({"error": "Não foi possível determinar o escopo de busca"}), 400
+
+        permissao = verificar_permissao_filtros(user)
+        if not permissao.get("permitted"):
+            return jsonify({"error": permissao.get("error")}), 403
+
+        # Definir schema do tenant (município)
+        municipio_str = str(municipio).strip()
+        set_search_path(city_id_to_schema_name(municipio_str))
+
+        nivel_granularidade = _determinar_nivel_granularidade(
+            estado, municipio, escola, serie, turma, avaliacao, user
+        )
+
+        # Usar as MESMAS funções do endpoint principal /avaliacoes
+        # (assim não dependemos de helpers inexistentes e mantemos consistência do payload)
+        from app.models.classTest import ClassTest
+
+        q = ClassTest.query
+        # Restringir por período de aplicação quando aplicável
+        q = _apply_class_test_application_period(q, periodo_bounds)
+        if avaliacao and str(avaliacao).lower() != "all":
+            q = q.filter(ClassTest.test_id == str(avaliacao))
+
+        todas_avaliacoes_escopo = q.all()
+        estatisticas_consolidadas = _calcular_estatisticas_consolidadas_por_escopo(
+            todas_avaliacoes_escopo, scope_info, nivel_granularidade, user
+        )
+        resultados_por_disciplina = _calcular_estatisticas_por_disciplina(
+            todas_avaliacoes_escopo, scope_info, nivel_granularidade
+        )
+        tabela_detalhada = {}
+        restrict_class_ids = None
+        if avaliacao and str(avaliacao).lower() != "all":
+            tabela_detalhada = _gerar_tabela_detalhada_por_disciplina(
+                str(avaliacao), scope_info, nivel_granularidade, user, restrict_class_ids
+            )
+
+        serie_ano = (
+            str(serie).strip()
+            if serie and str(serie).strip() and str(serie).strip().lower() != "all"
+            else ""
+        )
+        if not serie_ano:
+            # fallback: tentar extrair de um aluno na tabela detalhada
+            try:
+                for disc in ((tabela_detalhada or {}).get("disciplinas") or []):
+                    for aluno in (disc.get("alunos") or []):
+                        val = str(aluno.get("serie") or "").strip()
+                        if val and val.upper() != "N/A":
+                            serie_ano = val
+                            raise StopIteration()
+            except StopIteration:
+                pass
+            except Exception:
+                pass
+        componentes = []
+        by_disc_row = {}
+        for row in (resultados_por_disciplina or []):
+            if not isinstance(row, dict):
+                continue
+            dn = str((row.get("disciplina") or "")).strip()
+            if not dn:
+                continue
+            componentes.append(dn)
+            by_disc_row[dn] = row
+        componentes = list(dict.fromkeys(componentes))
+        componente_curricular = componentes[0] if len(componentes) == 1 else "all"
+
+        distrib = (estatisticas_consolidadas or {}).get("distribuicao_classificacao_geral") or {}
+        media_prof = (estatisticas_consolidadas or {}).get("media_proficiencia_geral")
+        media_nota = (estatisticas_consolidadas or {}).get("media_nota_geral")
+        niveis_proficiencia_alcancados = {
+            "media_proficiencia_geral": media_prof,
+            "media_nota_geral": media_nota,
+            "distribuicao_classificacao_geral": distrib,
+        }
+
+        habilidades_foco = []
+        for disc in ((tabela_detalhada or {}).get("disciplinas") or []):
+            for q in (disc.get("questoes") or []):
+                codigo = str(q.get("codigo_habilidade") or "").strip()
+                desc = str(q.get("habilidade") or "").strip()
+                if codigo or desc:
+                    habilidades_foco.append({"codigo": codigo, "descricao": desc})
+        seen = set()
+        uniq = []
+        for h in habilidades_foco:
+            k = (h.get("codigo") or "") + "||" + (h.get("descricao") or "")
+            if k in seen:
+                continue
+            seen.add(k)
+            uniq.append(h)
+        habilidades_foco = uniq
+
+        avaliacao_title = ""
+        try:
+            t = Test.query.get(str(avaliacao)) if avaliacao and str(avaliacao).lower() != "all" else None
+            avaliacao_title = (getattr(t, "title", None) or "").strip() if t else ""
+        except Exception:
+            avaliacao_title = ""
+
+        def _component_from_disciplina_name(name: str) -> str:
+            n = (name or "").lower()
+            return "MATEMÁTICA" if "matem" in n else "LÍNGUA PORTUGUESA"
+
+        # Sempre pedir análise por disciplina (mesmo quando só houver 1 disciplina),
+        # para o frontend ter explícito "qual análise é de qual disciplina".
+        if not componentes:
+            componentes = ["Outras"]
+        entrada_por_disciplina = {}
+        for dn in componentes:
+            comp = _component_from_disciplina_name(dn)
+            row = by_disc_row.get(dn) or {}
+            entrada_por_disciplina[dn] = {
+                "serie_ano_avaliado": serie_ano,
+                "componente_curricular": comp,
+                "niveis_proficiencia_alcancados": {
+                    "media_proficiencia": row.get("media_proficiencia"),
+                    "media_nota": row.get("media_nota"),
+                    "distribuicao_classificacao": row.get("distribuicao_classificacao") or {},
+                },
+                "habilidades_foco": habilidades_foco,
+            }
+        dados_entrada = entrada_por_disciplina
+        formato_saida = (
+            "IMPORTANTE: Responda APENAS com um JSON válido (objeto) e nada além do JSON. "
+            "Retorne um JSON no formato: "
+            "{ \"analises_por_disciplina\": { \"<disciplina>\": <relatorio_json> }, \"metadados_gerais\": {...} }."
+        )
+
+        prompt = (
+            "Aja como um Especialista em Avaliação Educacional e Gestor Pedagógico Orientado a Dados.\n"
+            "Sua tarefa é gerar um Relatório Escolar Analítico e Reflexivo com base nos resultados de uma avaliação aplicada a uma turma ou aluno específico.\n"
+            "O objetivo é traduzir escalas de proficiência em intervenções pedagógicas claras, analisando as habilidades cobradas, o que cada nível significa e os efeitos práticos.\n\n"
+            "[DADOS DE ENTRADA NECESSÁRIOS]\n"
+            f"{dados_entrada}\n\n"
+            "[REGRAS E DIRETRIZES ESTRITAS DE GERAÇÃO]\n"
+            "1. Adaptação de Nomenclatura de Etapa: se Anos Iniciais (1º ao 4º), use matriz de final de ciclo dos Anos Iniciais; "
+            "NUNCA mencione \"5º ano\". Se Anos Finais (6º ao 8º), use matriz de final de ciclo dos Anos Finais; NUNCA mencione \"9º ano\".\n"
+            "2. Restrição de Vocabulário: sob nenhuma circunstância utilize a sigla \"SAEB\" ou faça referência ao \"Sistema de Avaliação da Educação Básica\". "
+            "Use termos como \"avaliação aplicada\", \"instrumento avaliativo\", \"diagnóstico da rede\" ou \"a presente prova\".\n"
+            "3. Princípio da Cumulatividade: deixe claro que a escala está organizada em níveis da menor para a maior proficiência e que cada nível acumula saberes dos níveis anteriores.\n"
+            "4. Alerta para Níveis Críticos: para estudantes no Nível 0 (desempenho menor que 125), emitir alerta de \"atenção especial\".\n\n"
+            "[ESTRUTURA OBRIGATÓRIA DO RELATÓRIO]\n"
+            "I. Panorama Geral da Avaliação Aplicada\n"
+            "II. Reflexão sobre os Níveis Alcançados e Habilidades (para cada nível identificado)\n"
+            "III. Encaminhamentos e Cultura Digital (Opcional, se aplicável)\n\n"
+            f"{formato_saida}\n"
+            f"Metadados adicionais: titulo_avaliacao={avaliacao_title or 'Avaliação aplicada'}.\n"
+        )
+
+        r = _get_ai_redis_client()
+        if not r:
+            from app.services.ai_analysis_service import AIAnalysisService
+            ai_service = AIAnalysisService()
+            return jsonify(
+                {
+                    "analise_ia_status": "ready",
+                    "analise_ia_cache_key": cache_key,
+                    "analise_ia": ai_service.analyze_intervention_plan_json(prompt),
+                }
+            ), 200
+
+        should_enqueue = _ai_cache_set_processing(cache_key, ttl_sec=ttl_sec)
+        if should_enqueue:
+            generate_ai_analysis_json_to_redis.delay(
+                cache_key=cache_key,
+                prompt=prompt,
+                ttl_sec=ttl_sec,
+            )
+
+        return jsonify(
+            {"analise_ia_status": "processing", "analise_ia_cache_key": cache_key}
+        ), 200
+
+    except Exception as e:
+        logging.error("Erro analise IA /avaliacoes/analise-ia: %s", e, exc_info=True)
+        return jsonify({"error": "Erro ao gerar análise de IA", "details": str(e)}), 500
 
 
 def _gerar_tabela_detalhada_por_disciplina(
@@ -6737,12 +7150,106 @@ def mapa_habilidades_avaliacao_online():
         n_turma = len(all_students)
         n_part = len(participating_students)
 
+        por_faixa = data.get("por_faixa", {}) or {}
+        habilidades_abaixo = por_faixa.get("abaixo_do_basico", []) or []
+        habilidades_basico = por_faixa.get("basico", []) or []
+        habilidades_criticas = list(habilidades_abaixo) + list(habilidades_basico)
+
+        # Resolver nome da disciplina (quando disciplina != all)
+        disciplina_nome = None
+        subject_filter_id = subject_filter
+        if subject_filter_id:
+            for d in data.get("disciplinas_disponiveis", []) or []:
+                if str(d.get("id")) == str(subject_filter_id):
+                    disciplina_nome = d.get("nome")
+                    break
+        disciplina_label = (disciplina_nome or str(subject_filter_id)) if subject_filter_id else "all"
+
+        # Resolver referência da avaliação (Test.title)
+        try:
+            test_obj = Test.query.get(str(avaliacao))
+            avaliacao_referencia = (
+                (getattr(test_obj, "title", None) or "Avaliação Online").strip()
+                if test_obj
+                else "Avaliação Online"
+            )
+        except Exception:
+            avaliacao_referencia = "Avaliação Online"
+
+        # Resolver série/ano
+        ano_serie = str(serie).strip() if serie and str(serie).strip() else ""
+
+        # Montar lista de habilidades no formato do prompt
+        skills_lines: List[str] = []
+        for idx, h in enumerate(habilidades_criticas, start=1):
+            codigo = (h.get("codigo") or "").strip()
+            desc = (h.get("descricao") or "").strip()
+            if codigo and desc:
+                item = f"{codigo} - {desc}"
+            else:
+                item = codigo or desc or (h.get("skill_id") or "")
+            skills_lines.append(f"  {idx}. {item}")
+
+        prompt = (
+            "Atue como um Especialista em Avaliação Educacional e Recomposição de Aprendizagem, com profundo conhecimento "
+            "nas matrizes de referência do SAEB, SPAECE e SAVEAL.\n\n"
+            "Abaixo, fornecerei os dados de uma avaliação (Mensal ou Larga Escala) referentes a uma turma.\n\n"
+            "Sua tarefa é gerar um plano de ação estritamente focado em alunos que se encontram nos níveis de proficiência "
+            "\"ABAIXO DO BÁSICO\" e \"BÁSICO\". O plano deve ser realista, aplicável na rede pública ou privada, utilizando "
+            "recursos acessíveis de sala de aula.\n\n"
+            "Nomeie o documento final obrigatoriamente como: **ESTRATÉGIAS DE INTERVENÇÃO**.\n\n"
+            "O documento deve seguir rigorosamente a estrutura abaixo:\n\n"
+            "# ESTRATÉGIAS DE INTERVENÇÃO\n\n"
+            "## 1. Foco Analítico: Níveis Abaixo do Básico e Básico\n"
+            "[Escreva um breve parágrafo (máx 3 linhas) resumindo qual é a principal barreira cognitiva esperada para esses "
+            "alunos nas habilidades fornecidas.]\n\n"
+            "## 2. Matriz de Ação por Habilidade\n"
+            "Crie uma tabela para cada habilidade listada, contendo:\n"
+            "* **Habilidade (Código e Descrição):**\n"
+            "* **Conteúdo Estruturante:** (Qual é o conceito matemático ou linguístico fundamental que o aluno precisa dominar "
+            "para atingir essa habilidade?)\n"
+            "* **Dificuldade Mapeada (Abaixo do Básico/Básico):** (Exatamente onde o aluno trava? Ex: \"Não compreende a "
+            "conservação de quantidade\" ou \"Não localiza informação se não estiver no início do texto\").\n"
+            "* **Como Trabalhar (Passo a Passo Prático):** (3 etapas progressivas. Comece sempre do concreto/visual, vá para o "
+            "pictórico e depois para o abstrato/simbólico. Sem sugestões genéricas; dê exemplos do que o professor deve dizer "
+            "ou desenhar no quadro).\n"
+            "* **Sugestão de Atividade Curta:** (Uma atividade de no máximo 10 minutos para fixação imediata).\n\n"
+            "## 3. Dinâmica de Sala e Recomposição\n"
+            "Melhore as estratégias gerais adaptando-as EXCLUSIVAMENTE para alunos com defasagem:\n"
+            "* **Agrupamentos Produtivos Focados:** (Como juntar um aluno \"Básico\" com um \"Adequado\" sem que o Adequado faça "
+            "o trabalho todo? Dê instruções de papéis na dupla).\n"
+            "* **Avaliação Formativa de Baixo Risco (Tickets de Saída):** (Sugira 2 perguntas curtas e diretas para o professor "
+            "usar no final da aula e checar se a intervenção daquela habilidade funcionou).\n\n"
+            "---\n"
+            "DADOS PARA A ANÁLISE:\n"
+            f"- Ano/Série: {ano_serie}\n"
+            f"- Disciplina: {disciplina_label}\n"
+            f"- Avaliação Referência: {avaliacao_referencia}\n"
+            "- Habilidades Críticas a serem trabalhadas:\n"
+            f"{chr(10).join(skills_lines) if skills_lines else '  1. '}\n\n"
+            "IMPORTANTE: Sua resposta deve ser APENAS um JSON válido (objeto) e NADA além do JSON.\n"
+            "O JSON deve conter a estrutura equivalente ao documento \"ESTRATÉGIAS DE INTERVENÇÃO\", com chaves para os itens "
+            "1, 2 (lista por habilidade) e 3 (dinâmica e tickets).\n"
+        )
+
+        try:
+            from app.services.ai_analysis_service import AIAnalysisService
+
+            ai_service = AIAnalysisService()
+            analise_ia = ai_service.analyze_intervention_plan_json(prompt)
+        except Exception as _exc:
+            analise_ia = {
+                "error": "Falha ao gerar análise de IA",
+                "details": str(_exc),
+            }
+
         return jsonify(
             {
                 "nivel_granularidade": nivel_granularidade,
                 "disciplinas_disponiveis": data["disciplinas_disponiveis"],
                 "habilidades": data["habilidades"],
                 "por_faixa": data["por_faixa"],
+                "analise_ia": analise_ia,
                 "filtros_aplicados": {
                     "estado": estado,
                     "municipio": municipio,
@@ -6765,6 +7272,208 @@ def mapa_habilidades_avaliacao_online():
     except Exception as e:
         logging.error("Erro ao obter mapa de habilidades: %s", e, exc_info=True)
         return jsonify({"error": "Erro ao obter mapa de habilidades", "details": str(e)}), 500
+
+
+@bp.route("/mapa-habilidades/analise-ia", methods=["GET"])
+@jwt_required()
+@role_required("admin", "professor", "coordenador", "diretor", "tecadm")
+def mapa_habilidades_avaliacao_online_analise_ia():
+    """
+    Retorna apenas o status/resultado da análise de IA (JSON) para o mapa de habilidades (avaliação online).
+    Consulta Redis primeiro; se não houver cache, calcula 1x, dispara Celery e devolve processing.
+    """
+    try:
+        user = get_current_user_from_token()
+        if not user:
+            return jsonify({"error": "Usuário não encontrado"}), 401
+
+        estado = request.args.get("estado")
+        municipio = request.args.get("municipio")
+        escola = request.args.get("escola")
+        serie = request.args.get("serie")
+        turma = request.args.get("turma")
+        avaliacao = request.args.get("avaliacao")
+        disciplina = request.args.get("disciplina") or "all"
+        periodo_raw = request.args.get("periodo")
+
+        if not estado or str(estado).lower() == "all":
+            return jsonify({"error": "Estado é obrigatório e não pode ser 'all'"}), 400
+        if not municipio:
+            return jsonify({"error": "Município é obrigatório"}), 400
+        if not avaliacao or str(avaliacao).lower() == "all":
+            return jsonify({"error": "Avaliação é obrigatória"}), 400
+
+        ttl_sec = int(os.getenv("AI_ANALYSIS_CACHE_TTL_SEC", "3600"))
+        prompt_version = str(os.getenv("AI_ANALYSIS_PROMPT_VERSION", "v1"))
+        user_id = str(user.get("id") or "")
+        periodo_raw_clean = (str(periodo_raw).strip() if periodo_raw and str(periodo_raw).strip() else None)
+
+        from app.services.ai_redis_cache import (
+            get_redis_client as _get_ai_redis_client,
+            get_status as _ai_cache_get_status,
+            make_cache_key as _ai_make_cache_key,
+            set_processing as _ai_cache_set_processing,
+        )
+        from app.services.celery_tasks.ai_analysis_cache_tasks import (
+            generate_ai_analysis_json_to_redis,
+        )
+
+        cache_key = _ai_make_cache_key(
+            "evaluation_results_mapa_habilidades",
+            user_id=user_id,
+            prompt_version=prompt_version,
+            key_parts={
+                "estado": estado,
+                "municipio": municipio,
+                "escola": escola,
+                "serie": serie,
+                "turma": turma,
+                "avaliacao": avaliacao,
+                "disciplina": disciplina,
+                "periodo": periodo_raw_clean,
+            },
+        )
+
+        cached = _ai_cache_get_status(cache_key)
+        if cached:
+            st = cached.get("status")
+            if st == "ready":
+                return jsonify(
+                    {
+                        "analise_ia_status": "ready",
+                        "analise_ia_cache_key": cache_key,
+                        "analise_ia": cached.get("result") or {},
+                    }
+                ), 200
+            if st == "error":
+                return jsonify(
+                    {
+                        "analise_ia_status": "error",
+                        "analise_ia_cache_key": cache_key,
+                        "error": cached.get("error") or "Falha ao gerar análise de IA",
+                        "details": cached.get("details") or "",
+                    }
+                ), 200
+            return jsonify(
+                {"analise_ia_status": "processing", "analise_ia_cache_key": cache_key}
+            ), 200
+
+        periodo_bounds: Optional[Tuple[datetime, datetime]] = None
+        if periodo_raw is not None and str(periodo_raw).strip():
+            try:
+                periodo_bounds = _parse_periodo_bounds(periodo_raw)
+            except ValueError as ve:
+                return jsonify(
+                    {
+                        "error": "Parâmetro periodo inválido. Use YYYY-MM (ex.: 2026-04).",
+                        "details": str(ve),
+                    }
+                ), 400
+
+        scope_info = _determinar_escopo_busca(estado, municipio, escola, serie, turma, avaliacao, user)
+        if not scope_info:
+            return jsonify({"error": "Não foi possível determinar o escopo de busca"}), 400
+
+        municipio_str = str(municipio).strip()
+        set_search_path(city_id_to_schema_name(municipio_str))
+
+        nivel_granularidade = _determinar_nivel_granularidade(
+            estado, municipio, escola, serie, turma, avaliacao, user
+        )
+        escopo_calculo = _determinar_escopo_calculo(scope_info, nivel_granularidade)
+        all_students = _obter_alunos_para_mapa_habilidades_test(
+            scope_info, nivel_granularidade, user, escopo_calculo
+        )
+        all_students = _filtrar_alunos_mapa_digital_por_periodo_aplicacao(
+            all_students, str(avaliacao), periodo_bounds
+        )
+
+        subject_filter = None if str(disciplina).strip().lower() == "all" else str(disciplina).strip()
+        from app.services.skills_map_service import compute_digital_aggregate
+        data = compute_digital_aggregate(str(avaliacao), all_students, subject_filter)
+
+        por_faixa = data.get("por_faixa", {}) or {}
+        habilidades_abaixo = por_faixa.get("abaixo_do_basico", []) or []
+        habilidades_basico = por_faixa.get("basico", []) or []
+        habilidades_criticas = list(habilidades_abaixo) + list(habilidades_basico)
+
+        # Sempre pedir/retornar análise por disciplina (mesmo quando disciplina=all)
+        # Agrupa habilidades críticas por disciplina_nome do próprio mapa.
+        habilidades_por_disciplina: Dict[str, List[Dict[str, str]]] = {}
+        for h in habilidades_criticas:
+            dn = str(h.get("disciplina_nome") or "Outras").strip() or "Outras"
+            codigo = str(h.get("codigo") or "").strip()
+            desc = str(h.get("descricao") or "").strip()
+            if not codigo and not desc:
+                continue
+            habilidades_por_disciplina.setdefault(dn, []).append(
+                {"codigo": codigo or (h.get("skill_id") or ""), "descricao": desc}
+            )
+        for dn in list(habilidades_por_disciplina.keys()):
+            seen = set()
+            out = []
+            for it in habilidades_por_disciplina[dn]:
+                k = (it.get("codigo") or "") + "||" + (it.get("descricao") or "")
+                if k in seen:
+                    continue
+                seen.add(k)
+                out.append(it)
+            habilidades_por_disciplina[dn] = out
+
+        avaliacao_title = ""
+        try:
+            t = Test.query.get(str(avaliacao))
+            avaliacao_title = (getattr(t, "title", None) or "Avaliação aplicada").strip() if t else "Avaliação aplicada"
+        except Exception:
+            avaliacao_title = "Avaliação aplicada"
+
+        ano_serie = str(serie).strip() if serie and str(serie).strip() else ""
+
+        dados_entrada = {}
+        for dn, habs in habilidades_por_disciplina.items():
+            dados_entrada[dn] = {
+                "ano_serie": ano_serie,
+                "disciplina": dn,
+                "avaliacao_referencia": avaliacao_title,
+                "habilidades_criticas": habs,
+            }
+
+        prompt = (
+            "Atue como um Especialista em Avaliação Educacional e Recomposição de Aprendizagem, com profundo conhecimento nas matrizes de referência do SAEB, SPAECE e SAVEAL.\n\n"
+            "Sua tarefa é gerar um plano de ação estritamente focado em alunos que se encontram nos níveis de proficiência \"ABAIXO DO BÁSICO\" e \"BÁSICO\".\n\n"
+            "Nomeie o documento final obrigatoriamente como: **ESTRATÉGIAS DE INTERVENÇÃO**.\n\n"
+            "IMPORTANTE: Responda APENAS com JSON válido.\n"
+            "Como há possivelmente mais de uma disciplina, devolva SEMPRE no formato:\n"
+            "{ \"analises_por_disciplina\": { \"<disciplina>\": <estrategias_de_intervencao_json> } }\n\n"
+            "DADOS PARA A ANÁLISE (por disciplina):\n"
+            f"{dados_entrada}\n\n"
+            "O JSON <estrategias_de_intervencao_json> deve conter obrigatoriamente os campos equivalentes a:\n"
+            "1) foco_analitico\n"
+            "2) matriz_acao_por_habilidade (lista)\n"
+            "3) dinamica_sala_recomposicao\n"
+        )
+
+        r = _get_ai_redis_client()
+        if not r:
+            from app.services.ai_analysis_service import AIAnalysisService
+            ai_service = AIAnalysisService()
+            return jsonify(
+                {
+                    "analise_ia_status": "ready",
+                    "analise_ia_cache_key": cache_key,
+                    "analise_ia": ai_service.analyze_intervention_plan_json(prompt),
+                }
+            ), 200
+
+        should_enqueue = _ai_cache_set_processing(cache_key, ttl_sec=ttl_sec)
+        if should_enqueue:
+            generate_ai_analysis_json_to_redis.delay(cache_key=cache_key, prompt=prompt, ttl_sec=ttl_sec)
+
+        return jsonify({"analise_ia_status": "processing", "analise_ia_cache_key": cache_key}), 200
+
+    except Exception as e:
+        logging.error("Erro analise IA mapa-habilidades/analise-ia: %s", e, exc_info=True)
+        return jsonify({"error": "Erro ao gerar análise de IA", "details": str(e)}), 500
 
 
 @bp.route("/mapa-habilidades/erros", methods=["GET"])

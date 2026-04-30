@@ -1440,6 +1440,229 @@ def listar_avaliacoes():
         return jsonify({"error": "Erro ao listar avaliações", "details": str(e)}), 500
 
 
+@bp.route("/avaliacoes/analise-ia", methods=["GET"])
+@jwt_required()
+@role_required("admin", "professor", "coordenador", "diretor", "tecadm")
+def listar_avaliacoes_analise_ia():
+    """
+    Retorna apenas o status/resultado da análise de IA (JSON) para o recorte de /avaliacoes.
+    Consulta Redis primeiro; se não houver cache, calcula 1x, dispara Celery e devolve processing.
+    """
+    try:
+        user = get_current_user_from_token()
+        if not user:
+            return jsonify({"error": "Usuário não encontrado"}), 401
+
+        estado = request.args.get("estado")
+        municipio = request.args.get("municipio")
+        escola = request.args.get("escola")
+        serie = request.args.get("serie")
+        turma = request.args.get("turma")
+        avaliacao = request.args.get("avaliacao")
+        periodo_raw = request.args.get("periodo")
+
+        if not estado or str(estado).lower() == "all":
+            return jsonify({"error": "Estado é obrigatório e não pode ser 'all'"}), 400
+        if not municipio:
+            return jsonify({"error": "Município é obrigatório"}), 400
+
+        periodo_bounds: Optional[Tuple[datetime, datetime]] = None
+        if not is_answer_sheet_report_entity():
+            if periodo_raw is not None and str(periodo_raw).strip():
+                try:
+                    periodo_bounds = _parse_periodo_bounds(periodo_raw)
+                except ValueError as ve:
+                    return jsonify(
+                        {
+                            "error": "Parâmetro periodo inválido. Use YYYY-MM (ex.: 2026-04).",
+                            "details": str(ve),
+                        }
+                    ), 400
+
+        ttl_sec = int(os.getenv("AI_ANALYSIS_CACHE_TTL_SEC", "3600"))
+        prompt_version = str(os.getenv("AI_ANALYSIS_PROMPT_VERSION", "v1"))
+        user_id = str(user.get("id") or "")
+        periodo_raw_clean = (str(periodo_raw).strip() if periodo_raw and str(periodo_raw).strip() else None)
+
+        from app.services.ai_redis_cache import (
+            get_redis_client as _get_ai_redis_client,
+            get_status as _ai_cache_get_status,
+            make_cache_key as _ai_make_cache_key,
+            set_processing as _ai_cache_set_processing,
+        )
+        from app.services.celery_tasks.ai_analysis_cache_tasks import (
+            generate_ai_analysis_json_to_redis,
+        )
+
+        cache_key = _ai_make_cache_key(
+            "evaluation_results_avaliacoes",
+            user_id=user_id,
+            prompt_version=prompt_version,
+            key_parts={
+                "estado": estado,
+                "municipio": municipio,
+                "escola": escola,
+                "serie": serie,
+                "turma": turma,
+                "avaliacao": avaliacao,
+                "periodo": periodo_raw_clean,
+            },
+        )
+
+        cached = _ai_cache_get_status(cache_key)
+        if cached:
+            st = cached.get("status")
+            if st == "ready":
+                return jsonify(
+                    {
+                        "analise_ia_status": "ready",
+                        "analise_ia_cache_key": cache_key,
+                        "analise_ia": cached.get("result") or {},
+                    }
+                ), 200
+            if st == "error":
+                return jsonify(
+                    {
+                        "analise_ia_status": "error",
+                        "analise_ia_cache_key": cache_key,
+                        "error": cached.get("error") or "Falha ao gerar análise de IA",
+                        "details": cached.get("details") or "",
+                    }
+                ), 200
+            return jsonify(
+                {"analise_ia_status": "processing", "analise_ia_cache_key": cache_key}
+            ), 200
+
+        # Cache não existe: calcular dados 1x e disparar task
+        scope_info = _determinar_escopo_busca(estado, municipio, escola, serie, turma, avaliacao, user)
+        if not scope_info:
+            return jsonify({"error": "Não foi possível determinar o escopo de busca"}), 400
+
+        permissao = verificar_permissao_filtros(user)
+        if not permissao.get("permitted"):
+            return jsonify({"error": permissao.get("error")}), 403
+
+        # Definir schema do tenant (município)
+        municipio_str = str(municipio).strip()
+        set_search_path(city_id_to_schema_name(municipio_str))
+
+        nivel_granularidade = _determinar_nivel_granularidade(
+            estado, municipio, escola, serie, turma, avaliacao, user
+        )
+
+        estatisticas_consolidadas = _calcular_estatisticas_consolidadas(
+            scope_info, nivel_granularidade, avaliacao, user, periodo_bounds
+        )
+        resultados_por_disciplina = _calcular_resultados_por_disciplina(
+            scope_info, nivel_granularidade, avaliacao, user, periodo_bounds
+        )
+        tabela_detalhada = {}
+        restrict_class_ids = None
+        if avaliacao and str(avaliacao).lower() != "all":
+            tabela_detalhada = _gerar_tabela_detalhada_por_disciplina(
+                str(avaliacao), scope_info, nivel_granularidade, user, restrict_class_ids
+            )
+
+        serie_ano = (
+            str(serie).strip()
+            if serie and str(serie).strip() and str(serie).strip().lower() != "all"
+            else ""
+        )
+        componentes = []
+        for row in (resultados_por_disciplina or []):
+            dn = (row.get("disciplina") if isinstance(row, dict) else None) or ""
+            dn = str(dn).strip()
+            if dn:
+                componentes.append(dn)
+        componentes = list(dict.fromkeys(componentes))
+        componente_curricular = componentes[0] if len(componentes) == 1 else "all"
+
+        distrib = (estatisticas_consolidadas or {}).get("distribuicao_classificacao_geral") or {}
+        media_prof = (estatisticas_consolidadas or {}).get("media_proficiencia_geral")
+        media_nota = (estatisticas_consolidadas or {}).get("media_nota_geral")
+        niveis_proficiencia_alcancados = {
+            "media_proficiencia_geral": media_prof,
+            "media_nota_geral": media_nota,
+            "distribuicao_classificacao_geral": distrib,
+        }
+
+        habilidades_foco = []
+        for disc in ((tabela_detalhada or {}).get("disciplinas") or []):
+            for q in (disc.get("questoes") or []):
+                codigo = str(q.get("codigo_habilidade") or "").strip()
+                desc = str(q.get("habilidade") or "").strip()
+                if codigo or desc:
+                    habilidades_foco.append({"codigo": codigo, "descricao": desc})
+        seen = set()
+        uniq = []
+        for h in habilidades_foco:
+            k = (h.get("codigo") or "") + "||" + (h.get("descricao") or "")
+            if k in seen:
+                continue
+            seen.add(k)
+            uniq.append(h)
+        habilidades_foco = uniq
+
+        avaliacao_title = ""
+        try:
+            t = Test.query.get(str(avaliacao)) if avaliacao and str(avaliacao).lower() != "all" else None
+            avaliacao_title = (getattr(t, "title", None) or "").strip() if t else ""
+        except Exception:
+            avaliacao_title = ""
+
+        prompt = (
+            "Aja como um Especialista em Avaliação Educacional e Gestor Pedagógico Orientado a Dados.\n"
+            "Sua tarefa é gerar um Relatório Escolar Analítico e Reflexivo com base nos resultados de uma avaliação aplicada.\n\n"
+            "[DADOS DE ENTRADA NECESSÁRIOS]\n"
+            f"• Série/Ano Avaliado: {serie_ano}\n"
+            f"• Componente Curricular: {componente_curricular}\n"
+            f"• Níveis de Proficiência Alcançados: {niveis_proficiencia_alcancados}\n"
+            f"• Habilidades Foco da Avaliação: {habilidades_foco}\n\n"
+            "[REGRAS E DIRETRIZES ESTRITAS DE GERAÇÃO]\n"
+            "1. Adaptação de Nomenclatura de Etapa: se Anos Iniciais (1º ao 4º), use matriz de final de ciclo dos Anos Iniciais; "
+            "NUNCA mencione \"5º ano\". Se Anos Finais (6º ao 8º), use matriz de final de ciclo dos Anos Finais; NUNCA mencione \"9º ano\".\n"
+            "2. Restrição de Vocabulário: sob nenhuma circunstância utilize a sigla \"SAEB\" ou faça referência ao \"Sistema de Avaliação da Educação Básica\". "
+            "Use termos como \"avaliação aplicada\", \"instrumento avaliativo\", \"diagnóstico da rede\" ou \"a presente prova\".\n"
+            "3. Princípio da Cumulatividade: deixe claro que a escala está organizada em níveis da menor para a maior proficiência e que cada nível acumula saberes dos níveis anteriores.\n"
+            "4. Alerta para Níveis Críticos: para estudantes no Nível 0 (desempenho menor que 125), emitir alerta de \"atenção especial\".\n\n"
+            "[ESTRUTURA OBRIGATÓRIA DO RELATÓRIO]\n"
+            "I. Panorama Geral da Avaliação Aplicada\n"
+            "II. Reflexão sobre os Níveis Alcançados e Habilidades (para cada nível identificado)\n"
+            "III. Encaminhamentos e Cultura Digital (Opcional, se aplicável)\n\n"
+            "IMPORTANTE: Responda APENAS com um JSON válido (objeto) e nada além do JSON. "
+            "O JSON deve conter as chaves: panorama_geral, reflexao_niveis (lista), encaminhamentos_cultura_digital (opcional), metadados_entrada.\n"
+            f"Metadados adicionais: titulo_avaliacao={avaliacao_title or 'Avaliação aplicada'}.\n"
+        )
+
+        r = _get_ai_redis_client()
+        if not r:
+            from app.services.ai_analysis_service import AIAnalysisService
+            ai_service = AIAnalysisService()
+            return jsonify(
+                {
+                    "analise_ia_status": "ready",
+                    "analise_ia_cache_key": cache_key,
+                    "analise_ia": ai_service.analyze_intervention_plan_json(prompt),
+                }
+            ), 200
+
+        should_enqueue = _ai_cache_set_processing(cache_key, ttl_sec=ttl_sec)
+        if should_enqueue:
+            generate_ai_analysis_json_to_redis.delay(
+                cache_key=cache_key,
+                prompt=prompt,
+                ttl_sec=ttl_sec,
+            )
+
+        return jsonify(
+            {"analise_ia_status": "processing", "analise_ia_cache_key": cache_key}
+        ), 200
+
+    except Exception as e:
+        logging.error("Erro analise IA /avaliacoes/analise-ia: %s", e, exc_info=True)
+        return jsonify({"error": "Erro ao gerar análise de IA", "details": str(e)}), 500
+
+
 def _gerar_tabela_detalhada_por_disciplina(
     avaliacao_id: str,
     scope_info: Dict,
@@ -6994,6 +7217,191 @@ def mapa_habilidades_avaliacao_online():
     except Exception as e:
         logging.error("Erro ao obter mapa de habilidades: %s", e, exc_info=True)
         return jsonify({"error": "Erro ao obter mapa de habilidades", "details": str(e)}), 500
+
+
+@bp.route("/mapa-habilidades/analise-ia", methods=["GET"])
+@jwt_required()
+@role_required("admin", "professor", "coordenador", "diretor", "tecadm")
+def mapa_habilidades_avaliacao_online_analise_ia():
+    """
+    Retorna apenas o status/resultado da análise de IA (JSON) para o mapa de habilidades (avaliação online).
+    Consulta Redis primeiro; se não houver cache, calcula 1x, dispara Celery e devolve processing.
+    """
+    try:
+        user = get_current_user_from_token()
+        if not user:
+            return jsonify({"error": "Usuário não encontrado"}), 401
+
+        estado = request.args.get("estado")
+        municipio = request.args.get("municipio")
+        escola = request.args.get("escola")
+        serie = request.args.get("serie")
+        turma = request.args.get("turma")
+        avaliacao = request.args.get("avaliacao")
+        disciplina = request.args.get("disciplina") or "all"
+        periodo_raw = request.args.get("periodo")
+
+        if not estado or str(estado).lower() == "all":
+            return jsonify({"error": "Estado é obrigatório e não pode ser 'all'"}), 400
+        if not municipio:
+            return jsonify({"error": "Município é obrigatório"}), 400
+        if not avaliacao or str(avaliacao).lower() == "all":
+            return jsonify({"error": "Avaliação é obrigatória"}), 400
+
+        ttl_sec = int(os.getenv("AI_ANALYSIS_CACHE_TTL_SEC", "3600"))
+        prompt_version = str(os.getenv("AI_ANALYSIS_PROMPT_VERSION", "v1"))
+        user_id = str(user.get("id") or "")
+        periodo_raw_clean = (str(periodo_raw).strip() if periodo_raw and str(periodo_raw).strip() else None)
+
+        from app.services.ai_redis_cache import (
+            get_redis_client as _get_ai_redis_client,
+            get_status as _ai_cache_get_status,
+            make_cache_key as _ai_make_cache_key,
+            set_processing as _ai_cache_set_processing,
+        )
+        from app.services.celery_tasks.ai_analysis_cache_tasks import (
+            generate_ai_analysis_json_to_redis,
+        )
+
+        cache_key = _ai_make_cache_key(
+            "evaluation_results_mapa_habilidades",
+            user_id=user_id,
+            prompt_version=prompt_version,
+            key_parts={
+                "estado": estado,
+                "municipio": municipio,
+                "escola": escola,
+                "serie": serie,
+                "turma": turma,
+                "avaliacao": avaliacao,
+                "disciplina": disciplina,
+                "periodo": periodo_raw_clean,
+            },
+        )
+
+        cached = _ai_cache_get_status(cache_key)
+        if cached:
+            st = cached.get("status")
+            if st == "ready":
+                return jsonify(
+                    {
+                        "analise_ia_status": "ready",
+                        "analise_ia_cache_key": cache_key,
+                        "analise_ia": cached.get("result") or {},
+                    }
+                ), 200
+            if st == "error":
+                return jsonify(
+                    {
+                        "analise_ia_status": "error",
+                        "analise_ia_cache_key": cache_key,
+                        "error": cached.get("error") or "Falha ao gerar análise de IA",
+                        "details": cached.get("details") or "",
+                    }
+                ), 200
+            return jsonify(
+                {"analise_ia_status": "processing", "analise_ia_cache_key": cache_key}
+            ), 200
+
+        periodo_bounds: Optional[Tuple[datetime, datetime]] = None
+        if periodo_raw is not None and str(periodo_raw).strip():
+            try:
+                periodo_bounds = _parse_periodo_bounds(periodo_raw)
+            except ValueError as ve:
+                return jsonify(
+                    {
+                        "error": "Parâmetro periodo inválido. Use YYYY-MM (ex.: 2026-04).",
+                        "details": str(ve),
+                    }
+                ), 400
+
+        scope_info = _determinar_escopo_busca(estado, municipio, escola, serie, turma, avaliacao, user)
+        if not scope_info:
+            return jsonify({"error": "Não foi possível determinar o escopo de busca"}), 400
+
+        municipio_str = str(municipio).strip()
+        set_search_path(city_id_to_schema_name(municipio_str))
+
+        nivel_granularidade = _determinar_nivel_granularidade(
+            estado, municipio, escola, serie, turma, avaliacao, user
+        )
+        escopo_calculo = _determinar_escopo_calculo(scope_info, nivel_granularidade)
+        all_students = _obter_alunos_para_mapa_habilidades_test(
+            scope_info, nivel_granularidade, user, escopo_calculo
+        )
+        all_students = _filtrar_alunos_mapa_digital_por_periodo_aplicacao(
+            all_students, str(avaliacao), periodo_bounds
+        )
+
+        subject_filter = None if str(disciplina).strip().lower() == "all" else str(disciplina).strip()
+        from app.services.skills_map_service import compute_digital_aggregate
+        data = compute_digital_aggregate(str(avaliacao), all_students, subject_filter)
+
+        por_faixa = data.get("por_faixa", {}) or {}
+        habilidades_abaixo = por_faixa.get("abaixo_do_basico", []) or []
+        habilidades_basico = por_faixa.get("basico", []) or []
+        habilidades_criticas = list(habilidades_abaixo) + list(habilidades_basico)
+
+        disciplina_nome = None
+        if subject_filter:
+            for d in data.get("disciplinas_disponiveis", []) or []:
+                if str(d.get("id")) == str(subject_filter):
+                    disciplina_nome = d.get("nome")
+                    break
+        disciplina_label = (disciplina_nome or str(subject_filter)) if subject_filter else "all"
+
+        avaliacao_title = ""
+        try:
+            t = Test.query.get(str(avaliacao))
+            avaliacao_title = (getattr(t, "title", None) or "Avaliação aplicada").strip() if t else "Avaliação aplicada"
+        except Exception:
+            avaliacao_title = "Avaliação aplicada"
+
+        ano_serie = str(serie).strip() if serie and str(serie).strip() else ""
+
+        skills_lines = []
+        for idx, h in enumerate(habilidades_criticas, start=1):
+            codigo = (h.get("codigo") or "").strip()
+            desc = (h.get("descricao") or "").strip()
+            if codigo and desc:
+                item = f"{codigo} - {desc}"
+            else:
+                item = codigo or desc or (h.get("skill_id") or "")
+            skills_lines.append(f"  {idx}. {item}")
+
+        prompt = (
+            "Atue como um Especialista em Avaliação Educacional e Recomposição de Aprendizagem, com profundo conhecimento nas matrizes de referência do SAEB, SPAECE e SAVEAL.\n\n"
+            "---\n"
+            "DADOS PARA A ANÁLISE:\n"
+            f"- Ano/Série: {ano_serie}\n"
+            f"- Disciplina: {disciplina_label}\n"
+            f"- Avaliação Referência: {avaliacao_title}\n"
+            "- Habilidades Críticas a serem trabalhadas:\n"
+            f"{chr(10).join(skills_lines) if skills_lines else '  1. '}\n\n"
+            "IMPORTANTE: Sua resposta deve ser APENAS um JSON válido (objeto) e NADA além do JSON.\n"
+        )
+
+        r = _get_ai_redis_client()
+        if not r:
+            from app.services.ai_analysis_service import AIAnalysisService
+            ai_service = AIAnalysisService()
+            return jsonify(
+                {
+                    "analise_ia_status": "ready",
+                    "analise_ia_cache_key": cache_key,
+                    "analise_ia": ai_service.analyze_intervention_plan_json(prompt),
+                }
+            ), 200
+
+        should_enqueue = _ai_cache_set_processing(cache_key, ttl_sec=ttl_sec)
+        if should_enqueue:
+            generate_ai_analysis_json_to_redis.delay(cache_key=cache_key, prompt=prompt, ttl_sec=ttl_sec)
+
+        return jsonify({"analise_ia_status": "processing", "analise_ia_cache_key": cache_key}), 200
+
+    except Exception as e:
+        logging.error("Erro analise IA mapa-habilidades/analise-ia: %s", e, exc_info=True)
+        return jsonify({"error": "Erro ao gerar análise de IA", "details": str(e)}), 500
 
 
 @bp.route("/mapa-habilidades/erros", methods=["GET"])

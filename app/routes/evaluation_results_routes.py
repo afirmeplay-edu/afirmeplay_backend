@@ -83,6 +83,7 @@ from app.routes.answer_sheet_evaluation_listing import (
     obter_turmas_por_gabarito_serie_municipio,
 )
 from app import db
+import os
 import logging
 from typing import Dict, Any, List, Optional, Tuple, Set
 from collections import defaultdict

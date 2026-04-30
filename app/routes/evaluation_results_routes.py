@@ -1551,11 +1551,22 @@ def listar_avaliacoes_analise_ia():
             estado, municipio, escola, serie, turma, avaliacao, user
         )
 
-        estatisticas_consolidadas = _calcular_estatisticas_consolidadas(
-            scope_info, nivel_granularidade, avaliacao, user, periodo_bounds
+        # Usar as MESMAS funções do endpoint principal /avaliacoes
+        # (assim não dependemos de helpers inexistentes e mantemos consistência do payload)
+        from app.models.classTest import ClassTest
+
+        q = ClassTest.query
+        # Restringir por período de aplicação quando aplicável
+        q = _apply_class_test_application_period(q, periodo_bounds)
+        if avaliacao and str(avaliacao).lower() != "all":
+            q = q.filter(ClassTest.test_id == str(avaliacao))
+
+        todas_avaliacoes_escopo = q.all()
+        estatisticas_consolidadas = _calcular_estatisticas_consolidadas_por_escopo(
+            todas_avaliacoes_escopo, scope_info, nivel_granularidade, user
         )
-        resultados_por_disciplina = _calcular_resultados_por_disciplina(
-            scope_info, nivel_granularidade, avaliacao, user, periodo_bounds
+        resultados_por_disciplina = _calcular_estatisticas_por_disciplina(
+            todas_avaliacoes_escopo, scope_info, nivel_granularidade
         )
         tabela_detalhada = {}
         restrict_class_ids = None
@@ -1569,12 +1580,29 @@ def listar_avaliacoes_analise_ia():
             if serie and str(serie).strip() and str(serie).strip().lower() != "all"
             else ""
         )
+        if not serie_ano:
+            # fallback: tentar extrair de um aluno na tabela detalhada
+            try:
+                for disc in ((tabela_detalhada or {}).get("disciplinas") or []):
+                    for aluno in (disc.get("alunos") or []):
+                        val = str(aluno.get("serie") or "").strip()
+                        if val and val.upper() != "N/A":
+                            serie_ano = val
+                            raise StopIteration()
+            except StopIteration:
+                pass
+            except Exception:
+                pass
         componentes = []
+        by_disc_row = {}
         for row in (resultados_por_disciplina or []):
-            dn = (row.get("disciplina") if isinstance(row, dict) else None) or ""
-            dn = str(dn).strip()
-            if dn:
-                componentes.append(dn)
+            if not isinstance(row, dict):
+                continue
+            dn = str((row.get("disciplina") or "")).strip()
+            if not dn:
+                continue
+            componentes.append(dn)
+            by_disc_row[dn] = row
         componentes = list(dict.fromkeys(componentes))
         componente_curricular = componentes[0] if len(componentes) == 1 else "all"
 
@@ -1611,14 +1639,41 @@ def listar_avaliacoes_analise_ia():
         except Exception:
             avaliacao_title = ""
 
+        def _component_from_disciplina_name(name: str) -> str:
+            n = (name or "").lower()
+            return "MATEMÁTICA" if "matem" in n else "LÍNGUA PORTUGUESA"
+
+        # Sempre pedir análise por disciplina (mesmo quando só houver 1 disciplina),
+        # para o frontend ter explícito "qual análise é de qual disciplina".
+        if not componentes:
+            componentes = ["Outras"]
+        entrada_por_disciplina = {}
+        for dn in componentes:
+            comp = _component_from_disciplina_name(dn)
+            row = by_disc_row.get(dn) or {}
+            entrada_por_disciplina[dn] = {
+                "serie_ano_avaliado": serie_ano,
+                "componente_curricular": comp,
+                "niveis_proficiencia_alcancados": {
+                    "media_proficiencia": row.get("media_proficiencia"),
+                    "media_nota": row.get("media_nota"),
+                    "distribuicao_classificacao": row.get("distribuicao_classificacao") or {},
+                },
+                "habilidades_foco": habilidades_foco,
+            }
+        dados_entrada = entrada_por_disciplina
+        formato_saida = (
+            "IMPORTANTE: Responda APENAS com um JSON válido (objeto) e nada além do JSON. "
+            "Retorne um JSON no formato: "
+            "{ \"analises_por_disciplina\": { \"<disciplina>\": <relatorio_json> }, \"metadados_gerais\": {...} }."
+        )
+
         prompt = (
             "Aja como um Especialista em Avaliação Educacional e Gestor Pedagógico Orientado a Dados.\n"
-            "Sua tarefa é gerar um Relatório Escolar Analítico e Reflexivo com base nos resultados de uma avaliação aplicada.\n\n"
+            "Sua tarefa é gerar um Relatório Escolar Analítico e Reflexivo com base nos resultados de uma avaliação aplicada a uma turma ou aluno específico.\n"
+            "O objetivo é traduzir escalas de proficiência em intervenções pedagógicas claras, analisando as habilidades cobradas, o que cada nível significa e os efeitos práticos.\n\n"
             "[DADOS DE ENTRADA NECESSÁRIOS]\n"
-            f"• Série/Ano Avaliado: {serie_ano}\n"
-            f"• Componente Curricular: {componente_curricular}\n"
-            f"• Níveis de Proficiência Alcançados: {niveis_proficiencia_alcancados}\n"
-            f"• Habilidades Foco da Avaliação: {habilidades_foco}\n\n"
+            f"{dados_entrada}\n\n"
             "[REGRAS E DIRETRIZES ESTRITAS DE GERAÇÃO]\n"
             "1. Adaptação de Nomenclatura de Etapa: se Anos Iniciais (1º ao 4º), use matriz de final de ciclo dos Anos Iniciais; "
             "NUNCA mencione \"5º ano\". Se Anos Finais (6º ao 8º), use matriz de final de ciclo dos Anos Finais; NUNCA mencione \"9º ano\".\n"
@@ -1630,8 +1685,7 @@ def listar_avaliacoes_analise_ia():
             "I. Panorama Geral da Avaliação Aplicada\n"
             "II. Reflexão sobre os Níveis Alcançados e Habilidades (para cada nível identificado)\n"
             "III. Encaminhamentos e Cultura Digital (Opcional, se aplicável)\n\n"
-            "IMPORTANTE: Responda APENAS com um JSON válido (objeto) e nada além do JSON. "
-            "O JSON deve conter as chaves: panorama_geral, reflexao_niveis (lista), encaminhamentos_cultura_digital (opcional), metadados_entrada.\n"
+            f"{formato_saida}\n"
             f"Metadados adicionais: titulo_avaliacao={avaliacao_title or 'Avaliação aplicada'}.\n"
         )
 

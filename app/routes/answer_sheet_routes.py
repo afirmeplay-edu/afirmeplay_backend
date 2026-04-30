@@ -4821,12 +4821,17 @@ def get_resultados_agregados_analise_ia():
             if alunos_geral:
                 serie_ano = str(alunos_geral[0].get("serie") or "").strip()
 
+        # Disciplinas presentes no payload (para análise por disciplina quando aplicável)
         componentes = []
+        by_disc_row = {}
         for row in (resultados_por_disciplina or []):
-            dn = (row.get("disciplina") if isinstance(row, dict) else None) or ""
-            dn = str(dn).strip()
-            if dn:
-                componentes.append(dn)
+            if not isinstance(row, dict):
+                continue
+            dn = str((row.get("disciplina") or "")).strip()
+            if not dn:
+                continue
+            componentes.append(dn)
+            by_disc_row[dn] = row
         componentes = list(dict.fromkeys(componentes))
         componente_curricular = componentes[0] if len(componentes) == 1 else "all"
 
@@ -4839,15 +4844,94 @@ def get_resultados_agregados_analise_ia():
             "distribuicao_classificacao_geral": distrib,
         }
 
-        habilidades_codes = []
+        # Habilidades foco: coletar {codigo, descricao} (não apenas código)
+        def _safe_uuid(s: str) -> Optional[str]:
+            try:
+                return str(uuid.UUID(str(s).strip()))
+            except Exception:
+                return None
+
+        habilidades_foco_geral: List[Dict[str, str]] = []
+        # também gerar por disciplina para análise por disciplina
+        habilidades_por_disciplina: Dict[str, List[Dict[str, str]]] = {}
+
+        skills_to_fetch_by_id: Set[str] = set()
+        skills_to_fetch_by_code: Set[str] = set()
         for disc in ((tabela_detalhada or {}).get("disciplinas") or []):
+            dn = str(disc.get("nome") or disc.get("id") or "").strip() or "Outras"
             for q in (disc.get("questoes") or []):
                 for sk in (q.get("skills") or []):
-                    code = (sk.get("code") if isinstance(sk, dict) else "") or ""
-                    code = str(code).strip()
-                    if code and code.upper() != "N/A":
-                        habilidades_codes.append(code)
-        habilidades_codes = list(dict.fromkeys(habilidades_codes))
+                    if not isinstance(sk, dict):
+                        continue
+                    sid = str(sk.get("id") or "").strip()
+                    scode = str(sk.get("code") or "").strip()
+                    if sid and _safe_uuid(sid):
+                        skills_to_fetch_by_id.add(_safe_uuid(sid))
+                    elif sid:
+                        skills_to_fetch_by_code.add(sid)
+                    if scode and scode.upper() != "N/A":
+                        skills_to_fetch_by_code.add(scode)
+            if dn not in habilidades_por_disciplina:
+                habilidades_por_disciplina[dn] = []
+
+        skills_db_by_id: Dict[str, Skill] = {}
+        if skills_to_fetch_by_id:
+            try:
+                skills_db_by_id = {str(s.id): s for s in Skill.query.filter(Skill.id.in_(list(skills_to_fetch_by_id))).all()}
+            except Exception:
+                skills_db_by_id = {}
+        skills_db_by_code: Dict[str, Skill] = {}
+        if skills_to_fetch_by_code:
+            try:
+                skills_db_by_code = {str(s.code): s for s in Skill.query.filter(Skill.code.in_(list(skills_to_fetch_by_code))).all()}
+            except Exception:
+                skills_db_by_code = {}
+
+        def _resolve_skill(sid: str, code: str) -> Tuple[str, str]:
+            # retorna (codigo, descricao)
+            uid = _safe_uuid(sid) if sid else None
+            if uid and uid in skills_db_by_id:
+                s = skills_db_by_id[uid]
+                return (str(s.code or "").strip() or uid, str(s.description or "").strip() or "")
+            if code and code in skills_db_by_code:
+                s = skills_db_by_code[code]
+                return (str(s.code or "").strip() or code, str(s.description or "").strip() or "")
+            if sid and sid in skills_db_by_code:
+                s = skills_db_by_code[sid]
+                return (str(s.code or "").strip() or sid, str(s.description or "").strip() or "")
+            # fallback
+            c = (code or sid or "").strip()
+            return (c, "")
+
+        # popular listas
+        for disc in ((tabela_detalhada or {}).get("disciplinas") or []):
+            dn = str(disc.get("nome") or disc.get("id") or "").strip() or "Outras"
+            for q in (disc.get("questoes") or []):
+                for sk in (q.get("skills") or []):
+                    if not isinstance(sk, dict):
+                        continue
+                    codigo, descricao = _resolve_skill(str(sk.get("id") or "").strip(), str(sk.get("code") or "").strip())
+                    if not codigo or codigo.upper() == "N/A":
+                        continue
+                    item = {"codigo": codigo, "descricao": descricao}
+                    habilidades_foco_geral.append(item)
+                    habilidades_por_disciplina.setdefault(dn, []).append(item)
+
+        # dedupe preservando ordem
+        def _dedupe(items: List[Dict[str, str]]) -> List[Dict[str, str]]:
+            seen = set()
+            out = []
+            for it in items:
+                k = (it.get("codigo") or "") + "||" + (it.get("descricao") or "")
+                if k in seen:
+                    continue
+                seen.add(k)
+                out.append(it)
+            return out
+
+        habilidades_foco_geral = _dedupe(habilidades_foco_geral)
+        for dn in list(habilidades_por_disciplina.keys()):
+            habilidades_por_disciplina[dn] = _dedupe(habilidades_por_disciplina.get(dn) or [])
 
         gabarito_title = ""
         try:
@@ -4856,14 +4940,41 @@ def get_resultados_agregados_analise_ia():
         except Exception:
             gabarito_title = ""
 
+        def _component_from_disciplina_name(name: str) -> str:
+            n = (name or "").lower()
+            return "MATEMÁTICA" if "matem" in n else "LÍNGUA PORTUGUESA"
+
+        # Sempre pedir análise por disciplina (mesmo quando só houver 1 disciplina),
+        # para o frontend ter explícito "qual análise é de qual disciplina".
+        if not componentes:
+            componentes = ["Outras"]
+        entrada_por_disciplina = {}
+        for dn in componentes:
+            comp = _component_from_disciplina_name(dn)
+            row = by_disc_row.get(dn) or {}
+            entrada_por_disciplina[dn] = {
+                "serie_ano_avaliado": serie_ano,
+                "componente_curricular": comp,
+                "niveis_proficiencia_alcancados": {
+                    "media_proficiencia": row.get("media_proficiencia"),
+                    "media_nota": row.get("media_nota"),
+                    "distribuicao_classificacao": row.get("distribuicao_classificacao") or {},
+                },
+                "habilidades_foco": habilidades_por_disciplina.get(dn) or habilidades_foco_geral,
+            }
+        dados_entrada = entrada_por_disciplina
+        formato_saida = (
+            "IMPORTANTE: Responda APENAS com um JSON válido (objeto) e nada além do JSON. "
+            "Retorne um JSON no formato: "
+            "{ \"analises_por_disciplina\": { \"<disciplina>\": <relatorio_json> }, \"metadados_gerais\": {...} }."
+        )
+
         prompt = (
             "Aja como um Especialista em Avaliação Educacional e Gestor Pedagógico Orientado a Dados.\n"
-            "Sua tarefa é gerar um Relatório Escolar Analítico e Reflexivo com base nos resultados de uma avaliação aplicada.\n\n"
+            "Sua tarefa é gerar um Relatório Escolar Analítico e Reflexivo com base nos resultados de uma avaliação aplicada a uma turma ou aluno específico.\n"
+            "O objetivo é traduzir escalas de proficiência em intervenções pedagógicas claras, analisando as habilidades cobradas, o que cada nível significa e os efeitos práticos.\n\n"
             "[DADOS DE ENTRADA NECESSÁRIOS]\n"
-            f"• Série/Ano Avaliado: {serie_ano}\n"
-            f"• Componente Curricular: {componente_curricular}\n"
-            f"• Níveis de Proficiência Alcançados: {niveis_proficiencia_alcancados}\n"
-            f"• Habilidades Foco da Avaliação: {habilidades_codes}\n\n"
+            f"{dados_entrada}\n\n"
             "[REGRAS E DIRETRIZES ESTRITAS DE GERAÇÃO]\n"
             "1. Adaptação de Nomenclatura de Etapa: se Anos Iniciais (1º ao 4º), use matriz de final de ciclo dos Anos Iniciais; "
             "NUNCA mencione \"5º ano\". Se Anos Finais (6º ao 8º), use matriz de final de ciclo dos Anos Finais; NUNCA mencione \"9º ano\".\n"
@@ -4875,8 +4986,7 @@ def get_resultados_agregados_analise_ia():
             "I. Panorama Geral da Avaliação Aplicada\n"
             "II. Reflexão sobre os Níveis Alcançados e Habilidades (para cada nível identificado)\n"
             "III. Encaminhamentos e Cultura Digital (Opcional, se aplicável)\n\n"
-            "IMPORTANTE: Responda APENAS com um JSON válido (objeto) e nada além do JSON. "
-            "O JSON deve conter as chaves: panorama_geral, reflexao_niveis (lista), encaminhamentos_cultura_digital (opcional), metadados_entrada.\n"
+            f"{formato_saida}\n"
             f"Metadados adicionais: titulo_avaliacao={gabarito_title or 'Cartão-resposta'}.\n"
         )
 

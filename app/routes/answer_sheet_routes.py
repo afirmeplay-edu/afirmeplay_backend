@@ -5146,13 +5146,30 @@ def mapa_habilidades_cartao_analise_ia():
         habilidades_basico = por_faixa.get("basico", []) or []
         habilidades_criticas = list(habilidades_abaixo) + list(habilidades_basico)
 
-        disciplina_nome = None
-        if disc_filt:
-            for d in raw.get("disciplinas_disponiveis", []) or []:
-                if str(d.get("id")) == str(disc_filt):
-                    disciplina_nome = d.get("nome")
-                    break
-        disciplina_label = (disciplina_nome or str(disc_filt)) if disc_filt else "all"
+        # Sempre pedir/retornar análise por disciplina (mesmo quando disciplina=all)
+        # Agrupa habilidades críticas por disciplina_nome do próprio mapa.
+        habilidades_por_disciplina: Dict[str, List[Dict[str, str]]] = {}
+        for h in habilidades_criticas:
+            dn = str(h.get("disciplina_nome") or "Outras").strip() or "Outras"
+            codigo = str(h.get("codigo") or "").strip()
+            desc = str(h.get("descricao") or "").strip()
+            if not codigo and not desc:
+                continue
+            habilidades_por_disciplina.setdefault(dn, []).append(
+                {"codigo": codigo or (h.get("skill_id") or ""), "descricao": desc}
+            )
+
+        # De-duplicar mantendo ordem por disciplina
+        for dn in list(habilidades_por_disciplina.keys()):
+            seen = set()
+            out = []
+            for it in habilidades_por_disciplina[dn]:
+                k = (it.get("codigo") or "") + "||" + (it.get("descricao") or "")
+                if k in seen:
+                    continue
+                seen.add(k)
+                out.append(it)
+            habilidades_por_disciplina[dn] = out
 
         gab = AnswerSheetGabarito.query.get(gabarito_id)
         avaliacao_referencia = (getattr(gab, "title", None) or "Cartão-resposta").strip() if gab else "Cartão-resposta"
@@ -5164,29 +5181,30 @@ def mapa_habilidades_cartao_analise_ia():
         else:
             ano_serie = ""
 
-        skills_lines: List[str] = []
-        for idx, h in enumerate(habilidades_criticas, start=1):
-            codigo = (h.get("codigo") or "").strip()
-            desc = (h.get("descricao") or "").strip()
-            if codigo and desc:
-                item = f"{codigo} - {desc}"
-            else:
-                item = codigo or desc or (h.get("skill_id") or "")
-            skills_lines.append(f"  {idx}. {item}")
+        dados_entrada = {}
+        for dn, habs in habilidades_por_disciplina.items():
+            dados_entrada[dn] = {
+                "ano_serie": ano_serie,
+                "disciplina": dn,
+                "avaliacao_referencia": avaliacao_referencia,
+                "habilidades_criticas": habs,
+            }
 
         prompt = (
             "Atue como um Especialista em Avaliação Educacional e Recomposição de Aprendizagem, com profundo conhecimento nas matrizes de referência do SAEB, SPAECE e SAVEAL.\n\n"
             "Abaixo, fornecerei os dados de uma avaliação (Mensal ou Larga Escala) referentes a uma turma.\n\n"
-            "Sua tarefa é gerar um plano de ação estritamente focado em alunos que se encontram nos níveis de proficiência \"ABAIXO DO BÁSICO\" e \"BÁSICO\".\n\n"
+            "Sua tarefa é gerar um plano de ação estritamente focado em alunos que se encontram nos níveis de proficiência \"ABAIXO DO BÁSICO\" e \"BÁSICO\". "
+            "O plano deve ser realista, aplicável na rede pública ou privada, utilizando recursos acessíveis de sala de aula.\n\n"
             "Nomeie o documento final obrigatoriamente como: **ESTRATÉGIAS DE INTERVENÇÃO**.\n\n"
-            "---\n"
-            "DADOS PARA A ANÁLISE:\n"
-            f"- Ano/Série: {ano_serie}\n"
-            f"- Disciplina: {disciplina_label}\n"
-            f"- Avaliação Referência: {avaliacao_referencia}\n"
-            "- Habilidades Críticas a serem trabalhadas:\n"
-            f"{chr(10).join(skills_lines) if skills_lines else '  1. '}\n\n"
-            "IMPORTANTE: Sua resposta deve ser APENAS um JSON válido (objeto) e NADA além do JSON.\n"
+            "IMPORTANTE: Responda APENAS com JSON válido.\n"
+            "Como há possivelmente mais de uma disciplina, devolva SEMPRE no formato:\n"
+            "{ \"analises_por_disciplina\": { \"<disciplina>\": <estrategias_de_intervencao_json> } }\n\n"
+            "DADOS PARA A ANÁLISE (por disciplina):\n"
+            f"{dados_entrada}\n\n"
+            "O JSON <estrategias_de_intervencao_json> deve conter obrigatoriamente os campos equivalentes a:\n"
+            "1) foco_analitico\n"
+            "2) matriz_acao_por_habilidade (lista)\n"
+            "3) dinamica_sala_recomposicao\n"
         )
 
         r = _get_ai_redis_client()

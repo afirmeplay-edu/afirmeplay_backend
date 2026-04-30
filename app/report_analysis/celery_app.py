@@ -69,6 +69,7 @@ celery_app = Celery(
         'app.physical_tests.tasks',  # Tasks de geração de formulários físicos
         'app.services.celery_tasks.answer_sheet_tasks',  # Tasks de geração de cartões de resposta
         'app.services.celery_tasks.evaluation_recalculation_tasks',  # Tasks de recálculo de resultados
+        'app.services.celery_tasks.ai_analysis_cache_tasks',  # Tasks de cache de IA (Redis)
         'app.socioeconomic_forms.services.results_tasks',  # Tasks de resultados socioeconômicos
         'app.socioeconomic_forms.services.results_migration_tasks',  # Tasks de migração/população inicial
         'app.services.celery_tasks.competition_tasks',  # Tasks de finalização de competições

@@ -490,6 +490,11 @@ def main() -> int:
         action="store_true",
         help="Na validação, parar no primeiro erro (padrão: tentar todos e acumular).",
     )
+    parser.add_argument(
+        "--out-sql",
+        default="",
+        help="Opcional: caminho para salvar o SQL gerado em um arquivo (.sql).",
+    )
     args = parser.parse_args()
     dev_url = args.dev_url
     prod_url = args.prod_url
@@ -509,10 +514,23 @@ def main() -> int:
         return 0
 
     print(f"\n--- SQL gerado ({len(stmts)} comandos) ---\n")
+    sql_lines: list[str] = []
     for i, s in enumerate(stmts, 1):
-        print(f"-- [{i}] {s.kind}")
+        header = f"-- [{i}] {s.kind}"
+        sql_lines.append(header)
+        sql_lines.append(s.text)
+        sql_lines.append("")
+        print(header)
         print(s.text)
         print()
+
+    if args.out_sql:
+        try:
+            with open(args.out_sql, "w", encoding="utf-8") as f:
+                f.write("\n".join(sql_lines).rstrip() + "\n")
+            print(f"SQL salvo em: {args.out_sql}\n")
+        except Exception as ex:  # noqa: BLE001
+            print(f"Falha ao salvar --out-sql em '{args.out_sql}': {ex}", file=sys.stderr)
 
     warns = heuristic_warnings(stmts)
     if warns:

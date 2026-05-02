@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-Serviço para análise de relatórios usando OpenRouter AI
+Serviço para análise de relatórios usando Google AI Studio (Gemini).
 """
 
 import logging
@@ -11,13 +11,9 @@ import unicodedata
 from typing import Dict, Any, Optional, Mapping
 import google.generativeai as genai
 from app.openai_config.openai_config import (
-    OPENROUTER_MODEL,
     OPENROUTER_MAX_TOKENS,
     OPENROUTER_TEMPERATURE,
-    get_openrouter_client,
-    get_openrouter_extra_headers,
     ANALYSIS_PROMPT_BASE,
-    CONTEXT_SETTINGS,
     PARTICIPATION_CLASSIFICATION_TABLE,
     PARTICIPATION_ANALYSIS_PROMPT_TEMPLATE,
     NIVEIS_APRENDIZAGEM_ANALYSIS_PROMPT_TEMPLATE,
@@ -28,13 +24,10 @@ from app.openai_config.openai_config import (
 )
 
 class AIAnalysisService:
-    """Serviço para análise de relatórios usando OpenRouter AI"""
+    """Serviço para análise de relatórios (Google AI Studio / Gemini)."""
     
     def __init__(self):
         self.logger = logging.getLogger(__name__)
-        # Mantido por compatibilidade (não usado no fluxo Gemini),
-        # mas deixamos visível em runtime qual provedor/vars estão ativos.
-        self.client = get_openrouter_client()
 
         google_key_set = bool(os.getenv("GOOGLE_AI_STUDIO_API_KEY"))
         google_model = os.getenv("GOOGLE_AI_STUDIO_MODEL", "gemini-1.5-pro")

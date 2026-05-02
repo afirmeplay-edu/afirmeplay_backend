@@ -1,23 +1,14 @@
 # -*- coding: utf-8 -*-
 """
-Configuração para integração com OpenAI API
+Espelho / legado de prompts para análise (sem chaves no código).
+Credenciais OpenAI, se usadas no futuro, devem vir apenas do ambiente.
 """
 
 import os
-from openai import OpenAI
 
-# Configuração da API Key
-OPENAI_API_KEY = "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"
-
-# Configurações do modelo
-OPENAI_MODEL = "gpt-4o-mini"  # Modelo mais econômico e eficiente
-OPENAI_MAX_TOKENS = 2000
-OPENAI_TEMPERATURE = 0.7
-
-# Inicializar cliente OpenAI
-def get_openai_client():
-    """Retorna cliente OpenAI configurado"""
-    return OpenAI(api_key=OPENAI_API_KEY)
+OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+OPENAI_MAX_TOKENS = int(os.getenv("OPENAI_MAX_TOKENS", "2000"))
+OPENAI_TEMPERATURE = float(os.getenv("OPENAI_TEMPERATURE", "0.7"))
 
 # Prompt base para análise de relatórios
 ANALYSIS_PROMPT_BASE = """
@@ -55,5 +46,5 @@ com análises contextualizadas e recomendações práticas.
 CONTEXT_SETTINGS = {
     "max_tokens": OPENAI_MAX_TOKENS,
     "temperature": OPENAI_TEMPERATURE,
-    "model": OPENAI_MODEL
+    "model": OPENAI_MODEL,
 }

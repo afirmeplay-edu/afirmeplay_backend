@@ -1,24 +1,18 @@
 # -*- coding: utf-8 -*-
 """
-Configuração para integração com OpenRouter AI API
+Prompts e parâmetros não secretos para análise de relatórios.
+Chaves de API vêm apenas de variáveis de ambiente (ex.: Google AI Studio no serviço de análise).
 """
 
-from openai import OpenAI
+import os
 
-# Configuração da API Key OpenRouter
-OPENROUTER_API_KEY = "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"
-
-# Configurações do modelo OpenRouter
-OPENROUTER_MODEL = "xiaomi/mimo-v2-flash:free"
-OPENROUTER_MAX_TOKENS = 8192
-OPENROUTER_TEMPERATURE = 0.7
-
-# URL base da API OpenRouter
-OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
-
-# Headers opcionais para rankings no OpenRouter (opcional)
-OPENROUTER_HTTP_REFERER = None  # Opcional: URL do seu site
-OPENROUTER_SITE_NAME = None  # Opcional: Nome do seu site
+# OpenRouter (opcional): nunca armazenar API keys neste repositório
+OPENROUTER_BASE_URL = os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
+OPENROUTER_MODEL = os.getenv("OPENROUTER_MODEL", "xiaomi/mimo-v2-flash:free")
+OPENROUTER_MAX_TOKENS = int(os.getenv("OPENROUTER_MAX_TOKENS", "8192"))
+OPENROUTER_TEMPERATURE = float(os.getenv("OPENROUTER_TEMPERATURE", "0.7"))
+OPENROUTER_HTTP_REFERER = os.getenv("OPENROUTER_HTTP_REFERER") or None
+OPENROUTER_SITE_NAME = os.getenv("OPENROUTER_SITE_NAME") or None
 
 # Prompt base para análise de relatórios
 ANALYSIS_PROMPT_BASE = """
@@ -329,39 +323,19 @@ Embase seus juízos nos números concretos que balizam o documento (traga à ton
 PRINCÍPIO INEGOCIÁVEL DA SÉRIE E RÉGUA: O laudo exarado carrega a obrigatoriedade de citar exclusivamente a série focal do relatório. Estenda a parametrização do 5º ano aos Anos Iniciais e do 9º ano aos Anos Finais, recordando-se de omitir taxativamente o título "9º ano" caso a turma analisada pertença ao ciclo de 6º ao 8º ano, optando pela designação "Anos Finais".
 """
 
-# Configurações de contexto
+# Abacus RouteLLM (correção por IA): apenas variáveis de ambiente
+ABACUS_API_KEY = os.getenv("ABACUS_API_KEY", "")
+ABACUS_API_URL = os.getenv(
+    "ABACUS_API_URL",
+    "https://routellm.abacus.ai/v1/chat/completions",
+)
+ABACUS_MODEL = os.getenv("ABACUS_MODEL", "gpt-4o-mini")
+ABACUS_MAX_TOKENS = int(os.getenv("ABACUS_MAX_TOKENS", "4096"))
+ABACUS_TEMPERATURE = float(os.getenv("ABACUS_TEMPERATURE", "0.2"))
+
+# Configurações de contexto (referência; análise principal usa Gemini + env)
 CONTEXT_SETTINGS = {
     "max_tokens": OPENROUTER_MAX_TOKENS,
-    "temperature": OPENROUTER_TEMPERATURE
+    "temperature": OPENROUTER_TEMPERATURE,
+    "model": OPENROUTER_MODEL,
 }
-
-def get_openrouter_client() -> OpenAI:
-    """
-    Retorna cliente OpenAI configurado para OpenRouter
-
-    Returns:
-        OpenAI: Cliente configurado com base_url e api_key do OpenRouter
-    """
-    client = OpenAI(
-        base_url=OPENROUTER_BASE_URL,
-        api_key=OPENROUTER_API_KEY
-    )
-
-    return client
-
-def get_openrouter_extra_headers() -> dict:
-    """
-    Retorna headers extras para usar nas chamadas do OpenRouter
-
-    Returns:
-        dict: Headers extras (HTTP-Referer e X-Title) se configurados
-    """
-    extra_headers = {}
-
-    if OPENROUTER_HTTP_REFERER:
-        extra_headers["HTTP-Referer"] = OPENROUTER_HTTP_REFERER
-
-    if OPENROUTER_SITE_NAME:
-        extra_headers["X-Title"] = OPENROUTER_SITE_NAME
-
-    return extra_headers

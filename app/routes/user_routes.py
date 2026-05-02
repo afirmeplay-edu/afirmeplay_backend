@@ -1130,6 +1130,24 @@ def bulk_upload_students():
                         "Se for tecadm, diretor ou coordenador, faça login com usuário vinculado a uma cidade."
             }), 400
         
+        def normalize_column_name(column_name):
+            """Normaliza cabeçalhos para evitar erro com BOM/espacos/capitalizacao."""
+            if column_name is None:
+                return None
+            return str(column_name).replace('\ufeff', '').strip().lower()
+
+        def normalize_rows_columns(input_rows):
+            normalized_rows = []
+            for row in input_rows:
+                normalized_row = {}
+                for key, value in row.items():
+                    normalized_key = normalize_column_name(key)
+                    if normalized_key:
+                        normalized_row[normalized_key] = value
+                if any(v not in (None, '') for v in normalized_row.values()):
+                    normalized_rows.append(normalized_row)
+            return normalized_rows
+
         # Ler o arquivo
         try:
             if file_extension == 'csv':
@@ -1140,9 +1158,19 @@ def bulk_upload_students():
                     file.seek(0)
                     content = file.read().decode('latin-1')
                 
-                # Processar CSV
-                csv_reader = csv.DictReader(io.StringIO(content))
-                rows = list(csv_reader)
+                # Processar CSV com detecção de delimitador (ex.: ;, , ou tab)
+                sample = content[:4096]
+                delimiter = ','
+                try:
+                    dialect = csv.Sniffer().sniff(sample, delimiters=';,|\t,')
+                    delimiter = dialect.delimiter
+                except csv.Error:
+                    first_line = sample.splitlines()[0] if sample else ''
+                    if ';' in first_line and ',' not in first_line:
+                        delimiter = ';'
+
+                csv_reader = csv.DictReader(io.StringIO(content), delimiter=delimiter)
+                rows = normalize_rows_columns(list(csv_reader))
             else:
                 # Para Excel
                 if file_extension == 'xlsx':
@@ -1172,6 +1200,7 @@ def bulk_upload_students():
                                 row_data[headers[col_idx]] = sheet.cell_value(row_idx, col_idx)
                         if any(row_data.values()):  # Ignorar linhas vazias
                             rows.append(row_data)
+                rows = normalize_rows_columns(rows)
         except Exception as e:
             return jsonify({"erro": f"Erro ao ler arquivo: {str(e)}"}), 400
         

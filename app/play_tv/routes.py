@@ -1131,7 +1131,7 @@ def download_video_resource(video_id, resource_id):
 
 @bp.route('/videos/<string:video_id>', methods=['DELETE'])
 @jwt_required()
-@role_required("admin")
+@role_required("admin", "professor", "diretor", "coordenador", "tecadm")
 def delete_video(video_id):
     try:
         _, err = _require_play_tv_tenant()
@@ -1145,6 +1145,10 @@ def delete_video(video_id):
         video = PlayTvVideo.query.options(joinedload(PlayTvVideo.resources)).get(video_id)
         if not video:
             return jsonify({"erro": "Vídeo não encontrado"}), 404
+
+        role = (current_user.get("role") or "").lower()
+        if role != "admin" and str(video.created_by) != str(current_user.get("id")):
+            return jsonify({"erro": "Acesso negado."}), 403
 
         _delete_file_resources_from_minio(video)
         db.session.delete(video)

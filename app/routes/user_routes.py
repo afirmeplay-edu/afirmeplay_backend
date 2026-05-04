@@ -10,6 +10,7 @@ from werkzeug.security import check_password_hash
 from app.utils.auth import hash_password
 from app import db
 from app.models.school import School
+from app.models.student import Student
 from app.models.studentClass import Class
 from app.models.grades import Grade
 from app.models.studentPasswordLog import StudentPasswordLog

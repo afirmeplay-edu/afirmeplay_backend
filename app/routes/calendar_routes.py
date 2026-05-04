@@ -1,4 +1,4 @@
-from flask import Blueprint, request, jsonify
+from flask import Blueprint, request, jsonify, send_file
 from app.permissions.decorators import role_required, get_current_user_from_token
 from app.permissions.rules import get_user_permission_scope
 from app.decorators import requires_city_context
@@ -10,9 +10,10 @@ from sqlalchemy.dialects.postgresql import UUID as PostgresUUID
 from datetime import datetime
 from typing import List, Dict, Any
 from urllib.parse import urlparse
-from datetime import timedelta
+from io import BytesIO
 from app.services.storage.minio_service import MinIOService
 from app.utils.tenant_middleware import get_current_tenant_context
+import logging
 import os
 import uuid
 from werkzeug.utils import secure_filename
@@ -357,12 +358,20 @@ def download_event_resource(event_id: str, resource_id: str):
 
     minio = MinIOService()
     bucket = res.minio_bucket or minio.BUCKETS["USER_UPLOADS"]
-    url = minio.get_presigned_url(bucket, res.minio_object_name, expires=timedelta(hours=1))
-    return jsonify({
-        "download_url": url,
-        "expires_in_seconds": 3600,
-        "file_name": res.original_filename,
-    }), 200
+    try:
+        data = minio.download_file(bucket, res.minio_object_name)
+    except Exception as e:
+        logging.error("download calendar resource: %s", e, exc_info=True)
+        return jsonify({"error": "Não foi possível obter o arquivo"}), 500
+    mime = (res.content_type or "application/octet-stream")[:200]
+    fname = res.original_filename or "download"
+    return send_file(
+        BytesIO(data),
+        mimetype=mime,
+        as_attachment=True,
+        download_name=fname,
+        max_age=0,
+    )
 
 
 @bp.route('/events/<string:event_id>/resources/<string:resource_id>', methods=['DELETE'])

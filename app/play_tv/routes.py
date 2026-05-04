@@ -1,4 +1,4 @@
-from flask import Blueprint, request, jsonify, make_response
+from flask import Blueprint, request, jsonify, make_response, send_file
 from app.play_tv.models import (
     PlayTvVideo,
     PlayTvVideoSchool,
@@ -26,7 +26,7 @@ import logging
 import uuid
 import os
 from urllib.parse import urlparse
-from datetime import timedelta
+from io import BytesIO
 from werkzeug.utils import secure_filename
 
 bp = Blueprint('playtv', __name__, url_prefix='/play-tv')
@@ -1109,20 +1109,20 @@ def download_video_resource(video_id, resource_id):
         minio = MinIOService()
         bucket = res.minio_bucket or minio.BUCKETS["PLAY_TV_RESOURCES"]
         try:
-            url = minio.get_presigned_url(
-                bucket,
-                res.minio_object_name,
-                expires=timedelta(hours=1),
-            )
+            data = minio.download_file(bucket, res.minio_object_name)
         except Exception as e:
-            logging.error(f"presigned play_tv: {e}")
-            return jsonify({"erro": "Não foi possível gerar link de download"}), 500
+            logging.error(f"download play_tv resource: {e}", exc_info=True)
+            return jsonify({"erro": "Não foi possível obter o arquivo"}), 500
 
-        return jsonify({
-            "download_url": url,
-            "expires_in_seconds": 3600,
-            "file_name": res.original_filename,
-        }), 200
+        mime = (res.content_type or "application/octet-stream")[:200]
+        fname = res.original_filename or "download"
+        return send_file(
+            BytesIO(data),
+            mimetype=mime,
+            as_attachment=True,
+            download_name=fname,
+            max_age=0,
+        )
 
     except Exception as e:
         logging.error(str(e), exc_info=True)

@@ -3,57 +3,24 @@ name: Backend Pipeline
 on:
     push:
         branches:
-            - dev
+            - main
     workflow_dispatch:
 
 jobs:
-    build:
-        runs-on: [self-hosted, vps-afirme]
-
-        steps:
-            - name: Checkout
-              uses: actions/checkout@v4
-
-            - name: Get Version
-              run: |
-                  VERSION=$(cat VERSION)
-                  echo "VERSION=${VERSION}" >> $GITHUB_ENV
-
-            - name: Build Images
-              run: |
-                  docker build -t afirmeplay/afirmeplay-backend:v${{env.VERSION}} .
-                  docker build -t afirmeplay/afirmeplay-backend:latest .
-    push:
-        runs-on: [self-hosted, vps-afirme]
-        needs: [build]
-        steps:
-            - name: Checkout
-              uses: actions/checkout@v4
-
-            - name: Login Docker Hub
-              uses: docker/login-action@v3
-              with:
-                  username: ${{ secrets.DOCKER_REGISTRY_USERNAME }}
-                  password: ${{ secrets.DOCKER_REGISTRY_PASSWORD }}
-            - name: Get Version
-              run: |
-                  VERSION=$(cat VERSION)
-                  echo "VERSION=${VERSION}" >> $GITHUB_ENV
-            - name: Push Images
-              run: |
-                  docker push afirmeplay/afirmeplay-backend:v${{ env.VERSION }}
-                  docker push afirmeplay/afirmeplay-backend:latest
-
     deploy:
-        runs-on: [self-hosted, vps-afirme]
+        strategy:
+            matrix:
+                server: [vps-afirme, vps-limoeiro]
+        runs-on:
+            - self-hosted
+            - ${{ matrix.server }}
         environment: dev
-        needs: [push]
         steps:
             - name: Checkout
               uses: actions/checkout@v4
             - name: Deploy
               run: |
-                  export COMPOSE_PROJECT_NAME=afirmeplay_back_dev # Isso faz com que o docker compose separe os containers de produção dos de desenvolvimento
+                  export COMPOSE_PROJECT_NAME=afirmeplay_back_prod # Isso faz com que o docker compose separe os containers de produção dos de desenvolvimento
                   export VERSION=v$(cat VERSION)
                   export DATABASE_URL=${{ secrets.DATABASE_URL }}
                   # JWT Secret Key
@@ -88,5 +55,5 @@ jobs:
                   export PUBLIC_API_BASE_URL=${{ secrets.PUBLIC_API_BASE_URL }}
                   export SUBDOMAIN_MODE=${{ secrets.SUBDOMAIN_MODE }}
 
-                  docker compose -f docker-compose.dev.yml pull
-                  docker compose -f docker-compose.dev.yml up -d
+                  docker compose -f docker-compose.prod.yml pull
+                  docker compose -f docker-compose.prod.yml up -d

@@ -14,7 +14,7 @@ jobs:
         runs-on:
             - self-hosted
             - ${{ matrix.server }}
-        environment: dev
+        environment: prod
         steps:
             - name: Checkout
               uses: actions/checkout@v4

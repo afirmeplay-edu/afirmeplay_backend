@@ -94,16 +94,16 @@ class EvaluationResultService:
                         if str(answer.answer).strip().lower() == str(question.correct_answer).strip().lower():
                             correct_answers_subject += 1
             
-            # Calcular resultado para esta disciplina usando questões respondidas
+            # Calcular resultado para esta disciplina usando TODAS as questões (em branco conta como erro)
             result = EvaluationCalculator.calculate_complete_evaluation(
                 correct_answers=correct_answers_subject,
-                total_questions=answered_questions if answered_questions > 0 else total_questions_subject,
+                total_questions=total_questions_subject,
                 course_name=course_name,
                 subject_name=subject_name,
                 use_simple_calculation=False
             )
             
-            score_percentage = (correct_answers_subject / answered_questions * 100) if answered_questions > 0 else 0
+            score_percentage = (correct_answers_subject / total_questions_subject * 100) if total_questions_subject > 0 else 0
             
             subject_results.append({
                 'subject_id': subject_id,
@@ -623,7 +623,7 @@ class EvaluationResultService:
                         subject_results.append({
                             'student_id': result.student_id,
                             'correct_answers': subject_data.get('correct_answers', 0),
-                            'total_questions': subject_data.get('answered_questions', 0),
+                            'total_questions': subject_data.get('total_questions', 0),
                             'proficiency': subject_data.get('proficiency', 0.0),
                             'grade': subject_data.get('grade', 0.0),
                             'classification': subject_data.get('classification', 'Abaixo do Básico'),

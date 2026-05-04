@@ -49,7 +49,7 @@ from app.services.cartao_resposta.proficiency_by_subject import (
     calcular_proficiencia_por_disciplina,
 )
 from app.utils.decimal_helpers import round_to_two_decimals
-from app.utils.tenant_middleware import city_id_to_schema_name
+from app.utils.tenant_middleware import city_id_to_schema_name, set_search_path
 
 logging.basicConfig(
     level=logging.INFO,
@@ -343,7 +343,9 @@ def main() -> None:
     app = create_app()
     with app.app_context():
         schema = city_id_to_schema_name(city_id)
-        db.session.execute(text(f'SET search_path TO "{schema}", public'))
+        # Importante: o ORM usa `schema_translate_map` para traduzir "tenant" → schema físico (city_*)
+        # (SET search_path não resolve quando as queries referenciam `tenant.*` explicitamente).
+        set_search_path(schema)
 
         if has_restore:
             restore_file = Path(str(args.restore_file).strip())

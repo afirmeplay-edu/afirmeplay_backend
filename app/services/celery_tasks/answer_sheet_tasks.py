@@ -22,6 +22,237 @@ from app.utils.tenant_middleware import city_id_to_schema_name, set_search_path
 logger = logging.getLogger(__name__)
 
 
+def _mirror_recalc_job_to_db(job_id: str) -> None:
+    """
+    Atualiza contadores/status do job em public.answer_sheet_generation_jobs
+    em **transação separada**, para polling funcionar entre workers sem
+    interferir no commit em lote dos AnswerSheetResult na sessão principal.
+    """
+    from sqlalchemy.orm import sessionmaker
+
+    from app import db
+    from app.models.answerSheetGenerationJob import AnswerSheetGenerationJob
+    from app.services.progress_store import get_job
+
+    j = get_job(job_id)
+    if not j:
+        return
+    try:
+        tot = int(j.get("total") or 0)
+        comp = int(j.get("completed") or 0)
+        pct = min(100, int(round(100 * comp / tot))) if tot else 0
+        Session = sessionmaker(bind=db.engine)
+        s = Session()
+        try:
+            row = s.query(AnswerSheetGenerationJob).filter_by(job_id=job_id).first()
+            if not row:
+                return
+            row.completed = comp
+            row.successful = int(j.get("successful") or 0)
+            row.failed = int(j.get("failed") or 0)
+            row.status = j.get("status") or "processing"
+            row.progress_current = comp
+            row.progress_percentage = pct
+            ca = j.get("completed_at")
+            if ca:
+                if isinstance(ca, str):
+                    try:
+                        row.completed_at = datetime.fromisoformat(
+                            ca.replace("Z", "+00:00")
+                        )
+                    except (ValueError, TypeError):
+                        pass
+                elif isinstance(ca, datetime):
+                    row.completed_at = ca
+            s.commit()
+        finally:
+            s.close()
+    except Exception as e:
+        logger.warning("Espelho DB do job de recálculo %s: %s", job_id, e)
+
+
+def run_recalculate_answer_sheet_results_for_gabarito(
+    gabarito_id: str,
+    job_id: str,
+    city_id: str,
+) -> Dict[str, Any]:
+    """
+    Recalcula AnswerSheetResult após edição do gabarito.
+    Pode rodar no worker Celery ou no processo da API (fallback quando broker/Redis indisponível).
+    """
+    from app.models.answerSheetGabarito import AnswerSheetGabarito
+    from app.models.answerSheetResult import AnswerSheetResult
+    from app.models.student import Student
+    from app.services.progress_store import (
+        update_item_processing,
+        update_item_done,
+        update_item_error,
+        complete_job,
+        update_job,
+    )
+    from app.report_analysis.answer_sheet_aggregate_service import (
+        invalidate_answer_sheet_reports_after_gabarito_bulk_update,
+    )
+    from app.services.cartao_resposta.answer_sheet_recalculation_service import (
+        recalculate_answer_sheet_result_fields,
+    )
+
+    if not city_id:
+        raise ValueError("city_id é obrigatório para recálculo (multitenant)")
+    city_schema = city_id_to_schema_name(str(city_id))
+    set_search_path(city_schema)
+
+    gabarito = AnswerSheetGabarito.query.get(gabarito_id)
+    if not gabarito:
+        raise ValueError("Gabarito não encontrado")
+
+    results = AnswerSheetResult.query.filter_by(gabarito_id=gabarito_id).all()
+
+    update_job(
+        job_id,
+        {
+            "stage_message": "Recalculando resultados...",
+            "phase": "recalculating",
+        },
+    )
+    _mirror_recalc_job_to_db(job_id)
+
+    commit_every = 50
+    processed = 0
+    for idx, res in enumerate(results):
+        try:
+            set_search_path(city_schema)
+
+            student = Student.query.get(res.student_id) if res.student_id else None
+            extra = {
+                "student_id": str(res.student_id) if res.student_id else None,
+                "student_name": getattr(student, "name", None) if student else None,
+            }
+            update_item_processing(job_id, idx, extra=extra)
+
+            fields = recalculate_answer_sheet_result_fields(
+                gabarito_obj=gabarito,
+                detected_answers_raw=res.detected_answers,
+            )
+            for k, v in fields.items():
+                setattr(res, k, v)
+            res.corrected_at = datetime.utcnow()
+
+            processed += 1
+            if processed % commit_every == 0:
+                db.session.commit()
+
+            update_item_done(
+                job_id,
+                idx,
+                {
+                    "student_id": str(res.student_id) if res.student_id else None,
+                    "student_name": getattr(student, "name", None) if student else None,
+                    "correct": int(getattr(res, "correct_answers", 0) or 0),
+                    "total": int(getattr(res, "total_questions", 0) or 0),
+                    "percentage": float(getattr(res, "score_percentage", 0.0) or 0.0),
+                    "grade": float(getattr(res, "grade", 0.0) or 0.0),
+                    "classification": getattr(res, "classification", None),
+                    "proficiency": float(getattr(res, "proficiency", 0.0) or 0.0),
+                },
+            )
+            _mirror_recalc_job_to_db(job_id)
+        except Exception as item_err:
+            try:
+                db.session.rollback()
+            except Exception:
+                pass
+            update_item_error(
+                job_id,
+                idx,
+                str(item_err),
+                extra={"student_id": str(res.student_id) if res.student_id else None},
+            )
+            _mirror_recalc_job_to_db(job_id)
+
+    db.session.commit()
+
+    try:
+        invalidate_answer_sheet_reports_after_gabarito_bulk_update(
+            gabarito_id, city_id, commit=True
+        )
+    except Exception as inv_err:
+        logger.warning("Invalidate answer_sheet report cache (bulk): %s", inv_err)
+
+    complete_job(job_id)
+    update_job(
+        job_id,
+        {
+            "status": "completed",
+            "stage_message": "Concluído",
+            "phase": "done",
+        },
+    )
+    _mirror_recalc_job_to_db(job_id)
+
+    return {
+        "success": True,
+        "job_id": job_id,
+        "gabarito_id": gabarito_id,
+        "total": len(results),
+    }
+
+
+@celery_app.task(
+    bind=True,
+    name='answer_sheet_tasks.recalculate_answer_sheet_results_for_gabarito',
+    max_retries=1,
+    default_retry_delay=30,
+    time_limit=1800,
+    soft_time_limit=1740,
+)
+def recalculate_answer_sheet_results_for_gabarito(
+    self: Task,
+    gabarito_id: str,
+    job_id: str,
+    city_id: str,
+) -> Dict[str, Any]:
+    """
+    Wrapper Celery: delega para run_recalculate_answer_sheet_results_for_gabarito.
+    """
+    from app.services.progress_store import complete_job, update_job
+
+    try:
+        return run_recalculate_answer_sheet_results_for_gabarito(
+            gabarito_id, job_id, city_id
+        )
+    except Exception as e:
+        logger.error("[CELERY-RECALC] ❌ %s", str(e), exc_info=True)
+        try:
+            db.session.rollback()
+        except Exception:
+            pass
+        try:
+            update_job(
+                job_id,
+                {
+                    "status": "failed",
+                    "error": str(e),
+                    "stage_message": "Falhou",
+                    "phase": "done",
+                },
+            )
+        except Exception:
+            pass
+        try:
+            complete_job(job_id)
+        except Exception:
+            pass
+        if self.request.retries < self.max_retries:
+            raise self.retry(exc=e)
+        return {
+            "success": False,
+            "job_id": job_id,
+            "gabarito_id": gabarito_id,
+            "error": str(e),
+        }
+
+
 @celery_app.task(
     bind=True,
     name='answer_sheet_tasks.upload_answer_sheets_zip_async',

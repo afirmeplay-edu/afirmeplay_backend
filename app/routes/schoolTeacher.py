@@ -208,6 +208,7 @@ def get_school_teachers():
                 'updated_at': str(vinculo.updated_at) if vinculo.updated_at else None,
                 'professor': {
                     'id': teacher.id,
+                    'user_id': teacher.user_id,
                     'name': teacher.name,
                     'email': user.email if user else None
                 } if teacher else None,

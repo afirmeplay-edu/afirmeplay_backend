@@ -23,6 +23,9 @@ from app.services.progress_store import (
     create_job, update_item_processing, update_item_done,
     update_item_error, complete_job, get_job, purge_answer_sheet_job_keys,
 )
+from app.report_analysis.answer_sheet_aggregate_service import (
+    any_configured_redis_tcp_unreachable,
+)
 from app.services.answer_sheet_job_store import (
     create_answer_sheet_job,
     get_answer_sheet_job,
@@ -38,6 +41,7 @@ from app.utils.decimal_helpers import round_to_two_decimals
 from typing import Dict, Optional, List, Any, Tuple, Set
 from collections import defaultdict
 from sqlalchemy import cast, String, desc
+from sqlalchemy.orm import joinedload
 from app.services.cartao_resposta.answer_sheet_gabarito_generation import (
     AnswerSheetGabaritoGeneration,
     enrich_scope_snapshot,
@@ -56,6 +60,14 @@ from io import BytesIO
 from datetime import datetime, timedelta
 from urllib.parse import urlencode
 from calendar import monthrange
+from app.services.ai_analysis_service import AIAnalysisService
+from app.services.ai_redis_cache import (
+    get_redis_client as _get_ai_redis_client,
+    get_status as _ai_cache_get_status,
+    make_cache_key as _ai_make_cache_key,
+    set_processing as _ai_cache_set_processing,
+)
+from app.services.celery_tasks.ai_analysis_cache_tasks import generate_ai_analysis_json_to_redis
 
 bp = Blueprint('answer_sheets', __name__, url_prefix='/answer-sheets')
 
@@ -1811,6 +1823,221 @@ def get_gabarito(gabarito_id):
         return jsonify({"error": f"Erro ao buscar gabarito: {str(e)}"}), 500
 
 
+@bp.route('/gabaritos/<string:gabarito_id>', methods=['PATCH', 'POST'])
+@jwt_required()
+@role_required("admin", "professor", "coordenador", "diretor", "tecadm")
+@requires_city_context
+def patch_gabarito_correct_answers(gabarito_id: str):
+    """
+    Edita APENAS o gabarito (correct_answers) e dispara recálculo dos resultados.
+
+    Body:
+        { "correct_answers": { "1": "A", "2": "B", ... } }
+
+    Métodos:
+        - PATCH: semântica REST de edição parcial.
+        - POST: mesmo corpo e comportamento; use no browser se o preflight CORS
+          do ambiente não listar PATCH em Access-Control-Allow-Methods.
+
+    Returns (202 em sucesso):
+        { status, job_id, gabarito_id, polling_url, task_id?, recalculated_sync }
+
+        Sempre **202 Accepted** quando o recálculo foi aceito/concluído com sucesso
+        (incluindo execução síncrona). O cliente usa `status` e `recalculated_sync`
+        para saber se precisa do polling; não use só o código HTTP para isso.
+    """
+    try:
+        user = get_current_user_from_token()
+        if not user:
+            return jsonify({"error": "Usuário não encontrado"}), 401
+
+        gabarito = AnswerSheetGabarito.query.get(gabarito_id)
+        if not gabarito:
+            return jsonify({"error": "Gabarito não encontrado"}), 404
+
+        # Permissão: apenas criador (padrão já adotado em outras rotas do módulo)
+        if gabarito.created_by and str(gabarito.created_by) != str(user.get("id")):
+            return jsonify({"error": "Você não tem permissão para editar este gabarito"}), 403
+        if not gabarito.created_by:
+            return jsonify({"error": "Gabarito sem criador definido não pode ser editado"}), 403
+
+        data = request.get_json() or {}
+        if "correct_answers" not in data:
+            return jsonify({"error": "Campo 'correct_answers' é obrigatório"}), 400
+
+        from app.services.cartao_resposta.answer_sheet_recalculation_service import (
+            validate_correct_answers_payload,
+        )
+
+        ok, err, normalized = validate_correct_answers_payload(
+            data.get("correct_answers"),
+            int(gabarito.num_questions or 0),
+        )
+        if not ok:
+            return jsonify({"error": err}), 400
+
+        gabarito.correct_answers = {str(k): v for k, v in normalized.items()}
+        db.session.commit()
+
+        # Criar job de recálculo (um item por AnswerSheetResult)
+        results = (
+            AnswerSheetResult.query.options(joinedload(AnswerSheetResult.student))
+            .filter_by(gabarito_id=gabarito_id)
+            .all()
+        )
+
+        job_id = str(uuid.uuid4())
+        items_meta = []
+        for r in results:
+            st = getattr(r, "student", None)
+            items_meta.append(
+                {
+                    "student_id": str(r.student_id) if r.student_id else None,
+                    "student_name": getattr(st, "name", "") if st else "",
+                }
+            )
+
+        create_job(
+            job_id,
+            len(items_meta),
+            gabarito_id=str(gabarito_id),
+            user_id=str(user.get("id")),
+            task_ids=[],
+            items_meta=items_meta if items_meta else None,
+            stage_message="Recalculando resultados...",
+        )
+
+        context = get_current_tenant_context()
+        city_id = str(context.city_id) if context else None
+        if not city_id:
+            return jsonify({"error": "Contexto de município não encontrado"}), 400
+
+        # Espelho em public.answer_sheet_generation_jobs: GET /recalculate-jobs/.../status
+        # em outro worker ou sem Redis ainda encontra o job (contadores/status).
+        try:
+            from app.services.answer_sheet_job_store import create_answer_sheet_job
+            from sqlalchemy.exc import IntegrityError
+
+            create_answer_sheet_job(
+                job_id,
+                len(items_meta),
+                str(gabarito_id),
+                str(user.get("id")),
+                [],
+                city_id,
+                scope_type="recalculate_gabarito",
+            )
+        except IntegrityError:
+            db.session.rollback()
+            logging.debug("Job de recálculo %s já existia na tabela (reuso)", job_id)
+        except Exception as db_job_err:
+            db.session.rollback()
+            logging.warning(
+                "Espelho DB do job de recálculo não criado (GET status pode falhar entre workers): %s",
+                db_job_err,
+            )
+
+        # Disparar task Celery (ou recálculo síncrono se broker/Redis indisponível)
+        from app.services.celery_tasks.answer_sheet_tasks import (
+            recalculate_answer_sheet_results_for_gabarito,
+            run_recalculate_answer_sheet_results_for_gabarito,
+        )
+        from app.services.progress_store import update_job
+        from app.services.answer_sheet_job_store import update_answer_sheet_job
+
+        task_id = None
+        recalculated_sync = False
+
+        def _run_sync_recalc() -> None:
+            run_recalculate_answer_sheet_results_for_gabarito(
+                str(gabarito_id), job_id, city_id
+            )
+
+        # Evita chamar apply_async quando algum Redis configurado não aceita TCP:
+        # o cliente tenta reconectar dezenas de vezes e segura a requisição ~20s+.
+        if any_configured_redis_tcp_unreachable():
+            logging.warning(
+                "Redis inacessível (pré-check TCP); recálculo síncrono para gabarito %s",
+                gabarito_id,
+            )
+            try:
+                _run_sync_recalc()
+                recalculated_sync = True
+            except Exception as sync_err:
+                logging.error(
+                    "Recálculo síncrono falhou para gabarito %s: %s",
+                    gabarito_id,
+                    sync_err,
+                    exc_info=True,
+                )
+                return jsonify(
+                    {
+                        "error": "Recálculo falhou (Redis inacessível e execução síncrona falhou).",
+                        "details": str(sync_err),
+                        "job_id": job_id,
+                    }
+                ), 500
+        else:
+            try:
+                # ignore_result reduz uso do result backend (Redis) ao publicar a task
+                task = recalculate_answer_sheet_results_for_gabarito.apply_async(
+                    args=[str(gabarito_id), job_id, city_id],
+                    ignore_result=True,
+                )
+                task_id = task.id
+                update_job(job_id, {"task_ids": [task.id]})
+                try:
+                    update_answer_sheet_job(job_id, {"task_ids": [task.id]})
+                except Exception as upd_db_err:
+                    logging.debug(
+                        "Não foi possível gravar task_ids no job DB %s: %s", job_id, upd_db_err
+                    )
+            except Exception as enqueue_err:
+                logging.warning(
+                    "Fila Celery indisponível (%s); executando recálculo síncrono",
+                    enqueue_err,
+                )
+                try:
+                    _run_sync_recalc()
+                    recalculated_sync = True
+                except Exception as sync_err:
+                    logging.error(
+                        "Recálculo síncrono falhou para gabarito %s: %s",
+                        gabarito_id,
+                        sync_err,
+                        exc_info=True,
+                    )
+                    return jsonify(
+                        {
+                            "error": "Recálculo falhou (Celery indisponível e execução síncrona falhou).",
+                            "details": str(sync_err),
+                            "job_id": job_id,
+                        }
+                    ), 500
+
+        payload_status = "completed" if recalculated_sync else "processing"
+
+        # Sempre 202: clientes que só aceitam 202 como “iniciou” quebravam com 200
+        # quando o recálculo rodava síncrono (Redis/Celery indisponível).
+        return (
+            jsonify(
+                {
+                    "status": payload_status,
+                    "job_id": job_id,
+                    "task_id": task_id,
+                    "gabarito_id": str(gabarito_id),
+                    "polling_url": f"/answer-sheets/recalculate-jobs/{job_id}/status",
+                    "recalculated_sync": recalculated_sync,
+                }
+            ),
+            202,
+        )
+    except Exception as e:
+        db.session.rollback()
+        logging.error("Erro ao editar gabarito %s: %s", gabarito_id, e, exc_info=True)
+        return jsonify({"error": "Erro ao editar gabarito"}), 500
+
+
 @bp.route('/<string:gabarito_id>', methods=['DELETE'])  # Rota alternativa para compatibilidade
 @jwt_required()
 @role_required("admin", "professor", "coordenador", "diretor", "tecadm")
@@ -2426,14 +2653,58 @@ def _determinar_escopo_busca_cartao(
         gabarito_id = str(gabarito).strip() if _is_valid_filter(gabarito) else None
 
         if gabarito_id:
-            # Professor só vê seus gabaritos
-            if user and user.get('role') == 'professor':
-                g = AnswerSheetGabarito.query.filter_by(id=gabarito_id, created_by=str(user['id'])).first()
-                if not g:
-                    return None
-            else:
-                g = AnswerSheetGabarito.query.get(gabarito_id)
-                if not g:
+            # Validar acesso ao gabarito:
+            # - Admin/tecadm/diretor/coordenador: basta existir
+            # - Professor: pode acessar se (a) criou OU (b) o gabarito está vinculado a turma/escola em que ele está vinculado
+            g = AnswerSheetGabarito.query.get(gabarito_id)
+            if not g:
+                return None
+            if user and str(user.get('role') or '').lower() == 'professor':
+                created_by_ok = str(getattr(g, "created_by", None) or "") == str(user.get("id"))
+                vinculado_ok = False
+                try:
+                    from app.models.teacher import Teacher
+                    from app.models.teacherClass import TeacherClass
+
+                    teacher = Teacher.query.filter_by(user_id=user["id"]).first()
+                    if teacher:
+                        tc = TeacherClass.query.filter_by(teacher_id=teacher.id).all()
+                        teacher_class_ids = [t.class_id for t in tc if t.class_id]
+                        if teacher_class_ids:
+                            teacher_school_ids = list(
+                                {
+                                    c.school_id
+                                    for c in Class.query.filter(Class.id.in_(teacher_class_ids)).all()
+                                    if c.school_id
+                                }
+                            )
+                            vinculado_ok = (
+                                (getattr(g, "class_id", None) in teacher_class_ids)
+                                or (getattr(g, "school_id", None) in teacher_school_ids)
+                            )
+                except Exception:
+                    vinculado_ok = False
+                # Caso city/escopos múltiplos: school_id/class_id podem ser nulos; validar pelo escopo real
+                # (union de gerações/batch/resultados) intersectando com as turmas do professor.
+                if not vinculado_ok:
+                    try:
+                        from app.report_analysis.answer_sheet_report_builder import (
+                            union_target_class_ids_for_gabarito,
+                        )
+
+                        allowed = set()
+                        try:
+                            from app.permissions.utils import get_teacher_classes
+
+                            allowed = {str(x) for x in (get_teacher_classes(user["id"]) or []) if x}
+                        except Exception:
+                            allowed = set()
+                        if allowed:
+                            tgt = {str(x) for x in (union_target_class_ids_for_gabarito(g) or set()) if x}
+                            vinculado_ok = bool(tgt & allowed)
+                    except Exception:
+                        pass
+                if not (created_by_ok or vinculado_ok):
                     return None
             # Turmas que têm pelo menos um resultado deste gabarito (opcionalmente no mês de corrected_at)
             _rq = AnswerSheetResult.query.filter_by(gabarito_id=gabarito_id)
@@ -2522,13 +2793,44 @@ def _get_nome_granularidade_cartao(nivel, scope_info, escola_nome, serie_nome):
 
 def _get_empty_statistics_gerais_cartao(scope_info, nivel_granularidade):
     city_data = scope_info.get('city_data')
+    escola_nome = None
+    serie_nome = None
+
+    # Mesmo sem alunos/turmas no recorte, devolver o "contexto" selecionado (UX)
+    try:
+        if scope_info.get('escola') and _is_valid_filter(scope_info.get('escola')):
+            s = School.query.get(scope_info['escola'])
+            escola_nome = s.name if s else None
+    except Exception:
+        escola_nome = None
+
+    try:
+        if scope_info.get('serie') and _is_valid_filter(scope_info.get('serie')):
+            g = Grade.query.get(scope_info['serie'])
+            serie_nome = g.name if g else None
+    except Exception:
+        serie_nome = None
+
+    # Se houver gabarito, tentar inferir a série a partir dele (ex.: gabarito por série)
+    try:
+        if serie_nome is None and scope_info.get('gabarito') and _is_valid_filter(scope_info.get('gabarito')):
+            gab = AnswerSheetGabarito.query.get(str(scope_info.get('gabarito')).strip())
+            if gab:
+                if gab.grade_name and str(gab.grade_name).strip():
+                    serie_nome = gab.grade_name.strip()
+                elif gab.grade_id:
+                    g = Grade.query.get(gab.grade_id)
+                    serie_nome = g.name if g else None
+    except Exception:
+        pass
+
     return {
         "tipo": nivel_granularidade,
-        "nome": _get_nome_granularidade_cartao(nivel_granularidade, scope_info, None, None),
+        "nome": _get_nome_granularidade_cartao(nivel_granularidade, scope_info, escola_nome, serie_nome),
         "estado": scope_info.get('estado', 'Todos os estados'),
         "municipio": city_data.name if city_data else "Todos os municípios",
-        "escola": None,
-        "serie": None,
+        "escola": escola_nome,
+        "serie": serie_nome,
         "total_escolas": 0,
         "total_series": 0,
         "total_turmas": 0,
@@ -3370,8 +3672,10 @@ def _gerar_tabela_detalhada_cartao(scope_info, nivel_granularidade, gabarito_id,
             detected = {int(k): v for k, v in detected.items() if k is not None}
             respostas_por_questao = build_respostas_por_questao(q_numbers, detected)
             total_acertos = sum(1 for x in respostas_por_questao if x.get('acertou'))
-            total_erros = sum(1 for x in respostas_por_questao if x.get('respondeu') and not x.get('acertou'))
             total_respondidas = sum(1 for x in respostas_por_questao if x.get('respondeu'))
+            total_questoes_disciplina = len(q_numbers)
+            # Erros incluem: marcadas erradas, inválidas e em branco (não respondidas)
+            total_erros = max(0, total_questoes_disciplina - total_acertos)
             pbs = (r.proficiency_by_subject or {}) if r else {}
             if isinstance(pbs, str):
                 try:
@@ -3402,13 +3706,14 @@ def _gerar_tabela_detalhada_cartao(scope_info, nivel_granularidade, gabarito_id,
                 "total_acertos": total_acertos,
                 "total_erros": total_erros,
                 "total_respondidas": total_respondidas,
-                "total_questoes_disciplina": len(q_numbers),
-                "total_em_branco": len(q_numbers) - total_respondidas,
+                "total_questoes_disciplina": total_questoes_disciplina,
+                "total_em_branco": total_questoes_disciplina - total_respondidas,
                 "nivel_proficiencia": disciplina_classificacao,
                 "nota": round(disciplina_nota, 2),
                 "proficiencia": round(disciplina_proficiencia, 2) if disciplina_proficiencia else 0.0,
                 "status": "concluida" if r else "pendente",
-                "percentual_acertos": round((total_acertos / total_respondidas * 100), 2) if total_respondidas > 0 else 0.0
+                # Percentual deve considerar o total de questões da disciplina (inclui em branco como erro)
+                "percentual_acertos": round((total_acertos / total_questoes_disciplina * 100), 2) if total_questoes_disciplina > 0 else 0.0
             })
         disciplinas_out.append({
             "id": subject_id,
@@ -3649,7 +3954,9 @@ def _obter_gabaritos_por_municipio_cartao(
     class_ids_city = [c.id for c in Class.query.filter(Class.school_id.in_(school_ids_city)).all()] if school_ids_city else []
     city_name = (city.name or "").strip()
     city_state = (city.state or "").strip()
-    q = AnswerSheetGabarito.query.with_entities(AnswerSheetGabarito.id, AnswerSheetGabarito.title)
+    # Usamos o modelo completo porque o pós-filtro (professor) precisa ler created_by/class_id/school_id
+    # e resolver escopo real via gerações/batch/resultados.
+    q = AnswerSheetGabarito.query
     conditions = []
     if school_ids_city:
         conditions.append(AnswerSheetGabarito.school_id.in_(school_ids_city))
@@ -3678,21 +3985,31 @@ def _obter_gabaritos_por_municipio_cartao(
         )
     )
     # Admin (scope 'all') vê todos os gabaritos do município.
-    # Tecadm vê todos do seu município (não restringir por created_by).
-    # Diretor/Coordenador veem todos os gabaritos da sua escola (há filtro por school_id logo abaixo).
-    # Outros usuários (ex.: professor) ficam restritos ao que criaram.
-    if permissao.get('scope') != 'all' and str(user.get('role')) not in ('tecadm', 'diretor', 'coordenador'):
+    # Tecadm vê todos do seu município (sem restringir por created_by).
+    # Diretor/Coordenador com scope escola: filtro por escola abaixo; aqui não restringir por created_by.
+    # Professor: regra específica abaixo (o que criou OU escopo turmas/escolas).
+    # Demais perfis: apenas o que criaram.
+    user_role = str(user.get("role") or "").lower()
+    if permissao.get('scope') != 'all' and user_role not in (
+        'tecadm',
+        'diretor',
+        'coordenador',
+        'professor',
+    ):
         q = q.filter(AnswerSheetGabarito.created_by == str(user['id']))
     if permissao.get('scope') == 'escola' and user.get('role') in ['diretor', 'coordenador']:
         from app.models.manager import Manager
         manager = Manager.query.filter_by(user_id=user['id']).first()
         if manager and manager.school_id:
-            q = q.filter(AnswerSheetGabarito.school_id == manager.school_id)
+            # Não filtrar somente por school_id aqui: gabaritos scope_type="city" podem ter school_id/class_id nulos.
+            # O filtro correto para diretor/coordenador será aplicado via pós-filtro abaixo, usando o escopo real.
+            pass
         else:
             return []
     elif permissao.get('scope') == 'escola' and user.get('role') == 'professor':
         from app.models.teacher import Teacher
         from app.models.teacherClass import TeacherClass
+        from sqlalchemy import or_
         teacher = Teacher.query.filter_by(user_id=user['id']).first()
         if not teacher:
             return []
@@ -3701,17 +4018,107 @@ def _obter_gabaritos_por_municipio_cartao(
         if not teacher_class_ids:
             return []
         teacher_school_ids = list({c.school_id for c in Class.query.filter(Class.id.in_(teacher_class_ids)).all() if c.school_id})
-        if teacher_school_ids:
-            q = q.filter(AnswerSheetGabarito.school_id.in_(teacher_school_ids))
-        else:
-            return []
+        # Observação importante:
+        # Para professor, não restringimos o SQL apenas por created_by/class_id/school_id, porque gabaritos
+        # com scope_type="city" (ou múltiplas gerações) podem ter school_id/class_id nulos. O filtro correto
+        # precisa considerar answer_sheet_generations (+ batch + resultados). Isso é aplicado logo abaixo
+        # como pós-filtro em Python, usando union_target_class_ids_for_gabarito ∩ turmas do professor.
+        pass
     gabaritos = q.order_by(AnswerSheetGabarito.created_at.desc()).all()
+
+    # ✅ Importante: gabaritos com scope_type="city" (ou gerados por escopos múltiplos) podem ter
+    # school_id/class_id nulos. Nesses casos, o escopo real vem de answer_sheet_generations (+ batch + resultados).
+    # Para manter consistente com as rotas de detalhe/relatório, aplicamos um pós-filtro para professor
+    # baseado na interseção entre as turmas-alvo do gabarito e as turmas do professor.
+    user_role = str(user.get("role") or "").lower()
+    if user_role == "professor" and user:
+        # Pós-filtro robusto: nunca "zera tudo" por falha em um gabarito.
+        from app.permissions.utils import get_teacher_classes, get_teacher_schools
+        from app.report_analysis.answer_sheet_report_builder import (
+            union_target_class_ids_for_gabarito,
+        )
+
+        allowed_class_ids = {str(x) for x in (get_teacher_classes(user["id"]) or []) if x}
+        allowed_school_ids = {str(x) for x in (get_teacher_schools(user["id"]) or []) if x}
+
+        if not allowed_class_ids and not allowed_school_ids:
+            gabaritos = [
+                g for g in gabaritos if str(getattr(g, "created_by", "") or "") == str(user["id"])
+            ]
+        else:
+            filtered_gabs = []
+            for g in gabaritos:
+                # (a) Criado pelo professor
+                if str(getattr(g, "created_by", "") or "") == str(user["id"]):
+                    filtered_gabs.append(g)
+                    continue
+                # (b) Vínculo direto por turma/escola no registro do gabarito
+                if getattr(g, "class_id", None) and str(getattr(g, "class_id")) in allowed_class_ids:
+                    filtered_gabs.append(g)
+                    continue
+                if getattr(g, "school_id", None) and str(getattr(g, "school_id")) in allowed_school_ids:
+                    filtered_gabs.append(g)
+                    continue
+                # (c) Vínculo por escopo real (geraçōes/batch/resultados)
+                try:
+                    tgt = {str(x) for x in (union_target_class_ids_for_gabarito(g) or set()) if x}
+                except Exception:
+                    tgt = set()
+                if tgt and (tgt & allowed_class_ids):
+                    filtered_gabs.append(g)
+            gabaritos = filtered_gabs
+
+    # Pós-filtro para diretor/coordenador (escopo escola):
+    # - Gabaritos explícitos da escola (school_id) continuam
+    # - Gabaritos city/escopos múltiplos entram se o escopo real (geraçōes/batch/resultados) tiver
+    #   ao menos uma turma na escola do manager.
+    if user_role in ("diretor", "coordenador") and user and permissao.get("scope") == "escola":
+        try:
+            from app.models.manager import Manager
+            from app.report_analysis.answer_sheet_report_builder import (
+                get_answer_sheet_target_classes_for_report,
+            )
+
+            manager = Manager.query.filter_by(user_id=user["id"]).first()
+            mid = str(getattr(manager, "school_id", None) or "")
+            if not mid:
+                gabaritos = []
+            else:
+                keep = []
+                for g in gabaritos:
+                    if getattr(g, "school_id", None) and str(getattr(g, "school_id")) == mid:
+                        keep.append(g)
+                        continue
+                    try:
+                        classes = get_answer_sheet_target_classes_for_report(
+                            g, "city", str(municipio_id)
+                        )
+                    except Exception:
+                        classes = []
+                    if any(str(getattr(c, "school_id", "")) == mid for c in (classes or [])):
+                        keep.append(g)
+                gabaritos = keep
+        except Exception:
+            # Em erro, manter comportamento mais restritivo: apenas school_id explícito.
+            try:
+                from app.models.manager import Manager
+
+                manager = Manager.query.filter_by(user_id=user["id"]).first()
+                mid = str(getattr(manager, "school_id", None) or "")
+            except Exception:
+                mid = ""
+            if mid:
+                gabaritos = [g for g in gabaritos if str(getattr(g, "school_id", "") or "") == mid]
+            else:
+                gabaritos = []
     seen = set()
     out = []
     for g in gabaritos:
-        if g[0] not in seen:
-            seen.add(g[0])
-            out.append({"id": str(g[0]), "titulo": g[1] or "Gabarito"})
+        gid = str(getattr(g, "id", "") or "")
+        if not gid or gid in seen:
+            continue
+        seen.add(gid)
+        out.append({"id": gid, "titulo": (getattr(g, "title", None) or "Gabarito")})
     if not periodo_bounds or not out:
         return out
     school_ids_city = [s.id for s in School.query.filter(School.city_id == municipio_id).all()]
@@ -4093,6 +4500,7 @@ def get_resultados_agregados():
         serie = request.args.get('serie')
         turma = request.args.get('turma')
         gabarito = request.args.get('gabarito')
+        ai_analises = (request.args.get("ai_analises") or "").strip().lower() in {"1", "true", "yes"}
         periodo_raw = request.args.get('periodo')
         periodo_bounds = None
         if periodo_raw and str(periodo_raw).strip():
@@ -4146,7 +4554,7 @@ def get_resultados_agregados():
             scope_info, nivel_granularidade, user, periodo_bounds
         )
 
-        return jsonify({
+        response_payload = {
             "nivel_granularidade": nivel_granularidade,
             "filtros_aplicados": {
                 "estado": estado,
@@ -4166,10 +4574,665 @@ def get_resultados_agregados():
             "tabela_detalhada": tabela_detalhada,
             "ranking": ranking,
             "opcoes_proximos_filtros": opcoes_proximos_filtros
-        }), 200
+        }
+
+        if ai_analises:
+            try:
+                ttl_sec = int(os.getenv("AI_ANALYSIS_CACHE_TTL_SEC", "3600"))
+                prompt_version = str(os.getenv("AI_ANALYSIS_PROMPT_VERSION", "v1"))
+                user_id = str(user.get("id") or "")
+
+                # Série/Ano (prioriza filtro)
+                serie_ano = (str(serie).strip() if serie and str(serie).strip() and str(serie).strip().lower() != "all" else "")
+                if not serie_ano:
+                    # fallback: tenta do primeiro aluno
+                    alunos_geral = (((tabela_detalhada or {}).get("geral") or {}).get("alunos") or [])
+                    if alunos_geral:
+                        serie_ano = str(alunos_geral[0].get("serie") or "").strip()
+
+                # Componente curricular: lista de disciplinas presentes
+                componentes = []
+                for row in (resultados_por_disciplina or []):
+                    dn = (row.get("disciplina") if isinstance(row, dict) else None) or ""
+                    dn = str(dn).strip()
+                    if dn:
+                        componentes.append(dn)
+                componentes = list(dict.fromkeys(componentes))
+                componente_curricular = componentes[0] if len(componentes) == 1 else "all"
+
+                # Níveis de proficiência alcançados (distribuição + médias)
+                distrib = (estatisticas_gerais or {}).get("distribuicao_classificacao_geral") or {}
+                media_prof = (estatisticas_gerais or {}).get("media_proficiencia_geral")
+                media_nota = (estatisticas_gerais or {}).get("media_nota_geral") or (estatisticas_gerais or {}).get("media_nota")
+                niveis_proficiencia_alcancados = {
+                    "media_proficiencia_geral": media_prof,
+                    "media_nota_geral": media_nota,
+                    "distribuicao_classificacao_geral": distrib,
+                }
+
+                # Habilidades foco: coletar códigos (skills.code) da tabela detalhada
+                habilidades_codes = []
+                for disc in ((tabela_detalhada or {}).get("disciplinas") or []):
+                    for q in (disc.get("questoes") or []):
+                        for sk in (q.get("skills") or []):
+                            code = (sk.get("code") if isinstance(sk, dict) else "") or ""
+                            code = str(code).strip()
+                            if code and code.upper() != "N/A":
+                                habilidades_codes.append(code)
+                habilidades_codes = list(dict.fromkeys(habilidades_codes))
+
+                # Referência da avaliação (gabarito)
+                gabarito_title = ""
+                try:
+                    gab = AnswerSheetGabarito.query.get(str(gabarito_id)) if gabarito_id else None
+                    gabarito_title = (getattr(gab, "title", None) or "").strip() if gab else ""
+                except Exception:
+                    gabarito_title = ""
+
+                prompt = (
+                    "Aja como um Especialista em Avaliação Educacional e Gestor Pedagógico Orientado a Dados.\n"
+                    "Sua tarefa é gerar um Relatório Escolar Analítico e Reflexivo com base nos resultados de uma avaliação aplicada.\n\n"
+                    "[DADOS DE ENTRADA NECESSÁRIOS]\n"
+                    f"• Série/Ano Avaliado: {serie_ano}\n"
+                    f"• Componente Curricular: {componente_curricular}\n"
+                    f"• Níveis de Proficiência Alcançados: {niveis_proficiencia_alcancados}\n"
+                    f"• Habilidades Foco da Avaliação: {habilidades_codes}\n\n"
+                    "[REGRAS E DIRETRIZES ESTRITAS DE GERAÇÃO]\n"
+                    "1. Adaptação de Nomenclatura de Etapa: se Anos Iniciais (1º ao 4º), use matriz de final de ciclo dos Anos Iniciais; "
+                    "NUNCA mencione \"5º ano\". Se Anos Finais (6º ao 8º), use matriz de final de ciclo dos Anos Finais; NUNCA mencione \"9º ano\".\n"
+                    "2. Restrição de Vocabulário: sob nenhuma circunstância utilize a sigla \"SAEB\" ou faça referência ao \"Sistema de Avaliação da Educação Básica\". "
+                    "Use termos como \"avaliação aplicada\", \"instrumento avaliativo\", \"diagnóstico da rede\" ou \"a presente prova\".\n"
+                    "3. Princípio da Cumulatividade: deixe claro que a escala está organizada em níveis da menor para a maior proficiência e que cada nível acumula saberes dos níveis anteriores.\n"
+                    "4. Alerta para Níveis Críticos: para estudantes no Nível 0 (desempenho menor que 125), emitir alerta de \"atenção especial\".\n\n"
+                    "[ESTRUTURA OBRIGATÓRIA DO RELATÓRIO]\n"
+                    "I. Panorama Geral da Avaliação Aplicada\n"
+                    "II. Reflexão sobre os Níveis Alcançados e Habilidades (para cada nível identificado)\n"
+                    "III. Encaminhamentos e Cultura Digital (Opcional, se aplicável)\n\n"
+                    "IMPORTANTE: Responda APENAS com um JSON válido (objeto) e nada além do JSON. "
+                    "O JSON deve conter as chaves: panorama_geral, reflexao_niveis (lista), encaminhamentos_cultura_digital (opcional), metadados_entrada.\n"
+                    f"Metadados adicionais: titulo_avaliacao={gabarito_title or 'Cartão-resposta'}.\n"
+                )
+
+                cache_key = _ai_make_cache_key(
+                    "answer_sheets_resultados_agregados",
+                    user_id=user_id,
+                    prompt_version=prompt_version,
+                    key_parts={
+                        "estado": estado,
+                        "municipio": municipio,
+                        "escola": escola,
+                        "serie": serie,
+                        "turma": turma,
+                        "gabarito": gabarito,
+                        "periodo": (str(periodo_raw).strip() if periodo_raw and str(periodo_raw).strip() else None),
+                    },
+                )
+
+                cached = _ai_cache_get_status(cache_key)
+                if cached and cached.get("status") == "ready":
+                    response_payload["analise_ia"] = cached.get("result") or {}
+                    response_payload["analise_ia_status"] = "ready"
+                    response_payload["analise_ia_cache_key"] = cache_key
+                else:
+                    # Se Redis indisponível, faz fallback síncrono para não quebrar fluxo
+                    r = _get_ai_redis_client()
+                    if not r:
+                        ai_service = AIAnalysisService()
+                        response_payload["analise_ia"] = ai_service.analyze_intervention_plan_json(prompt)
+                        response_payload["analise_ia_status"] = "ready"
+                    else:
+                        # Marcar processing com NX (evita duplicar em paralelo)
+                        should_enqueue = _ai_cache_set_processing(cache_key, ttl_sec=ttl_sec)
+                        if should_enqueue:
+                            generate_ai_analysis_json_to_redis.delay(
+                                cache_key=cache_key,
+                                prompt=prompt,
+                                ttl_sec=ttl_sec,
+                            )
+                        response_payload["analise_ia_status"] = (cached or {}).get("status") or "processing"
+                        response_payload["analise_ia_cache_key"] = cache_key
+            except Exception as _exc:
+                response_payload["analise_ia"] = {"error": "Falha ao gerar análise de IA", "details": str(_exc)}
+                response_payload["analise_ia_status"] = "error"
+
+        return jsonify(response_payload), 200
     except Exception as e:
         logging.error(f"Erro ao obter resultados agregados: {str(e)}", exc_info=True)
         return jsonify({"error": "Erro ao obter resultados agregados", "details": str(e)}), 500
+
+
+@bp.route("/resultados-agregados/analise-ia", methods=["GET"])
+@jwt_required()
+@role_required("admin", "professor", "coordenador", "diretor", "tecadm")
+def get_resultados_agregados_analise_ia():
+    """
+    Retorna apenas o status/resultado da análise de IA (JSON) para resultados agregados de cartão-resposta.
+    - Consulta Redis primeiro (sem recalcular agregados).
+    - Se não houver cache, calcula 1x, dispara Celery e devolve processing.
+    """
+    try:
+        user = get_current_user_from_token()
+        if not user:
+            return jsonify({"error": "Usuário não encontrado"}), 401
+
+        estado = request.args.get("estado")
+        municipio = request.args.get("municipio")
+        escola = request.args.get("escola")
+        serie = request.args.get("serie")
+        turma = request.args.get("turma")
+        gabarito = request.args.get("gabarito")
+        periodo_raw = request.args.get("periodo")
+
+        if not _is_valid_filter(estado):
+            return jsonify({"error": "Estado é obrigatório e não pode ser 'all'"}), 400
+        if not _is_valid_filter(municipio):
+            return jsonify({"error": "Município é obrigatório"}), 400
+
+        ttl_sec = int(os.getenv("AI_ANALYSIS_CACHE_TTL_SEC", "3600"))
+        prompt_version = str(os.getenv("AI_ANALYSIS_PROMPT_VERSION", "v1"))
+        user_id = str(user.get("id") or "")
+        cache_key = _ai_make_cache_key(
+            "answer_sheets_resultados_agregados",
+            user_id=user_id,
+            prompt_version=prompt_version,
+            key_parts={
+                "estado": estado,
+                "municipio": municipio,
+                "escola": escola,
+                "serie": serie,
+                "turma": turma,
+                "gabarito": gabarito,
+                "periodo": (str(periodo_raw).strip() if periodo_raw and str(periodo_raw).strip() else None),
+            },
+        )
+
+        cached = _ai_cache_get_status(cache_key)
+        if cached:
+            st = cached.get("status")
+            if st == "ready":
+                return jsonify(
+                    {
+                        "analise_ia_status": "ready",
+                        "analise_ia_cache_key": cache_key,
+                        "analise_ia": cached.get("result") or {},
+                    }
+                ), 200
+            if st == "error":
+                return jsonify(
+                    {
+                        "analise_ia_status": "error",
+                        "analise_ia_cache_key": cache_key,
+                        "error": cached.get("error") or "Falha ao gerar análise de IA",
+                        "details": cached.get("details") or "",
+                    }
+                ), 200
+            return jsonify(
+                {
+                    "analise_ia_status": "processing",
+                    "analise_ia_cache_key": cache_key,
+                }
+            ), 200
+
+        # Cache não existe: calcular dados 1x e disparar task
+        periodo_bounds = None
+        if periodo_raw and str(periodo_raw).strip():
+            try:
+                periodo_bounds = _parse_cartao_periodo_bounds(str(periodo_raw).strip())
+            except ValueError:
+                return jsonify({"error": "Parâmetro periodo inválido. Use YYYY-MM (ex.: 2026-04)."}), 400
+
+        scope_info = _determinar_escopo_busca_cartao(
+            estado, municipio, escola, serie, turma, gabarito, user, periodo_bounds
+        )
+        if not scope_info:
+            return jsonify({"error": "Não foi possível determinar o escopo de busca"}), 400
+
+        nivel_granularidade = _determinar_nivel_granularidade_cartao(
+            estado, municipio, escola, serie, turma, gabarito
+        )
+        gabarito_id = str(gabarito).strip() if _is_valid_filter(gabarito) else None
+
+        estatisticas_gerais = _calcular_estatisticas_consolidadas_cartao(
+            scope_info, nivel_granularidade, gabarito_id, user, periodo_bounds
+        )
+        resultados_por_disciplina = (
+            _calcular_resultados_por_disciplina_cartao(
+                scope_info, nivel_granularidade, gabarito_id, periodo_bounds, user
+            )
+            if gabarito_id
+            else []
+        )
+        tabela_detalhada = (
+            _gerar_tabela_detalhada_cartao(
+                scope_info, nivel_granularidade, gabarito_id, user, periodo_bounds
+            )
+            if gabarito_id
+            else {"disciplinas": [], "geral": {"alunos": []}}
+        )
+
+        # Série/Ano (prioriza filtro)
+        serie_ano = (
+            str(serie).strip()
+            if serie and str(serie).strip() and str(serie).strip().lower() != "all"
+            else ""
+        )
+        if not serie_ano:
+            alunos_geral = (((tabela_detalhada or {}).get("geral") or {}).get("alunos") or [])
+            if alunos_geral:
+                serie_ano = str(alunos_geral[0].get("serie") or "").strip()
+
+        # Disciplinas presentes no payload (para análise por disciplina quando aplicável)
+        componentes = []
+        by_disc_row = {}
+        for row in (resultados_por_disciplina or []):
+            if not isinstance(row, dict):
+                continue
+            dn = str((row.get("disciplina") or "")).strip()
+            if not dn:
+                continue
+            componentes.append(dn)
+            by_disc_row[dn] = row
+        componentes = list(dict.fromkeys(componentes))
+        componente_curricular = componentes[0] if len(componentes) == 1 else "all"
+
+        distrib = (estatisticas_gerais or {}).get("distribuicao_classificacao_geral") or {}
+        media_prof = (estatisticas_gerais or {}).get("media_proficiencia_geral")
+        media_nota = (estatisticas_gerais or {}).get("media_nota_geral") or (estatisticas_gerais or {}).get("media_nota")
+        niveis_proficiencia_alcancados = {
+            "media_proficiencia_geral": media_prof,
+            "media_nota_geral": media_nota,
+            "distribuicao_classificacao_geral": distrib,
+        }
+
+        # Habilidades foco: coletar {codigo, descricao} (não apenas código)
+        def _safe_uuid(s: str) -> Optional[str]:
+            try:
+                return str(uuid.UUID(str(s).strip()))
+            except Exception:
+                return None
+
+        habilidades_foco_geral: List[Dict[str, str]] = []
+        # também gerar por disciplina para análise por disciplina
+        habilidades_por_disciplina: Dict[str, List[Dict[str, str]]] = {}
+
+        skills_to_fetch_by_id: Set[str] = set()
+        skills_to_fetch_by_code: Set[str] = set()
+        for disc in ((tabela_detalhada or {}).get("disciplinas") or []):
+            dn = str(disc.get("nome") or disc.get("id") or "").strip() or "Outras"
+            for q in (disc.get("questoes") or []):
+                for sk in (q.get("skills") or []):
+                    if not isinstance(sk, dict):
+                        continue
+                    sid = str(sk.get("id") or "").strip()
+                    scode = str(sk.get("code") or "").strip()
+                    if sid and _safe_uuid(sid):
+                        skills_to_fetch_by_id.add(_safe_uuid(sid))
+                    elif sid:
+                        skills_to_fetch_by_code.add(sid)
+                    if scode and scode.upper() != "N/A":
+                        skills_to_fetch_by_code.add(scode)
+            if dn not in habilidades_por_disciplina:
+                habilidades_por_disciplina[dn] = []
+
+        skills_db_by_id: Dict[str, Skill] = {}
+        if skills_to_fetch_by_id:
+            try:
+                skills_db_by_id = {str(s.id): s for s in Skill.query.filter(Skill.id.in_(list(skills_to_fetch_by_id))).all()}
+            except Exception:
+                skills_db_by_id = {}
+        skills_db_by_code: Dict[str, Skill] = {}
+        if skills_to_fetch_by_code:
+            try:
+                skills_db_by_code = {str(s.code): s for s in Skill.query.filter(Skill.code.in_(list(skills_to_fetch_by_code))).all()}
+            except Exception:
+                skills_db_by_code = {}
+
+        def _resolve_skill(sid: str, code: str) -> Tuple[str, str]:
+            # retorna (codigo, descricao)
+            uid = _safe_uuid(sid) if sid else None
+            if uid and uid in skills_db_by_id:
+                s = skills_db_by_id[uid]
+                return (str(s.code or "").strip() or uid, str(s.description or "").strip() or "")
+            if code and code in skills_db_by_code:
+                s = skills_db_by_code[code]
+                return (str(s.code or "").strip() or code, str(s.description or "").strip() or "")
+            if sid and sid in skills_db_by_code:
+                s = skills_db_by_code[sid]
+                return (str(s.code or "").strip() or sid, str(s.description or "").strip() or "")
+            # fallback
+            c = (code or sid or "").strip()
+            return (c, "")
+
+        # popular listas
+        for disc in ((tabela_detalhada or {}).get("disciplinas") or []):
+            dn = str(disc.get("nome") or disc.get("id") or "").strip() or "Outras"
+            for q in (disc.get("questoes") or []):
+                for sk in (q.get("skills") or []):
+                    if not isinstance(sk, dict):
+                        continue
+                    codigo, descricao = _resolve_skill(str(sk.get("id") or "").strip(), str(sk.get("code") or "").strip())
+                    if not codigo or codigo.upper() == "N/A":
+                        continue
+                    item = {"codigo": codigo, "descricao": descricao}
+                    habilidades_foco_geral.append(item)
+                    habilidades_por_disciplina.setdefault(dn, []).append(item)
+
+        # dedupe preservando ordem
+        def _dedupe(items: List[Dict[str, str]]) -> List[Dict[str, str]]:
+            seen = set()
+            out = []
+            for it in items:
+                k = (it.get("codigo") or "") + "||" + (it.get("descricao") or "")
+                if k in seen:
+                    continue
+                seen.add(k)
+                out.append(it)
+            return out
+
+        habilidades_foco_geral = _dedupe(habilidades_foco_geral)
+        for dn in list(habilidades_por_disciplina.keys()):
+            habilidades_por_disciplina[dn] = _dedupe(habilidades_por_disciplina.get(dn) or [])
+
+        gabarito_title = ""
+        try:
+            gab = AnswerSheetGabarito.query.get(str(gabarito_id)) if gabarito_id else None
+            gabarito_title = (getattr(gab, "title", None) or "").strip() if gab else ""
+        except Exception:
+            gabarito_title = ""
+
+        def _component_from_disciplina_name(name: str) -> str:
+            n = (name or "").lower()
+            return "MATEMÁTICA" if "matem" in n else "LÍNGUA PORTUGUESA"
+
+        # Sempre pedir análise por disciplina (mesmo quando só houver 1 disciplina),
+        # para o frontend ter explícito "qual análise é de qual disciplina".
+        if not componentes:
+            componentes = ["Outras"]
+        entrada_por_disciplina = {}
+        for dn in componentes:
+            comp = _component_from_disciplina_name(dn)
+            row = by_disc_row.get(dn) or {}
+            entrada_por_disciplina[dn] = {
+                "serie_ano_avaliado": serie_ano,
+                "componente_curricular": comp,
+                "niveis_proficiencia_alcancados": {
+                    "media_proficiencia": row.get("media_proficiencia"),
+                    "media_nota": row.get("media_nota"),
+                    "distribuicao_classificacao": row.get("distribuicao_classificacao") or {},
+                },
+                "habilidades_foco": habilidades_por_disciplina.get(dn) or habilidades_foco_geral,
+            }
+        dados_entrada = entrada_por_disciplina
+        formato_saida = (
+            "IMPORTANTE: Responda APENAS com um JSON válido (objeto) e nada além do JSON. "
+            "Retorne um JSON no formato: "
+            "{ \"analises_por_disciplina\": { \"<disciplina>\": <relatorio_json> }, \"metadados_gerais\": {...} }."
+        )
+
+        prompt = (
+            "Aja como um Especialista em Avaliação Educacional e Gestor Pedagógico Orientado a Dados.\n"
+            "Sua tarefa é gerar um Relatório Escolar Analítico e Reflexivo com base nos resultados de uma avaliação aplicada a uma turma ou aluno específico.\n"
+            "O objetivo é traduzir escalas de proficiência em intervenções pedagógicas claras, analisando as habilidades cobradas, o que cada nível significa e os efeitos práticos.\n\n"
+            "[DADOS DE ENTRADA NECESSÁRIOS]\n"
+            f"{dados_entrada}\n\n"
+            "[REGRAS E DIRETRIZES ESTRITAS DE GERAÇÃO]\n"
+            "1. Adaptação de Nomenclatura de Etapa: se Anos Iniciais (1º ao 4º), use matriz de final de ciclo dos Anos Iniciais; "
+            "NUNCA mencione \"5º ano\". Se Anos Finais (6º ao 8º), use matriz de final de ciclo dos Anos Finais; NUNCA mencione \"9º ano\".\n"
+            "2. Restrição de Vocabulário: sob nenhuma circunstância utilize a sigla \"SAEB\" ou faça referência ao \"Sistema de Avaliação da Educação Básica\". "
+            "Use termos como \"avaliação aplicada\", \"instrumento avaliativo\", \"diagnóstico da rede\" ou \"a presente prova\".\n"
+            "3. Princípio da Cumulatividade: deixe claro que a escala está organizada em níveis da menor para a maior proficiência e que cada nível acumula saberes dos níveis anteriores.\n"
+            "4. Alerta para Níveis Críticos: para estudantes no Nível 0 (desempenho menor que 125), emitir alerta de \"atenção especial\".\n\n"
+            "[ESTRUTURA OBRIGATÓRIA DO RELATÓRIO]\n"
+            "I. Panorama Geral da Avaliação Aplicada\n"
+            "II. Reflexão sobre os Níveis Alcançados e Habilidades (para cada nível identificado)\n"
+            "III. Encaminhamentos e Cultura Digital (Opcional, se aplicável)\n\n"
+            f"{formato_saida}\n"
+            f"Metadados adicionais: titulo_avaliacao={gabarito_title or 'Cartão-resposta'}.\n"
+        )
+
+        r = _get_ai_redis_client()
+        if not r:
+            ai_service = AIAnalysisService()
+            return jsonify(
+                {
+                    "analise_ia_status": "ready",
+                    "analise_ia_cache_key": cache_key,
+                    "analise_ia": ai_service.analyze_intervention_plan_json(prompt),
+                }
+            ), 200
+
+        should_enqueue = _ai_cache_set_processing(cache_key, ttl_sec=ttl_sec)
+        if should_enqueue:
+            generate_ai_analysis_json_to_redis.delay(
+                cache_key=cache_key,
+                prompt=prompt,
+                ttl_sec=ttl_sec,
+            )
+
+        return jsonify(
+            {
+                "analise_ia_status": "processing",
+                "analise_ia_cache_key": cache_key,
+            }
+        ), 200
+
+    except Exception as e:
+        logging.error("Erro analise IA resultados-agregados: %s", e, exc_info=True)
+        return jsonify({"error": "Erro ao gerar análise de IA", "details": str(e)}), 500
+
+
+@bp.route("/mapa-habilidades/analise-ia", methods=["GET"])
+@jwt_required()
+@role_required("admin", "professor", "coordenador", "diretor", "tecadm")
+def mapa_habilidades_cartao_analise_ia():
+    """
+    Retorna apenas o status/resultado da análise de IA (JSON) para o mapa de habilidades (cartão-resposta).
+    """
+    try:
+        user = get_current_user_from_token()
+        if not user:
+            return jsonify({"error": "Usuário não encontrado"}), 401
+
+        estado = request.args.get("estado")
+        municipio = request.args.get("municipio")
+        escola = request.args.get("escola")
+        serie = request.args.get("serie")
+        turma = request.args.get("turma")
+        gabarito = request.args.get("gabarito")
+        disciplina = request.args.get("disciplina") or "all"
+        periodo_raw = request.args.get("periodo")
+
+        if not _is_valid_filter(estado):
+            return jsonify({"error": "Estado é obrigatório e não pode ser 'all'"}), 400
+        if not _is_valid_filter(municipio):
+            return jsonify({"error": "Município é obrigatório"}), 400
+        if not _is_valid_filter(gabarito):
+            return jsonify({"error": "Gabarito é obrigatório"}), 400
+
+        ttl_sec = int(os.getenv("AI_ANALYSIS_CACHE_TTL_SEC", "3600"))
+        prompt_version = str(os.getenv("AI_ANALYSIS_PROMPT_VERSION", "v1"))
+        user_id = str(user.get("id") or "")
+        cache_key = _ai_make_cache_key(
+            "answer_sheets_mapa_habilidades",
+            user_id=user_id,
+            prompt_version=prompt_version,
+            key_parts={
+                "estado": estado,
+                "municipio": municipio,
+                "escola": escola,
+                "serie": serie,
+                "turma": turma,
+                "gabarito": gabarito,
+                "disciplina": disciplina,
+                "periodo": (str(periodo_raw).strip() if periodo_raw and str(periodo_raw).strip() else None),
+            },
+        )
+
+        cached = _ai_cache_get_status(cache_key)
+        if cached:
+            st = cached.get("status")
+            if st == "ready":
+                return jsonify(
+                    {
+                        "analise_ia_status": "ready",
+                        "analise_ia_cache_key": cache_key,
+                        "analise_ia": cached.get("result") or {},
+                    }
+                ), 200
+            if st == "error":
+                return jsonify(
+                    {
+                        "analise_ia_status": "error",
+                        "analise_ia_cache_key": cache_key,
+                        "error": cached.get("error") or "Falha ao gerar análise de IA",
+                        "details": cached.get("details") or "",
+                    }
+                ), 200
+            return jsonify(
+                {"analise_ia_status": "processing", "analise_ia_cache_key": cache_key}
+            ), 200
+
+        # Cache não existe: calcular mapa 1x, montar prompt e disparar task
+        periodo_bounds = None
+        if periodo_raw and str(periodo_raw).strip():
+            try:
+                periodo_bounds = _parse_cartao_periodo_bounds(str(periodo_raw).strip())
+            except ValueError:
+                return jsonify({"error": "Parâmetro periodo inválido. Use YYYY-MM (ex.: 2026-04)."}), 400
+
+        municipio_str = str(municipio).strip()
+        set_search_path(city_id_to_schema_name(municipio_str))
+
+        gabarito_id = str(gabarito).strip()
+        if not _gabarito_eh_somente_cartao_resposta(gabarito_id):
+            return jsonify(
+                {
+                    "error": "Gabarito inválido",
+                    "details": "Use apenas gabaritos de cartão-resposta. Avaliações online aparecem na outra aba.",
+                }
+            ), 400
+
+        scope_info = _determinar_escopo_busca_cartao(
+            estado, municipio, escola, serie, turma, gabarito, user
+        )
+        if not scope_info:
+            return jsonify({"error": "Não foi possível determinar o escopo de busca"}), 400
+
+        nivel_granularidade = _determinar_nivel_granularidade_cartao(
+            estado, municipio, escola, serie, turma, gabarito
+        )
+        class_ids = _class_ids_alunos_previstos_cartao(
+            gabarito_id, scope_info, nivel_granularidade, user
+        )
+        if not class_ids:
+            # Sem dados: devolve pronto com warning
+            return jsonify(
+                {
+                    "analise_ia_status": "ready",
+                    "analise_ia_cache_key": cache_key,
+                    "analise_ia": {
+                        "document_title": "ESTRATÉGIAS DE INTERVENÇÃO",
+                        "warning": "Nenhum aluno/resultado encontrado para o escopo informado.",
+                    },
+                }
+            ), 200
+
+        disc_filt = None if str(disciplina).strip().lower() == "all" else str(disciplina).strip()
+        from app.services.skills_map_service import build_skills_map_answer_sheet
+
+        raw = build_skills_map_answer_sheet(gabarito_id, [str(c) for c in class_ids], disc_filt)
+        por_faixa = raw.get("por_faixa", {}) or {}
+        habilidades_abaixo = por_faixa.get("abaixo_do_basico", []) or []
+        habilidades_basico = por_faixa.get("basico", []) or []
+        habilidades_criticas = list(habilidades_abaixo) + list(habilidades_basico)
+
+        # Sempre pedir/retornar análise por disciplina (mesmo quando disciplina=all)
+        # Agrupa habilidades críticas por disciplina_nome do próprio mapa.
+        habilidades_por_disciplina: Dict[str, List[Dict[str, str]]] = {}
+        for h in habilidades_criticas:
+            dn = str(h.get("disciplina_nome") or "Outras").strip() or "Outras"
+            codigo = str(h.get("codigo") or "").strip()
+            desc = str(h.get("descricao") or "").strip()
+            if not codigo and not desc:
+                continue
+            habilidades_por_disciplina.setdefault(dn, []).append(
+                {"codigo": codigo or (h.get("skill_id") or ""), "descricao": desc}
+            )
+
+        # De-duplicar mantendo ordem por disciplina
+        for dn in list(habilidades_por_disciplina.keys()):
+            seen = set()
+            out = []
+            for it in habilidades_por_disciplina[dn]:
+                k = (it.get("codigo") or "") + "||" + (it.get("descricao") or "")
+                if k in seen:
+                    continue
+                seen.add(k)
+                out.append(it)
+            habilidades_por_disciplina[dn] = out
+
+        gab = AnswerSheetGabarito.query.get(gabarito_id)
+        avaliacao_referencia = (getattr(gab, "title", None) or "Cartão-resposta").strip() if gab else "Cartão-resposta"
+
+        if serie and str(serie).strip():
+            ano_serie = str(serie).strip()
+        elif gab and getattr(gab, "grade_name", None):
+            ano_serie = str(gab.grade_name).strip()
+        else:
+            ano_serie = ""
+
+        dados_entrada = {}
+        for dn, habs in habilidades_por_disciplina.items():
+            dados_entrada[dn] = {
+                "ano_serie": ano_serie,
+                "disciplina": dn,
+                "avaliacao_referencia": avaliacao_referencia,
+                "habilidades_criticas": habs,
+            }
+
+        prompt = (
+            "Atue como um Especialista em Avaliação Educacional e Recomposição de Aprendizagem, com profundo conhecimento nas matrizes de referência do SAEB, SPAECE e SAVEAL.\n\n"
+            "Abaixo, fornecerei os dados de uma avaliação (Mensal ou Larga Escala) referentes a uma turma.\n\n"
+            "Sua tarefa é gerar um plano de ação estritamente focado em alunos que se encontram nos níveis de proficiência \"ABAIXO DO BÁSICO\" e \"BÁSICO\". "
+            "O plano deve ser realista, aplicável na rede pública ou privada, utilizando recursos acessíveis de sala de aula.\n\n"
+            "Nomeie o documento final obrigatoriamente como: **ESTRATÉGIAS DE INTERVENÇÃO**.\n\n"
+            "IMPORTANTE: Responda APENAS com JSON válido.\n"
+            "Como há possivelmente mais de uma disciplina, devolva SEMPRE no formato:\n"
+            "{ \"analises_por_disciplina\": { \"<disciplina>\": <estrategias_de_intervencao_json> } }\n\n"
+            "DADOS PARA A ANÁLISE (por disciplina):\n"
+            f"{dados_entrada}\n\n"
+            "O JSON <estrategias_de_intervencao_json> deve conter obrigatoriamente os campos equivalentes a:\n"
+            "1) foco_analitico\n"
+            "2) matriz_acao_por_habilidade (lista)\n"
+            "3) dinamica_sala_recomposicao\n"
+        )
+
+        r = _get_ai_redis_client()
+        if not r:
+            ai_service = AIAnalysisService()
+            return jsonify(
+                {
+                    "analise_ia_status": "ready",
+                    "analise_ia_cache_key": cache_key,
+                    "analise_ia": ai_service.analyze_intervention_plan_json(prompt),
+                }
+            ), 200
+
+        should_enqueue = _ai_cache_set_processing(cache_key, ttl_sec=ttl_sec)
+        if should_enqueue:
+            generate_ai_analysis_json_to_redis.delay(
+                cache_key=cache_key,
+                prompt=prompt,
+                ttl_sec=ttl_sec,
+            )
+
+        return jsonify(
+            {"analise_ia_status": "processing", "analise_ia_cache_key": cache_key}
+        ), 200
+
+    except Exception as e:
+        logging.error("Erro analise IA mapa-habilidades (cartão): %s", e, exc_info=True)
+        return jsonify({"error": "Erro ao gerar análise de IA", "details": str(e)}), 500
 
 
 @bp.route("/mapa-habilidades", methods=["GET"])
@@ -4177,7 +5240,7 @@ def get_resultados_agregados():
 @role_required("admin", "professor", "coordenador", "diretor", "tecadm")
 def mapa_habilidades_cartao():
     """
-    Mapa de habilidades para cartão-resposta (gabarito).
+    Mapa de habilidades para cartão-resposta (gabarito). Não chama IA; use /mapa-habilidades/analise-ia.
     Query: estado, municipio, gabarito (obrigatório), escola, serie, turma, disciplina (id do bloco ou all).
     Query opcional: periodo=YYYY-MM (filtra correções por corrected_at).
     """
@@ -4863,6 +5926,76 @@ def get_job_status(job_id):
     except Exception as e:
         logging.error(f"Erro ao buscar status: {str(e)}", exc_info=True)
         return jsonify({"error": "Erro ao buscar status"}), 500
+
+
+@bp.route('/recalculate-jobs/<job_id>/status', methods=['GET'])
+@jwt_required()
+def get_recalculate_job_status(job_id: str):
+    """
+    Status de recálculo após edição do gabarito.
+    Usa progress_store (memória/Redis) e, se necessário, espelho em
+    public.answer_sheet_generation_jobs (scope_type=recalculate_gabarito)
+    para outro worker ou quando Redis não guarda o job.
+    """
+    try:
+        from app.services.answer_sheet_job_store import get_answer_sheet_job
+
+        current_user_id = get_jwt_identity()
+        job = get_job(job_id)
+        if not job:
+            job_db = get_answer_sheet_job(job_id)
+            if job_db and job_db.get("scope_type") == "recalculate_gabarito":
+                job = dict(job_db)
+        if not job:
+            return jsonify({"error": "Job não encontrado"}), 404
+
+        uid_job = str(job.get("user_id") or "")
+        uid_req = str(current_user_id) if current_user_id is not None else ""
+        if uid_job != uid_req:
+            return jsonify({"error": "Acesso negado"}), 403
+
+        total = int(job.get("total") or 0)
+        completed = int(job.get("completed") or 0)
+        pct = int(round((completed / total * 100))) if total > 0 else 0
+        st = job.get("status") or "processing"
+        msg = job.get("stage_message") or (
+            "Concluído" if st == "completed" else "Processando..."
+        )
+        phase = job.get("phase")
+        if phase is None and st == "completed":
+            phase = "done"
+
+        return (
+            jsonify(
+                {
+                    "job_id": job_id,
+                    "gabarito_id": job.get("gabarito_id"),
+                    "task_id": (job.get("task_ids") or [None])[0],
+                    "status": st,
+                    "message": msg,
+                    "phase": phase,
+                    "progress": {
+                        "current": completed,
+                        "total": total,
+                        "percentage": min(100, pct),
+                    },
+                    "items": job.get("items") or {},
+                    "summary": {
+                        "total_items": total,
+                        "completed_items": completed,
+                        "successful_items": int(job.get("successful") or 0),
+                        "failed_items": int(job.get("failed") or 0),
+                    },
+                    "error": job.get("error"),
+                }
+            ),
+            200,
+        )
+    except Exception as e:
+        logging.error(
+            "Erro ao buscar status do recálculo %s: %s", job_id, e, exc_info=True
+        )
+        return jsonify({"error": "Erro ao buscar status do recálculo"}), 500
 
 
 @bp.route('/jobs/<job_id>/download', methods=['GET'])

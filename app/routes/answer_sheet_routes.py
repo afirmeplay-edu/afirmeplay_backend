@@ -3,7 +3,7 @@
 Rotas para geração e correção de cartões resposta
 """
 
-from flask import Blueprint, request, jsonify, send_file, redirect, url_for
+from flask import Blueprint, request, jsonify, send_file, url_for
 from flask_jwt_extended import jwt_required, get_jwt_identity
 from app.decorators.role_required import role_required, get_current_user_from_token
 from app.decorators import requires_city_context
@@ -1258,9 +1258,9 @@ def list_gabaritos():
     Em **uma única resposta**, cada item inclui:
     - Dados resumidos do cartão (último download em minio_url / can_download, etc.)
     - **generations**: histórico **completo** de todas as gerações (cada job tem ZIP próprio: `minio_url`,
-      `download_url` com `job_id`). O `minio_url` / `download_url` no **nível do cartão** espelham só a
+      `download_url` da API com `?job_id=`). O `minio_url` / `download_url` no **nível do cartão** espelham só a
       **última** geração gravada no registro do gabarito — para baixar uma geração antiga use o item em
-      `generations[]`.
+      `generations[]` (GET autenticado que devolve o ZIP).
 
     Query Parameters:
         page: Número da página (padrão: 1)
@@ -1328,7 +1328,7 @@ def list_gabaritos():
                         _external=True,
                     )
                     row_dict["download_url"] = (
-                        f"{_dl}?{urlencode({'redirect': '1', 'job_id': row_dict['job_id']})}"
+                        f"{_dl}?{urlencode({'job_id': row_dict['job_id']})}"
                     )
                     generations_by_gabarito[str(gr.gabarito_id)].append(row_dict)
             except Exception as gen_err:
@@ -1485,7 +1485,6 @@ def list_gabaritos():
                 "download_url": (
                     request.url_root.rstrip("/")
                     + url_for("answer_sheets.download_gabarito", gabarito_id=gabarito.id)
-                    + "?redirect=1"
                     if gabarito.minio_object_name else None
                 ),
                 "latest_generation_job_id": gabarito.last_generation_job_id,
@@ -1529,14 +1528,13 @@ def list_gabaritos():
 @requires_city_context
 def download_gabarito(gabarito_id):
     """
-    URL pré-assinada para o ZIP no MinIO.
+    Download do ZIP de cartões pelo backend (MinIO local da VPS).
 
     - Sem **job_id**: objeto no gabarito (em geral a última geração).
-    - Com **?job_id=&lt;uuid&gt;**: ZIP daquela linha em ``answer_sheet_generations`` (qualquer geração).
+    - Com **?job_id=&lt;uuid&gt;**: ZIP daquela linha em ``answer_sheet_generations``.
     """
     try:
         from app.services.storage.minio_service import MinIOService
-        from datetime import timedelta
         
         user = get_current_user_from_token()
         if not user:
@@ -1553,10 +1551,6 @@ def download_gabarito(gabarito_id):
         job_id_param = (request.args.get("job_id") or "").strip() or None
         bucket_name = gabarito.minio_bucket or minio.BUCKETS['ANSWER_SHEETS']
         object_name = None
-        zip_generated_at = gabarito.zip_generated_at
-        resolved_job_id = gabarito.last_generation_job_id
-        minio_url_out = gabarito.minio_url
-        gen_row = None
 
         if job_id_param:
             gen_row = AnswerSheetGabaritoGeneration.query.filter_by(
@@ -1576,9 +1570,6 @@ def download_gabarito(gabarito_id):
                 }), 400
             object_name = gen_row.minio_object_name
             bucket_name = gen_row.minio_bucket or minio.BUCKETS['ANSWER_SHEETS']
-            zip_generated_at = gen_row.zip_generated_at
-            resolved_job_id = gen_row.job_id
-            minio_url_out = gen_row.minio_url
         else:
             if not gabarito.minio_object_name:
                 return jsonify({
@@ -1590,36 +1581,22 @@ def download_gabarito(gabarito_id):
             object_name = gabarito.minio_object_name
         
         try:
-            presigned_url = minio.get_presigned_url(
-                bucket_name=bucket_name,
-                object_name=object_name,
-                expires=timedelta(hours=1)
+            zip_data = minio.download_file(bucket_name=bucket_name, object_name=object_name)
+            fname = os.path.basename(object_name) or "cartoes.zip"
+            if not fname.lower().endswith(".zip"):
+                fname = f"{fname}.zip"
+            return send_file(
+                BytesIO(zip_data),
+                mimetype="application/zip",
+                as_attachment=True,
+                download_name=fname,
+                max_age=0,
             )
-            
-            if request.args.get("redirect") == "1":
-                return redirect(presigned_url, code=302)
-            
-            class_obj = Class.query.get(gabarito.class_id) if gabarito.class_id else None
-            
-            return jsonify({
-                "download_url": presigned_url,
-                "expires_in": "1 hour",
-                "gabarito_id": str(gabarito.id),
-                "job_id": resolved_job_id,
-                "test_id": str(gabarito.test_id) if gabarito.test_id else None,
-                "class_id": str(gabarito.class_id) if gabarito.class_id else None,
-                "class_name": class_obj.name if class_obj else None,
-                "title": gabarito.title,
-                "num_questions": gabarito.num_questions,
-                "generated_at": zip_generated_at.isoformat() if zip_generated_at else None,
-                "created_at": gabarito.created_at.isoformat() if gabarito.created_at else None,
-                "minio_url": minio_url_out,
-            }), 200
-            
+
         except Exception as minio_error:
-            logging.error(f"Erro ao gerar URL pré-assinada: {str(minio_error)}")
+            logging.error(f"Erro no download do gabarito: {str(minio_error)}", exc_info=True)
             return jsonify({
-                "error": "Erro ao gerar URL de download",
+                "error": "Erro ao baixar o arquivo",
                 "details": str(minio_error)
             }), 500
         
@@ -1797,7 +1774,7 @@ def get_gabarito(gabarito_id):
                     _external=True,
                 )
                 row_dict["download_url"] = (
-                    f"{_dl}?{urlencode({'redirect': '1', 'job_id': row_dict['job_id']})}"
+                    f"{_dl}?{urlencode({'job_id': row_dict['job_id']})}"
                 )
                 generations_list.append(row_dict)
         except Exception as gen_err:
@@ -5857,6 +5834,16 @@ def get_job_status(job_id):
             elif c['completed'] == c['total_students'] and c['total_students'] > 0:
                 c['status'] = 'completed'
 
+        api_download = None
+        if gabarito and getattr(gabarito, "minio_object_name", None):
+            api_download = (
+                request.url_root.rstrip("/")
+                + url_for(
+                    "answer_sheets.download_gabarito",
+                    gabarito_id=str(gabarito.id),
+                )
+            )
+
         result_data = {
             'classes_generated': classes_generated,
             'total_students': total_students_generated,
@@ -5864,8 +5851,8 @@ def get_job_status(job_id):
             'failed_classes': failed,
             'scope_type': job.get('scope_type', 'unknown'),
             'minio_url': gabarito.minio_url if gabarito else None,
-            'download_url': gabarito.minio_url if gabarito else None,
-            'can_download': bool(gabarito and gabarito.minio_url),
+            'download_url': api_download,
+            'can_download': bool(gabarito and gabarito.minio_object_name),
             'zip_generated_at': gabarito.zip_generated_at.isoformat() if (gabarito and gabarito.zip_generated_at) else None
         }
         
@@ -5887,7 +5874,7 @@ def get_job_status(job_id):
                 'successful_students': sum(c['successful'] for c in classes_list),
                 'failed_students': sum(c['failed'] for c in classes_list),
                 'zip_minio_url': gabarito.minio_url if gabarito else None,
-                'can_download': bool(gabarito and gabarito.minio_url),
+                'can_download': bool(gabarito and gabarito.minio_object_name),
             },
             'classes': classes_list,
             'errors': errors_list if errors_list else errors

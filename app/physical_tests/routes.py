@@ -6,6 +6,7 @@ Suporta correção única (síncrona) e em lote (assíncrona com polling)
 """
 
 from flask import Blueprint, request, jsonify, send_file
+from io import BytesIO
 from flask_jwt_extended import jwt_required, get_jwt_identity, get_jwt
 from app.decorators.role_required import role_required, get_current_user_from_token as get_user_for_permission_check
 from app.decorators import requires_city_context
@@ -1588,10 +1589,7 @@ def get_physical_forms(test_id):
 @role_required("admin", "professor", "coordenador", "diretor", "tecadm")
 def download_physical_form(test_id, form_id):
     """
-    Download de formulário físico específico (URL pré-assinada do MinIO)
-
-    Returns:
-        - JSON com URL pré-assinada válida por 1 hora
+    Download do PDF do formulário físico via backend (MinIO local da VPS).
     """
     try:
         user = get_current_user_from_token()
@@ -1619,9 +1617,7 @@ def download_physical_form(test_id, form_id):
         if not form.form_pdf_url:
             return jsonify({"error": "URL do PDF não encontrada para este formulário"}), 404
 
-        # Gerar URL pré-assinada a partir da URL salva (MinIO)
         from app.services.storage.minio_service import MinIOService
-        from datetime import timedelta
 
         minio = MinIOService()
         bucket_name = minio.BUCKETS['PHYSICAL_TESTS']
@@ -1649,28 +1645,26 @@ def download_physical_form(test_id, form_id):
                 "test_id": test_id
             }), 400
 
-        # Gerar URL pré-assinada (válida por 1 hora)
+        # Download via backend (MinIO local da VPS)
         try:
-            presigned_url = minio.get_presigned_url(
-                bucket_name=bucket_name,
-                object_name=object_name,
-                expires=timedelta(hours=1)
+            pdf_bytes = minio.download_file(bucket_name=bucket_name, object_name=object_name)
+            fname = os.path.basename(object_name) or "formulario.pdf"
+            if not fname.lower().endswith(".pdf"):
+                fname = f"{fname}.pdf"
+            return send_file(
+                BytesIO(pdf_bytes),
+                mimetype="application/pdf",
+                as_attachment=True,
+                download_name=fname,
+                max_age=0,
             )
 
-            return jsonify({
-                "download_url": presigned_url,
-                "expires_in": "1 hour",
-                "test_id": test_id,
-                "form_id": form_id,
-                "student_id": form.student_id,
-                "student_name": getattr(form, "student", None).name if getattr(form, "student", None) else None,
-                "created_at": form.generated_at.isoformat() if form.generated_at else None
-            }), 200
-
         except Exception as minio_error:
-            logging.error(f"Erro ao gerar URL pré-assinada para formulário físico: {str(minio_error)}")
+            logging.error(
+                "Erro ao baixar PDF de formulário físico: %s", minio_error, exc_info=True
+            )
             return jsonify({
-                "error": "Erro ao gerar URL de download",
+                "error": "Erro ao baixar o arquivo",
                 "details": str(minio_error)
             }), 500
         
@@ -1683,17 +1677,13 @@ def download_physical_form(test_id, form_id):
 @role_required("admin", "professor", "coordenador", "diretor", "tecadm")
 def download_all_physical_forms(test_id):
     """
-    Retorna URL pré-assinada para download do ZIP de provas físicas do MinIO
-    
+    Download do ZIP de provas físicas via backend (MinIO local da VPS).
+
     Se o ZIP ainda não foi gerado, retorna erro pedindo para gerar primeiro.
     O ZIP é gerado automaticamente pela task Celery após POST /physical-tests/test/{test_id}/generate-forms.
-    
-    Returns:
-        JSON com URL pré-assinada válida por 1 hora
     """
     try:
         from app.services.storage.minio_service import MinIOService
-        from datetime import timedelta
         
         user = get_current_user_from_token()
         if not user:
@@ -1719,33 +1709,32 @@ def download_all_physical_forms(test_id):
                 "status": "not_generated"
             }), 400
         
-        # Gerar URL pré-assinada (válida por 1 hora)
         minio = MinIOService()
-        
+        bucket_name = gabarito.minio_bucket or minio.BUCKETS['PHYSICAL_TESTS']
+        object_name = gabarito.minio_object_name
+
         try:
-            presigned_url = minio.get_presigned_url(
-                bucket_name=gabarito.minio_bucket or minio.BUCKETS['PHYSICAL_TESTS'],
-                object_name=gabarito.minio_object_name,
-                expires=timedelta(hours=1)
+            zip_bytes = minio.download_file(bucket_name=bucket_name, object_name=object_name)
+            fname = os.path.basename(object_name) or "provas_fisicas.zip"
+            if not fname.lower().endswith(".zip"):
+                fname = f"{fname}.zip"
+            return send_file(
+                BytesIO(zip_bytes),
+                mimetype="application/zip",
+                as_attachment=True,
+                download_name=fname,
+                max_age=0,
             )
-            
-            return jsonify({
-                "download_url": presigned_url,
-                "expires_in": "1 hour",
-                "test_id": test_id,
-                "test_title": test.title,
-                "gabarito_id": str(gabarito.id) if gabarito else None,
-                "generated_at": gabarito.zip_generated_at.isoformat() if gabarito and gabarito.zip_generated_at else None,
-                "minio_url": gabarito.minio_url
-            }), 200
-            
+
         except Exception as minio_error:
-            logging.error(f"Erro ao gerar URL pré-assinada: {str(minio_error)}")
+            logging.error(
+                "Erro ao baixar ZIP de provas físicas: %s", minio_error, exc_info=True
+            )
             return jsonify({
-                "error": "Erro ao gerar URL de download",
+                "error": "Erro ao baixar o arquivo",
                 "details": str(minio_error)
             }), 500
-        
+            
     except Exception as e:
         print(f"❌ Erro ao baixar formulários físicos: {str(e)}")
         return jsonify({"error": "Erro interno do servidor"}), 500

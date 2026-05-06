@@ -12,6 +12,6 @@ class MobileOfflinePackRegistry(db.Model):
     __table_args__ = {"schema": "public"}
 
     code_hash = db.Column(db.String(128), primary_key=True)
-    city_id = db.Column(db.String, db.ForeignKey("city.id"), nullable=False)
+    city_id = db.Column(db.String, db.ForeignKey("public.city.id"), nullable=False)
     pack_id = db.Column(UUID(as_uuid=True), nullable=False)
     created_at = db.Column(db.TIMESTAMP, server_default=text("CURRENT_TIMESTAMP"))

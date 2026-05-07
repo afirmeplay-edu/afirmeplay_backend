@@ -151,10 +151,27 @@ class EvaluationResultService:
                 return None
             
             # Buscar respostas do aluno
-            answers = StudentAnswer.query.filter_by(
+            raw_answers = StudentAnswer.query.filter_by(
                 test_id=test_id,
                 student_id=student_id
             ).all()
+
+            # Deduplicar por questão: manter a resposta mais recente por question_id
+            answers_by_question: Dict[str, StudentAnswer] = {}
+            for a in raw_answers:
+                qid = str(a.question_id)
+                prev = answers_by_question.get(qid)
+                if not prev:
+                    answers_by_question[qid] = a
+                    continue
+                prev_ts = getattr(prev, "answered_at", None)
+                a_ts = getattr(a, "answered_at", None)
+                if prev_ts is None and a_ts is not None:
+                    answers_by_question[qid] = a
+                elif prev_ts is not None and a_ts is not None and a_ts >= prev_ts:
+                    answers_by_question[qid] = a
+
+            answers = list(answers_by_question.values())
             
             # Calcular acertos
             correct_answers = 0

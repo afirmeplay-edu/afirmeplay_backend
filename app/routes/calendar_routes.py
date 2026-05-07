@@ -112,6 +112,39 @@ def _parse_link_resources(raw):
     return out, None
 
 
+def _targets_include_global_all(targets: List[Dict[str, Any]]) -> bool:
+    if not isinstance(targets, list):
+        return False
+    for t in targets:
+        if str(t.get("target_type") or "").upper() == "ALL":
+            return True
+    return False
+
+
+def _payload_is_aviso(data: Dict[str, Any]) -> bool:
+    meta = data.get("metadata")
+    return isinstance(meta, dict) and meta.get("kind") == "aviso"
+
+
+def _event_is_aviso(e: CalendarEvent) -> bool:
+    m = getattr(e, "metadata_json", None)
+    return isinstance(m, dict) and m.get("kind") == "aviso"
+
+
+def _validate_aviso_targets_no_global(targets: List[Dict[str, Any]], *, is_aviso: bool) -> tuple:
+    """
+    Avisos ficam restritos a escopo municipal ou escola — sem target ALL (global no tenant).
+    """
+    if not is_aviso:
+        return True, ""
+    if _targets_include_global_all(targets or []):
+        return (
+            False,
+            "Avisos não podem ter escopo global. Use município (MUNICIPALITY) ou escola (SCHOOL).",
+        )
+    return True, ""
+
+
 def _sync_link_resources_for_event(event_id: str, items: List[Dict[str, Any]]) -> None:
     existing_links = CalendarEventResource.query.filter_by(event_id=event_id, resource_type="link").all()
     by_id = {r.id: r for r in existing_links}
@@ -162,6 +195,10 @@ def create_event():
         is_valid, error_message = CalendarEventService.validate_targets_by_role(user, targets)
         if not is_valid:
             return jsonify({"error": error_message}), 403
+
+    ok_av, err_av = _validate_aviso_targets_no_global(targets, is_aviso=_payload_is_aviso(data))
+    if not ok_av:
+        return jsonify({"error": err_av}), 400
 
     resources_plan, res_err = _parse_link_resources(data.get("resources"))
     if res_err:
@@ -228,6 +265,10 @@ def update_event(event_id: str):
         is_valid, error_message = CalendarEventService.validate_targets_by_role(user, data.get('targets') or [])
         if not is_valid:
             return jsonify({"error": error_message}), 403
+        is_aviso_ctx = _payload_is_aviso(data) or _event_is_aviso(e)
+        ok_av, err_av = _validate_aviso_targets_no_global(data.get('targets') or [], is_aviso=is_aviso_ctx)
+        if not ok_av:
+            return jsonify({"error": err_av}), 400
 
     if 'resources' in data:
         resources_plan, res_err = _parse_link_resources(data.get("resources"))
@@ -458,7 +499,14 @@ def my_events():
     except Exception:
         return jsonify({"error": "Datas inválidas. Use ISO 8601."}), 400
 
-    events = CalendarEventService.list_my_events(user['id'], start_dt, end_dt)
+    kind_param = request.args.get('kind')
+    exclude_kind = request.args.get('exclude_kind')
+
+    events = CalendarEventService.list_my_events(
+        user['id'], start_dt, end_dt,
+        kind=kind_param if kind_param else None,
+        exclude_kind=exclude_kind if exclude_kind else None,
+    )
     # Recuperar registros de recipient para flag read
     recs = {r.event_id: r for r in CalendarEventUser.query.filter(
         CalendarEventUser.user_id == user['id'],

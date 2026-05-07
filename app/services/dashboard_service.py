@@ -25,6 +25,9 @@ from app.models.test import Test
 from app.models.testQuestion import TestQuestion
 from app.models.testSession import TestSession
 from app.models.user import User
+from app.models.calendar_event import CalendarEvent
+from app.models.calendar_event_user import CalendarEventUser
+from app.services.calendar_event_service import CalendarEventService
 from app.models.evaluationResult import EvaluationResult
 from app.models.answerSheetGabarito import AnswerSheetGabarito
 from app.models.answerSheetResult import AnswerSheetResult
@@ -976,10 +979,25 @@ class DashboardService:
     @classmethod
     def _count_notices(cls, scope: Dict[str, Any]) -> int:
         """
-        Retorna a quantidade de avisos no escopo do usuário.
-        Quando existir modelo/tabela de avisos, implementar a contagem aqui.
+        Contagem de avisos não lidos do usuário (eventos de calendário com metadata.kind='aviso'
+        na tabela materializada calendar_event_users).
         """
-        return 0
+        user = scope.get("user") or {}
+        uid = user.get("id")
+        if not uid:
+            return 0
+
+        return (
+            db.session.query(CalendarEventUser)
+            .join(CalendarEvent, CalendarEvent.id == CalendarEventUser.event_id)
+            .filter(
+                CalendarEventUser.user_id == str(uid),
+                CalendarEventUser.read_at.is_(None),
+                CalendarEventService.filter_metadata_has_kind("aviso"),
+                CalendarEvent.is_published.is_(True),
+            )
+            .count()
+        )
 
     @classmethod
     def _count_certificates(cls, scope: Dict[str, Any]) -> int:

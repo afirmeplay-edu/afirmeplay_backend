@@ -72,6 +72,231 @@ COMMENT ON TABLE "{schema}".play_tv_video_classes IS 'Vídeos do Play TV disponi
 """
 
 
+def get_plantao_online_tables_ddl(schema: str) -> str:
+    """
+    DDL idempotente das tabelas Plantão Online no schema city_xxx.
+
+    Cria a tabela tenant ``plantao_online`` (antes só existia em ``public``) e a tabela de
+    junção ``plantao_schools`` com FK apontando para a versão local de ``plantao_online``.
+    Usado por provision_city_schema, provision_plantao_online_for_city_schema e o script
+    de migração public→tenant.
+    """
+    return f"""
+CREATE TABLE IF NOT EXISTS "{schema}".plantao_online (
+    id VARCHAR PRIMARY KEY,
+    link TEXT NOT NULL,
+    title TEXT,
+    grade_id UUID NOT NULL REFERENCES public.grade(id),
+    subject_id VARCHAR NOT NULL REFERENCES public.subject(id),
+    created_by VARCHAR NOT NULL REFERENCES public.users(id),
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS ix_plantao_online_grade_id ON "{schema}".plantao_online(grade_id);
+CREATE INDEX IF NOT EXISTS ix_plantao_online_subject_id ON "{schema}".plantao_online(subject_id);
+CREATE INDEX IF NOT EXISTS ix_plantao_online_created_by ON "{schema}".plantao_online(created_by);
+COMMENT ON TABLE "{schema}".plantao_online IS 'Plantão Online: plantões do município (schema tenant)';
+
+CREATE TABLE IF NOT EXISTS "{schema}".plantao_schools (
+    id VARCHAR PRIMARY KEY,
+    plantao_id VARCHAR NOT NULL REFERENCES "{schema}".plantao_online(id) ON DELETE CASCADE,
+    school_id VARCHAR(36) REFERENCES "{schema}".school(id),
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT uq_plantao_school UNIQUE(plantao_id, school_id)
+);
+CREATE INDEX IF NOT EXISTS ix_plantao_schools_plantao_id ON "{schema}".plantao_schools(plantao_id);
+CREATE INDEX IF NOT EXISTS ix_plantao_schools_school_id ON "{schema}".plantao_schools(school_id);
+COMMENT ON TABLE "{schema}".plantao_schools IS 'Plantões online disponibilizados para escolas';
+"""
+
+
+def provision_plantao_online_for_city_schema(schema_name: str) -> None:
+    """
+    Aplica apenas o bloco DDL Plantão Online em um schema city_* já existente (idempotente).
+    Não altera public. Para realinhar FKs legadas que referenciam public.plantao_online,
+    use migrate_plantao_online_from_public_to_city_schema após copiar os dados necessários.
+    """
+    if not schema_name.replace("_", "").isalnum() or not schema_name.startswith("city_"):
+        raise ValueError(f"Nome de schema inválido: {schema_name}")
+
+    raw_conn = db.engine.raw_connection()
+    try:
+        raw_conn.set_isolation_level(0)
+        cursor = raw_conn.cursor()
+        cursor.execute(get_plantao_online_tables_ddl(schema_name))
+        logger.info("Plantão Online DDL aplicado em schema %s", schema_name)
+    except Exception as e:
+        logger.exception("Falha ao aplicar Plantão Online em %s: %s", schema_name, e)
+        raise
+    finally:
+        raw_conn.close()
+
+
+def _plantao_online_table_exists(cursor, schema: str, table: str) -> bool:
+    cursor.execute(
+        """
+        SELECT 1 FROM information_schema.tables
+        WHERE table_schema = %s AND table_name = %s
+        """,
+        (schema, table),
+    )
+    return cursor.fetchone() is not None
+
+
+def _plantao_online_drop_public_fks(cursor, schema: str, table: str) -> int:
+    cursor.execute(
+        """
+        SELECT c.conname
+        FROM pg_constraint c
+        JOIN pg_class rel ON rel.oid = c.conrelid
+        JOIN pg_namespace n ON n.oid = rel.relnamespace
+        JOIN pg_class ref ON ref.oid = c.confrelid
+        JOIN pg_namespace rn ON rn.oid = ref.relnamespace
+        WHERE n.nspname = %s AND rel.relname = %s
+          AND c.contype = 'f'
+          AND ref.relname = 'plantao_online'
+          AND rn.nspname = 'public'
+        """,
+        (schema, table),
+    )
+    names = [row[0] for row in cursor.fetchall()]
+    for conname in names:
+        cursor.execute(
+            f'ALTER TABLE "{schema}"."{table}" DROP CONSTRAINT IF EXISTS "{conname}"'
+        )
+    return len(names)
+
+
+def _plantao_online_has_fk_to_public(cursor, schema: str, table: str) -> bool:
+    cursor.execute(
+        """
+        SELECT 1 FROM pg_constraint c
+        JOIN pg_class rel ON rel.oid = c.conrelid
+        JOIN pg_namespace n ON n.oid = rel.relnamespace
+        JOIN pg_class ref ON ref.oid = c.confrelid
+        JOIN pg_namespace rn ON rn.oid = ref.relnamespace
+        WHERE n.nspname = %s AND rel.relname = %s
+          AND c.contype = 'f' AND ref.relname = 'plantao_online'
+          AND rn.nspname = 'public'
+        LIMIT 1
+        """,
+        (schema, table),
+    )
+    return cursor.fetchone() is not None
+
+
+def _backfill_plantao_online_from_public(cursor, schema_name: str) -> int:
+    """
+    Insere em {schema}.plantao_online as linhas de public.plantao_online cujo id
+    aparece em {schema}.plantao_schools e ainda não existe localmente.
+    """
+    if not _plantao_online_table_exists(cursor, schema_name, "plantao_schools"):
+        return 0
+
+    insert_sql = f"""
+        INSERT INTO "{schema_name}".plantao_online (
+            id, link, title, grade_id, subject_id, created_by, created_at
+        )
+        SELECT p.id, p.link, p.title, p.grade_id, p.subject_id, p.created_by, p.created_at
+        FROM public.plantao_online p
+        WHERE p.id IN (
+            SELECT plantao_id FROM "{schema_name}".plantao_schools WHERE plantao_id IS NOT NULL
+        )
+        ON CONFLICT (id) DO NOTHING
+    """
+    cursor.execute(insert_sql)
+    return cursor.rowcount
+
+
+def migrate_plantao_online_from_public_to_city_schema(schema_name: str) -> dict:
+    """
+    Copia plantões referenciados de public.plantao_online para city_xxx.plantao_online
+    (backfill) e, se a junção plantao_schools ainda tiver FK para public.plantao_online,
+    remove essa FK e recria apontando para o schema do tenant.
+
+    Idempotente: pode ser executado várias vezes; linhas já presentes em plantao_online
+    local são ignoradas (ON CONFLICT DO NOTHING).
+    """
+    if not schema_name.replace("_", "").isalnum() or not schema_name.startswith("city_"):
+        raise ValueError(f"Nome de schema inválido: {schema_name}")
+
+    summary = {
+        "schema": schema_name,
+        "fks_dropped": 0,
+        "plantoes_copied": 0,
+        "fks_recreated": 0,
+        "skipped": False,
+    }
+
+    raw_conn = db.engine.raw_connection()
+    try:
+        raw_conn.set_isolation_level(0)
+        cursor = raw_conn.cursor()
+
+        if not _plantao_online_table_exists(cursor, "public", "plantao_online"):
+            summary["skipped"] = True
+            summary["note"] = "public.plantao_online inexistente"
+            return summary
+
+        if not _plantao_online_table_exists(cursor, schema_name, "plantao_online"):
+            summary["skipped"] = True
+            summary["note"] = "plantao_online local inexistente (rode provision antes)"
+            return summary
+
+        if not _plantao_online_table_exists(cursor, schema_name, "plantao_schools"):
+            summary["skipped"] = True
+            summary["note"] = "Sem tabela plantao_schools neste schema"
+            return summary
+
+        summary["plantoes_copied"] = _backfill_plantao_online_from_public(cursor, schema_name)
+
+        refs_public = _plantao_online_has_fk_to_public(cursor, schema_name, "plantao_schools")
+
+        if not refs_public:
+            summary["note"] = (
+                "FK já referencia plantao_online local; backfill aplicado se necessário"
+            )
+            logger.info("Plantão Online migrate %s: %s", schema_name, summary)
+            return summary
+
+        dropped = _plantao_online_drop_public_fks(cursor, schema_name, "plantao_schools")
+        summary["fks_dropped"] = dropped
+        if dropped == 0:
+            raise RuntimeError(
+                f"Detectada FK para public.plantao_online em {schema_name}.plantao_schools "
+                "mas nenhuma constraint foi removida"
+            )
+
+        try:
+            cursor.execute(
+                f"""
+                ALTER TABLE "{schema_name}"."plantao_schools"
+                ADD CONSTRAINT plantao_schools_plantao_id_fkey
+                FOREIGN KEY (plantao_id)
+                REFERENCES "{schema_name}".plantao_online(id)
+                ON DELETE CASCADE
+                """
+            )
+            summary["fks_recreated"] += 1
+        except Exception as ex:
+            err = str(ex).lower()
+            if "already exists" in err or "duplicate" in err:
+                logger.info(
+                    "Constraint plantao_schools_plantao_id_fkey já existe em %s",
+                    schema_name,
+                )
+            else:
+                raise
+
+        summary["note"] = "FK realinhada para plantao_online do schema tenant"
+        logger.info("Plantão Online migrado public→%s: %s", schema_name, summary)
+        return summary
+    except Exception as e:
+        logger.exception("migrate_plantao_online_from_public %s: %s", schema_name, e)
+        raise
+    finally:
+        raw_conn.close()
+
+
 def get_calendar_tables_ddl(schema: str) -> str:
     """DDL idempotente para estruturas do Calendar em schemas city_*."""
     return f"""
@@ -418,6 +643,7 @@ def provision_city_schema(city_id: str, city_name: str, city_state: str) -> None
 def _get_city_tables_ddl(schema: str) -> str:
     """Retorna o SQL de criação das tabelas do schema city (mesmo conteúdo da migração 0001)."""
     play_tv_block = get_play_tv_tables_ddl(schema)
+    plantao_online_block = get_plantao_online_tables_ddl(schema)
     # Uso de {schema} único; literais JSON como '{{}}' para .format()
     return f"""
 CREATE TABLE IF NOT EXISTS "{schema}".school (
@@ -1089,15 +1315,7 @@ CREATE TABLE IF NOT EXISTS "{schema}".form_result_cache (
 COMMENT ON TABLE "{schema}".form_result_cache IS 'Cache de resultados de formulários';
 CREATE INDEX IF NOT EXISTS idx_form_result_cache_form_type ON "{schema}".form_result_cache(form_id, report_type);
 CREATE INDEX IF NOT EXISTS idx_form_result_cache_dirty ON "{schema}".form_result_cache(is_dirty);
-""" + play_tv_block + f"""
-CREATE TABLE IF NOT EXISTS "{schema}".plantao_schools (
-    id VARCHAR PRIMARY KEY,
-    plantao_id VARCHAR REFERENCES public.plantao_online(id),
-    school_id VARCHAR(36) REFERENCES "{schema}".school(id),
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-);
-COMMENT ON TABLE "{schema}".plantao_schools IS 'Plantões online disponibilizados para escolas';
-
+""" + play_tv_block + plantao_online_block + f"""
 CREATE TABLE IF NOT EXISTS "{schema}".certificate_templates (
     id VARCHAR PRIMARY KEY,
     evaluation_id VARCHAR REFERENCES "{schema}".test(id),

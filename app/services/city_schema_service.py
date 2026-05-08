@@ -109,6 +109,27 @@ COMMENT ON TABLE "{schema}".plantao_schools IS 'Plantões online disponibilizado
 """
 
 
+def get_ideb_meta_tables_ddl(schema: str) -> str:
+    """
+    DDL idempotente da Calculadora de Metas IDEB no schema city_xxx.
+
+    Nota: a tabela referencia public.city (cross-schema) para identificar o município
+    do contexto salvo. Uma linha por (city_id, level).
+    """
+    return f"""
+CREATE TABLE IF NOT EXISTS "{schema}".ideb_meta_saves (
+    id VARCHAR PRIMARY KEY,
+    city_id VARCHAR NOT NULL REFERENCES public.city(id) ON DELETE CASCADE,
+    level VARCHAR(100) NOT NULL,
+    payload JSON NOT NULL,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT uq_ideb_meta_saves_context UNIQUE(city_id, level)
+);
+CREATE INDEX IF NOT EXISTS idx_ideb_meta_saves_context ON "{schema}".ideb_meta_saves(city_id, level);
+COMMENT ON TABLE "{schema}".ideb_meta_saves IS 'Calculadora IDEB: payload salvo por (city_id, level) no schema do município';
+"""
+
+
 def provision_plantao_online_for_city_schema(schema_name: str) -> None:
     """
     Aplica apenas o bloco DDL Plantão Online em um schema city_* já existente (idempotente).
@@ -644,6 +665,7 @@ def _get_city_tables_ddl(schema: str) -> str:
     """Retorna o SQL de criação das tabelas do schema city (mesmo conteúdo da migração 0001)."""
     play_tv_block = get_play_tv_tables_ddl(schema)
     plantao_online_block = get_plantao_online_tables_ddl(schema)
+    ideb_meta_block = get_ideb_meta_tables_ddl(schema)
     # Uso de {schema} único; literais JSON como '{{}}' para .format()
     return f"""
 CREATE TABLE IF NOT EXISTS "{schema}".school (
@@ -1315,7 +1337,7 @@ CREATE TABLE IF NOT EXISTS "{schema}".form_result_cache (
 COMMENT ON TABLE "{schema}".form_result_cache IS 'Cache de resultados de formulários';
 CREATE INDEX IF NOT EXISTS idx_form_result_cache_form_type ON "{schema}".form_result_cache(form_id, report_type);
 CREATE INDEX IF NOT EXISTS idx_form_result_cache_dirty ON "{schema}".form_result_cache(is_dirty);
-""" + play_tv_block + plantao_online_block + f"""
+""" + play_tv_block + plantao_online_block + ideb_meta_block + f"""
 CREATE TABLE IF NOT EXISTS "{schema}".certificate_templates (
     id VARCHAR PRIMARY KEY,
     evaluation_id VARCHAR REFERENCES "{schema}".test(id),

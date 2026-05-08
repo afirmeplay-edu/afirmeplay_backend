@@ -569,3 +569,152 @@ class AggregatedResultsService:
             'geradoEm': datetime.utcnow().isoformat(),
             'message': 'Nenhum formulário encontrado para o escopo especificado'
         }
+
+    @staticmethod
+    def get_aggregated_pneerq(filters):
+        """
+        Obtém indicadores PNEERQ agregados de TODOS os formulários aplicados no escopo.
+        Reaproveita o cache por-formulário (report_type='pneerq') via ResultsCacheService.
+        """
+        try:
+            forms = AggregatedResultsService._find_forms_for_scope(filters)
+            if not forms:
+                return {
+                    'escopo': AggregatedResultsService._format_scope_info(filters),
+                    'formularios': [],
+                    'totalFormularios': 0,
+                    'totalRespostas': 0,
+                    'pneerqConsolidado': {},
+                    'geradoEm': datetime.utcnow().isoformat(),
+                    'message': 'Nenhum formulário encontrado para o escopo especificado'
+                }
+
+            all_results = []
+            forms_summary = []
+            total_respostas = 0
+
+            from app.socioeconomic_forms.services.pneerq_service import PneerqService
+
+            for form in forms:
+                cached_result = ResultsCacheService.get_result(form.id, 'pneerq', filters)
+                if cached_result:
+                    result = cached_result
+                else:
+                    result = PneerqService.calculate_pneerq_report(
+                        form_id=form.id,
+                        filters=filters
+                    )
+                all_results.append({
+                    'form_id': form.id,
+                    'form_title': form.title,
+                    'form_type': form.form_type,
+                    'result': result
+                })
+
+                tr = result.get('totalRespostas', 0) or 0
+                total_respostas += tr
+                forms_summary.append({
+                    'formId': form.id,
+                    'formTitle': form.title,
+                    'formType': form.form_type,
+                    'totalRespostas': tr,
+                    'createdAt': form.created_at.isoformat() if form.created_at else None
+                })
+
+            consolidated = AggregatedResultsService._consolidate_pneerq(all_results)
+
+            return {
+                'escopo': AggregatedResultsService._format_scope_info(filters),
+                'formularios': forms_summary,
+                'totalFormularios': len(forms),
+                'totalRespostas': total_respostas,
+                'pneerqConsolidado': consolidated,
+                'geradoEm': datetime.utcnow().isoformat(),
+            }
+
+        except SQLAlchemyError as e:
+            logger.error("Erro ao obter PNEERQ agregado: %s", str(e))
+            raise
+
+    @staticmethod
+    def _consolidate_pneerq(all_results):
+        """
+        Consolida múltiplos relatórios PNEERQ somando numeradores/denominadores.
+        Mantém a mesma estrutura de eixos/indicadores.
+        """
+        consolidated = {
+            'gruposRaciais': {'disponiveis': [], 'definicao': {}},
+            'eixos': {},
+            'metadados': {'fonte': 'forms'},
+        }
+
+        # Basear estrutura no primeiro resultado válido
+        base = None
+        for item in all_results:
+            r = item.get('result') or {}
+            if r.get('eixos'):
+                base = r
+                break
+        if not base:
+            consolidated['eixos'] = {}
+            return consolidated
+
+        consolidated['gruposRaciais'] = base.get('gruposRaciais', consolidated['gruposRaciais'])
+        consolidated['metadados'] = base.get('metadados', consolidated['metadados'])
+
+        # Inicializar eixos/indicadores com zeros
+        for eixo_key, eixo in base.get('eixos', {}).items():
+            consolidated['eixos'][eixo_key] = {
+                'nome': eixo.get('nome'),
+                'indicadores': []
+            }
+            for ind in eixo.get('indicadores', []):
+                consolidated['eixos'][eixo_key]['indicadores'].append({
+                    'id': ind.get('id'),
+                    'nome': ind.get('nome'),
+                    'descricao': ind.get('descricao'),
+                    'unidade': ind.get('unidade', 'percent'),
+                    'metricas': {'numerador': 0, 'denominador': 0, 'valor': 0},
+                    'porGrupoRacial': {}
+                })
+                # init groups from base
+                for g in (ind.get('porGrupoRacial') or {}).keys():
+                    consolidated['eixos'][eixo_key]['indicadores'][-1]['porGrupoRacial'][g] = {
+                        'numerador': 0, 'denominador': 0, 'valor': 0
+                    }
+
+        # Helper lookup (eixo_key, indicator_id) -> dict ref
+        index = {}
+        for eixo_key, eixo in consolidated['eixos'].items():
+            for ind in eixo['indicadores']:
+                index[(eixo_key, ind['id'])] = ind
+
+        # Sum numerators/denominators
+        for item in all_results:
+            r = item.get('result') or {}
+            for eixo_key, eixo in (r.get('eixos') or {}).items():
+                for ind in (eixo.get('indicadores') or []):
+                    ref = index.get((eixo_key, ind.get('id')))
+                    if not ref:
+                        continue
+                    m = ind.get('metricas') or {}
+                    ref['metricas']['numerador'] += int(m.get('numerador', 0) or 0)
+                    ref['metricas']['denominador'] += int(m.get('denominador', 0) or 0)
+                    for g, gm in (ind.get('porGrupoRacial') or {}).items():
+                        if g not in ref['porGrupoRacial']:
+                            ref['porGrupoRacial'][g] = {'numerador': 0, 'denominador': 0, 'valor': 0}
+                        ref['porGrupoRacial'][g]['numerador'] += int(gm.get('numerador', 0) or 0)
+                        ref['porGrupoRacial'][g]['denominador'] += int(gm.get('denominador', 0) or 0)
+
+        # Recalcular percentuais
+        for eixo in consolidated['eixos'].values():
+            for ind in eixo['indicadores']:
+                den = ind['metricas']['denominador']
+                num = ind['metricas']['numerador']
+                ind['metricas']['valor'] = round((num / den * 100.0), 2) if den else 0
+                for g, gm in ind['porGrupoRacial'].items():
+                    gden = gm.get('denominador') or 0
+                    gnum = gm.get('numerador') or 0
+                    gm['valor'] = round((gnum / gden * 100.0), 2) if gden else 0
+
+        return consolidated

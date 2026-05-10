@@ -12,6 +12,7 @@ from celery import Task
 from app.report_analysis.celery_app import celery_app
 from app.socioeconomic_forms.services.results_service import ResultsService
 from app.socioeconomic_forms.services.results_cache_service import ResultsCacheService
+from app.socioeconomic_forms.services.pneerq_service import PneerqService
 from app.socioeconomic_forms.models import Form
 from app import db
 from app.utils.tenant_middleware import set_search_path
@@ -237,6 +238,70 @@ def generate_responses_report(
         
     except Exception as e:
         logger.error(f"[RESPOSTAS] Erro ao gerar relatório: {str(e)}", exc_info=True)
+        raise self.retry(exc=e)
+
+
+@celery_app.task(bind=True, max_retries=3, default_retry_delay=60)
+def generate_pneerq_report(
+    self: Task,
+    form_id: str,
+    filters: Dict[str, Any],
+    schema: Optional[str] = None,
+    age_distortion_delta: Optional[int] = None,  # DEPRECADO: mantido para retrocompatibilidade de tasks antigas
+) -> Dict[str, Any]:
+    """
+    Task Celery para gerar relatório PNEERQ (equidade racial).
+
+    Args:
+        form_id: ID do formulário
+        filters: Filtros aplicados
+        schema: Nome do schema PostgreSQL do tenant (multi-tenant).
+        age_distortion_delta: (DEPRECADO) parâmetro legado; ignorado.
+    """
+    try:
+        _set_tenant_schema(schema)
+        logger.info(f"[PNEERQ] Iniciando geração de relatório: form_id={form_id}, filters={filters}")
+
+        form = Form.query.get(form_id)
+        if not form:
+            logger.error(f"[PNEERQ] Formulário {form_id} não encontrado")
+            raise ValueError(f"Formulário {form_id} não encontrado")
+
+        cached = ResultsCacheService.get_result(form_id, 'pneerq', filters)
+        if cached:
+            logger.info(f"[PNEERQ] Usando resultado do cache para form_id={form_id}")
+            return {
+                'success': True,
+                'cached': True,
+                'result': cached
+            }
+
+        logger.info(f"[PNEERQ] Calculando resultado para form_id={form_id}")
+        result = PneerqService.calculate_pneerq_report(
+            form_id=form_id,
+            filters=filters,
+        )
+        student_count = result.get('totalRespostas', 0)
+
+        ResultsCacheService.save(
+            form_id=form_id,
+            report_type='pneerq',
+            filters=filters,
+            result=result,
+            student_count=student_count,
+            commit=True
+        )
+
+        logger.info(f"[PNEERQ] Relatório gerado com sucesso: form_id={form_id}")
+        return {
+            'success': True,
+            'cached': False,
+            'result': result,
+            'student_count': student_count
+        }
+
+    except Exception as e:
+        logger.error(f"[PNEERQ] Erro ao gerar relatório: {str(e)}", exc_info=True)
         raise self.retry(exc=e)
 
 

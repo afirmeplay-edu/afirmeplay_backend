@@ -236,3 +236,50 @@ def get_aggregated_summary():
     except Exception as e:
         logger.error("Erro ao obter resumo agregado: %s", str(e))
         return jsonify({'error': 'Erro ao gerar resumo', 'details': str(e)}), 500
+
+
+@bp.route('/results/pneerq', methods=['GET'])
+@jwt_required()
+def get_aggregated_pneerq():
+    """
+    GET /forms/aggregated/results/pneerq
+
+    Consolida indicadores PNEERQ (equidade racial) de TODOS os formulários aplicados no escopo.
+
+    Query Parameters:
+        - state: Estado (opcional)
+        - municipio: UUID do município (opcional)
+        - escola: UUID da escola (opcional)
+        - serie: UUID da série (opcional)
+        - turma: UUID da turma (opcional)
+        - ageDistortionDelta: (DEPRECADO) se enviado pelo frontend, será ignorado.
+    """
+    try:
+        filters = {}
+
+        if request.args.get('state'):
+            filters['state'] = request.args.get('state')
+
+        if request.args.get('municipio'):
+            filters['municipio'] = request.args.get('municipio')
+
+        if request.args.get('escola'):
+            filters['escola'] = request.args.get('escola')
+
+        if request.args.get('serie'):
+            filters['serie'] = request.args.get('serie')
+
+        if request.args.get('turma'):
+            filters['turma'] = request.args.get('turma')
+
+        logger.info("[AGGREGATED PNEERQ] Solicitação recebida - Filtros: %s", filters)
+        result = AggregatedResultsService.get_aggregated_pneerq(filters)
+        return jsonify(result), 200
+
+    except ValueError as e:
+        logger.error("Erro de validação: %s", str(e))
+        return jsonify({'error': 'Parâmetros inválidos', 'details': str(e)}), 400
+
+    except Exception as e:
+        logger.error("Erro ao obter PNEERQ agregado: %s", str(e))
+        return jsonify({'error': 'Erro ao gerar relatório agregado', 'details': str(e)}), 500

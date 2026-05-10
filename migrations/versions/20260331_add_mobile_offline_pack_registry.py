@@ -46,7 +46,7 @@ def upgrade():
         ),
         sa.ForeignKeyConstraint(
             ["city_id"],
-            ["city.id"],
+            ["public.city.id"],
         ),
         sa.PrimaryKeyConstraint("code_hash"),
         schema="public",

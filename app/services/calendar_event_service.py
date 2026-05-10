@@ -1,6 +1,7 @@
-from typing import List, Dict, Any, Set, Tuple
+from typing import List, Dict, Any, Set, Tuple, Optional
 from datetime import datetime
-from sqlalchemy import or_, and_
+from sqlalchemy import or_, and_, not_, cast
+from sqlalchemy.dialects.postgresql import JSONB
 from app import db
 from app.models import (
     CalendarEvent,
@@ -23,6 +24,22 @@ from app.models.teacherClass import TeacherClass
 
 
 class CalendarEventService:
+    @staticmethod
+    def _metadata_as_jsonb():
+        """Coluna JSON armazenada como tipo `json` no PG: usa cast para `@>` (contains) com JSONB."""
+        return cast(CalendarEvent.metadata_json, JSONB)
+
+    @staticmethod
+    def filter_metadata_has_kind(kind_value: str):
+        return CalendarEventService._metadata_as_jsonb().contains({"kind": kind_value})
+
+    @staticmethod
+    def filter_metadata_excludes_kind(kind_value: str):
+        return or_(
+            CalendarEvent.metadata_json.is_(None),
+            not_(CalendarEventService._metadata_as_jsonb().contains({"kind": kind_value})),
+        )
+
     @staticmethod
     def _extract_user_role(user: User) -> str:
         if not user:
@@ -301,6 +318,8 @@ class CalendarEventService:
     
     @staticmethod
     def create_event(data: Dict[str, Any], creator: Dict[str, Any]) -> CalendarEvent:
+        meta = data.get('metadata')
+        meta_json = dict(meta) if isinstance(meta, dict) else meta
         event = CalendarEvent(
             title=data['title'],
             description=data.get('description'),
@@ -311,6 +330,7 @@ class CalendarEventService:
             timezone=data.get('timezone'),
             recurrence_rule=data.get('recurrence_rule'),
             is_published=bool(data.get('is_published', False)),
+            metadata_json=meta_json,
             created_by_user_id=creator['id'],
             created_by_role=creator['role'],
             visibility_scope=CalendarVisibilityScope(data['visibility_scope'])
@@ -354,6 +374,10 @@ class CalendarEventService:
 
         if 'visibility_scope' in data:
             event.visibility_scope = CalendarVisibilityScope(data['visibility_scope'])
+
+        if 'metadata' in data:
+            _m = data.get('metadata')
+            event.metadata_json = dict(_m) if isinstance(_m, dict) else _m
 
         if 'targets' in data:
             # Replace targets
@@ -625,11 +649,24 @@ class CalendarEventService:
         db.session.commit()
 
     @staticmethod
-    def list_my_events(user_id: str, start: datetime, end: datetime) -> List[CalendarEvent]:
+    def list_my_events(
+        user_id: str,
+        start: datetime,
+        end: datetime,
+        kind: Optional[str] = None,
+        exclude_kind: Optional[str] = None,
+    ) -> List[CalendarEvent]:
         date_clause = or_(
             and_(CalendarEvent.start_at >= start, CalendarEvent.start_at <= end),
             and_(CalendarEvent.end_at != None, CalendarEvent.end_at >= start, CalendarEvent.end_at <= end)
         )
+        meta_parts = []
+        if kind:
+            meta_parts.append(CalendarEventService.filter_metadata_has_kind(kind))
+        if exclude_kind:
+            meta_parts.append(CalendarEventService.filter_metadata_excludes_kind(exclude_kind))
+        meta_filter = and_(*meta_parts) if meta_parts else None
+
         q_recipient = (
             db.session.query(CalendarEvent)
             .join(CalendarEventUser, CalendarEventUser.event_id == CalendarEvent.id)
@@ -641,6 +678,9 @@ class CalendarEventService:
             .filter(CalendarEvent.created_by_user_id == user_id)
             .filter(date_clause)
         )
+        if meta_filter is not None:
+            q_recipient = q_recipient.filter(meta_filter)
+            q_creator = q_creator.filter(meta_filter)
         by_id = {e.id: e for e in q_recipient.all()}
         for ev in q_creator.all():
             by_id[ev.id] = ev

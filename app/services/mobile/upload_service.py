@@ -164,17 +164,30 @@ def process_one_submission(
             session_id_created = session_row.id
 
             for ans in answers:
-                sa = StudentAnswer(
+                qid = ans.get("question_id")
+                existing_answer = StudentAnswer.query.filter_by(
                     student_id=student_id,
                     test_id=test_id,
-                    question_id=ans.get("question_id"),
-                    answer=str(ans.get("answer", "")),
-                )
+                    question_id=qid,
+                ).first()
+
+                if existing_answer:
+                    sa = existing_answer
+                    sa.answer = str(ans.get("answer", ""))
+                else:
+                    sa = StudentAnswer(
+                        student_id=student_id,
+                        test_id=test_id,
+                        question_id=qid,
+                        answer=str(ans.get("answer", "")),
+                    )
+                    db.session.add(sa)
                 if ans.get("answered_at"):
                     parsed = _parse_ts(ans.get("answered_at"))
                     if parsed:
                         sa.answered_at = parsed
-                db.session.add(sa)
+                else:
+                    sa.answered_at = datetime.utcnow()
 
             sub_row = MobileSyncSubmission(
                 submission_id=submission_uuid,

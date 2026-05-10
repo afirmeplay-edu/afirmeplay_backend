@@ -865,13 +865,30 @@ class MultiTenantMigration:
         -- ===================================================================
         -- DISTRIBUIÇÃO DE CONTEÚDO (outros módulos PUBLIC → CITY)
         -- ===================================================================
-        
-        CREATE TABLE IF NOT EXISTS {schema}.plantao_schools (
+
+        CREATE TABLE IF NOT EXISTS {schema}.plantao_online (
             id VARCHAR PRIMARY KEY,
-            plantao_id VARCHAR REFERENCES public.plantao_online(id),
-            school_id VARCHAR(36) REFERENCES {schema}.school(id),
+            link TEXT NOT NULL,
+            title TEXT,
+            grade_id UUID NOT NULL REFERENCES public.grade(id),
+            subject_id VARCHAR NOT NULL REFERENCES public.subject(id),
+            created_by VARCHAR NOT NULL REFERENCES public.users(id),
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
+        CREATE INDEX IF NOT EXISTS ix_plantao_online_grade_id ON {schema}.plantao_online(grade_id);
+        CREATE INDEX IF NOT EXISTS ix_plantao_online_subject_id ON {schema}.plantao_online(subject_id);
+        CREATE INDEX IF NOT EXISTS ix_plantao_online_created_by ON {schema}.plantao_online(created_by);
+        COMMENT ON TABLE {schema}.plantao_online IS 'Plantão Online: plantões do município (schema tenant)';
+
+        CREATE TABLE IF NOT EXISTS {schema}.plantao_schools (
+            id VARCHAR PRIMARY KEY,
+            plantao_id VARCHAR NOT NULL REFERENCES {schema}.plantao_online(id) ON DELETE CASCADE,
+            school_id VARCHAR(36) REFERENCES {schema}.school(id),
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            CONSTRAINT uq_plantao_school UNIQUE(plantao_id, school_id)
+        );
+        CREATE INDEX IF NOT EXISTS ix_plantao_schools_plantao_id ON {schema}.plantao_schools(plantao_id);
+        CREATE INDEX IF NOT EXISTS ix_plantao_schools_school_id ON {schema}.plantao_schools(school_id);
         COMMENT ON TABLE {schema}.plantao_schools IS 'Plantões online disponibilizados para escolas';
         
         -- ===================================================================

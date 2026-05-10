@@ -9,6 +9,7 @@ import logging
 from werkzeug.security import check_password_hash
 from app.utils.auth import hash_password
 from app import db
+from app.models.city import City
 from app.models.school import School
 from app.models.student import Student
 from app.models.studentClass import Class

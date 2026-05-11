@@ -498,6 +498,21 @@ def listar_avaliacoes_answer_sheet_response(
         "media_nota_geral": round_to_two_decimals(sum(grades) / len(grades)) if grades else 0.0,
         "media_proficiencia_geral": round_to_two_decimals(sum(profs) / len(profs)) if profs else 0.0,
         "distribuicao_classificacao_geral": dict(dist),
+        # Para cartão-resposta não há múltiplas disciplinas; ainda assim expomos um consolidado
+        # por "GERAL" no mesmo nó, para o frontend não calcular nada.
+        "por_disciplina": [
+            {
+                "disciplina": "GERAL",
+                "total_avaliacoes": 1,
+                "total_alunos": n,
+                "alunos_participantes": n,
+                "alunos_pendentes": 0,
+                "alunos_ausentes": 0,
+                "media_nota": round_to_two_decimals(sum(grades) / len(grades)) if grades else 0.0,
+                "media_proficiencia": round_to_two_decimals(sum(profs) / len(profs)) if profs else 0.0,
+                "distribuicao_classificacao": dict(dist),
+            }
+        ],
         "report_entity_type": REPORT_ENTITY_ANSWER_SHEET,
     }
 

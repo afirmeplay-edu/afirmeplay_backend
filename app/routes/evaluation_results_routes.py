@@ -1134,6 +1134,10 @@ def listar_avaliacoes():
             estatisticas_consolidadas["participantes_distribuicao"] = estatisticas_consolidadas.get(
                 "alunos_participantes", 0
             )
+            # Consolidado por disciplina do mesmo escopo (para evitar o frontend recalcular)
+            estatisticas_consolidadas["por_disciplina"] = _calcular_estatisticas_gerais_por_disciplina_escopo(
+                todas_avaliacoes_escopo, scope_info, nivel_granularidade
+            )
         
         # Calcular estatísticas por disciplina
         resultados_por_disciplina = _calcular_estatisticas_por_disciplina(todas_avaliacoes_escopo, scope_info, nivel_granularidade)
@@ -2762,6 +2766,9 @@ def _calcular_estatisticas_por_disciplina(class_tests: list, scope_info: dict, n
     """
     try:
         from app.services.evaluation_result_service import EvaluationResultService
+        from app.models.school import School
+        from app.models.studentClass import Class
+        from app.models.grades import Grade
         
         if not class_tests:
             return []
@@ -2772,45 +2779,196 @@ def _calcular_estatisticas_por_disciplina(class_tests: list, scope_info: dict, n
             return []
         
         test_id = test.id
-        
-        # CORRIGIDO: Usar a função corrigida do EvaluationResultService com filtros de granularidade
-        statistics = EvaluationResultService.get_subject_detailed_statistics(test_id, scope_info, nivel_granularidade)
-        
-        if "error" in statistics:
-            logging.error(f"Erro ao obter estatísticas por disciplina: {statistics['error']}")
-            return []
-        
-        # Converter o formato retornado para o formato esperado pela rota
-        resultados_disciplina = []
-        
-        if 'subjects' in statistics:
-            for subject_name, subject_data in statistics['subjects'].items():
-                # Converter classificação para o formato esperado
-                distribuicao_classificacao = subject_data.get('classification_distribution', {})
-                
-                resultado_disciplina = {
-                    "disciplina": subject_name,
-                    "total_avaliacoes": 1,
-                    "total_alunos": subject_data.get('total_students', 0),
-                    "alunos_participantes": subject_data.get('total_students', 0),
-                    "alunos_pendentes": 0,
-                    "alunos_ausentes": 0,
-                    "media_nota": subject_data.get('average_grade', 0.0),
-                    "media_proficiencia": subject_data.get('average_proficiency', 0.0),
-                    "distribuicao_classificacao": {
-                        'abaixo_do_basico': distribuicao_classificacao.get('abaixo_do_basico', 0),
-                        'basico': distribuicao_classificacao.get('basico', 0),
-                        'adequado': distribuicao_classificacao.get('adequado', 0),
-                        'avancado': distribuicao_classificacao.get('avancado', 0)
+
+        def _convert_subjects_to_rows(statistics: dict) -> List[Dict[str, Any]]:
+            """
+            Converte o dict retornado pelo serviço (subjects:{...}) para uma lista de rows
+            no formato esperado pelo frontend.
+            IMPORTANTE: não alterar cálculos nem campos (mantém redundâncias atuais).
+            """
+            if not isinstance(statistics, dict) or "subjects" not in statistics:
+                return []
+
+            rows: List[Dict[str, Any]] = []
+            for subject_name, subject_data in (statistics.get("subjects") or {}).items():
+                distribuicao_classificacao = (subject_data or {}).get("classification_distribution", {}) or {}
+                rows.append(
+                    {
+                        "disciplina": subject_name,
+                        "total_avaliacoes": 1,
+                        "total_alunos": (subject_data or {}).get("total_students", 0),
+                        "alunos_participantes": (subject_data or {}).get("total_students", 0),
+                        "alunos_pendentes": 0,
+                        "alunos_ausentes": 0,
+                        "media_nota": (subject_data or {}).get("average_grade", 0.0),
+                        "media_proficiencia": (subject_data or {}).get("average_proficiency", 0.0),
+                        "distribuicao_classificacao": {
+                            "abaixo_do_basico": distribuicao_classificacao.get("abaixo_do_basico", 0),
+                            "basico": distribuicao_classificacao.get("basico", 0),
+                            "adequado": distribuicao_classificacao.get("adequado", 0),
+                            "avancado": distribuicao_classificacao.get("avancado", 0),
+                        },
                     }
-                }
-                
-                resultados_disciplina.append(resultado_disciplina)
-        
-        return resultados_disciplina
+                )
+            return rows
+
+        def _safe_get_subject_stats(scoped_info: dict, scoped_level: str) -> List[Dict[str, Any]]:
+            statistics = EvaluationResultService.get_subject_detailed_statistics(test_id, scoped_info, scoped_level)
+            if isinstance(statistics, dict) and "error" in statistics:
+                logging.error(f"Erro ao obter estatísticas por disciplina: {statistics['error']}")
+                return []
+            return _convert_subjects_to_rows(statistics)
+
+        # ==========================
+        # NOVO: agrupamento por entidade do nível atual
+        # ==========================
+        resultados_disciplina: List[Dict[str, Any]] = []
+
+        # Municipio: quebrar por escola (para cada escola, calcular por disciplina)
+        if nivel_granularidade == "municipio":
+            escolas = scope_info.get("escolas") if isinstance(scope_info, dict) else None
+            if not escolas:
+                # Fallback: derivar escolas via class_tests
+                escolas = []
+                seen = set()
+                for ct in class_tests:
+                    try:
+                        sc = ct.class_.school if ct.class_ and ct.class_.school else None
+                    except Exception:
+                        sc = None
+                    if not sc:
+                        continue
+                    if sc.id in seen:
+                        continue
+                    seen.add(sc.id)
+                    escolas.append(sc)
+
+            for sc in escolas or []:
+                scoped = dict(scope_info or {})
+                scoped["escola"] = str(sc.id)
+
+                # Para um recorte por escola dentro da visão municipal, o nível efetivo de filtro é "escola"
+                rows = _safe_get_subject_stats(scoped, "escola")
+                for r in rows:
+                    # Só adiciona metadados do grupo; não altera campos existentes.
+                    r["escola_id"] = str(sc.id)
+                    r["escola"] = getattr(sc, "name", None)
+                    resultados_disciplina.append(r)
+
+            return resultados_disciplina
+
+        # Escola e Série: quebrar por turma (para cada turma, calcular por disciplina)
+        if nivel_granularidade in ("escola", "serie"):
+            turmas: List[Any] = []
+            seen = set()
+            for ct in class_tests:
+                t = getattr(ct, "class_", None)
+                if not t or getattr(t, "id", None) is None:
+                    continue
+                if t.id in seen:
+                    continue
+                seen.add(t.id)
+                turmas.append(t)
+
+            for turma_obj in turmas:
+                scoped = dict(scope_info or {})
+                scoped["turma"] = str(turma_obj.id)
+
+                # Recorte por turma deve usar nível "turma"
+                rows = _safe_get_subject_stats(scoped, "turma")
+                for r in rows:
+                    r["turma_id"] = str(turma_obj.id)
+                    r["turma"] = getattr(turma_obj, "name", None)
+
+                    # Metadados auxiliares (não removem/alteram nenhum campo existente)
+                    try:
+                        grade = getattr(turma_obj, "grade", None)
+                        if grade is not None:
+                            r["serie_id"] = str(getattr(grade, "id", "") or "")
+                            r["serie"] = getattr(grade, "name", None)
+                    except Exception:
+                        pass
+                    try:
+                        school = getattr(turma_obj, "school", None)
+                        if school is not None:
+                            r["escola_id"] = str(getattr(school, "id", "") or "")
+                            r["escola"] = getattr(school, "name", None)
+                    except Exception:
+                        pass
+
+                    resultados_disciplina.append(r)
+
+            return resultados_disciplina
+
+        # Turma (ou outros níveis): manter comportamento atual (escopo inteiro por disciplina)
+        return _safe_get_subject_stats(dict(scope_info or {}), nivel_granularidade)
         
     except Exception as e:
         logging.error(f"Erro ao calcular estatísticas por disciplina: {str(e)}")
+        return []
+
+
+def _calcular_estatisticas_gerais_por_disciplina_escopo(
+    class_tests: list, scope_info: dict, nivel_granularidade: str
+) -> List[Dict[str, Any]]:
+    """
+    Retorna o consolidado por disciplina DO ESCOPO (sem agrupamento por escola/turma),
+    para ser aninhado em estatisticas_gerais.por_disciplina.
+
+    Importante:
+    - Reutiliza o mesmo serviço/cálculo de médias já existente.
+    - Não altera nem "corrige" campos redundantes do payload.
+    """
+    try:
+        from app.services.evaluation_result_service import EvaluationResultService
+
+        if not class_tests:
+            return []
+
+        test = class_tests[0].test
+        if not test or not getattr(test, "subjects_info", None):
+            return []
+
+        statistics = EvaluationResultService.get_subject_detailed_statistics(
+            str(test.id), scope_info, nivel_granularidade
+        )
+        if isinstance(statistics, dict) and "error" in statistics:
+            logging.error(
+                "Erro ao obter estatísticas gerais por disciplina: %s",
+                statistics.get("error"),
+            )
+            return []
+
+        subjects = (statistics or {}).get("subjects") or {}
+        rows: List[Dict[str, Any]] = []
+        for subject_name, subject_data in subjects.items():
+            distribuicao_classificacao = (subject_data or {}).get("classification_distribution", {}) or {}
+            rows.append(
+                {
+                    "disciplina": subject_name,
+                    "total_avaliacoes": 1,
+                    "total_alunos": (subject_data or {}).get("total_students", 0),
+                    "alunos_participantes": (subject_data or {}).get("total_students", 0),
+                    "alunos_pendentes": 0,
+                    "alunos_ausentes": 0,
+                    "media_nota": (subject_data or {}).get("average_grade", 0.0),
+                    "media_proficiencia": (subject_data or {}).get("average_proficiency", 0.0),
+                    "distribuicao_classificacao": {
+                        "abaixo_do_basico": distribuicao_classificacao.get("abaixo_do_basico", 0),
+                        "basico": distribuicao_classificacao.get("basico", 0),
+                        "adequado": distribuicao_classificacao.get("adequado", 0),
+                        "avancado": distribuicao_classificacao.get("avancado", 0),
+                    },
+                }
+            )
+
+        return rows
+    except Exception as e:
+        logging.error(
+            "Erro ao calcular estatísticas gerais por disciplina (escopo): %s",
+            str(e),
+            exc_info=True,
+        )
         return []
 
 

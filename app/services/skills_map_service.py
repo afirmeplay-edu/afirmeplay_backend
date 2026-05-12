@@ -14,6 +14,7 @@ from sqlalchemy.orm import joinedload
 
 from app.models.answerSheetGabarito import AnswerSheetGabarito
 from app.models.answerSheetResult import AnswerSheetResult
+from app.models.evaluationResult import EvaluationResult
 from app.models.question import Question
 from app.models.skill import Skill
 from app.models.student import Student
@@ -232,11 +233,19 @@ def compute_digital_aggregate(
             answers_by_student[a.student_id] = {}
         answers_by_student[a.student_id][a.question_id] = a
 
-    # Exclui alunos faltosos (sem nenhuma resposta registrada para a prova).
-    # Alunos ausentes não têm StudentAnswer → não devem entrar no cálculo de % acertos
-    # nem aparecer no drill-down "quem errou", assim como ocorre com o cartão-resposta
-    # (que filtra via _participating_answer_sheet_result).
-    participating_students = [s for s in students if s.id in answers_by_student]
+    # Participante = mesmo critério de GET /evaluation-results/avaliacoes: existe
+    # `evaluation_results` para o teste (rascunho só com StudentAnswer não conta).
+    eval_student_ids = {
+        row[0]
+        for row in EvaluationResult.query.filter(
+            EvaluationResult.test_id == str(test_id),
+            EvaluationResult.student_id.in_(student_ids),
+        )
+        .with_entities(EvaluationResult.student_id)
+        .distinct()
+        .all()
+    }
+    participating_students = [s for s in students if s.id in eval_student_ids]
 
     stats: Dict[str, Dict[str, Any]] = defaultdict(
         lambda: {"correct": 0, "total": 0, "question_ref": "", "subject_id": None}
@@ -628,6 +637,20 @@ def build_skills_map_answer_sheet(
         for s in students_all
         if s.id in result_by_student and _participating_answer_sheet_result(result_by_student[s.id])
     ]
+    linked_test_id = getattr(gabarito, "test_id", None)
+    if linked_test_id and students:
+        sid_list = [s.id for s in students]
+        eval_ids = {
+            row[0]
+            for row in EvaluationResult.query.filter(
+                EvaluationResult.test_id == str(linked_test_id),
+                EvaluationResult.student_id.in_(sid_list),
+            )
+            .with_entities(EvaluationResult.student_id)
+            .distinct()
+            .all()
+        }
+        students = [s for s in students if s.id in eval_ids]
 
     stats: Dict[str, Dict[str, int]] = defaultdict(lambda: {"correct": 0, "total": 0})
     failed_by_skill: Dict[str, Set[str]] = defaultdict(set)

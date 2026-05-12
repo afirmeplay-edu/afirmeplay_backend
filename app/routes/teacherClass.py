@@ -198,12 +198,44 @@ def get_teacher_classes():
 
 @teacher_class_bp.route('/teacher-class/<string:id>', methods=['DELETE'])
 @jwt_required()
-@role_required('admin', 'tecadm')
+@role_required('admin', 'tecadm', 'diretor', 'coordenador')
 def delete_teacher_class(id):
     try:
+        current_user = get_current_user_from_token()
+        if not current_user:
+            return jsonify({"erro": "Usuário não encontrado"}), 404
+
         teacher_class = TeacherClass.query.get(id)
         if not teacher_class:
             return jsonify({'error': 'Vínculo não encontrado'}), 404
+
+        from app.models.studentClass import Class
+        from app.utils.uuid_helpers import uuid_to_str
+
+        class_obj = Class.query.get(teacher_class.class_id)
+        if not class_obj:
+            return jsonify({"erro": "Turma não encontrada para o vínculo informado"}), 404
+
+        school_id_raw = getattr(class_obj, "_school_id", None) or getattr(class_obj, "school_id", None)
+        school_id = uuid_to_str(school_id_raw) if school_id_raw else str(school_id_raw)
+
+        if current_user["role"] in ("diretor", "coordenador"):
+            from app.models.manager import Manager
+
+            manager = Manager.query.filter_by(user_id=current_user["id"]).first()
+            if not manager or str(manager.school_id) != str(school_id):
+                return jsonify({
+                    "erro": "Você só pode remover vínculos de turmas da sua escola"
+                }), 403
+        elif current_user["role"] == "tecadm":
+            from app.models.school import School
+
+            sch = School.query.get(school_id)
+            city_id = current_user.get("tenant_id") or current_user.get("city_id")
+            if not sch or not city_id or sch.city_id != city_id:
+                return jsonify({
+                    "erro": "Você só pode remover vínculos de turmas de escolas do seu município"
+                }), 403
             
         db.session.delete(teacher_class)
         db.session.commit()

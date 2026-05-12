@@ -14,6 +14,7 @@ from app.models.school import School
 from app.models.student import Student
 from app.models.studentClass import Class
 from app.models.grades import Grade
+from app.models.manager import Manager
 from app.models.studentPasswordLog import StudentPasswordLog
 from app.models.user_settings import UserSettings
 from sqlalchemy.orm import joinedload
@@ -1206,8 +1207,26 @@ def bulk_upload_students():
         except Exception as e:
             return jsonify({"erro": f"Erro ao ler arquivo: {str(e)}"}), 400
         
+        # Quando class_id vem no formulário, o backend força o vínculo em uma turma específica.
+        target_class_id = request.form.get("class_id")
+        target_class = None
+        target_school = None
+        target_grade = None
+        if target_class_id:
+            target_class = Class.query.get(target_class_id)
+            if not target_class:
+                return jsonify({"erro": "Turma informada não encontrada"}), 404
+            target_school = School.query.get(target_class.school_id)
+            if not target_school:
+                return jsonify({"erro": "Escola da turma informada não encontrada"}), 404
+            target_grade = Grade.query.get(target_class.grade_id) if target_class.grade_id else None
+            if not target_grade:
+                return jsonify({"erro": "Série da turma informada não encontrada"}), 404
+
         # Verificar colunas obrigatórias (email e senha são gerados pelo sistema; data_nascimento é opcional)
-        required_columns = ['nome', 'escola', 'endereco_escola', 'estado_escola', 'municipio_escola', 'grade_id', 'serie', 'turma']
+        required_columns = ['nome']
+        if not target_class:
+            required_columns = ['nome', 'escola', 'endereco_escola', 'estado_escola', 'municipio_escola', 'grade_id', 'serie', 'turma']
         if rows:
             missing_columns = [col for col in required_columns if col not in rows[0].keys()]
         else:
@@ -1226,8 +1245,9 @@ def bulk_upload_students():
             raw_grade = row.get('grade_id')
             print(f"[bulk-upload-students] Linha {i+2}: grade_id raw={repr(raw_grade)}, type={type(raw_grade).__name__}, serie={repr(row.get('serie'))}")
         
-        # Limpar dados (nome e dados da escola/turma obrigatórios; email e senha não vêm do arquivo)
-        rows = [row for row in rows if all(str(row.get(col, '')).strip() for col in ['nome', 'escola', 'endereco_escola', 'estado_escola', 'municipio_escola', 'grade_id', 'serie', 'turma'])]
+        # Limpar dados (email e senha não vêm do arquivo)
+        required_values_columns = ['nome'] if target_class else ['nome', 'escola', 'endereco_escola', 'estado_escola', 'municipio_escola', 'grade_id', 'serie', 'turma']
+        rows = [row for row in rows if all(str(row.get(col, '')).strip() for col in required_values_columns)]
         
         # Converter data de nascimento
         def parse_date(date_value):
@@ -1291,6 +1311,9 @@ def bulk_upload_students():
         
         if not allowed_schools:
             return jsonify({"erro": "Usuário não tem permissão para criar alunos em nenhuma escola"}), 403
+
+        if target_class and target_class.school_id not in allowed_schools:
+            return jsonify({"erro": "Sem permissão para criar alunos nesta turma"}), 403
         
         # Conjunto de emails já atribuídos neste batch (para evitar duplicatas)
         emails_usados_no_batch = set()
@@ -1347,100 +1370,108 @@ def bulk_upload_students():
                     })
                     continue
                 
-                # Buscar escola existente (busca normalizada - case-insensitive e espaços normalizados)
-                escola_nome = str(row.get('escola', '')).strip()
-                escola_nome_normalizado = normalizar_nome_para_busca(escola_nome)
-                
-                # Buscar todas as escolas e comparar com normalização
-                todas_escolas = School.query.all()
-                escola = None
-                for escola_candidata in todas_escolas:
-                    nome_escola_normalizado = normalizar_nome_para_busca(escola_candidata.name)
-                    if nome_escola_normalizado == escola_nome_normalizado:
-                        escola = escola_candidata
-                        break
-                
-                if not escola:
-                    results["erros"].append({
-                        "linha": index + 2,
-                        "campo": "escola",
-                        "valor": escola_nome,
-                        "erro": "Escola não encontrada"
-                    })
-                    continue
-                
-                # Verificar se usuário tem permissão para esta escola
-                if escola.id not in allowed_schools:
-                    results["erros"].append({
-                        "linha": index + 2,
-                        "campo": "escola",
-                        "valor": escola_nome,
-                        "erro": "Sem permissão para criar alunos nesta escola"
-                    })
-                    continue
-                
-                # Buscar série pelo grade_id (coluna grade_id contém o UUID; serie contém o nome para contexto)
-                grade_id_raw = row.get('grade_id')
-                # Normalizar: Excel pode trazer UUID como float ou número; garantir string
-                if grade_id_raw is None:
-                    grade_id_str = ''
-                elif isinstance(grade_id_raw, (int, float)):
-                    grade_id_str = str(int(grade_id_raw)) if isinstance(grade_id_raw, float) and grade_id_raw == int(grade_id_raw) else str(grade_id_raw).strip()
+                if target_class:
+                    escola = target_school
+                    serie = target_grade
+                    turma = target_class
+                    escola_nome = escola.name if escola else ""
+                    serie_nome = serie.name if serie else ""
+                    turma_nome = turma.name if turma else ""
                 else:
-                    grade_id_str = str(grade_id_raw).strip()
-                serie_nome = str(row.get('serie', '')).strip()  # mantido para mensagens de erro
-                
-                # DEBUG: ver valor usado no lookup
-                if index < 3:
-                    print(f"[bulk-upload-students] Linha {index + 2} lookup: grade_id_str={repr(grade_id_str)}")
-                
-                if not grade_id_str:
-                    results["erros"].append({
-                        "linha": index + 2,
-                        "campo": "grade_id",
-                        "valor": grade_id_raw,
-                        "erro": "grade_id é obrigatório"
-                    })
-                    continue
-                
-                serie = Grade.query.get(grade_id_str)
-                if index < 3:
-                    print(f"[bulk-upload-students] Linha {index + 2} Grade.query.get({repr(grade_id_str)}) = {serie}")
-                if not serie:
-                    results["erros"].append({
-                        "linha": index + 2,
-                        "campo": "grade_id",
-                        "valor": grade_id_str,
-                        "erro": "Série não encontrada",
-                        "serie_nome": serie_nome or None
-                    })
-                    continue
-                
-                # Buscar turma existente (busca normalizada - case-insensitive e espaços normalizados)
-                turma_nome = str(row.get('turma', '')).strip()
-                turma_nome_normalizado = normalizar_nome_para_busca(turma_nome)
-                
-                # Buscar turmas da escola e série, e comparar com normalização
-                turmas_candidatas = Class.query.filter(
-                    Class.school_id == escola.id,
-                    Class.grade_id == serie.id
-                ).all()
-                
-                turma = None
-                for turma_candidata in turmas_candidatas:
-                    nome_turma_normalizado = normalizar_nome_para_busca(turma_candidata.name)
-                    if nome_turma_normalizado == turma_nome_normalizado:
-                        turma = turma_candidata
-                        break
-                
-                if not turma:
-                    results["erros"].append({
-                        "linha": index + 2,
-                        "campo": "turma",
-                        "valor": turma_nome,
-                        "erro": f"Turma não encontrada na escola {escola_nome} e série {serie_nome}"
-                    })
-                    continue
+                    # Buscar escola existente (busca normalizada - case-insensitive e espaços normalizados)
+                    escola_nome = str(row.get('escola', '')).strip()
+                    escola_nome_normalizado = normalizar_nome_para_busca(escola_nome)
+
+                    # Buscar todas as escolas e comparar com normalização
+                    todas_escolas = School.query.all()
+                    escola = None
+                    for escola_candidata in todas_escolas:
+                        nome_escola_normalizado = normalizar_nome_para_busca(escola_candidata.name)
+                        if nome_escola_normalizado == escola_nome_normalizado:
+                            escola = escola_candidata
+                            break
+
+                    if not escola:
+                        results["erros"].append({
+                            "linha": index + 2,
+                            "campo": "escola",
+                            "valor": escola_nome,
+                            "erro": "Escola não encontrada"
+                        })
+                        continue
+
+                    # Verificar se usuário tem permissão para esta escola
+                    if escola.id not in allowed_schools:
+                        results["erros"].append({
+                            "linha": index + 2,
+                            "campo": "escola",
+                            "valor": escola_nome,
+                            "erro": "Sem permissão para criar alunos nesta escola"
+                        })
+                        continue
+
+                    # Buscar série pelo grade_id (coluna grade_id contém o UUID; serie contém o nome para contexto)
+                    grade_id_raw = row.get('grade_id')
+                    # Normalizar: Excel pode trazer UUID como float ou número; garantir string
+                    if grade_id_raw is None:
+                        grade_id_str = ''
+                    elif isinstance(grade_id_raw, (int, float)):
+                        grade_id_str = str(int(grade_id_raw)) if isinstance(grade_id_raw, float) and grade_id_raw == int(grade_id_raw) else str(grade_id_raw).strip()
+                    else:
+                        grade_id_str = str(grade_id_raw).strip()
+                    serie_nome = str(row.get('serie', '')).strip()  # mantido para mensagens de erro
+
+                    # DEBUG: ver valor usado no lookup
+                    if index < 3:
+                        print(f"[bulk-upload-students] Linha {index + 2} lookup: grade_id_str={repr(grade_id_str)}")
+
+                    if not grade_id_str:
+                        results["erros"].append({
+                            "linha": index + 2,
+                            "campo": "grade_id",
+                            "valor": grade_id_raw,
+                            "erro": "grade_id é obrigatório"
+                        })
+                        continue
+
+                    serie = Grade.query.get(grade_id_str)
+                    if index < 3:
+                        print(f"[bulk-upload-students] Linha {index + 2} Grade.query.get({repr(grade_id_str)}) = {serie}")
+                    if not serie:
+                        results["erros"].append({
+                            "linha": index + 2,
+                            "campo": "grade_id",
+                            "valor": grade_id_str,
+                            "erro": "Série não encontrada",
+                            "serie_nome": serie_nome or None
+                        })
+                        continue
+
+                    # Buscar turma existente (busca normalizada - case-insensitive e espaços normalizados)
+                    turma_nome = str(row.get('turma', '')).strip()
+                    turma_nome_normalizado = normalizar_nome_para_busca(turma_nome)
+
+                    # Buscar turmas da escola e série, e comparar com normalização
+                    turmas_candidatas = Class.query.filter(
+                        Class.school_id == escola.id,
+                        Class.grade_id == serie.id
+                    ).all()
+
+                    turma = None
+                    for turma_candidata in turmas_candidatas:
+                        nome_turma_normalizado = normalizar_nome_para_busca(turma_candidata.name)
+                        if nome_turma_normalizado == turma_nome_normalizado:
+                            turma = turma_candidata
+                            break
+
+                    if not turma:
+                        results["erros"].append({
+                            "linha": index + 2,
+                            "campo": "turma",
+                            "valor": turma_nome,
+                            "erro": f"Turma não encontrada na escola {escola_nome} e série {serie_nome}"
+                        })
+                        continue
                 
                 # Verificar se já existe aluno na mesma turma (por matrícula, se fornecida)
                 if matricula:

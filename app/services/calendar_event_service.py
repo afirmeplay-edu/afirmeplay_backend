@@ -656,9 +656,14 @@ class CalendarEventService:
         kind: Optional[str] = None,
         exclude_kind: Optional[str] = None,
     ) -> List[CalendarEvent]:
-        date_clause = or_(
-            and_(CalendarEvent.start_at >= start, CalendarEvent.start_at <= end),
-            and_(CalendarEvent.end_at != None, CalendarEvent.end_at >= start, CalendarEvent.end_at <= end)
+        # Qualquer evento que sobreponha a janela [start, end].
+        # Se end_at for nulo, trata como evento pontual em start_at.
+        date_clause = and_(
+            CalendarEvent.start_at <= end,
+            or_(
+                CalendarEvent.end_at.is_(None),
+                CalendarEvent.end_at >= start,
+            ),
         )
         meta_parts = []
         if kind:

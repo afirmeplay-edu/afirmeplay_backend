@@ -34,6 +34,7 @@ from jinja2 import Environment, FileSystemLoader, select_autoescape
 from weasyprint import HTML
 
 bp = Blueprint('students', __name__, url_prefix="/students")
+STUDENTS_PER_PDF_PAGE = 14
 
 
 def _get_logo_path():
@@ -1628,7 +1629,18 @@ def get_password_report_pdf():
                 "registration": log.registration,
             })
 
-        turmas = list(turmas_map.values())
+        turmas = []
+        for turma in turmas_map.values():
+            alunos = turma["alunos"]
+            total_pages = max(1, (len(alunos) + STUDENTS_PER_PDF_PAGE - 1) // STUDENTS_PER_PDF_PAGE)
+            for page_idx, start in enumerate(range(0, len(alunos), STUDENTS_PER_PDF_PAGE), start=1):
+                turmas.append({
+                    "class_name": turma["class_name"],
+                    "grade_name": turma["grade_name"],
+                    "alunos": alunos[start:start + STUDENTS_PER_PDF_PAGE],
+                    "chunk_page": page_idx,
+                    "chunk_total_pages": total_pages,
+                })
 
         # Metadados para a capa
         escola_nome = None

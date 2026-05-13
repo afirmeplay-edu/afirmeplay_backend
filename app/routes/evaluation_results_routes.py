@@ -97,6 +97,13 @@ import re
 bp = Blueprint('evaluation_results', __name__, url_prefix='/evaluation-results')
 
 
+def _effective_user_city_id(user: Optional[Dict[str, Any]]) -> Optional[str]:
+    """Município do usuário: `city_id` do cadastro ou `tenant_id` do JWT (comum em tecadm)."""
+    if not user:
+        return None
+    return user.get("city_id") or user.get("tenant_id")
+
+
 # ⚠️ SUBSTITUÍDA: Esta função foi movida para app/permissions/rules.py
 # Use: from app.permissions import can_view_test
 # e passe o dict do usuário completo em vez de apenas user_id
@@ -721,6 +728,12 @@ def listar_avaliacoes():
         # (estatísticas gerais, por disciplina, tabela detalhada, ranking, etc.).
         if (user.get("role") or "").lower() == "professor":
             scope_info["_restrict_class_ids"] = list(professor_allowed_class_ids or [])
+        elif (user.get("role") or "").lower() in ("diretor", "coordenador"):
+            from app.models.manager import Manager
+
+            mgr = Manager.query.filter_by(user_id=user["id"]).first()
+            if mgr and mgr.school_id:
+                scope_info["_restrict_school_id"] = mgr.school_id
         
         # ✅ ALTERADO: Validação flexível - só exige escola para resultados, não para listagem
         from app.permissions import validate_professor_school_selection, validate_manager_school_selection
@@ -779,9 +792,10 @@ def listar_avaliacoes():
             escola_ids = [escola.id for escola in escolas_escopo]
         elif permissao['scope'] == 'municipio':
             # Tecadm vê apenas escolas do seu município
-            if user.get('city_id') != city_data.id:
+            eff_city = _effective_user_city_id(user)
+            if eff_city != city_data.id:
                 return jsonify({"error": "Acesso negado a este município"}), 403
-            escola_ids = [escola.id for escola in escolas_escopo if escola.city_id == user.get('city_id')]
+            escola_ids = [escola.id for escola in escolas_escopo if escola.city_id == eff_city]
         elif permissao['scope'] == 'escola':
             if user.get('role') in ['diretor', 'coordenador']:
                 # Diretor e Coordenador veem apenas sua escola
@@ -909,7 +923,9 @@ def listar_avaliacoes():
             # ✅ ALTERADO: Aplicar filtros usando o novo módulo de permissões
             if permissao['scope'] == 'municipio':
                 # Tecadm vê apenas avaliações do seu município
-                query_base = query_base.filter(City.id == user.get('city_id'))
+                eff_city = _effective_user_city_id(user)
+                if eff_city:
+                    query_base = query_base.filter(City.id == eff_city)
             elif permissao['scope'] == 'escola':
                 if user.get('role') in ['diretor', 'coordenador']:
                     # ✅ ALTERADO: Diretor/Coordenador usa filtro flexível - permite listagem sem escola específica
@@ -8494,7 +8510,9 @@ def _calcular_ranking_global_alunos(
                 else:
                     all_students = []
             else:
-                all_students = []
+                # Admin/tecadm (e demais papéis válidos nesta rota) devem usar o
+                # mesmo escopo filtrado já calculado para escola/série/turma.
+                all_students = _buscar_alunos_por_escopo(escopo_calculo)
         else:
             all_students = _buscar_alunos_por_escopo(escopo_calculo)
 

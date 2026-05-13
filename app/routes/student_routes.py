@@ -641,10 +641,14 @@ def deletar_aluno(aluno_id):
         if not aluno:
             return jsonify({"error": "Student not found"}), 404
 
+        from app.services.student_tenant_cleanup import delete_student_tenant_dependencies
+
+        delete_student_tenant_dependencies(aluno_id)
+
         # Verifica se existe usuário associado
         if aluno.user:
             get_orm_session().delete(aluno.user)
-        
+
         get_orm_session().delete(aluno)
         get_orm_session().commit()
         return jsonify({"message": "Student deleted successfully"}), 200

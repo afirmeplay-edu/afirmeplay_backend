@@ -1908,7 +1908,24 @@ def _gerar_tabela_detalhada_por_disciplina(
                 respostas_por_aluno[resposta.student_id] = {}
             respostas_por_aluno[resposta.student_id][resposta.question_id] = resposta
 
-        logging.debug("Tabela detalhada: %d resultados, %d respostas", len(evaluation_results), len(all_student_answers))
+        # Somente alunos com resultado gravado ou com ao menos uma resposta na avaliação
+        all_students = [
+            s for s in all_students
+            if s.id in results_dict or bool(respostas_por_aluno.get(s.id))
+        ]
+        if not all_students:
+            logging.warning("Nenhum aluno com dados para a avaliação no escopo (tabela detalhada)")
+            payload = {"disciplinas": list(questoes_por_disciplina.values())}
+            if nivel_granularidade != "turma":
+                payload["geral"] = {"alunos": []}
+            return payload
+
+        logging.debug(
+            "Tabela detalhada: %d alunos com dados, %d resultados, %d respostas",
+            len(all_students),
+            len(evaluation_results),
+            len(all_student_answers),
+        )
 
         for subject_id, disciplina_data in questoes_por_disciplina.items():
             alunos_disciplina = []
@@ -3154,6 +3171,7 @@ def _get_empty_statistics_gerais(scope_info, nivel_granularidade):
         "total_alunos": 0,
         "alunos_participantes": 0,
         "alunos_pendentes": 0,
+        "alunos_pendentes_detalhe": [],
         "alunos_ausentes": 0,
         "media_nota_geral": 0.0,
         "media_proficiencia_geral": 0.0,
@@ -7993,6 +8011,74 @@ def obter_opcoes_filtros():
 
 # ==================== FUNÇÕES AUXILIARES PARA CÁLCULO CONSOLIDADO ====================
 
+def _dedupe_evaluation_results_by_student(resultados: List[Any]) -> List[Any]:
+    """Uma entrada por aluno; em duplicidade, prefere o resultado com calculated_at mais recente."""
+    if not resultados:
+        return []
+    by_sid: Dict[str, Any] = {}
+    for r in resultados:
+        sid = getattr(r, "student_id", None)
+        if not sid:
+            continue
+        prev = by_sid.get(sid)
+        if prev is None:
+            by_sid[sid] = r
+            continue
+        r_ca = getattr(r, "calculated_at", None)
+        p_ca = getattr(prev, "calculated_at", None)
+        if r_ca and (p_ca is None or r_ca > p_ca):
+            by_sid[sid] = r
+    return list(by_sid.values())
+
+
+def _detalhe_alunos_sem_evaluation_result(
+    todos_alunos: List[Student],
+    student_ids_com_resultado: Set[str],
+) -> List[Dict[str, Any]]:
+    """
+    Lista completa de alunos do escopo sem registro em evaluation_results (nome, escola, série, turma).
+    """
+    if not todos_alunos:
+        return []
+    missing_ids = [a.id for a in todos_alunos if a.id not in student_ids_com_resultado]
+    if not missing_ids:
+        return []
+    alunos = (
+        Student.query.options(joinedload(Student.class_).joinedload(Class.grade))
+        .filter(Student.id.in_(missing_ids))
+        .all()
+    )
+    school_ids = list(
+        {s.class_.school_id for s in alunos if s.class_ and getattr(s.class_, "school_id", None)}
+    )
+    school_by_id: Dict[str, School] = {}
+    if school_ids:
+        school_by_id = {str(x.id): x for x in School.query.filter(School.id.in_(school_ids)).all()}
+    out: List[Dict[str, Any]] = []
+    for s in alunos:
+        turma_nome = "N/A"
+        serie_nome = "N/A"
+        escola_nome = "N/A"
+        if s.class_:
+            turma_nome = s.class_.name or "N/A"
+            if s.class_.grade:
+                serie_nome = s.class_.grade.name or "N/A"
+            sid = getattr(s.class_, "school_id", None)
+            if sid and str(sid) in school_by_id:
+                escola_nome = school_by_id[str(sid)].name or "N/A"
+        out.append(
+            {
+                "id": s.id,
+                "nome": s.name or "",
+                "escola": escola_nome,
+                "serie": serie_nome,
+                "turma": turma_nome,
+            }
+        )
+    out.sort(key=lambda x: (x.get("nome") or "").lower())
+    return out
+
+
 def _calcular_estatisticas_consolidadas_por_escopo(class_tests: list, scope_info: dict, nivel_granularidade: str, user: dict = None) -> Dict[str, Any]:
     """
     Calcula estatísticas consolidadas baseadas no escopo dos filtros aplicados
@@ -8034,28 +8120,36 @@ def _calcular_estatisticas_consolidadas_por_escopo(class_tests: list, scope_info
             ).all()
         else:
             resultados_escopo = []
-        
-        alunos_participantes = len(resultados_escopo)
-        logging.info(f"resultados_escopo: {alunos_participantes}, test_ids: {test_ids}, total_alunos: {total_alunos}")
-        
+
+        student_ids_com_resultado = {er.student_id for er in resultados_escopo if getattr(er, "student_id", None)}
+        alunos_participantes = len(student_ids_com_resultado)
+        resultados_por_aluno_unico = _dedupe_evaluation_results_by_student(resultados_escopo)
+        logging.info(
+            "resultados_escopo rows=%s alunos_distintos=%s test_ids=%s total_alunos=%s",
+            len(resultados_escopo),
+            alunos_participantes,
+            test_ids,
+            total_alunos,
+        )
+
         # Calcular estatísticas consolidadas (agregação hierárquica conforme granularidade)
-        if resultados_escopo:
+        if resultados_por_aluno_unico:
             media_nota, media_proficiencia = hierarchical_mean_grade_and_proficiency(
-                resultados_escopo, granularidade_to_hierarchical_target(nivel_granularidade)
+                resultados_por_aluno_unico, granularidade_to_hierarchical_target(nivel_granularidade)
             )
         else:
             media_nota = 0.0
             media_proficiencia = 0.0
-        
-        # Calcular distribuição consolidada
+
+        # Calcular distribuição consolidada (uma classificação por aluno)
         distribuicao_geral = {
             'abaixo_do_basico': 0,
             'basico': 0,
             'adequado': 0,
             'avancado': 0
         }
-        
-        for resultado in resultados_escopo:
+
+        for resultado in resultados_por_aluno_unico:
             classificacao = resultado.classification.lower()
             # ✅ CORRIGIDO: Verificar 'abaixo' PRIMEIRO (mais específico)
             if 'abaixo' in classificacao:
@@ -8066,12 +8160,12 @@ def _calcular_estatisticas_consolidadas_por_escopo(class_tests: list, scope_info
                 distribuicao_geral['adequado'] += 1
             elif 'avançado' in classificacao or 'avancado' in classificacao:
                 distribuicao_geral['avancado'] += 1
-        
+
         # Determinar informações específicas baseadas no nível de granularidade
         city_data = scope_info.get('city_data')
         escola_info = None
         serie_info = None
-        
+
         if scope_info.get('escola') and scope_info.get('escola') != 'all':
             # ✅ CORRIGIDO: Converter para string (School.id é VARCHAR)
             from app.utils.uuid_helpers import uuid_to_str
@@ -8080,16 +8174,23 @@ def _calcular_estatisticas_consolidadas_por_escopo(class_tests: list, scope_info
             escola_obj = School.query.filter(School.id == escola_id_str).first() if escola_id_str else None
             if escola_obj:
                 escola_info = escola_obj.name
-        
+
         if scope_info.get('serie') and scope_info.get('serie') != 'all':
             serie_obj = Grade.query.get(scope_info.get('serie'))
             if serie_obj:
                 serie_info = serie_obj.name
-        
-        # Calcular alunos ausentes
+
+        # Calcular alunos ausentes (sem evaluation_results no escopo)
         alunos_ausentes = total_alunos - alunos_participantes
-        logging.info(f"Cálculo final: total_alunos={total_alunos}, alunos_participantes={alunos_participantes}, alunos_ausentes={alunos_ausentes}")
-        
+        alunos_pendentes_detalhe = _detalhe_alunos_sem_evaluation_result(
+            todos_alunos, student_ids_com_resultado
+        )
+        alunos_pendentes = len(alunos_pendentes_detalhe)
+        logging.info(
+            f"Cálculo final: total_alunos={total_alunos}, alunos_participantes={alunos_participantes}, "
+            f"alunos_ausentes={alunos_ausentes}, alunos_pendentes_lista={alunos_pendentes}"
+        )
+
         return {
             "tipo": nivel_granularidade,
             "nome": _get_nome_granularidade(nivel_granularidade, scope_info, escola_info, serie_info),
@@ -8103,7 +8204,8 @@ def _calcular_estatisticas_consolidadas_por_escopo(class_tests: list, scope_info
             "total_avaliacoes": len(test_ids),
             "total_alunos": total_alunos,
             "alunos_participantes": alunos_participantes,
-            "alunos_pendentes": 0,
+            "alunos_pendentes": alunos_pendentes,
+            "alunos_pendentes_detalhe": alunos_pendentes_detalhe,
             "alunos_ausentes": alunos_ausentes,
             "media_nota_geral": round(media_nota, 2),
             "media_proficiencia_geral": format_decimal_two_places(media_proficiencia),
@@ -8425,7 +8527,13 @@ def _calcular_ranking_global_alunos(
                 respostas_por_aluno[resposta.student_id] = {}
             respostas_por_aluno[resposta.student_id][resposta.question_id] = resposta
 
-        # Class + Grade + School em poucas queries (evita N+1 ao acessar student.class_)
+        all_students = [
+            s for s in all_students
+            if s.id in results_dict or bool(respostas_por_aluno.get(s.id))
+        ]
+        if not all_students:
+            return []
+
         class_ids = list({s.class_id for s in all_students if s.class_id})
         school_by_class_id = {}
         class_info_by_id = {}
@@ -8753,11 +8861,12 @@ def _calcular_estatisticas_grupo(class_tests_grupo, evaluation, aggregation_leve
             ).all()
         else:
             resultados = []
-        
+
+        resultados = _dedupe_evaluation_results_by_student(resultados)
         alunos_participantes = len(resultados)
         alunos_pendentes = total_alunos - alunos_participantes
-        alunos_ausentes = 0  # Simplificado - pode ser calculado mais precisamente
-        
+        alunos_ausentes = alunos_pendentes
+
         # Calcular médias (agregação hierárquica no recorte do grupo)
         if resultados:
             media_nota, media_proficiencia = hierarchical_mean_grade_and_proficiency(
@@ -8766,7 +8875,7 @@ def _calcular_estatisticas_grupo(class_tests_grupo, evaluation, aggregation_leve
         else:
             media_nota = 0.0
             media_proficiencia = 0.0
-        
+
         # Calcular distribuição de classificação
         distribuicao = {
             'abaixo_do_basico': 0,
@@ -8774,7 +8883,7 @@ def _calcular_estatisticas_grupo(class_tests_grupo, evaluation, aggregation_leve
             'adequado': 0,
             'avancado': 0
         }
-        
+
         for resultado in resultados:
             if resultado.classification:
                 if resultado.classification == "Abaixo do Básico":

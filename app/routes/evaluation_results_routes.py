@@ -8099,27 +8099,34 @@ def _calcular_estatisticas_consolidadas_por_escopo(class_tests: list, scope_info
         class_ids = [ct.class_id for ct in class_tests]
         logging.info(f"class_tests: {len(class_tests)}, test_ids: {test_ids}, class_ids: {class_ids}")
         
-        # Buscar alunos baseado no escopo
+        # Buscar alunos baseado no escopo (união com transferidos que têm snapshot no escopo)
         if nivel_granularidade == "avaliacao":
-            # Para avaliação específica, contar apenas alunos das turmas onde foi aplicada
             todos_alunos = Student.query.filter(Student.class_id.in_(class_ids)).all()
-            total_alunos = len(todos_alunos)
-            logging.info(f"Avaliação específica: total_alunos={total_alunos}, class_ids={class_ids}")
+            logging.info(f"Avaliação específica: class_ids={class_ids}")
         else:
-            # Para outros níveis, buscar todos os alunos do escopo
             todos_alunos = _buscar_alunos_por_escopo(escopo_calculo)
-            total_alunos = len(todos_alunos)
-            logging.info(f"Outro nível: total_alunos={total_alunos}, nivel={nivel_granularidade}")
-        
-        # Buscar resultados das avaliações do escopo (apenas dos alunos do escopo específico)
-        if todos_alunos:
-            student_ids = [aluno.id for aluno in todos_alunos]
-            resultados_escopo = EvaluationResult.query.filter(
-                EvaluationResult.test_id.in_(test_ids),
-                EvaluationResult.student_id.in_(student_ids)
-            ).all()
-        else:
-            resultados_escopo = []
+            logging.info(f"Outro nível: nivel={nivel_granularidade}")
+
+        from app.services.evaluation_result_snapshot import (
+            merge_participant_student_ids,
+            query_evaluation_results_for_stats,
+        )
+
+        base_orig_ids = [a.id for a in todos_alunos]
+        merged_ids = merge_participant_student_ids(
+            test_ids, escopo_calculo, class_ids, set(base_orig_ids)
+        )
+        todos_alunos = Student.query.filter(Student.id.in_(merged_ids)).all() if merged_ids else []
+        total_alunos = len(todos_alunos)
+        logging.info(
+            "Universo de alunos pós-snapshot: total_alunos=%s (base=%s)",
+            total_alunos,
+            len(base_orig_ids),
+        )
+
+        resultados_escopo = query_evaluation_results_for_stats(
+            test_ids, escopo_calculo, class_ids, base_orig_ids
+        ).all()
 
         student_ids_com_resultado = {er.student_id for er in resultados_escopo if getattr(er, "student_id", None)}
         alunos_participantes = len(student_ids_com_resultado)
@@ -8847,20 +8854,26 @@ def _calcular_estatisticas_grupo(class_tests_grupo, evaluation, aggregation_leve
                 }
             }
         
-        # Coletar todos os alunos das turmas do grupo
+        # Coletar todos os alunos das turmas do grupo + transferidos com snapshot nessas turmas
         class_ids = [ct.class_id for ct in class_tests_grupo]
-        todos_alunos = Student.query.filter(Student.class_id.in_(class_ids)).all()
+        base_roster = Student.query.filter(Student.class_id.in_(class_ids)).all()
+        base_ids_set = {a.id for a in base_roster}
+
+        from app.services.evaluation_result_snapshot import (
+            query_evaluation_results_for_class_group,
+            student_ids_for_class_group_with_snapshots,
+        )
+
+        merged_ids = student_ids_for_class_group_with_snapshots(
+            evaluation.id, class_ids, base_ids_set
+        )
+        todos_alunos = Student.query.filter(Student.id.in_(merged_ids)).all() if merged_ids else []
         total_alunos = len(todos_alunos)
-        
-        # Buscar resultados da avaliação para esses alunos
-        if todos_alunos:
-            student_ids = [aluno.id for aluno in todos_alunos]
-            resultados = EvaluationResult.query.filter(
-                EvaluationResult.test_id == evaluation.id,
-                EvaluationResult.student_id.in_(student_ids)
-            ).all()
-        else:
-            resultados = []
+
+        base_orig_list = list(base_ids_set)
+        resultados = query_evaluation_results_for_class_group(
+            evaluation.id, class_ids, base_orig_list
+        ).all()
 
         resultados = _dedupe_evaluation_results_by_student(resultados)
         alunos_participantes = len(resultados)

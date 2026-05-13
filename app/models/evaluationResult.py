@@ -3,6 +3,7 @@ from app import db
 from datetime import datetime
 import uuid
 from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.dialects.postgresql import UUID as PGUUID
 
 from app.models.testSession import TestSession
 
@@ -29,6 +30,11 @@ class EvaluationResult(db.Model):
     # Formato: {"subject_id": {"grade": 2.5, "proficiency": 250.0, "classification": "Básico", ...}}
     subject_results = db.Column(JSONB, nullable=True)
     
+    school_id_snapshot = db.Column(db.String(36), nullable=True)
+    class_id_snapshot = db.Column(PGUUID(as_uuid=True), nullable=True)
+    grade_id_snapshot = db.Column(PGUUID(as_uuid=True), nullable=True)
+    enrollment_id_snapshot = db.Column(db.String(36), nullable=True)
+
     # Metadados
     calculated_at = db.Column(db.TIMESTAMP, default=datetime.utcnow)
     
@@ -77,7 +83,11 @@ class EvaluationResult(db.Model):
             'proficiency': self.proficiency,
             'classification': self.classification,
             'subject_results': self.subject_results,
-            'calculated_at': self.calculated_at.isoformat() if self.calculated_at else None
+            'calculated_at': self.calculated_at.isoformat() if self.calculated_at else None,
+            'school_id_snapshot': self.school_id_snapshot,
+            'class_id_snapshot': str(self.class_id_snapshot) if self.class_id_snapshot else None,
+            'grade_id_snapshot': str(self.grade_id_snapshot) if self.grade_id_snapshot else None,
+            'enrollment_id_snapshot': self.enrollment_id_snapshot,
         }
     
     def __repr__(self):

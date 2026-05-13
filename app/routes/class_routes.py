@@ -830,12 +830,12 @@ def add_student_to_class(class_id):
                     continue
 
                 # Check if student is already in this class
-                if student.class_id == class_id:
+                if student.class_id == class_id_uuid:
                     errors.append(f"Student {student_id} is already in class {class_id}")
                     continue
 
                 # Update the student's class_id and school_id
-                student.class_id = class_id
+                student.class_id = class_id_uuid
                 student.school_id = class_obj.school_id
                 
                 # Atualizar city_id do usuário se necessário
@@ -843,6 +843,10 @@ def add_student_to_class(class_id):
                     student.user.city_id = class_obj.school.city_id
                     logging.info(f"Atualizando city_id do aluno {student.user.id} para {class_obj.school.city_id}")
                 
+                from app.services.student_enrollment_service import sync_enrollment_from_student_placement
+
+                sync_enrollment_from_student_placement(db.session, student)
+
                 added_students.append(student_id)
                 logging.info(f"Student {student_id} successfully added to class {class_id}")
                 
@@ -927,6 +931,10 @@ def remove_student_from_class(class_id):
                 student.user.city_id = school.city_id
                 logging.info(f"Atualizando city_id do aluno {student.user.id} para {school.city_id}")
         
+        from app.services.student_enrollment_service import sync_enrollment_from_student_placement
+
+        sync_enrollment_from_student_placement(db.session, student)
+
         db.session.commit()
 
         logging.info(f"Student {student_id} successfully removed from class {class_id}")
@@ -940,7 +948,62 @@ def remove_student_from_class(class_id):
     except Exception as e:
         db.session.rollback()
         logging.error(f"Unexpected error in remove_student_from_class route: {str(e)}", exc_info=True)
-        return jsonify({"message": "An unexpected error occurred", "details": str(e)}), 500 
+        return jsonify({"message": "An unexpected error occurred", "details": str(e)}), 500
+
+
+@bp.route("/<string:class_id>/transferir-escola", methods=["POST"])
+@jwt_required()
+@role_required("admin", "diretor", "coordenador", "tecadm")
+def transferir_turma_para_escola(class_id):
+    """
+    Move a turma inteira para outra escola do mesmo município.
+    Body JSON: { "target_school_id": "<id da escola de destino>" }
+    """
+    try:
+        data = request.get_json()
+        if not data or "target_school_id" not in data:
+            return jsonify({"error": "Informe target_school_id no corpo da requisição."}), 400
+
+        target_school_id = str(data["target_school_id"]).strip()
+        if not target_school_id:
+            return jsonify({"error": "target_school_id inválido."}), 400
+
+        class_id_uuid = ensure_uuid(class_id)
+        if not class_id_uuid:
+            return jsonify({"error": "ID de turma inválido"}), 400
+
+        class_obj = Class.query.get(class_id_uuid)
+        if not class_obj:
+            return jsonify({"error": "Turma não encontrada."}), 404
+
+        from app.services.student_enrollment_service import transfer_class_to_school
+
+        try:
+            n = transfer_class_to_school(db.session, class_obj, target_school_id)
+        except ValueError as ve:
+            db.session.rollback()
+            return jsonify({"error": str(ve)}), 400
+
+        db.session.commit()
+
+        return jsonify(
+            {
+                "message": "Turma transferida para a nova escola.",
+                "class_id": str(class_obj.id),
+                "school_id": class_obj.school_id,
+                "students_updated": n,
+            }
+        ), 200
+
+    except SQLAlchemyError as e:
+        db.session.rollback()
+        logging.error("transferir_turma_para_escola: %s", e)
+        return jsonify({"message": "Erro de banco ao transferir turma.", "details": str(e)}), 500
+    except Exception as e:
+        db.session.rollback()
+        logging.error("transferir_turma_para_escola: %s", e, exc_info=True)
+        return jsonify({"message": "Erro inesperado ao transferir turma.", "details": str(e)}), 500
+
 
 @bp.route('/<string:class_id>/teachers', methods=['GET'])
 @jwt_required()

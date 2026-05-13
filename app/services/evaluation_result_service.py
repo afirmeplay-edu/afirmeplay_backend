@@ -301,7 +301,12 @@ class EvaluationResultService:
                 test_id=test_id,
                 student_id=student_id
             ).first()
-            
+
+            student_obj = Student.query.get(student_id)
+            from app.services.evaluation_result_snapshot import build_placement_snapshots_from_student
+
+            placement = build_placement_snapshots_from_student(student_obj) if student_obj else {}
+
             if existing_result:
                 # Atualizar resultado existente (não alterar session_id para evitar problemas de FK)
                 existing_result.correct_answers = correct_answers
@@ -312,7 +317,16 @@ class EvaluationResultService:
                 existing_result.classification = result['classification']
                 existing_result.subject_results = subject_results_json
                 existing_result.calculated_at = datetime.utcnow()
-                
+
+                for snap_key in (
+                    "school_id_snapshot",
+                    "class_id_snapshot",
+                    "grade_id_snapshot",
+                    "enrollment_id_snapshot",
+                ):
+                    if getattr(existing_result, snap_key, None) is None and placement.get(snap_key) is not None:
+                        setattr(existing_result, snap_key, placement[snap_key])
+
                 evaluation_result = existing_result
             else:
                 # Criar novo resultado
@@ -325,28 +339,37 @@ class EvaluationResultService:
                     score_percentage=score_percentage,
                     grade=result['grade'],
                     proficiency=result['proficiency'],
-                    classification=result['classification']
+                    classification=result['classification'],
                 )
                 evaluation_result.subject_results = subject_results_json
+                for snap_key, snap_val in placement.items():
+                    if snap_val is not None:
+                        setattr(evaluation_result, snap_key, snap_val)
                 db.session.add(evaluation_result)
 
-            # Marcar agregados como desatualizados antes do commit
+            # Marcar agregados como desatualizados antes do commit (escola/turma do snapshot)
             scope_school_id = None
             scope_city_id = None
-            student_obj = Student.query.get(student_id)
-            if student_obj:
-                scope_school_id = getattr(student_obj, 'school_id', None)
-                class_identifier = getattr(student_obj, 'class_id', None)
-                if not scope_school_id and class_identifier:
-                    class_obj = Class.query.get(class_identifier)
-                    if class_obj and getattr(class_obj, 'school_id', None):
-                        scope_school_id = class_obj.school_id
-                if scope_school_id:
-                    school_obj = School.query.get(scope_school_id)
-                    if school_obj and getattr(school_obj, 'city_id', None):
-                        scope_city_id = school_obj.city_id
-                    else:
-                        scope_city_id = None
+            class_identifier = None
+            if getattr(evaluation_result, "school_id_snapshot", None):
+                scope_school_id = str(evaluation_result.school_id_snapshot)
+            elif student_obj:
+                scope_school_id = getattr(student_obj, "school_id", None)
+
+            class_identifier = getattr(evaluation_result, "class_id_snapshot", None)
+            if class_identifier is None and student_obj:
+                class_identifier = getattr(student_obj, "class_id", None)
+
+            if not scope_school_id and class_identifier:
+                class_obj = Class.query.get(class_identifier)
+                if class_obj and getattr(class_obj, "school_id", None):
+                    scope_school_id = class_obj.school_id
+            if scope_school_id:
+                school_obj = School.query.get(scope_school_id)
+                if school_obj and getattr(school_obj, "city_id", None):
+                    scope_city_id = school_obj.city_id
+                else:
+                    scope_city_id = None
 
             # Marcar todos os escopos como dirty
             ReportAggregateService.mark_dirty(test_id, 'overall', None, commit=False)
@@ -431,8 +454,11 @@ class EvaluationResultService:
         try:
             from app.models.classTest import ClassTest
             from app.models.student import Student
-            
-            # Buscar todas as turmas onde a avaliação foi aplicada
+            from app.services.evaluation_result_snapshot import (
+                query_evaluation_results_for_class_group,
+                student_ids_for_class_group_with_snapshots,
+            )
+
             class_tests = ClassTest.query.filter_by(test_id=test_id).all()
             class_ids = [ct.class_id for ct in class_tests]
             
@@ -452,13 +478,15 @@ class EvaluationResultService:
                     }
                 }
             
-            # Buscar todos os alunos das turmas envolvidas
-            todos_alunos = Student.query.filter(Student.class_id.in_(class_ids)).all()
+            # Alunos atuais nas turmas + alunos com resultado snapshot nessas turmas (transferidos)
+            base_roster = Student.query.filter(Student.class_id.in_(class_ids)).all()
+            base_ids = {s.id for s in base_roster}
+            merged_ids = student_ids_for_class_group_with_snapshots(test_id, class_ids, base_ids)
+            todos_alunos = Student.query.filter(Student.id.in_(merged_ids)).all() if merged_ids else []
             total_alunos = len(todos_alunos)
             
-            # Buscar resultados dos alunos
-            from app.models.evaluationResult import EvaluationResult
-            results = EvaluationResult.query.filter_by(test_id=test_id).all()
+            base_ids_list = list(base_ids)
+            results = query_evaluation_results_for_class_group(test_id, class_ids, base_ids_list).all()
             
             if not results:
                 return {
@@ -476,13 +504,27 @@ class EvaluationResultService:
                     }
                 }
             
-            # Calcular estatísticas
-            alunos_participantes = len(results)
+            # Um registro por aluno (evita duplicar médias se houver mais de uma linha)
+            results_por_aluno = {}
+            for r in results:
+                if not r.student_id:
+                    continue
+                prev = results_por_aluno.get(r.student_id)
+                if prev is None or (
+                    getattr(r, "calculated_at", None)
+                    and getattr(prev, "calculated_at", None)
+                    and r.calculated_at > prev.calculated_at
+                ):
+                    results_por_aluno[r.student_id] = r
+            unique_results = list(results_por_aluno.values())
+
+            # Calcular estatísticas (um participante por aluno)
+            alunos_participantes = len(unique_results)
             alunos_pendentes = total_alunos - alunos_participantes
             
             if alunos_participantes > 0:
-                media_nota = sum(r.grade for r in results) / alunos_participantes
-                media_proficiencia = sum(r.proficiency for r in results) / alunos_participantes
+                media_nota = sum(r.grade for r in unique_results) / alunos_participantes
+                media_proficiencia = sum(r.proficiency for r in unique_results) / alunos_participantes
             else:
                 media_nota = 0.0
                 media_proficiencia = 0.0
@@ -495,7 +537,7 @@ class EvaluationResultService:
                 'avancado': 0
             }
             
-            for result in results:
+            for result in unique_results:
                 if result.classification:
                     classification_lower = result.classification.lower().replace(' ', '_')
                     if classification_lower in distribuicao:
@@ -593,20 +635,25 @@ class EvaluationResultService:
             
             # 8. Buscar resultados dos alunos (com filtros de granularidade se especificados)
             if scope_info and nivel_granularidade:
-                # Aplicar filtros de granularidade
+                from app.models.classTest import ClassTest
                 from app.routes.evaluation_results_routes import _determinar_escopo_calculo, _buscar_alunos_por_escopo
+                from app.services.evaluation_result_snapshot import (
+                    merge_participant_student_ids,
+                    query_evaluation_results_for_stats,
+                )
 
                 escopo_calculo = _determinar_escopo_calculo(scope_info, nivel_granularidade)
                 alunos_escopo = _buscar_alunos_por_escopo(escopo_calculo)
-
-                if alunos_escopo:
-                    student_ids = [aluno.id for aluno in alunos_escopo]
-                    results = EvaluationResult.query.filter(
-                        EvaluationResult.test_id == test_id,
-                        EvaluationResult.student_id.in_(student_ids)
-                    ).all()
-                else:
-                    results = []
+                class_tests_ct = ClassTest.query.filter_by(test_id=str(test_id)).all()
+                class_ids_ct = [ct.class_id for ct in class_tests_ct]
+                base_ids = [aluno.id for aluno in alunos_escopo] if alunos_escopo else []
+                merged = merge_participant_student_ids(
+                    [test_id], escopo_calculo, class_ids_ct, set(base_ids)
+                )
+                alunos_escopo = Student.query.filter(Student.id.in_(merged)).all() if merged else []
+                results = query_evaluation_results_for_stats(
+                    [test_id], escopo_calculo, class_ids_ct, base_ids
+                ).all()
             else:
                 # Sem filtros de granularidade, buscar todos os resultados
                 results = EvaluationResult.query.filter_by(test_id=test_id).all()

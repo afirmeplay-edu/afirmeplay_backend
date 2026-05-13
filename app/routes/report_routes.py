@@ -44,6 +44,7 @@ from app.models.studentClass import Class
 from app.models.grades import Grade
 from app.models.classTest import ClassTest
 from app.models.evaluationResult import EvaluationResult
+from app.services.evaluation_result_snapshot import municipal_evaluation_results_query
 from app.utils.uuid_helpers import ensure_uuid, ensure_uuid_list
 from app.utils.decimal_helpers import round_to_two_decimals
 from app import db
@@ -3541,7 +3542,16 @@ def _calcular_totais_alunos_por_municipio(evaluation_id: str, class_tests: List[
     
     # Buscar resultados da avaliação (alunos que realizaram)
     evaluation_results = EvaluationResult.query.filter_by(test_id=evaluation_id).all()
-    results_by_student = {er.student_id: er for er in evaluation_results}
+
+    # Avaliados por escola: prioridade school_id_snapshot; legado usa escola atual do aluno
+    avaliados_ids_por_escola = defaultdict(set)
+    for er in evaluation_results:
+        if er.school_id_snapshot:
+            avaliados_ids_por_escola[str(er.school_id_snapshot)].add(er.student_id)
+        else:
+            st = Student.query.get(er.student_id)
+            if st and st.class_ and st.class_.school:
+                avaliados_ids_por_escola[str(st.class_.school.id)].add(er.student_id)
     
     # Agrupar alunos por escola
     students_by_school = defaultdict(list)
@@ -3555,13 +3565,13 @@ def _calcular_totais_alunos_por_municipio(evaluation_id: str, class_tests: List[
     total_avaliados = 0
     
     for school_id, school_students in students_by_school.items():
-        # Matriculados = Alunos da escola onde a avaliação foi aplicada
+        # Matriculados = Alunos da escola onde a avaliação foi aplicada (turmas atuais)
         matriculados = len(school_students)
-        # Avaliados = Alunos que realmente realizaram a avaliação (têm resultado)
-        avaliados = sum(1 for s in school_students if s.id in results_by_student)
+        av_ids = set(avaliados_ids_por_escola.get(str(school_id), set()))
+        avaliados = len(av_ids)
         percentual = (avaliados / matriculados * 100) if matriculados > 0 else 0
-        # Faltosos = Matriculados que não realizaram
-        faltosos = matriculados - avaliados
+        # Faltosos = Matriculados que não realizaram (no recorte atual)
+        faltosos = sum(1 for s in school_students if s.id not in av_ids)
         
         # Obter nome da escola
         escola_nome = "Escola Desconhecida"
@@ -5879,17 +5889,9 @@ def _calcular_media_municipal(evaluation_id: str) -> float:
         
         city_id = first_class.school.city_id
         
-        # Buscar todos os resultados do município para esta avaliação
-        municipal_results = db.session.query(EvaluationResult).join(
-            Student, EvaluationResult.student_id == Student.id
-        ).join(
-            Class, Student.class_id == Class.id
-        ).join(
-            School, Class.school_id == School.id
-        ).filter(
-            School.city_id == city_id,
-            EvaluationResult.test_id == evaluation_id
-        ).all()
+        # Buscar todos os resultados do município para esta avaliação (snapshot + legado)
+
+        municipal_results = municipal_evaluation_results_query(str(city_id), str(evaluation_id)).all()
         
         if not municipal_results:
             return 0.0
@@ -5923,17 +5925,9 @@ def _calcular_media_municipal_nota(evaluation_id: str) -> float:
         
         city_id = first_class.school.city_id
         
-        # Buscar todos os resultados do município para esta avaliação
-        municipal_results = db.session.query(EvaluationResult).join(
-            Student, EvaluationResult.student_id == Student.id
-        ).join(
-            Class, Student.class_id == Class.id
-        ).join(
-            School, Class.school_id == School.id
-        ).filter(
-            School.city_id == city_id,
-            EvaluationResult.test_id == evaluation_id
-        ).all()
+        # Buscar todos os resultados do município para esta avaliação (snapshot + legado)
+
+        municipal_results = municipal_evaluation_results_query(str(city_id), str(evaluation_id)).all()
         
         if not municipal_results:
             return 0.0
@@ -5967,17 +5961,9 @@ def _calcular_media_municipal_por_disciplina(evaluation_id: str, question_discip
         
         city_id = first_class.school.city_id
         
-        # Buscar todos os resultados do município para esta avaliação
-        municipal_results = db.session.query(EvaluationResult).join(
-            Student, EvaluationResult.student_id == Student.id
-        ).join(
-            Class, Student.class_id == Class.id
-        ).join(
-            School, Class.school_id == School.id
-        ).filter(
-            School.city_id == city_id,
-            EvaluationResult.test_id == evaluation_id
-        ).all()
+        # Buscar todos os resultados do município para esta avaliação (snapshot + legado)
+
+        municipal_results = municipal_evaluation_results_query(str(city_id), str(evaluation_id)).all()
         
         if not municipal_results:
             return {}
@@ -6069,17 +6055,9 @@ def _calcular_media_municipal_nota_por_disciplina(evaluation_id: str, question_d
         
         city_id = first_class.school.city_id
         
-        # Buscar todos os resultados do município para esta avaliação
-        municipal_results = db.session.query(EvaluationResult).join(
-            Student, EvaluationResult.student_id == Student.id
-        ).join(
-            Class, Student.class_id == Class.id
-        ).join(
-            School, Class.school_id == School.id
-        ).filter(
-            School.city_id == city_id,
-            EvaluationResult.test_id == evaluation_id
-        ).all()
+        # Buscar todos os resultados do município para esta avaliação (snapshot + legado)
+
+        municipal_results = municipal_evaluation_results_query(str(city_id), str(evaluation_id)).all()
         
         if not municipal_results:
             return {}

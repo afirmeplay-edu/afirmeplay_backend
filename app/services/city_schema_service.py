@@ -709,6 +709,34 @@ CREATE TABLE IF NOT EXISTS "{schema}".student (
 );
 COMMENT ON TABLE "{schema}".student IS 'Alunos das escolas do município';
 
+CREATE TABLE IF NOT EXISTS "{schema}".student_school_enrollment (
+    id VARCHAR(36) PRIMARY KEY DEFAULT (uuid_generate_v4()::text),
+    student_id VARCHAR NOT NULL REFERENCES "{schema}".student(id) ON DELETE CASCADE,
+    school_id VARCHAR(36) REFERENCES "{schema}".school(id),
+    class_id UUID REFERENCES "{schema}".class(id),
+    valid_from TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    valid_to TIMESTAMP,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT ck_student_school_enrollment_valid_range
+        CHECK (valid_to IS NULL OR valid_to >= valid_from)
+);
+COMMENT ON TABLE "{schema}".student_school_enrollment IS 'Histórico de vínculo aluno–escola–turma (matrícula). valid_to IS NULL indica período vigente.';
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_student_school_enrollment_one_active
+    ON "{schema}".student_school_enrollment (student_id)
+    WHERE valid_to IS NULL;
+
+CREATE INDEX IF NOT EXISTS idx_student_school_enrollment_student_hist
+    ON "{schema}".student_school_enrollment (student_id, valid_from DESC);
+
+CREATE INDEX IF NOT EXISTS idx_student_school_enrollment_school
+    ON "{schema}".student_school_enrollment (school_id)
+    WHERE school_id IS NOT NULL;
+
+CREATE INDEX IF NOT EXISTS idx_student_school_enrollment_class
+    ON "{schema}".student_school_enrollment (class_id)
+    WHERE class_id IS NOT NULL;
+
 CREATE TABLE IF NOT EXISTS "{schema}".teacher (
     id VARCHAR PRIMARY KEY,
     name VARCHAR(100) NOT NULL,
@@ -874,9 +902,17 @@ CREATE TABLE IF NOT EXISTS "{schema}".evaluation_results (
     proficiency FLOAT NOT NULL,
     classification VARCHAR(50) NOT NULL,
     subject_results JSONB,
-    calculated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    calculated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    school_id_snapshot VARCHAR(36),
+    class_id_snapshot UUID,
+    grade_id_snapshot UUID,
+    enrollment_id_snapshot VARCHAR(36)
 );
 COMMENT ON TABLE "{schema}".evaluation_results IS 'Resultados de avaliações';
+COMMENT ON COLUMN "{schema}".evaluation_results.school_id_snapshot IS 'Escola no momento da participação (imutável após preenchido).';
+COMMENT ON COLUMN "{schema}".evaluation_results.class_id_snapshot IS 'Turma no momento da participação (imutável após preenchido).';
+COMMENT ON COLUMN "{schema}".evaluation_results.grade_id_snapshot IS 'Série no momento da participação (imutável após preenchido).';
+COMMENT ON COLUMN "{schema}".evaluation_results.enrollment_id_snapshot IS 'Matrícula vigente (student_school_enrollment) no momento do resultado.';
 
 CREATE TABLE IF NOT EXISTS "{schema}".physical_test_forms (
     id VARCHAR PRIMARY KEY,

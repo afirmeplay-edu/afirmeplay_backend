@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 
-from sqlalchemy import case, distinct, func, or_
+from sqlalchemy import case, distinct, func, or_, and_
 from sqlalchemy.orm import aliased
 
 from app import db
@@ -1450,12 +1450,12 @@ class DashboardService:
             school_ids = cls._extract_school_ids(scope)
             er_by_school = (
                 db.session.query(
-                    cast(Student.school_id, VARCHAR).label("school_id"),
+                    cast(EvaluationResult.school_id_snapshot, VARCHAR).label("school_id"),
                     func.count(distinct(EvaluationResult.test_id)).label("cnt"),
                 )
-                .select_from(Student)
-                .join(EvaluationResult, EvaluationResult.student_id == Student.id)
-                .group_by(Student.school_id)
+                .select_from(EvaluationResult)
+                .filter(EvaluationResult.school_id_snapshot.isnot(None))
+                .group_by(EvaluationResult.school_id_snapshot)
             ).subquery()
             asr_by_school = (
                 db.session.query(
@@ -1479,7 +1479,19 @@ class DashboardService:
                 )
                 # ✅ CORRIGIDO: Garantir que ambos sejam strings no join (School.id é VARCHAR)
                 .join(Student, cast(Student.school_id, VARCHAR) == cast(School.id, VARCHAR))
-                .outerjoin(EvaluationResult, EvaluationResult.student_id == Student.id)
+                .outerjoin(
+                    EvaluationResult,
+                    and_(
+                        EvaluationResult.student_id == Student.id,
+                        or_(
+                            cast(EvaluationResult.school_id_snapshot, VARCHAR) == cast(School.id, VARCHAR),
+                            and_(
+                                EvaluationResult.school_id_snapshot.is_(None),
+                                cast(Student.school_id, VARCHAR) == cast(School.id, VARCHAR),
+                            ),
+                        ),
+                    ),
+                )
                 .outerjoin(er_by_school, er_by_school.c.school_id == cast(School.id, VARCHAR))
                 .outerjoin(asr_by_school, asr_by_school.c.school_id == cast(School.id, VARCHAR))
                 .outerjoin(City, City.id == School.city_id)
@@ -1558,12 +1570,12 @@ class DashboardService:
 
             er_by_class = (
                 db.session.query(
-                    Student.class_id.label("class_id"),
+                    EvaluationResult.class_id_snapshot.label("class_id"),
                     func.count(distinct(EvaluationResult.test_id)).label("cnt"),
                 )
-                .select_from(Student)
-                .join(EvaluationResult, EvaluationResult.student_id == Student.id)
-                .group_by(Student.class_id)
+                .select_from(EvaluationResult)
+                .filter(EvaluationResult.class_id_snapshot.isnot(None))
+                .group_by(EvaluationResult.class_id_snapshot)
             ).subquery()
             asr_by_class = (
                 db.session.query(
@@ -1590,7 +1602,19 @@ class DashboardService:
                 )
                 .outerjoin(Grade, Class.grade_id == Grade.id)
                 .join(Student, Student.class_id == Class.id)
-                .outerjoin(EvaluationResult, EvaluationResult.student_id == Student.id)
+                .outerjoin(
+                    EvaluationResult,
+                    and_(
+                        EvaluationResult.student_id == Student.id,
+                        or_(
+                            EvaluationResult.class_id_snapshot == Class.id,
+                            and_(
+                                EvaluationResult.class_id_snapshot.is_(None),
+                                Student.class_id == Class.id,
+                            ),
+                        ),
+                    ),
+                )
                 .outerjoin(er_by_class, er_by_class.c.class_id == Class.id)
                 .outerjoin(asr_by_class, asr_by_class.c.class_id == Class.id)
             )
@@ -1675,12 +1699,12 @@ class DashboardService:
             school_ids = cls._extract_school_ids(scope)
             er_by_school = (
                 db.session.query(
-                    cast(Student.school_id, VARCHAR).label("school_id"),
+                    cast(EvaluationResult.school_id_snapshot, VARCHAR).label("school_id"),
                     func.count(distinct(EvaluationResult.test_id)).label("cnt"),
                 )
-                .select_from(Student)
-                .join(EvaluationResult, EvaluationResult.student_id == Student.id)
-                .group_by(Student.school_id)
+                .select_from(EvaluationResult)
+                .filter(EvaluationResult.school_id_snapshot.isnot(None))
+                .group_by(EvaluationResult.school_id_snapshot)
             ).subquery()
             asr_by_school = (
                 db.session.query(
@@ -1705,7 +1729,19 @@ class DashboardService:
                     func.count(EvaluationResult.id).label("total_provas_entregues"),
                 )
                 .join(Student, cast(Student.school_id, VARCHAR) == cast(School.id, VARCHAR))
-                .outerjoin(EvaluationResult, EvaluationResult.student_id == Student.id)
+                .outerjoin(
+                    EvaluationResult,
+                    and_(
+                        EvaluationResult.student_id == Student.id,
+                        or_(
+                            cast(EvaluationResult.school_id_snapshot, VARCHAR) == cast(School.id, VARCHAR),
+                            and_(
+                                EvaluationResult.school_id_snapshot.is_(None),
+                                cast(Student.school_id, VARCHAR) == cast(School.id, VARCHAR),
+                            ),
+                        ),
+                    ),
+                )
                 .outerjoin(er_by_school, er_by_school.c.school_id == cast(School.id, VARCHAR))
                 .outerjoin(asr_by_school, asr_by_school.c.school_id == cast(School.id, VARCHAR))
                 .outerjoin(City, City.id == School.city_id)
@@ -1815,12 +1851,12 @@ class DashboardService:
 
             er_by_class = (
                 db.session.query(
-                    Student.class_id.label("class_id"),
+                    EvaluationResult.class_id_snapshot.label("class_id"),
                     func.count(distinct(EvaluationResult.test_id)).label("cnt"),
                 )
-                .select_from(Student)
-                .join(EvaluationResult, EvaluationResult.student_id == Student.id)
-                .group_by(Student.class_id)
+                .select_from(EvaluationResult)
+                .filter(EvaluationResult.class_id_snapshot.isnot(None))
+                .group_by(EvaluationResult.class_id_snapshot)
             ).subquery()
             asr_by_class = (
                 db.session.query(
@@ -1847,7 +1883,19 @@ class DashboardService:
                 )
                 .outerjoin(Grade, Class.grade_id == Grade.id)
                 .join(Student, Student.class_id == Class.id)
-                .outerjoin(EvaluationResult, EvaluationResult.student_id == Student.id)
+                .outerjoin(
+                    EvaluationResult,
+                    and_(
+                        EvaluationResult.student_id == Student.id,
+                        or_(
+                            EvaluationResult.class_id_snapshot == Class.id,
+                            and_(
+                                EvaluationResult.class_id_snapshot.is_(None),
+                                Student.class_id == Class.id,
+                            ),
+                        ),
+                    ),
+                )
                 .outerjoin(er_by_class, er_by_class.c.class_id == Class.id)
                 .outerjoin(asr_by_class, asr_by_class.c.class_id == Class.id)
             )
@@ -1950,7 +1998,16 @@ class DashboardService:
                     func.coalesce(er_by_student.c.cnt, 0) + func.coalesce(asr_by_student.c.cnt, 0)
                 ).label("completed_evaluations"),
             )
-            .outerjoin(EvaluationResult, EvaluationResult.student_id == Student.id)
+            .outerjoin(
+                EvaluationResult,
+                and_(
+                    EvaluationResult.student_id == Student.id,
+                    or_(
+                        cast(EvaluationResult.school_id_snapshot, VARCHAR) == cast(Student.school_id, VARCHAR),
+                        EvaluationResult.school_id_snapshot.is_(None),
+                    ),
+                ),
+            )
             .outerjoin(er_by_student, er_by_student.c.student_id == Student.id)
             .outerjoin(asr_by_student, asr_by_student.c.student_id == Student.id)
             .outerjoin(school_alias, cast(school_alias.id, VARCHAR) == cast(Student.school_id, VARCHAR))
@@ -2045,7 +2102,16 @@ class DashboardService:
                 Student.profile_picture.label("profile_picture"),
                 avatar_config_expr.label("avatar_config"),
             )
-            .outerjoin(EvaluationResult, EvaluationResult.student_id == Student.id)
+            .outerjoin(
+                EvaluationResult,
+                and_(
+                    EvaluationResult.student_id == Student.id,
+                    or_(
+                        cast(EvaluationResult.school_id_snapshot, VARCHAR) == cast(Student.school_id, VARCHAR),
+                        EvaluationResult.school_id_snapshot.is_(None),
+                    ),
+                ),
+            )
             .outerjoin(er_by_student, er_by_student.c.student_id == Student.id)
             .outerjoin(asr_by_student, asr_by_student.c.student_id == Student.id)
             .outerjoin(User, User.id == Student.user_id)
@@ -2228,7 +2294,19 @@ class DashboardService:
                 func.count(distinct(Student.id)).label("active_students"),
             )
             .join(Student, Student.class_id == Class.id)
-            .join(EvaluationResult, EvaluationResult.student_id == Student.id, isouter=True)
+            .outerjoin(
+                EvaluationResult,
+                and_(
+                    EvaluationResult.student_id == Student.id,
+                    or_(
+                        EvaluationResult.class_id_snapshot == Class.id,
+                        and_(
+                            EvaluationResult.class_id_snapshot.is_(None),
+                            Student.class_id == Class.id,
+                        ),
+                    ),
+                ),
+            )
             .join(TestSession, TestSession.student_id == Student.id, isouter=True)
         )
 
@@ -2266,7 +2344,19 @@ class DashboardService:
             .select_from(TeacherClass)
             .join(Class, Class.id == TeacherClass.class_id)
             .join(Student, Student.class_id == Class.id)
-            .join(EvaluationResult, EvaluationResult.student_id == Student.id)
+            .join(
+                EvaluationResult,
+                and_(
+                    EvaluationResult.student_id == Student.id,
+                    or_(
+                        EvaluationResult.class_id_snapshot == Class.id,
+                        and_(
+                            EvaluationResult.class_id_snapshot.is_(None),
+                            Student.class_id == Class.id,
+                        ),
+                    ),
+                ),
+            )
             .group_by(TeacherClass.teacher_id)
         ).subquery()
         asr_by_teacher = (
@@ -2294,7 +2384,19 @@ class DashboardService:
             .join(TeacherClass, TeacherClass.teacher_id == teacher_alias.id)
             .join(Class, Class.id == TeacherClass.class_id)
             .join(Student, Student.class_id == Class.id)
-            .outerjoin(EvaluationResult, EvaluationResult.student_id == Student.id)
+            .outerjoin(
+                EvaluationResult,
+                and_(
+                    EvaluationResult.student_id == Student.id,
+                    or_(
+                        EvaluationResult.class_id_snapshot == Class.id,
+                        and_(
+                            EvaluationResult.class_id_snapshot.is_(None),
+                            Student.class_id == Class.id,
+                        ),
+                    ),
+                ),
+            )
             .outerjoin(er_by_teacher, er_by_teacher.c.teacher_id == teacher_alias.id)
             .outerjoin(asr_by_teacher, asr_by_teacher.c.teacher_id == teacher_alias.id)
         )

@@ -593,6 +593,11 @@ def atualizar_aluno(student_id, class_id):
                 usuario.city_id = school.city_id
                 logging.info(f"Atualizando city_id do aluno {usuario.id} para {school.city_id}")
 
+        if class_changed or school_changed:
+            from app.services.student_enrollment_service import sync_enrollment_from_student_placement
+
+            sync_enrollment_from_student_placement(get_orm_session(), aluno)
+
         get_orm_session().commit()
         
         # Preparar resposta detalhada
@@ -630,6 +635,74 @@ def atualizar_aluno(student_id, class_id):
         get_orm_session().rollback()
         logging.error(f"Error updating student: {str(e)}", exc_info=True)
         return jsonify({"error": "Error updating student", "details": str(e)}), 500
+
+
+@bp.route("/<string:student_id>/transferir-turma", methods=["POST"])
+@jwt_required()
+@role_required("admin", "professor", "coordenador", "diretor", "tecadm")
+def transferir_aluno_para_turma(student_id):
+    """
+    Move o aluno para outra turma (pode ser de outra escola, mesmo município).
+    Body JSON: { "class_id": "<uuid da turma de destino>" }
+    """
+    try:
+        data = request.get_json()
+        if not data or "class_id" not in data:
+            return jsonify({"error": "Informe class_id no corpo da requisição."}), 400
+
+        from app.utils.uuid_helpers import ensure_uuid
+        from app.models.studentClass import Class
+        from app.services.student_enrollment_service import transfer_student_to_class
+
+        new_class_id = ensure_uuid(data["class_id"])
+        if not new_class_id:
+            return jsonify({"error": "ID de turma inválido."}), 400
+
+        sess = get_orm_session()
+        aluno = sess.query(Student).filter_by(id=student_id).first()
+        if not aluno:
+            return jsonify({"error": "Aluno não encontrado."}), 404
+
+        new_class = sess.query(Class).get(new_class_id)
+        if not new_class:
+            return jsonify({"error": "Turma de destino não encontrada."}), 404
+
+        old_class_id = aluno.class_id
+        old_school_id = aluno.school_id
+
+        try:
+            transfer_student_to_class(sess, aluno, new_class, update_user_city=True)
+        except ValueError as ve:
+            sess.rollback()
+            return jsonify({"error": str(ve)}), 400
+
+        sess.commit()
+
+        return jsonify(
+            {
+                "message": "Aluno transferido para a nova turma.",
+                "student": {
+                    "id": aluno.id,
+                    "class_id": str(aluno.class_id) if aluno.class_id else None,
+                    "school_id": aluno.school_id,
+                },
+                "relocation": {
+                    "old_class_id": str(old_class_id) if old_class_id else None,
+                    "new_class_id": str(aluno.class_id) if aluno.class_id else None,
+                    "old_school_id": old_school_id,
+                    "new_school_id": aluno.school_id,
+                },
+            }
+        ), 200
+
+    except IntegrityError as e:
+        get_orm_session().rollback()
+        return jsonify({"error": "Erro de integridade.", "details": str(e)}), 400
+    except Exception as e:
+        get_orm_session().rollback()
+        logging.error("transferir_aluno_para_turma: %s", e, exc_info=True)
+        return jsonify({"error": "Erro ao transferir aluno.", "details": str(e)}), 500
+
 
 @bp.route('/<string:aluno_id>', methods=['DELETE'])
 @jwt_required()

@@ -4,6 +4,7 @@ from .schoolTeacher import SchoolTeacher
 from .schoolCourse import SchoolCourse
 from .teacher import Teacher
 from .student import Student
+from .studentSchoolEnrollment import StudentSchoolEnrollment
 from .subject import Subject
 from .studentClass import Class
 from .classSubject import ClassSubject

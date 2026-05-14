@@ -114,7 +114,7 @@ def transfer_student_to_class(
     if not to_school:
         raise ValueError("Escola da turma de destino não encontrada.")
 
-    if old_sid:
+    if old_sid and str(old_sid) != str(new_sid):
         assert_same_municipality_two_schools(sess, str(old_sid), str(new_sid))
     else:
         if student.user and student.user.city_id and student.user.city_id != to_school.city_id:

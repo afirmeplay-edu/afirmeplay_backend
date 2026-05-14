@@ -5,16 +5,156 @@ Usa município (City) e nível do sistema.
 GET: carregar dados por contexto (city_id, level).
 PUT: salvar/atualizar dados (upsert por contexto).
 """
+from __future__ import annotations
+
+import copy
+import logging
+from typing import Any, Dict, Optional, Set
+
 from flask import Blueprint, request, jsonify
 from flask_jwt_extended import jwt_required
-from app import db
-from app.models.city import City
-from app.ideb_meta.models import IdebMetaSave
-from app.permissions import get_current_user_from_token
 from sqlalchemy.exc import SQLAlchemyError, IntegrityError
-import logging
+
+from app import db
+from app.ideb_meta.models import IdebMetaSave
+from app.models.city import City
+from app.models.school import School
+from app.permissions import get_current_user_from_token
+from app.permissions.roles import Roles
+from app.permissions.utils import get_manager_school, get_teacher_schools
 
 bp = Blueprint('ideb_meta', __name__, url_prefix='/ideb-meta')
+
+
+def _ideb_meta_allowed_school_ids(user: Optional[Dict[str, Any]]) -> Optional[Set[str]]:
+    """
+    Escolas que o usuário pode ver/editar na calculadora de metas (lista escolas).
+
+    None = sem restrição (admin, tecadm): vê todas as escolas do município no JSON.
+    set vazio = perfil restrito sem escola vinculada.
+    set não vazio = apenas esses IDs (diretor/coordenador: uma; professor: todas as vinculadas).
+    """
+    if not user:
+        return set()
+    role = Roles.normalize(user.get('role', ''))
+    if Roles.is_admin_role(role):
+        return None
+    uid = user.get('id')
+    if not uid:
+        return set()
+    if role in (Roles.DIRETOR, Roles.COORDENADOR):
+        sid = get_manager_school(uid)
+        return {str(sid)} if sid else set()
+    if role == Roles.PROFESSOR:
+        ids = get_teacher_schools(uid)
+        return {str(x) for x in ids} if ids else set()
+    return set()
+
+
+def _sanitize_active_entity_id(active_entity_id: Any, city_id: str, allowed: Optional[Set[str]]) -> Any:
+    """Evita que o front mantenha seleção de outra escola na resposta após filtrar escolas."""
+    if allowed is None:
+        return active_entity_id
+    if active_entity_id is None:
+        return None
+    ae = str(active_entity_id).strip()
+    if ae == str(city_id):
+        return active_entity_id
+    if ae.lower() in ('municipio', 'municipality', 'municipal'):
+        return active_entity_id
+    if not allowed:
+        return None
+    if ae in allowed:
+        return active_entity_id
+    return None
+
+
+def _filter_payload_for_ideb_response(
+    payload: Optional[Dict[str, Any]],
+    user: Optional[Dict[str, Any]],
+    city_id: str,
+) -> Dict[str, Any]:
+    """Diretor/coordenador/professor: mantém dados municipais do JSON, mas só suas escolas em escolas[]."""
+    if not payload:
+        return {}
+    allowed = _ideb_meta_allowed_school_ids(user)
+    if allowed is None:
+        return copy.deepcopy(payload)
+    out = copy.deepcopy(payload)
+    md = out.get('municipalityData')
+    if isinstance(md, dict):
+        md = dict(md)
+        out['municipalityData'] = md
+        escolas = md.get('escolas')
+        if isinstance(escolas, list):
+            md['escolas'] = [
+                e for e in escolas
+                if isinstance(e, dict) and str(e.get('id')) in allowed
+            ]
+    out['activeEntityId'] = _sanitize_active_entity_id(out.get('activeEntityId'), city_id, allowed)
+    return out
+
+
+def _merge_put_payload_for_restricted_school_roles(
+    existing: Optional[Dict[str, Any]],
+    incoming: Dict[str, Any],
+    city_id: str,
+    allowed: Set[str],
+) -> Dict[str, Any]:
+    """
+    Mescla PUT sem permitir que diretor/coordenador/professor sobrescrevam o bloco
+    municipal nem alterem escolas de terceiros; só atualiza entradas das próprias escolas.
+    """
+    base = copy.deepcopy(existing) if existing else {}
+    if not isinstance(base, dict):
+        base = {}
+    base.setdefault('municipalityData', {})
+    if not isinstance(base['municipalityData'], dict):
+        base['municipalityData'] = {}
+    base_md = base['municipalityData']
+    base_md.setdefault('escolas', [])
+    if not isinstance(base_md['escolas'], list):
+        base_md['escolas'] = []
+
+    inc_md = incoming.get('municipalityData') if isinstance(incoming.get('municipalityData'), dict) else {}
+    inc_escolas = inc_md.get('escolas') if isinstance(inc_md.get('escolas'), list) else []
+
+    by_id: Dict[str, Any] = {}
+    for e in base_md['escolas']:
+        if isinstance(e, dict) and e.get('id') is not None:
+            by_id[str(e['id'])] = e
+    for e in inc_escolas:
+        if not isinstance(e, dict) or e.get('id') is None:
+            continue
+        eid = str(e['id'])
+        if eid in allowed:
+            by_id[eid] = e
+
+    new_escolas = []
+    seen: Set[str] = set()
+    for e in base_md['escolas']:
+        if not isinstance(e, dict) or e.get('id') is None:
+            continue
+        eid = str(e['id'])
+        if eid in allowed:
+            new_escolas.append(by_id.get(eid, e))
+        else:
+            new_escolas.append(e)
+        seen.add(eid)
+    for eid, e in by_id.items():
+        if eid not in seen:
+            new_escolas.append(e)
+
+    base_md['escolas'] = new_escolas
+
+    if 'customTarget' in incoming:
+        base['customTarget'] = incoming.get('customTarget')
+    if 'targetYear' in incoming:
+        base['targetYear'] = incoming.get('targetYear')
+    if 'activeEntityId' in incoming:
+        base['activeEntityId'] = _sanitize_active_entity_id(incoming.get('activeEntityId'), city_id, allowed)
+
+    return base
 
 
 def _user_can_access_city(city_id):
@@ -22,7 +162,7 @@ def _user_can_access_city(city_id):
     user = get_current_user_from_token()
     if not user:
         return False
-    if user.get('role') == 'admin':
+    if Roles.normalize(user.get('role', '')) == Roles.ADMIN:
         return True
     user_city_id = user.get('tenant_id') or user.get('city_id')
     return user_city_id == city_id
@@ -88,8 +228,9 @@ def get_ideb_meta():
     if not record:
         return jsonify({"erro": "Nenhum dado salvo para este contexto"}), 404
 
+    user = get_current_user_from_token()
     return jsonify({
-        "payload": record.payload,
+        "payload": _filter_payload_for_ideb_response(record.payload, user, city_id),
         "updated_at": record.updated_at.isoformat() if record.updated_at else None,
     }), 200
 
@@ -121,14 +262,26 @@ def put_ideb_meta():
     if not _user_can_access_city(city_id):
         return jsonify({"erro": "Você não tem permissão para salvar neste município"}), 403
 
-    payload = {
-        'municipalityData': data.get('municipalityData'),
-        'customTarget': data.get('customTarget'),
-        'activeEntityId': data.get('activeEntityId'),
-        'targetYear': data.get('targetYear'),
-    }
+    user = get_current_user_from_token()
+    allowed = _ideb_meta_allowed_school_ids(user)
 
     record = IdebMetaSave.query.filter_by(city_id=city_id, level=level).first()
+
+    if allowed is None:
+        payload = {
+            'municipalityData': data.get('municipalityData'),
+            'customTarget': data.get('customTarget'),
+            'activeEntityId': data.get('activeEntityId'),
+            'targetYear': data.get('targetYear'),
+        }
+    else:
+        existing = record.payload if record and record.payload else None
+        payload = _merge_put_payload_for_restricted_school_roles(
+            existing if isinstance(existing, dict) else None,
+            data,
+            city_id,
+            allowed,
+        )
 
     if record:
         record.payload = payload
@@ -147,7 +300,7 @@ def put_ideb_meta():
         status = 201
 
     return jsonify({
-        "payload": record.payload,
+        "payload": _filter_payload_for_ideb_response(record.payload, user, city_id),
         "updated_at": record.updated_at.isoformat() if record.updated_at else None,
     }), status
 
@@ -208,6 +361,16 @@ def add_school_to_calculator():
     if not _user_can_access_city(city_id):
         return jsonify({"erro": "Você não tem permissão para acessar este município"}), 403
 
+    user = get_current_user_from_token()
+    allowed = _ideb_meta_allowed_school_ids(user)
+    sch = School.query.get(str(school_id))
+    if not sch or str(sch.city_id) != str(city_id):
+        return jsonify({"erro": "Escola não encontrada ou não pertence a este município"}), 400
+    if allowed is not None and str(school_id) not in allowed:
+        return jsonify({
+            "erro": "Sem permissão para incluir ou alterar dados de outra escola na calculadora de metas",
+        }), 403
+
     record, payload = _get_or_create_payload(city_id, level)
     escolas = payload['municipalityData']['escolas']
 
@@ -235,7 +398,7 @@ def add_school_to_calculator():
     db.session.refresh(record)
 
     return jsonify({
-        "payload": record.payload,
+        "payload": _filter_payload_for_ideb_response(record.payload, user, city_id),
         "updated_at": record.updated_at.isoformat() if record.updated_at else None,
     }), 200
 

@@ -89,6 +89,17 @@ def process_one_submission(
 
     gen = get_bundle_generation(school_id, sbv)
     if not gen:
+        known_versions = [
+            row.sync_bundle_version
+            for row in MobileSyncBundleGeneration.query.filter_by(school_id=school_id)
+            .order_by(MobileSyncBundleGeneration.sync_bundle_version.asc())
+            .all()
+        ]
+        print(
+            f"[mobile/v1/sync/upload] bundle não encontrado — school_id={school_id} "
+            f"sync_bundle_version={sbv!r} versões_no_banco={known_versions} "
+            f"submission_id={submission_uuid} student_id={student_id} test_id={test_id}"
+        )
         return {
             "submission_id": str(submission_uuid),
             "status": "error",

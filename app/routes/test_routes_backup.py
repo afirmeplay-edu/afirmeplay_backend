@@ -2231,12 +2231,13 @@ def debug_test_dates(test_id):
         }
         
         for class_test in class_tests:
-                # ✅ REGRA 6: Se datetime do banco vier naive, torná-lo aware
-                application_time = None
-                expiration_time = None
-                
-                if class_test.application:
-                    application_dt = dateutil.parser.parse(class_test.application)
+            # ✅ REGRA 6: Se datetime do banco vier naive, torná-lo aware
+            application_time = None
+            expiration_time = None
+
+            if class_test.application:
+                import dateutil.parser
+                application_dt = dateutil.parser.parse(class_test.application)
                 if application_dt.tzinfo is None:
                     if class_test.timezone:
                         import pytz

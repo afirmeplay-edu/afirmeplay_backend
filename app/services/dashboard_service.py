@@ -2052,7 +2052,7 @@ class DashboardService:
         return ranking
 
     @classmethod
-    def get_ranking_alunos(cls, scope: Dict[str, Any], limit: int = 20) -> Dict[str, Any]:
+    def get_ranking_alunos(cls, scope: Dict[str, Any], limit: int = 20, offset: int = 0) -> Dict[str, Any]:
         """
         Retorna o top de alunos (ranking) para o dashboard, respeitando o escopo
         do usuário (município, escola ou global para admin).
@@ -2066,6 +2066,7 @@ class DashboardService:
         school_alias = aliased(School)
         class_alias = aliased(Class)
         limit = min(max(1, limit), 50)
+        offset = max(0, int(offset or 0))
         # Cast avatar_config (JSON) para Text no GROUP BY: PostgreSQL não tem operador de igualdade para json
         avatar_config_expr = cast(User.avatar_config, db.Text)
 
@@ -2087,6 +2088,7 @@ class DashboardService:
         # Média de proficiência (escala de pontos), alinhado ao ranking de turmas do dashboard admin.
         # outerjoin em EvaluationResult: inclui todos os alunos do escopo, mesmo sem avaliações (média 0).
         avg_proficiency = func.coalesce(func.avg(EvaluationResult.proficiency), 0)
+        avg_grade = func.coalesce(func.avg(EvaluationResult.grade), 0)
 
         query = (
             db.session.query(
@@ -2095,7 +2097,9 @@ class DashboardService:
                 school_alias.name.label("school_name"),
                 class_alias.name.label("class_name"),
                 Grade.name.label("serie"),
+                avg_grade.label("average_grade"),
                 avg_proficiency.label("average_proficiency"),
+                func.mode().within_group(EvaluationResult.classification).label("classification"),
                 (
                     func.coalesce(er_by_student.c.cnt, 0) + func.coalesce(asr_by_student.c.cnt, 0)
                 ).label("completed_evaluations"),
@@ -2129,7 +2133,7 @@ class DashboardService:
                 er_by_student.c.cnt,
                 asr_by_student.c.cnt,
             )
-            .order_by(avg_proficiency.desc())
+            .order_by(avg_proficiency.desc(), avg_grade.desc())
         )
 
         if scope["scope"] == "turma" and scope.get("class_id"):
@@ -2141,23 +2145,34 @@ class DashboardService:
             school_ids_str = uuid_list_to_str(school_ids) if school_ids else []
             query = query.filter(Student.school_id.in_(school_ids_str)) if school_ids_str else query.filter(False)
 
+        # Exibir somente alunos com participação real:
+        # pelo menos 1 avaliação (evaluation_results) ou 1 cartão-resposta (answer_sheet_results).
+        completed_total = func.coalesce(er_by_student.c.cnt, 0) + func.coalesce(asr_by_student.c.cnt, 0)
+        query = query.having(completed_total > 0)
+
         # Classificação da medalha por posição: 1º platina, 2º ouro, 3º prata, 4º bronze
         MEDALHA_POR_POSICAO = {1: "platina", 2: "ouro", 3: "prata", 4: "bronze"}
 
-        rows = query.limit(limit).all()
+        total = query.order_by(None).count()
+        first_row = query.limit(1).first()
+        first_media = round(float(first_row.average_proficiency or 0), 2) if first_row else 0
+        rows = query.offset(offset).limit(limit).all()
         ranking = []
         for idx, row in enumerate(rows):
-            position = idx + 1
+            position = offset + idx + 1
             # Média de proficiência (pontos), arredondada a 2 decimais para evitar floats esquisitos
             media_proficiencia = round(float(row.average_proficiency or 0), 2)
+            media_nota = round(float(row.average_grade or 0), 2)
             item = {
                 "student_id": row.student_id,
                 "name": row.student_name,
                 "school_name": row.school_name,
                 "class_name": row.class_name,
                 "serie": row.serie or "",
-                "media": media_proficiencia,
+                "media": media_nota,
+                "media_nota": media_nota,
                 "media_proficiencia": media_proficiencia,
+                "classification": row.classification,
                 "completed_evaluations": int(row.completed_evaluations or 0),
                 "position": position,
                 "medalha": MEDALHA_POR_POSICAO.get(position),
@@ -2176,11 +2191,10 @@ class DashboardService:
             ranking.append(item)
 
         # Diferença para o 1º lugar (calculada e arredondada no backend para evitar 11.150000000000006 no front)
-        primeiro_media = ranking[0]["media"] if ranking else 0
         for item in ranking:
-            item["pontos_para_primeiro"] = round(primeiro_media - item["media"], 2)
+            item["pontos_para_primeiro"] = round(first_media - item["media"], 2)
 
-        return {"ranking": ranking, "total": len(ranking)}
+        return {"ranking": ranking, "total": int(total)}
 
     # ------------------------------------------------------------------ #
     # Engajamento
@@ -2335,7 +2349,12 @@ class DashboardService:
 
     @classmethod
     def _build_teacher_ranking(cls, scope: Dict[str, Any]) -> List[Dict[str, Any]]:
+        from sqlalchemy import cast
+        from sqlalchemy.dialects.postgresql import VARCHAR
+
         teacher_alias = aliased(Teacher)
+        avg_proficiency_expr = func.coalesce(func.avg(EvaluationResult.proficiency), 0)
+        avg_grade_expr = func.coalesce(func.avg(EvaluationResult.grade), 0)
         er_by_teacher = (
             db.session.query(
                 TeacherClass.teacher_id.label("teacher_id"),
@@ -2374,7 +2393,9 @@ class DashboardService:
             db.session.query(
                 teacher_alias.id.label("teacher_id"),
                 teacher_alias.name.label("teacher_name"),
-                func.avg(EvaluationResult.grade).label("average_grade"),
+                User.email.label("teacher_email"),
+                avg_grade_expr.label("average_grade"),
+                avg_proficiency_expr.label("average_proficiency"),
                 (
                     func.coalesce(er_by_teacher.c.cnt, 0) + func.coalesce(asr_by_teacher.c.cnt, 0)
                 ).label("total_evaluations"),
@@ -2399,32 +2420,54 @@ class DashboardService:
             )
             .outerjoin(er_by_teacher, er_by_teacher.c.teacher_id == teacher_alias.id)
             .outerjoin(asr_by_teacher, asr_by_teacher.c.teacher_id == teacher_alias.id)
+            .outerjoin(User, User.id == teacher_alias.user_id)
         )
 
         school_ids = scope.get("school_ids") or []
+        city_id = scope.get("city_id")
         if school_ids:
             # Converter school_ids para strings (SchoolTeacher.school_id é VARCHAR)
             school_ids_str = uuid_list_to_str(school_ids) if school_ids else []
-            query = query.join(SchoolTeacher, SchoolTeacher.teacher_id == teacher_alias.id).filter(
-                SchoolTeacher.school_id.in_(school_ids_str)
-            )
-        else:
-            return []
+            query = query.filter(cast(Class._school_id, VARCHAR).in_(school_ids_str)) if school_ids_str else query.filter(False)
+        elif city_id:
+            municipal_school_ids = [
+                str(row[0])
+                for row in School.query.with_entities(School.id).filter(School.city_id == str(city_id)).all()
+                if row[0]
+            ]
+            if not municipal_school_ids:
+                return []
+            query = query.filter(cast(Class._school_id, VARCHAR).in_(municipal_school_ids))
 
         query = query.group_by(
             teacher_alias.id,
             teacher_alias.name,
+            User.email,
             er_by_teacher.c.cnt,
             asr_by_teacher.c.cnt,
-        ).order_by(func.avg(EvaluationResult.grade).desc())
+        ).order_by(avg_proficiency_expr.desc(), avg_grade_expr.desc())
 
         ranking = []
+
+        def _classification_from_proficiency(proficiency: float) -> str:
+            if proficiency < 200:
+                return "Abaixo do Básico"
+            if proficiency < 500:
+                return "Básico"
+            if proficiency < 750:
+                return "Adequado"
+            return "Avançado"
+
         for idx, row in enumerate(query.limit(DashboardService.MAX_LIST_SIZE).all()):
+            average_proficiency = float(row.average_proficiency or 0)
             ranking.append(
                 {
                     "teacher_id": row.teacher_id,
                     "teacher_name": row.teacher_name,
+                    "teacher_email": row.teacher_email,
                     "average_score": float(row.average_grade or 0),
+                    "average_proficiency": average_proficiency,
+                    "classification": _classification_from_proficiency(average_proficiency),
                     "total_evaluations": int(row.total_evaluations or 0),
                     "classes_count": int(row.classes_count or 0),
                     "position": idx + 1,

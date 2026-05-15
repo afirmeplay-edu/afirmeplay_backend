@@ -68,6 +68,7 @@ def _allow_subdomain_from_origin_when_host_has_no_slug():
 # Domínios que devem ser ignorados na resolução de subdomínio
 IGNORED_HOSTS = [
     'afirmeplay.com.br',
+    'prod-api.afirmeplay.com.br',
     'www.afirmeplay.com.br',
     'api.afirmeplay.com.br',
     'files.afirmeplay.com.br',

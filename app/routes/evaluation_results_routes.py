@@ -1924,11 +1924,14 @@ def _gerar_tabela_detalhada_por_disciplina(
                 respostas_por_aluno[resposta.student_id] = {}
             respostas_por_aluno[resposta.student_id][resposta.question_id] = resposta
 
-        # Somente alunos com resultado gravado ou com ao menos uma resposta na avaliação
-        all_students = [
-            s for s in all_students
-            if s.id in results_dict or bool(respostas_por_aluno.get(s.id))
-        ]
+        # Somente alunos participantes da avaliação (resultado/resposta/sessão submetida-finalizada)
+        participating_student_ids = _collect_participating_student_ids(
+            test_id=avaliacao_id,
+            student_ids=student_ids,
+            results_dict=results_dict,
+            respostas_por_aluno=respostas_por_aluno,
+        )
+        all_students = [s for s in all_students if s.id in participating_student_ids]
         if not all_students:
             logging.warning("Nenhum aluno com dados para a avaliação no escopo (tabela detalhada)")
             payload = {"disciplinas": list(questoes_por_disciplina.values())}
@@ -8453,6 +8456,47 @@ def _obter_alunos_para_mapa_habilidades_test(
     )
 
 
+def _collect_participating_student_ids(
+    test_id: str,
+    student_ids: List[Any],
+    results_dict: Optional[Dict[Any, Any]] = None,
+    respostas_por_aluno: Optional[Dict[Any, Dict[Any, Any]]] = None,
+) -> Set[Any]:
+    """
+    Critério único de participação em avaliação:
+    - possui EvaluationResult, ou
+    - possui ao menos uma StudentAnswer, ou
+    - possui TestSession finalizada/expirada/corrigida/revisada/finalized
+      ou com submitted_at preenchido.
+    """
+    participants: Set[Any] = set()
+
+    if results_dict:
+        participants.update(results_dict.keys())
+
+    if respostas_por_aluno:
+        participants.update(
+            student_id
+            for student_id, respostas in respostas_por_aluno.items()
+            if respostas
+        )
+
+    if not student_ids:
+        return participants
+
+    completed_statuses = ("finalizada", "expirada", "corrigida", "revisada", "finalized")
+    session_rows = db.session.query(TestSession.student_id).filter(
+        TestSession.test_id == test_id,
+        TestSession.student_id.in_(student_ids),
+        or_(
+            TestSession.status.in_(completed_statuses),
+            TestSession.submitted_at.isnot(None),
+        ),
+    ).distinct().all()
+    participants.update(row[0] for row in session_rows if row and row[0] is not None)
+    return participants
+
+
 # ==================== ENDPOINT 1: GET /avaliacoes ====================
 
 def _calcular_ranking_global_alunos(
@@ -8552,10 +8596,13 @@ def _calcular_ranking_global_alunos(
                 respostas_por_aluno[resposta.student_id] = {}
             respostas_por_aluno[resposta.student_id][resposta.question_id] = resposta
 
-        all_students = [
-            s for s in all_students
-            if s.id in results_dict or bool(respostas_por_aluno.get(s.id))
-        ]
+        participating_student_ids = _collect_participating_student_ids(
+            test_id=avaliacao_id,
+            student_ids=student_ids,
+            results_dict=results_dict,
+            respostas_por_aluno=respostas_por_aluno,
+        )
+        all_students = [s for s in all_students if s.id in participating_student_ids]
         if not all_students:
             return []
 

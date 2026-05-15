@@ -86,10 +86,126 @@ class CalendarEventService:
         }
 
     @staticmethod
-    def _matches_role_group_filters_for_user(role_group: str, user_id: str, filters: Dict[str, List[str]]) -> Tuple[bool, Tuple[str, str, str]]:
+    def _resolve_tenant_city_id(event: CalendarEvent, targets: List[CalendarEventTarget], creator: Optional[User] = None) -> Optional[str]:
+        try:
+            from app.utils.tenant_middleware import get_current_tenant_context
+            ctx = get_current_tenant_context()
+            if ctx and getattr(ctx, 'city_id', None):
+                return str(ctx.city_id)
+        except Exception:
+            pass
+
+        if event and event.municipality_id:
+            return str(event.municipality_id)
+
+        if creator and getattr(creator, 'city_id', None):
+            return str(creator.city_id)
+
+        school_ids: Set[str] = set()
+        for tgt in targets or []:
+            filters = CalendarEventService._normalize_role_group_filters(getattr(tgt, 'target_filters', None) or {})
+            for sid in filters.get('school_ids') or []:
+                school_ids.add(str(sid))
+
+            for cid in filters.get('class_ids') or []:
+                class_obj = Class.query.get(cid)
+                if class_obj and class_obj.school_id:
+                    school_ids.add(str(class_obj.school_id))
+
+            for gid in filters.get('grade_ids') or []:
+                for cls in Class.query.filter_by(grade_id=gid).all():
+                    if cls.school_id:
+                        school_ids.add(str(cls.school_id))
+
+            if tgt.target_type == CalendarTargetType.MUNICIPALITY and tgt.target_id:
+                return str(tgt.target_id)
+            if tgt.target_type == CalendarTargetType.SCHOOL and tgt.target_id:
+                school_ids.add(str(tgt.target_id))
+            if tgt.target_type == CalendarTargetType.CLASS and tgt.target_id:
+                class_obj = Class.query.get(tgt.target_id)
+                if class_obj and class_obj.school_id:
+                    school_ids.add(str(class_obj.school_id))
+            if tgt.target_type == CalendarTargetType.GRADE and tgt.target_id:
+                for cls in Class.query.filter_by(grade_id=tgt.target_id).all():
+                    if cls.school_id:
+                        school_ids.add(str(cls.school_id))
+
+        if not school_ids:
+            return None
+
+        schools = School.query.filter(School.id.in_(list(school_ids))).all()
+        city_ids = {str(s.city_id) for s in schools if s and s.city_id}
+        if len(city_ids) == 1:
+            return next(iter(city_ids))
+        return None
+
+    @staticmethod
+    def _matches_tecadm_filters_for_user(
+        user_id: str,
+        filters: Dict[str, List[str]],
+        tenant_city_id: Optional[str] = None
+    ) -> Tuple[bool, Tuple[str, str, str]]:
+        user = User.query.get(user_id)
+        if not user or CalendarEventService._extract_user_role(user) != 'tecadm':
+            return False, (None, None, None)
+
+        manager = Manager.query.filter_by(user_id=user_id).first()
+        user_city_id = getattr(user, 'city_id', None)
+        manager_city_id = getattr(manager, 'city_id', None) if manager else None
+        tecadm_city_id = str(user_city_id or manager_city_id) if (user_city_id or manager_city_id) else None
+
+        if tenant_city_id and tecadm_city_id and str(tecadm_city_id) != str(tenant_city_id):
+            return False, (None, None, None)
+
         school_ids = set(filters.get('school_ids') or [])
         grade_ids = set(filters.get('grade_ids') or [])
         class_ids = set(filters.get('class_ids') or [])
+
+        if not school_ids and not grade_ids and not class_ids:
+            return True, (manager.school_id if manager else None, None, 'tecadm')
+
+        if not tecadm_city_id:
+            return False, (None, None, None)
+
+        scoped_school_ids: Set[str] = set()
+        scoped_school_ids.update({str(sid) for sid in school_ids})
+
+        if grade_ids:
+            grade_classes = Class.query.filter(Class.grade_id.in_(list(grade_ids))).all()
+            grade_school_ids = {str(c.school_id) for c in grade_classes if c.school_id}
+            if not grade_school_ids:
+                return False, (None, None, None)
+            scoped_school_ids.update(grade_school_ids)
+
+        if class_ids:
+            scoped_classes = Class.query.filter(Class.id.in_(list(class_ids))).all()
+            class_school_ids = {str(c.school_id) for c in scoped_classes if c.school_id}
+            if not class_school_ids:
+                return False, (None, None, None)
+            scoped_school_ids.update(class_school_ids)
+
+        if scoped_school_ids:
+            schools = School.query.filter(School.id.in_(list(scoped_school_ids))).all()
+            if not schools:
+                return False, (None, None, None)
+            if any(str(s.city_id) != str(tecadm_city_id) for s in schools if s and s.city_id):
+                return False, (None, None, None)
+
+        return True, (manager.school_id if manager else None, None, 'tecadm')
+
+    @staticmethod
+    def _matches_role_group_filters_for_user(
+        role_group: str,
+        user_id: str,
+        filters: Dict[str, List[str]],
+        tenant_city_id: Optional[str] = None
+    ) -> Tuple[bool, Tuple[str, str, str]]:
+        school_ids = set(filters.get('school_ids') or [])
+        grade_ids = set(filters.get('grade_ids') or [])
+        class_ids = set(filters.get('class_ids') or [])
+
+        if role_group == 'tecadm':
+            return CalendarEventService._matches_tecadm_filters_for_user(user_id, filters, tenant_city_id)
 
         if role_group == 'aluno':
             student = Student.query.filter_by(user_id=user_id).first()
@@ -131,7 +247,7 @@ class CalendarEventService:
             ctx_class = next(iter(teacher_class_ids), None)
             return True, (ctx_school, ctx_class, 'professor')
 
-        if role_group in ['diretor', 'coordenador', 'tecadm']:
+        if role_group in ['diretor', 'coordenador']:
             manager = Manager.query.filter_by(user_id=user_id).first()
             if not manager:
                 return False, (None, None, None)
@@ -432,6 +548,7 @@ class CalendarEventService:
             creator_role = event.created_by_role
 
         targets = CalendarEventTarget.query.filter_by(event_id=event_id).all()
+        tenant_city_id = CalendarEventService._resolve_tenant_city_id(event, targets, creator)
 
         for tgt in targets:
             if tgt.target_type == CalendarTargetType.ALL:
@@ -448,7 +565,7 @@ class CalendarEventService:
                         school_links = SchoolTeacher.query.filter_by(teacher_id=t.id).all()
                         school_id = school_links[0].school_id if school_links else None
                         add_user(t.user_id, school_id=school_id, role_snapshot='professor')
-                # Gestores (diretor/coordenador/tecadm)
+                # Gestores (diretor/coordenador/admin)
                 for m in Manager.query.all():
                     if not m.user_id or m.user_id in seen:
                         continue
@@ -456,9 +573,24 @@ class CalendarEventService:
                     if not user:
                         continue
                     user_role = CalendarEventService._extract_user_role(user)
-                    if user_role in ['diretor', 'coordenador', 'tecadm', 'admin']:
+                    if user_role in ['diretor', 'coordenador', 'admin']:
                         seen.add(m.user_id)
                         add_user(m.user_id, school_id=m.school_id, role_snapshot=user_role)
+                # Tecadm do município (inclui usuários sem vínculo em Manager)
+                for u in User.query.all():
+                    if not u.id or u.id in seen:
+                        continue
+                    if CalendarEventService._extract_user_role(u) != 'tecadm':
+                        continue
+                    user_city_id = getattr(u, 'city_id', None)
+                    if tenant_city_id and user_city_id and str(user_city_id) != str(tenant_city_id):
+                        continue
+                    if tenant_city_id and not user_city_id:
+                        manager = Manager.query.filter_by(user_id=u.id).first()
+                        if not manager or not manager.city_id or str(manager.city_id) != str(tenant_city_id):
+                            continue
+                    seen.add(u.id)
+                    add_user(u.id, role_snapshot='tecadm')
             elif tgt.target_type == CalendarTargetType.USER:
                 add_user(tgt.target_id)
             elif tgt.target_type == CalendarTargetType.ROLE_GROUP:
@@ -468,7 +600,7 @@ class CalendarEventService:
                     for s in Student.query.all():
                         if not s.user_id:
                             continue
-                        ok, ctx = CalendarEventService._matches_role_group_filters_for_user('aluno', s.user_id, filters)
+                        ok, ctx = CalendarEventService._matches_role_group_filters_for_user('aluno', s.user_id, filters, tenant_city_id)
                         if ok:
                             school_id, class_id, role_snapshot = ctx
                             add_user(s.user_id, school_id=school_id, class_id=class_id, role_snapshot=role_snapshot)
@@ -476,11 +608,11 @@ class CalendarEventService:
                     for t in Teacher.query.all():
                         if not t.user_id:
                             continue
-                        ok, ctx = CalendarEventService._matches_role_group_filters_for_user('professor', t.user_id, filters)
+                        ok, ctx = CalendarEventService._matches_role_group_filters_for_user('professor', t.user_id, filters, tenant_city_id)
                         if ok:
                             school_id, class_id, role_snapshot = ctx
                             add_user(t.user_id, school_id=school_id, class_id=class_id, role_snapshot=role_snapshot)
-                elif role_group in ['diretor', 'coordenador', 'tecadm']:
+                elif role_group in ['diretor', 'coordenador']:
                     managers = Manager.query.all()
                     for m in managers:
                         if not m.user_id:
@@ -491,16 +623,26 @@ class CalendarEventService:
                         user_role = CalendarEventService._extract_user_role(user)
                         if user_role != role_group:
                             continue
-                        ok, ctx = CalendarEventService._matches_role_group_filters_for_user(role_group, m.user_id, filters)
+                        ok, ctx = CalendarEventService._matches_role_group_filters_for_user(role_group, m.user_id, filters, tenant_city_id)
                         if ok:
                             school_id, class_id, role_snapshot = ctx
                             add_user(m.user_id, school_id=school_id, class_id=class_id, role_snapshot=role_snapshot)
+                elif role_group == 'tecadm':
+                    for u in User.query.all():
+                        if not u.id:
+                            continue
+                        if CalendarEventService._extract_user_role(u) != 'tecadm':
+                            continue
+                        ok, ctx = CalendarEventService._matches_role_group_filters_for_user('tecadm', u.id, filters, tenant_city_id)
+                        if ok:
+                            school_id, class_id, role_snapshot = ctx
+                            add_user(u.id, school_id=school_id, class_id=class_id, role_snapshot=role_snapshot)
                 elif role_group == 'admin':
                     for u in User.query.all():
                         user_role = CalendarEventService._extract_user_role(u)
                         if user_role != 'admin':
                             continue
-                        ok, ctx = CalendarEventService._matches_role_group_filters_for_user('admin', u.id, filters)
+                        ok, ctx = CalendarEventService._matches_role_group_filters_for_user('admin', u.id, filters, tenant_city_id)
                         if ok:
                             school_id, class_id, role_snapshot = ctx
                             add_user(u.id, school_id=school_id, class_id=class_id, role_snapshot=role_snapshot)

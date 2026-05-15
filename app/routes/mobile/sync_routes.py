@@ -1,4 +1,4 @@
-from flask import request, jsonify
+from flask import request, jsonify, g
 from flask_jwt_extended import jwt_required, get_jwt_identity
 
 from app import db
@@ -128,14 +128,46 @@ def mobile_sync_upload():
         if item.get("device_id") != hdr_dev:
             return jsonify({"error": "device_id no corpo deve coincidir com X-Device-Id"}), 400
 
+    ctx = getattr(g, "tenant_context", None)
+    schema = getattr(ctx, "schema", None) if ctx else None
+    sbv_in_payload = [
+        item.get("sync_bundle_version") for item in submissions if isinstance(item, dict)
+    ]
+    print(
+        f"[mobile/v1/sync/upload] POST — user_id={user.id} device_id={device_id} "
+        f"school_id={school_id} submissions={len(submissions)} "
+        f"sync_bundle_versions={sbv_in_payload} schema={schema!r}"
+    )
+
     try:
         results = process_batch(submissions, str(user.id), school_id)
         register_or_touch_device(str(user.id), device_id)
         db.session.commit()
+
+        errors = [r for r in results if r.get("status") == "error"]
+        applied = sum(1 for r in results if r.get("status") == "applied")
+        if errors:
+            print(
+                f"[mobile/v1/sync/upload] 200 com erros — school_id={school_id} "
+                f"applied={applied} errors={len(errors)}"
+            )
+            for r in errors:
+                print(
+                    f"[mobile/v1/sync/upload]   erro submission_id={r.get('submission_id')} "
+                    f"code={r.get('code')!r} message={r.get('message')!r}"
+                )
+        else:
+            print(
+                f"[mobile/v1/sync/upload] 200 — school_id={school_id} "
+                f"applied={applied} total={len(results)}"
+            )
+
         return jsonify({"results": results}), 200
     except PermissionError as e:
         db.session.rollback()
+        print(f"[mobile/v1/sync/upload] 403 — {e}")
         return jsonify({"error": str(e)}), 403
     except Exception as e:
         db.session.rollback()
+        print(f"[mobile/v1/sync/upload] 500 — {type(e).__name__}: {e}")
         return jsonify({"error": str(e)}), 500

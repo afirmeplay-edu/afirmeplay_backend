@@ -78,21 +78,19 @@ Ordem das chaves no JSON **não** é garantida; usar nomes exatos.
 |-------|------|-------------|-----------|
 | `id` | `string` | sim | UUID do aluno (`student.id`). |
 | `name` | `string` | sim | Nome exibido (campo do aluno). |
-| `registration` | `string` \| `null` | sim | Matrícula; pode ser `null`. |
-| `email` | `string` \| `null` | sim | E-mail do **`users`** ligado ao aluno (`User.email`); `null` se não houver. **Login offline:** aceitar o mesmo identificador que o web (`registration` **ou** `email`). |
+| `registration` | `string` \| `null` | sim | PIN de 4 dígitos (`student.registration`); gerado no cadastro do aluno. `null` se ainda não atribuído (rodar backfill). |
 | `user_id` | `string` \| `null` | sim | UUID em `public.users`. |
-| `password_hash` | `string` \| `null` | sim | Cópia **literal** de `users.password_hash` para verificação offline (pode ser `pbkdf2:sha256`, `scrypt`, etc., conforme Werkzeug/versão). |
 | `class_id` | `string` \| `null` | sim | UUID da turma. |
 | `grade_id` | `string` \| `null` | sim | UUID da série/nota. |
 | `school_id` | `string` | sim | UUID da escola. |
 
-**Identificação de login no app:** o utilizador pode digitar **matrícula** (`registration`) ou **e-mail** (`email`). O app deve resolver para o registo local cujo `registration` ou `email` (case-insensitive para email) coincidir, e validar a senha com `password_hash` (biblioteca compatível com o formato recebido).
+**Login offline do aluno:** usar **`registration`** como identificador e como senha (mesmo valor, 4 dígitos). Não enviar `email` nem `password_hash` no pacote.
 
 ---
 
 ## 3. Alinhamento com `GET /mobile/v1/sync/bundle`
 
-O bundle por escola (`sync/bundle`) segue o **mesmo formato** de cada item em `students` (incluindo `email` a partir deste contrato), e os mesmos conceitos de `tests`, `questions_by_test`, `test_content_version`, `student_test_links`.  
+O bundle por escola (`sync/bundle`) segue o **mesmo formato** de cada item em `students` e os mesmos conceitos de `tests`, `questions_by_test`, `test_content_version`, `student_test_links`.  
 Diferenças:
 
 - `sync/bundle` expõe `school_id` e **um** `sync_bundle_version` (escola única no pedido).  

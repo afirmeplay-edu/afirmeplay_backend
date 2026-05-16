@@ -107,16 +107,12 @@ def criar_usuario_e_aluno():
         else:
             logging.info("Usuário não encontrado, criando novo usuário.")
             usuario_foi_criado_agora = True  # Marcar que vamos criar o usuário agora
-            # Verificar se matrícula já existe (caso fornecida) - apenas para novo usuário
-            if data.get("registration") and get_orm_session().query(User).filter_by(registration=data["registration"]).first():
-                return jsonify({"error": "Registration number already exists"}), 400
-            
             # Criar usuário (role padrão: aluno) com city_id da escola
             usuario = User(
                 name=data["name"],
                 email=data["email"],
                 password_hash=hash_password(data["password"]),
-                registration=data.get("registration"),
+                registration=None,
                 role=RoleEnum("aluno"),
                 city_id=city_id
             )
@@ -139,27 +135,33 @@ def criar_usuario_e_aluno():
         # Determinar grade_id (série) com fallback da turma
         grade_id = data.get("grade_id") or class_obj.grade_id
 
-        # Criar aluno
+        from app.services.mobile.student_registration_pin import assign_registration_pin
+
+        # Criar aluno (PIN de 4 dígitos em student.registration)
         novo_aluno = Student(
             name=usuario.name,
             user_id=usuario.id,
-            registration=usuario.registration,
             birth_date=birth_date,
             class_id=data["class_id"],
             grade_id=grade_id,
             school_id=class_obj.school_id
         )
         get_orm_session().add(novo_aluno)
-        get_orm_session().flush()  # Flush para obter o ID do aluno
-        
+        get_orm_session().flush()
+        try:
+            pin = assign_registration_pin(novo_aluno, get_orm_session())
+        except RuntimeError as exc:
+            get_orm_session().rollback()
+            return jsonify({"error": str(exc)}), 500
+
         # Salvar senha em texto plano na tabela de log apenas se criamos um novo usuário
         # (quando o usuário já existe, não temos a senha original em texto plano)
         if usuario_foi_criado_agora:
             password_log = StudentPasswordLog(
                 student_name=data["name"],
                 email=data["email"],
-                password=data["password"],  # Senha em texto plano
-                registration=data.get("registration"),
+                password=data["password"],
+                registration=pin,
                 user_id=usuario.id,
                 student_id=novo_aluno.id,
                 class_id=data["class_id"],

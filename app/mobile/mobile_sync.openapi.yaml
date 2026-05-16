@@ -257,7 +257,8 @@ components:
             type: object
             required: [password]
             description: |
-                Enviar **matrícula** em `registration` e/ou **e-mail** em `email` (o backend usa `registration || email` como identificador).
+                Enviar **matrícula** em `registration` e/ou **e-mail** em `email` (o backend usa `registration || email`).
+                Aceita e-mail completo ou apenas o prefixo antes do `@` (ex.: `artur.calderonart`), com resolução por tenant quando aplicável.
             properties:
                 registration:
                     type: string
@@ -466,26 +467,18 @@ components:
                 - id
                 - name
                 - registration
-                - email
                 - user_id
-                - password_hash
                 - class_id
                 - grade_id
                 - school_id
             properties:
                 id: { type: string }
                 name: { type: string }
-                registration: { type: string, nullable: true }
-                email:
+                registration:
                     type: string
                     nullable: true
-                    description: E-mail de `public.users` (login web); null se ausente
+                    description: PIN de 4 dígitos (`student.registration`) para login offline (identificador = senha)
                 user_id: { type: string, nullable: true }
-                password_hash:
-                    type: string
-                    nullable: true
-                    description: |
-                        Cópia literal de `users.password_hash` (Werkzeug). Pode ser `pbkdf2:sha256`, `scrypt`, etc., conforme versão/parametrização do servidor.
                 class_id: { type: string, nullable: true }
                 grade_id: { type: string, nullable: true }
                 school_id: { type: string }

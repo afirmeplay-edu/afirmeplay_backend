@@ -19,7 +19,6 @@ from app.models.mobile_offline_pack_registry import MobileOfflinePackRegistry
 from app.models.school import School
 from app.models.student import Student
 from app.models.test import Test
-from app.models.user import User
 from app.services.mobile.bundle_service import (
     build_tests_questions_payload,
     collect_school_scope,
@@ -220,14 +219,11 @@ def _parse_iso_naive(raw: str) -> datetime:
 
 
 def _serialize_student_row(s: Student) -> Dict[str, Any]:
-    u = User.query.get(s.user_id) if s.user_id else None
     return {
         "id": s.id,
         "name": s.name,
         "registration": s.registration,
-        "email": u.email if u else None,
         "user_id": s.user_id,
-        "password_hash": u.password_hash if u else None,
         "class_id": str(s.class_id) if s.class_id else None,
         "grade_id": str(s.grade_id) if s.grade_id else None,
         "school_id": s.school_id,

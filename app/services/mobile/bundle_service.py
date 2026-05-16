@@ -13,7 +13,6 @@ from app.models.classTest import ClassTest
 from app.models.test import Test
 from app.models.testQuestion import TestQuestion
 from app.models.question import Question
-from app.models.user import User
 from app.models.mobile_models import MobileSyncBundleGeneration
 
 from app.services.mobile.content_hash import compute_test_content_version, question_to_canon
@@ -178,15 +177,12 @@ def serialize_students_page(
     items = q.offset((page - 1) * page_size).limit(page_size).all()
     out = []
     for s in items:
-        u = User.query.get(s.user_id) if s.user_id else None
         out.append(
             {
                 "id": s.id,
                 "name": s.name,
                 "registration": s.registration,
-                "email": u.email if u else None,
                 "user_id": s.user_id,
-                "password_hash": u.password_hash if u else None,
                 "class_id": str(s.class_id) if s.class_id else None,
                 "grade_id": str(s.grade_id) if s.grade_id else None,
                 "school_id": s.school_id,

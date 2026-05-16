@@ -19,6 +19,37 @@ _MOBILE_LOGIN_ROLES = frozenset(
 )
 
 
+def _resolve_mobile_login_user(ident: str):
+    """
+    Resolve usuário por matrícula (staff), e-mail completo ou prefixo antes do @.
+    Com prefixo, restringe por city_id do tenant quando disponível.
+    """
+    ident = (ident or "").strip()
+    if not ident:
+        return None
+
+    usuario = User.query.filter_by(registration=ident).first()
+    if usuario:
+        return usuario
+
+    usuario = User.query.filter(User.email.ilike(ident)).first()
+    if usuario:
+        return usuario
+
+    if "@" in ident:
+        return None
+
+    q = User.query.filter(User.email.ilike(f"{ident}@%"))
+    ctx = getattr(g, "tenant_context", None)
+    city_id = getattr(ctx, "city_id", None) if ctx else None
+    if city_id:
+        q = q.filter(User.city_id == str(city_id))
+    candidates = q.all()
+    if len(candidates) == 1:
+        return candidates[0]
+    return None
+
+
 @mobile_bp.route("/auth/login", methods=["POST", "OPTIONS"])
 def mobile_auth_login():
     if request.method == "OPTIONS":
@@ -42,9 +73,7 @@ def mobile_auth_login():
         )
         return jsonify({"error": "registration/email e password obrigatórios"}), 400
 
-    usuario = User.query.filter_by(registration=ident).first()
-    if not usuario:
-        usuario = User.query.filter_by(email=ident).first()
+    usuario = _resolve_mobile_login_user(ident)
 
     if not usuario or not authenticate_usuario(usuario, password):
         print(f"[mobile/v1/auth/login] 401 — credenciais inválidas para ident={ident!r}")

@@ -1317,7 +1317,13 @@ def bulk_upload_students():
         
         # Conjunto de emails já atribuídos neste batch (para evitar duplicatas)
         emails_usados_no_batch = set()
-        
+        from app.services.mobile.student_registration_pin import (
+            assign_registration_pin,
+            collect_used_student_registrations,
+        )
+
+        used_pins = collect_used_student_registrations(db.session)
+
         # Processar cada linha
         for index, row in enumerate(rows):
             try:
@@ -1347,29 +1353,7 @@ def bulk_upload_students():
                 # Gerar senha: primeiro nome + @afirmeplay
                 primeiro_nome = gerar_primeiro_nome(nome_completo)
                 senha = f"{primeiro_nome}@afirmeplay" if primeiro_nome else "aluno@afirmeplay"
-                
-                # Validar matrícula se fornecida (opcional)
-                matricula_raw = row.get('matricula', '')
-                # Normalizar matrícula: tratar None, "None", "null", "", etc. como vazio
-                if matricula_raw is None:
-                    matricula = None
-                else:
-                    matricula = str(matricula_raw).strip()
-                    # Se após strip for vazio ou valores como "None", "null", etc., tratar como None
-                    if not matricula or matricula.lower() in ['none', 'null', 'nulo', '']:
-                        matricula = None
-                
-                # Verificar se matrícula já existe nesta cidade (Student no schema atual)
-                # Matrícula é única por cidade, não globalmente em User
-                if matricula and Student.query.filter_by(registration=matricula).first():
-                    results["erros"].append({
-                        "linha": index + 2,
-                        "campo": "matricula",
-                        "valor": matricula,
-                        "erro": "Matrícula já cadastrada nesta cidade"
-                    })
-                    continue
-                
+
                 if target_class:
                     escola = target_school
                     serie = target_grade
@@ -1473,21 +1457,6 @@ def bulk_upload_students():
                         })
                         continue
                 
-                # Verificar se já existe aluno na mesma turma (por matrícula, se fornecida)
-                if matricula:
-                    existing_student_in_class = Student.query.filter_by(
-                        class_id=turma.id,
-                        registration=matricula
-                    ).first()
-                    if existing_student_in_class:
-                        results["erros"].append({
-                            "linha": index + 2,
-                            "campo": "matricula",
-                            "valor": matricula,
-                            "erro": f"Aluno com esta matrícula já está cadastrado na turma {turma_nome}"
-                        })
-                        continue
-                
                 # Data de nascimento é opcional
                 data_nascimento = row.get('data_nascimento_parsed')
                 
@@ -1509,7 +1478,6 @@ def bulk_upload_students():
                 novo_aluno = Student(
                     id=str(uuid.uuid4()),
                     name=str(row.get('nome', '')).strip(),
-                    registration=matricula if matricula else None,
                     birth_date=data_nascimento,
                     profile_picture=str(row.get('foto_perfil', '')).strip() if row.get('foto_perfil') else None,
                     user_id=novo_usuario.id,
@@ -1518,14 +1486,25 @@ def bulk_upload_students():
                     class_id=turma.id
                 )
                 db.session.add(novo_aluno)
-                db.session.flush()  # Flush para obter o ID do aluno
-                
+                db.session.flush()
+                try:
+                    pin = assign_registration_pin(novo_aluno, db.session, used_pins)
+                except RuntimeError as exc:
+                    results["erros"].append({
+                        "linha": index + 2,
+                        "campo": "matricula",
+                        "valor": "",
+                        "erro": str(exc),
+                    })
+                    db.session.rollback()
+                    continue
+
                 # Salvar senha em texto plano na tabela de log (sem hash)
                 password_log = StudentPasswordLog(
                     student_name=str(row.get('nome', '')).strip(),
                     email=email,
-                    password=senha,  # Senha em texto plano (gerada pelo sistema)
-                    registration=matricula if matricula else None,
+                    password=senha,
+                    registration=pin,
                     user_id=novo_usuario.id,
                     student_id=novo_aluno.id,
                     class_id=turma.id,
@@ -1540,7 +1519,7 @@ def bulk_upload_students():
                     "nome": nome_completo,
                     "email": email,
                     "senha": senha,
-                    "matricula": matricula,
+                    "matricula": pin,
                     "escola": escola.name,
                     "serie": serie.name,
                     "turma": turma.name

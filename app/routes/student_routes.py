@@ -1533,7 +1533,7 @@ def get_password_report():
 def get_password_report_pdf():
     """
     Retorna relatório de alunos com e-mails e senhas em formato PDF, agrupado por turma.
-    Inclui capa com nome da escola e tabelas por turma (Nome, E-mail, Senha, Matrícula).
+    Inclui capa com nome da escola e tabelas por turma (Nome, E-mail, Senha, Acesso ao App).
 
     Query Parameters:
         school_id: Escola (obrigatório para admin/tecadm; diretor/coordenador usam a escola vinculada)

@@ -27,6 +27,7 @@ class TestMobileDDL(unittest.TestCase):
         self.assertIn("mobile_sync_submission", sql)
         self.assertIn("mobile_sync_bundle_generation", sql)
         self.assertIn("mobile_offline_pack_code", sql)
+        self.assertIn("activation_code", sql)
         self.assertIn("mobile_offline_pack_redeem_device", sql)
 
     def test_ddl_rejects_bad_schema(self):

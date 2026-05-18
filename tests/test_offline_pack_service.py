@@ -1,0 +1,118 @@
+"""
+Testes do pacote offline (código em texto claro, escopo, cache de bundle).
+Execução: python -m unittest tests.test_offline_pack_service
+"""
+import unittest
+from datetime import datetime, timedelta
+from unittest.mock import MagicMock, patch
+
+from app.services.mobile import offline_pack_service as svc
+from app.services.mobile.ddl import get_mobile_tables_ddl
+
+
+class TestOfflinePackDDL(unittest.TestCase):
+    def test_ddl_has_activation_code(self):
+        sql = get_mobile_tables_ddl("city_test123")
+        self.assertIn("activation_code", sql)
+
+
+class TestOfflinePackCodeHelpers(unittest.TestCase):
+    def test_format_and_normalize_roundtrip(self):
+        raw = "ABCD-EFGH-JKLM"
+        norm = svc.normalize_mobile_input_code(raw)
+        self.assertEqual(len(norm), 12)
+        self.assertEqual(svc.format_code(norm), "ABCD-EFGH-JKLM")
+
+    def test_registry_lookup_key_is_plain(self):
+        norm = "ABCDEFGHJKLM"
+        self.assertEqual(svc.registry_lookup_key(norm), norm)
+        self.assertNotEqual(svc.registry_lookup_key(norm), svc.hash_code(norm))
+
+
+class TestInvalidatePackBundleCache(unittest.TestCase):
+    def test_clears_resolved_versions(self):
+        pack = MagicMock()
+        pack.scope_json = {
+            "type": "custom",
+            "school_ids": ["s1"],
+            "_resolved": {
+                "sync_bundle_version_by_school": {"s1": 1},
+                "bundle_valid_until_min": "2026-01-01T00:00:00Z",
+            },
+        }
+        svc.invalidate_pack_bundle_cache(pack)
+        self.assertNotIn(
+            "sync_bundle_version_by_school",
+            pack.scope_json.get("_resolved", {}),
+        )
+
+
+class TestUpdateOfflinePackValidation(unittest.TestCase):
+    def test_expired_without_ttl_raises(self):
+        pack = MagicMock()
+        pack.revoked_at = None
+        pack.expires_at = datetime.utcnow() - timedelta(hours=1)
+        pack.scope_json = {"type": "municipality"}
+        with self.assertRaises(ValueError) as ctx:
+            svc.update_offline_pack(
+                pack=pack,
+                city_id="city-1",
+                scope={"type": "municipality"},
+            )
+        self.assertIn("expirado", str(ctx.exception).lower())
+
+    @patch.object(svc, "resolve_school_ids")
+    @patch.object(svc, "invalidate_pack_bundle_cache")
+    @patch.object(svc, "db")
+    def test_scope_update_invalidates_cache(
+        self, mock_db, mock_invalidate, mock_resolve
+    ):
+        pack = MagicMock()
+        pack.revoked_at = None
+        pack.expires_at = datetime.utcnow() + timedelta(hours=24)
+        pack.scope_json = {"type": "custom", "school_ids": ["a"]}
+        new_scope = {"type": "custom", "school_ids": ["a", "b"]}
+        svc.update_offline_pack(
+            pack=pack,
+            city_id="city-1",
+            scope=new_scope,
+        )
+        mock_resolve.assert_called_once()
+        mock_invalidate.assert_called_once_with(pack)
+        self.assertEqual(pack.scope_json, new_scope)
+
+
+class TestDeleteOfflinePacksBulk(unittest.TestCase):
+    def test_empty_ids_raises(self):
+        with self.assertRaises(ValueError):
+            svc.delete_offline_packs_bulk([])
+
+    def test_too_many_ids_raises(self):
+        ids = [f"id-{i}" for i in range(svc._BULK_DELETE_MAX + 1)]
+        with self.assertRaises(ValueError):
+            svc.delete_offline_packs_bulk(ids)
+
+    @patch.object(svc, "delete_offline_pack")
+    @patch.object(svc, "get_offline_pack_by_id")
+    def test_bulk_deletes_found_only(self, mock_get, mock_delete):
+        pack = MagicMock()
+        pack.id = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+
+        def lookup(pid):
+            if pid == str(pack.id):
+                return pack
+            return None
+
+        mock_get.side_effect = lookup
+        result = svc.delete_offline_packs_bulk(
+            [str(pack.id), "00000000-0000-0000-0000-000000000099", str(pack.id)]
+        )
+        self.assertEqual(result["deleted"], [str(pack.id)])
+        self.assertEqual(
+            result["not_found"], ["00000000-0000-0000-0000-000000000099"]
+        )
+        mock_delete.assert_called_once_with(pack)
+
+
+if __name__ == "__main__":
+    unittest.main()

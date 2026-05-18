@@ -6,7 +6,7 @@ info:
 
         - **Auth aplicador:** `POST /auth/login` — JWT (Flask-JWT-Extended); contexto de município via `X-City-ID`, `X-City-Slug` ou subdomínio.
         - **Sync:** `GET /sync/bundle`, `POST /sync/upload` — Bearer JWT mobile + `X-Device-Id`.
-        - **Pacote offline (código web):** `POST /offline-pack/register` (JWT do **login web** + tenant); `POST /offline-pack/redeem` (só `X-Device-Id` + corpo, com resolução de município via `public.mobile_offline_pack_registry` quando o código existe lá).
+        - **Pacote offline (código web):** `POST /offline-pack/register`, `GET /offline-pack`, `GET/PATCH/DELETE /offline-pack/{offline_pack_id}`, `POST /offline-pack/bulk-delete` (JWT do **login web** + tenant); `POST /offline-pack/redeem` (só `X-Device-Id` + corpo, com resolução de município via `public.mobile_offline_pack_registry` quando o código existe lá).
 
         Contrato normativo detalhado do **redeem** e alunos: **`OFFLINE_PACK_API_CONTRACT.md`** (campo `api_contract_version` na resposta do redeem, atualmente `"1.0"`).
 
@@ -95,6 +95,164 @@ paths:
                     $ref: "#/components/responses/Forbidden"
                 "401":
                     $ref: "#/components/responses/Unauthorized"
+
+    /mobile/v1/offline-pack:
+        get:
+            tags: [offline-pack]
+            summary: Listar códigos de pacote offline (painel web)
+            description: |
+                Mesma autenticação e papéis de `POST /offline-pack/register`.
+                O campo `code` é o código em texto claro (ex. `XXXX-XXXX-XXXX`) para exibir e editar no painel.
+                Query `include_expired=1` inclui pacotes com `expires_at` no passado (ainda editáveis via PATCH com `ttl_hours`).
+            security:
+                - bearerAuthWeb: []
+            parameters:
+                - $ref: "#/components/parameters/XCityId"
+                - $ref: "#/components/parameters/XCitySlug"
+                - name: include_expired
+                  in: query
+                  schema:
+                      type: boolean
+                      default: false
+            responses:
+                "200":
+                    description: Lista de pacotes
+                    content:
+                        application/json:
+                            schema:
+                                $ref: "#/components/schemas/OfflinePackListResponse"
+                "401":
+                    $ref: "#/components/responses/Unauthorized"
+                "403":
+                    $ref: "#/components/responses/Forbidden"
+
+    /mobile/v1/offline-pack/bulk-delete:
+        post:
+            tags: [offline-pack]
+            summary: Excluir vários pacotes offline de uma vez
+            description: |
+                Mesma autenticação e papéis do register. Remove registros no tenant e no índice `public.mobile_offline_pack_registry`.
+                Máximo 200 ids por requisição. Ids duplicados ou vazios são ignorados.
+            security:
+                - bearerAuthWeb: []
+            parameters:
+                - $ref: "#/components/parameters/XCityId"
+                - $ref: "#/components/parameters/XCitySlug"
+            requestBody:
+                required: true
+                content:
+                    application/json:
+                        schema:
+                            $ref: "#/components/schemas/OfflinePackBulkDeleteRequest"
+            responses:
+                "200":
+                    description: Resultado por id (apagados vs não encontrados)
+                    content:
+                        application/json:
+                            schema:
+                                $ref: "#/components/schemas/OfflinePackBulkDeleteResponse"
+                "400":
+                    $ref: "#/components/responses/BadRequest"
+                "401":
+                    $ref: "#/components/responses/Unauthorized"
+                "403":
+                    $ref: "#/components/responses/Forbidden"
+
+    /mobile/v1/offline-pack/{offline_pack_id}:
+        get:
+            tags: [offline-pack]
+            summary: Detalhe de um pacote offline (painel web)
+            security:
+                - bearerAuthWeb: []
+            parameters:
+                - $ref: "#/components/parameters/XCityId"
+                - $ref: "#/components/parameters/XCitySlug"
+                - name: offline_pack_id
+                  in: path
+                  required: true
+                  schema:
+                      type: string
+                      format: uuid
+            responses:
+                "200":
+                    description: Pacote encontrado
+                    content:
+                        application/json:
+                            schema:
+                                $ref: "#/components/schemas/OfflinePackItem"
+                "404":
+                    $ref: "#/components/responses/NotFound"
+                "401":
+                    $ref: "#/components/responses/Unauthorized"
+                "403":
+                    $ref: "#/components/responses/Forbidden"
+        patch:
+            tags: [offline-pack]
+            summary: Editar escopo ou metadados do pacote (mesmo código)
+            description: |
+                Atualiza `scope` (ex. adicionar escolas em `school_ids`), `ttl_hours` ou `max_redemptions`.
+                Invalida o snapshot em cache; o app deve **resgatar de novo** o mesmo código para baixar o pacote atualizado.
+            security:
+                - bearerAuthWeb: []
+            parameters:
+                - $ref: "#/components/parameters/XCityId"
+                - $ref: "#/components/parameters/XCitySlug"
+                - name: offline_pack_id
+                  in: path
+                  required: true
+                  schema:
+                      type: string
+                      format: uuid
+            requestBody:
+                required: true
+                content:
+                    application/json:
+                        schema:
+                            $ref: "#/components/schemas/OfflinePackUpdateRequest"
+            responses:
+                "200":
+                    description: Pacote atualizado
+                    content:
+                        application/json:
+                            schema:
+                                $ref: "#/components/schemas/OfflinePackItem"
+                "400":
+                    $ref: "#/components/responses/BadRequest"
+                "404":
+                    $ref: "#/components/responses/NotFound"
+                "401":
+                    $ref: "#/components/responses/Unauthorized"
+                "403":
+                    $ref: "#/components/responses/Forbidden"
+        delete:
+            tags: [offline-pack]
+            summary: Excluir um pacote offline
+            description: |
+                Remove o pacote do município e o código deixa de ser resgatável no app.
+            security:
+                - bearerAuthWeb: []
+            parameters:
+                - $ref: "#/components/parameters/XCityId"
+                - $ref: "#/components/parameters/XCitySlug"
+                - name: offline_pack_id
+                  in: path
+                  required: true
+                  schema:
+                      type: string
+                      format: uuid
+            responses:
+                "200":
+                    description: Pacote excluído
+                    content:
+                        application/json:
+                            schema:
+                                $ref: "#/components/schemas/OfflinePackDeleteResponse"
+                "404":
+                    $ref: "#/components/responses/NotFound"
+                "401":
+                    $ref: "#/components/responses/Unauthorized"
+                "403":
+                    $ref: "#/components/responses/Forbidden"
 
     /mobile/v1/offline-pack/redeem:
         post:
@@ -323,6 +481,111 @@ components:
                 scope:
                     type: object
                     additionalProperties: true
+
+        OfflinePackListResponse:
+            type: object
+            required: [items, total]
+            properties:
+                items:
+                    type: array
+                    items:
+                        $ref: "#/components/schemas/OfflinePackItem"
+                total:
+                    type: integer
+
+        OfflinePackItem:
+            type: object
+            required:
+                [
+                    offline_pack_id,
+                    expires_at,
+                    max_redemptions,
+                    scope,
+                    redemptions_count,
+                    is_expired,
+                ]
+            properties:
+                offline_pack_id:
+                    type: string
+                    format: uuid
+                code:
+                    type: string
+                    nullable: true
+                    description: Código em texto claro; null em registros antigos (antes da migração)
+                scope:
+                    type: object
+                    additionalProperties: true
+                expires_at:
+                    type: string
+                max_redemptions:
+                    type: integer
+                redemptions_count:
+                    type: integer
+                revoked_at:
+                    type: string
+                    nullable: true
+                created_at:
+                    type: string
+                    nullable: true
+                is_expired:
+                    type: boolean
+
+        OfflinePackDeleteResponse:
+            type: object
+            required: [deleted, offline_pack_id]
+            properties:
+                deleted:
+                    type: boolean
+                    example: true
+                offline_pack_id:
+                    type: string
+                    format: uuid
+
+        OfflinePackBulkDeleteRequest:
+            type: object
+            required: [offline_pack_ids]
+            properties:
+                offline_pack_ids:
+                    type: array
+                    minItems: 1
+                    maxItems: 200
+                    items:
+                        type: string
+                        format: uuid
+
+        OfflinePackBulkDeleteResponse:
+            type: object
+            required: [deleted, not_found]
+            properties:
+                deleted:
+                    type: array
+                    items:
+                        type: string
+                        format: uuid
+                    description: IDs excluídos com sucesso
+                not_found:
+                    type: array
+                    items:
+                        type: string
+                    description: IDs inexistentes no município atual
+
+        OfflinePackUpdateRequest:
+            type: object
+            description: Pelo menos um campo deve ser enviado
+            properties:
+                scope:
+                    type: object
+                    description: Substitui o escopo completo (mesmo formato do register)
+                    additionalProperties: true
+                ttl_hours:
+                    type: integer
+                    minimum: 1
+                    maximum: 336
+                    description: Renova validade a partir de agora
+                max_redemptions:
+                    type: integer
+                    minimum: 1
+                    maximum: 10000
 
         OfflinePackRedeemRequest:
             type: object

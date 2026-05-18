@@ -48,6 +48,7 @@ class MobileOfflinePackCode(db.Model):
     __table_args__ = {"schema": "tenant"}
 
     id = db.Column(UUID(as_uuid=True), primary_key=True, server_default=text("uuid_generate_v4()"))
+    activation_code = db.Column(db.String(20), nullable=True, unique=True)
     code_hash = db.Column(db.String(128), nullable=False, unique=True)
     scope_json = db.Column(JSONB, nullable=False)
     created_by_user_id = db.Column(db.String, db.ForeignKey("public.users.id"), nullable=True)

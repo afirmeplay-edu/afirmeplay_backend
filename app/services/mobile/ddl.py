@@ -42,6 +42,7 @@ CREATE INDEX IF NOT EXISTS idx_mobile_bundle_school ON "{schema}".mobile_sync_bu
 
 CREATE TABLE IF NOT EXISTS "{schema}".mobile_offline_pack_code (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    activation_code VARCHAR(20),
     code_hash VARCHAR(128) NOT NULL,
     scope_json JSONB NOT NULL,
     created_by_user_id VARCHAR REFERENCES public.users(id),
@@ -49,10 +50,12 @@ CREATE TABLE IF NOT EXISTS "{schema}".mobile_offline_pack_code (
     max_redemptions INTEGER NOT NULL DEFAULT 50,
     revoked_at TIMESTAMP WITHOUT TIME ZONE,
     created_at TIMESTAMP WITHOUT TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-    CONSTRAINT uq_mobile_offline_pack_code_hash UNIQUE (code_hash)
+    CONSTRAINT uq_mobile_offline_pack_code_hash UNIQUE (code_hash),
+    CONSTRAINT uq_mobile_offline_pack_activation_code UNIQUE (activation_code)
 );
 COMMENT ON TABLE "{schema}".mobile_offline_pack_code IS 'Códigos de ativação para download de pacote offline (escopo no JSON)';
 CREATE INDEX IF NOT EXISTS idx_mobile_offline_pack_expires ON "{schema}".mobile_offline_pack_code(expires_at);
+CREATE INDEX IF NOT EXISTS idx_mobile_offline_pack_activation ON "{schema}".mobile_offline_pack_code(activation_code);
 CREATE INDEX IF NOT EXISTS idx_mobile_offline_pack_created_by ON "{schema}".mobile_offline_pack_code(created_by_user_id);
 
 CREATE TABLE IF NOT EXISTS "{schema}".mobile_offline_pack_redeem_device (

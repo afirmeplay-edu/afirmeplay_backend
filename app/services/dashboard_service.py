@@ -2052,7 +2052,13 @@ class DashboardService:
         return ranking
 
     @classmethod
-    def get_ranking_alunos(cls, scope: Dict[str, Any], limit: int = 20, offset: int = 0) -> Dict[str, Any]:
+    def get_ranking_alunos(
+        cls,
+        scope: Dict[str, Any],
+        limit: int = 20,
+        offset: int = 0,
+        filters: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
         """
         Retorna o top de alunos (ranking) para o dashboard, respeitando o escopo
         do usuário (município, escola ou global para admin).
@@ -2065,8 +2071,9 @@ class DashboardService:
 
         school_alias = aliased(School)
         class_alias = aliased(Class)
-        limit = min(max(1, limit), 50)
+        limit = min(max(1, limit), 500)
         offset = max(0, int(offset or 0))
+        normalized_filters = filters or {}
         # Cast avatar_config (JSON) para Text no GROUP BY: PostgreSQL não tem operador de igualdade para json
         avatar_config_expr = cast(User.avatar_config, db.Text)
 
@@ -2136,6 +2143,20 @@ class DashboardService:
             .order_by(avg_proficiency.desc(), avg_grade.desc())
         )
 
+        if normalized_filters.get("escola"):
+            query = query.filter(Student.school_id == str(normalized_filters["escola"]))
+        if normalized_filters.get("turma"):
+            query = query.filter(Student.class_id == str(normalized_filters["turma"]))
+        if normalized_filters.get("serie"):
+            query = query.filter(
+                or_(
+                    Student.grade_id == str(normalized_filters["serie"]),
+                    class_alias.grade_id == str(normalized_filters["serie"]),
+                )
+            )
+        if normalized_filters.get("municipio"):
+            query = query.filter(school_alias.city_id == str(normalized_filters["municipio"]))
+
         if scope["scope"] == "turma" and scope.get("class_id"):
             query = query.filter(Student.class_id == scope["class_id"])
         elif scope["scope"] == "municipio" and scope.get("city_id"):
@@ -2144,6 +2165,10 @@ class DashboardService:
             school_ids = scope.get("school_ids") or []
             school_ids_str = uuid_list_to_str(school_ids) if school_ids else []
             query = query.filter(Student.school_id.in_(school_ids_str)) if school_ids_str else query.filter(False)
+
+        class_ids = scope.get("class_ids") or []
+        if class_ids:
+            query = query.filter(Student.class_id.in_(class_ids))
 
         # Exibir somente alunos com participação real:
         # pelo menos 1 avaliação (evaluation_results) ou 1 cartão-resposta (answer_sheet_results).
@@ -2348,11 +2373,13 @@ class DashboardService:
         return ranking
 
     @classmethod
-    def _build_teacher_ranking(cls, scope: Dict[str, Any]) -> List[Dict[str, Any]]:
+    def _build_teacher_ranking(cls, scope: Dict[str, Any], limit: Optional[int] = None) -> List[Dict[str, Any]]:
         from sqlalchemy import cast
         from sqlalchemy.dialects.postgresql import VARCHAR
 
         teacher_alias = aliased(Teacher)
+        class_grade_alias = aliased(Grade)
+        student_grade_alias = aliased(Grade)
         avg_proficiency_expr = func.coalesce(func.avg(EvaluationResult.proficiency), 0)
         avg_grade_expr = func.coalesce(func.avg(EvaluationResult.grade), 0)
         er_by_teacher = (
@@ -2394,6 +2421,10 @@ class DashboardService:
                 teacher_alias.id.label("teacher_id"),
                 teacher_alias.name.label("teacher_name"),
                 User.email.label("teacher_email"),
+                func.array_remove(
+                    func.array_agg(distinct(func.coalesce(class_grade_alias.name, student_grade_alias.name))),
+                    None,
+                ).label("grade_names"),
                 avg_grade_expr.label("average_grade"),
                 avg_proficiency_expr.label("average_proficiency"),
                 (
@@ -2405,6 +2436,8 @@ class DashboardService:
             .join(TeacherClass, TeacherClass.teacher_id == teacher_alias.id)
             .join(Class, Class.id == TeacherClass.class_id)
             .join(Student, Student.class_id == Class.id)
+            .outerjoin(class_grade_alias, class_grade_alias.id == Class.grade_id)
+            .outerjoin(student_grade_alias, student_grade_alias.id == Student.grade_id)
             .outerjoin(
                 EvaluationResult,
                 and_(
@@ -2445,6 +2478,8 @@ class DashboardService:
             User.email,
             er_by_teacher.c.cnt,
             asr_by_teacher.c.cnt,
+        ).having(
+            (func.coalesce(er_by_teacher.c.cnt, 0) + func.coalesce(asr_by_teacher.c.cnt, 0)) > 0
         ).order_by(avg_proficiency_expr.desc(), avg_grade_expr.desc())
 
         ranking = []
@@ -2458,7 +2493,8 @@ class DashboardService:
                 return "Adequado"
             return "Avançado"
 
-        for idx, row in enumerate(query.limit(DashboardService.MAX_LIST_SIZE).all()):
+        effective_limit = limit if isinstance(limit, int) and limit > 0 else DashboardService.MAX_LIST_SIZE
+        for idx, row in enumerate(query.limit(effective_limit).all()):
             average_proficiency = float(row.average_proficiency or 0)
             ranking.append(
                 {
@@ -2470,6 +2506,7 @@ class DashboardService:
                     "classification": _classification_from_proficiency(average_proficiency),
                     "total_evaluations": int(row.total_evaluations or 0),
                     "classes_count": int(row.classes_count or 0),
+                    "grade_names": [str(name) for name in (row.grade_names or []) if name],
                     "position": idx + 1,
                 }
             )

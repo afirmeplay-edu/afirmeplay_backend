@@ -679,7 +679,27 @@ def listar_avaliacoes():
                 # Em caso de erro, ser conservador e não retornar dados fora do escopo.
                 professor_allowed_class_ids = set()
         
-        # Validar filtros obrigatórios (estado e município são sempre obrigatórios)
+        # Compatibilidade legada:
+        # algumas telas de detalhe chamam /avaliacoes com apenas `avaliacao`.
+        # Nesse caso, inferir estado/município pelo contexto da avaliação para
+        # manter o contrato sem forçar ajuste imediato no frontend.
+        avaliacao_especifica = bool(avaliacao and str(avaliacao).lower() != 'all')
+        if avaliacao_especifica and ((not estado or str(estado).lower() == 'all') or not municipio):
+            city_from_eval = (
+                db.session.query(City)
+                .join(School, School.city_id == City.id)
+                .join(Class, School.id == cast(Class.school_id, String))
+                .join(ClassTest, Class.id == ClassTest.class_id)
+                .filter(ClassTest.test_id == str(avaliacao))
+                .first()
+            )
+            if city_from_eval:
+                if not municipio:
+                    municipio = str(city_from_eval.id)
+                if not estado or str(estado).lower() == 'all':
+                    estado = city_from_eval.state
+
+        # Validar filtros obrigatórios (estado e município)
         if not estado or estado.lower() == 'all':
             return jsonify({
                 "error": "Estado é obrigatório e não pode ser 'all'"
@@ -1879,7 +1899,8 @@ def _gerar_tabela_detalhada_por_disciplina(
         school_ids = list({s.class_.school_id for s in all_students if s.class_ and getattr(s.class_, 'school_id', None)})
         school_by_id = {}
         if school_ids:
-            school_by_id = {s.id: s for s in School.query.filter(School.id.in_(school_ids)).all()}
+            # Normaliza chave em string para evitar mismatch UUID vs str.
+            school_by_id = {str(s.id): s for s in School.query.filter(School.id.in_(school_ids)).all()}
 
         # Curso da avaliação (uma vez; evita query por aluno)
         course_name = "Anos Iniciais"
@@ -1924,7 +1945,8 @@ def _gerar_tabela_detalhada_por_disciplina(
                 respostas_por_aluno[resposta.student_id] = {}
             respostas_por_aluno[resposta.student_id][resposta.question_id] = resposta
 
-        # Somente alunos participantes da avaliação (resultado/resposta/sessão submetida-finalizada)
+        # Somente alunos com entrega oficial da avaliação (EvaluationResult persistido)
+        # Presença operacional de sessão não entra aqui: ranking usa envio oficial.
         participating_student_ids = _collect_participating_student_ids(
             test_id=avaliacao_id,
             student_ids=student_ids,
@@ -1955,14 +1977,18 @@ def _gerar_tabela_detalhada_por_disciplina(
                 turma_nome = "N/A"
                 serie_nome = "N/A"
                 escola_nome = "N/A"
+                escola_id = None
                 
                 if student.class_:
                     turma_nome = student.class_.name or "N/A"
                     if student.class_.grade:
                         serie_nome = student.class_.grade.name or "N/A"
                     sid = getattr(student.class_, 'school_id', None)
-                    if sid and sid in school_by_id:
-                        escola_nome = school_by_id[sid].name or "N/A"
+                    if sid:
+                        escola_id = str(sid)
+                        school = school_by_id.get(escola_id)
+                        if school:
+                            escola_nome = school.name or "N/A"
 
                 evaluation_result = results_dict.get(student.id)
 
@@ -2062,6 +2088,7 @@ def _gerar_tabela_detalhada_por_disciplina(
                 aluno_disciplina = {
                     "id": student.id,
                     "nome": student.name,
+                    "escola_id": escola_id,
                     "escola": escola_nome,
                     "serie": serie_nome,
                     "turma": turma_nome,
@@ -2116,6 +2143,7 @@ def _calcular_dados_gerais_alunos(questoes_por_disciplina: dict, course_name: st
                     dados_alunos[aluno_id] = {
                         "id": aluno_id,
                         "nome": aluno_data["nome"],
+                        "escola_id": aluno_data.get("escola_id"),
                         "escola": aluno_data["escola"],
                         "serie": aluno_data["serie"],
                         "turma": aluno_data["turma"],
@@ -2198,6 +2226,7 @@ def _calcular_dados_gerais_alunos(questoes_por_disciplina: dict, course_name: st
             aluno_geral = {
                 "id": dados["id"],
                 "nome": dados["nome"],
+                "escola_id": dados.get("escola_id"),
                 "escola": dados["escola"],
                 "serie": dados["serie"],
                 "turma": dados["turma"],
@@ -2228,8 +2257,6 @@ def _calculate_evaluation_stats_frontend(test_id: str) -> Dict[str, Any]:
     """
     Calcula estatísticas de uma avaliação para o frontend
     """
-    from app.models.question import Question
-    
     # Buscar avaliação
     test = Test.query.get(test_id)
     if not test:
@@ -2251,88 +2278,25 @@ def _calculate_evaluation_stats_frontend(test_id: str) -> Dict[str, Any]:
     
     if total_alunos == 0:
         return _empty_stats()
-    
-    # Buscar respostas dos alunos que responderam
-    student_answers_data = db.session.query(
-        StudentAnswer.student_id,
-        func.count(StudentAnswer.id).label('total_answered'),
-        func.sum(
-            case(
-                (StudentAnswer.answer == Question.correct_answer, 1),
-                else_=0
-            )
-        ).label('correct_answers')
-    ).join(
-        Question, StudentAnswer.question_id == Question.id
-    ).filter(
-        StudentAnswer.test_id == test_id
-    ).group_by(StudentAnswer.student_id).all()
-    
-    # Criar dicionário para mapear student_id -> dados de resposta
-    answers_dict = {sa.student_id: {'total_answered': sa.total_answered, 'correct_answers': sa.correct_answers} for sa in student_answers_data}
-    
-    total_questions = len(test.questions) if test.questions else 0
-    if total_questions == 0:
-        return _empty_stats()
+
+    scope_student_ids = [s.id for s in all_students]
+    evaluation_results = EvaluationResult.query.filter(
+        EvaluationResult.test_id == str(test_id),
+        EvaluationResult.student_id.in_(scope_student_ids),
+    ).all()
+    results_by_student = {r.student_id: r for r in evaluation_results}
     
     # Calcular resultados para cada aluno
-    notas = []
-    proficiencias = []  # CORREÇÃO: valores originais, não escala 1000
     classificacoes = {'Abaixo do Básico': 0, 'Básico': 0, 'Adequado': 0, 'Avançado': 0}
     alunos_participantes = 0
-    
-    # Buscar nome do curso baseado no ID
-    course_name = "Anos Iniciais"  # Padrão
-    if test.course:
-        try:
-            from app.models.educationStage import EducationStage
-            import uuid
-            # Converter string para UUID
-            course_uuid = uuid.UUID(test.course)
-            course_obj = EducationStage.query.get(course_uuid)
-            if course_obj:
-                course_name = course_obj.name
-        except (ValueError, TypeError, Exception):
-            # Se houver erro, manter o padrão
-            pass
-    
-    subject_name = test.subject_rel.name if test.subject_rel else "Outras"
-    
+
     for student in all_students:
-        # Verificar se o aluno respondeu
-        student_answers = answers_dict.get(student.id)
-        
-        if student_answers:
-            # Aluno respondeu - calcular resultados normalmente
+        result = results_by_student.get(student.id)
+        if result:
             alunos_participantes += 1
-            correct_answers = int(student_answers['correct_answers'] or 0)
-            
-            # Determinar tipo de cálculo baseado na configuração do teste
-            use_simple_calculation = test.grade_calculation_type == 'simple'
-            
-            # CORREÇÃO: Usar questões respondidas pelo aluno, não total da avaliação
-            answered_questions = int(student_answers['total_answered'] or 0)
-            
-            result = EvaluationCalculator.calculate_complete_evaluation(
-                correct_answers=correct_answers,
-                total_questions=answered_questions,  # CORREÇÃO: usar questões respondidas
-                course_name=course_name,
-                subject_name=subject_name,
-                use_simple_calculation=use_simple_calculation
-            )
-            
-            # CORREÇÃO: Usar valores originais da proficiência em vez de converter para escala 1000
-            # Isso evita distorções nos cálculos e mantém os limites corretos
-            proficiency_original = result['proficiency']
-            classification_original = result['classification']
-            
-            notas.append(result['grade'])
-            proficiencias.append(proficiency_original)  # CORREÇÃO: usar valor original
-            classificacoes[classification_original] += 1
-        else:
-            # Aluno NÃO respondeu - não incluir na distribuição de classificação
-            # Alunos ausentes não são classificados
-            pass
+            classification_original = getattr(result, "classification", None)
+            if classification_original in classificacoes:
+                classificacoes[classification_original] += 1
     
     if result_rows_frontend:
         mn, mp = hierarchical_mean_grade_and_proficiency(result_rows_frontend, "municipio")
@@ -2362,8 +2326,6 @@ def _calculate_evaluation_stats_by_class(test_id: str, class_id: str) -> Dict[st
     """
     Calcula estatísticas de uma avaliação para uma turma específica
     """
-    from app.models.question import Question
-    
     # Buscar avaliação
     test = Test.query.get(test_id)
     if not test:
@@ -2377,89 +2339,25 @@ def _calculate_evaluation_stats_by_class(test_id: str, class_id: str) -> Dict[st
     
     if total_alunos == 0:
         return _empty_stats()
-    
-    # Buscar respostas dos alunos que responderam
-    student_answers_data = db.session.query(
-        StudentAnswer.student_id,
-        func.count(StudentAnswer.id).label('total_answered'),
-        func.sum(
-            case(
-                (StudentAnswer.answer == Question.correct_answer, 1),
-                else_=0
-            )
-        ).label('correct_answers')
-    ).join(
-        Question, StudentAnswer.question_id == Question.id
-    ).filter(
-        StudentAnswer.test_id == test_id,
-        StudentAnswer.student_id.in_([s.id for s in all_students])
-    ).group_by(StudentAnswer.student_id).all()
-    
-    # Criar dicionário para mapear student_id -> dados de resposta
-    answers_dict = {sa.student_id: {'total_answered': sa.total_answered, 'correct_answers': sa.correct_answers} for sa in student_answers_data}
-    
-    total_questions = len(test.questions) if test.questions else 0
-    if total_questions == 0:
-        return _empty_stats()
+
+    scope_student_ids = [s.id for s in all_students]
+    evaluation_results = EvaluationResult.query.filter(
+        EvaluationResult.test_id == str(test_id),
+        EvaluationResult.student_id.in_(scope_student_ids),
+    ).all()
+    results_by_student = {r.student_id: r for r in evaluation_results}
     
     # Calcular resultados para cada aluno
-    notas = []
-    proficiencias = []  # CORREÇÃO: valores originais, não escala 1000
     classificacoes = {'Abaixo do Básico': 0, 'Básico': 0, 'Adequado': 0, 'Avançado': 0}
     alunos_participantes = 0
-    
-    # Buscar nome do curso baseado no ID
-    course_name = "Anos Iniciais"  # Padrão
-    if test.course:
-        try:
-            from app.models.educationStage import EducationStage
-            import uuid
-            # Converter string para UUID
-            course_uuid = uuid.UUID(test.course)
-            course_obj = EducationStage.query.get(course_uuid)
-            if course_obj:
-                course_name = course_obj.name
-        except (ValueError, TypeError, Exception):
-            # Se houver erro, manter o padrão
-            pass
-    
-    subject_name = test.subject_rel.name if test.subject_rel else "Outras"
-    
+
     for student in all_students:
-        # Verificar se o aluno respondeu
-        student_answers = answers_dict.get(student.id)
-        
-        if student_answers:
-            # Aluno respondeu - calcular resultados normalmente
+        result = results_by_student.get(student.id)
+        if result:
             alunos_participantes += 1
-            correct_answers = int(student_answers['correct_answers'] or 0)
-            
-            # Determinar tipo de cálculo baseado na configuração do teste
-            use_simple_calculation = test.grade_calculation_type == 'simple'
-            
-            # CORREÇÃO: Usar questões respondidas pelo aluno, não total da avaliação
-            answered_questions = int(student_answers['total_answered'] or 0)
-            
-            result = EvaluationCalculator.calculate_complete_evaluation(
-                correct_answers=correct_answers,
-                total_questions=answered_questions,  # CORREÇÃO: usar questões respondidas
-                course_name=course_name,
-                subject_name=subject_name,
-                use_simple_calculation=use_simple_calculation
-            )
-            
-            # CORREÇÃO: Usar valores originais da proficiência em vez de converter para escala 1000
-            # Isso evita distorções nos cálculos e mantém os limites corretos
-            proficiency_original = result['proficiency']
-            classification_original = result['classification']
-            
-            notas.append(result['grade'])
-            proficiencias.append(proficiency_original)  # CORREÇÃO: usar valor original
-            classificacoes[classification_original] += 1
-        else:
-            # Aluno NÃO respondeu - não incluir na distribuição de classificação
-            # Alunos ausentes não são classificados
-            pass
+            classification_original = getattr(result, "classification", None)
+            if classification_original in classificacoes:
+                classificacoes[classification_original] += 1
     
     if result_rows_by_class:
         mn, mp = hierarchical_mean_grade_and_proficiency(result_rows_by_class, "turma")
@@ -2549,10 +2447,14 @@ def _calcular_estatisticas_municipio(class_tests: list, scope_info) -> Dict[str,
         # Buscar todos os alunos das turmas envolvidas
         todos_alunos = Student.query.filter(Student.class_id.in_(class_ids)).all()
         total_alunos = len(todos_alunos)
+        scope_student_ids = [a.id for a in todos_alunos]
         
         # Buscar todos os resultados das avaliações
-        todos_resultados = EvaluationResult.query.filter(EvaluationResult.test_id.in_(test_ids)).all()
-        alunos_participantes = len(todos_resultados)
+        todos_resultados = EvaluationResult.query.filter(
+            EvaluationResult.test_id.in_(test_ids),
+            EvaluationResult.student_id.in_(scope_student_ids),
+        ).all()
+        alunos_participantes = len({r.student_id for r in todos_resultados})
         
         # Calcular médias consolidadas
         if todos_resultados:
@@ -3093,10 +2995,14 @@ def _calcular_estatisticas_gerais(class_tests: list, scope_info, nivel_granulari
         # Buscar todos os alunos das turmas envolvidas
         todos_alunos = Student.query.filter(Student.class_id.in_(class_ids)).all()
         total_alunos = len(todos_alunos)
+        scope_student_ids = [a.id for a in todos_alunos]
         
         # Buscar todos os resultados das avaliações
-        todos_resultados = EvaluationResult.query.filter(EvaluationResult.test_id.in_(test_ids)).all()
-        alunos_participantes = len(todos_resultados)
+        todos_resultados = EvaluationResult.query.filter(
+            EvaluationResult.test_id.in_(test_ids),
+            EvaluationResult.student_id.in_(scope_student_ids),
+        ).all()
+        alunos_participantes = len({r.student_id for r in todos_resultados})
         
         # Calcular médias consolidadas (agregação hierárquica conforme granularidade)
         if todos_resultados:
@@ -3160,7 +3066,7 @@ def _calcular_estatisticas_gerais(class_tests: list, scope_info, nivel_granulari
             "total_alunos": total_alunos,
             "alunos_participantes": alunos_participantes,
             "alunos_pendentes": total_alunos - alunos_participantes,
-            "alunos_ausentes": 0,  # Pode ser calculado se necessário
+            "alunos_ausentes": total_alunos - alunos_participantes,
             "media_nota_geral": round_to_two_decimals(media_nota_geral),
             "media_proficiencia_geral": format_decimal_two_places(media_proficiencia_geral),
             "distribuicao_classificacao_geral": distribuicao_geral
@@ -5103,6 +5009,13 @@ def get_student_test_results(test_id, student_id):
             if not student:
                 return jsonify({"error": "Aluno não encontrado"}), 404
             actual_student_id = student_id
+
+        class_obj = Class.query.filter(Class.id == student.class_id).first() if student.class_id else None
+        school_obj = None
+        if class_obj:
+            class_school_id = getattr(class_obj, "school_id", None) or getattr(class_obj, "_school_id", None)
+            if class_school_id:
+                school_obj = School.query.filter(School.id == str(class_school_id)).first()
         
         # Buscar resultado pré-calculado
         evaluation_result = EvaluationResult.query.filter_by(
@@ -5210,6 +5123,10 @@ def get_student_test_results(test_id, student_id):
             "student_id": student_id,  # user_id
             "student_db_id": student.id,  # id real da tabela Student
             "student_name": student.name,
+            "school_id": str(getattr(school_obj, "id", "") or "") or None,
+            "school_name": getattr(school_obj, "name", None),
+            "class_id": str(getattr(class_obj, "id", "") or "") or None,
+            "class_name": getattr(class_obj, "name", None),
             "total_questions": total_questions,
             "answered_questions": correct_answers,  # Simplificado - usar acertos como questões respondidas
             "correct_answers": correct_answers,
@@ -6027,6 +5944,7 @@ def _obter_escolas_por_avaliacao(
         return []
     
     # Buscar escolas onde a avaliação foi aplicada no município
+    # (participando ou pendente), para exibir o universo completo.
     query_escolas = School.query.with_entities(School.id, School.name)\
                            .join(Class, School.id == cast(Class.school_id, String))\
                            .join(ClassTest, Class.id == ClassTest.class_id)\
@@ -8463,37 +8381,31 @@ def _collect_participating_student_ids(
     respostas_por_aluno: Optional[Dict[Any, Dict[Any, Any]]] = None,
 ) -> Set[Any]:
     """
-    Critério único de participação em avaliação:
-    - possui EvaluationResult, ou
-    - possui ao menos uma StudentAnswer, ou
-    - possui TestSession finalizada/expirada/corrigida/revisada/finalized
-      ou com submitted_at preenchido.
+    Critério oficial de participação pedagógica em resultados:
+    - participante = possui EvaluationResult para o test_id no escopo.
+
+    Observação:
+    - StudentAnswer (autosave/rascunho) e TestSession não caracterizam entrega oficial
+      da avaliação para tabela detalhada/ranking de resultados.
     """
     participants: Set[Any] = set()
 
     if results_dict:
         participants.update(results_dict.keys())
 
-    if respostas_por_aluno:
-        participants.update(
-            student_id
-            for student_id, respostas in respostas_por_aluno.items()
-            if respostas
-        )
-
-    if not student_ids:
+    if participants or not student_ids:
         return participants
 
-    completed_statuses = ("finalizada", "expirada", "corrigida", "revisada", "finalized")
-    session_rows = db.session.query(TestSession.student_id).filter(
-        TestSession.test_id == test_id,
-        TestSession.student_id.in_(student_ids),
-        or_(
-            TestSession.status.in_(completed_statuses),
-            TestSession.submitted_at.isnot(None),
-        ),
-    ).distinct().all()
-    participants.update(row[0] for row in session_rows if row and row[0] is not None)
+    persisted_rows = (
+        db.session.query(EvaluationResult.student_id)
+        .filter(
+            EvaluationResult.test_id == test_id,
+            EvaluationResult.student_id.in_(student_ids),
+        )
+        .distinct()
+        .all()
+    )
+    participants.update(row[0] for row in persisted_rows if row and row[0] is not None)
     return participants
 
 
@@ -8615,8 +8527,8 @@ def _calcular_ranking_global_alunos(
             school_ids = list({c.school_id for c in classes_with_grade if c.school_id})
             if school_ids:
                 schools = School.query.filter(School.id.in_(school_ids)).all()
-                school_by_id = {s.id: s for s in schools}
-                school_by_class_id = {c.id: school_by_id.get(c.school_id) for c in classes_with_grade}
+                school_by_id = {str(s.id): s for s in schools}
+                school_by_class_id = {c.id: school_by_id.get(str(c.school_id)) for c in classes_with_grade if c.school_id}
 
         alunos_ranking = []
         for student in all_students:
@@ -8645,11 +8557,15 @@ def _calcular_ranking_global_alunos(
             
             turma_nome, serie_nome = class_info_by_id.get(student.class_id, ("N/A", "N/A"))
             escola_nome = "N/A"
+            escola_id = None
             if student.class_id and school_by_class_id.get(student.class_id):
-                escola_nome = school_by_class_id[student.class_id].name or "N/A"
+                school_obj = school_by_class_id[student.class_id]
+                escola_id = str(getattr(school_obj, "id", "") or "") or None
+                escola_nome = school_obj.name or "N/A"
             aluno_ranking = {
                 "id": student.id,
                 "nome": student.name,
+                "escola_id": escola_id,
                 "escola": escola_nome,
                 "serie": serie_nome,
                 "turma": turma_nome,

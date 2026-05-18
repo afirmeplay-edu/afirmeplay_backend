@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import math
+import re
+import unicodedata
 from collections import defaultdict
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
@@ -30,6 +32,350 @@ class RankingRequest:
 
 
 class RankingReportService:
+    @staticmethod
+    def _normalize_text(value: str) -> str:
+        normalized = unicodedata.normalize("NFD", str(value or ""))
+        return "".join(ch for ch in normalized if unicodedata.category(ch) != "Mn").strip().lower()
+
+    @classmethod
+    def _derive_course_label(cls, grade_name: str) -> str:
+        normalized = cls._normalize_text(grade_name)
+        if "anos iniciais" in normalized or "inicial" in normalized:
+            return "Anos Iniciais"
+        if "anos finais" in normalized or "final" in normalized:
+            return "Anos Finais"
+
+        numeric_match = re.search(r"\d+", normalized)
+        grade_number = int(numeric_match.group(0)) if numeric_match else None
+        if grade_number is not None:
+            if 1 <= grade_number <= 5:
+                return "Anos Iniciais"
+            if 6 <= grade_number <= 9:
+                return "Anos Finais"
+
+        grade_name_clean = str(grade_name or "").strip()
+        return f"Curso: {grade_name_clean}" if grade_name_clean else "Curso não identificado"
+
+    @classmethod
+    def _build_general_course_sections(cls, school_rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        buckets: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+
+        for school in school_rows:
+            series = school.get("series") or []
+            grouped_series: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+            for item in series:
+                grade_name = str(item.get("grade_name") or "Sem série")
+                course_label = cls._derive_course_label(grade_name)
+                grouped_series[course_label].append(item)
+
+            for course_label, course_series in grouped_series.items():
+                students_with_results = sum(int(item.get("students_count") or 0) for item in course_series)
+                participating_students = sum(
+                    int(item.get("participating_students") or item.get("students_count") or 0) for item in course_series
+                )
+                total_students = sum(
+                    int(item.get("total_students") or item.get("students_count") or 0) for item in course_series
+                )
+                if total_students < participating_students:
+                    total_students = participating_students
+                weighted_score = sum(
+                    float(item.get("average_score") or 0) * int(item.get("students_count") or 0) for item in course_series
+                )
+                weighted_prof = sum(
+                    float(item.get("average_proficiency") or 0) * int(item.get("students_count") or 0) for item in course_series
+                )
+
+                average_score = round((weighted_score / students_with_results), 1) if students_with_results > 0 else 0.0
+                average_proficiency = round((weighted_prof / students_with_results), 1) if students_with_results > 0 else 0.0
+                classification = cls._classification_from_proficiency(average_proficiency)
+
+                participation_rate = round((participating_students / total_students) * 100, 1) if total_students > 0 else 0.0
+
+                buckets[course_label].append(
+                    {
+                        "school_id": school.get("school_id"),
+                        "school_name": school.get("school_name"),
+                        "average_score": average_score,
+                        "average_proficiency": average_proficiency,
+                        "classification": classification,
+                        "participation_rate": participation_rate,
+                        "participating_students": participating_students,
+                        "total_students": total_students,
+                        "students_count": students_with_results,
+                        "series": course_series,
+                    }
+                )
+
+        def _course_sort_priority(label: str) -> int:
+            if label == "Anos Iniciais":
+                return 0
+            if label == "Anos Finais":
+                return 1
+            return 2
+
+        sections: List[Dict[str, Any]] = []
+        for course_label in sorted(buckets.keys(), key=lambda label: (_course_sort_priority(label), label)):
+            rows = buckets[course_label]
+            rows.sort(
+                key=lambda row: (
+                    -float(row.get("average_score") or 0),
+                    -float(row.get("average_proficiency") or 0),
+                    str(row.get("school_name") or ""),
+                )
+            )
+            for idx, row in enumerate(rows):
+                row["position"] = idx + 1
+
+            avg_score = round(
+                sum(float(row.get("average_score") or 0) for row in rows) / len(rows),
+                1,
+            ) if rows else 0.0
+            critical_count = sum(1 for row in rows if row.get("classification") == "Abaixo do Básico")
+
+            sections.append(
+                {
+                    "course_label": course_label,
+                    "totals": {
+                        "count": len(rows),
+                        "average_score": avg_score,
+                        "critical_schools_count": critical_count,
+                    },
+                    "items": rows,
+                }
+            )
+
+        return sections
+
+    @staticmethod
+    def _pagination_block(total: int, per_page: int = 0, page: int = 1) -> Dict[str, int]:
+        safe_per_page = per_page if per_page > 0 else max(total, 1)
+        return {
+            "page": page,
+            "per_page": safe_per_page,
+            "total": total,
+            "total_pages": math.ceil(total / safe_per_page) if total else 0,
+        }
+
+    @classmethod
+    def _build_series_by_school_and_course(cls, school_rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        school_sections: List[Dict[str, Any]] = []
+        for school in school_rows:
+            series = school.get("series") or []
+            grouped_series: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+            for item in series:
+                grade_name = str(item.get("grade_name") or "Sem série")
+                course_label = cls._derive_course_label(grade_name)
+                grouped_series[course_label].append(item)
+
+            course_sections: List[Dict[str, Any]] = []
+            for course_label in sorted(grouped_series.keys()):
+                course_series_rows: List[Dict[str, Any]] = []
+                for raw in grouped_series[course_label]:
+                    total_students = int(raw.get("total_students") or raw.get("students_count") or 0)
+                    participating_students = int(raw.get("participating_students") or raw.get("students_count") or 0)
+                    if total_students < participating_students:
+                        total_students = participating_students
+                    participation_rate = round((participating_students / total_students) * 100, 1) if total_students > 0 else 0.0
+                    course_series_rows.append(
+                        {
+                            "grade_id": raw.get("grade_id"),
+                            "grade_name": raw.get("grade_name"),
+                            "average_score": float(raw.get("average_score") or 0),
+                            "average_proficiency": float(raw.get("average_proficiency") or 0),
+                            "classification": str(raw.get("classification") or ""),
+                            "students_count": int(raw.get("students_count") or 0),
+                            "participating_students": participating_students,
+                            "total_students": total_students,
+                            "participation_rate": participation_rate,
+                        }
+                    )
+
+                course_series_rows.sort(
+                    key=lambda row: (
+                        -float(row.get("average_score") or 0),
+                        -float(row.get("average_proficiency") or 0),
+                        str(row.get("grade_name") or ""),
+                    )
+                )
+                for idx, row in enumerate(course_series_rows):
+                    row["position"] = idx + 1
+
+                avg_score = (
+                    round(
+                        sum(float(row.get("average_score") or 0) for row in course_series_rows) / len(course_series_rows),
+                        1,
+                    )
+                    if course_series_rows
+                    else 0.0
+                )
+                critical_count = sum(1 for row in course_series_rows if row.get("classification") == "Abaixo do Básico")
+                course_sections.append(
+                    {
+                        "course_label": course_label,
+                        "totals": {
+                            "count": len(course_series_rows),
+                            "average_score": avg_score,
+                            "critical_series_count": critical_count,
+                        },
+                        "items": course_series_rows,
+                    }
+                )
+
+            school_sections.append(
+                {
+                    "school_id": school.get("school_id"),
+                    "school_name": school.get("school_name"),
+                    "school_position": int(school.get("position") or 0),
+                    "totals": {
+                        "course_count": len(course_sections),
+                        "series_count": sum(len(section.get("items") or []) for section in course_sections),
+                    },
+                    "course_sections": course_sections,
+                }
+            )
+
+        return school_sections
+
+    @classmethod
+    def _build_classes_by_series(
+        cls,
+        class_rows: List[Dict[str, Any]],
+        selected_grade_name: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        grouped: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+        selected_grade_name_norm = cls._normalize_text(selected_grade_name or "")
+        for row in class_rows:
+            grade_name = str(row.get("serie") or "Sem série")
+            if selected_grade_name_norm and cls._normalize_text(grade_name) != selected_grade_name_norm:
+                continue
+            grouped[grade_name].append(
+                {
+                    "class_id": row.get("class_id"),
+                    "class_name": row.get("turma"),
+                    "grade_name": grade_name,
+                    "average_score": float(row.get("media") or 0),
+                    "accuracy_percent": float(row.get("acerto_percent") or 0),
+                    "completion_rate": float(row.get("conclusao") or 0),
+                    "students_count": int(row.get("alunos") or 0),
+                    "evaluations_count": int(row.get("avaliacoes") or 0),
+                }
+            )
+
+        sections: List[Dict[str, Any]] = []
+        for grade_name in sorted(grouped.keys()):
+            rows = grouped[grade_name]
+            rows.sort(
+                key=lambda row: (
+                    -float(row.get("average_score") or 0),
+                    -float(row.get("accuracy_percent") or 0),
+                    str(row.get("class_name") or ""),
+                )
+            )
+            for idx, row in enumerate(rows):
+                row["position"] = idx + 1
+            sections.append(
+                {
+                    "grade_name": grade_name,
+                    "totals": {"count": len(rows)},
+                    "items": rows,
+                }
+            )
+
+        return sections
+
+    @classmethod
+    def _build_students_by_course(cls, student_rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        grouped: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+        for row in student_rows:
+            course_label = cls._derive_course_label(str(row.get("serie") or "Sem série"))
+            grouped[course_label].append(
+                {
+                    "student_id": row.get("student_id"),
+                    "name": row.get("name"),
+                    "school_name": row.get("school_name"),
+                    "class_name": row.get("class_name"),
+                    "serie": row.get("serie"),
+                    "average_score": float(row.get("average_score") or 0),
+                    "average_proficiency": float(row.get("average_proficiency") or 0),
+                    "classification": row.get("classification"),
+                    "completed_evaluations": int(row.get("completed_evaluations") or 0),
+                }
+            )
+
+        sections: List[Dict[str, Any]] = []
+        for course_label in sorted(grouped.keys(), key=lambda value: (0 if value == "Anos Iniciais" else 1 if value == "Anos Finais" else 2, value)):
+            rows = grouped[course_label]
+            rows.sort(
+                key=lambda row: (
+                    -float(row.get("average_proficiency") or 0),
+                    -float(row.get("average_score") or 0),
+                    str(row.get("name") or ""),
+                )
+            )
+            for idx, row in enumerate(rows):
+                row["position"] = idx + 1
+            sections.append(
+                {
+                    "course_label": course_label,
+                    "totals": {"count": len(rows)},
+                    "items": rows,
+                }
+            )
+        return sections
+
+    @classmethod
+    def _build_teachers_by_course(cls, teacher_rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        grouped: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+        for row in teacher_rows:
+            grade_names = row.get("grade_names") or []
+            # Um professor pode atuar em mais de um curso; incluir em todos os cursos detectados.
+            course_candidates = sorted(
+                {
+                    cls._derive_course_label(str(name))
+                    for name in grade_names
+                    if str(name or "").strip()
+                },
+                key=lambda value: (0 if value == "Anos Iniciais" else 1 if value == "Anos Finais" else 2, value),
+            )
+            if not course_candidates:
+                course_candidates = ["Curso não identificado"]
+
+            teacher_payload = {
+                "teacher_id": row.get("teacher_id"),
+                "teacher_name": row.get("teacher_name"),
+                "teacher_email": row.get("teacher_email"),
+                "average_score": float(row.get("average_score") or 0),
+                "average_proficiency": float(row.get("average_proficiency") or 0),
+                "classification": row.get("classification"),
+                "total_evaluations": int(row.get("total_evaluations") or 0),
+                "classes_count": int(row.get("classes_count") or 0),
+                "grade_names": grade_names,
+            }
+
+            for course_label in course_candidates:
+                grouped[course_label].append(dict(teacher_payload))
+
+        sections: List[Dict[str, Any]] = []
+        for course_label in sorted(grouped.keys(), key=lambda value: (0 if value == "Anos Iniciais" else 1 if value == "Anos Finais" else 2, value)):
+            rows = grouped[course_label]
+            rows.sort(
+                key=lambda row: (
+                    -float(row.get("average_proficiency") or 0),
+                    -float(row.get("average_score") or 0),
+                    str(row.get("teacher_name") or ""),
+                )
+            )
+            for idx, row in enumerate(rows):
+                row["position"] = idx + 1
+            sections.append(
+                {
+                    "course_label": course_label,
+                    "totals": {"count": len(rows)},
+                    "items": rows,
+                }
+            )
+        return sections
+
     @staticmethod
     def _classification_from_proficiency(proficiency: float) -> str:
         if proficiency < 200:
@@ -166,8 +512,9 @@ class RankingReportService:
 
         students_data = DashboardService.get_ranking_alunos(
             scope,
-            limit=req.per_page,
-            offset=offset,
+            limit=500,
+            offset=0,
+            filters=req.filters,
         ) or {}
         student_rows = students_data.get("ranking") or []
         students_items = [
@@ -188,12 +535,80 @@ class RankingReportService:
         ]
         students_total = int(students_data.get("total") or 0)
 
+        class_rows_data = DashboardService.get_class_ranking_card(scope, limit=1000, offset=0) or {}
+        class_rows = class_rows_data.get("ranking") or []
+        selected_grade_name = None
+        selected_grade_id = str(req.filters.get("serie") or "").strip()
+        if selected_grade_id:
+            grade = db.session.query(Grade.name).filter(Grade.id == selected_grade_id).first()
+            selected_grade_name = str(getattr(grade, "name", "") or "").strip() if grade else None
+
+        schools_selected = bool(str(req.filters.get("escola") or "").strip())
+        series_selected = bool(selected_grade_id)
+        class_selected = bool(str(req.filters.get("turma") or "").strip())
+        visibility = {
+            "schools_by_course": not schools_selected and not series_selected and not class_selected,
+            "series_by_school_and_course": (not class_selected) and (not series_selected),
+            "classes_by_series": (not class_selected) and (schools_selected or series_selected),
+            "students_by_course": True,
+        }
+
+        schools_by_course_sections = cls._build_general_course_sections(school_rows) if visibility["schools_by_course"] else []
+        series_by_school_sections = cls._build_series_by_school_and_course(school_rows) if visibility["series_by_school_and_course"] else []
+        classes_by_series_sections = (
+            cls._build_classes_by_series(class_rows, selected_grade_name=selected_grade_name)
+            if visibility["classes_by_series"]
+            else []
+        )
+        students_by_course_sections = cls._build_students_by_course(students_items)
+
         response = cls._build_response(req, scope, total=school_total, items=paged_schools)
         response["students_items"] = students_items
         response["students_totals"] = {"count": students_total}
         response["students_pagination"] = cls._pagination(req.page, req.per_page, students_total)
         response["series_labels"] = cls._extract_series_labels(paged_schools)
         response["network_series_averages"] = cls._build_network_series_averages(paged_schools)
+        response["course_sections"] = schools_by_course_sections
+        response["general_rankings"] = {
+            "visibility": visibility,
+            "schools_by_course": {
+                "sections": schools_by_course_sections,
+                "totals": {"count": len(schools_by_course_sections)},
+                "pagination": cls._pagination_block(len(schools_by_course_sections)),
+            },
+            "series_by_school_and_course": {
+                "schools": series_by_school_sections,
+                "totals": {
+                    "schools_count": len(series_by_school_sections),
+                    "series_count": sum(
+                        len(course.get("items") or [])
+                        for school in series_by_school_sections
+                        for course in school.get("course_sections") or []
+                    ),
+                },
+                "pagination": cls._pagination_block(len(series_by_school_sections)),
+            },
+            "classes_by_series": {
+                "sections": classes_by_series_sections,
+                "totals": {
+                    "series_count": len(classes_by_series_sections),
+                    "classes_count": sum(len(section.get("items") or []) for section in classes_by_series_sections),
+                },
+                "pagination": cls._pagination_block(
+                    sum(len(section.get("items") or []) for section in classes_by_series_sections)
+                ),
+            },
+            "students_by_course": {
+                "sections": students_by_course_sections,
+                "totals": {
+                    "courses_count": len(students_by_course_sections),
+                    "students_count": sum(len(section.get("items") or []) for section in students_by_course_sections),
+                },
+                "pagination": cls._pagination_block(
+                    sum(len(section.get("items") or []) for section in students_by_course_sections)
+                ),
+            },
+        }
         return response
 
     @classmethod
@@ -225,11 +640,13 @@ class RankingReportService:
                 query = query.filter(School.city_id == str(city_id))
             return query
 
+        grade_ref = db.func.coalesce(Student.grade_id, Class.grade_id)
+
         query = (
             db.session.query(
                 School.id.label("school_id"),
                 School.name.label("school_name"),
-                Grade.id.label("grade_id"),
+                grade_ref.label("grade_id"),
                 Grade.name.label("grade_name"),
                 db.func.avg(EvaluationResult.grade).label("average_score"),
                 db.func.avg(EvaluationResult.proficiency).label("average_proficiency"),
@@ -239,11 +656,11 @@ class RankingReportService:
             .join(Student, Student.id == EvaluationResult.student_id)
             .outerjoin(School, School.id == Student.school_id)
             .outerjoin(Class, Class.id == Student.class_id)
-            .outerjoin(Grade, Grade.id == Student.grade_id)
+            .outerjoin(Grade, Grade.id == grade_ref)
         )
         query = _apply_common_student_filters(query)
 
-        grouped = query.group_by(School.id, School.name, Grade.id, Grade.name).all()
+        grouped = query.group_by(School.id, School.name, grade_ref, Grade.name).all()
         if not grouped:
             return []
 
@@ -260,6 +677,22 @@ class RankingReportService:
         totals_by_school = {
             str(row.school_id): int(row.total_students or 0)
             for row in totals_query.group_by(School.id).all()
+        }
+
+        totals_by_school_grade_query = (
+            db.session.query(
+                School.id.label("school_id"),
+                grade_ref.label("grade_id"),
+                db.func.count(db.func.distinct(Student.id)).label("total_students"),
+            )
+            .select_from(Student)
+            .outerjoin(School, School.id == Student.school_id)
+            .outerjoin(Class, Class.id == Student.class_id)
+        )
+        totals_by_school_grade_query = _apply_common_student_filters(totals_by_school_grade_query)
+        totals_by_school_grade = {
+            (str(row.school_id or ""), str(row.grade_id or "")): int(row.total_students or 0)
+            for row in totals_by_school_grade_query.group_by(School.id, grade_ref).all()
         }
 
         participating_query = (
@@ -283,6 +716,30 @@ class RankingReportService:
         participating_by_school = {
             str(row.school_id): int(row.participating_students or 0)
             for row in participating_query.group_by(School.id).all()
+        }
+
+        participating_by_school_grade_query = (
+            db.session.query(
+                School.id.label("school_id"),
+                grade_ref.label("grade_id"),
+                db.func.count(db.func.distinct(Student.id)).label("participating_students"),
+            )
+            .select_from(Student)
+            .outerjoin(School, School.id == Student.school_id)
+            .outerjoin(Class, Class.id == Student.class_id)
+            .outerjoin(EvaluationResult, EvaluationResult.student_id == Student.id)
+            .outerjoin(AnswerSheetResult, AnswerSheetResult.student_id == Student.id)
+            .filter(
+                or_(
+                    EvaluationResult.id.isnot(None),
+                    AnswerSheetResult.id.isnot(None),
+                )
+            )
+        )
+        participating_by_school_grade_query = _apply_common_student_filters(participating_by_school_grade_query)
+        participating_by_school_grade = {
+            (str(row.school_id or ""), str(row.grade_id or "")): int(row.participating_students or 0)
+            for row in participating_by_school_grade_query.group_by(School.id, grade_ref).all()
         }
 
         by_school: Dict[str, Dict[str, Any]] = {}
@@ -310,6 +767,13 @@ class RankingReportService:
             avg_score = float(row.average_score or 0)
             avg_prof = float(row.average_proficiency or 0)
             students_count = int(row.students_count or 0)
+            grade_id = str(row.grade_id or "")
+            series_total_students = int(totals_by_school_grade.get((school_id, grade_id), students_count) or 0)
+            series_participating_students = int(
+                participating_by_school_grade.get((school_id, grade_id), students_count) or 0
+            )
+            if series_total_students < series_participating_students:
+                series_total_students = series_participating_students
 
             current["series"].append(
                 {
@@ -319,6 +783,8 @@ class RankingReportService:
                     "average_proficiency": round(avg_prof, 1),
                     "classification": cls._classification_from_proficiency(avg_prof),
                     "students_count": students_count,
+                    "total_students": series_total_students,
+                    "participating_students": series_participating_students,
                 }
             )
 
@@ -582,7 +1048,7 @@ class RankingReportService:
 
     @classmethod
     def _teacher_ranking(cls, scope: Dict[str, Any], req: RankingRequest) -> Dict[str, Any]:
-        teachers = DashboardService._build_teacher_ranking(scope)
+        teachers = DashboardService._build_teacher_ranking(scope, limit=1000)
         total = len(teachers)
         offset = (req.page - 1) * req.per_page
         selected = teachers[offset : offset + req.per_page]
@@ -597,7 +1063,10 @@ class RankingReportService:
                 "classification": row.get("classification"),
                 "total_evaluations": row.get("total_evaluations"),
                 "classes_count": row.get("classes_count"),
+                "grade_names": row.get("grade_names") or [],
             }
             for row in selected
         ]
-        return cls._build_response(req, scope, total=total, items=items)
+        response = cls._build_response(req, scope, total=total, items=items)
+        response["teacher_course_sections"] = cls._build_teachers_by_course(items)
+        return response

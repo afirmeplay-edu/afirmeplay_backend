@@ -19,7 +19,7 @@ bp = Blueprint('city', __name__, url_prefix='/city')
 
 def _ensure_municipio_access(user: dict, municipio_id: str):
     """
-    Admin: qualquer município. tecadm/professor: city_id do token.
+    Admin: qualquer município. tecadm/professor/aplicador: city_id do token.
     diretor/coordenador: escola do manager no município.
     Retorna (jsonify, status) se negado; None se permitido.
     """
@@ -39,7 +39,7 @@ def _ensure_municipio_access(user: dict, municipio_id: str):
         if not school or school.city_id != municipio_id:
             return jsonify({"erro": "Sem permissão para este município"}), 403
         return None
-    if role == "professor":
+    if role in ("professor", "aplicador"):
         uid = user.get("tenant_id") or user.get("city_id")
         if uid != municipio_id:
             return jsonify({"erro": "Sem permissão para este município"}), 403
@@ -179,7 +179,7 @@ def listar_usuarios_municipio(municipio_id):
                 if not school or school.city_id != municipio_id:
                     return jsonify({"erro": "Você não tem permissão para acessar usuários deste município"}), 403
             else:
-                # tecadm, professor
+                # tecadm, professor, aplicador
                 city_id = user.get("tenant_id") or user.get("city_id")
                 if not city_id or city_id != municipio_id:
                     return jsonify({"erro": "Você não tem permissão para acessar usuários deste município"}), 403

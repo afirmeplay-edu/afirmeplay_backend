@@ -15,6 +15,7 @@ _ALLOWED = frozenset(
         RoleEnum.COORDENADOR,
         RoleEnum.DIRETOR,
         RoleEnum.TECADM,
+        RoleEnum.APLICADOR,
     }
 )
 

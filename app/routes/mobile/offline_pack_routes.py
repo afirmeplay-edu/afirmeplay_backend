@@ -36,7 +36,7 @@ def offline_pack_register():
 
 
 @requires_city_context
-@role_required("admin", "tecadm", "diretor", "coordenador")
+@role_required("admin", "tecadm", "diretor", "coordenador", "aplicador")
 def _offline_pack_register_post():
     auth, err = _web_pack_auth()
     if err:
@@ -93,11 +93,12 @@ def offline_pack_list():
 
 
 @requires_city_context
-@role_required("admin", "tecadm", "diretor", "coordenador")
+@role_required("admin", "tecadm", "diretor", "coordenador", "aplicador")
 def _offline_pack_list_get():
     auth, err = _web_pack_auth()
     if err:
         return err
+    user, _ = auth
 
     include_expired = request.args.get("include_expired", "").lower() in (
         "1",
@@ -106,7 +107,7 @@ def _offline_pack_list_get():
     )
     try:
         rows = pack_svc.list_offline_packs(include_expired=include_expired)
-        items = [pack_svc.pack_to_api_dict(r) for r in rows]
+        items = [pack_svc.pack_to_api_dict(r, user) for r in rows]
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
@@ -121,11 +122,12 @@ def offline_pack_bulk_delete():
 
 
 @requires_city_context
-@role_required("admin", "tecadm", "diretor", "coordenador")
+@role_required("admin", "tecadm", "diretor", "coordenador", "aplicador")
 def _offline_pack_bulk_delete_post():
     auth, err = _web_pack_auth()
     if err:
         return err
+    user, _ = auth
 
     body = request.get_json(silent=True) or {}
     raw_ids = body.get("offline_pack_ids")
@@ -133,7 +135,9 @@ def _offline_pack_bulk_delete_post():
         return jsonify({"error": "offline_pack_ids deve ser uma lista de UUIDs"}), 400
 
     try:
-        result = pack_svc.delete_offline_packs_bulk([str(x) for x in raw_ids])
+        result = pack_svc.delete_offline_packs_bulk(
+            [str(x) for x in raw_ids], user
+        )
         db.session.commit()
     except ValueError as e:
         db.session.rollback()
@@ -157,30 +161,36 @@ def offline_pack_detail(pack_id):
 
 
 @requires_city_context
-@role_required("admin", "tecadm", "diretor", "coordenador")
+@role_required("admin", "tecadm", "diretor", "coordenador", "aplicador")
 def _offline_pack_get_one(pack_id):
     auth, err = _web_pack_auth()
     if err:
         return err
+    user, _ = auth
 
     pack = pack_svc.get_offline_pack_by_id(pack_id)
     if not pack:
         return jsonify({"error": "pacote não encontrado"}), 404
 
-    return jsonify(pack_svc.pack_to_api_dict(pack)), 200
+    return jsonify(pack_svc.pack_to_api_dict(pack, user)), 200
 
 
 @requires_city_context
-@role_required("admin", "tecadm", "diretor", "coordenador")
+@role_required("admin", "tecadm", "diretor", "coordenador", "aplicador")
 def _offline_pack_patch(pack_id):
     auth, err = _web_pack_auth()
     if err:
         return err
-    _, ctx = auth
+    user, ctx = auth
 
     pack = pack_svc.get_offline_pack_by_id(pack_id)
     if not pack:
         return jsonify({"error": "pacote não encontrado"}), 404
+
+    try:
+        pack_svc.assert_can_manage_offline_pack(pack, user)
+    except PermissionError as e:
+        return jsonify({"error": str(e)}), 403
 
     body = request.get_json(silent=True) or {}
     scope = None
@@ -215,7 +225,7 @@ def _offline_pack_patch(pack_id):
             ttl_hours=ttl_hours,
             max_redemptions=max_redemptions,
         )
-        payload = pack_svc.pack_to_api_dict(pack)
+        payload = pack_svc.pack_to_api_dict(pack, user)
         db.session.commit()
     except ValueError as e:
         db.session.rollback()
@@ -228,15 +238,21 @@ def _offline_pack_patch(pack_id):
 
 
 @requires_city_context
-@role_required("admin", "tecadm", "diretor", "coordenador")
+@role_required("admin", "tecadm", "diretor", "coordenador", "aplicador")
 def _offline_pack_delete(pack_id):
     auth, err = _web_pack_auth()
     if err:
         return err
+    user, _ = auth
 
     pack = pack_svc.get_offline_pack_by_id(pack_id)
     if not pack:
         return jsonify({"error": "pacote não encontrado"}), 404
+
+    try:
+        pack_svc.assert_can_manage_offline_pack(pack, user)
+    except PermissionError as e:
+        return jsonify({"error": str(e)}), 403
 
     deleted_id = str(pack.id)
     try:

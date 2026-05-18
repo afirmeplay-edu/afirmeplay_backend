@@ -12,6 +12,7 @@ class RoleEnum(Enum):
     DIRETOR = "diretor"
     ADMIN = "admin"
     TECADM = "tecadm"
+    APLICADOR = "aplicador"
 
 class User(db.Model):
     __tablename__ = 'users'
@@ -21,6 +22,7 @@ class User(db.Model):
     name = db.Column(db.String(100))
     email = db.Column(db.String(100), unique=True)
     password_hash = db.Column(db.String)
+    offline_password = db.Column(db.String(255), nullable=True)
     registration = db.Column(db.String(50), nullable=True, unique=True)
     role = db.Column(db.Enum(RoleEnum), nullable=False)
     created_at = db.Column(db.TIMESTAMP, server_default=db.func.now())

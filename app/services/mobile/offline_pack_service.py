@@ -28,6 +28,7 @@ from app.services.mobile.bundle_service import (
     collect_school_scope,
     ensure_bundle_generation,
 )
+from app.services.aplicador_user_service import collect_aplicadores_for_city
 
 _CODE_ALPHABET = "23456789ABCDEFGHJKLMNPQRSTUVWXYZ"
 
@@ -121,15 +122,44 @@ def invalidate_pack_bundle_cache(pack: MobileOfflinePackCode) -> None:
     flag_modified(pack, "scope_json")
 
 
-def pack_to_api_dict(pack: MobileOfflinePackCode) -> Dict[str, Any]:
+def can_manage_offline_pack(
+    pack: MobileOfflinePackCode, current_user: Dict[str, Any]
+) -> bool:
+    """
+    Admin: qualquer código do município (tenant). Demais roles: só o criador.
+    Pacotes sem created_by_user_id: apenas admin.
+    """
+    role = str(current_user.get("role") or "").strip().lower()
+    if role == "admin":
+        return True
+    creator = pack.created_by_user_id
+    if not creator:
+        return False
+    return str(creator) == str(current_user.get("id"))
+
+
+def assert_can_manage_offline_pack(
+    pack: MobileOfflinePackCode, current_user: Dict[str, Any]
+) -> None:
+    if not can_manage_offline_pack(pack, current_user):
+        raise PermissionError(
+            "sem permissão para alterar ou excluir este código (apenas o criador ou admin)"
+        )
+
+
+def pack_to_api_dict(
+    pack: MobileOfflinePackCode,
+    current_user: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
     redeemed = _count_devices(pack.id)
-    return {
+    body: Dict[str, Any] = {
         "offline_pack_id": str(pack.id),
         "code": pack.activation_code,
         "scope": user_scope_persisted(pack),
         "expires_at": pack.expires_at.isoformat() + "Z",
         "max_redemptions": int(pack.max_redemptions),
         "redemptions_count": redeemed,
+        "created_by_user_id": pack.created_by_user_id,
         "revoked_at": (
             pack.revoked_at.isoformat() + "Z" if pack.revoked_at else None
         ),
@@ -138,6 +168,10 @@ def pack_to_api_dict(pack: MobileOfflinePackCode) -> Dict[str, Any]:
         ),
         "is_expired": pack.expires_at < datetime.utcnow(),
     }
+    if current_user is not None:
+        body["can_delete"] = can_manage_offline_pack(pack, current_user)
+        body["can_edit"] = body["can_delete"]
+    return body
 
 
 def resolve_school_ids(city_id: str, scope: Dict[str, Any]) -> List[str]:
@@ -434,9 +468,11 @@ def delete_offline_pack(pack: MobileOfflinePackCode) -> None:
     db.session.flush()
 
 
-def delete_offline_packs_bulk(offline_pack_ids: List[str]) -> Dict[str, List[str]]:
+def delete_offline_packs_bulk(
+    offline_pack_ids: List[str], current_user: Dict[str, Any]
+) -> Dict[str, List[str]]:
     """
-    Exclui vários pacotes. Retorna listas de ids apagados e não encontrados.
+    Exclui vários pacotes. Retorna ids apagados, não encontrados e sem permissão.
     """
     if not offline_pack_ids:
         raise ValueError("offline_pack_ids não pode ser vazio")
@@ -445,6 +481,7 @@ def delete_offline_packs_bulk(offline_pack_ids: List[str]) -> Dict[str, List[str
 
     deleted: List[str] = []
     not_found: List[str] = []
+    forbidden: List[str] = []
     seen: Set[str] = set()
 
     for raw_id in offline_pack_ids:
@@ -456,10 +493,13 @@ def delete_offline_packs_bulk(offline_pack_ids: List[str]) -> Dict[str, List[str
         if not pack:
             not_found.append(pid)
             continue
+        if not can_manage_offline_pack(pack, current_user):
+            forbidden.append(pid)
+            continue
         delete_offline_pack(pack)
         deleted.append(pid)
 
-    return {"deleted": deleted, "not_found": not_found}
+    return {"deleted": deleted, "not_found": not_found, "forbidden": forbidden}
 
 
 def _count_devices(pack_id) -> int:
@@ -553,8 +593,12 @@ def redeem_offline_pack_page(
     if len(versions) == 1:
         sync_single = int(next(iter(versions.values())))
 
+    aplicadores_payload = (
+        collect_aplicadores_for_city(city_id) if include_full else []
+    )
+
     body: Dict[str, Any] = {
-        "api_contract_version": "1.0",
+        "api_contract_version": "1.1",
         "city_id": city_id,
         "offline_pack_id": str(pack.id),
         "bundle_valid_until": valid_min.isoformat() + "Z",
@@ -566,6 +610,7 @@ def redeem_offline_pack_page(
         "total_pages": total_pages,
         "unchanged": False,
         "students": students_payload,
+        "aplicadores": aplicadores_payload,
         "student_test_links": links_out if include_full else [],
         "tests": tests_payload if include_full else {},
         "questions_by_test": questions_by_test if include_full else {},

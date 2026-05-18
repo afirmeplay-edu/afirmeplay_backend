@@ -85,16 +85,17 @@ class TestUpdateOfflinePackValidation(unittest.TestCase):
 class TestDeleteOfflinePacksBulk(unittest.TestCase):
     def test_empty_ids_raises(self):
         with self.assertRaises(ValueError):
-            svc.delete_offline_packs_bulk([])
+            svc.delete_offline_packs_bulk([], {"id": "u1", "role": "admin"})
 
     def test_too_many_ids_raises(self):
         ids = [f"id-{i}" for i in range(svc._BULK_DELETE_MAX + 1)]
         with self.assertRaises(ValueError):
-            svc.delete_offline_packs_bulk(ids)
+            svc.delete_offline_packs_bulk(ids, {"id": "u1", "role": "admin"})
 
     @patch.object(svc, "delete_offline_pack")
     @patch.object(svc, "get_offline_pack_by_id")
     def test_bulk_deletes_found_only(self, mock_get, mock_delete):
+        user = {"id": "user-1", "role": "admin"}
         pack = MagicMock()
         pack.id = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
 
@@ -105,13 +106,45 @@ class TestDeleteOfflinePacksBulk(unittest.TestCase):
 
         mock_get.side_effect = lookup
         result = svc.delete_offline_packs_bulk(
-            [str(pack.id), "00000000-0000-0000-0000-000000000099", str(pack.id)]
+            [str(pack.id), "00000000-0000-0000-0000-000000000099", str(pack.id)],
+            user,
         )
         self.assertEqual(result["deleted"], [str(pack.id)])
         self.assertEqual(
             result["not_found"], ["00000000-0000-0000-0000-000000000099"]
         )
+        self.assertEqual(result["forbidden"], [])
         mock_delete.assert_called_once_with(pack)
+
+    @patch.object(svc, "delete_offline_pack")
+    @patch.object(svc, "get_offline_pack_by_id")
+    def test_bulk_forbidden_for_non_creator(self, mock_get, mock_delete):
+        pack = MagicMock()
+        pack.id = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+        pack.created_by_user_id = "other-user"
+        mock_get.return_value = pack
+        user = {"id": "user-1", "role": "aplicador"}
+        result = svc.delete_offline_packs_bulk([str(pack.id)], user)
+        self.assertEqual(result["deleted"], [])
+        self.assertEqual(result["forbidden"], [str(pack.id)])
+        mock_delete.assert_not_called()
+
+    def test_can_manage_admin_any_pack(self):
+        pack = MagicMock()
+        pack.created_by_user_id = "other"
+        self.assertTrue(
+            svc.can_manage_offline_pack(pack, {"id": "a", "role": "admin"})
+        )
+
+    def test_can_manage_creator_only(self):
+        pack = MagicMock()
+        pack.created_by_user_id = "user-1"
+        self.assertTrue(
+            svc.can_manage_offline_pack(pack, {"id": "user-1", "role": "coordenador"})
+        )
+        self.assertFalse(
+            svc.can_manage_offline_pack(pack, {"id": "user-2", "role": "aplicador"})
+        )
 
 
 if __name__ == "__main__":

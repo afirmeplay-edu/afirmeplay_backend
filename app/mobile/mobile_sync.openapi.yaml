@@ -8,7 +8,7 @@ info:
         - **Sync:** `GET /sync/bundle`, `POST /sync/upload` — Bearer JWT mobile + `X-Device-Id`.
         - **Pacote offline (código web):** `POST /offline-pack/register`, `GET /offline-pack`, `GET/PATCH/DELETE /offline-pack/{offline_pack_id}`, `POST /offline-pack/bulk-delete` (JWT do **login web** + tenant); `POST /offline-pack/redeem` (só `X-Device-Id` + corpo, com resolução de município via `public.mobile_offline_pack_registry` quando o código existe lá).
 
-        Contrato normativo detalhado do **redeem** e alunos: **`OFFLINE_PACK_API_CONTRACT.md`** (campo `api_contract_version` na resposta do redeem, atualmente `"1.0"`).
+        Contrato normativo detalhado do **redeem**, alunos e aplicadores: **`OFFLINE_PACK_API_CONTRACT.md`** (`api_contract_version` **1.1**).
 
         Multitenant: schemas PostgreSQL `city_*` + `public`.
     version: 1.1.0
@@ -68,7 +68,7 @@ paths:
 
                 Exige contexto de município (`requires_city_context`): para admin, usar `X-City-ID` ou subdomínio quando o host não resolver o tenant.
 
-                Papéis permitidos: `admin`, `tecadm`, `diretor`, `coordenador`.
+                Papéis permitidos: `admin`, `tecadm`, `diretor`, `coordenador`, `aplicador`.
 
                 Preflight CORS (`OPTIONS`) responde 200 sem passar pelos decoradores de tenant.
             security:
@@ -103,6 +103,8 @@ paths:
             description: |
                 Mesma autenticação e papéis de `POST /offline-pack/register`.
                 O campo `code` é o código em texto claro (ex. `XXXX-XXXX-XXXX`) para exibir e editar no painel.
+                `can_edit` / `can_delete`: admin pode gerir qualquer código do município; demais roles só os que criaram (`created_by_user_id`).
+                Códigos legados sem criador: só admin.
                 Query `include_expired=1` inclui pacotes com `expires_at` no passado (ainda editáveis via PATCH com `ttl_hours`).
             security:
                 - bearerAuthWeb: []
@@ -132,6 +134,7 @@ paths:
             summary: Excluir vários pacotes offline de uma vez
             description: |
                 Mesma autenticação e papéis do register. Remove registros no tenant e no índice `public.mobile_offline_pack_registry`.
+                Mesma regra de permissão do DELETE individual: ids sem permissão entram em `forbidden` (não em `not_found`).
                 Máximo 200 ids por requisição. Ids duplicados ou vazios são ignorados.
             security:
                 - bearerAuthWeb: []
@@ -267,7 +270,7 @@ paths:
 
                 O campo `code` é obrigatório em **todas** as páginas; na página 1 recomenda-se gravar `offline_pack_id` e `city_id` para as seguintes requisições e para login mobile posterior.
 
-                Resposta alinhada a `OFFLINE_PACK_API_CONTRACT.md` (`api_contract_version` **1.0**).
+                Resposta alinhada a `OFFLINE_PACK_API_CONTRACT.md` (`api_contract_version` **1.1**, campo `aplicadores`).
             parameters:
                 - $ref: "#/components/parameters/XDeviceId"
                 - $ref: "#/components/parameters/XCityId"
@@ -503,6 +506,9 @@ components:
                     scope,
                     redemptions_count,
                     is_expired,
+                    created_by_user_id,
+                    can_delete,
+                    can_edit,
                 ]
             properties:
                 offline_pack_id:
@@ -521,6 +527,16 @@ components:
                     type: integer
                 redemptions_count:
                     type: integer
+                created_by_user_id:
+                    type: string
+                    nullable: true
+                    description: UUID do usuário que criou o código
+                can_delete:
+                    type: boolean
+                    description: Admin apaga qualquer código do município; demais roles só os próprios
+                can_edit:
+                    type: boolean
+                    description: Mesma regra de can_delete (PATCH)
                 revoked_at:
                     type: string
                     nullable: true
@@ -555,7 +571,7 @@ components:
 
         OfflinePackBulkDeleteResponse:
             type: object
-            required: [deleted, not_found]
+            required: [deleted, not_found, forbidden]
             properties:
                 deleted:
                     type: array
@@ -568,6 +584,12 @@ components:
                     items:
                         type: string
                     description: IDs inexistentes no município atual
+                forbidden:
+                    type: array
+                    items:
+                        type: string
+                        format: uuid
+                    description: IDs existentes mas sem permissão (não é admin nem criador)
 
         OfflinePackUpdateRequest:
             type: object
@@ -626,6 +648,7 @@ components:
                 - total_pages
                 - unchanged
                 - students
+                - aplicadores
                 - student_test_links
                 - tests
                 - questions_by_test
@@ -633,7 +656,7 @@ components:
             properties:
                 api_contract_version:
                     type: string
-                    example: "1.0"
+                    example: "1.1"
                 city_id:
                     type: string
                 offline_pack_id:
@@ -661,6 +684,11 @@ components:
                     type: array
                     items:
                         $ref: "#/components/schemas/StudentBundle"
+                aplicadores:
+                    type: array
+                    description: Todos os usuários role aplicador do município (página 1); [] nas demais
+                    items:
+                        $ref: "#/components/schemas/AplicadorBundle"
                 student_test_links:
                     type: array
                     items:
@@ -723,6 +751,33 @@ components:
                         $ref: "#/components/schemas/StudentTestLink"
                 includes_full_payload:
                     type: boolean
+
+        AplicadorBundle:
+            type: object
+            required:
+                - user_id
+                - name
+                - email
+                - login
+                - role
+                - offline_password
+            properties:
+                user_id:
+                    type: string
+                    format: uuid
+                name:
+                    type: string
+                email:
+                    type: string
+                login:
+                    type: string
+                    description: Prefixo do e-mail (antes do @) para login offline/online curto
+                role:
+                    type: string
+                    enum: [aplicador]
+                offline_password:
+                    type: string
+                    description: Senha em texto claro (validação literal no app offline)
 
         StudentBundle:
             type: object

@@ -1,4 +1,4 @@
-# Contrato da API mobile — pacote offline (`api_contract_version` **1.0**)
+# Contrato da API mobile — pacote offline (`api_contract_version` **1.1**)
 
 Documento normativo para o **app** consumir **estritamente** o JSON devolvido pelo backend.  
 Prefixo HTTP: **`/mobile/v1`**.
@@ -36,7 +36,7 @@ Campos **sempre presentes** em todas as páginas:
 
 | Campo | Tipo | Descrição |
 |-------|------|-----------|
-| `api_contract_version` | `string` | Fixo `"1.0"` até nova versão documentada. |
+| `api_contract_version` | `string` | `"1.1"` inclui `aplicadores`; `"1.0"` sem esse campo. |
 | `city_id` | `string` | UUID do município (`public.city.id`). |
 | `offline_pack_id` | `string` | UUID do registro no tenant (`mobile_offline_pack_code.id`). |
 | `bundle_valid_until` | `string` | ISO 8601 com sufixo `Z` (validade mínima do snapshot para upload). |
@@ -49,10 +49,11 @@ Campos **sempre presentes** em todas as páginas:
 | `unchanged` | `boolean` | No offline pack costuma ser `false`. |
 | `students` | `array` | Lista de **StudentPayload** (ver §2). |
 
-**Página 1** (`page === 1`): payload completo de provas.
+**Página 1** (`page === 1`): payload completo de provas e aplicadores do município.
 
 | Campo | Tipo | Descrição |
 |-------|------|-----------|
+| `aplicadores` | `array` | **AplicadorPayload** (§2.1) — todos os `users` com `role=aplicador` e `city_id` do pacote. |
 | `student_test_links` | `array` | Lista de `{ "student_id", "test_id" }`. |
 | `tests` | `object` | Mapa **`test_id` → objeto metadados da prova** (igual espírito ao `sync/bundle`). |
 | `questions_by_test` | `object` | Mapa **`test_id` → array de questões** canónicas (com `order`). |
@@ -62,6 +63,7 @@ Campos **sempre presentes** em todas as páginas:
 
 | Campo | Tipo | Descrição |
 |-------|------|-----------|
+| `aplicadores` | `array` | Sempre `[]`. |
 | `student_test_links` | `array` | Sempre `[]`. |
 | `tests` | `object` | Sempre `{}`. |
 | `questions_by_test` | `object` | Sempre `{}`. |
@@ -70,7 +72,23 @@ Campos **sempre presentes** em todas as páginas:
 
 ---
 
-## 2. `StudentPayload` (cada elemento de `students`)
+## 2.1 `AplicadorPayload` (cada elemento de `aplicadores`)
+
+| Campo | Tipo | Descrição |
+|-------|------|-----------|
+| `user_id` | `string` | UUID em `public.users`. |
+| `name` | `string` | Nome exibido. |
+| `email` | `string` | E-mail completo (cadastro web). |
+| `login` | `string` | Prefixo antes do `@` (ex. `joao` para `joao@afirmeplay.com.br`). |
+| `role` | `string` | Fixo `"aplicador"`. |
+| `offline_password` | `string` | Senha em texto claro para login offline rápido (mesma senha definida no cadastro). |
+
+**Login offline do aplicador:** `login` + `offline_password` (comparação literal, sem hash).  
+**Login online (sync):** `POST /mobile/v1/auth/login` com `registration` = prefixo ou e-mail + `password` (hash web).
+
+---
+
+## 2.2 `StudentPayload` (cada elemento de `students`)
 
 Ordem das chaves no JSON **não** é garantida; usar nomes exatos.
 
@@ -105,6 +123,29 @@ Cada item de `submissions` deve incluir o **`sync_bundle_version`** inteiro corr
 
 ---
 
-## 5. Evolução de versão
+## 5. Painel web — listagem, edição e exclusão (`/mobile/v1/offline-pack*`)
+
+Autenticação: JWT do login web + tenant (`X-City-Id` ou slug).
+
+Cada item (`GET` lista/detalhe, resposta de `PATCH`) inclui:
+
+| Campo | Tipo | Descrição |
+|-------|------|-----------|
+| `created_by_user_id` | `string` \| `null` | Quem gerou o código (`POST /register`). `null` em registros antigos. |
+| `can_edit` | `boolean` | Pode chamar `PATCH` neste pacote. |
+| `can_delete` | `boolean` | Pode chamar `DELETE` ou incluir o id no bulk. |
+
+**Regras:**
+
+- **admin** — edita/exclui qualquer código do município.
+- **tecadm, diretor, coordenador, aplicador** — só códigos com `created_by_user_id ===` id do usuário logado.
+- Códigos sem criador (legado) — só **admin**.
+
+`PATCH` / `DELETE` sem permissão → **403**.  
+`POST /offline-pack/bulk-delete` → corpo `{ "offline_pack_ids": [...] }`; resposta `{ "deleted", "not_found", "forbidden" }` (HTTP 200 mesmo com `forbidden` parcial).
+
+---
+
+## 6. Evolução de versão
 
 Alterações incompatíveis devem incrementar **`api_contract_version`** (ex.: `"2.0"`) e atualizar este ficheiro. O app pode negociar ou recusar versões desconhecidas.

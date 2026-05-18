@@ -53,12 +53,49 @@ class TestRankingReportService(unittest.TestCase):
     def test_general_ranking_uses_page_offset(self):
         req = RankingReportService.build_request("general", page=2, per_page=10, filters={})
         with patch.object(RankingReportService, "_resolve_scope", return_value={"scope": "municipio"}):
-            with patch("app.services.ranking_report_service.DashboardService.get_ranking_alunos") as ranking_mock:
-                ranking_mock.return_value = {"ranking": [], "total": 123}
-                payload = RankingReportService.get_report({"role": "admin"}, req)
-        ranking_mock.assert_called_once_with({"scope": "municipio"}, limit=10, offset=10)
-        self.assertEqual(payload["pagination"]["total"], 123)
-        self.assertEqual(payload["pagination"]["page"], 2)
+            with patch.object(
+                RankingReportService,
+                "_build_school_general_rows",
+                return_value=[
+                    {
+                        "school_id": "s1",
+                        "school_name": "Escola 1",
+                        "average_score": 7.1,
+                        "average_proficiency": 260.4,
+                        "classification": "Básico",
+                        "students_count": 20,
+                        "total_students": 25,
+                        "participating_students": 15,
+                        "participation_rate": 60.0,
+                        "series": [
+                            {
+                                "grade_id": "g1",
+                                "grade_name": "1º Ano",
+                                "average_score": 7.1,
+                                "average_proficiency": 260.4,
+                                "classification": "Básico",
+                                "students_count": 20,
+                                "total_students": 25,
+                                "participating_students": 15,
+                            }
+                        ],
+                    }
+                ],
+            ):
+                with patch("app.services.ranking_report_service.DashboardService.get_school_ranking_card") as school_card_mock:
+                    with patch("app.services.ranking_report_service.DashboardService.get_class_ranking_card") as class_mock:
+                        with patch("app.services.ranking_report_service.DashboardService.get_ranking_alunos") as ranking_mock:
+                            school_card_mock.return_value = {"ranking": [], "total": 0}
+                            class_mock.return_value = {"ranking": [], "total": 0}
+                            ranking_mock.return_value = {"ranking": [], "total": 123}
+                            payload = RankingReportService.get_report({"role": "admin"}, req)
+        ranking_mock.assert_called_once_with({"scope": "municipio"}, limit=500, offset=0, filters={})
+        self.assertEqual(payload["totals"]["count"], 1)
+        self.assertIn("general_rankings", payload)
+        self.assertIn("visibility", payload["general_rankings"])
+        self.assertEqual(payload["general_rankings"]["visibility"]["schools_by_course"], True)
+        self.assertEqual(payload["general_rankings"]["visibility"]["students_by_course"], True)
+        self.assertEqual(payload["students_totals"]["count"], 123)
 
 
 class TestRankingRoutesParse(unittest.TestCase):

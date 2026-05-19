@@ -201,7 +201,19 @@ class UserDeletionService(BaseDeletionService):
             _set_search_path_for_user()
             from app.models.game import Game, GameClass
             from app.models.calendar_event_user import CalendarEventUser
-            from app.models.mobile_models import MobileDevice, MobileSyncSubmission
+            from app.models.mobile_models import (
+                MobileDevice,
+                MobileOfflinePackCode,
+                MobileSyncSubmission,
+            )
+            from app.services.mobile.offline_pack_service import delete_offline_pack
+
+            offline_packs = MobileOfflinePackCode.query.filter_by(
+                created_by_user_id=user_id
+            ).all()
+            for pack in offline_packs:
+                delete_offline_pack(pack)
+            deleted["mobile_offline_pack_code"] = len(offline_packs)
 
             game_ids_subq = self.session.query(Game.id).filter(Game.userId == user_id).subquery()
             deleted_game_classes = GameClass.query.filter(GameClass.game_id.in_(game_ids_subq)).delete(

@@ -1,4 +1,4 @@
-# Contrato da API mobile — pacote offline (`api_contract_version` **1.0**)
+# Contrato da API mobile — pacote offline (`api_contract_version` **1.1**)
 
 Documento normativo para o **app** consumir **estritamente** o JSON devolvido pelo backend.  
 Prefixo HTTP: **`/mobile/v1`**.
@@ -36,7 +36,7 @@ Campos **sempre presentes** em todas as páginas:
 
 | Campo | Tipo | Descrição |
 |-------|------|-----------|
-| `api_contract_version` | `string` | Fixo `"1.0"` até nova versão documentada. |
+| `api_contract_version` | `string` | Fixo `"1.1"` (ver §5). Versão `"1.0"` deixou de ser emitida. |
 | `city_id` | `string` | UUID do município (`public.city.id`). |
 | `offline_pack_id` | `string` | UUID do registro no tenant (`mobile_offline_pack_code.id`). |
 | `bundle_valid_until` | `string` | ISO 8601 com sufixo `Z` (validade mínima do snapshot para upload). |
@@ -83,6 +83,11 @@ Ordem das chaves no JSON **não** é garantida; usar nomes exatos.
 | `class_id` | `string` \| `null` | sim | UUID da turma. |
 | `grade_id` | `string` \| `null` | sim | UUID da série/nota. |
 | `school_id` | `string` | sim | UUID da escola. |
+| `school_name` | `string` \| `null` | sim* | Nome da escola (`tenant.school.name`). `null` se `school_id` ausente ou registro não encontrado. |
+| `grade_name` | `string` \| `null` | sim* | Nome da série (`public.grade.name`). `null` se `grade_id` for `null` ou registro não encontrado. |
+| `class_name` | `string` \| `null` | sim* | Nome da turma (`tenant.class.name`). `null` se `class_id` for `null` ou registro não encontrado. |
+
+\*Presentes em todas as respostas a partir da versão **1.1**; apps **1.0** podem ignorar.
 
 **Login offline do aluno:** usar **`registration`** como identificador e como senha (mesmo valor, 4 dígitos). Não enviar `email` nem `password_hash` no pacote.
 
@@ -106,5 +111,10 @@ Cada item de `submissions` deve incluir o **`sync_bundle_version`** inteiro corr
 ---
 
 ## 5. Evolução de versão
+
+| Versão | Alteração |
+|--------|-----------|
+| **1.1** | Cada `StudentPayload` inclui `school_name`, `grade_name`, `class_name` (mesmo formato em `GET /sync/bundle`). Compatível com apps que só leem IDs. |
+| **1.0** | Apenas IDs de escola, série e turma no aluno. |
 
 Alterações incompatíveis devem incrementar **`api_contract_version`** (ex.: `"2.0"`) e atualizar este ficheiro. O app pode negociar ou recusar versões desconhecidas.

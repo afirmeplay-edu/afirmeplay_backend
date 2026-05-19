@@ -8,7 +8,7 @@ info:
         - **Sync:** `GET /sync/bundle`, `POST /sync/upload` — Bearer JWT mobile + `X-Device-Id`.
         - **Pacote offline (código web):** `POST /offline-pack/register` (JWT do **login web** + tenant); `POST /offline-pack/redeem` (só `X-Device-Id` + corpo, com resolução de município via `public.mobile_offline_pack_registry` quando o código existe lá).
 
-        Contrato normativo detalhado do **redeem** e alunos: **`OFFLINE_PACK_API_CONTRACT.md`** (campo `api_contract_version` na resposta do redeem, atualmente `"1.0"`).
+        Contrato normativo detalhado do **redeem** e alunos: **`OFFLINE_PACK_API_CONTRACT.md`** (campo `api_contract_version` na resposta do redeem, atualmente `"1.1"`).
 
         Multitenant: schemas PostgreSQL `city_*` + `public`.
     version: 1.1.0
@@ -109,7 +109,7 @@ paths:
 
                 O campo `code` é obrigatório em **todas** as páginas; na página 1 recomenda-se gravar `offline_pack_id` e `city_id` para as seguintes requisições e para login mobile posterior.
 
-                Resposta alinhada a `OFFLINE_PACK_API_CONTRACT.md` (`api_contract_version` **1.0**).
+                Resposta alinhada a `OFFLINE_PACK_API_CONTRACT.md` (`api_contract_version` **1.1**).
             parameters:
                 - $ref: "#/components/parameters/XDeviceId"
                 - $ref: "#/components/parameters/XCityId"
@@ -370,7 +370,7 @@ components:
             properties:
                 api_contract_version:
                     type: string
-                    example: "1.0"
+                    example: "1.1"
                 city_id:
                     type: string
                 offline_pack_id:
@@ -482,6 +482,18 @@ components:
                 class_id: { type: string, nullable: true }
                 grade_id: { type: string, nullable: true }
                 school_id: { type: string }
+                school_name:
+                    type: string
+                    nullable: true
+                    description: Nome da escola (tenant.school.name)
+                grade_name:
+                    type: string
+                    nullable: true
+                    description: Nome da série (public.grade.name)
+                class_name:
+                    type: string
+                    nullable: true
+                    description: Nome da turma (tenant.class.name)
 
         StudentTestLink:
             type: object

@@ -16,6 +16,10 @@ from app.models.question import Question
 from app.models.mobile_models import MobileSyncBundleGeneration
 
 from app.services.mobile.content_hash import compute_test_content_version, question_to_canon
+from app.services.mobile.student_bundle_serializer import (
+    serialize_student_for_bundle,
+    student_bundle_query_options,
+)
 from app.utils.response_formatters import _get_all_subjects_from_test
 
 
@@ -172,22 +176,12 @@ def serialize_students_page(
     page_size: int,
 ) -> Tuple[List[Dict[str, Any]], int, int]:
     """Lista alunos da escola paginada; total alunos da escola."""
-    q = Student.query.filter_by(school_id=school_id).order_by(Student.name.asc())
+    q = student_bundle_query_options(
+        Student.query.filter_by(school_id=school_id).order_by(Student.name.asc())
+    )
     total = q.count()
     items = q.offset((page - 1) * page_size).limit(page_size).all()
-    out = []
-    for s in items:
-        out.append(
-            {
-                "id": s.id,
-                "name": s.name,
-                "registration": s.registration,
-                "user_id": s.user_id,
-                "class_id": str(s.class_id) if s.class_id else None,
-                "grade_id": str(s.grade_id) if s.grade_id else None,
-                "school_id": s.school_id,
-            }
-        )
+    out = [serialize_student_for_bundle(s) for s in items]
     total_pages = max(1, (total + page_size - 1) // page_size)
     return out, total, total_pages
 

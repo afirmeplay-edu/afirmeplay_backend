@@ -24,6 +24,10 @@ from app.services.mobile.bundle_service import (
     collect_school_scope,
     ensure_bundle_generation,
 )
+from app.services.mobile.student_bundle_serializer import (
+    serialize_student_for_bundle,
+    student_bundle_query_options,
+)
 
 _CODE_ALPHABET = "23456789ABCDEFGHJKLMNPQRSTUVWXYZ"
 
@@ -218,18 +222,6 @@ def _parse_iso_naive(raw: str) -> datetime:
     return datetime.fromisoformat(s)
 
 
-def _serialize_student_row(s: Student) -> Dict[str, Any]:
-    return {
-        "id": s.id,
-        "name": s.name,
-        "registration": s.registration,
-        "user_id": s.user_id,
-        "class_id": str(s.class_id) if s.class_id else None,
-        "grade_id": str(s.grade_id) if s.grade_id else None,
-        "school_id": s.school_id,
-    }
-
-
 def register_offline_pack(
     *,
     city_id: str,
@@ -356,16 +348,20 @@ def redeem_offline_pack_page(
         _reserve_device_slot(pack, device_id)
 
     if student_keys:
-        eligible_query = Student.query.filter(Student.id.in_(student_keys))
+        eligible_query = student_bundle_query_options(
+            Student.query.filter(Student.id.in_(student_keys))
+        )
     else:
-        eligible_query = Student.query.filter(sa_false())
+        eligible_query = student_bundle_query_options(
+            Student.query.filter(sa_false())
+        )
     eligible_query = eligible_query.order_by(
         Student.school_id.asc(), Student.name.asc()
     )
     total_students = eligible_query.count()
     total_pages = max(1, (total_students + page_size - 1) // page_size)
     rows = eligible_query.offset((page - 1) * page_size).limit(page_size).all()
-    students_payload = [_serialize_student_row(s) for s in rows]
+    students_payload = [serialize_student_for_bundle(s) for s in rows]
 
     tests_payload, content_versions, questions_by_test = build_tests_questions_payload(
         tests_map
@@ -378,7 +374,7 @@ def redeem_offline_pack_page(
         sync_single = int(next(iter(versions.values())))
 
     body: Dict[str, Any] = {
-        "api_contract_version": "1.0",
+        "api_contract_version": "1.1",
         "city_id": city_id,
         "offline_pack_id": str(pack.id),
         "bundle_valid_until": valid_min.isoformat() + "Z",

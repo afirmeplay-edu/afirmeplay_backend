@@ -8,6 +8,11 @@ from sqlalchemy import func, text
 import logging
 from werkzeug.security import check_password_hash
 from app.utils.auth import hash_password
+from app.services.aplicador_user_service import (
+    apply_aplicador_credentials,
+    assert_email_prefix_unique_in_city,
+    sync_offline_password_if_aplicador,
+)
 from app import db
 from app.models.city import City
 from app.models.school import School
@@ -275,15 +280,34 @@ def create_user():
             if not city_id:
                 return jsonify({"error": "city_id is required for tecadm"}), 400
 
+        role_value = data.get("role")
+        if not role_value:
+            return jsonify({"error": "Missing required field: role"}), 400
+        try:
+            role_enum = RoleEnum(role_value)
+        except ValueError:
+            return jsonify({"error": f"role inválido: {role_value}"}), 400
+
+        if role_enum == RoleEnum.APLICADOR:
+            if not city_id:
+                return jsonify({"error": "city_id is required for aplicador"}), 400
+            try:
+                assert_email_prefix_unique_in_city(data["email"], str(city_id))
+            except ValueError as e:
+                return jsonify({"error": str(e)}), 400
+
         # Create user
         novo_usuario = User(
             name=data["name"],
             email=data["email"],
-            password_hash=hash_password(data["password"]),
             registration=data.get("registration"),
-            role=RoleEnum(data.get("role")),
-            city_id=city_id  # Adicionando city_id
+            role=role_enum,
+            city_id=city_id,
         )
+        if role_enum == RoleEnum.APLICADOR:
+            apply_aplicador_credentials(novo_usuario, data["password"])
+        else:
+            novo_usuario.password_hash = hash_password(data["password"])
         db.session.add(novo_usuario)
         db.session.commit()
 
@@ -489,7 +513,7 @@ def submit_onboarding():
 
 @bp.route('/<string:user_id>', methods=['GET'])
 @jwt_required()
-@role_required("admin", "tecadm", "diretor", "coordenador", "professor", "aluno")
+@role_required("admin", "tecadm", "diretor", "coordenador", "professor", "aluno", "aplicador")
 def get_user_by_id(user_id):
     try:
         logging.info(f"Fetching user with ID: {user_id}")
@@ -627,6 +651,7 @@ def reset_password():
         
         # Atualizar senha
         user.password_hash = hash_password(new_password)
+        sync_offline_password_if_aplicador(user, new_password)
         user.reset_token = None
         user.reset_token_expires = None
         user.updated_at = datetime.utcnow()
@@ -688,6 +713,7 @@ def change_password():
         
         # Atualizar senha
         user.password_hash = hash_password(new_password)
+        sync_offline_password_if_aplicador(user, new_password)
         user.updated_at = datetime.utcnow()
         db.session.commit()
         
@@ -794,7 +820,7 @@ def validate_reset_token():
 
 @bp.route('/<string:user_id>', methods=['PUT'])
 @jwt_required()
-@role_required("admin", "tecadm", "diretor", "coordenador", "professor", "aluno")
+@role_required("admin", "tecadm", "diretor", "coordenador", "professor", "aluno", "aplicador")
 def update_user(user_id):
     try:
         current_user = get_current_user_from_token()
@@ -832,12 +858,22 @@ def update_user(user_id):
             if existing_email:
                 return jsonify({"erro": "Email já cadastrado"}), 400
             user.email = email_clean
+            if user.role == RoleEnum.APLICADOR and user.city_id:
+                try:
+                    assert_email_prefix_unique_in_city(
+                        user.email, str(user.city_id), exclude_user_id=user.id
+                    )
+                except ValueError as e:
+                    return jsonify({"erro": str(e)}), 400
 
         password = data.get('password')
         if password is not None:
             if not isinstance(password, str) or len(password) < 8:
                 return jsonify({"erro": "password deve conter ao menos 8 caracteres"}), 400
-            user.password_hash = hash_password(password)
+            if user.role == RoleEnum.APLICADOR:
+                apply_aplicador_credentials(user, password)
+            else:
+                user.password_hash = hash_password(password)
 
         registration = data.get('registration')
         if registration is not None:
@@ -885,6 +921,13 @@ def update_user(user_id):
                 return jsonify({"erro": "Tecadm não pode atribuir role admin"}), 403
 
             user.role = new_role
+            if new_role == RoleEnum.APLICADOR and user.city_id and user.email:
+                try:
+                    assert_email_prefix_unique_in_city(
+                        user.email, str(user.city_id), exclude_user_id=user.id
+                    )
+                except ValueError as e:
+                    return jsonify({"erro": str(e)}), 400
 
         birth_date_value = data.get('birth_date')
         if birth_date_value:
@@ -985,7 +1028,7 @@ def _user_settings_in_public(fn):
 
 @bp.route('/user-settings/<string:user_id>', methods=['POST'])
 @jwt_required()
-@role_required("admin", "tecadm", "diretor", "coordenador", "professor", "aluno")
+@role_required("admin", "tecadm", "diretor", "coordenador", "professor", "aluno", "aplicador")
 def save_user_settings(user_id):
     try:
         current_user = get_current_user_from_token()
@@ -1063,7 +1106,7 @@ def save_user_settings(user_id):
 
 @bp.route('/user-settings/<string:user_id>', methods=['GET'])
 @jwt_required()
-@role_required("admin", "tecadm", "diretor", "coordenador", "professor", "aluno")
+@role_required("admin", "tecadm", "diretor", "coordenador", "professor", "aluno", "aplicador")
 def get_user_settings(user_id):
     try:
         current_user = get_current_user_from_token()

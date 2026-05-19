@@ -1,5 +1,6 @@
-from flask import Blueprint, request, jsonify
+from flask import Blueprint, request, jsonify, g
 from app.utils.auth import authenticate_usuario
+from app.services.aplicador_user_service import resolve_user_by_login_ident
 import datetime
 import jwt
 from app.models.user import User, RoleEnum
@@ -52,10 +53,13 @@ def login():
         return jsonify({"erro": "Identificador (e-mail ou matrícula) e senha são obrigatórios."}), 400
 
     try:
-    # tenta encontrar o usuário
-        usuario = User.query.filter_by(registration=identificador).first()
-        if not usuario:
-            usuario = User.query.filter_by(email=identificador).first()
+        tenant_context = getattr(g, "tenant_context", None)
+        login_city_id = (
+            str(tenant_context.city_id)
+            if tenant_context and getattr(tenant_context, "city_id", None)
+            else None
+        )
+        usuario = resolve_user_by_login_ident(identificador, login_city_id)
 
         if not usuario or not authenticate_usuario(usuario, password):
             logging.warning(f"Falha de login para o usuário: {identificador}")

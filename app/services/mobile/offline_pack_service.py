@@ -14,7 +14,11 @@ from sqlalchemy import false as sa_false
 from sqlalchemy.orm.attributes import flag_modified
 
 from app import db
-from app.models.mobile_models import MobileOfflinePackCode, MobileOfflinePackRedeemDevice
+from app.models.mobile_models import (
+    MobileOfflinePackCode,
+    MobileOfflinePackRedeemDevice,
+    MobileSyncBundleGeneration,
+)
 from app.models.mobile_offline_pack_registry import MobileOfflinePackRegistry
 from app.models.school import School
 from app.models.student import Student
@@ -28,6 +32,9 @@ from app.services.mobile.student_bundle_serializer import (
     serialize_student_for_bundle,
     student_bundle_query_options,
 )
+
+from app.services.aplicador_user_service import collect_aplicadores_for_city
+
 
 _CODE_ALPHABET = "23456789ABCDEFGHJKLMNPQRSTUVWXYZ"
 
@@ -74,7 +81,13 @@ def format_code(normalized: str, chars_per_group: int = 4) -> str:
 
 
 def hash_code(normalized: str) -> str:
+    """Legado: códigos antigos no registry usam SHA-256; novos usam texto normalizado."""
     return hashlib.sha256(f"{_pepper()}:{normalized}".encode("utf-8")).hexdigest()
+
+
+def registry_lookup_key(normalized: str) -> str:
+    """Chave de índice public.mobile_offline_pack_registry (texto claro, 12 caracteres)."""
+    return normalized
 
 
 def bind_tenant_context_for_redeem(city_id: str) -> None:
@@ -100,6 +113,71 @@ def user_scope_persisted(pack: MobileOfflinePackCode) -> Dict[str, Any]:
     d = dict(pack.scope_json or {})
     d.pop("_resolved", None)
     return d
+
+
+def invalidate_pack_bundle_cache(pack: MobileOfflinePackCode) -> None:
+    scope = dict(pack.scope_json or {})
+    internal = dict(scope.get("_resolved") or {})
+    internal.pop("sync_bundle_version_by_school", None)
+    internal.pop("bundle_valid_until_min", None)
+    if internal:
+        scope["_resolved"] = internal
+    else:
+        scope.pop("_resolved", None)
+    pack.scope_json = scope
+    flag_modified(pack, "scope_json")
+
+
+def can_manage_offline_pack(
+    pack: MobileOfflinePackCode, current_user: Dict[str, Any]
+) -> bool:
+    """
+    Admin: qualquer código do município (tenant). Demais roles: só o criador.
+    Pacotes sem created_by_user_id: apenas admin.
+    """
+    role = str(current_user.get("role") or "").strip().lower()
+    if role == "admin":
+        return True
+    creator = pack.created_by_user_id
+    if not creator:
+        return False
+    return str(creator) == str(current_user.get("id"))
+
+
+def assert_can_manage_offline_pack(
+    pack: MobileOfflinePackCode, current_user: Dict[str, Any]
+) -> None:
+    if not can_manage_offline_pack(pack, current_user):
+        raise PermissionError(
+            "sem permissão para alterar ou excluir este código (apenas o criador ou admin)"
+        )
+
+
+def pack_to_api_dict(
+    pack: MobileOfflinePackCode,
+    current_user: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    redeemed = _count_devices(pack.id)
+    body: Dict[str, Any] = {
+        "offline_pack_id": str(pack.id),
+        "code": pack.activation_code,
+        "scope": user_scope_persisted(pack),
+        "expires_at": pack.expires_at.isoformat() + "Z",
+        "max_redemptions": int(pack.max_redemptions),
+        "redemptions_count": redeemed,
+        "created_by_user_id": pack.created_by_user_id,
+        "revoked_at": (
+            pack.revoked_at.isoformat() + "Z" if pack.revoked_at else None
+        ),
+        "created_at": (
+            pack.created_at.isoformat() + "Z" if pack.created_at else None
+        ),
+        "is_expired": pack.expires_at < datetime.utcnow(),
+    }
+    if current_user is not None:
+        body["can_delete"] = can_manage_offline_pack(pack, current_user)
+        body["can_edit"] = body["can_delete"]
+    return body
 
 
 def resolve_school_ids(city_id: str, scope: Dict[str, Any]) -> List[str]:
@@ -179,29 +257,51 @@ def _ensure_pack_bundle_versions(
     pack: MobileOfflinePackCode, school_ids_for_bundle: Set[str]
 ) -> Tuple[Dict[str, int], datetime]:
     """
-    Cria/atualiza mobile_sync_bundle_generation por escola afetada (uma vez por pacote)
-    e grava versões em scope_json._resolved.
+    Garante mobile_sync_bundle_generation para cada escola do pacote e grava
+    versões em scope_json._resolved. Escolas novas recebem nova geração; escolas
+    já mapeadas reutilizam a versão em cache.
     """
     scope = dict(pack.scope_json or {})
     internal = dict(scope.get("_resolved") or {})
     existing = internal.get("sync_bundle_version_by_school")
-    if isinstance(existing, dict) and existing:
-        raw_min = internal.get("bundle_valid_until_min")
-        if raw_min:
-            valid_min = _parse_iso_naive(raw_min)
-        else:
-            valid_min = datetime.utcnow()
-        # normaliza chaves para str
-        versions = {str(k): int(v) for k, v in existing.items()}
-        return versions, valid_min
-
     versions: Dict[str, int] = {}
+    if isinstance(existing, dict) and existing:
+        versions = {str(k): int(v) for k, v in existing.items()}
+
     min_valid: Optional[datetime] = None
+    raw_min = internal.get("bundle_valid_until_min")
+    if raw_min:
+        min_valid = _parse_iso_naive(raw_min)
+
+    changed = False
     for sch_id in sorted(school_ids_for_bundle):
+        key = str(sch_id)
+        if key in versions:
+            continue
         v, valid_until, _ = ensure_bundle_generation(sch_id, None, True, 1)
-        versions[str(sch_id)] = int(v)
+        versions[key] = int(v)
+        changed = True
         if min_valid is None or valid_until < min_valid:
             min_valid = valid_until
+
+    if not versions:
+        min_valid = min_valid or datetime.utcnow()
+        internal["sync_bundle_version_by_school"] = versions
+        internal["bundle_valid_until_min"] = min_valid.isoformat() + "Z"
+        scope["_resolved"] = internal
+        pack.scope_json = scope
+        flag_modified(pack, "scope_json")
+        db.session.flush()
+        return versions, min_valid
+
+    if changed or not raw_min:
+        min_valid = None
+        for key, ver in versions.items():
+            gen = MobileSyncBundleGeneration.query.filter_by(
+                school_id=key, sync_bundle_version=ver
+            ).first()
+            if gen and (min_valid is None or gen.bundle_valid_until < min_valid):
+                min_valid = gen.bundle_valid_until
 
     if not min_valid:
         min_valid = datetime.utcnow()
@@ -241,26 +341,33 @@ def register_offline_pack(
     resolve_school_ids(city_id, scope)
 
     plain = None
-    digest = None
+    lookup_key = None
+    formatted = None
     for _ in range(24):
         candidate = generate_activation_code()
         norm = "".join(c for c in candidate if c in _CODE_ALPHABET)
         if len(norm) != 12:
             continue
-        h = hash_code(norm)
-        if MobileOfflinePackCode.query.filter_by(code_hash=h).first():
+        key = registry_lookup_key(norm)
+        if MobileOfflinePackCode.query.filter_by(code_hash=key).first():
             continue
-        if MobileOfflinePackRegistry.query.filter_by(code_hash=h).first():
+        if MobileOfflinePackCode.query.filter_by(activation_code=format_code(norm)).first():
+            continue
+        if MobileOfflinePackRegistry.query.filter_by(code_hash=key).first():
+            continue
+        if MobileOfflinePackRegistry.query.filter_by(code_hash=hash_code(norm)).first():
             continue
         plain = norm
-        digest = h
+        lookup_key = key
+        formatted = format_code(norm)
         break
-    if not plain or not digest:
+    if not plain or not lookup_key or not formatted:
         raise RuntimeError("não foi possível gerar código único; tente novamente")
 
     expires_at = datetime.utcnow() + timedelta(hours=ttl_hours)
     row = MobileOfflinePackCode(
-        code_hash=digest,
+        activation_code=formatted,
+        code_hash=lookup_key,
         scope_json=dict(scope),
         created_by_user_id=created_by_user_id,
         expires_at=expires_at,
@@ -270,12 +377,123 @@ def register_offline_pack(
     db.session.flush()
     db.session.add(
         MobileOfflinePackRegistry(
-            code_hash=digest,
+            code_hash=lookup_key,
             city_id=city_id,
             pack_id=row.id,
         )
     )
-    return format_code(plain), row
+    return formatted, row
+
+
+def update_offline_pack(
+    *,
+    pack: MobileOfflinePackCode,
+    city_id: str,
+    scope: Optional[Dict[str, Any]] = None,
+    ttl_hours: Optional[int] = None,
+    max_redemptions: Optional[int] = None,
+) -> MobileOfflinePackCode:
+    """Atualiza escopo e/ou metadados; invalida cache de bundle para novo resgate."""
+    if pack.revoked_at:
+        raise ValueError("código revogado")
+    if pack.expires_at < datetime.utcnow() and ttl_hours is None:
+        raise ValueError("código expirado; informe ttl_hours para renovar validade")
+
+    if scope is not None:
+        resolve_school_ids(city_id, scope)
+        pack.scope_json = dict(scope)
+        flag_modified(pack, "scope_json")
+        invalidate_pack_bundle_cache(pack)
+
+    if ttl_hours is not None:
+        if ttl_hours < 1 or ttl_hours > 24 * 14:
+            raise ValueError("ttl_hours deve estar entre 1 e 336")
+        pack.expires_at = datetime.utcnow() + timedelta(hours=ttl_hours)
+
+    if max_redemptions is not None:
+        if max_redemptions < 1 or max_redemptions > 10_000:
+            raise ValueError("max_redemptions inválido")
+        redeemed = _count_devices(pack.id)
+        if max_redemptions < redeemed:
+            raise ValueError(
+                f"max_redemptions não pode ser menor que dispositivos já resgatados ({redeemed})"
+            )
+        pack.max_redemptions = max_redemptions
+
+    db.session.flush()
+    return pack
+
+
+def list_offline_packs(*, include_expired: bool = False) -> List[MobileOfflinePackCode]:
+    q = MobileOfflinePackCode.query.filter(MobileOfflinePackCode.revoked_at.is_(None))
+    if not include_expired:
+        q = q.filter(MobileOfflinePackCode.expires_at >= datetime.utcnow())
+    return q.order_by(MobileOfflinePackCode.created_at.desc()).all()
+
+
+def get_offline_pack_by_id(pack_id: str) -> Optional[MobileOfflinePackCode]:
+    try:
+        import uuid as _uuid
+
+        pid = _uuid.UUID(str(pack_id))
+    except (TypeError, ValueError):
+        return None
+    return MobileOfflinePackCode.query.get(pid)
+
+
+_BULK_DELETE_MAX = 200
+
+
+def _remove_pack_registry_entries(pack: MobileOfflinePackCode) -> None:
+    """Remove linha em public.mobile_offline_pack_registry (resgate deixa de funcionar)."""
+    MobileOfflinePackRegistry.query.filter_by(pack_id=pack.id).delete(
+        synchronize_session=False
+    )
+    if pack.code_hash:
+        MobileOfflinePackRegistry.query.filter_by(code_hash=pack.code_hash).delete(
+            synchronize_session=False
+        )
+
+
+def delete_offline_pack(pack: MobileOfflinePackCode) -> None:
+    """Exclui pacote no tenant; dispositivos resgatados em cascade."""
+    _remove_pack_registry_entries(pack)
+    db.session.delete(pack)
+    db.session.flush()
+
+
+def delete_offline_packs_bulk(
+    offline_pack_ids: List[str], current_user: Dict[str, Any]
+) -> Dict[str, List[str]]:
+    """
+    Exclui vários pacotes. Retorna ids apagados, não encontrados e sem permissão.
+    """
+    if not offline_pack_ids:
+        raise ValueError("offline_pack_ids não pode ser vazio")
+    if len(offline_pack_ids) > _BULK_DELETE_MAX:
+        raise ValueError(f"máximo de {_BULK_DELETE_MAX} ids por requisição")
+
+    deleted: List[str] = []
+    not_found: List[str] = []
+    forbidden: List[str] = []
+    seen: Set[str] = set()
+
+    for raw_id in offline_pack_ids:
+        pid = str(raw_id).strip()
+        if not pid or pid in seen:
+            continue
+        seen.add(pid)
+        pack = get_offline_pack_by_id(pid)
+        if not pack:
+            not_found.append(pid)
+            continue
+        if not can_manage_offline_pack(pack, current_user):
+            forbidden.append(pid)
+            continue
+        delete_offline_pack(pack)
+        deleted.append(pid)
+
+    return {"deleted": deleted, "not_found": not_found, "forbidden": forbidden}
 
 
 def _count_devices(pack_id) -> int:
@@ -373,6 +591,10 @@ def redeem_offline_pack_page(
     if len(versions) == 1:
         sync_single = int(next(iter(versions.values())))
 
+    aplicadores_payload = (
+        collect_aplicadores_for_city(city_id) if include_full else []
+    )
+
     body: Dict[str, Any] = {
         "api_contract_version": "1.1",
         "city_id": city_id,
@@ -386,6 +608,7 @@ def redeem_offline_pack_page(
         "total_pages": total_pages,
         "unchanged": False,
         "students": students_payload,
+        "aplicadores": aplicadores_payload,
         "student_test_links": links_out if include_full else [],
         "tests": tests_payload if include_full else {},
         "questions_by_test": questions_by_test if include_full else {},
@@ -396,9 +619,29 @@ def redeem_offline_pack_page(
     return body
 
 
+def find_registry_by_normalized(normalized: str) -> Optional[MobileOfflinePackRegistry]:
+    key = registry_lookup_key(normalized)
+    reg = MobileOfflinePackRegistry.query.filter_by(code_hash=key).first()
+    if reg:
+        return reg
+    return MobileOfflinePackRegistry.query.filter_by(
+        code_hash=hash_code(normalized)
+    ).first()
+
+
 def find_pack_by_code_normalized(normalized: str) -> MobileOfflinePackCode:
-    h = hash_code(normalized)
-    row = MobileOfflinePackCode.query.filter_by(code_hash=h).first()
+    reg = find_registry_by_normalized(normalized)
+    if reg:
+        pack = MobileOfflinePackCode.query.get(reg.pack_id)
+        if pack:
+            return pack
+    key = registry_lookup_key(normalized)
+    row = MobileOfflinePackCode.query.filter_by(code_hash=key).first()
+    if not row:
+        row = MobileOfflinePackCode.query.filter_by(code_hash=hash_code(normalized)).first()
+    if not row:
+        formatted = format_code(normalized)
+        row = MobileOfflinePackCode.query.filter_by(activation_code=formatted).first()
     if not row:
         raise ValueError("código não encontrado")
     return row

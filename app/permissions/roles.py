@@ -31,9 +31,29 @@ class Roles:
     DIRETOR = "diretor"
     ADMIN = "admin"
     TECADM = "tecadm"
+    APLICADOR = "aplicador"
     
     # Lista de todos os roles
-    ALL_ROLES = [ALUNO, PROFESSOR, COORDENADOR, DIRETOR, ADMIN, TECADM]
+    ALL_ROLES = [ALUNO, PROFESSOR, COORDENADOR, DIRETOR, ADMIN, TECADM, APLICADOR]
+
+    # Painel web: leituras básicas (município, escolas, séries, perfil próprio)
+    MUNICIPAL_READ_ROLES = (
+        ADMIN,
+        DIRETOR,
+        COORDENADOR,
+        PROFESSOR,
+        TECADM,
+        APLICADOR,
+    )
+    SELF_SERVICE_ROLES = (
+        ADMIN,
+        TECADM,
+        DIRETOR,
+        COORDENADOR,
+        PROFESSOR,
+        ALUNO,
+        APLICADOR,
+    )
     
     # Roles administrativos (acesso total ou amplo)
     ADMIN_ROLES = [ADMIN, TECADM]

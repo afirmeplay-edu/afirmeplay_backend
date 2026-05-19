@@ -8,6 +8,7 @@ from app.models.user import User, RoleEnum
 from app.utils.auth import authenticate_usuario
 from app.routes.mobile.blueprint import mobile_bp
 from app.services.mobile.device_service import register_or_touch_device, is_valid_uuid_v4
+from app.services.aplicador_user_service import resolve_user_by_login_ident
 
 _MOBILE_LOGIN_ROLES = frozenset(
     {
@@ -15,39 +16,15 @@ _MOBILE_LOGIN_ROLES = frozenset(
         RoleEnum.COORDENADOR,
         RoleEnum.DIRETOR,
         RoleEnum.TECADM,
+        RoleEnum.APLICADOR,
     }
 )
 
 
 def _resolve_mobile_login_user(ident: str):
-    """
-    Resolve usuário por matrícula (staff), e-mail completo ou prefixo antes do @.
-    Com prefixo, restringe por city_id do tenant quando disponível.
-    """
-    ident = (ident or "").strip()
-    if not ident:
-        return None
-
-    usuario = User.query.filter_by(registration=ident).first()
-    if usuario:
-        return usuario
-
-    usuario = User.query.filter(User.email.ilike(ident)).first()
-    if usuario:
-        return usuario
-
-    if "@" in ident:
-        return None
-
-    q = User.query.filter(User.email.ilike(f"{ident}@%"))
     ctx = getattr(g, "tenant_context", None)
     city_id = getattr(ctx, "city_id", None) if ctx else None
-    if city_id:
-        q = q.filter(User.city_id == str(city_id))
-    candidates = q.all()
-    if len(candidates) == 1:
-        return candidates[0]
-    return None
+    return resolve_user_by_login_ident(ident, str(city_id) if city_id else None)
 
 
 @mobile_bp.route("/auth/login", methods=["POST", "OPTIONS"])

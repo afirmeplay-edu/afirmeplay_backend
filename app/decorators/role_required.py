@@ -22,6 +22,24 @@ import os
 
 SECRET_KEY = os.getenv("JWT_SECRET_KEY")
 
+_APLICADOR_AUTO_BLOCKLIST = frozenset({"create_user", "delete_user"})
+_MUNICIPAL_STAFF_FOR_APLICADOR = frozenset(
+    {"professor", "coordenador", "diretor", "tecadm"}
+)
+
+
+def _expand_roles_for_aplicador(base_roles, view_func):
+    roles = list(base_roles)
+    norm = {str(r).lower().strip() for r in base_roles}
+    if "aplicador" in norm:
+        return roles
+    if not (norm & _MUNICIPAL_STAFF_FOR_APLICADOR):
+        return roles
+    if view_func and view_func.__name__ in _APLICADOR_AUTO_BLOCKLIST:
+        return roles
+    roles.append("aplicador")
+    return roles
+
 # ⚠️ Esta função foi movida para app/permissions/decorators.py
 def get_current_user_from_token():
     auth_header = request.headers.get('Authorization')
@@ -68,10 +86,11 @@ def role_required(*roles):
                     "erro": "Acesso negado.",
                     "mensagem": "Token inválido, expirado ou não informado. Envie o header Authorization: Bearer <token>."
                 }), 403
-            if user["role"] not in roles:
+            effective_roles = _expand_roles_for_aplicador(roles, f)
+            if user["role"] not in effective_roles:
                 return jsonify({
                     "erro": "Acesso negado.",
-                    "mensagem": f"Sua função ({user['role']}) não tem permissão para esta rota. Permitidas: {', '.join(roles)}."
+                    "mensagem": f"Sua função ({user['role']}) não tem permissão para esta rota. Permitidas: {', '.join(effective_roles)}."
                 }), 403
             return f(*args, **kwargs)
         return wrapper

@@ -17,9 +17,36 @@ from functools import wraps
 from flask import request, jsonify
 import jwt
 from app.models.user import User
+from app.permissions.roles import Roles
 import os
 
 SECRET_KEY = os.getenv("JWT_SECRET_KEY")
+
+# Rotas em que aplicador NÃO ganha acesso automático (mesmo com professor no decorator)
+_APLICADOR_AUTO_BLOCKLIST = frozenset(
+    {
+        "create_user",
+        "delete_user",
+    }
+)
+
+_MUNICIPAL_STAFF_FOR_APLICADOR = frozenset(
+    {"professor", "coordenador", "diretor", "tecadm"}
+)
+
+
+def _expand_roles_for_aplicador(base_roles, view_func):
+    """Inclui aplicador em leituras municipais (como professor), exceto blocklist."""
+    roles = list(base_roles)
+    norm = {Roles.normalize(r) for r in base_roles}
+    if Roles.APLICADOR in norm:
+        return roles
+    if not (norm & _MUNICIPAL_STAFF_FOR_APLICADOR):
+        return roles
+    if view_func and view_func.__name__ in _APLICADOR_AUTO_BLOCKLIST:
+        return roles
+    roles.append(Roles.APLICADOR)
+    return roles
 
 
 def get_current_user_from_token():
@@ -99,8 +126,6 @@ def role_required(*roles):
     Raises:
         403: Se usuário não autenticado ou role incorreto
     """
-    from .roles import Roles
-    
     def decorator(f):
         @wraps(f)
         def wrapper(*args, **kwargs):
@@ -112,8 +137,9 @@ def role_required(*roles):
             # Normalizar role do usuário
             user_role = Roles.normalize(user.get('role', ''))
             
-            # Normalizar roles aceitos
-            normalized_roles = [Roles.normalize(role) for role in roles]
+            # Normalizar roles aceitos (aplicador em leituras municipais)
+            effective_roles = _expand_roles_for_aplicador(roles, f)
+            normalized_roles = [Roles.normalize(role) for role in effective_roles]
             
             # Verificar se o role do usuário está entre os aceitos
             if user_role not in normalized_roles:

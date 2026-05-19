@@ -35,7 +35,7 @@ def dashboard_admin():
 
 @bp.route("/dashboard/tecadm", methods=["GET"])
 @jwt_required()
-@role_required("tecadm")
+@role_required("tecadm", "aplicador")
 @requires_city_context
 def dashboard_tecadm():
     try:

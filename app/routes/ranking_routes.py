@@ -46,6 +46,7 @@ def parse_ranking_request_args(args) -> Tuple[str, int, int, Dict[str, str]]:
         "serie": _clean_arg(args.get("serie")),
         "turma": _clean_arg(args.get("turma")),
         "periodo": _clean_arg(args.get("periodo")),
+        "disciplina": _clean_arg(args.get("disciplina")),
         "avaliacao": avaliacao,
         "gabarito_id": gabarito_id,
         "evaluation_id": evaluation_id,

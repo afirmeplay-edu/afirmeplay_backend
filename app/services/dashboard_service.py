@@ -2373,15 +2373,41 @@ class DashboardService:
         return ranking
 
     @classmethod
-    def _build_teacher_ranking(cls, scope: Dict[str, Any], limit: Optional[int] = None) -> List[Dict[str, Any]]:
+    def _build_teacher_ranking(
+        cls,
+        scope: Dict[str, Any],
+        limit: Optional[int] = None,
+        filters: Optional[Dict[str, Any]] = None,
+    ) -> List[Dict[str, Any]]:
         from sqlalchemy import cast
         from sqlalchemy.dialects.postgresql import VARCHAR
+
+        normalized_filters = filters or {}
+        evaluation_id = str(normalized_filters.get("evaluation_id") or "").strip()
+        answer_sheet_id = str(normalized_filters.get("answer_sheet_id") or "").strip()
+        selected_school_id = str(normalized_filters.get("escola") or "").strip()
+        selected_grade_id = str(normalized_filters.get("serie") or "").strip()
+        selected_class_id = str(normalized_filters.get("turma") or "").strip()
+        discipline_id = str(normalized_filters.get("disciplina") or "").strip()
+        use_answer_sheet = bool(answer_sheet_id and not evaluation_id)
 
         teacher_alias = aliased(Teacher)
         class_grade_alias = aliased(Grade)
         student_grade_alias = aliased(Grade)
-        avg_proficiency_expr = func.coalesce(func.avg(EvaluationResult.proficiency), 0)
-        avg_grade_expr = func.coalesce(func.avg(EvaluationResult.grade), 0)
+        score_model = AnswerSheetResult if use_answer_sheet else EvaluationResult
+        discipline_grade_expr = None
+        discipline_prof_expr = None
+        if discipline_id:
+            if use_answer_sheet:
+                discipline_grade_expr = cast(AnswerSheetResult.proficiency_by_subject[discipline_id]["grade"].astext, db.Float)
+                discipline_prof_expr = cast(AnswerSheetResult.proficiency_by_subject[discipline_id]["proficiency"].astext, db.Float)
+            else:
+                discipline_grade_expr = cast(EvaluationResult.subject_results[discipline_id]["grade"].astext, db.Float)
+                discipline_prof_expr = cast(EvaluationResult.subject_results[discipline_id]["proficiency"].astext, db.Float)
+        score_grade_expr = discipline_grade_expr if discipline_grade_expr is not None else score_model.grade
+        score_prof_expr = discipline_prof_expr if discipline_prof_expr is not None else score_model.proficiency
+        avg_proficiency_expr = func.coalesce(func.avg(score_prof_expr), 0)
+        avg_grade_expr = func.coalesce(func.avg(score_grade_expr), 0)
         er_by_teacher = (
             db.session.query(
                 TeacherClass.teacher_id.label("teacher_id"),
@@ -2394,6 +2420,10 @@ class DashboardService:
                 EvaluationResult,
                 and_(
                     EvaluationResult.student_id == Student.id,
+                    EvaluationResult.test_id == evaluation_id if evaluation_id else True,
+                    cast(EvaluationResult.subject_results[discipline_id]["proficiency"].astext, db.Float).isnot(None)
+                    if discipline_id
+                    else True,
                     or_(
                         EvaluationResult.class_id_snapshot == Class.id,
                         and_(
@@ -2413,24 +2443,51 @@ class DashboardService:
             .select_from(TeacherClass)
             .join(Class, Class.id == TeacherClass.class_id)
             .join(Student, Student.class_id == Class.id)
-            .join(AnswerSheetResult, AnswerSheetResult.student_id == Student.id)
+            .join(
+                AnswerSheetResult,
+                and_(
+                    AnswerSheetResult.student_id == Student.id,
+                    AnswerSheetResult.gabarito_id == answer_sheet_id if answer_sheet_id else True,
+                    cast(AnswerSheetResult.proficiency_by_subject[discipline_id]["proficiency"].astext, db.Float).isnot(None)
+                    if discipline_id
+                    else True,
+                ),
+            )
             .group_by(TeacherClass.teacher_id)
         ).subquery()
+        if use_answer_sheet:
+            total_evaluations_expr = func.coalesce(asr_by_teacher.c.cnt, 0)
+        elif evaluation_id:
+            total_evaluations_expr = func.coalesce(er_by_teacher.c.cnt, 0)
+        else:
+            total_evaluations_expr = func.coalesce(er_by_teacher.c.cnt, 0) + func.coalesce(asr_by_teacher.c.cnt, 0)
+
+        score_present_expr = score_model.id.isnot(None)
+        grade_name_for_scope = case(
+            (score_present_expr, func.coalesce(class_grade_alias.name, student_grade_alias.name)),
+            else_=None,
+        )
+        classes_count_expr = func.count(
+            distinct(
+                case(
+                    (score_present_expr, TeacherClass.class_id),
+                    else_=None,
+                )
+            )
+        )
         query = (
             db.session.query(
                 teacher_alias.id.label("teacher_id"),
                 teacher_alias.name.label("teacher_name"),
                 User.email.label("teacher_email"),
                 func.array_remove(
-                    func.array_agg(distinct(func.coalesce(class_grade_alias.name, student_grade_alias.name))),
+                    func.array_agg(distinct(grade_name_for_scope)),
                     None,
                 ).label("grade_names"),
                 avg_grade_expr.label("average_grade"),
                 avg_proficiency_expr.label("average_proficiency"),
-                (
-                    func.coalesce(er_by_teacher.c.cnt, 0) + func.coalesce(asr_by_teacher.c.cnt, 0)
-                ).label("total_evaluations"),
-                func.count(distinct(TeacherClass.class_id)).label("classes_count"),
+                total_evaluations_expr.label("total_evaluations"),
+                classes_count_expr.label("classes_count"),
             )
             .select_from(teacher_alias)
             .join(TeacherClass, TeacherClass.teacher_id == teacher_alias.id)
@@ -2439,16 +2496,23 @@ class DashboardService:
             .outerjoin(class_grade_alias, class_grade_alias.id == Class.grade_id)
             .outerjoin(student_grade_alias, student_grade_alias.id == Student.grade_id)
             .outerjoin(
-                EvaluationResult,
+                score_model,
                 and_(
-                    EvaluationResult.student_id == Student.id,
+                    score_model.student_id == Student.id,
+                    score_model.gabarito_id == answer_sheet_id if use_answer_sheet and answer_sheet_id else True,
+                    score_model.test_id == evaluation_id if (not use_answer_sheet and evaluation_id) else True,
+                    discipline_prof_expr.isnot(None) if discipline_prof_expr is not None else True,
                     or_(
-                        EvaluationResult.class_id_snapshot == Class.id,
+                        score_model.class_id_snapshot == Class.id if not use_answer_sheet else False,
                         and_(
-                            EvaluationResult.class_id_snapshot.is_(None),
+                            score_model.class_id_snapshot.is_(None),
                             Student.class_id == Class.id,
-                        ),
-                    ),
+                        )
+                        if not use_answer_sheet
+                        else Student.class_id == Class.id,
+                    )
+                    if not use_answer_sheet
+                    else Student.class_id == Class.id,
                 ),
             )
             .outerjoin(er_by_teacher, er_by_teacher.c.teacher_id == teacher_alias.id)
@@ -2471,6 +2535,12 @@ class DashboardService:
             if not municipal_school_ids:
                 return []
             query = query.filter(cast(Class._school_id, VARCHAR).in_(municipal_school_ids))
+        if selected_school_id:
+            query = query.filter(Class._school_id == selected_school_id)
+        if selected_grade_id:
+            query = query.filter(or_(Class.grade_id == selected_grade_id, Student.grade_id == selected_grade_id))
+        if selected_class_id:
+            query = query.filter(Student.class_id == selected_class_id)
 
         query = query.group_by(
             teacher_alias.id,
@@ -2479,7 +2549,7 @@ class DashboardService:
             er_by_teacher.c.cnt,
             asr_by_teacher.c.cnt,
         ).having(
-            (func.coalesce(er_by_teacher.c.cnt, 0) + func.coalesce(asr_by_teacher.c.cnt, 0)) > 0
+            total_evaluations_expr > 0
         ).order_by(avg_proficiency_expr.desc(), avg_grade_expr.desc())
 
         ranking = []

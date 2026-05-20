@@ -96,6 +96,60 @@ class TestRankingReportService(unittest.TestCase):
         self.assertEqual(payload["general_rankings"]["visibility"]["schools_by_course"], True)
         self.assertEqual(payload["general_rankings"]["visibility"]["students_by_course"], True)
         self.assertEqual(payload["students_totals"]["count"], 123)
+        self.assertIn("overview", payload)
+        self.assertIn("municipal_ranking", payload)
+        self.assertIn("school_class_ranking", payload)
+        self.assertIn("teachers_top", payload)
+
+    def test_general_ranking_with_escola_and_serie_filters(self):
+        req = RankingReportService.build_request(
+            "general",
+            page=1,
+            per_page=10,
+            filters={
+                "escola": "school-1",
+                "serie": "grade-1",
+                "evaluation_id": "eval-1",
+            },
+        )
+        school_row = {
+            "school_id": "school-1",
+            "school_name": "Escola 1",
+            "average_score": 7.1,
+            "average_proficiency": 260.4,
+            "classification": "Básico",
+            "students_count": 20,
+            "total_students": 25,
+            "participating_students": 15,
+            "participation_rate": 60.0,
+            "series": [
+                {
+                    "grade_id": "grade-1",
+                    "grade_name": "4º Ano",
+                    "average_score": 7.1,
+                    "average_proficiency": 260.4,
+                    "classification": "Básico",
+                    "students_count": 20,
+                    "total_students": 25,
+                    "participating_students": 15,
+                }
+            ],
+        }
+        with patch.object(RankingReportService, "_resolve_scope", return_value={"scope": "escola", "school_ids": ["school-1"]}):
+            with patch.object(RankingReportService, "_build_school_general_rows", return_value=[school_row]):
+                with patch("app.services.ranking_report_service.DashboardService.get_school_ranking_card") as school_card_mock:
+                    with patch.object(RankingReportService, "_build_evaluation_class_rows", return_value=[]):
+                        with patch("app.services.ranking_report_service.DashboardService.get_ranking_alunos") as ranking_mock:
+                            with patch("app.services.ranking_report_service.db.session.query") as grade_query_mock:
+                                school_card_mock.return_value = {"ranking": [], "total": 0}
+                                ranking_mock.return_value = {"ranking": [], "total": 0}
+                                grade_query_mock.return_value.filter.return_value.first.return_value = type(
+                                    "GradeRow", (), {"name": "4º Ano"}
+                                )()
+                                payload = RankingReportService.get_report({"role": "admin"}, req)
+        self.assertEqual(payload["general_rankings"]["visibility"]["schools_by_course"], False)
+        self.assertEqual(payload["grade_options"], [{"id": "grade-1", "name": "4º Ano"}])
+        self.assertIn("classes_ranking", payload)
 
 
 class TestRankingRoutesParse(unittest.TestCase):
@@ -143,6 +197,19 @@ class TestRankingRoutesParse(unittest.TestCase):
         self.assertIsNone(filters["municipio"])
         self.assertIsNone(filters["escola"])
         self.assertIsNone(filters["avaliacao"])
+
+
+class TestAdequadoAvancadoClassification(unittest.TestCase):
+    def test_matches_adequado_and_avancado(self):
+        self.assertTrue(RankingReportService._is_adequado_or_avancado_classification("Adequado"))
+        self.assertTrue(RankingReportService._is_adequado_or_avancado_classification("Avançado"))
+        self.assertTrue(RankingReportService._is_adequado_or_avancado_classification("avancado"))
+
+    def test_rejects_other_levels(self):
+        self.assertFalse(RankingReportService._is_adequado_or_avancado_classification("Básico"))
+        self.assertFalse(RankingReportService._is_adequado_or_avancado_classification("Abaixo do Básico"))
+        self.assertFalse(RankingReportService._is_adequado_or_avancado_classification(""))
+        self.assertFalse(RankingReportService._is_adequado_or_avancado_classification(None))
 
 
 class TestRankingRoutesValidation(unittest.TestCase):

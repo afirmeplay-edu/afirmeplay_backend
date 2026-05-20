@@ -5,7 +5,7 @@ from app import db
 from app.models.user import User, RoleEnum
 from app.models.school import School
 from app.routes.mobile.blueprint import mobile_bp
-from app.services.mobile.device_service import is_valid_uuid_v4, register_or_touch_device
+from app.services.mobile.device_service import is_valid_uuid_v4
 from app.services.mobile.bundle_service import build_bundle_response
 from app.services.mobile.upload_service import process_batch
 
@@ -83,7 +83,6 @@ def mobile_sync_bundle():
         return jsonify({"error": "escola não encontrada"}), 404
 
     try:
-        register_or_touch_device(str(user.id), device_id)
         payload = build_bundle_response(
             school_id, since_val, page, page_size, refresh
         )
@@ -142,7 +141,6 @@ def mobile_sync_upload():
 
     try:
         results = process_batch(submissions, str(user.id), school_id)
-        register_or_touch_device(str(user.id), device_id)
         db.session.commit()
 
         errors = [r for r in results if r.get("status") == "error"]
@@ -164,10 +162,6 @@ def mobile_sync_upload():
             )
 
         return jsonify({"results": results}), 200
-    except PermissionError as e:
-        db.session.rollback()
-        print(f"[mobile/v1/sync/upload] 403 — {e}")
-        return jsonify({"error": str(e)}), 403
     except Exception as e:
         db.session.rollback()
         print(f"[mobile/v1/sync/upload] 500 — {type(e).__name__}: {e}")

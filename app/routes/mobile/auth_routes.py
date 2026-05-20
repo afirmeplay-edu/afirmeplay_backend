@@ -3,11 +3,10 @@ from datetime import timedelta
 from flask import request, jsonify, g
 from flask_jwt_extended import create_access_token
 
-from app import db
 from app.models.user import User, RoleEnum
 from app.utils.auth import authenticate_usuario
 from app.routes.mobile.blueprint import mobile_bp
-from app.services.mobile.device_service import register_or_touch_device, is_valid_uuid_v4
+from app.services.mobile.device_service import is_valid_uuid_v4
 from app.services.aplicador_user_service import resolve_user_by_login_ident
 
 _MOBILE_LOGIN_ROLES = frozenset(
@@ -96,17 +95,6 @@ def mobile_auth_login():
         },
         expires_delta=timedelta(hours=8),
     )
-
-    try:
-        register_or_touch_device(str(usuario.id), device_id)
-        db.session.commit()
-    except PermissionError as e:
-        db.session.rollback()
-        print(f"[mobile/v1/auth/login] 403 — device: {e}")
-        return jsonify({"error": str(e)}), 403
-    except Exception:
-        db.session.rollback()
-        raise
 
     print(
         f"[mobile/v1/auth/login] 200 — user_id={usuario.id} role={usuario.role.value} "

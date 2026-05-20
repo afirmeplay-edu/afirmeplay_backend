@@ -4,20 +4,25 @@ info:
     description: |
         API offline-first isolada em `/mobile/v1`.
 
+        - **Discovery (bootstrap):** `GET /available-cities` — público, sem JWT; lista municípios e `api_base_url` de cada backend (catálogo `public.mobile_city_directory` na API central).
         - **Auth aplicador:** `POST /auth/login` — JWT (Flask-JWT-Extended); contexto de município via `X-City-ID`, `X-City-Slug` ou subdomínio.
         - **Sync:** `GET /sync/bundle`, `POST /sync/upload` — Bearer JWT mobile + `X-Device-Id`.
         - **Pacote offline (código web):** `POST /offline-pack/register`, `GET /offline-pack`, `GET/PATCH/DELETE /offline-pack/{offline_pack_id}`, `POST /offline-pack/bulk-delete` (JWT do **login web** + tenant); `POST /offline-pack/redeem` (só `X-Device-Id` + corpo, com resolução de município via `public.mobile_offline_pack_registry` quando o código existe lá).
 
+        **Fluxo multi-VPS:** o app chama `GET /available-cities` na API central (`prod-api.afirmeplay.com.br`), o usuário escolhe o município e passa a usar `api_base_url` retornada para redeem, login e sync.
+
         Contrato normativo detalhado do **redeem**, alunos e aplicadores: **`OFFLINE_PACK_API_CONTRACT.md`** (`api_contract_version` **1.1**).
 
         Multitenant: schemas PostgreSQL `city_*` + `public`.
-    version: 1.1.0
+    version: 1.2.0
 
 servers:
     - url: /
       description: Mesma origem do backend
 
 tags:
+    - name: discovery
+      description: Catálogo público de municípios e URLs de API (bootstrap multi-VPS)
     - name: auth
       description: Login aplicador (JWT mobile)
     - name: sync
@@ -26,6 +31,43 @@ tags:
       description: Geração e resgate de código de pacote offline
 
 paths:
+    /mobile/v1/available-cities:
+        get:
+            tags: [discovery]
+            summary: Listar municípios disponíveis para o app
+            description: |
+                Endpoint **público** na API central. Não exige JWT, `X-City-ID` nem tenant.
+
+                Retorna apenas entradas com `mobile_visible=true` e `is_active=true`, ordenadas por `sort_order` e nome.
+
+                Após a seleção, o app deve usar `api_base_url` de cada item como base HTTP para
+                `POST /offline-pack/redeem`, `POST /auth/login` e rotas de sync na VPS daquele município.
+            responses:
+                "200":
+                    description: Catálogo de discovery
+                    content:
+                        application/json:
+                            schema:
+                                $ref: "#/components/schemas/AvailableCitiesResponse"
+                            example:
+                                api_contract_version: "1.0"
+                                generated_at: "2026-05-20T12:00:00Z"
+                                cities:
+                                    - id: "a1b2c3d4-e5f6-4789-a012-000000000001"
+                                      tenant_code: "AFR001"
+                                      slug: "afirme"
+                                      name: "Afirme Play (VPS central)"
+                                      hosting_mode: "shared"
+                                      api_base_url: "https://prod-api.afirmeplay.com.br"
+                                    - id: "b2c3d4e5-f6a7-4890-b123-000000000002"
+                                      tenant_code: "LIM001"
+                                      slug: "limoeirodeanadia"
+                                      name: "Limoeiro de Anadia"
+                                      hosting_mode: "dedicated"
+                                      api_base_url: "https://api.afirmeplay.com.br"
+                "500":
+                    $ref: "#/components/responses/InternalError"
+
     /mobile/v1/auth/login:
         post:
             tags: [auth]
@@ -418,6 +460,46 @@ components:
                 type: string
 
     schemas:
+        AvailableCitiesResponse:
+            type: object
+            required: [api_contract_version, generated_at, cities]
+            properties:
+                api_contract_version:
+                    type: string
+                    example: "1.0"
+                generated_at:
+                    type: string
+                    description: ISO 8601 UTC (sufixo Z)
+                cities:
+                    type: array
+                    items:
+                        $ref: "#/components/schemas/AvailableCityEntry"
+
+        AvailableCityEntry:
+            type: object
+            required:
+                [id, tenant_code, slug, name, hosting_mode, api_base_url]
+            properties:
+                id:
+                    type: string
+                    description: UUID estável no catálogo mobile (não é o city_id interno do multitenant)
+                tenant_code:
+                    type: string
+                    description: Código técnico estável (ex. AFR001, LIM001)
+                slug:
+                    type: string
+                    description: Identificador amigável; usar em X-City-Slug no login aplicador
+                name:
+                    type: string
+                    description: Nome exibido na seleção de município
+                hosting_mode:
+                    type: string
+                    enum: [shared, dedicated]
+                api_base_url:
+                    type: string
+                    format: uri
+                    description: Base HTTP da API daquele município (sem barra final)
+
         MobileLoginRequest:
             type: object
             required: [password]
@@ -927,6 +1009,12 @@ components:
                         $ref: "#/components/schemas/ErrorBody"
         NotFound:
             description: Recurso não encontrado
+            content:
+                application/json:
+                    schema:
+                        $ref: "#/components/schemas/ErrorBody"
+        InternalError:
+            description: Erro interno do servidor
             content:
                 application/json:
                     schema:

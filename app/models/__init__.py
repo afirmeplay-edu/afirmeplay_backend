@@ -71,3 +71,4 @@ from .mobile_models import (
     MobileSyncSubmission,
 )
 from .mobile_offline_pack_registry import MobileOfflinePackRegistry
+from .mobile_city_directory import MobileCityDirectory

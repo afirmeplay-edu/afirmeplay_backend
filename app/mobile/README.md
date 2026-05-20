@@ -16,6 +16,7 @@ Planejamento **revisado e fechado** para integração do app mobile com o backen
 | Arquivo | Conteúdo |
 |---------|----------|
 | [PLANEJAMENTO_SINCRONIZACAO.md](./PLANEJAMENTO_SINCRONIZACAO.md) | Decisões absolutas, contratos, versão, dispositivo, download/upload, limpeza, fases M1–M5 |
+| [MOBILE_TENANT_DISCOVERY.md](./MOBILE_TENANT_DISCOVERY.md) | Catálogo `mobile_city_directory`, `GET /available-cities`, multi-VPS |
 
 ## Referência ao repositório (inalterada pelo módulo mobile)
 

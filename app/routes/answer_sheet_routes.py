@@ -4095,7 +4095,12 @@ def _obter_gabaritos_por_municipio_cartao(
         if not gid or gid in seen:
             continue
         seen.add(gid)
-        out.append({"id": gid, "titulo": (getattr(g, "title", None) or "Gabarito")})
+        disciplina = ""
+        blocks = (((getattr(g, "blocks_config", None) or {}).get("topology") or {}).get("blocks")) or []
+        if blocks:
+            first_block = blocks[0] if isinstance(blocks[0], dict) else {}
+            disciplina = str(first_block.get("subject_name") or "").strip()
+        out.append({"id": gid, "titulo": (getattr(g, "title", None) or "Gabarito"), "disciplina": disciplina})
     if not periodo_bounds or not out:
         return out
     school_ids_city = [s.id for s in School.query.filter(School.city_id == municipio_id).all()]

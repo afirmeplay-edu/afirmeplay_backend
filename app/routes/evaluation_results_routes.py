@@ -5874,7 +5874,7 @@ def _obter_avaliacoes_por_municipio(
         periodo_bounds: Se definido, só inclui provas com ClassTest.application no mês (ver _parse_periodo_bounds).
 
     Returns:
-        Lista de avaliações no formato [{"id": "...", "titulo": "..."}]
+        Lista de avaliações no formato [{"id": "...", "titulo": "...", "disciplina": "..."}]
     """
     city = City.query.get(municipio_id)
     if not city:
@@ -5887,7 +5887,8 @@ def _obter_avaliacoes_por_municipio(
     # Exclui fluxo de olimpíada (StudentTestOlimpics); competições (COMPETICAO) permanecem listadas
     excluir_olimpiada = or_(Test.type.is_(None), func.upper(Test.type) != 'OLIMPIADA')
     if permissao['scope'] == 'escola':
-        test_query = Test.query.with_entities(Test.id, Test.title)
+        test_query = Test.query.with_entities(Test.id, Test.title, Subject.name)
+        test_query = test_query.outerjoin(Subject, Subject.id == Test.subject)
         test_query = filter_tests_by_user(test_query, user, escola_param, require_school=False)
         
         # Aplicar joins para filtrar por município
@@ -5901,7 +5902,8 @@ def _obter_avaliacoes_por_municipio(
         avaliacoes = test_query.distinct().all()
     else:
         # Para admin e tecadm, aplicar filtro por município
-        query_avaliacoes = Test.query.with_entities(Test.id, Test.title)\
+        query_avaliacoes = Test.query.with_entities(Test.id, Test.title, Subject.name)\
+                            .outerjoin(Subject, Subject.id == Test.subject)\
                             .join(ClassTest, Test.id == ClassTest.test_id)\
                             .join(Class, ClassTest.class_id == Class.id)\
                             .join(School, School.id == cast(Class.school_id, String))\
@@ -5912,7 +5914,7 @@ def _obter_avaliacoes_por_municipio(
 
         avaliacoes = query_avaliacoes.distinct().all()
     
-    return [{"id": str(a[0]), "titulo": a[1]} for a in avaliacoes]
+    return [{"id": str(a[0]), "titulo": a[1], "disciplina": (a[2] or "")} for a in avaliacoes]
 
 
 def _obter_escolas_por_avaliacao(

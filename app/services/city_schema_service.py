@@ -130,6 +130,78 @@ COMMENT ON TABLE "{schema}".ideb_meta_saves IS 'Calculadora IDEB: payload salvo 
 """
 
 
+def get_monitoring_tables_ddl(schema: str) -> str:
+    """DDL idempotente de ações de monitoramento no schema city_xxx."""
+    return f"""
+CREATE TABLE IF NOT EXISTS "{schema}".monitoring_action (
+    id VARCHAR NOT NULL PRIMARY KEY,
+    source_type VARCHAR(30) NOT NULL,
+    source_id VARCHAR NOT NULL,
+    student_id VARCHAR NOT NULL REFERENCES "{schema}".student(id),
+    school_id VARCHAR(36) REFERENCES "{schema}".school(id),
+    class_id UUID REFERENCES "{schema}".class(id),
+    grade_id UUID REFERENCES public.grade(id),
+    discipline VARCHAR(120),
+    coordinator_id VARCHAR REFERENCES public.users(id),
+    pedagogical_action TEXT,
+    responsible_id VARCHAR REFERENCES public.users(id),
+    deadline DATE,
+    status VARCHAR(30) NOT NULL DEFAULT 'pendente',
+    completed_at DATE,
+    done_by_school BOOLEAN NOT NULL DEFAULT FALSE,
+    seen_by_semed BOOLEAN NOT NULL DEFAULT FALSE,
+    note TEXT,
+    created_by VARCHAR REFERENCES public.users(id),
+    updated_by VARCHAR REFERENCES public.users(id),
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_monitoring_action_source_student
+    ON "{schema}".monitoring_action (source_type, source_id, student_id);
+CREATE INDEX IF NOT EXISTS idx_monitoring_action_school_status
+    ON "{schema}".monitoring_action (school_id, status);
+
+CREATE TABLE IF NOT EXISTS "{schema}".monitoring_action_history (
+    id VARCHAR NOT NULL PRIMARY KEY,
+    monitoring_action_id VARCHAR NOT NULL
+        REFERENCES "{schema}".monitoring_action(id),
+    changed_by VARCHAR REFERENCES public.users(id),
+    changed_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    changed_fields JSON,
+    old_values JSON,
+    new_values JSON,
+    note TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_monitoring_action_history_action_changed_at
+    ON "{schema}".monitoring_action_history (monitoring_action_id, changed_at);
+COMMENT ON TABLE "{schema}".monitoring_action IS 'Ações pedagógicas de monitoramento (avaliação/cartão resposta)';
+COMMENT ON TABLE "{schema}".monitoring_action_history IS 'Histórico de alterações em monitoring_action';
+"""
+
+
+def get_saved_ata_sala_tables_ddl(schema: str) -> str:
+    """DDL idempotente de atas de sala salvas no schema city_xxx."""
+    return f"""
+CREATE TABLE IF NOT EXISTS "{schema}".saved_ata_sala (
+    id VARCHAR PRIMARY KEY,
+    user_id VARCHAR NOT NULL REFERENCES public.users(id),
+    created_by_name VARCHAR(255) NOT NULL,
+    city_id VARCHAR NOT NULL,
+    school_id VARCHAR(36) NOT NULL REFERENCES "{schema}".school(id),
+    title VARCHAR(255) NOT NULL,
+    modo_lista VARCHAR(30) NOT NULL,
+    filters JSON NOT NULL,
+    content JSON NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_saved_ata_sala_user_id ON "{schema}".saved_ata_sala(user_id);
+CREATE INDEX IF NOT EXISTS idx_saved_ata_sala_school_updated ON "{schema}".saved_ata_sala(school_id, updated_at);
+CREATE INDEX IF NOT EXISTS idx_saved_ata_sala_city_updated ON "{schema}".saved_ata_sala(city_id, updated_at);
+COMMENT ON TABLE "{schema}".saved_ata_sala IS 'Atas de sala salvas por usuário (visibilidade por escola/município)';
+"""
+
+
 def provision_plantao_online_for_city_schema(schema_name: str) -> None:
     """
     Aplica apenas o bloco DDL Plantão Online em um schema city_* já existente (idempotente).
@@ -666,6 +738,8 @@ def _get_city_tables_ddl(schema: str) -> str:
     play_tv_block = get_play_tv_tables_ddl(schema)
     plantao_online_block = get_plantao_online_tables_ddl(schema)
     ideb_meta_block = get_ideb_meta_tables_ddl(schema)
+    monitoring_block = get_monitoring_tables_ddl(schema)
+    saved_ata_block = get_saved_ata_sala_tables_ddl(schema)
     # Uso de {schema} único; literais JSON como '{{}}' para .format()
     return f"""
 CREATE TABLE IF NOT EXISTS "{schema}".school (
@@ -1373,7 +1447,7 @@ CREATE TABLE IF NOT EXISTS "{schema}".form_result_cache (
 COMMENT ON TABLE "{schema}".form_result_cache IS 'Cache de resultados de formulários';
 CREATE INDEX IF NOT EXISTS idx_form_result_cache_form_type ON "{schema}".form_result_cache(form_id, report_type);
 CREATE INDEX IF NOT EXISTS idx_form_result_cache_dirty ON "{schema}".form_result_cache(is_dirty);
-""" + play_tv_block + plantao_online_block + ideb_meta_block + f"""
+""" + play_tv_block + plantao_online_block + ideb_meta_block + monitoring_block + saved_ata_block + f"""
 CREATE TABLE IF NOT EXISTS "{schema}".certificate_templates (
     id VARCHAR PRIMARY KEY,
     evaluation_id VARCHAR REFERENCES "{schema}".test(id),

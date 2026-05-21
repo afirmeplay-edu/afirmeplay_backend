@@ -21,6 +21,7 @@ class MonitoringAction(db.Model):
     coordinator_id = db.Column(db.String, db.ForeignKey("public.users.id"), nullable=True)
     pedagogical_action = db.Column(db.Text, nullable=True)
     responsible_id = db.Column(db.String, db.ForeignKey("public.users.id"), nullable=True)
+    responsible_name = db.Column(db.String(255), nullable=True)
     deadline = db.Column(db.Date, nullable=True)
     status = db.Column(db.String(30), nullable=False, default="pendente")
     completed_at = db.Column(db.Date, nullable=True)
@@ -57,6 +58,7 @@ class MonitoringAction(db.Model):
             "coordinator_id": self.coordinator_id,
             "pedagogical_action": self.pedagogical_action,
             "responsible_id": self.responsible_id,
+            "responsible_name": self.responsible_name,
             "deadline": self.deadline.isoformat() if self.deadline else None,
             "status": self.status,
             "completed_at": self.completed_at.isoformat() if self.completed_at else None,

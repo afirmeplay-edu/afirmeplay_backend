@@ -145,6 +145,7 @@ CREATE TABLE IF NOT EXISTS "{schema}".monitoring_action (
     coordinator_id VARCHAR REFERENCES public.users(id),
     pedagogical_action TEXT,
     responsible_id VARCHAR REFERENCES public.users(id),
+    responsible_name VARCHAR(255),
     deadline DATE,
     status VARCHAR(30) NOT NULL DEFAULT 'pendente',
     completed_at DATE,
@@ -177,6 +178,28 @@ CREATE INDEX IF NOT EXISTS idx_monitoring_action_history_action_changed_at
 COMMENT ON TABLE "{schema}".monitoring_action IS 'Ações pedagógicas de monitoramento (avaliação/cartão resposta)';
 COMMENT ON TABLE "{schema}".monitoring_action_history IS 'Histórico de alterações em monitoring_action';
 """
+
+
+def get_monitoring_action_column_migrations_ddl(schema: str) -> str:
+    """ALTER idempotente para colunas adicionadas após a criação inicial."""
+    return f"""
+ALTER TABLE "{schema}".monitoring_action
+    ADD COLUMN IF NOT EXISTS responsible_name VARCHAR(255);
+"""
+
+
+def ensure_monitoring_action_columns(schema: str) -> None:
+    """Garante colunas novas em monitoring_action (idempotente)."""
+    import re
+
+    from sqlalchemy import text
+
+    from app import db
+
+    if not schema or not re.match(r"^city_[a-zA-Z0-9_]+$", schema):
+        return
+    db.session.execute(text(get_monitoring_action_column_migrations_ddl(schema)))
+    db.session.commit()
 
 
 def get_saved_ata_sala_tables_ddl(schema: str) -> str:

@@ -21,6 +21,7 @@ from app.models.manager import Manager
 from app.models.monitoring_action import MonitoringAction
 from app.models.monitoring_action_history import MonitoringActionHistory
 from app.models.question import Question
+from app.models.skill import Skill
 from app.models.school import School
 from app.models.student import Student
 from app.models.studentAnswer import StudentAnswer
@@ -29,7 +30,13 @@ from app.models.subject import Subject
 from app.models.test import Test
 from app.models.user import RoleEnum, User
 from app.permissions.utils import get_user_scope
+from app.services.city_schema_service import ensure_monitoring_action_columns
 from app.services.evaluation_result_snapshot import municipal_evaluation_results_query
+from app.services.skills_map_service import (
+    _extract_skill_ids_from_question_field,
+    _fetch_skills_batch,
+)
+from app.utils.tenant_middleware import city_id_to_schema_name, get_current_tenant_context
 
 
 class MonitoringValidationError(Exception):
@@ -43,6 +50,7 @@ class MonitoringValidationError(Exception):
 class MonitoringService:
     STAFF_ROLES = {"admin", "tecadm", "diretor", "coordenador", "professor"}
     STATUS_ALLOWED = {"pendente", "sendo_realizada", "nao_realizado"}
+    _monitoring_columns_ensured: Set[str] = set()
 
     @staticmethod
     def _normalize_source_type(raw: Optional[str]) -> str:
@@ -81,6 +89,59 @@ class MonitoringService:
             return (value or "").lower() if isinstance(value, str) else ""
         if value is None:
             return 0
+        return value
+
+    @staticmethod
+    def _ensure_monitoring_schema_columns(filters: Dict[str, Any]) -> None:
+        municipio = (filters.get("municipio") or "").strip()
+        schema = ""
+        if municipio:
+            schema = city_id_to_schema_name(municipio) or ""
+        if not schema:
+            ctx = get_current_tenant_context()
+            schema = (ctx.schema if ctx else None) or ""
+        if not schema or schema in MonitoringService._monitoring_columns_ensured:
+            return
+        ensure_monitoring_action_columns(schema)
+        MonitoringService._monitoring_columns_ensured.add(schema)
+
+    @staticmethod
+    def _action_responsible_display(action: Optional[MonitoringAction]) -> str:
+        if not action:
+            return ""
+        name = (action.responsible_name or "").strip()
+        if name:
+            return name
+        if action.responsible and action.responsible.name:
+            return str(action.responsible.name).strip()
+        return ""
+
+    @staticmethod
+    def _student_list_sort_key(item: Dict[str, Any], sort_by: str) -> Any:
+        nivel_rank = {
+            "Abaixo do Básico": 0,
+            "Básico": 1,
+            "Adequado": 2,
+            "Avançado": 3,
+        }
+        if sort_by == "aluno_nome":
+            return (item.get("aluno_nome") or "").lower()
+        if sort_by == "nivel":
+            return nivel_rank.get((item.get("nivel") or "").strip(), 99)
+        if sort_by in {"nota", "proficiencia"}:
+            try:
+                return float(item.get(sort_by) or 0)
+            except (TypeError, ValueError):
+                return 0.0
+        if sort_by in {"feita_pela_escola", "vista_pela_semed"}:
+            return 1 if item.get(sort_by) else 0
+        if sort_by in {"prazo", "realizada_em"}:
+            return item.get(sort_by) or ""
+        value = item.get(sort_by)
+        if isinstance(value, str):
+            return value.lower()
+        if value is None:
+            return ""
         return value
 
     @staticmethod
@@ -137,8 +198,9 @@ class MonitoringService:
 
     @staticmethod
     def _scope_filtered_school_ids(user: Dict[str, Any]) -> Optional[set]:
+        """None = sem filtro por escola (admin/tecadm). Set vazio = sem escolas permitidas."""
         scope = get_user_scope(user)
-        if scope.get("scope") == "all":
+        if scope.get("scope") in ("all", "municipio"):
             return None
         ids = set()
         if scope.get("school_id"):
@@ -156,14 +218,106 @@ class MonitoringService:
         scope_school_ids: Optional[set],
     ):
         if escola_id:
-            return query.filter(Class.school_id == escola_id)
+            return query.filter(cast(Class._school_id, String) == escola_id)
         if municipio:
-            query = query.join(School, School.id == Class.school_id).filter(School.city_id == municipio)
+            query = query.join(School, School.id == cast(Class._school_id, String)).filter(
+                School.city_id == municipio
+            )
         if scope_school_ids is not None:
             if not scope_school_ids:
                 return query.filter(False)
-            query = query.filter(Class.school_id.in_(list(scope_school_ids)))
+            query = query.filter(cast(Class._school_id, String).in_(list(scope_school_ids)))
         return query
+
+    @staticmethod
+    def _list_avaliacoes_options(user: Dict[str, Any], filters: Dict[str, Any]) -> List[Dict[str, str]]:
+        """Avaliações aplicadas no município (mesmo critério de Resultados)."""
+        municipio = (filters.get("municipio") or "").strip()
+        if not municipio:
+            return []
+        bounds = MonitoringService._parse_periodo_bounds((filters.get("periodo") or "").strip())
+        scope_school_ids = MonitoringService._scope_filtered_school_ids(user)
+        excluir_olimpiada = or_(Test.type.is_(None), func.upper(Test.type) != "OLIMPIADA")
+
+        scoped_ids = (
+            db.session.query(Test.id)
+            .join(ClassTest, Test.id == ClassTest.test_id)
+            .join(Class, ClassTest.class_id == Class.id)
+            .join(School, School.id == cast(Class._school_id, String))
+            .filter(School.city_id == municipio, excluir_olimpiada)
+        )
+        scoped_ids = MonitoringService._apply_class_test_application_period(scoped_ids, bounds)
+        if scope_school_ids is not None:
+            if not scope_school_ids:
+                return []
+            scoped_ids = scoped_ids.filter(School.id.in_(list(scope_school_ids)))
+
+        test_ids = [row[0] for row in scoped_ids.distinct().all() if row[0]]
+        if not test_ids:
+            return []
+
+        tests = (
+            Test.query.filter(Test.id.in_(test_ids))
+            .order_by(Test.created_at.desc())
+            .limit(120)
+            .all()
+        )
+        return [
+            {"id": str(test.id), "name": test.title or f"Avaliação {str(test.id)[:8]}"}
+            for test in tests
+        ]
+
+    @staticmethod
+    def _list_gabaritos_options(user: Dict[str, Any], filters: Dict[str, Any]) -> List[Dict[str, str]]:
+        """Cartões-resposta do município (mesmo critério de Resultados / cartão-resposta)."""
+        municipio = (filters.get("municipio") or "").strip()
+        if not municipio:
+            return []
+        bounds = MonitoringService._parse_periodo_bounds((filters.get("periodo") or "").strip())
+        scope_school_ids = MonitoringService._scope_filtered_school_ids(user)
+
+        school_ids_city = [
+            str(row[0])
+            for row in db.session.query(School.id).filter(School.city_id == municipio).all()
+            if row[0]
+        ]
+        if scope_school_ids is not None:
+            school_ids_city = [sid for sid in school_ids_city if sid in scope_school_ids]
+        if not school_ids_city:
+            return []
+
+        class_ids_in_city = db.session.query(Class.id).filter(Class._school_id.in_(school_ids_city))
+        gab_ids_from_results = (
+            db.session.query(AnswerSheetGabarito.id)
+            .join(AnswerSheetResult, AnswerSheetResult.gabarito_id == AnswerSheetGabarito.id)
+            .join(Student, AnswerSheetResult.student_id == Student.id)
+            .join(Class, Student.class_id == Class.id)
+            .join(School, Class._school_id == School.id)
+            .filter(School.city_id == municipio)
+            .distinct()
+        )
+        q = AnswerSheetGabarito.query.filter(
+            or_(
+                AnswerSheetGabarito.school_id.in_(school_ids_city),
+                AnswerSheetGabarito.class_id.in_(class_ids_in_city),
+                AnswerSheetGabarito.id.in_(gab_ids_from_results),
+            )
+        )
+        q = q.outerjoin(Test, AnswerSheetGabarito.test_id == Test.id).filter(
+            or_(
+                AnswerSheetGabarito.test_id.is_(None),
+                Test.evaluation_mode == "physical",
+            )
+        )
+        if bounds:
+            q = q.filter(
+                AnswerSheetGabarito.created_at >= bounds[0],
+                AnswerSheetGabarito.created_at <= bounds[1],
+            )
+        return [
+            {"id": g.id, "name": g.title or f"Gabarito {g.id[:8]}"}
+            for g in q.order_by(AnswerSheetGabarito.created_at.desc()).limit(120).all()
+        ]
 
     @staticmethod
     def _test_ids_for_options(user: Dict[str, Any], filters: Dict[str, Any]) -> Set[str]:
@@ -211,7 +365,7 @@ class MonitoringService:
         school_class_ids: Optional[List] = None
         if escola_id:
             school_class_ids = [
-                row[0] for row in db.session.query(Class.id).filter(Class.school_id == escola_id).all()
+                row[0] for row in db.session.query(Class.id).filter(Class._school_id == escola_id).all()
             ]
             if not school_class_ids:
                 return set()
@@ -226,7 +380,7 @@ class MonitoringService:
             if not school_ids:
                 return set()
             school_class_ids = [
-                row[0] for row in db.session.query(Class.id).filter(Class.school_id.in_(school_ids)).all()
+                row[0] for row in db.session.query(Class.id).filter(Class._school_id.in_(school_ids)).all()
             ]
             if school_class_ids:
                 query = query.filter(AnswerSheetGabarito.class_id.in_(school_class_ids))
@@ -237,7 +391,7 @@ class MonitoringService:
                 return set()
             school_class_ids = [
                 row[0]
-                for row in db.session.query(Class.id).filter(Class.school_id.in_(list(scope_school_ids))).all()
+                for row in db.session.query(Class.id).filter(Class._school_id.in_(list(scope_school_ids))).all()
             ]
             if school_class_ids:
                 query = query.filter(AnswerSheetGabarito.class_id.in_(school_class_ids))
@@ -277,7 +431,7 @@ class MonitoringService:
         if source_type == "avaliacao":
             query = (
                 db.session.query(School.id)
-                .join(Class, School.id == cast(Class.school_id, String))
+                .join(Class, School.id == cast(Class._school_id, String))
                 .join(ClassTest, Class.id == ClassTest.class_id)
                 .filter(ClassTest.test_id == source_id)
             )
@@ -299,7 +453,7 @@ class MonitoringService:
                     School,
                     or_(
                         School.id == Student.school_id,
-                        School.id == cast(Class.school_id, String),
+                        School.id == cast(Class._school_id, String),
                     ),
                 )
                 .filter(EvaluationResult.test_id == source_id)
@@ -334,7 +488,7 @@ class MonitoringService:
                     School,
                     or_(
                         School.id == Student.school_id,
-                        School.id == cast(Class.school_id, String),
+                        School.id == cast(Class._school_id, String),
                     ),
                 )
                 .filter(AnswerSheetResult.gabarito_id == source_id)
@@ -462,16 +616,16 @@ class MonitoringService:
 
         classes_query = Class.query
         if escola_id:
-            classes_query = classes_query.filter(Class.school_id == escola_id)
+            classes_query = classes_query.filter(Class._school_id == escola_id)
         elif scope_school_ids:
-            classes_query = classes_query.filter(Class.school_id.in_(list(scope_school_ids)))
+            classes_query = classes_query.filter(Class._school_id.in_(list(scope_school_ids)))
         turmas = [{"id": str(t.id), "name": t.name} for t in classes_query.order_by(Class.name.asc()).all()]
 
         if escola_id:
             grade_ids = [
                 row[0]
                 for row in db.session.query(Class.grade_id)
-                .filter(Class.school_id == escola_id, Class.grade_id.isnot(None))
+                .filter(Class._school_id == escola_id, Class.grade_id.isnot(None))
                 .distinct()
                 .all()
                 if row[0]
@@ -483,55 +637,38 @@ class MonitoringService:
 
         avaliacoes: List[Dict[str, str]] = []
         gabaritos: List[Dict[str, str]] = []
-        if estado and municipio:
-            if source_type == "avaliacao":
-                scoped_test_ids = MonitoringService._test_ids_for_options(user, filters)
-                evaluations_query = Test.query.order_by(Test.created_at.desc())
-                if scoped_test_ids:
-                    evaluations_query = evaluations_query.filter(Test.id.in_(list(scoped_test_ids)))
-                else:
-                    evaluations_query = evaluations_query.filter(False)
-                avaliacoes = [
-                    {"id": t.id, "name": t.title or f"Avaliação {t.id[:8]}"}
-                    for t in evaluations_query.limit(120).all()
-                ]
-            else:
-                scoped_gabarito_ids = MonitoringService._gabarito_ids_for_options(user, filters)
-                gabaritos_query = AnswerSheetGabarito.query.order_by(AnswerSheetGabarito.created_at.desc())
-                if scoped_gabarito_ids:
-                    gabaritos_query = gabaritos_query.filter(AnswerSheetGabarito.id.in_(list(scoped_gabarito_ids)))
-                else:
-                    gabaritos_query = gabaritos_query.filter(False)
-                gabaritos = [
-                    {
-                        "id": g.id,
-                        "name": g.title or f"Gabarito {g.id[:8]}",
-                    }
-                    for g in gabaritos_query.limit(120).all()
-                ]
+        if municipio:
+            from app.utils.tenant_middleware import city_id_to_schema_name, set_search_path
 
-        coordinators_query = User.query.join(Manager, Manager.user_id == User.id).filter(
-            User.role.in_([RoleEnum.COORDENADOR, RoleEnum.DIRETOR])
-        )
+            set_search_path(city_id_to_schema_name(municipio))
+            if source_type == "avaliacao":
+                avaliacoes = MonitoringService._list_avaliacoes_options(user, filters)
+            else:
+                gabaritos = MonitoringService._list_gabaritos_options(user, filters)
+
+        coordenadores: List[Dict[str, str]] = []
         if escola_id:
-            coordinators_query = coordinators_query.filter(Manager.school_id == escola_id)
-        elif source_id:
-            coord_school_ids = MonitoringService._school_ids_for_source(user, filters, source_type, source_id)
-            if coord_school_ids:
-                coordinators_query = coordinators_query.filter(Manager.school_id.in_(list(coord_school_ids)))
-            else:
-                coordinators_query = coordinators_query.filter(False)
-        elif municipio:
-            school_ids_in_city = [s.id for s in School.query.filter(School.city_id == municipio).all()]
-            if school_ids_in_city:
-                coordinators_query = coordinators_query.filter(Manager.school_id.in_(school_ids_in_city))
-            else:
-                coordinators_query = coordinators_query.filter(False)
-        elif city_id_scope:
-            school_ids_in_city = [s.id for s in School.query.filter(School.city_id == city_id_scope).all()]
-            if school_ids_in_city:
-                coordinators_query = coordinators_query.filter(Manager.school_id.in_(school_ids_in_city))
-        coordenadores = [{"id": u.id, "name": u.name} for u in coordinators_query.order_by(User.name.asc()).all()]
+            coordinators_query = (
+                User.query.join(Manager, Manager.user_id == User.id)
+                .filter(User.role.in_([RoleEnum.COORDENADOR, RoleEnum.DIRETOR]))
+                .filter(Manager.school_id == escola_id)
+            )
+            coordenadores = [
+                {"id": u.id, "name": u.name}
+                for u in coordinators_query.order_by(User.name.asc()).all()
+            ]
+            if not coordenadores:
+                city_for_tecadm = municipio or city_id_scope
+                if city_for_tecadm:
+                    tecadm_users = (
+                        User.query.filter(
+                            User.role == RoleEnum.TECADM,
+                            User.city_id == city_for_tecadm,
+                        )
+                        .order_by(User.name.asc())
+                        .all()
+                    )
+                    coordenadores = [{"id": u.id, "name": u.name} for u in tecadm_users]
 
         scope = get_user_scope(user) or {}
         user_role = (user.get("role") or "").strip().lower()
@@ -570,6 +707,27 @@ class MonitoringService:
         }
 
     @staticmethod
+    def _skill_raw_to_code_map(raw_values: Set[str]) -> Dict[str, str]:
+        """Resolve valores de Question.skill (ID ou código) para Skill.code."""
+        skill_ids: Set[str] = set()
+        for raw in raw_values:
+            for sid in _extract_skill_ids_from_question_field(raw):
+                skill_ids.add(sid)
+        if not skill_ids:
+            return {}
+
+        skills_by_id = _fetch_skills_batch(skill_ids)
+        code_map: Dict[str, str] = {}
+        for sid in skill_ids:
+            skill_obj = skills_by_id.get(sid)
+            if skill_obj and skill_obj.code:
+                code_map[sid] = str(skill_obj.code).strip()
+                continue
+            by_code = Skill.query.filter(Skill.code == sid).first()
+            code_map[sid] = str(by_code.code).strip() if by_code and by_code.code else sid
+        return code_map
+
+    @staticmethod
     def _critical_descriptors_for_test(test_id: str, student_ids: List[str]) -> Dict[str, List[str]]:
         if not test_id or not student_ids:
             return {}
@@ -580,11 +738,13 @@ class MonitoringService:
             .filter((StudentAnswer.is_correct == False) | (StudentAnswer.is_correct.is_(None)))
             .all()
         )
+        code_map = MonitoringService._skill_raw_to_code_map({skill for _, skill in rows if skill})
         grouped: Dict[str, List[str]] = defaultdict(list)
         for student_id, skill in rows:
-            text = (skill or "").strip()
-            if text and text not in grouped[student_id]:
-                grouped[student_id].append(text)
+            for sid in _extract_skill_ids_from_question_field(skill):
+                text = code_map.get(sid, sid).strip()
+                if text and text not in grouped[student_id]:
+                    grouped[student_id].append(text)
         return {k: v[:4] for k, v in grouped.items()}
 
     @staticmethod
@@ -842,17 +1002,27 @@ class MonitoringService:
 
     @staticmethod
     def list_schools(user: Dict[str, Any], filters: Dict[str, Any]) -> Dict[str, Any]:
+        MonitoringService._ensure_monitoring_schema_columns(filters)
         rows = MonitoringService._build_rows(user, filters)
         search = (filters.get("q") or "").strip().lower()
+        escola_id_filter = (filters.get("escola_id") or "").strip()
         grouped: Dict[str, Dict[str, Any]] = {}
 
         source_type = MonitoringService._normalize_source_type(filters.get("tipo_origem"))
         explicit_id = (filters.get("avaliacao_id") or filters.get("gabarito_id") or "").strip()
         if explicit_id:
-            for school_id in MonitoringService._school_ids_for_source(
-                user, filters, source_type, explicit_id
-            ):
-                school_key = MonitoringService._str_id(school_id) or "unknown"
+            if escola_id_filter:
+                candidate_school_ids = {escola_id_filter}
+            else:
+                candidate_school_ids = {
+                    MonitoringService._str_id(sid) or "unknown"
+                    for sid in MonitoringService._school_ids_for_source(
+                        user, filters, source_type, explicit_id
+                    )
+                }
+            for school_key in candidate_school_ids:
+                if not school_key or school_key == "unknown":
+                    continue
                 if school_key in grouped:
                     continue
                 school_row = School.query.get(school_key)
@@ -865,6 +1035,8 @@ class MonitoringService:
             if search and search not in (row.get("school_name") or "").lower():
                 continue
             school_key = MonitoringService._str_id(row.get("school_id")) or "unknown"
+            if escola_id_filter and school_key != escola_id_filter:
+                continue
             if school_key not in grouped:
                 grouped[school_key] = {
                     "escola_id": school_key,
@@ -943,6 +1115,7 @@ class MonitoringService:
 
     @staticmethod
     def list_students(user: Dict[str, Any], filters: Dict[str, Any]) -> Dict[str, Any]:
+        MonitoringService._ensure_monitoring_schema_columns(filters)
         rows = MonitoringService._build_rows(user, filters)
         search = (filters.get("q") or "").strip().lower()
         if search:
@@ -955,11 +1128,9 @@ class MonitoringService:
             ]
         page = MonitoringService._parse_int(filters.get("page"), 1)
         page_size = max(1, min(300, MonitoringService._parse_int(filters.get("page_size"), 40)))
-        start = (page - 1) * page_size
-        end = start + page_size
 
         items = []
-        for row in rows[start:end]:
+        for row in rows:
             action: Optional[MonitoringAction] = row.get("monitoring_action")
             items.append(
                 {
@@ -978,7 +1149,7 @@ class MonitoringService:
                     "acao_id": action.id if action else None,
                     "acao_pedagogica": action.pedagogical_action if action else "",
                     "responsavel_id": action.responsible_id if action else None,
-                    "responsavel_nome": action.responsible.name if (action and action.responsible) else "",
+                    "responsavel_nome": MonitoringService._action_responsible_display(action),
                     "coordenador_id": action.coordinator_id if action else None,
                     "coordenador_nome": action.coordinator.name if (action and action.coordinator) else "",
                     "prazo": action.deadline.isoformat() if (action and action.deadline) else None,
@@ -993,9 +1164,37 @@ class MonitoringService:
                 }
             )
 
-        total = len(rows)
+        sort_by = (filters.get("sort_by") or "aluno_nome").strip()
+        sort_order = (filters.get("sort_order") or "asc").strip().lower()
+        reverse = sort_order == "desc"
+        student_sortable = {
+            "aluno_nome",
+            "serie",
+            "turma",
+            "disciplina",
+            "nota",
+            "proficiencia",
+            "nivel",
+            "acao_pedagogica",
+            "responsavel_nome",
+            "prazo",
+            "status",
+            "realizada_em",
+            "feita_pela_escola",
+            "vista_pela_semed",
+        }
+        if sort_by in student_sortable:
+            items.sort(
+                key=lambda item: MonitoringService._student_list_sort_key(item, sort_by),
+                reverse=reverse,
+            )
+
+        total = len(items)
+        start = (page - 1) * page_size
+        end = start + page_size
+        paged_items = items[start:end]
         return {
-            "items": items,
+            "items": paged_items,
             "pagination": {
                 "page": page,
                 "page_size": page_size,
@@ -1039,8 +1238,9 @@ class MonitoringService:
         acao = (payload.get("acao_pedagogica") or "").strip()
         if not acao:
             raise MonitoringValidationError("Informe a ação pedagógica.")
-        if not (payload.get("responsavel_id") or "").strip():
-            raise MonitoringValidationError("Selecione o responsável pela ação.")
+        responsavel_nome = (payload.get("responsavel_nome") or "").strip()
+        if not responsavel_nome and not (payload.get("responsavel_id") or "").strip():
+            raise MonitoringValidationError("Informe o responsável pela ação.")
         if not payload.get("prazo"):
             raise MonitoringValidationError("Informe o prazo da ação.")
         status = (payload.get("status") or "pendente").strip().lower()
@@ -1060,11 +1260,14 @@ class MonitoringService:
 
     @staticmethod
     def update_action(user: Dict[str, Any], action_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+        MonitoringService._ensure_monitoring_schema_columns(payload)
         MonitoringService._validate_action_payload(user, payload)
         action = MonitoringService._load_or_create_action(action_id, payload)
+        responsavel_nome = (payload.get("responsavel_nome") or "").strip() or None
         track_fields = {
             "pedagogical_action": payload.get("acao_pedagogica"),
-            "responsible_id": payload.get("responsavel_id"),
+            "responsible_name": responsavel_nome,
+            "responsible_id": None,
             "coordinator_id": payload.get("coordenador_id"),
             "deadline": MonitoringService._parse_date(payload.get("prazo")),
             "status": (payload.get("status") or action.status or "pendente").strip().lower(),

@@ -12,7 +12,6 @@ from app.models.testSession import TestSession
 from app.models.mobile_models import MobileSyncSubmission, MobileSyncBundleGeneration
 
 from app.services.mobile.bundle_service import collect_school_scope, build_tests_questions_payload
-from app.services.mobile.device_service import register_or_touch_device
 
 
 def get_bundle_generation(
@@ -239,8 +238,6 @@ def process_one_submission(
             test_id,
             student_id,
         )
-
-    register_or_touch_device(user_id, device_id)
 
     return {
         "submission_id": str(submission_uuid),

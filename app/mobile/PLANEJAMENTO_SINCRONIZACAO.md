@@ -61,9 +61,9 @@ Esta seção **descreve** o existente; **nenhuma** mudança aqui é planejada.
 - Definir claims mínimos no JWT mobile: identidade do usuário aplicador, `tenant_id` / contexto de cidade compatível com o middleware atual, `role`, expiração curta (**valor exato** fixado na implementação e na OpenAPI).
 - O token **não** substitui login offline do aluno; serve apenas a chamadas **online** (download, upload, eventual registro de dispositivo, mídia).
 
-### 4.3 Conferência de dispositivo
+### 4.3 Identificação de dispositivo nas requisições
 
-Toda requisição autenticada à API mobile deve transportar **`device_id`** (ver §6). O backend **registra** o par `(tenant, usuário autenticado, device_id)` e rejeita ou audita desvios conforme política definida na implementação (ex.: dispositivo não registrado tentando sincronizar).
+Toda requisição autenticada à API mobile deve transportar **`device_id`** (ver §6) para auditoria em submissões (`mobile_sync_submission`). **Não** há vínculo exclusivo dispositivo↔usuário staff: o mesmo `X-Device-Id` pode ser usado por vários perfis autorizados no mesmo tenant.
 
 ---
 
@@ -104,10 +104,9 @@ A validação offline **só é possível** se o app reproduzir a mesma semântic
 - **`device_id`:** **UUID versão 4** (RFC 4122), gerado **uma vez** na primeira execução da aplicação (ou na primeira chamada mobile), **persistido** em armazenamento local do app e **imutável** durante o ciclo de vida da instalação (**não** regenerar nem permitir troca de identidade silenciosa). Isso evita colisão de auditoria e fraude de identidade de dispositivo nas tráfegos `/mobile/v1/*`.
 - **Transporte obrigatório:** em **todas** as requisições HTTP aos endpoints `/mobile/v1/*`, via header canônico (ex.: `X-Device-Id`) **ou** parâmetro acordado **único** por método; a escolha final é **uma** convenção documentada na OpenAPI (não duplicar formas opcionais conflitantes).
 
-### 6.2 Registro no backend
+### 6.2 Uso no backend
 
-- Persistir entidade lógica **`mobile_device`** (nome de tabela a definir na migration) com, no mínimo: `device_id`, `user_id` (aplicador que autenticou), `tenant`/`city` scope, `first_seen_at`, `last_seen_at`, opcional `label`/`platform`.
-- Operações de sync (download/upload) **atualizam** `last_seen_at` e validam que o dispositivo está vinculado ao usuário/tenant esperado.
+- O header **`X-Device-Id`** identifica o aparelho em sync/upload e em `mobile_sync_submission` (auditoria). A tabela legada **`mobile_device`** pode existir no schema do tenant, mas **não** bloqueia login nem troca de usuário staff no mesmo dispositivo.
 
 ---
 

@@ -4,11 +4,15 @@ Usa tabelas mobile_offline_pack_* no schema do município.
 """
 from __future__ import annotations
 
+import base64
 import hashlib
+import io
 import os
 import secrets
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional, Set, Tuple
+
+import qrcode
 
 from sqlalchemy import false as sa_false
 from sqlalchemy.orm.attributes import flag_modified
@@ -28,7 +32,13 @@ from app.services.mobile.bundle_service import (
     collect_school_scope,
     ensure_bundle_generation,
 )
+from app.services.mobile.student_bundle_serializer import (
+    serialize_student_for_bundle,
+    student_bundle_query_options,
+)
+
 from app.services.aplicador_user_service import collect_aplicadores_for_city
+
 
 _CODE_ALPHABET = "23456789ABCDEFGHJKLMNPQRSTUVWXYZ"
 
@@ -72,6 +82,41 @@ def format_code(normalized: str, chars_per_group: int = 4) -> str:
         for i in range(0, len(normalized), chars_per_group)
     ]
     return "-".join(parts)
+
+
+def build_offline_pack_qr_png_base64(activation_code: str) -> str:
+    """
+    QR PNG (preto/branco) com o texto do código de ativação (mesmo valor do redeem).
+    Não é persistido; regenerar com o mesmo código produz a mesma imagem.
+    """
+    text = (activation_code or "").strip()
+    if not text:
+        raise ValueError("código obrigatório para gerar QR")
+    qr = qrcode.QRCode(
+        version=1,
+        error_correction=qrcode.constants.ERROR_CORRECT_M,
+        box_size=8,
+        border=2,
+    )
+    qr.add_data(text)
+    qr.make(fit=True)
+    img = qr.make_image(fill_color="black", back_color="white")
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    return base64.b64encode(buf.getvalue()).decode("ascii")
+
+
+def offline_pack_qrcode_api_dict(pack: MobileOfflinePackCode) -> Dict[str, Any]:
+    code = (pack.activation_code or "").strip()
+    if not code:
+        raise ValueError("código indisponível para gerar QR")
+    b64 = build_offline_pack_qr_png_base64(code)
+    return {
+        "offline_pack_id": str(pack.id),
+        "code": code,
+        "qr_code_png_base64": b64,
+        "qr_code_data_url": f"data:image/png;base64,{b64}",
+    }
 
 
 def hash_code(normalized: str) -> str:
@@ -314,18 +359,6 @@ def _parse_iso_naive(raw: str) -> datetime:
     if len(s) >= 26 and s[23] in "+-":
         s = s[:23]
     return datetime.fromisoformat(s)
-
-
-def _serialize_student_row(s: Student) -> Dict[str, Any]:
-    return {
-        "id": s.id,
-        "name": s.name,
-        "registration": s.registration,
-        "user_id": s.user_id,
-        "class_id": str(s.class_id) if s.class_id else None,
-        "grade_id": str(s.grade_id) if s.grade_id else None,
-        "school_id": s.school_id,
-    }
 
 
 def register_offline_pack(
@@ -572,16 +605,20 @@ def redeem_offline_pack_page(
         _reserve_device_slot(pack, device_id)
 
     if student_keys:
-        eligible_query = Student.query.filter(Student.id.in_(student_keys))
+        eligible_query = student_bundle_query_options(
+            Student.query.filter(Student.id.in_(student_keys))
+        )
     else:
-        eligible_query = Student.query.filter(sa_false())
+        eligible_query = student_bundle_query_options(
+            Student.query.filter(sa_false())
+        )
     eligible_query = eligible_query.order_by(
         Student.school_id.asc(), Student.name.asc()
     )
     total_students = eligible_query.count()
     total_pages = max(1, (total_students + page_size - 1) // page_size)
     rows = eligible_query.offset((page - 1) * page_size).limit(page_size).all()
-    students_payload = [_serialize_student_row(s) for s in rows]
+    students_payload = [serialize_student_for_bundle(s) for s in rows]
 
     tests_payload, content_versions, questions_by_test = build_tests_questions_payload(
         tests_map

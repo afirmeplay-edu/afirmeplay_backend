@@ -15,8 +15,35 @@ branch_labels = None
 depends_on = None
 
 
+def _table_exists(connection, table_name):
+    r = connection.execute(
+        sa.text(
+            "SELECT 1 FROM information_schema.tables "
+            "WHERE table_schema = 'public' AND table_name = :name"
+        ),
+        {"name": table_name},
+    )
+    return r.scalar() is not None
+
+
+def _index_exists(connection, index_name):
+    r = connection.execute(
+        sa.text(
+            "SELECT 1 FROM pg_indexes "
+            "WHERE schemaname = 'public' AND indexname = :name"
+        ),
+        {"name": index_name},
+    )
+    return r.scalar() is not None
+
+
 def upgrade():
-    op.create_table(
+    connection = op.get_bind()
+
+    if _table_exists(connection, 'store_items'):
+        pass
+    else:
+        op.create_table(
         'store_items',
         sa.Column('id', sa.String(), nullable=False),
         sa.Column('name', sa.String(255), nullable=False),
@@ -33,11 +60,14 @@ def upgrade():
         sa.Column('created_at', sa.TIMESTAMP(), server_default=sa.text('CURRENT_TIMESTAMP')),
         sa.Column('updated_at', sa.TIMESTAMP(), server_default=sa.text('CURRENT_TIMESTAMP')),
         sa.PrimaryKeyConstraint('id'),
-    )
+        )
 
     # student_id sem FK: student vive nos schemas por cidade (city_xxx), não em public.
     # Em runtime, student_purchases pode estar em public ou em city_xxx (ver city_schema_service).
-    op.create_table(
+    if _table_exists(connection, 'student_purchases'):
+        pass
+    else:
+        op.create_table(
         'student_purchases',
         sa.Column('id', sa.String(), nullable=False),
         sa.Column('student_id', sa.String(), nullable=False),
@@ -46,10 +76,13 @@ def upgrade():
         sa.Column('created_at', sa.TIMESTAMP(), server_default=sa.text('CURRENT_TIMESTAMP')),
         sa.PrimaryKeyConstraint('id'),
         sa.ForeignKeyConstraint(['store_item_id'], ['store_items.id'], ondelete='CASCADE'),
-    )
-    op.create_index('idx_student_purchases_student_id', 'student_purchases', ['student_id'])
-    op.create_index('idx_student_purchases_store_item_id', 'student_purchases', ['store_item_id'])
-    op.create_index('idx_student_purchases_created_at', 'student_purchases', ['created_at'])
+        )
+    if not _index_exists(connection, 'idx_student_purchases_student_id'):
+        op.create_index('idx_student_purchases_student_id', 'student_purchases', ['student_id'])
+    if not _index_exists(connection, 'idx_student_purchases_store_item_id'):
+        op.create_index('idx_student_purchases_store_item_id', 'student_purchases', ['store_item_id'])
+    if not _index_exists(connection, 'idx_student_purchases_created_at'):
+        op.create_index('idx_student_purchases_created_at', 'student_purchases', ['created_at'])
 
 
 def downgrade():

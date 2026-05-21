@@ -284,6 +284,17 @@ def get_user_from_token():
         return None
 
 
+def _resolve_mobile_discovery_public_context():
+    """
+    GET /mobile/v1/available-cities: catálogo em public.mobile_city_directory;
+    sem JWT, sem tenant, sem resolução por Host/headers.
+    """
+    ctx = TenantContext()
+    ctx.schema = "public"
+    ctx.has_tenant_context = False
+    return ctx
+
+
 def _resolve_mobile_offline_pack_redeem_preflight():
     """
     POST /offline-pack/redeem: começa em public para consultar mobile_offline_pack_registry
@@ -349,6 +360,12 @@ def resolve_tenant_context():
         404: Município não encontrado
     """
     path = request.path.rstrip("/")
+    if path.endswith("/mobile/v1/available-cities") and request.method in (
+        "GET",
+        "HEAD",
+        "OPTIONS",
+    ):
+        return _resolve_mobile_discovery_public_context()
     if path.endswith("/mobile/v1/auth/login") and request.method in ("POST", "OPTIONS"):
         return _resolve_mobile_login_tenant_context()
     if path.endswith("/mobile/v1/offline-pack/redeem") and request.method == "POST":
@@ -553,6 +570,15 @@ def tenant_middleware():
             ctx = TenantContext()
             ctx.schema = 'public'
             ctx.has_tenant_context = False
+            g.tenant_context = ctx
+            _register_multitenant_sessions(ctx)
+            return None
+        if path_norm.endswith('/mobile/v1/available-cities') and request.method in (
+            'GET',
+            'HEAD',
+            'OPTIONS',
+        ):
+            ctx = _resolve_mobile_discovery_public_context()
             g.tenant_context = ctx
             _register_multitenant_sessions(ctx)
             return None

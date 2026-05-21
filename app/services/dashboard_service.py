@@ -2052,6 +2052,171 @@ class DashboardService:
         return ranking
 
     @classmethod
+    def _get_ranking_alunos_entity_filtered(
+        cls,
+        scope: Dict[str, Any],
+        *,
+        limit: int,
+        offset: int,
+        filters: Dict[str, Any],
+        school_alias,
+        class_alias,
+    ) -> Dict[str, Any]:
+        """Ranking de alunos para uma avaliação/cartão (e disciplina opcional) — relatório de ranking."""
+        import json
+        from sqlalchemy import Float, cast
+        from sqlalchemy.dialects.postgresql import VARCHAR
+
+        evaluation_id = str(filters.get("evaluation_id") or "").strip()
+        answer_sheet_id = str(filters.get("answer_sheet_id") or "").strip()
+        discipline_id = str(filters.get("disciplina") or "").strip()
+        use_answer_sheet = bool(answer_sheet_id and not evaluation_id)
+        score_model = AnswerSheetResult if use_answer_sheet else EvaluationResult
+
+        discipline_grade_expr = None
+        discipline_prof_expr = None
+        discipline_class_expr = None
+        if discipline_id:
+            if use_answer_sheet:
+                discipline_grade_expr = cast(
+                    AnswerSheetResult.proficiency_by_subject[discipline_id]["grade"].astext, Float
+                )
+                discipline_prof_expr = cast(
+                    AnswerSheetResult.proficiency_by_subject[discipline_id]["proficiency"].astext, Float
+                )
+                discipline_class_expr = cast(
+                    AnswerSheetResult.proficiency_by_subject[discipline_id]["classification"].astext, db.String
+                )
+            else:
+                discipline_grade_expr = cast(
+                    EvaluationResult.subject_results[discipline_id]["grade"].astext, Float
+                )
+                discipline_prof_expr = cast(
+                    EvaluationResult.subject_results[discipline_id]["proficiency"].astext, Float
+                )
+                discipline_class_expr = cast(
+                    EvaluationResult.subject_results[discipline_id]["classification"].astext, db.String
+                )
+
+        score_grade_expr = discipline_grade_expr if discipline_grade_expr is not None else score_model.grade
+        score_prof_expr = discipline_prof_expr if discipline_prof_expr is not None else score_model.proficiency
+        classification_expr = discipline_class_expr if discipline_class_expr is not None else score_model.classification
+        avg_proficiency = func.coalesce(func.avg(score_prof_expr), 0)
+        avg_grade = func.coalesce(func.avg(score_grade_expr), 0)
+        avatar_config_expr = cast(User.avatar_config, db.Text)
+
+        join_cond = and_(
+            score_model.student_id == Student.id,
+            score_model.gabarito_id == answer_sheet_id if use_answer_sheet and answer_sheet_id else True,
+            score_model.test_id == evaluation_id if (not use_answer_sheet and evaluation_id) else True,
+            discipline_prof_expr.isnot(None) if discipline_prof_expr is not None else True,
+        )
+
+        query = (
+            db.session.query(
+                Student.id.label("student_id"),
+                Student.name.label("student_name"),
+                school_alias.name.label("school_name"),
+                class_alias.name.label("class_name"),
+                Grade.name.label("serie"),
+                avg_grade.label("average_grade"),
+                avg_proficiency.label("average_proficiency"),
+                func.max(classification_expr).label("classification"),
+                func.count(score_model.id).label("completed_evaluations"),
+                Student.profile_picture.label("profile_picture"),
+                avatar_config_expr.label("avatar_config"),
+            )
+            .join(score_model, join_cond)
+            .outerjoin(User, User.id == Student.user_id)
+            .outerjoin(school_alias, cast(school_alias.id, VARCHAR) == cast(Student.school_id, VARCHAR))
+            .outerjoin(class_alias, class_alias.id == Student.class_id)
+            .outerjoin(Grade, Grade.id == Student.grade_id)
+            .group_by(
+                Student.id,
+                Student.name,
+                school_alias.name,
+                class_alias.name,
+                Grade.name,
+                Student.profile_picture,
+                avatar_config_expr,
+            )
+            .order_by(avg_proficiency.desc(), avg_grade.desc())
+        )
+
+        if filters.get("escola"):
+            query = query.filter(Student.school_id == str(filters["escola"]))
+        if filters.get("turma"):
+            query = query.filter(Student.class_id == str(filters["turma"]))
+        if filters.get("serie"):
+            query = query.filter(
+                or_(
+                    Student.grade_id == str(filters["serie"]),
+                    class_alias.grade_id == str(filters["serie"]),
+                )
+            )
+        if filters.get("municipio"):
+            query = query.filter(school_alias.city_id == str(filters["municipio"]))
+
+        if scope["scope"] == "turma" and scope.get("class_id"):
+            query = query.filter(Student.class_id == scope["class_id"])
+        elif scope["scope"] == "municipio" and scope.get("city_id"):
+            query = query.filter(school_alias.city_id == scope["city_id"])
+        elif scope["scope"] == "escola":
+            school_ids = scope.get("school_ids") or []
+            school_ids_str = uuid_list_to_str(school_ids) if school_ids else []
+            query = query.filter(Student.school_id.in_(school_ids_str)) if school_ids_str else query.filter(False)
+
+        class_ids = scope.get("class_ids") or []
+        if class_ids:
+            query = query.filter(Student.class_id.in_(class_ids))
+
+        return cls._finalize_ranking_alunos_rows(query, limit=limit, offset=offset)
+
+    @classmethod
+    def _finalize_ranking_alunos_rows(cls, query, *, limit: int, offset: int) -> Dict[str, Any]:
+        import json
+
+        MEDALHA_POR_POSICAO = {1: "platina", 2: "ouro", 3: "prata", 4: "bronze"}
+        total = query.order_by(None).count()
+        first_row = query.limit(1).first()
+        first_media = round(float(first_row.average_proficiency or 0), 2) if first_row else 0
+        rows = query.offset(offset).limit(limit).all()
+        ranking = []
+        for idx, row in enumerate(rows):
+            position = offset + idx + 1
+            media_proficiencia = round(float(row.average_proficiency or 0), 2)
+            media_nota = round(float(row.average_grade or 0), 2)
+            item = {
+                "student_id": row.student_id,
+                "name": row.student_name,
+                "school_name": row.school_name,
+                "class_name": row.class_name,
+                "serie": row.serie or "",
+                "media": media_nota,
+                "media_nota": media_nota,
+                "media_proficiencia": media_proficiencia,
+                "classification": row.classification,
+                "completed_evaluations": int(row.completed_evaluations or 0),
+                "position": position,
+                "medalha": MEDALHA_POR_POSICAO.get(position),
+            }
+            item["profile_picture"] = getattr(row, "profile_picture", None) or None
+            raw_avatar = getattr(row, "avatar_config", None)
+            if isinstance(raw_avatar, str) and raw_avatar.strip().startswith("{"):
+                try:
+                    item["avatar_config"] = json.loads(raw_avatar)
+                except Exception:
+                    item["avatar_config"] = raw_avatar
+            else:
+                item["avatar_config"] = raw_avatar
+            ranking.append(item)
+
+        for item in ranking:
+            item["pontos_para_primeiro"] = round(first_media - item["media_proficiencia"], 2)
+
+        return {"ranking": ranking, "total": int(total)}
+
+    @classmethod
     def get_ranking_alunos(
         cls,
         scope: Dict[str, Any],
@@ -2074,6 +2239,19 @@ class DashboardService:
         limit = min(max(1, limit), 500)
         offset = max(0, int(offset or 0))
         normalized_filters = filters or {}
+
+        evaluation_id = str(normalized_filters.get("evaluation_id") or "").strip()
+        answer_sheet_id = str(normalized_filters.get("answer_sheet_id") or "").strip()
+        if evaluation_id or answer_sheet_id:
+            return cls._get_ranking_alunos_entity_filtered(
+                scope,
+                limit=limit,
+                offset=offset,
+                filters=normalized_filters,
+                school_alias=school_alias,
+                class_alias=class_alias,
+            )
+
         # Cast avatar_config (JSON) para Text no GROUP BY: PostgreSQL não tem operador de igualdade para json
         avatar_config_expr = cast(User.avatar_config, db.Text)
 
@@ -2175,51 +2353,7 @@ class DashboardService:
         completed_total = func.coalesce(er_by_student.c.cnt, 0) + func.coalesce(asr_by_student.c.cnt, 0)
         query = query.having(completed_total > 0)
 
-        # Classificação da medalha por posição: 1º platina, 2º ouro, 3º prata, 4º bronze
-        MEDALHA_POR_POSICAO = {1: "platina", 2: "ouro", 3: "prata", 4: "bronze"}
-
-        total = query.order_by(None).count()
-        first_row = query.limit(1).first()
-        first_media = round(float(first_row.average_proficiency or 0), 2) if first_row else 0
-        rows = query.offset(offset).limit(limit).all()
-        ranking = []
-        for idx, row in enumerate(rows):
-            position = offset + idx + 1
-            # Média de proficiência (pontos), arredondada a 2 decimais para evitar floats esquisitos
-            media_proficiencia = round(float(row.average_proficiency or 0), 2)
-            media_nota = round(float(row.average_grade or 0), 2)
-            item = {
-                "student_id": row.student_id,
-                "name": row.student_name,
-                "school_name": row.school_name,
-                "class_name": row.class_name,
-                "serie": row.serie or "",
-                "media": media_nota,
-                "media_nota": media_nota,
-                "media_proficiencia": media_proficiencia,
-                "classification": row.classification,
-                "completed_evaluations": int(row.completed_evaluations or 0),
-                "position": position,
-                "medalha": MEDALHA_POR_POSICAO.get(position),
-            }
-            # Ícone/foto do perfil: foto (URL) ou avatar_config (ícone escolhido no app)
-            item["profile_picture"] = getattr(row, "profile_picture", None) or None
-            raw_avatar = getattr(row, "avatar_config", None)
-            # avatar_config vem como string (cast JSON->Text); devolver objeto se for JSON válido
-            if isinstance(raw_avatar, str) and raw_avatar.strip().startswith("{"):
-                try:
-                    item["avatar_config"] = json.loads(raw_avatar)
-                except Exception:
-                    item["avatar_config"] = raw_avatar
-            else:
-                item["avatar_config"] = raw_avatar
-            ranking.append(item)
-
-        # Diferença para o 1º lugar (calculada e arredondada no backend para evitar 11.150000000000006 no front)
-        for item in ranking:
-            item["pontos_para_primeiro"] = round(first_media - item["media"], 2)
-
-        return {"ranking": ranking, "total": int(total)}
+        return cls._finalize_ranking_alunos_rows(query, limit=limit, offset=offset)
 
     # ------------------------------------------------------------------ #
     # Engajamento

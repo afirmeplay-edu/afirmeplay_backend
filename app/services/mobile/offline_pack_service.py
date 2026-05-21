@@ -4,11 +4,15 @@ Usa tabelas mobile_offline_pack_* no schema do município.
 """
 from __future__ import annotations
 
+import base64
 import hashlib
+import io
 import os
 import secrets
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional, Set, Tuple
+
+import qrcode
 
 from sqlalchemy import false as sa_false
 from sqlalchemy.orm.attributes import flag_modified
@@ -78,6 +82,41 @@ def format_code(normalized: str, chars_per_group: int = 4) -> str:
         for i in range(0, len(normalized), chars_per_group)
     ]
     return "-".join(parts)
+
+
+def build_offline_pack_qr_png_base64(activation_code: str) -> str:
+    """
+    QR PNG (preto/branco) com o texto do código de ativação (mesmo valor do redeem).
+    Não é persistido; regenerar com o mesmo código produz a mesma imagem.
+    """
+    text = (activation_code or "").strip()
+    if not text:
+        raise ValueError("código obrigatório para gerar QR")
+    qr = qrcode.QRCode(
+        version=1,
+        error_correction=qrcode.constants.ERROR_CORRECT_M,
+        box_size=8,
+        border=2,
+    )
+    qr.add_data(text)
+    qr.make(fit=True)
+    img = qr.make_image(fill_color="black", back_color="white")
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    return base64.b64encode(buf.getvalue()).decode("ascii")
+
+
+def offline_pack_qrcode_api_dict(pack: MobileOfflinePackCode) -> Dict[str, Any]:
+    code = (pack.activation_code or "").strip()
+    if not code:
+        raise ValueError("código indisponível para gerar QR")
+    b64 = build_offline_pack_qr_png_base64(code)
+    return {
+        "offline_pack_id": str(pack.id),
+        "code": code,
+        "qr_code_png_base64": b64,
+        "qr_code_data_url": f"data:image/png;base64,{b64}",
+    }
 
 
 def hash_code(normalized: str) -> str:

@@ -63,6 +63,7 @@ def _offline_pack_register_post():
         response_expires_at = row.expires_at.isoformat() + "Z"
         response_max_redemptions = int(row.max_redemptions)
         response_scope = pack_svc.user_scope_persisted(row)
+        qr_payload = pack_svc.offline_pack_qrcode_api_dict(row)
         db.session.commit()
     except ValueError as e:
         db.session.rollback()
@@ -79,6 +80,8 @@ def _offline_pack_register_post():
                 "expires_at": response_expires_at,
                 "max_redemptions": response_max_redemptions,
                 "scope": response_scope,
+                "qr_code_png_base64": qr_payload["qr_code_png_base64"],
+                "qr_code_data_url": qr_payload["qr_code_data_url"],
             }
         ),
         200,
@@ -147,6 +150,34 @@ def _offline_pack_bulk_delete_post():
         return jsonify({"error": str(e)}), 500
 
     return jsonify(result), 200
+
+
+@mobile_bp.route("/offline-pack/<pack_id>/qrcode", methods=["GET", "OPTIONS"])
+def offline_pack_qrcode(pack_id):
+    if request.method == "OPTIONS":
+        return "", 200
+    return _offline_pack_qrcode_get(pack_id)
+
+
+@requires_city_context
+@role_required("admin", "tecadm", "diretor", "coordenador", "aplicador")
+def _offline_pack_qrcode_get(pack_id):
+    auth, err = _web_pack_auth()
+    if err:
+        return err
+
+    pack = pack_svc.get_offline_pack_by_id(pack_id)
+    if not pack:
+        return jsonify({"error": "pacote não encontrado"}), 404
+
+    try:
+        payload = pack_svc.offline_pack_qrcode_api_dict(pack)
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+    return jsonify(payload), 200
 
 
 @mobile_bp.route("/offline-pack/<pack_id>", methods=["GET", "PATCH", "DELETE", "OPTIONS"])

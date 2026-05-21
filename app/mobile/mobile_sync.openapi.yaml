@@ -7,7 +7,7 @@ info:
         - **Discovery (bootstrap):** `GET /available-cities` — público, sem JWT; lista municípios e `api_base_url` de cada backend (catálogo `public.mobile_city_directory` na API central).
         - **Auth aplicador:** `POST /auth/login` — JWT (Flask-JWT-Extended); contexto de município via `X-City-ID`, `X-City-Slug` ou subdomínio.
         - **Sync:** `GET /sync/bundle`, `POST /sync/upload` — Bearer JWT mobile + `X-Device-Id`.
-        - **Pacote offline (código web):** `POST /offline-pack/register`, `GET /offline-pack`, `GET/PATCH/DELETE /offline-pack/{offline_pack_id}`, `POST /offline-pack/bulk-delete` (JWT do **login web** + tenant); `POST /offline-pack/redeem` (só `X-Device-Id` + corpo, com resolução de município via `public.mobile_offline_pack_registry` quando o código existe lá).
+        - **Pacote offline (código web):** `POST /offline-pack/register`, `GET /offline-pack`, `GET/PATCH/DELETE /offline-pack/{offline_pack_id}`, `GET /offline-pack/{offline_pack_id}/qrcode`, `POST /offline-pack/bulk-delete` (JWT do **login web** + tenant); `POST /offline-pack/redeem` (só `X-Device-Id` + corpo, com resolução de município via `public.mobile_offline_pack_registry` quando o código existe lá).
 
         **Fluxo multi-VPS:** o app chama `GET /available-cities` na API central (`prod-api.afirmeplay.com.br`), o usuário escolhe o município e passa a usar `api_base_url` retornada para redeem, login e sync.
 
@@ -299,6 +299,42 @@ paths:
                 "403":
                     $ref: "#/components/responses/Forbidden"
 
+    /mobile/v1/offline-pack/{offline_pack_id}/qrcode:
+        get:
+            tags: [offline-pack]
+            summary: Gerar QR do código de ativação (painel web)
+            description: |
+                Mesma autenticação e papéis de `POST /offline-pack/register`.
+                O QR codifica o mesmo texto que `code` (ex. `XXXX-XXXX-XXXX`); não é armazenado no servidor.
+                Regenerar (chamar de novo) produz a mesma imagem enquanto o código não mudar.
+                Pacotes legados sem `activation_code` respondem 400.
+            security:
+                - bearerAuthWeb: []
+            parameters:
+                - $ref: "#/components/parameters/XCityId"
+                - $ref: "#/components/parameters/XCitySlug"
+                - name: offline_pack_id
+                  in: path
+                  required: true
+                  schema:
+                      type: string
+                      format: uuid
+            responses:
+                "200":
+                    description: QR em PNG (base64) e data URL
+                    content:
+                        application/json:
+                            schema:
+                                $ref: "#/components/schemas/OfflinePackQrCodeResponse"
+                "400":
+                    $ref: "#/components/responses/BadRequest"
+                "404":
+                    $ref: "#/components/responses/NotFound"
+                "401":
+                    $ref: "#/components/responses/Unauthorized"
+                "403":
+                    $ref: "#/components/responses/Forbidden"
+
     /mobile/v1/offline-pack/redeem:
         post:
             tags: [offline-pack]
@@ -554,7 +590,15 @@ components:
         OfflinePackRegisterResponse:
             type: object
             required:
-                [code, offline_pack_id, expires_at, max_redemptions, scope]
+                [
+                    code,
+                    offline_pack_id,
+                    expires_at,
+                    max_redemptions,
+                    scope,
+                    qr_code_png_base64,
+                    qr_code_data_url,
+                ]
             properties:
                 code:
                     type: string
@@ -570,6 +614,28 @@ components:
                 scope:
                     type: object
                     additionalProperties: true
+                qr_code_png_base64:
+                    type: string
+                    description: PNG do QR em base64 (sem prefixo data URL)
+                qr_code_data_url:
+                    type: string
+                    description: "data:image/png;base64,... para uso direto em img src"
+
+        OfflinePackQrCodeResponse:
+            type: object
+            required:
+                [offline_pack_id, code, qr_code_png_base64, qr_code_data_url]
+            properties:
+                offline_pack_id:
+                    type: string
+                    format: uuid
+                code:
+                    type: string
+                    description: Mesmo valor codificado no QR e usado no redeem
+                qr_code_png_base64:
+                    type: string
+                qr_code_data_url:
+                    type: string
 
         OfflinePackListResponse:
             type: object

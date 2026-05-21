@@ -2,6 +2,7 @@
 Testes do pacote offline (código em texto claro, escopo, cache de bundle).
 Execução: python -m unittest tests.test_offline_pack_service
 """
+import base64
 import unittest
 from datetime import datetime, timedelta
 from unittest.mock import MagicMock, patch
@@ -14,6 +15,33 @@ class TestOfflinePackDDL(unittest.TestCase):
     def test_ddl_has_activation_code(self):
         sql = get_mobile_tables_ddl("city_test123")
         self.assertIn("activation_code", sql)
+
+
+class TestOfflinePackQrCode(unittest.TestCase):
+    def test_build_qr_png_base64_decodes_as_png(self):
+        b64 = svc.build_offline_pack_qr_png_base64("ABCD-EFGH-JKLM")
+        raw = base64.b64decode(b64)
+        self.assertEqual(raw[:8], b"\x89PNG\r\n\x1a\n")
+
+    def test_qrcode_api_dict_matches_code(self):
+        pack = MagicMock()
+        pack.id = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+        pack.activation_code = "WXYZ-2345-6789"
+        payload = svc.offline_pack_qrcode_api_dict(pack)
+        self.assertEqual(payload["code"], "WXYZ-2345-6789")
+        self.assertEqual(payload["offline_pack_id"], str(pack.id))
+        self.assertTrue(payload["qr_code_data_url"].startswith("data:image/png;base64,"))
+        self.assertEqual(
+            payload["qr_code_data_url"],
+            f"data:image/png;base64,{payload['qr_code_png_base64']}",
+        )
+
+    def test_qrcode_without_activation_code_raises(self):
+        pack = MagicMock()
+        pack.id = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+        pack.activation_code = None
+        with self.assertRaises(ValueError):
+            svc.offline_pack_qrcode_api_dict(pack)
 
 
 class TestOfflinePackCodeHelpers(unittest.TestCase):

@@ -6,7 +6,9 @@ from app.services.folha_rascunho_service import (
     FolhaRascunhoValidationError,
     _count_covers,
     _count_totals,
+    _filter_students_by_ids,
     _parse_filters,
+    _parse_student_ids,
     _tree_to_response,
 )
 
@@ -36,6 +38,16 @@ class TestFolhaRascunhoService(unittest.TestCase):
         with self.assertRaises(FolhaRascunhoValidationError) as ctx:
             _parse_filters({"modo": "cartao_resposta", "municipio": "city-1"})
         self.assertIn("cartão", ctx.exception.message.lower())
+
+    def test_parse_student_ids_comma_separated(self):
+        ids = _parse_student_ids({"student_ids": "a1, a2,b3"})
+        self.assertEqual(ids, {"a1", "a2", "b3"})
+
+    def test_filter_students_by_ids(self):
+        students = [{"id": "1", "name": "Ana"}, {"id": "2", "name": "Bruno"}]
+        filtered = _filter_students_by_ids(students, {"2"})
+        self.assertEqual(len(filtered), 1)
+        self.assertEqual(filtered[0]["name"], "Bruno")
 
     def test_parse_filters_accepts_valid_personalizada(self):
         parsed = _parse_filters(

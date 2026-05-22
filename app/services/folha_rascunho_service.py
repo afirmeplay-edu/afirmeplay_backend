@@ -126,11 +126,31 @@ def _students_participants_cartao(classe: Class, gab: AnswerSheetGabarito) -> Li
     return _students_enrolled(classe)
 
 
+def _parse_student_ids(args: Dict[str, Any]) -> Optional[Set[str]]:
+    raw = _norm_param(args.get("student_ids"))
+    if not raw:
+        return None
+    ids = {part.strip() for part in raw.split(",") if part.strip()}
+    return ids or None
+
+
+def _filter_students_by_ids(
+    students: List[Dict[str, str]],
+    student_ids: Optional[Set[str]],
+) -> List[Dict[str, str]]:
+    if not student_ids:
+        return students
+    return [s for s in students if s.get("id") in student_ids]
+
+
 def _append_class_to_tree(
     tree: Dict[str, Dict[str, Any]],
     classe: Class,
     students: List[Dict[str, str]],
+    *,
+    student_ids: Optional[Set[str]] = None,
 ) -> None:
+    students = _filter_students_by_ids(students, student_ids)
     if not students:
         return
     school_id, school_name, grade_id, grade_name, class_id, turma_label, turno = _class_context(classe)
@@ -156,6 +176,7 @@ def _append_class_to_tree(
 def _collect_personalizada(
     filters: Dict[str, str],
     allowed: Optional[Set[str]],
+    student_ids: Optional[Set[str]] = None,
 ) -> Dict[str, Dict[str, Any]]:
     city_id = filters["municipio"]
     school_id = filters["escola"]
@@ -184,7 +205,7 @@ def _collect_personalizada(
     tree: Dict[str, Dict[str, Any]] = {}
     for classe in classes:
         students = _students_enrolled(classe)
-        _append_class_to_tree(tree, classe, students)
+        _append_class_to_tree(tree, classe, students, student_ids=student_ids)
     return tree
 
 
@@ -219,6 +240,7 @@ def _filter_classes_avaliacao(
 def _collect_avaliacao(
     filters: Dict[str, str],
     allowed: Optional[Set[str]],
+    student_ids: Optional[Set[str]] = None,
 ) -> Tuple[Dict[str, Dict[str, Any]], str]:
     test = Test.query.get(filters["evaluation_id"])
     if not test:
@@ -234,7 +256,7 @@ def _collect_avaliacao(
     tree: Dict[str, Dict[str, Any]] = {}
     for classe in classes:
         students = _students_enrolled(classe)
-        _append_class_to_tree(tree, classe, students)
+        _append_class_to_tree(tree, classe, students, student_ids=student_ids)
 
     titulo = str(test.title or "").strip()
     return tree, titulo
@@ -243,6 +265,7 @@ def _collect_avaliacao(
 def _collect_cartao_resposta(
     filters: Dict[str, str],
     allowed: Optional[Set[str]],
+    student_ids: Optional[Set[str]] = None,
 ) -> Tuple[Dict[str, Dict[str, Any]], str]:
     gab = AnswerSheetGabarito.query.get(filters["answer_sheet_id"])
     if not gab:
@@ -272,7 +295,7 @@ def _collect_cartao_resposta(
     tree: Dict[str, Dict[str, Any]] = {}
     for classe in classes:
         students = _students_enrolled(classe)
-        _append_class_to_tree(tree, classe, students)
+        _append_class_to_tree(tree, classe, students, student_ids=student_ids)
 
     titulo = str(gab.title or "").strip() if getattr(gab, "title", None) else ""
     return tree, titulo
@@ -357,6 +380,7 @@ class FolhaRascunhoService:
     @staticmethod
     def get_dados(user: Dict[str, Any], args: Dict[str, Any]) -> Dict[str, Any]:
         filters = _parse_filters(args)
+        student_ids = _parse_student_ids(args)
         allowed = _allowed_school_ids(user)
 
         city = City.query.get(filters["municipio"])
@@ -370,11 +394,11 @@ class FolhaRascunhoService:
         modo = filters["modo"]
 
         if modo == "personalizada":
-            tree = _collect_personalizada(filters, allowed)
+            tree = _collect_personalizada(filters, allowed, student_ids)
         elif modo == "avaliacao":
-            tree, avaliacao_titulo = _collect_avaliacao(filters, allowed)
+            tree, avaliacao_titulo = _collect_avaliacao(filters, allowed, student_ids)
         else:
-            tree, avaliacao_titulo = _collect_cartao_resposta(filters, allowed)
+            tree, avaliacao_titulo = _collect_cartao_resposta(filters, allowed, student_ids)
 
         escolas = _tree_to_response(tree)
         if not escolas:

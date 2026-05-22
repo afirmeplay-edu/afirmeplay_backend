@@ -13,10 +13,6 @@ from app.models.test import Test
 from app.models.classTest import ClassTest
 from app.permissions.utils import get_manager_school, get_teacher_schools
 from app.report_analysis.answer_sheet_report_builder import get_answer_sheet_target_classes_for_report
-from app.routes.lista_frequencia_routes import (
-    _status_estudante_avaliacao,
-    _status_estudante_cartao_resposta,
-)
 from app.utils.uuid_helpers import ensure_uuid
 
 
@@ -109,6 +105,7 @@ def _class_context(classe: Class) -> Tuple[str, str, str, str, str, str, str]:
 
 
 def _students_enrolled(classe: Class) -> List[Dict[str, str]]:
+    """Todos os alunos matriculados na turma (folha de rascunho para cada um)."""
     rows = Student.query.filter_by(class_id=classe.id).order_by(Student.name).all()
     out: List[Dict[str, str]] = []
     for student in rows:
@@ -118,32 +115,15 @@ def _students_enrolled(classe: Class) -> List[Dict[str, str]]:
     return out
 
 
+# Aliases mantidos para reload parcial do Flask não quebrar referências antigas.
 def _students_participants_avaliacao(classe: Class, test: Test) -> List[Dict[str, str]]:
-    enrolled = Student.query.filter_by(class_id=classe.id).all()
-    student_ids = [str(s.id) for s in enrolled]
-    status_map = _status_estudante_avaliacao(student_ids, test.id)
-    out: List[Dict[str, str]] = []
-    for student in enrolled:
-        if status_map.get(str(student.id)) != "P":
-            continue
-        name = str(student.name or "").strip()
-        if name:
-            out.append({"id": str(student.id), "name": name})
-    return sorted(out, key=lambda item: item["name"].lower())
+    del test  # escopo da avaliação define turmas; alunos = todos matriculados
+    return _students_enrolled(classe)
 
 
 def _students_participants_cartao(classe: Class, gab: AnswerSheetGabarito) -> List[Dict[str, str]]:
-    enrolled = Student.query.filter_by(class_id=classe.id).all()
-    student_ids = [str(s.id) for s in enrolled]
-    status_map = _status_estudante_cartao_resposta(student_ids, gab.id)
-    out: List[Dict[str, str]] = []
-    for student in enrolled:
-        if status_map.get(str(student.id)) != "P":
-            continue
-        name = str(student.name or "").strip()
-        if name:
-            out.append({"id": str(student.id), "name": name})
-    return sorted(out, key=lambda item: item["name"].lower())
+    del gab
+    return _students_enrolled(classe)
 
 
 def _append_class_to_tree(
@@ -253,7 +233,7 @@ def _collect_avaliacao(
 
     tree: Dict[str, Dict[str, Any]] = {}
     for classe in classes:
-        students = _students_participants_avaliacao(classe, test)
+        students = _students_enrolled(classe)
         _append_class_to_tree(tree, classe, students)
 
     titulo = str(test.title or "").strip()
@@ -291,7 +271,7 @@ def _collect_cartao_resposta(
 
     tree: Dict[str, Dict[str, Any]] = {}
     for classe in classes:
-        students = _students_participants_cartao(classe, gab)
+        students = _students_enrolled(classe)
         _append_class_to_tree(tree, classe, students)
 
     titulo = str(gab.title or "").strip() if getattr(gab, "title", None) else ""

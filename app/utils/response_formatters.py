@@ -105,7 +105,8 @@ def _get_all_subjects_from_test(test):
                             })
                             
     except Exception as e:
-        logging.warning(f"Erro ao buscar disciplinas para teste {test.id}: {str(e)}")
+        test_ref = getattr(test, "id", None) or type(test).__name__
+        logging.warning(f"Erro ao buscar disciplinas para teste {test_ref}: {str(e)}")
     
     return subjects_list
 

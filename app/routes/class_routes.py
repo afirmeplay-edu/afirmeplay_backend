@@ -640,8 +640,7 @@ def delete_class(class_id):
         )
 
         # 1. Desvincular alunos
-        from app.models.student import Student
-        students = Student.query.filter_by(class_id=class_id).all()
+        students = Student.query.filter_by(class_id=class_id_uuid).all()
         student_ids = [s.id for s in students]
         logging.info(
             f"👥 Desvinculando {len(students)} alunos da turma {class_id}. "
@@ -649,10 +648,20 @@ def delete_class(class_id):
         )
         for student in students:
             student.class_id = None
-        
+
+        from app.models.studentSchoolEnrollment import StudentSchoolEnrollment
+        enrollments_updated = (
+            db.session.query(StudentSchoolEnrollment)
+            .filter(StudentSchoolEnrollment.class_id == class_id_uuid)
+            .update({StudentSchoolEnrollment.class_id: None}, synchronize_session=False)
+        )
+        logging.info(
+            f"📋 Desvinculando {enrollments_updated} matrículas (student_school_enrollment) da turma {class_id}"
+        )
+
         # 2. Excluir registros em ClassTest
         from app.models.classTest import ClassTest
-        class_tests = ClassTest.query.filter_by(class_id=class_id).all()
+        class_tests = ClassTest.query.filter_by(class_id=class_id_uuid).all()
         test_ids = [ct.test_id for ct in class_tests]
         logging.info(
             f"📝 Excluindo {len(class_tests)} registros em ClassTest para turma {class_id}. "
@@ -660,10 +669,10 @@ def delete_class(class_id):
         )
         for ct in class_tests:
             db.session.delete(ct)
-        
+
         # 3. Excluir registros em ClassSubject
         from app.models.classSubject import ClassSubject
-        class_subjects = ClassSubject.query.filter_by(class_id=class_id).all()
+        class_subjects = ClassSubject.query.filter_by(class_id=class_id_uuid).all()
         subject_ids = [cs.subject_id for cs in class_subjects]
         logging.info(
             f"📚 Excluindo {len(class_subjects)} registros em ClassSubject para turma {class_id}. "
@@ -671,11 +680,73 @@ def delete_class(class_id):
         )
         for cs in class_subjects:
             db.session.delete(cs)
-        
+
+        from app.models.teacherClass import TeacherClass
+        teacher_classes_deleted = TeacherClass.query.filter_by(class_id=class_id_uuid).delete(
+            synchronize_session=False
+        )
+        logging.info(
+            f"👨‍🏫 Excluindo {teacher_classes_deleted} vínculos professor-turma para turma {class_id}"
+        )
+
+        from app.models.game import GameClass
+        game_classes_deleted = GameClass.query.filter_by(class_id=class_id_uuid).delete(
+            synchronize_session=False
+        )
+        logging.info(
+            f"🎮 Excluindo {game_classes_deleted} vínculos game_classes para turma {class_id}"
+        )
+
+        from app.play_tv.models import PlayTvVideoClass
+        play_tv_deleted = PlayTvVideoClass.query.filter_by(class_id=class_id_uuid).delete(
+            synchronize_session=False
+        )
+        logging.info(
+            f"📺 Excluindo {play_tv_deleted} vínculos play_tv_video_classes para turma {class_id}"
+        )
+
+        from app.models.answerSheetGabarito import AnswerSheetGabarito
+        gabaritos_deleted = AnswerSheetGabarito.query.filter_by(class_id=class_id_uuid).delete(
+            synchronize_session=False
+        )
+        logging.info(
+            f"📄 Excluindo {gabaritos_deleted} gabaritos (answer_sheet_gabaritos) para turma {class_id}"
+        )
+
+        from app.models.calendar_event_user import CalendarEventUser
+        calendar_users_updated = (
+            db.session.query(CalendarEventUser)
+            .filter(CalendarEventUser.class_id == class_id_uuid)
+            .update({CalendarEventUser.class_id: None}, synchronize_session=False)
+        )
+        logging.info(
+            f"📅 Desvinculando {calendar_users_updated} registros em calendar_event_users da turma {class_id}"
+        )
+
+        from app.models.monitoring_action import MonitoringAction
+        monitoring_updated = (
+            db.session.query(MonitoringAction)
+            .filter(MonitoringAction.class_id == class_id_uuid)
+            .update({MonitoringAction.class_id: None}, synchronize_session=False)
+        )
+        logging.info(
+            f"📊 Desvinculando {monitoring_updated} ações de monitoramento da turma {class_id}"
+        )
+
+        from app.models.studentPasswordLog import StudentPasswordLog
+        password_logs_updated = (
+            db.session.query(StudentPasswordLog)
+            .filter(StudentPasswordLog.class_id == class_id_uuid)
+            .update({StudentPasswordLog.class_id: None}, synchronize_session=False)
+        )
+        logging.info(
+            f"🔑 Desvinculando {password_logs_updated} logs de senha da turma {class_id}"
+        )
+
         # 4. Excluir a turma
         logging.info(f"🗑️ Excluindo turma {class_id} (nome: {class_obj.name})")
         db.session.delete(class_obj)
-        
+
         # Commit com log de sucesso
         db.session.commit()
         logging.info(
@@ -683,7 +754,8 @@ def delete_class(class_id):
             f"Usuário: {user_info.get('email', 'N/A') if user_info else 'N/A'} - "
             f"Alunos desvinculados: {len(students)}, "
             f"ClassTests excluídos: {len(class_tests)}, "
-            f"ClassSubjects excluídos: {len(class_subjects)}"
+            f"ClassSubjects excluídos: {len(class_subjects)}, "
+            f"calendar_event_users: {calendar_users_updated}"
         )
         return jsonify({"message": "Class deleted successfully"}), 200
         

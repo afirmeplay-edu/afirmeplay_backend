@@ -3959,36 +3959,78 @@ def _calcular_dados_gerais_alunos_cartao(disciplinas_out, grade_name, student_id
 
 
 def _calcular_ranking_cartao(scope_info, nivel_granularidade, gabarito_id, user, periodo_bounds=None):
-    """Ranking de alunos por nota no gabarito."""
+    """Ranking de alunos por nota no gabarito.
+
+    Itens incluem contexto do aluno (escola_id/escola/serie/turma) e contagens
+    de acertos/respondidas, alinhado ao contrato do ranking da rota online.
+    """
     class_ids = _class_ids_alunos_previstos_cartao(gabarito_id, scope_info, nivel_granularidade, user)
     if not class_ids or not gabarito_id:
         return []
-    student_ids = [s.id for s in Student.query.filter(Student.class_id.in_(class_ids)).all()]
+
+    students = Student.query.filter(Student.class_id.in_(class_ids)).all()
+    if not students:
+        return []
+    student_ids = [s.id for s in students]
+    students_by_id = {s.id: s for s in students}
+
+    classes_with_grade = (
+        Class.query.options(joinedload(Class.grade))
+        .filter(Class.id.in_(class_ids))
+        .all()
+    )
+    class_info_by_id: Dict[Any, Tuple[str, str, Any]] = {
+        c.id: (
+            c.name or "N/A",
+            c.grade.name if c.grade else "N/A",
+            c.school_id,
+        )
+        for c in classes_with_grade
+    }
+    school_ids = list({c.school_id for c in classes_with_grade if c.school_id})
+    schools_by_id = (
+        {str(s.id): s for s in School.query.filter(School.id.in_(school_ids)).all()}
+        if school_ids
+        else {}
+    )
+
     _rq = AnswerSheetResult.query.filter(
         AnswerSheetResult.gabarito_id == gabarito_id,
         AnswerSheetResult.student_id.in_(student_ids),
     )
     _rq = _apply_answer_sheet_result_period_filter(_rq, periodo_bounds)
     results = _dedupe_answer_sheet_results_latest_per_student(_rq.all())
-    enriched = []
-    for r in results:
-        enriched.append((r, float(r.grade or 0), r.classification or ""))
+
     sorted_results = sorted(
-        enriched,
-        key=lambda t: (t[1], t[0].proficiency or 0),
+        results,
+        key=lambda r: (float(r.grade or 0), float(r.proficiency or 0)),
         reverse=True,
     )
-    ranking = []
-    for pos, (r, eff_grade, _) in enumerate(sorted_results, 1):
-        student = Student.query.get(r.student_id)
+
+    ranking: List[Dict[str, Any]] = []
+    for pos, r in enumerate(sorted_results, 1):
+        student = students_by_id.get(r.student_id)
+        turma_nome, serie_nome, school_id = class_info_by_id.get(
+            getattr(student, "class_id", None), ("N/A", "N/A", None)
+        )
+        school_obj = schools_by_id.get(str(school_id)) if school_id else None
+        escola_id = str(getattr(school_obj, "id", "") or "") or None
+        escola_nome = (getattr(school_obj, "name", None) or "N/A")
         ranking.append({
             "posicao": pos,
             "student_id": str(r.student_id),
             "nome": student.name if student else "N/A",
-            "grade": eff_grade,
+            "escola_id": escola_id,
+            "escola": escola_nome,
+            "serie": serie_nome,
+            "turma": turma_nome,
+            "grade": float(r.grade or 0),
             "proficiency": r.proficiency,
             "classification": r.classification,
-            "score_percentage": r.score_percentage
+            "score_percentage": r.score_percentage,
+            "total_acertos": int(r.correct_answers or 0),
+            "total_respondidas": int(r.answered_questions or 0),
+            "total_questoes": int(r.total_questions or 0),
         })
     return ranking
 

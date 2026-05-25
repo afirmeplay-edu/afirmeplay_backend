@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+import unicodedata
 from calendar import monthrange
 from collections import defaultdict
 from datetime import date, datetime
@@ -35,6 +36,10 @@ from app.services.evaluation_result_snapshot import municipal_evaluation_results
 from app.services.skills_map_service import (
     _extract_skill_ids_from_question_field,
     _fetch_skills_batch,
+    compute_student_critical_skills_answer_sheet,
+    compute_student_critical_skills_digital,
+    get_instrument_skill_detail,
+    merge_critical_skills_for_row,
 )
 from app.utils.tenant_middleware import city_id_to_schema_name, get_current_tenant_context
 
@@ -49,7 +54,7 @@ class MonitoringValidationError(Exception):
 
 class MonitoringService:
     STAFF_ROLES = {"admin", "tecadm", "diretor", "coordenador", "professor"}
-    STATUS_ALLOWED = {"pendente", "sendo_realizada", "nao_realizado"}
+    STATUS_ALLOWED = {"pendente", "sendo_realizada", "realizada", "nao_realizado"}
     _monitoring_columns_ensured: Set[str] = set()
 
     @staticmethod
@@ -62,30 +67,300 @@ class MonitoringService:
         return str(value).strip() if value is not None else ""
 
     @staticmethod
-    def _discipline_name_for_evaluation_result(
-        result: EvaluationResult, discipline_filter: str = ""
-    ) -> str:
-        if isinstance(result.subject_results, dict) and result.subject_results:
-            if discipline_filter:
-                for data in result.subject_results.values():
-                    if not isinstance(data, dict):
-                        continue
-                    name = str(data.get("subject_name") or data.get("name") or "").strip()
-                    if name.lower() == discipline_filter:
-                        return name
-            else:
-                first = next(iter(result.subject_results.values()))
-                if isinstance(first, dict):
-                    return str(first.get("subject_name") or first.get("name") or "").strip()
-        test = result.test
-        if test and getattr(test, "subject_rel", None):
-            return str(test.subject_rel.name or "").strip()
+    def _normalize_proficiency_nivel(nivel: Any) -> str:
+        """Rótulo canônico (minúsculas, sem acento) para comparar classificações."""
+        raw = str(nivel or "").strip()
+        if not raw:
+            return ""
+        lowered = raw.lower()
+        decomposed = unicodedata.normalize("NFD", lowered)
+        ascii_only = "".join(c for c in decomposed if unicodedata.category(c) != "Mn")
+        if "abaixo" in ascii_only and "basico" in ascii_only:
+            return "abaixo do básico"
+        if ascii_only == "basico":
+            return "básico"
+        if ascii_only == "adequado":
+            return "adequado"
+        if ascii_only == "avancado":
+            return "avancado"
+        return lowered
+
+    @staticmethod
+    def _is_intervention_nivel(nivel: Any) -> bool:
+        return MonitoringService._normalize_proficiency_nivel(nivel) in (
+            "abaixo do básico",
+            "básico",
+        )
+
+    @staticmethod
+    def _nivel_dedupe_rank(nivel: Any) -> int:
+        ranks = {
+            "abaixo do básico": 0,
+            "básico": 1,
+            "adequado": 2,
+            "avancado": 3,
+        }
+        return ranks.get(MonitoringService._normalize_proficiency_nivel(nivel), 99)
+
+    @staticmethod
+    def _discipline_lookup_key(value: Any) -> str:
+        decomposed = unicodedata.normalize("NFD", str(value or "").strip().lower())
+        return "".join(c for c in decomposed if unicodedata.category(c) != "Mn")
+
+    @staticmethod
+    def _discipline_names_match(left: Any, right: Any) -> bool:
+        left_key = MonitoringService._discipline_lookup_key(left)
+        right_key = MonitoringService._discipline_lookup_key(right)
+        return bool(left_key) and left_key == right_key
+
+    @staticmethod
+    def _subject_name_from_result_data(data: Dict[str, Any], key: str = "") -> str:
+        name = str(data.get("subject_name") or data.get("name") or "").strip()
+        if name:
+            return name
+        if key:
+            subject_row = Subject.query.get(str(key))
+            if subject_row and subject_row.name:
+                return str(subject_row.name).strip()
         return ""
+
+    @staticmethod
+    def _iter_avaliacao_subjects(
+        result: EvaluationResult, discipline_filter: str = ""
+    ) -> List[Dict[str, Any]]:
+        filter_active = bool((discipline_filter or "").strip())
+        items: List[Dict[str, Any]] = []
+        if isinstance(result.subject_results, dict) and result.subject_results:
+            for key, data in result.subject_results.items():
+                if not isinstance(data, dict):
+                    continue
+                name = MonitoringService._subject_name_from_result_data(data, str(key))
+                if not name:
+                    continue
+                if filter_active and not MonitoringService._discipline_names_match(
+                    name, discipline_filter
+                ):
+                    continue
+                items.append(
+                    {
+                        "name": name,
+                        "grade": float(data.get("grade") or 0),
+                        "proficiency": float(data.get("proficiency") or 0),
+                        "classification": str(data.get("classification") or "Abaixo do Básico"),
+                    }
+                )
+            return items
+        test = result.test
+        fallback_name = ""
+        if test and getattr(test, "subject_rel", None):
+            fallback_name = str(test.subject_rel.name or "").strip()
+        if filter_active and fallback_name and not MonitoringService._discipline_names_match(
+            fallback_name, discipline_filter
+        ):
+            return []
+        items.append(
+            {
+                "name": fallback_name,
+                "grade": float(result.grade or 0),
+                "proficiency": float(result.proficiency or 0),
+                "classification": str(result.classification or "Abaixo do Básico"),
+            }
+        )
+        return items
+
+    @staticmethod
+    def _iter_gabarito_subjects(
+        result: AnswerSheetResult, discipline_filter: str = ""
+    ) -> List[Dict[str, Any]]:
+        filter_active = bool((discipline_filter or "").strip())
+        items: List[Dict[str, Any]] = []
+        payload = result.proficiency_by_subject
+        if isinstance(payload, dict) and payload:
+            for key, data in payload.items():
+                if not isinstance(data, dict):
+                    continue
+                name = MonitoringService._subject_name_from_result_data(data, str(key))
+                if not name:
+                    continue
+                if filter_active and not MonitoringService._discipline_names_match(
+                    name, discipline_filter
+                ):
+                    continue
+                items.append(
+                    {
+                        "name": name,
+                        "grade": float(data.get("grade") or result.grade or 0),
+                        "proficiency": float(data.get("proficiency") or result.proficiency or 0),
+                        "classification": str(
+                            data.get("classification") or result.classification or "Abaixo do Básico"
+                        ),
+                    }
+                )
+            return items
+        items.append(
+            {
+                "name": "",
+                "grade": float(result.grade or 0),
+                "proficiency": float(result.proficiency or 0),
+                "classification": str(result.classification or "Abaixo do Básico"),
+            }
+        )
+        return items
+
+    @staticmethod
+    def _subjects_for_monitoring_row(
+        result: Any,
+        source_type: str,
+        discipline_filter: str,
+        expand_disciplines: bool,
+    ) -> List[Dict[str, Any]]:
+        if source_type == "avaliacao":
+            subjects = MonitoringService._iter_avaliacao_subjects(result, discipline_filter)
+            overall = {
+                "name": "",
+                "grade": float(result.grade or 0),
+                "proficiency": float(result.proficiency or 0),
+                "classification": str(result.classification or "Abaixo do Básico"),
+            }
+        else:
+            subjects = MonitoringService._iter_gabarito_subjects(result, discipline_filter)
+            overall = {
+                "name": "",
+                "grade": float(result.grade or 0),
+                "proficiency": float(result.proficiency or 0),
+                "classification": str(result.classification or "Abaixo do Básico"),
+            }
+        discipline_filter_active = bool((discipline_filter or "").strip())
+        if expand_disciplines:
+            if discipline_filter_active:
+                return [
+                    subj
+                    for subj in subjects
+                    if MonitoringService._is_intervention_nivel(subj.get("classification"))
+                ]
+            intervention_subjects = [
+                subj
+                for subj in subjects
+                if MonitoringService._is_intervention_nivel(subj.get("classification"))
+            ]
+            if intervention_subjects:
+                return intervention_subjects
+            if MonitoringService._is_intervention_nivel(overall["classification"]):
+                if subjects:
+                    return MonitoringService._expand_subjects_with_overall_intervention(
+                        subjects, overall
+                    )
+                return [overall]
+            return []
+        if discipline_filter and subjects:
+            return subjects[:1]
+        return [overall]
+
+    @staticmethod
+    def _expand_subjects_with_overall_intervention(
+        subjects: List[Dict[str, Any]], overall: Dict[str, Any]
+    ) -> List[Dict[str, Any]]:
+        """
+        Aluno Básico/Abaixo no geral, mas disciplinas sem classificação de intervenção
+        no JSON — mantém uma entrada por disciplina com o nível geral.
+        """
+        overall_class = str(overall.get("classification") or "")
+        expanded: List[Dict[str, Any]] = []
+        for subj in subjects:
+            classif = str(subj.get("classification") or "")
+            if MonitoringService._is_intervention_nivel(classif):
+                expanded.append(subj)
+            else:
+                expanded.append({**subj, "classification": overall_class})
+        return expanded
+
+    @staticmethod
+    def _discipline_display_from_key(
+        discipline_key: str, subjects: Optional[List[Dict[str, Any]]] = None
+    ) -> str:
+        key_lower = (discipline_key or "").strip().lower()
+        if not key_lower or key_lower in {"sem disciplina", "geral"}:
+            return "Geral"
+        for subj in subjects or []:
+            name = (subj.get("name") or "").strip()
+            if name and name.lower() == key_lower:
+                return name
+        return discipline_key.strip().title()
+
+    @staticmethod
+    def _expand_overall_entry_by_critical_disciplines(
+        overall_entry: Dict[str, Any],
+        critical_by_discipline: Dict[str, List[str]],
+        subjects: Optional[List[Dict[str, Any]]] = None,
+    ) -> List[Dict[str, Any]]:
+        """Separa habilidades críticas por disciplina quando só há linha geral no resultado."""
+        usable = {
+            key: codes
+            for key, codes in (critical_by_discipline or {}).items()
+            if key.strip().lower() not in {"", "sem disciplina", "geral"} and codes
+        }
+        if len(usable) <= 1:
+            return [overall_entry]
+        entries: List[Dict[str, Any]] = []
+        for disc_key in sorted(usable.keys(), key=lambda value: value.lower()):
+            entries.append(
+                {
+                    "name": MonitoringService._discipline_display_from_key(disc_key, subjects),
+                    "grade": overall_entry.get("grade"),
+                    "proficiency": overall_entry.get("proficiency"),
+                    "classification": overall_entry.get("classification"),
+                }
+            )
+        return entries
+
+    @staticmethod
+    def _resolve_subject_entries_for_student(
+        result: Any,
+        source_type: str,
+        discipline_filter: str,
+        expand_disciplines: bool,
+        critical_skills_map: Dict[str, Dict[str, List[str]]],
+        student_id: str,
+    ) -> List[Dict[str, Any]]:
+        subjects = (
+            MonitoringService._iter_avaliacao_subjects(result, discipline_filter)
+            if source_type == "avaliacao"
+            else MonitoringService._iter_gabarito_subjects(result, discipline_filter)
+        )
+        entries = MonitoringService._subjects_for_monitoring_row(
+            result, source_type, discipline_filter, expand_disciplines
+        )
+        if not expand_disciplines:
+            return entries
+        discipline_filter_active = bool((discipline_filter or "").strip())
+        if discipline_filter_active:
+            if (
+                len(entries) == 1
+                and not (entries[0].get("name") or "").strip()
+                and subjects
+            ):
+                subject = subjects[0]
+                return [
+                    {
+                        "name": subject["name"],
+                        "grade": subject["grade"],
+                        "proficiency": subject["proficiency"],
+                        "classification": subject["classification"],
+                    }
+                ]
+            return entries
+        if len(entries) == 1 and not (entries[0].get("name") or "").strip():
+            per_discipline = critical_skills_map.get(student_id, {})
+            if len(per_discipline) > 1:
+                return MonitoringService._expand_overall_entry_by_critical_disciplines(
+                    entries[0], per_discipline, subjects
+                )
+        return entries
 
     @staticmethod
     def _school_list_sort_key(item: Dict[str, Any], sort_by: str) -> Any:
         value = item.get(sort_by)
-        if sort_by == "escola_nome":
+        if sort_by in ("escola_nome", "turma_nome", "serie_nome"):
             return (value or "").lower() if isinstance(value, str) else ""
         if value is None:
             return 0
@@ -118,16 +393,10 @@ class MonitoringService:
 
     @staticmethod
     def _student_list_sort_key(item: Dict[str, Any], sort_by: str) -> Any:
-        nivel_rank = {
-            "Abaixo do Básico": 0,
-            "Básico": 1,
-            "Adequado": 2,
-            "Avançado": 3,
-        }
         if sort_by == "aluno_nome":
             return (item.get("aluno_nome") or "").lower()
         if sort_by == "nivel":
-            return nivel_rank.get((item.get("nivel") or "").strip(), 99)
+            return MonitoringService._nivel_dedupe_rank(item.get("nivel"))
         if sort_by in {"nota", "proficiencia"}:
             try:
                 return float(item.get(sort_by) or 0)
@@ -556,6 +825,94 @@ class MonitoringService:
         return [{"id": sid, "name": name} for sid, name in sorted(options.items(), key=lambda item: item[1])]
 
     @staticmethod
+    def _series_for_source(
+        user: Dict[str, Any],
+        filters: Dict[str, Any],
+        source_type: str,
+        source_id: str,
+        escola_id: str = "",
+    ) -> List[Dict[str, str]]:
+        """Séries vinculadas à avaliação/cartão selecionado (não todas as séries da escola)."""
+        if not source_id:
+            return []
+
+        municipio = (filters.get("municipio") or "").strip()
+        bounds = MonitoringService._parse_periodo_bounds((filters.get("periodo") or "").strip())
+        scope_school_ids = MonitoringService._scope_filtered_school_ids(user)
+        grade_ids: Set[str] = set()
+
+        def _grade_option(grade_row: Optional[Grade]) -> List[Dict[str, str]]:
+            if not grade_row:
+                return []
+            return [{"id": str(grade_row.id), "name": grade_row.name or "Série"}]
+
+        if source_type == "avaliacao":
+            test = Test.query.get(source_id)
+            if not test:
+                return []
+            if test.grade_id:
+                return _grade_option(Grade.query.get(test.grade_id))
+
+            grade_query = (
+                db.session.query(Class.grade_id)
+                .select_from(ClassTest)
+                .join(Class, Class.id == ClassTest.class_id)
+                .filter(ClassTest.test_id == source_id, Class.grade_id.isnot(None))
+            )
+            if escola_id:
+                grade_query = grade_query.filter(cast(Class._school_id, String) == escola_id)
+            elif municipio:
+                grade_query = grade_query.join(
+                    School, School.id == cast(Class._school_id, String)
+                ).filter(School.city_id == municipio)
+            if scope_school_ids is not None:
+                if not scope_school_ids:
+                    return []
+                grade_query = grade_query.filter(
+                    cast(Class._school_id, String).in_(list(scope_school_ids))
+                )
+            grade_query = MonitoringService._apply_class_test_application_period(grade_query, bounds)
+            for row in grade_query.distinct().all():
+                if row[0]:
+                    grade_ids.add(str(row[0]))
+        else:
+            gab = AnswerSheetGabarito.query.get(source_id)
+            if not gab:
+                return []
+            if gab.grade_id:
+                return _grade_option(Grade.query.get(gab.grade_id))
+            if gab.class_id:
+                class_row = Class.query.get(gab.class_id)
+                if class_row and class_row.grade_id:
+                    return _grade_option(Grade.query.get(class_row.grade_id))
+
+            from app.report_analysis.answer_sheet_report_builder import (
+                get_answer_sheet_target_classes_for_report,
+            )
+
+            scope_kind = "city" if municipio else "overall"
+            for class_obj in get_answer_sheet_target_classes_for_report(
+                gab, scope_kind, municipio or None
+            ):
+                school_id = str(getattr(class_obj, "school_id", None) or "")
+                if escola_id and school_id != escola_id:
+                    continue
+                if scope_school_ids is not None and school_id not in scope_school_ids:
+                    continue
+                if class_obj.grade_id:
+                    grade_ids.add(str(class_obj.grade_id))
+
+        if not grade_ids:
+            return []
+
+        rows = (
+            Grade.query.filter(Grade.id.in_(list(grade_ids)))
+            .order_by(Grade.name.asc())
+            .all()
+        )
+        return [{"id": str(g.id), "name": g.name or "Série"} for g in rows]
+
+    @staticmethod
     def _discover_source_ids(user: Dict[str, Any], filters: Dict[str, Any], source_type: str) -> List[str]:
         if source_type == "avaliacao":
             return list(MonitoringService._test_ids_in_scope(user, filters))[:80]
@@ -614,26 +971,21 @@ class MonitoringService:
             MonitoringService._disciplines_for_source(source_type, source_id) if source_id else []
         )
 
+        serie_id_filter = (filters.get("serie_id") or filters.get("grade_id") or "").strip()
         classes_query = Class.query
         if escola_id:
             classes_query = classes_query.filter(Class._school_id == escola_id)
+            if serie_id_filter:
+                classes_query = classes_query.filter(Class.grade_id == serie_id_filter)
         elif scope_school_ids:
             classes_query = classes_query.filter(Class._school_id.in_(list(scope_school_ids)))
         turmas = [{"id": str(t.id), "name": t.name} for t in classes_query.order_by(Class.name.asc()).all()]
 
-        if escola_id:
-            grade_ids = [
-                row[0]
-                for row in db.session.query(Class.grade_id)
-                .filter(Class._school_id == escola_id, Class.grade_id.isnot(None))
-                .distinct()
-                .all()
-                if row[0]
-            ]
-            series_query = Grade.query.filter(Grade.id.in_(grade_ids)) if grade_ids else Grade.query.filter(False)
-        else:
-            series_query = Grade.query
-        series = [{"id": str(g.id), "name": g.name} for g in series_query.order_by(Grade.name.asc()).all()]
+        series = (
+            MonitoringService._series_for_source(user, filters, source_type, source_id, escola_id)
+            if source_id
+            else []
+        )
 
         avaliacoes: List[Dict[str, str]] = []
         gabaritos: List[Dict[str, str]] = []
@@ -728,24 +1080,14 @@ class MonitoringService:
         return code_map
 
     @staticmethod
-    def _critical_descriptors_for_test(test_id: str, student_ids: List[str]) -> Dict[str, List[str]]:
-        if not test_id or not student_ids:
+    def _critical_skills_map_for_source(
+        source_type: str, source_id: str, student_ids: List[str]
+    ) -> Dict[str, Dict[str, List[str]]]:
+        if not source_id or not student_ids:
             return {}
-        rows = (
-            db.session.query(StudentAnswer.student_id, Question.skill)
-            .join(Question, Question.id == StudentAnswer.question_id)
-            .filter(StudentAnswer.test_id == test_id, StudentAnswer.student_id.in_(student_ids))
-            .filter((StudentAnswer.is_correct == False) | (StudentAnswer.is_correct.is_(None)))
-            .all()
-        )
-        code_map = MonitoringService._skill_raw_to_code_map({skill for _, skill in rows if skill})
-        grouped: Dict[str, List[str]] = defaultdict(list)
-        for student_id, skill in rows:
-            for sid in _extract_skill_ids_from_question_field(skill):
-                text = code_map.get(sid, sid).strip()
-                if text and text not in grouped[student_id]:
-                    grouped[student_id].append(text)
-        return {k: v[:4] for k, v in grouped.items()}
+        if source_type == "avaliacao":
+            return compute_student_critical_skills_digital(source_id, student_ids)
+        return compute_student_critical_skills_answer_sheet(source_id, student_ids)
 
     @staticmethod
     def _action_key(source_type: str, source_id: str, student_id: str, discipline: str) -> str:
@@ -766,7 +1108,12 @@ class MonitoringService:
         return result
 
     @staticmethod
-    def _build_rows(user: Dict[str, Any], filters: Dict[str, Any]) -> List[Dict[str, Any]]:
+    def _build_rows(
+        user: Dict[str, Any],
+        filters: Dict[str, Any],
+        *,
+        expand_disciplines: bool = False,
+    ) -> List[Dict[str, Any]]:
         source_type = MonitoringService._normalize_source_type(filters.get("tipo_origem"))
         explicit_id = (filters.get("avaliacao_id") or filters.get("gabarito_id") or filters.get("source_id") or "").strip()
         source_ids = [explicit_id] if explicit_id else MonitoringService._discover_source_ids(user, filters, source_type)
@@ -775,18 +1122,16 @@ class MonitoringService:
 
         rows: List[Dict[str, Any]] = []
         for source_id in source_ids:
-            rows.extend(MonitoringService._build_rows_for_source(user, filters, source_type, source_id))
+            rows.extend(
+                MonitoringService._build_rows_for_source(
+                    user, filters, source_type, source_id, expand_disciplines=expand_disciplines
+                )
+            )
         return MonitoringService._dedupe_rows(rows)
 
     @staticmethod
     def _dedupe_rows(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """Um aluno/disciplina/escola aparece uma vez mesmo com várias avaliações no recorte."""
-        nivel_rank = {
-            "Abaixo do Básico": 0,
-            "Básico": 1,
-            "Adequado": 2,
-            "Avançado": 3,
-        }
         merged: Dict[str, Dict[str, Any]] = {}
         for row in rows:
             key = f"{row.get('student_id')}:{(row.get('discipline') or '').lower()}:{row.get('school_id')}"
@@ -794,8 +1139,8 @@ class MonitoringService:
             if not current:
                 merged[key] = row
                 continue
-            current_rank = nivel_rank.get((current.get("nivel") or "").strip(), 99)
-            row_rank = nivel_rank.get((row.get("nivel") or "").strip(), 99)
+            current_rank = MonitoringService._nivel_dedupe_rank(current.get("nivel"))
+            row_rank = MonitoringService._nivel_dedupe_rank(row.get("nivel"))
             current_action = current.get("monitoring_action")
             row_action = row.get("monitoring_action")
             if row_rank < current_rank:
@@ -810,6 +1155,8 @@ class MonitoringService:
         filters: Dict[str, Any],
         source_type: str,
         source_id: str,
+        *,
+        expand_disciplines: bool = False,
     ) -> List[Dict[str, Any]]:
         if not source_id:
             return []
@@ -867,44 +1214,55 @@ class MonitoringService:
 
             query_rows = query.all()
             student_ids = [student.id for _, student, _, _, _ in query_rows]
-            descriptors_map = MonitoringService._critical_descriptors_for_test(source_id, student_ids)
+            critical_skills_map = MonitoringService._critical_skills_map_for_source(
+                source_type, source_id, student_ids
+            )
             actions_map = MonitoringService._fetch_actions_map(source_type, source_id)
 
             for result, student, school, class_, grade in query_rows:
-                discipline_name = MonitoringService._discipline_name_for_evaluation_result(
-                    result, discipline_filter
-                )
-                if discipline_filter and discipline_name.lower() != discipline_filter:
-                    continue
-                action_key = MonitoringService._action_key(source_type, source_id, student.id, discipline_name)
-                action = actions_map.get(action_key)
                 school_id = (
                     MonitoringService._str_id(school.id if school else None)
                     or MonitoringService._str_id(result.school_id_snapshot)
                     or MonitoringService._str_id(student.school_id)
                     or MonitoringService._str_id(getattr(class_, "school_id", None))
                 )
-                rows.append(
-                    {
-                        "source_type": source_type,
-                        "source_id": source_id,
-                        "student_id": student.id,
-                        "student_name": student.name,
-                        "registration": student.registration,
-                        "school_id": school_id or None,
-                        "school_name": (school.name if school and school.name else None) or "Escola",
-                        "class_id": str(student.class_id) if student.class_id else None,
-                        "class_name": class_.name if class_ else "—",
-                        "grade_id": str(student.grade_id) if student.grade_id else None,
-                        "grade_name": grade.name if grade else "—",
-                        "discipline": discipline_name,
-                        "nota": float(result.grade or 0),
-                        "proficiencia": float(result.proficiency or 0),
-                        "nivel": result.classification or "Abaixo do Básico",
-                        "descritores_criticos": descriptors_map.get(student.id, []),
-                        "monitoring_action": action,
-                    }
+                subject_entries = MonitoringService._resolve_subject_entries_for_student(
+                    result,
+                    source_type,
+                    discipline_filter,
+                    expand_disciplines,
+                    critical_skills_map,
+                    student.id,
                 )
+                for subj in subject_entries:
+                    discipline_name = subj["name"]
+                    action_key = MonitoringService._action_key(
+                        source_type, source_id, student.id, discipline_name
+                    )
+                    action = actions_map.get(action_key)
+                    rows.append(
+                        {
+                            "source_type": source_type,
+                            "source_id": source_id,
+                            "student_id": student.id,
+                            "student_name": student.name,
+                            "registration": student.registration,
+                            "school_id": school_id or None,
+                            "school_name": (school.name if school and school.name else None) or "Escola",
+                            "class_id": str(student.class_id) if student.class_id else None,
+                            "class_name": class_.name if class_ else "—",
+                            "grade_id": str(student.grade_id) if student.grade_id else None,
+                            "grade_name": grade.name if grade else "—",
+                            "discipline": discipline_name,
+                            "nota": subj["grade"],
+                            "proficiencia": subj["proficiency"],
+                            "nivel": subj["classification"],
+                            "descritores_criticos": merge_critical_skills_for_row(
+                                critical_skills_map, student.id, discipline_name
+                            ),
+                            "monitoring_action": action,
+                        }
+                    )
         else:
             query = (
                 db.session.query(AnswerSheetResult, Student, School, Class, Grade)
@@ -937,53 +1295,54 @@ class MonitoringService:
                 query = query.filter(Student.school_id.in_(list(scope_school_ids)))
 
             query_rows = query.all()
+            student_ids = [student.id for _, student, _, _, _ in query_rows]
+            critical_skills_map = MonitoringService._critical_skills_map_for_source(
+                source_type, source_id, student_ids
+            )
             actions_map = MonitoringService._fetch_actions_map(source_type, source_id)
             for result, student, school, class_, grade in query_rows:
-                discipline_name = ""
-                if isinstance(result.proficiency_by_subject, dict) and result.proficiency_by_subject:
-                    first = next(iter(result.proficiency_by_subject.values()))
-                    if isinstance(first, dict):
-                        discipline_name = str(first.get("subject_name") or "").strip()
-                if discipline_filter and discipline_name.lower() != discipline_filter:
-                    continue
-                action_key = MonitoringService._action_key(source_type, source_id, student.id, discipline_name)
-                action = actions_map.get(action_key)
-                critical_subjects: List[str] = []
-                if isinstance(result.proficiency_by_subject, dict):
-                    for subject_data in result.proficiency_by_subject.values():
-                        if not isinstance(subject_data, dict):
-                            continue
-                        classification = str(subject_data.get("classification") or "")
-                        if classification in {"Abaixo do Básico", "Básico"}:
-                            subject_name = str(subject_data.get("subject_name") or "").strip()
-                            if subject_name:
-                                critical_subjects.append(subject_name)
-                rows.append(
-                    {
-                        "source_type": source_type,
-                        "source_id": source_id,
-                        "student_id": student.id,
-                        "student_name": student.name,
-                        "registration": student.registration,
-                        "school_id": (
-                            MonitoringService._str_id(school.id if school else None)
-                            or MonitoringService._str_id(student.school_id)
-                            or MonitoringService._str_id(getattr(class_, "school_id", None))
-                            or None
-                        ),
-                        "school_name": (school.name if school and school.name else None) or "Escola",
-                        "class_id": str(student.class_id) if student.class_id else None,
-                        "class_name": class_.name if class_ else "—",
-                        "grade_id": str(student.grade_id) if student.grade_id else None,
-                        "grade_name": grade.name if grade else "—",
-                        "discipline": discipline_name,
-                        "nota": float(result.grade or 0),
-                        "proficiencia": float(result.proficiency or 0),
-                        "nivel": result.classification or "Abaixo do Básico",
-                        "descritores_criticos": critical_subjects[:4],
-                        "monitoring_action": action,
-                    }
+                subject_entries = MonitoringService._resolve_subject_entries_for_student(
+                    result,
+                    source_type,
+                    discipline_filter,
+                    expand_disciplines,
+                    critical_skills_map,
+                    student.id,
                 )
+                for subj in subject_entries:
+                    discipline_name = subj["name"]
+                    action_key = MonitoringService._action_key(
+                        source_type, source_id, student.id, discipline_name
+                    )
+                    action = actions_map.get(action_key)
+                    rows.append(
+                        {
+                            "source_type": source_type,
+                            "source_id": source_id,
+                            "student_id": student.id,
+                            "student_name": student.name,
+                            "registration": student.registration,
+                            "school_id": (
+                                MonitoringService._str_id(school.id if school else None)
+                                or MonitoringService._str_id(student.school_id)
+                                or MonitoringService._str_id(getattr(class_, "school_id", None))
+                                or None
+                            ),
+                            "school_name": (school.name if school and school.name else None) or "Escola",
+                            "class_id": str(student.class_id) if student.class_id else None,
+                            "class_name": class_.name if class_ else "—",
+                            "grade_id": str(student.grade_id) if student.grade_id else None,
+                            "grade_name": grade.name if grade else "—",
+                            "discipline": discipline_name,
+                            "nota": subj["grade"],
+                            "proficiencia": subj["proficiency"],
+                            "nivel": subj["classification"],
+                            "descritores_criticos": merge_critical_skills_for_row(
+                                critical_skills_map, student.id, discipline_name
+                            ),
+                            "monitoring_action": action,
+                        }
+                    )
         return rows
 
     @staticmethod
@@ -1102,6 +1461,7 @@ class MonitoringService:
             "total_acoes": sum(i["acoes_realizadas"] for i in items),
             "total_vistos_semed": sum(i["vistos_semed"] for i in items),
         }
+        summary.update(MonitoringService._monitoring_kpi_summary(user, filters))
         return {
             "items": paged,
             "summary": summary,
@@ -1114,9 +1474,357 @@ class MonitoringService:
         }
 
     @staticmethod
+    def _aggregate_level_counts(target: Dict[str, Any], row: Dict[str, Any]) -> None:
+        target["total_alunos"] += 1
+        level = (row.get("nivel") or "").strip()
+        if level == "Avançado":
+            target["avancado"] += 1
+        elif level == "Adequado":
+            target["adequado"] += 1
+        elif level == "Básico":
+            target["basico"] += 1
+        else:
+            target["abaixo_basico"] += 1
+        action: Optional[MonitoringAction] = row.get("monitoring_action")
+        if action and action.pedagogical_action and action.status != "pendente":
+            target["acoes_realizadas"] += 1
+        if action and action.seen_by_semed:
+            target["vistos_semed"] += 1
+
+    @staticmethod
+    def list_classes(user: Dict[str, Any], filters: Dict[str, Any]) -> Dict[str, Any]:
+        MonitoringService._ensure_monitoring_schema_columns(filters)
+        escola_id_filter = (filters.get("escola_id") or "").strip()
+        if not escola_id_filter:
+            return {
+                "items": [],
+                "summary": {
+                    "total_escolas": 0,
+                    "total_alunos": 0,
+                    "total_acoes": 0,
+                    "total_vistos_semed": 0,
+                },
+                "pagination": {"page": 1, "page_size": 20, "total": 0, "total_pages": 1},
+            }
+
+        turma_id_filter = (filters.get("turma_id") or filters.get("class_id") or "").strip()
+        row_filters = dict(filters)
+        if not turma_id_filter:
+            row_filters["turma_id"] = ""
+
+        rows = MonitoringService._build_rows(user, row_filters)
+        search = (filters.get("q") or "").strip().lower()
+        grouped: Dict[str, Dict[str, Any]] = {}
+
+        for row in rows:
+            class_key = MonitoringService._str_id(row.get("class_id")) or ""
+            if not class_key:
+                continue
+            if turma_id_filter and class_key != turma_id_filter:
+                continue
+            class_name = (row.get("class_name") or "").strip() or "Turma"
+            if search and search not in class_name.lower():
+                continue
+            school_key = MonitoringService._str_id(row.get("school_id")) or escola_id_filter
+            if school_key != escola_id_filter:
+                continue
+            if class_key not in grouped:
+                grouped[class_key] = {
+                    "turma_id": class_key,
+                    "turma_nome": class_name,
+                    "serie_nome": (row.get("grade_name") or "").strip() or "—",
+                    "escola_id": school_key,
+                    "escola_nome": row.get("school_name") or "Escola",
+                    "total_alunos": 0,
+                    "abaixo_basico": 0,
+                    "basico": 0,
+                    "adequado": 0,
+                    "avancado": 0,
+                    "acoes_realizadas": 0,
+                    "vistos_semed": 0,
+                }
+            MonitoringService._aggregate_level_counts(grouped[class_key], row)
+
+        if turma_id_filter and turma_id_filter not in grouped:
+            class_row = Class.query.get(turma_id_filter)
+            grade_name = "—"
+            if class_row and class_row.grade_id:
+                grade_row = Grade.query.get(class_row.grade_id)
+                if grade_row and grade_row.name:
+                    grade_name = grade_row.name
+            school_row = School.query.get(escola_id_filter)
+            grouped[turma_id_filter] = {
+                "turma_id": turma_id_filter,
+                "turma_nome": (class_row.name if class_row and class_row.name else None) or "Turma",
+                "serie_nome": grade_name,
+                "escola_id": escola_id_filter,
+                "escola_nome": (school_row.name if school_row and school_row.name else None) or "Escola",
+                "total_alunos": 0,
+                "abaixo_basico": 0,
+                "basico": 0,
+                "adequado": 0,
+                "avancado": 0,
+                "acoes_realizadas": 0,
+                "vistos_semed": 0,
+            }
+
+        items = list(grouped.values())
+        sort_by = (filters.get("sort_by") or "turma_nome").strip()
+        sort_order = (filters.get("sort_order") or "asc").strip().lower()
+        reverse = sort_order == "desc"
+        sortable_fields = {
+            "turma_nome",
+            "serie_nome",
+            "total_alunos",
+            "abaixo_basico",
+            "basico",
+            "adequado",
+            "avancado",
+            "acoes_realizadas",
+            "vistos_semed",
+        }
+        if sort_by in sortable_fields:
+            items = sorted(
+                items,
+                key=lambda item: MonitoringService._school_list_sort_key(item, sort_by),
+                reverse=reverse,
+            )
+        else:
+            items = sorted(
+                items,
+                key=lambda item: MonitoringService._school_list_sort_key(item, "turma_nome"),
+            )
+
+        page = MonitoringService._parse_int(filters.get("page"), 1)
+        page_size = max(1, min(200, MonitoringService._parse_int(filters.get("page_size"), 20)))
+        start = (page - 1) * page_size
+        end = start + page_size
+        paged = items[start:end]
+        total = len(items)
+
+        summary = {
+            "total_escolas": total,
+            "total_alunos": sum(i["total_alunos"] for i in items),
+            "total_acoes": sum(i["acoes_realizadas"] for i in items),
+            "total_vistos_semed": sum(i["vistos_semed"] for i in items),
+        }
+        summary.update(MonitoringService._monitoring_kpi_summary(user, filters))
+        return {
+            "items": paged,
+            "summary": summary,
+            "pagination": {
+                "page": page,
+                "page_size": page_size,
+                "total": total,
+                "total_pages": (total + page_size - 1) // page_size if page_size else 1,
+            },
+        }
+
+    @staticmethod
+    def _include_in_student_detail(row: Dict[str, Any]) -> bool:
+        """Detalhamento de alunos: apenas Básico e Abaixo do Básico."""
+        return MonitoringService._is_intervention_nivel(row.get("nivel"))
+
+    @staticmethod
+    def _canonical_nivel_label(nivel: Any) -> str:
+        normalized = MonitoringService._normalize_proficiency_nivel(nivel)
+        labels = {
+            "abaixo do básico": "Abaixo do Básico",
+            "básico": "Básico",
+            "adequado": "Adequado",
+            "avancado": "Avançado",
+        }
+        raw = str(nivel or "").strip()
+        return labels.get(normalized, raw or "—")
+
+    @staticmethod
+    def _student_consolidation_key(row: Dict[str, Any]) -> str:
+        return (
+            f"{row.get('student_id')}:"
+            f"{row.get('source_type')}:"
+            f"{row.get('source_id')}:"
+            f"{row.get('school_id')}"
+        )
+
+    @staticmethod
+    def _pick_merged_monitoring_action(
+        actions: List[Optional[MonitoringAction]],
+    ) -> Optional[MonitoringAction]:
+        valid = [action for action in actions if action]
+        if not valid:
+            return None
+        for action in valid:
+            if not (action.discipline or "").strip():
+                return action
+        valid.sort(key=lambda item: item.updated_at or datetime.min, reverse=True)
+        return valid[0]
+
+    @staticmethod
+    def _consolidate_student_rows(
+        rows: List[Dict[str, Any]], discipline_filter: str = ""
+    ) -> List[Dict[str, Any]]:
+        """Uma linha por aluno, reunindo disciplinas em intervenção e descritores críticos."""
+        discipline_filter_active = bool((discipline_filter or "").strip())
+        grouped: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+        for row in rows:
+            grouped[MonitoringService._student_consolidation_key(row)].append(row)
+
+        consolidated: List[Dict[str, Any]] = []
+        for group_rows in grouped.values():
+            if discipline_filter_active:
+                group_rows = [
+                    row
+                    for row in group_rows
+                    if MonitoringService._discipline_names_match(
+                        row.get("discipline"), discipline_filter
+                    )
+                ]
+                if not group_rows:
+                    continue
+            first = group_rows[0]
+            disciplinas_criticas: List[Dict[str, Any]] = []
+            worst_rank = 99
+            worst_nivel = first.get("nivel")
+            min_nota = float(first.get("nota") or 0)
+            min_proficiencia = float(first.get("proficiencia") or 0)
+            descritores_flat: List[str] = []
+            summary_nota = min_nota
+            summary_proficiencia = min_proficiencia
+            summary_nivel = worst_nivel
+
+            if discipline_filter_active and len(group_rows) == 1:
+                only = group_rows[0]
+                try:
+                    summary_nota = float(only.get("nota") or 0)
+                except (TypeError, ValueError):
+                    summary_nota = 0.0
+                try:
+                    summary_proficiencia = float(only.get("proficiencia") or 0)
+                except (TypeError, ValueError):
+                    summary_proficiencia = 0.0
+                summary_nivel = only.get("nivel")
+
+            for row in sorted(
+                group_rows,
+                key=lambda item: ((item.get("discipline") or "").lower()),
+            ):
+                discipline_name = (row.get("discipline") or "").strip() or "Geral"
+                nivel = row.get("nivel")
+                rank = MonitoringService._nivel_dedupe_rank(nivel)
+                if rank < worst_rank:
+                    worst_rank = rank
+                    worst_nivel = nivel
+                try:
+                    nota = float(row.get("nota") or 0)
+                except (TypeError, ValueError):
+                    nota = 0.0
+                min_nota = min(min_nota, nota)
+                try:
+                    proficiencia = float(row.get("proficiencia") or 0)
+                except (TypeError, ValueError):
+                    proficiencia = 0.0
+                min_proficiencia = min(min_proficiencia, proficiencia)
+
+                crit = [
+                    str(code).strip()
+                    for code in (row.get("descritores_criticos") or [])
+                    if str(code).strip()
+                ]
+                descritores_flat.extend(crit)
+                disciplinas_criticas.append(
+                    {
+                        "disciplina": discipline_name,
+                        "nivel": MonitoringService._canonical_nivel_label(nivel),
+                        "nota": nota,
+                        "descritores_criticos": crit,
+                    }
+                )
+
+            merged_action = MonitoringService._pick_merged_monitoring_action(
+                [row.get("monitoring_action") for row in group_rows]
+            )
+            consolidated.append(
+                {
+                    **first,
+                    "discipline": "",
+                    "nota": summary_nota,
+                    "proficiencia": summary_proficiencia,
+                    "nivel": MonitoringService._canonical_nivel_label(summary_nivel),
+                    "descritores_criticos": list(dict.fromkeys(descritores_flat)),
+                    "disciplinas_criticas": disciplinas_criticas,
+                    "monitoring_action": merged_action,
+                }
+            )
+        return consolidated
+
+    @staticmethod
+    def _monitoring_kpi_summary(user: Dict[str, Any], filters: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        KPIs do painel: relatórios (Básico/Abaixo), vistos pela SEMED e pendentes de vista.
+        Contagem por aluno (uma linha no detalhamento), alinhada ao modal de alunos.
+        """
+        empty = {
+            "total_relatorios": 0,
+            "total_vistos_semed": 0,
+            "total_nao_vistos": 0,
+            "taxa_vistos_pct": 0,
+            "total_preenchidas": 0,
+            "total_realizadas": 0,
+            "total_pendentes_nao_realizadas": 0,
+        }
+        source_type = MonitoringService._normalize_source_type(filters.get("tipo_origem"))
+        explicit_id = (filters.get("avaliacao_id") or filters.get("gabarito_id") or "").strip()
+        if not explicit_id and not MonitoringService._discover_source_ids(user, filters, source_type):
+            return empty
+
+        discipline_filter = (filters.get("disciplina") or "").strip()
+        rows = MonitoringService._build_rows(user, filters, expand_disciplines=True)
+        relatorio_rows = MonitoringService._consolidate_student_rows(
+            [row for row in rows if MonitoringService._include_in_student_detail(row)],
+            discipline_filter,
+        )
+        total_relatorios = len(relatorio_rows)
+        total_vistos = sum(
+            1
+            for row in relatorio_rows
+            if row.get("monitoring_action") and row["monitoring_action"].seen_by_semed
+        )
+        total_nao_vistos = max(0, total_relatorios - total_vistos)
+        taxa_vistos_pct = (
+            round((total_vistos / total_relatorios) * 100) if total_relatorios > 0 else 0
+        )
+        total_preenchidas = 0
+        total_realizadas = 0
+        total_pendentes_nao_realizadas = 0
+        for row in relatorio_rows:
+            action: Optional[MonitoringAction] = row.get("monitoring_action")
+            acao_text = (action.pedagogical_action if action else "") or ""
+            if acao_text.strip():
+                total_preenchidas += 1
+            status = (action.status if action else "pendente").strip().lower()
+            if status == "realizada":
+                total_realizadas += 1
+            elif status in ("pendente", "nao_realizado"):
+                total_pendentes_nao_realizadas += 1
+        return {
+            "total_relatorios": total_relatorios,
+            "total_vistos_semed": total_vistos,
+            "total_nao_vistos": total_nao_vistos,
+            "taxa_vistos_pct": taxa_vistos_pct,
+            "total_preenchidas": total_preenchidas,
+            "total_realizadas": total_realizadas,
+            "total_pendentes_nao_realizadas": total_pendentes_nao_realizadas,
+        }
+
+    @staticmethod
     def list_students(user: Dict[str, Any], filters: Dict[str, Any]) -> Dict[str, Any]:
         MonitoringService._ensure_monitoring_schema_columns(filters)
-        rows = MonitoringService._build_rows(user, filters)
+        discipline_filter = (filters.get("disciplina") or "").strip()
+        rows = MonitoringService._build_rows(user, filters, expand_disciplines=True)
+        rows = MonitoringService._consolidate_student_rows(
+            [row for row in rows if MonitoringService._include_in_student_detail(row)],
+            discipline_filter,
+        )
         search = (filters.get("q") or "").strip().lower()
         if search:
             rows = [
@@ -1125,6 +1833,10 @@ class MonitoringService:
                 if search in (row.get("student_name") or "").lower()
                 or search in (row.get("class_name") or "").lower()
                 or search in (row.get("grade_name") or "").lower()
+                or any(
+                    search in str(block.get("disciplina") or "").lower()
+                    for block in (row.get("disciplinas_criticas") or [])
+                )
             ]
         page = MonitoringService._parse_int(filters.get("page"), 1)
         page_size = max(1, min(300, MonitoringService._parse_int(filters.get("page_size"), 40)))
@@ -1134,6 +1846,7 @@ class MonitoringService:
             action: Optional[MonitoringAction] = row.get("monitoring_action")
             items.append(
                 {
+                    "linha_id": str(row["student_id"]),
                     "aluno_id": row["student_id"],
                     "aluno_nome": row["student_name"],
                     "matricula": row["registration"],
@@ -1144,8 +1857,8 @@ class MonitoringService:
                     "nota": row["nota"],
                     "proficiencia": row["proficiencia"],
                     "nivel": row["nivel"],
-                    "disciplina": row["discipline"],
-                    "descritores_criticos": row["descritores_criticos"],
+                    "disciplinas_criticas": row.get("disciplinas_criticas") or [],
+                    "descritores_criticos": row.get("descritores_criticos") or [],
                     "acao_id": action.id if action else None,
                     "acao_pedagogica": action.pedagogical_action if action else "",
                     "responsavel_id": action.responsible_id if action else None,
@@ -1171,7 +1884,6 @@ class MonitoringService:
             "aluno_nome",
             "serie",
             "turma",
-            "disciplina",
             "nota",
             "proficiencia",
             "nivel",
@@ -1202,6 +1914,25 @@ class MonitoringService:
                 "total_pages": (total + page_size - 1) // page_size if page_size else 1,
             },
         }
+
+    @staticmethod
+    def get_skill_detail(user: Dict[str, Any], filters: Dict[str, Any]) -> Dict[str, Any]:
+        MonitoringService._ensure_monitoring_schema_columns(filters)
+        source_type = MonitoringService._normalize_source_type(filters.get("tipo_origem"))
+        source_id = (
+            filters.get("avaliacao_id")
+            or filters.get("gabarito_id")
+            or filters.get("source_id")
+            or ""
+        )
+        source_id = str(source_id).strip()
+        if not source_id:
+            raise MonitoringValidationError("Selecione a avaliação ou o cartão-resposta.")
+        codigo = (filters.get("codigo") or "").strip()
+        if not codigo:
+            raise MonitoringValidationError("Informe o código da habilidade.")
+        disciplina = (filters.get("disciplina") or "").strip()
+        return get_instrument_skill_detail(source_type, source_id, codigo, disciplina)
 
     @staticmethod
     def _load_or_create_action(action_id: str, payload: Dict[str, Any]) -> MonitoringAction:

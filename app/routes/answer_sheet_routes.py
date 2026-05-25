@@ -3413,95 +3413,268 @@ def _extrair_blocos_por_disciplina_cartao(blocks_config):
     return list(by_subject.values())
 
 
-def _calcular_resultados_por_disciplina_cartao(
-    scope_info, nivel_granularidade, gabarito_id, periodo_bounds=None, user=None
-):
-    """Retorna lista no mesmo formato de evaluation_results: resultados_por_disciplina."""
-    if not gabarito_id:
-        return []
-    class_ids = _class_ids_alunos_previstos_cartao(gabarito_id, scope_info, nivel_granularidade, user)
-    if not class_ids:
-        return []
-    student_ids = [s.id for s in Student.query.filter(Student.class_id.in_(class_ids)).all()]
-    _rq = AnswerSheetResult.query.filter(
-        AnswerSheetResult.gabarito_id == gabarito_id,
-        AnswerSheetResult.student_id.in_(student_ids),
-    )
-    _rq = _apply_answer_sheet_result_period_filter(_rq, periodo_bounds)
-    results = _dedupe_answer_sheet_results_latest_per_student(_rq.all())
-    if not results:
-        return []
-    gabarito = AnswerSheetGabarito.query.get(gabarito_id)
-    grade_name = (gabarito.grade_name or gabarito.title or '') if gabarito else ''
-    from app.services.cartao_resposta.proficiency_by_subject import _get_course_name_from_grade
-    course_name = _get_course_name_from_grade(grade_name)
-    from app.utils.school_equal_weight_means import (
-        granularidade_to_hierarchical_target,
-        hierarchical_mean_from_subject_rows,
-    )
+def _build_disciplina_rows_from_cartao_results(
+    results: List[AnswerSheetResult],
+    total_alunos: int,
+    gabarito: AnswerSheetGabarito,
+    aggregation_level: str,
+) -> List[Dict[str, Any]]:
+    """Linhas de estatística por disciplina (contrato alinhado a evaluation-results/avaliacoes)."""
+    import json
 
-    tgt = granularidade_to_hierarchical_target(nivel_granularidade)
+    if not results or not gabarito:
+        return []
+
+    grade_name = (gabarito.grade_name or gabarito.title or "") or ""
+    from app.services.cartao_resposta.proficiency_by_subject import _get_course_name_from_grade
+    from app.services.evaluation_calculator import EvaluationCalculator
+    from app.utils.school_equal_weight_means import hierarchical_mean_from_subject_rows
+
+    course_name = _get_course_name_from_grade(grade_name)
     subject_rows: Dict[Any, List[Dict[str, Any]]] = defaultdict(list)
-    # Agregar por disciplina a partir de proficiency_by_subject
-    by_subject = {}
+    by_subject: Dict[Any, Dict[str, Any]] = {}
+
     for r in results:
         pbs = r.proficiency_by_subject or {}
         if isinstance(pbs, str):
             try:
-                import json
                 pbs = json.loads(pbs)
             except Exception:
                 pbs = {}
         for sid, data in (pbs or {}).items():
             if sid not in by_subject:
                 by_subject[sid] = {
-                    'disciplina': data.get('subject_name', sid),
-                    'total_alunos': 0,
-                    'alunos_participantes': 0,
-                    'dist': {'abaixo_do_basico': 0, 'basico': 0, 'adequado': 0, 'avancado': 0}
+                    "disciplina": (data.get("subject_name") if isinstance(data, dict) else None) or sid,
+                    "alunos_participantes": 0,
+                    "dist": {"abaixo_do_basico": 0, "basico": 0, "adequado": 0, "avancado": 0},
                 }
-            by_subject[sid]['alunos_participantes'] += 1
-            nota_disc = data.get('grade')
-            if nota_disc is None and data.get('proficiency') is not None:
-                from app.services.evaluation_calculator import EvaluationCalculator
-                subject_name = data.get('subject_name') or 'Outras'
+            by_subject[sid]["alunos_participantes"] += 1
+            if not isinstance(data, dict):
+                continue
+            if data.get("subject_name"):
+                by_subject[sid]["disciplina"] = data.get("subject_name")
+            nota_disc = data.get("grade")
+            if nota_disc is None and data.get("proficiency") is not None:
+                subject_name = data.get("subject_name") or "Outras"
                 nota_disc = EvaluationCalculator.calculate_grade(
-                    data.get('proficiency'), course_name, subject_name
+                    data.get("proficiency"), course_name, subject_name
                 )
             nf = float(nota_disc) if nota_disc is not None else 0.0
-            pf = float(data.get('proficiency') or 0)
+            pf = float(data.get("proficiency") or 0)
             subject_rows[sid].append(
                 {"student_id": r.student_id, "grade": nf, "proficiency": pf}
             )
-            cl = (data.get('classification') or '').lower()
-            if 'abaixo' in cl:
-                by_subject[sid]['dist']['abaixo_do_basico'] += 1
-            elif 'básico' in cl or 'basico' in cl:
-                by_subject[sid]['dist']['basico'] += 1
-            elif 'adequado' in cl:
-                by_subject[sid]['dist']['adequado'] += 1
-            elif 'avançado' in cl or 'avancado' in cl:
-                by_subject[sid]['dist']['avancado'] += 1
-    total_alunos = len(student_ids)
-    out = []
+            cl = (data.get("classification") or "").lower()
+            if "abaixo" in cl:
+                by_subject[sid]["dist"]["abaixo_do_basico"] += 1
+            elif "básico" in cl or "basico" in cl:
+                by_subject[sid]["dist"]["basico"] += 1
+            elif "adequado" in cl:
+                by_subject[sid]["dist"]["adequado"] += 1
+            elif "avançado" in cl or "avancado" in cl:
+                by_subject[sid]["dist"]["avancado"] += 1
+
+    out: List[Dict[str, Any]] = []
     for sid, agg in by_subject.items():
-        n = agg['alunos_participantes']
+        n = agg["alunos_participantes"]
         rows = subject_rows.get(sid) or []
-        media_nota, media_prof, _ = hierarchical_mean_from_subject_rows(rows, tgt)
-        media_nota = round(media_nota, 2)
-        media_prof = round(media_prof, 2)
+        media_nota, media_prof, _ = hierarchical_mean_from_subject_rows(rows, aggregation_level)
         out.append({
-            "disciplina": agg['disciplina'],
+            "disciplina": agg["disciplina"],
             "total_avaliacoes": 1,
             "total_alunos": total_alunos,
             "alunos_participantes": n,
-            "alunos_pendentes": total_alunos - n,
+            "alunos_pendentes": max(0, total_alunos - n),
             "alunos_ausentes": max(0, total_alunos - n),
-            "media_nota": media_nota,
-            "media_proficiencia": media_prof,
-            "distribuicao_classificacao": agg['dist']
+            "media_nota": round(media_nota, 2),
+            "media_proficiencia": round(media_prof, 2),
+            "distribuicao_classificacao": agg["dist"],
         })
     return out
+
+
+def _load_cartao_results_and_students_for_disciplina(
+    gabarito_id: str,
+    class_ids: List[Any],
+    periodo_bounds=None,
+) -> Tuple[List[AnswerSheetResult], List[Student], Dict[Any, Class]]:
+    """Resultados deduplicados e alunos do recorte (turmas previstas do gabarito)."""
+    students = Student.query.filter(Student.class_id.in_(class_ids)).all()
+    if not students:
+        return [], [], {}
+    student_ids = [s.id for s in students]
+    _rq = AnswerSheetResult.query.filter(
+        AnswerSheetResult.gabarito_id == gabarito_id,
+        AnswerSheetResult.student_id.in_(student_ids),
+    )
+    _rq = _apply_answer_sheet_result_period_filter(_rq, periodo_bounds)
+    results = _dedupe_answer_sheet_results_latest_per_student(_rq.all())
+    classes = {
+        c.id: c
+        for c in Class.query.filter(Class.id.in_(class_ids)).all()
+    }
+    return results, students, classes
+
+
+def _calcular_estatisticas_gerais_por_disciplina_escopo_cartao(
+    scope_info,
+    nivel_granularidade: str,
+    gabarito_id: str,
+    periodo_bounds=None,
+    user=None,
+) -> List[Dict[str, Any]]:
+    """
+    Consolidado por disciplina do escopo inteiro (estatisticas_gerais.por_disciplina),
+    espelhando evaluation-results/avaliacoes.
+    """
+    from app.utils.school_equal_weight_means import granularidade_to_hierarchical_target
+
+    class_ids = _class_ids_alunos_previstos_cartao(gabarito_id, scope_info, nivel_granularidade, user)
+    if not class_ids:
+        return []
+    results, students, _classes = _load_cartao_results_and_students_for_disciplina(
+        gabarito_id, class_ids, periodo_bounds
+    )
+    gabarito = AnswerSheetGabarito.query.get(gabarito_id)
+    if not gabarito:
+        return []
+    tgt = granularidade_to_hierarchical_target(nivel_granularidade)
+    return _build_disciplina_rows_from_cartao_results(
+        results, len(students), gabarito, tgt
+    )
+
+
+def _calcular_resultados_por_disciplina_cartao(
+    scope_info, nivel_granularidade, gabarito_id, periodo_bounds=None, user=None
+):
+    """
+    Retorna lista no mesmo formato de evaluation_results: resultados_por_disciplina.
+    No nível município quebra por escola; em escola/série quebra por turma.
+    """
+    if not gabarito_id:
+        return []
+    class_ids = _class_ids_alunos_previstos_cartao(gabarito_id, scope_info, nivel_granularidade, user)
+    if not class_ids:
+        return []
+    results, students, classes_by_id = _load_cartao_results_and_students_for_disciplina(
+        str(gabarito_id).strip(), class_ids, periodo_bounds
+    )
+    gabarito = AnswerSheetGabarito.query.get(gabarito_id)
+    if not gabarito:
+        return []
+
+    student_ids_in_scope = {s.id for s in students}
+    student_class_id = {s.id: s.class_id for s in students if s.class_id}
+
+    def _results_for_student_ids(sids: Set[Any]) -> List[AnswerSheetResult]:
+        return [r for r in results if r.student_id in sids]
+
+    resultados_disciplina: List[Dict[str, Any]] = []
+
+    if nivel_granularidade == "municipio":
+        escolas = scope_info.get("escolas") if isinstance(scope_info, dict) else None
+        if not escolas:
+            school_ids = {
+                classes_by_id[cid].school_id
+                for cid in class_ids
+                if cid in classes_by_id and classes_by_id[cid].school_id
+            }
+            escolas = (
+                School.query.filter(School.id.in_(list(school_ids))).all()
+                if school_ids
+                else []
+            )
+        for sc in escolas or []:
+            sids = {
+                sid
+                for sid in student_ids_in_scope
+                if student_class_id.get(sid)
+                and classes_by_id.get(student_class_id[sid])
+                and str(classes_by_id[student_class_id[sid]].school_id) == str(sc.id)
+            }
+            if not sids:
+                continue
+            subset = _results_for_student_ids(sids)
+            rows = _build_disciplina_rows_from_cartao_results(
+                subset, len(sids), gabarito, "escola"
+            )
+            for row in rows:
+                row["escola_id"] = str(sc.id)
+                row["escola"] = getattr(sc, "name", None)
+                resultados_disciplina.append(row)
+        return resultados_disciplina
+
+    if nivel_granularidade in ("escola", "serie"):
+        seen_turmas: Set[Any] = set()
+        turmas = []
+        for cid in class_ids:
+            if cid in seen_turmas:
+                continue
+            turma_obj = classes_by_id.get(cid)
+            if not turma_obj:
+                continue
+            seen_turmas.add(cid)
+            turmas.append(turma_obj)
+
+        for turma_obj in turmas:
+            sids = {sid for sid in student_ids_in_scope if student_class_id.get(sid) == turma_obj.id}
+            if not sids:
+                continue
+            subset = _results_for_student_ids(sids)
+            rows = _build_disciplina_rows_from_cartao_results(
+                subset, len(sids), gabarito, "turma"
+            )
+            grade = Grade.query.get(turma_obj.grade_id) if turma_obj.grade_id else None
+            school = (
+                School.query.get(turma_obj.school_id) if turma_obj.school_id else None
+            )
+            for row in rows:
+                row["turma_id"] = str(turma_obj.id)
+                row["turma"] = getattr(turma_obj, "name", None)
+                if grade is not None:
+                    row["serie_id"] = str(getattr(grade, "id", "") or "")
+                    row["serie"] = getattr(grade, "name", None)
+                if school is not None:
+                    row["escola_id"] = str(getattr(school, "id", "") or "")
+                    row["escola"] = getattr(school, "name", None)
+                resultados_disciplina.append(row)
+        return resultados_disciplina
+
+    from app.utils.school_equal_weight_means import granularidade_to_hierarchical_target
+
+    tgt = granularidade_to_hierarchical_target(nivel_granularidade)
+    return _build_disciplina_rows_from_cartao_results(
+        results, len(students), gabarito, tgt
+    )
+
+
+def _aplicar_contrato_disciplina_cartao(
+    estatisticas_gerais: Optional[Dict[str, Any]],
+    resultados_por_disciplina: Optional[List[Dict[str, Any]]],
+    scope_info,
+    nivel_granularidade: str,
+    gabarito_id: Optional[str],
+    periodo_bounds=None,
+    user=None,
+) -> None:
+    """Alinha campos por_disciplina e participantes_distribuicao com evaluation-results/avaliacoes."""
+    if isinstance(estatisticas_gerais, dict):
+        estatisticas_gerais["participantes_distribuicao"] = estatisticas_gerais.get(
+            "alunos_participantes", 0
+        )
+        if gabarito_id:
+            estatisticas_gerais["por_disciplina"] = _calcular_estatisticas_gerais_por_disciplina_escopo_cartao(
+                scope_info,
+                nivel_granularidade,
+                str(gabarito_id).strip(),
+                periodo_bounds,
+                user,
+            )
+    for disciplina in resultados_por_disciplina or []:
+        if isinstance(disciplina, dict):
+            disciplina["participantes_distribuicao"] = disciplina.get(
+                "alunos_participantes", 0
+            )
 
 
 def _build_question_skill_lookup_for_detailed_table(
@@ -3786,36 +3959,78 @@ def _calcular_dados_gerais_alunos_cartao(disciplinas_out, grade_name, student_id
 
 
 def _calcular_ranking_cartao(scope_info, nivel_granularidade, gabarito_id, user, periodo_bounds=None):
-    """Ranking de alunos por nota no gabarito."""
+    """Ranking de alunos por nota no gabarito.
+
+    Itens incluem contexto do aluno (escola_id/escola/serie/turma) e contagens
+    de acertos/respondidas, alinhado ao contrato do ranking da rota online.
+    """
     class_ids = _class_ids_alunos_previstos_cartao(gabarito_id, scope_info, nivel_granularidade, user)
     if not class_ids or not gabarito_id:
         return []
-    student_ids = [s.id for s in Student.query.filter(Student.class_id.in_(class_ids)).all()]
+
+    students = Student.query.filter(Student.class_id.in_(class_ids)).all()
+    if not students:
+        return []
+    student_ids = [s.id for s in students]
+    students_by_id = {s.id: s for s in students}
+
+    classes_with_grade = (
+        Class.query.options(joinedload(Class.grade))
+        .filter(Class.id.in_(class_ids))
+        .all()
+    )
+    class_info_by_id: Dict[Any, Tuple[str, str, Any]] = {
+        c.id: (
+            c.name or "N/A",
+            c.grade.name if c.grade else "N/A",
+            c.school_id,
+        )
+        for c in classes_with_grade
+    }
+    school_ids = list({c.school_id for c in classes_with_grade if c.school_id})
+    schools_by_id = (
+        {str(s.id): s for s in School.query.filter(School.id.in_(school_ids)).all()}
+        if school_ids
+        else {}
+    )
+
     _rq = AnswerSheetResult.query.filter(
         AnswerSheetResult.gabarito_id == gabarito_id,
         AnswerSheetResult.student_id.in_(student_ids),
     )
     _rq = _apply_answer_sheet_result_period_filter(_rq, periodo_bounds)
     results = _dedupe_answer_sheet_results_latest_per_student(_rq.all())
-    enriched = []
-    for r in results:
-        enriched.append((r, float(r.grade or 0), r.classification or ""))
+
     sorted_results = sorted(
-        enriched,
-        key=lambda t: (t[1], t[0].proficiency or 0),
+        results,
+        key=lambda r: (float(r.grade or 0), float(r.proficiency or 0)),
         reverse=True,
     )
-    ranking = []
-    for pos, (r, eff_grade, _) in enumerate(sorted_results, 1):
-        student = Student.query.get(r.student_id)
+
+    ranking: List[Dict[str, Any]] = []
+    for pos, r in enumerate(sorted_results, 1):
+        student = students_by_id.get(r.student_id)
+        turma_nome, serie_nome, school_id = class_info_by_id.get(
+            getattr(student, "class_id", None), ("N/A", "N/A", None)
+        )
+        school_obj = schools_by_id.get(str(school_id)) if school_id else None
+        escola_id = str(getattr(school_obj, "id", "") or "") or None
+        escola_nome = (getattr(school_obj, "name", None) or "N/A")
         ranking.append({
             "posicao": pos,
             "student_id": str(r.student_id),
             "nome": student.name if student else "N/A",
-            "grade": eff_grade,
+            "escola_id": escola_id,
+            "escola": escola_nome,
+            "serie": serie_nome,
+            "turma": turma_nome,
+            "grade": float(r.grade or 0),
             "proficiency": r.proficiency,
             "classification": r.classification,
-            "score_percentage": r.score_percentage
+            "score_percentage": r.score_percentage,
+            "total_acertos": int(r.correct_answers or 0),
+            "total_respondidas": int(r.answered_questions or 0),
+            "total_questoes": int(r.total_questions or 0),
         })
     return ranking
 
@@ -4515,6 +4730,15 @@ def get_resultados_agregados():
             if gabarito_id
             else []
         )
+        _aplicar_contrato_disciplina_cartao(
+            estatisticas_gerais,
+            resultados_por_disciplina,
+            scope_info,
+            nivel_granularidade,
+            gabarito_id,
+            periodo_bounds,
+            user,
+        )
         resultados_detalhados = (
             _gerar_resultados_detalhados_por_granularidade_cartao(
                 scope_info, nivel_granularidade, gabarito_id, periodo_bounds, user
@@ -4783,6 +5007,15 @@ def get_resultados_agregados_analise_ia():
             )
             if gabarito_id
             else []
+        )
+        _aplicar_contrato_disciplina_cartao(
+            estatisticas_gerais,
+            resultados_por_disciplina,
+            scope_info,
+            nivel_granularidade,
+            gabarito_id,
+            periodo_bounds,
+            user,
         )
         tabela_detalhada = (
             _gerar_tabela_detalhada_cartao(

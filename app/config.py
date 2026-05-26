@@ -21,9 +21,16 @@ class Config:
     # então também protegem jobs/scheduler/celery que usem o mesmo pool.
     #
     # Valores hardcoded (sem env):
-    # - idle_in_transaction_session_timeout: 60s
+    # - idle_in_transaction_session_timeout: 10min
+    #     Antes era 60s. Era agressivo demais para tasks Celery longas (geração de
+    #     PDFs, formulários físicos, recálculos) que mantêm sessão aberta entre
+    #     operações de SQL. O Postgres derrubava a conexão e a próxima query
+    #     estourava com "server closed the connection unexpectedly".
+    #     10min cobre o uso real de Celery e ainda mantém proteção contra
+    #     transações "perdidas". Para HTTP, o teardown do request já fecha a
+    #     sessão muito antes desse limite.
     # - statement_timeout: 5min
-    PG_IDLE_IN_TX_SESSION_TIMEOUT_MS = 60_000
+    PG_IDLE_IN_TX_SESSION_TIMEOUT_MS = 600_000
     PG_STATEMENT_TIMEOUT_MS = 300_000
     
     # Configurações do SendGrid

@@ -571,7 +571,18 @@ def generate_physical_forms_async(
         
         # Gerar formulários usando o serviço existente (processamento incremental)
         logger.info(f"[CELERY] 🔨 Iniciando geração de PDFs para {len(students_data)} alunos...")
-        
+
+        # Libera a transação implícita aberta pelas queries de Class/School acima
+        # antes do trabalho CPU-bound do form_service (WeasyPrint/ReportLab por aluno).
+        # Sem isso, em turmas grandes a sessão fica "idle in transaction" e o Postgres
+        # derruba a conexão (idle_in_transaction_session_timeout), quebrando queries
+        # posteriores com "server closed the connection unexpectedly".
+        try:
+            db.session.commit()
+        except Exception:
+            db.session.rollback()
+        set_search_path(city_schema)
+
         form_service = PhysicalTestFormService()
         
         # output_dir padrão será usado (/tmp/celery_pdfs/physical_tests)
@@ -610,6 +621,14 @@ def generate_physical_forms_async(
             except Exception:
                 pass
             logger.info(f"[CELERY] 📦 Criando ZIP a partir de arquivos em disco...")
+
+            # Libera a conexão antes do zipping/upload MinIO (CPU+rede demorados
+            # sem SQL no meio). Evita "idle in transaction" derrubar a sessão.
+            try:
+                db.session.commit()
+            except Exception:
+                db.session.rollback()
+            set_search_path(city_schema)
             
             minio_url = None
             minio_object_name = None
@@ -678,6 +697,13 @@ def generate_physical_forms_async(
                     except Exception:
                         pass
                     logger.info(f"[CELERY] ☁️ Enviando ZIP para MinIO...")
+                    # Mesmo motivo: libera a transação aberta pelas queries de
+                    # City/Grade no setup do ZIP antes do upload remoto (rede longa).
+                    try:
+                        db.session.commit()
+                    except Exception:
+                        db.session.rollback()
+                    set_search_path(city_schema)
                     try:
                         from app.services.storage.minio_service import MinIOService
                         

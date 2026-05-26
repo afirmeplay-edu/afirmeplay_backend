@@ -344,6 +344,34 @@ class TestTeachersTopSection(unittest.TestCase):
         )
 
 
+class TestClassRankingAdequadoAvancado(unittest.TestCase):
+    def test_class_ranking_payload_propagates_adequado_avancado_counts(self):
+        class_rows = [
+            {
+                "class_id": "class-1",
+                "turma": "Turma A",
+                "serie": "4º Ano",
+                "media": 7.5,
+                "average_score": 7.5,
+                "average_proficiency": 520.0,
+                "participating_students": 20,
+                "total_students": 22,
+                "participation_rate": 90.9,
+                "adequado_avancado_count": 8,
+                "adequado_avancado_pct": 40.0,
+                "classification": "Adequado",
+                "acerto_percent": 75.0,
+                "conclusao": 90.9,
+                "avaliacoes": 1,
+            }
+        ]
+        payload = RankingReportService._build_class_ranking_payload(class_rows, filters={"serie": ""})
+        self.assertEqual(len(payload["items"]), 1)
+        item = payload["items"][0]
+        self.assertEqual(item["adequado_avancado_count"], 8)
+        self.assertEqual(item["adequado_avancado_pct"], 40.0)
+
+
 class TestDisciplineOptions(unittest.TestCase):
     def test_looks_like_course_label(self):
         self.assertTrue(RankingReportService._looks_like_course_label("Anos Iniciais"))

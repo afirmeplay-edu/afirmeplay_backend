@@ -53,7 +53,15 @@ class AnswerSheetGabaritoGeneration(db.Model):
     gabarito = db.relationship(
         'AnswerSheetGabarito',
         foreign_keys=[gabarito_id],
-        backref=db.backref('generation_records', lazy='dynamic'),
+        # passive_deletes=True: deixa o ON DELETE CASCADE do banco apagar as linhas filhas.
+        # Sem isso, o ORM emite UPDATE ... SET gabarito_id = NULL antes do DELETE,
+        # quebrando o NOT NULL da coluna gabarito_id.
+        passive_deletes=True,
+        backref=db.backref(
+            'generation_records',
+            lazy='dynamic',
+            passive_deletes=True,
+        ),
     )
 
     def to_dict(self):

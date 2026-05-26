@@ -814,6 +814,15 @@ def generate_answer_sheets_batch_async(
                     if batch_id and len(classes) > 0:
                         pct = min(100, int(round((idx / len(classes)) * 100)))
                         update_answer_sheet_job(batch_id, {'progress_current': idx, 'progress_percentage': pct})
+                    # Libera a conexão entre turmas para evitar "idle in transaction".
+                    # A geração de PDFs (ReportLab/pypdf) é CPU-bound e pode demorar
+                    # mais que idle_in_transaction_session_timeout sem nenhum SQL;
+                    # sem commit aqui, a próxima iteração estoura com
+                    # "server closed the connection unexpectedly".
+                    try:
+                        db.session.commit()
+                    except Exception:
+                        db.session.rollback()
                     _ensure_tenant_search_path()
         else:
             # Fluxo antigo: 1 gabarito por turma
@@ -875,6 +884,10 @@ def generate_answer_sheets_batch_async(
                         logger.warning(f"[CELERY-BATCH] ⚠️ Falha ao gerar PDF para gabarito {gabarito.id}")
                     
                 except Exception as e:
+                    try:
+                        db.session.rollback()
+                    except Exception:
+                        pass
                     logger.error(f"[CELERY-BATCH] ❌ Erro ao gerar PDF para gabarito {gabarito.id}: {str(e)}", exc_info=True)
                     continue
                 finally:
@@ -882,6 +895,13 @@ def generate_answer_sheets_batch_async(
                     if batch_id and len(gabaritos) > 0:
                         pct = min(100, int(round((idx / len(gabaritos)) * 100)))
                         update_answer_sheet_job(batch_id, {'progress_current': idx, 'progress_percentage': pct})
+                    # Libera a conexão entre turmas (mesma razão do bloco com class_ids):
+                    # evita "idle in transaction" durante a geração CPU-bound de PDFs.
+                    try:
+                        db.session.commit()
+                    except Exception:
+                        db.session.rollback()
+                    _ensure_tenant_search_path()
         
         if not generated_pdfs:
             raise ValueError("Nenhum PDF foi gerado")
@@ -1191,6 +1211,15 @@ def generate_answer_sheets_single_class_async(
 
         test_data_merged = dict(test_data) if test_data else {}
 
+        # Fecha a transação implícita aberta pelo City.query.get antes do trabalho
+        # CPU-bound pesado do generator (que pode ficar muitos segundos sem SQL).
+        # Sem isso, "server closed the connection unexpectedly" por
+        # idle_in_transaction_session_timeout pode aparecer ao retomar SQL.
+        try:
+            db.session.commit()
+        except Exception:
+            db.session.rollback()
+
         generator = AnswerSheetGenerator()
         result = generator.generate_class_answer_sheets(
             class_id=class_id,
@@ -1284,6 +1313,17 @@ def build_zip_and_upload_answer_sheets(
 
         minio_url = None
         city = City.query.get(city_id)
+        if city:
+            set_search_path(city_id_to_schema_name(str(city.id)))
+
+        # Libera a transação implícita aberta pelo City.query.get antes do
+        # upload MinIO (rede longa, sem SQL no meio). Evita que
+        # idle_in_transaction_session_timeout derrube a conexão antes das
+        # queries que vêm depois do upload (UPDATE em AnswerSheetGabarito etc.).
+        try:
+            db.session.commit()
+        except Exception:
+            db.session.rollback()
         if city:
             set_search_path(city_id_to_schema_name(str(city.id)))
 

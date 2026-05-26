@@ -57,3 +57,4 @@ jobs:
 
                   docker compose -f docker-compose.prod.yml pull
                   docker compose -f docker-compose.prod.yml up -d
+                  docker restart afirmeplay_front_dev afirmeplay_front_prod

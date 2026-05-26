@@ -1,8 +1,9 @@
 import re
 import unicodedata
 import logging
+from io import BytesIO
 from urllib.parse import unquote
-from flask import Blueprint, request, jsonify
+from flask import Blueprint, request, jsonify, send_file, url_for
 from app import db
 from app.models.city import City
 from app.models.user import User
@@ -217,6 +218,46 @@ def listar_usuarios_municipio(municipio_id):
 
 # --- Branding municipal (logo + timbrado) ---------------------------------
 
+def _branding_proxy_url(endpoint: str, municipio_id: str) -> str:
+    """URL relativa do proxy de branding (servida pelo backend)."""
+    try:
+        return url_for(endpoint, municipio_id=municipio_id)
+    except Exception:
+        # Fallback se o app context não permitir url_for (não deve ocorrer em request).
+        suffix = {
+            "city.get_branding_logo": "branding/logo",
+            "city.get_branding_letterhead_image": "branding/letterhead/image",
+            "city.get_branding_letterhead_pdf": "branding/letterhead/pdf",
+        }.get(endpoint, "")
+        return f"/city/{municipio_id}/{suffix}"
+
+
+def _serve_branding_asset(municipio_id: str, asset_kind: str):
+    """Lógica comum aos proxies GET de logo/timbrado."""
+    user = get_current_user_from_token()
+    denied = _ensure_municipio_access(user, municipio_id)
+    if denied:
+        return denied
+    municipio = City.query.get(municipio_id)
+    if not municipio:
+        return jsonify({"erro": "Município não encontrado"}), 404
+    try:
+        data, ctype = CityBrandingService().load_asset(municipio, asset_kind)
+    except LookupError as e:
+        return jsonify({"erro": str(e)}), 404
+    except ValueError as e:
+        return jsonify({"erro": str(e)}), 400
+    except Exception as e:
+        logging.error("Erro ao servir branding %s: %s", asset_kind, e, exc_info=True)
+        return jsonify({"erro": "Erro ao carregar asset de branding", "detalhes": str(e)}), 500
+    return send_file(
+        BytesIO(data),
+        mimetype=ctype,
+        as_attachment=False,
+        max_age=3600,
+    )
+
+
 @bp.route("<string:municipio_id>/branding", methods=["GET"])
 @jwt_required()
 @role_required("admin", "diretor", "coordenador", "professor", "tecadm")
@@ -228,15 +269,60 @@ def obter_branding_municipio(municipio_id):
     municipio = City.query.get(municipio_id)
     if not municipio:
         return jsonify({"erro": "Município não encontrado"}), 404
-    svc = CityBrandingService()
-    presigned = svc.presigned_urls(municipio, expires_hours=1)
+
+    logo_url = (
+        _branding_proxy_url("city.get_branding_logo", municipio.id)
+        if municipio.logo_url else None
+    )
+    letterhead_image_url = (
+        _branding_proxy_url("city.get_branding_letterhead_image", municipio.id)
+        if municipio.letterhead_image_url else None
+    )
+    letterhead_pdf_url = (
+        _branding_proxy_url("city.get_branding_letterhead_pdf", municipio.id)
+        if municipio.letterhead_pdf_url else None
+    )
+    # Campo `presigned` mantido por compatibilidade de contrato com o frontend,
+    # mas o conteúdo agora são URLs servidas pelo próprio backend (proxy autenticado
+    # que baixa do MinIO interno). Isso evita expor o storage diretamente e remove
+    # a dependência do hostname público (files.afirmeplay.com.br) na URL final.
+    urls = {
+        "logo_url": logo_url,
+        "letterhead_image_url": letterhead_image_url,
+        "letterhead_pdf_url": letterhead_pdf_url,
+    }
     return jsonify({
         "city_id": municipio.id,
         "logo_object_key": municipio.logo_url,
         "letterhead_image_object_key": municipio.letterhead_image_url,
         "letterhead_pdf_object_key": municipio.letterhead_pdf_url,
-        "presigned": presigned,
+        "presigned": urls,
+        "urls": urls,
     })
+
+
+@bp.route("<string:municipio_id>/branding/logo", methods=["GET"])
+@jwt_required(locations=["headers", "query_string"])
+@role_required("admin", "diretor", "coordenador", "professor", "tecadm")
+def get_branding_logo(municipio_id):
+    """Proxy autenticado: devolve os bytes do logo armazenado no MinIO."""
+    return _serve_branding_asset(municipio_id, "logo")
+
+
+@bp.route("<string:municipio_id>/branding/letterhead/image", methods=["GET"])
+@jwt_required(locations=["headers", "query_string"])
+@role_required("admin", "diretor", "coordenador", "professor", "tecadm")
+def get_branding_letterhead_image(municipio_id):
+    """Proxy autenticado: PNG do timbrado (primeira página renderizada)."""
+    return _serve_branding_asset(municipio_id, "letterhead_image")
+
+
+@bp.route("<string:municipio_id>/branding/letterhead/pdf", methods=["GET"])
+@jwt_required(locations=["headers", "query_string"])
+@role_required("admin", "diretor", "coordenador", "professor", "tecadm")
+def get_branding_letterhead_pdf(municipio_id):
+    """Proxy autenticado: PDF original do timbrado."""
+    return _serve_branding_asset(municipio_id, "letterhead_pdf")
 
 
 @bp.route("<string:municipio_id>/branding/logo", methods=["POST"])
@@ -267,11 +353,12 @@ def upload_branding_logo_municipio(municipio_id):
         db.session.rollback()
         return jsonify({"erro": str(e)}), 500
 
-    presigned = CityBrandingService().presigned_urls(municipio, expires_hours=1)
+    logo_url = _branding_proxy_url("city.get_branding_logo", municipio.id)
     return jsonify({
         "mensagem": "Logo atualizado",
         "logo_object_key": municipio.logo_url,
-        "presigned": presigned.get("logo_url"),
+        "presigned": logo_url,
+        "url": logo_url,
     })
 
 
@@ -308,16 +395,24 @@ def upload_branding_letterhead_municipio(municipio_id):
         code = 503 if "poppler" in msg or "pdf2image" in msg else 500
         return jsonify({"erro": str(e)}), code
 
-    svc = CityBrandingService()
-    presigned = svc.presigned_urls(municipio, expires_hours=1)
+    letterhead_image_url = (
+        _branding_proxy_url("city.get_branding_letterhead_image", municipio.id)
+        if municipio.letterhead_image_url else None
+    )
+    letterhead_pdf_url = (
+        _branding_proxy_url("city.get_branding_letterhead_pdf", municipio.id)
+        if municipio.letterhead_pdf_url else None
+    )
+    urls = {
+        "letterhead_image_url": letterhead_image_url,
+        "letterhead_pdf_url": letterhead_pdf_url,
+    }
     return jsonify({
         "mensagem": "Timbrado atualizado (PNG gerado a partir da primeira página)",
         "letterhead_image_object_key": municipio.letterhead_image_url,
         "letterhead_pdf_object_key": municipio.letterhead_pdf_url,
-        "presigned": {
-            "letterhead_image_url": presigned.get("letterhead_image_url"),
-            "letterhead_pdf_url": presigned.get("letterhead_pdf_url"),
-        },
+        "presigned": urls,
+        "urls": urls,
     })
 
 

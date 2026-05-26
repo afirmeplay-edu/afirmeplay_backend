@@ -8,6 +8,7 @@ from __future__ import annotations
 import base64
 import io
 import logging
+import mimetypes
 import os
 from datetime import timedelta
 from typing import Any, Dict, Optional, Tuple
@@ -281,6 +282,50 @@ class CityBrandingService:
             except Exception as e:
                 logger.warning("Presigned letterhead pdf: %s", e)
         return out
+
+    _ASSET_KINDS: Tuple[str, ...] = ("logo", "letterhead_image", "letterhead_pdf")
+
+    @staticmethod
+    def _content_type_for(object_key: str, fallback: str) -> str:
+        guessed, _ = mimetypes.guess_type(object_key or "")
+        return guessed or fallback
+
+    def load_asset(self, city: City, asset_kind: str) -> Tuple[bytes, str]:
+        """
+        Baixa do MinIO interno o asset de branding solicitado e devolve (bytes, content_type).
+
+        Usado pelas rotas proxy autenticadas para servir logo/timbrado sem expor
+        URLs presigned do MinIO ao cliente.
+
+        Args:
+            city: município.
+            asset_kind: 'logo' | 'letterhead_image' | 'letterhead_pdf'.
+
+        Raises:
+            ValueError: asset_kind inválido.
+            LookupError: município não possui o asset cadastrado.
+        """
+        if asset_kind not in self._ASSET_KINDS:
+            raise ValueError(f"asset_kind inválido: {asset_kind!r}")
+
+        if asset_kind == "logo":
+            key = city.logo_url
+            fallback_ct = "image/png"
+        elif asset_kind == "letterhead_image":
+            key = city.letterhead_image_url
+            fallback_ct = "image/png"
+        else:
+            key = city.letterhead_pdf_url
+            fallback_ct = "application/pdf"
+
+        if not key:
+            raise LookupError("Asset de branding não encontrado para este município")
+
+        data = self.minio.download_file(self.bucket, key)
+        if not data:
+            raise LookupError("Asset vazio ou indisponível no armazenamento")
+
+        return data, self._content_type_for(key, fallback_ct)
 
     def build_test_data_branding_patch(self, city: City) -> Dict[str, str]:
         """

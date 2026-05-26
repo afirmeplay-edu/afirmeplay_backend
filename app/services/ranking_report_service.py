@@ -714,6 +714,8 @@ class RankingReportService:
                     "participating_students": participating,
                     "total_students": total_students,
                     "participation_rate": float(row.get("participation_rate") or 0),
+                    "adequado_avancado_count": int(row.get("adequado_avancado_count") or 0),
+                    "adequado_avancado_pct": float(row.get("adequado_avancado_pct") or 0),
                     "classification": row.get("classification"),
                     "evaluations_count": int(row.get("avaliacoes") or 0),
                 }
@@ -1697,7 +1699,7 @@ class RankingReportService:
         response.update(report_sections)
         response["discipline_options"] = cls._resolve_discipline_options(req.filters)
         response["selected_discipline"] = str(req.filters.get("disciplina") or "").strip() or None
-        response["grade_options"] = cls._resolve_grade_options(school_rows, req.filters)
+        response["grade_options"] = cls._resolve_grade_options(school_rows, req.filters, scope=scope)
         if str(req.filters.get("serie") or "").strip():
             response["classes_ranking"] = cls._build_class_ranking_payload(class_rows, req.filters)
         else:
@@ -2097,18 +2099,70 @@ class RankingReportService:
         cls,
         school_rows: List[Dict[str, Any]],
         filters: Dict[str, Any],
+        scope: Optional[Dict[str, Any]] = None,
     ) -> List[Dict[str, str]]:
-        school_id = str(filters.get("escola") or "").strip()
-        if not school_id:
-            return []
-        school = next((row for row in school_rows if str(row.get("school_id") or "") == school_id), None)
-        if not school:
-            return []
+        # Importante: as opções de série devem ser estáveis ao trocar o filtro de série.
+        # Por isso, ignoramos `filters.serie` ao montar a lista e consultamos diretamente
+        # as séries com participação no instrumento selecionado dentro do recorte.
+        evaluation_id = str(filters.get("evaluation_id") or "").strip()
+        answer_sheet_id = str(filters.get("answer_sheet_id") or "").strip()
+        if not evaluation_id and not answer_sheet_id and scope is None:
+            school_id = str(filters.get("escola") or "").strip()
+            if school_id:
+                relevant_rows = [
+                    row for row in school_rows if str(row.get("school_id") or "") == school_id
+                ]
+            else:
+                relevant_rows = school_rows
+            options: Dict[str, str] = {}
+            for school in relevant_rows:
+                for item in school.get("series") or []:
+                    grade_id = str(item.get("grade_id") or "").strip()
+                    grade_name = str(item.get("grade_name") or "Sem série").strip()
+                    if grade_id and grade_id not in options:
+                        options[grade_id] = grade_name
+            return [{"id": grade_id, "name": name} for grade_id, name in sorted(options.items(), key=lambda item: item[1].lower())]
+
+        scope = scope or {}
+        results_model = AnswerSheetResult if answer_sheet_id and not evaluation_id else EvaluationResult
+        grade_ref = func.coalesce(Student.grade_id, Class.grade_id)
+        query = (
+            db.session.query(
+                grade_ref.label("grade_id"),
+                Grade.name.label("grade_name"),
+            )
+            .select_from(results_model)
+            .join(Student, Student.id == results_model.student_id)
+            .outerjoin(Class, Class.id == Student.class_id)
+            .outerjoin(Grade, Grade.id == grade_ref)
+            .outerjoin(School, School.id == Student.school_id)
+        )
+        if evaluation_id:
+            query = query.filter(results_model.test_id == evaluation_id)
+        elif answer_sheet_id:
+            query = query.filter(results_model.gabarito_id == answer_sheet_id)
+
+        escola = str(filters.get("escola") or "").strip()
+        if escola:
+            query = query.filter(Student.school_id == escola)
+        if filters.get("municipio"):
+            query = query.filter(School.city_id == str(filters["municipio"]))
+
+        school_ids = scope.get("school_ids") or []
+        class_ids = scope.get("class_ids") or []
+        city_id = scope.get("city_id")
+        if school_ids:
+            query = query.filter(Student.school_id.in_([str(x) for x in school_ids]))
+        if class_ids:
+            query = query.filter(Student.class_id.in_(class_ids))
+        if city_id and not filters.get("municipio"):
+            query = query.filter(School.city_id == str(city_id))
+
         options: Dict[str, str] = {}
-        for item in school.get("series") or []:
-            grade_id = str(item.get("grade_id") or "").strip()
-            grade_name = str(item.get("grade_name") or "Sem série").strip()
-            if grade_id:
+        for row in query.distinct().all():
+            grade_id = str(row.grade_id or "").strip()
+            grade_name = str(row.grade_name or "Sem série").strip()
+            if grade_id and grade_id not in options:
                 options[grade_id] = grade_name
         return [{"id": grade_id, "name": name} for grade_id, name in sorted(options.items(), key=lambda item: item[1].lower())]
 

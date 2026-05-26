@@ -1642,6 +1642,8 @@ def get_password_report_pdf():
                     "alunos": alunos[start:start + STUDENTS_PER_PDF_PAGE],
                     "chunk_page": page_idx,
                     "chunk_total_pages": total_pages,
+                    # Índice inicial (1-based) para numeração contínua entre páginas da mesma turma
+                    "start_index": start + 1,
                 })
 
         # Metadados para a capa

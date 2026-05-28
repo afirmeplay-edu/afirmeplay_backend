@@ -24,10 +24,9 @@ class TestFolhaRascunhoService(unittest.TestCase):
             _parse_filters({"modo": "personalizada"})
         self.assertIn("município", ctx.exception.message.lower())
 
-    def test_parse_filters_personalizada_requires_escola(self):
-        with self.assertRaises(FolhaRascunhoValidationError) as ctx:
-            _parse_filters({"modo": "personalizada", "municipio": "city-1"})
-        self.assertIn("escola", ctx.exception.message.lower())
+    def test_parse_filters_personalizada_allows_municipio_sem_escola(self):
+        parsed = _parse_filters({"modo": "personalizada", "municipio": "city-1"})
+        self.assertEqual(parsed["escola"], "")
 
     def test_parse_filters_avaliacao_requires_evaluation_id(self):
         with self.assertRaises(FolhaRascunhoValidationError) as ctx:

@@ -10,10 +10,12 @@ import io
 import logging
 import mimetypes
 import os
+import re
 from datetime import timedelta
 from typing import Any, Dict, Optional, Tuple
 
 from PIL import Image
+from minio.error import S3Error
 from pypdf import PdfReader
 
 from app import db
@@ -25,6 +27,11 @@ logger = logging.getLogger(__name__)
 MAX_LOGO_BYTES = 5 * 1024 * 1024
 MAX_LETTERHEAD_PDF_BYTES = 30 * 1024 * 1024
 LETTERHEAD_RENDER_DPI = 300
+_CITY_KEY_RE = re.compile(r"^cities/[0-9a-fA-F-]{36}/[A-Za-z0-9._/\-]+$")
+
+
+class StorageUnavailableError(RuntimeError):
+    """Falha de conectividade/infra com armazenamento de branding."""
 
 _LOGO_MAGIC: Tuple[Tuple[bytes, str], ...] = (
     (b"\x89PNG\r\n\x1a\n", "png"),
@@ -290,6 +297,46 @@ class CityBrandingService:
         guessed, _ = mimetypes.guess_type(object_key or "")
         return guessed or fallback
 
+    @staticmethod
+    def _is_valid_asset_key(city_id: str, key: str) -> bool:
+        if not key or not isinstance(key, str):
+            return False
+        if key.startswith("/city/") or "://" in key:
+            return False
+        if not _CITY_KEY_RE.match(key):
+            return False
+        return key.startswith(f"cities/{city_id}/")
+
+    def get_asset_object_key(self, city: City, asset_kind: str) -> Optional[str]:
+        if asset_kind not in self._ASSET_KINDS:
+            raise ValueError(f"asset_kind inválido: {asset_kind!r}")
+        if asset_kind == "logo":
+            key = city.logo_url
+        elif asset_kind == "letterhead_image":
+            key = city.letterhead_image_url
+        else:
+            key = city.letterhead_pdf_url
+        if not key:
+            return None
+        if not self._is_valid_asset_key(str(city.id), str(key)):
+            logger.warning(
+                "Branding key inválida city=%s asset=%s key=%s",
+                city.id,
+                asset_kind,
+                key,
+            )
+            return None
+        return str(key)
+
+    def asset_exists(self, object_key: str) -> bool:
+        if not object_key:
+            return False
+        try:
+            return self.minio.file_exists(self.bucket, object_key)
+        except Exception as e:
+            logger.warning("Falha ao verificar existência de asset key=%s: %s", object_key, e)
+            return False
+
     def load_asset(self, city: City, asset_kind: str) -> Tuple[bytes, str]:
         """
         Baixa do MinIO interno o asset de branding solicitado e devolve (bytes, content_type).
@@ -305,23 +352,22 @@ class CityBrandingService:
             ValueError: asset_kind inválido.
             LookupError: município não possui o asset cadastrado.
         """
-        if asset_kind not in self._ASSET_KINDS:
-            raise ValueError(f"asset_kind inválido: {asset_kind!r}")
-
-        if asset_kind == "logo":
-            key = city.logo_url
-            fallback_ct = "image/png"
-        elif asset_kind == "letterhead_image":
-            key = city.letterhead_image_url
-            fallback_ct = "image/png"
-        else:
-            key = city.letterhead_pdf_url
+        key = self.get_asset_object_key(city, asset_kind)
+        if asset_kind == "letterhead_pdf":
             fallback_ct = "application/pdf"
-
+        else:
+            fallback_ct = "image/png"
         if not key:
             raise LookupError("Asset de branding não encontrado para este município")
-
-        data = self.minio.download_file(self.bucket, key)
+        try:
+            data = self.minio.download_file(self.bucket, key)
+        except S3Error as e:
+            code = (getattr(e, "code", "") or "").lower()
+            if code in ("nosuchkey", "nosuchbucket", "notfound", "notsuchkey"):
+                raise LookupError("Asset de branding não encontrado para este município") from e
+            raise StorageUnavailableError("Armazenamento de branding indisponível no momento") from e
+        except Exception as e:
+            raise StorageUnavailableError("Armazenamento de branding indisponível no momento") from e
         if not data:
             raise LookupError("Asset vazio ou indisponível no armazenamento")
 

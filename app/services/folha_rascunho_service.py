@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 from __future__ import annotations
 
+from collections import defaultdict
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Set, Tuple
 
@@ -63,9 +64,6 @@ def _parse_filters(args: Dict[str, Any]) -> Dict[str, str]:
     turma = _norm_param(args.get("turma"))
     evaluation_id = _norm_param(args.get("evaluation_id"))
     answer_sheet_id = _norm_param(args.get("answer_sheet_id"))
-
-    if modo == "personalizada" and not escola:
-        raise FolhaRascunhoValidationError("Selecione a escola no modo personalizável.")
 
     if modo == "avaliacao" and not evaluation_id:
         raise FolhaRascunhoValidationError("Selecione uma avaliação.")
@@ -183,13 +181,19 @@ def _collect_personalizada(
     grade_id = filters["serie"]
     class_id = filters["turma"]
 
-    if not _school_allowed(school_id, allowed):
+    if school_id and not _school_allowed(school_id, allowed):
         return {}
 
-    query = (
-        Class.query.join(School, Class.school_id == School.id)
-        .filter(School.city_id == city_id, School.id == school_id)
+    query = Class.query.join(School, Class._school_id == School.id).filter(
+        School.city_id == city_id
     )
+    if school_id:
+        query = query.filter(School.id == school_id)
+    elif allowed is not None:
+        if not allowed:
+            return {}
+        query = query.filter(School.id.in_(list(allowed)))
+
     if grade_id:
         grade_uuid = ensure_uuid(grade_id)
         if not grade_uuid:
@@ -201,10 +205,24 @@ def _collect_personalizada(
             raise FolhaRascunhoValidationError("turma inválida.")
         query = query.filter(Class.id == class_uuid)
 
-    classes = query.order_by(Class.grade_id, Class.name).all()
+    classes = query.order_by(School.name, Class.grade_id, Class.name).all()
+    class_ids = [c.id for c in classes]
+    alunos_por_turma: Dict[Any, List[Dict[str, str]]] = defaultdict(list)
+    if class_ids:
+        for aluno in (
+            Student.query.filter(Student.class_id.in_(class_ids))
+            .order_by(Student.class_id, Student.name)
+            .all()
+        ):
+            name = str(aluno.name or "").strip()
+            if name:
+                alunos_por_turma[aluno.class_id].append(
+                    {"id": str(aluno.id), "name": name}
+                )
+
     tree: Dict[str, Dict[str, Any]] = {}
     for classe in classes:
-        students = _students_enrolled(classe)
+        students = alunos_por_turma.get(classe.id) or _students_enrolled(classe)
         _append_class_to_tree(tree, classe, students, student_ids=student_ids)
     return tree
 

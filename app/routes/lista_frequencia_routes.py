@@ -4,13 +4,17 @@ Para avaliações, provas físicas e frequência diária do professor.
 Legenda de status: P, A, T, NE, SE, SS, I. Sem dados de assinatura.
 """
 
+from collections import defaultdict
 from datetime import datetime
-from flask import Blueprint, jsonify, request
+from flask import Blueprint, current_app, jsonify, request
 from flask_jwt_extended import jwt_required
+from sqlalchemy.orm import joinedload, selectinload
 
 from app import db
 from app.decorators.role_required import role_required
+from app.models.city import City
 from app.models.studentClass import Class
+from app.models.school import School
 from app.models.student import Student
 from app.models.grades import Grade
 from app.models.classSubject import ClassSubject
@@ -49,18 +53,34 @@ INSTRUCOES_APLICADOR = (
 # Status de sessão considerados como "presente" na avaliação
 SESSION_STATUS_PRESENTE = ("finalizada", "expirada", "corrigida", "revisada")
 
+_CLASS_LIST_OPTIONS = (
+    selectinload(Class.class_subjects).joinedload(ClassSubject.subject),
+    joinedload(Class.grade),
+)
 
-def _cabecalho_real(classe, tipo, test=None, gabarito=None):
+
+def _turmas_query(query):
+    """Eager-load de série e disciplinas para evitar N+1 no cabeçalho."""
+    return query.options(*_CLASS_LIST_OPTIONS)
+
+
+def _cabecalho_real(classe, tipo, test=None, gabarito=None, school=None, city=None):
     """Monta o cabeçalho a partir da turma (Class) e do tipo de lista.
     Se test ou gabarito tiver título, usa em nome_prova_ano.
     """
-    school = classe.school
-    city = school.city if school else None
+    if school is None:
+        school = classe.school
+    if city is None and school is not None:
+        city = school.city
     grade = classe.grade if hasattr(classe, "grade") else None
 
     municipio_uf = None
-    if city:
-        municipio_uf = f"{city.name.upper()}/{city.state.upper()}" if city.state else city.name.upper()
+    if city and city.name:
+        municipio_uf = (
+            f"{city.name.upper()}/{city.state.upper()}"
+            if city.state
+            else city.name.upper()
+        )
 
     ano = datetime.now().year
     if test and getattr(test, "title", None):
@@ -179,6 +199,124 @@ def _status_estudante_cartao_resposta(student_ids, gabarito_id):
     return {sid: ("P" if sid in com_resultado else "A") for sid in student_ids}
 
 
+def _estudantes_payload(alunos, fill_status, test=None, gabarito=None, status_map=None):
+    """Monta a lista de estudantes; status_map opcional (pré-carregado em lote)."""
+    if fill_status and gabarito:
+        status_map = status_map or _status_estudante_cartao_resposta(
+            [str(s.id) for s in alunos], gabarito.id
+        )
+        return [
+            {
+                "numero": idx + 1,
+                "nome_estudante": (s.name or "").strip() or None,
+                "status": status_map.get(str(s.id), "A"),
+            }
+            for idx, s in enumerate(alunos)
+        ]
+    if fill_status and test:
+        status_map = status_map or _status_estudante_avaliacao(
+            [str(s.id) for s in alunos], test.id
+        )
+        return [
+            {
+                "numero": idx + 1,
+                "nome_estudante": (s.name or "").strip() or None,
+                "status": status_map.get(str(s.id), "A"),
+            }
+            for idx, s in enumerate(alunos)
+        ]
+    return [
+        {
+            "numero": idx + 1,
+            "nome_estudante": (s.name or "").strip() or None,
+            "status": None,
+        }
+        for idx, s in enumerate(alunos)
+    ]
+
+
+def _montar_listas_turmas_bulk(turmas, tipo, test, fill_status, gabarito=None, city_fallback=None):
+    """
+    Monta várias turmas com poucas queries (alunos, escolas e status em lote).
+    """
+    if not turmas:
+        return []
+
+    class_ids = [c.id for c in turmas]
+    alunos_por_turma = defaultdict(list)
+    if class_ids:
+        for aluno in (
+            Student.query.filter(Student.class_id.in_(class_ids))
+            .order_by(Student.class_id, Student.name)
+            .all()
+        ):
+            alunos_por_turma[aluno.class_id].append(aluno)
+
+    school_ids = {str(c._school_id) for c in turmas if c._school_id}
+    schools_by_id = {}
+    if school_ids:
+        for escola in (
+            School.query.filter(School.id.in_(list(school_ids)))
+            .options(joinedload(School.city))
+            .all()
+        ):
+            schools_by_id[str(escola.id)] = escola
+
+    status_map_global = None
+    if fill_status and (gabarito or test):
+        todos_ids = [
+            str(s.id)
+            for cid in class_ids
+            for s in alunos_por_turma.get(cid, [])
+        ]
+        if gabarito:
+            status_map_global = _status_estudante_cartao_resposta(todos_ids, gabarito.id)
+        else:
+            status_map_global = _status_estudante_avaliacao(todos_ids, test.id)
+
+    lista = []
+    for classe in turmas:
+        escola = schools_by_id.get(str(classe._school_id)) if classe._school_id else None
+        cidade = city_fallback
+        if cidade is None and escola is not None:
+            cidade = escola.city
+        cabecalho = _cabecalho_real(
+            classe, tipo, test=test, gabarito=gabarito, school=escola, city=cidade
+        )
+        alunos = alunos_por_turma.get(classe.id, [])
+        lista.append({
+            "class_id": str(classe.id),
+            "cabecalho": cabecalho,
+            "estudantes": _estudantes_payload(
+                alunos, fill_status, test=test, gabarito=gabarito, status_map=status_map_global
+            ),
+        })
+    return lista
+
+
+def _response_turmas_lista(lista):
+    """Resposta em lote: legenda/instruções uma vez (payload menor, evita crash no cliente)."""
+    if not lista:
+        return jsonify({"turmas": []}), 200
+    if len(lista) == 1:
+        return jsonify({"turmas": lista}), 200
+    turmas = []
+    for item in lista:
+        cab = dict(item["cabecalho"])
+        cab.pop("legenda", None)
+        cab.pop("instrucoes_aplicador", None)
+        turmas.append({
+            "class_id": item["class_id"],
+            "cabecalho": cab,
+            "estudantes": item["estudantes"],
+        })
+    return jsonify({
+        "legenda": LEGENDA,
+        "instrucoes_aplicador": INSTRUCOES_APLICADOR,
+        "turmas": turmas,
+    }), 200
+
+
 def _montar_lista_turma(classe, tipo, test, fill_status, gabarito=None):
     """Monta um item de lista (cabecalho + estudantes) para uma turma."""
     cabecalho = _cabecalho_real(classe, tipo, test=test, gabarito=gabarito)
@@ -187,37 +325,9 @@ def _montar_lista_turma(classe, tipo, test, fill_status, gabarito=None):
         .order_by(Student.name)
         .all()
     )
-    if fill_status and gabarito:
-        student_ids = [str(s.id) for s in alunos]
-        status_map = _status_estudante_cartao_resposta(student_ids, gabarito.id)
-        estudantes = [
-            {
-                "numero": idx + 1,
-                "nome_estudante": (s.name or "").strip() or None,
-                "status": status_map.get(str(s.id), "A"),
-            }
-            for idx, s in enumerate(alunos)
-        ]
-    elif fill_status and test:
-        student_ids = [str(s.id) for s in alunos]
-        status_map = _status_estudante_avaliacao(student_ids, test.id)
-        estudantes = [
-            {
-                "numero": idx + 1,
-                "nome_estudante": (s.name or "").strip() or None,
-                "status": status_map.get(str(s.id), "A"),
-            }
-            for idx, s in enumerate(alunos)
-        ]
-    else:
-        estudantes = [
-            {
-                "numero": idx + 1,
-                "nome_estudante": (s.name or "").strip() or None,
-                "status": None,
-            }
-            for idx, s in enumerate(alunos)
-        ]
+    estudantes = _estudantes_payload(
+        alunos, fill_status, test=test, gabarito=gabarito
+    )
     return {"cabecalho": cabecalho, "estudantes": estudantes}
 
 
@@ -245,6 +355,7 @@ def lista_frequencia():
     test_id = request.args.get("test_id")
     class_id = request.args.get("class_id")
     grade_id = request.args.get("grade_id")
+    school_id = request.args.get("school_id")
 
     if gabarito_id:
         if not city_id:
@@ -292,15 +403,21 @@ def lista_frequencia():
             }
             return jsonify(payload), 200
 
-        lista = []
-        for c in turmas_filtradas:
+        city_fallback = City.query.get(city_id) if city_id else None
+        if len(turmas_filtradas) > 1:
+            lista = _montar_listas_turmas_bulk(
+                turmas_filtradas, tipo, test=None, fill_status=True,
+                gabarito=gab, city_fallback=city_fallback,
+            )
+        else:
+            c = turmas_filtradas[0]
             item = _montar_lista_turma(c, tipo, test=None, fill_status=True, gabarito=gab)
-            lista.append({
+            lista = [{
                 "class_id": str(c.id),
                 "cabecalho": item["cabecalho"],
                 "estudantes": item["estudantes"],
-            })
-        return jsonify({"turmas": lista}), 200
+            }]
+        return _response_turmas_lista(lista)
 
     classe = None
     class_uuid = None
@@ -324,9 +441,11 @@ def lista_frequencia():
             if not grade_uuid:
                 return jsonify({"erro": "grade_id inválido"}), 400
             turmas_grade = (
-                Class.query.filter(
-                    Class.id.in_(class_ids_avaliacao),
-                    Class.grade_id == grade_uuid,
+                _turmas_query(
+                    Class.query.filter(
+                        Class.id.in_(class_ids_avaliacao),
+                        Class.grade_id == grade_uuid,
+                    )
                 )
                 .order_by(Class.name)
                 .all()
@@ -350,7 +469,7 @@ def lista_frequencia():
         # Sem class_id nem grade_id: retornar TODAS as turmas da avaliação (ex.: "todas as turmas")
         elif not class_id and not grade_id:
             turmas_grade = (
-                Class.query.filter(Class.id.in_(class_ids_avaliacao))
+                _turmas_query(Class.query.filter(Class.id.in_(class_ids_avaliacao)))
                 .order_by(Class.grade_id, Class.name)
                 .all()
             )
@@ -359,30 +478,70 @@ def lista_frequencia():
             return jsonify({"erro": "Turma não encontrada"}), 404
 
     else:
-        if not class_id:
-            return jsonify({"erro": "Informe class_id ou test_id"}), 400
-        class_uuid = ensure_uuid(class_id)
-        if not class_uuid:
-            return jsonify({"erro": "class_id inválido"}), 400
-        classe = Class.query.get(class_uuid)
-        if not classe:
-            return jsonify({"erro": "Turma não encontrada"}), 404
+        if city_id and not class_id:
+            # city_id em public.city é VARCHAR; não usar uuid.UUID na comparação (evita cast ::UUID no SQL)
+            city_id_str = city_id.strip()
+            if not city_id_str:
+                return jsonify({"erro": "city_id inválido"}), 400
+
+            school_ids_city = [
+                str(s.id) for s in School.query.filter(School.city_id == city_id_str).all()
+            ]
+            if not school_ids_city:
+                return jsonify({"erro": "Nenhuma escola encontrada para o município informado"}), 404
+            query = Class.query.filter(Class._school_id.in_(school_ids_city))
+
+            if school_id:
+                school_uuid = ensure_uuid(school_id)
+                if not school_uuid:
+                    return jsonify({"erro": "school_id inválido"}), 400
+                query = query.filter(Class._school_id == str(school_uuid))
+
+            if grade_id:
+                grade_uuid = ensure_uuid(grade_id)
+                if not grade_uuid:
+                    return jsonify({"erro": "grade_id inválido"}), 400
+                query = query.filter(Class.grade_id == grade_uuid)
+
+            turmas_grade = (
+                _turmas_query(query).order_by(Class.grade_id, Class.name).all()
+            )
+            if not turmas_grade:
+                return jsonify({"erro": "Nenhuma turma encontrada para os filtros informados"}), 404
+        else:
+            if not class_id:
+                return jsonify({"erro": "Informe class_id, test_id ou city_id"}), 400
+            class_uuid = ensure_uuid(class_id)
+            if not class_uuid:
+                return jsonify({"erro": "class_id inválido"}), 400
+            classe = Class.query.get(class_uuid)
+            if not classe:
+                return jsonify({"erro": "Turma não encontrada"}), 404
 
     tipo = request.args.get("tipo", "avaliacao")
     if tipo not in ("avaliacao", "prova_fisica", "frequencia_diaria"):
         tipo = "avaliacao"
 
     if turmas_grade is not None:
-        # Resposta: todas as turmas (da série ou da avaliação inteira)
-        lista = []
-        for c in turmas_grade:
-            item = _montar_lista_turma(c, tipo, test, fill_status=True)
-            lista.append({
-                "class_id": str(c.id),
-                "cabecalho": item["cabecalho"],
-                "estudantes": item["estudantes"],
-            })
-        return jsonify({"turmas": lista}), 200
+        fill_status_bulk = test is not None
+        city_fallback = City.query.get(city_id) if city_id else None
+        try:
+            if len(turmas_grade) > 1:
+                lista = _montar_listas_turmas_bulk(
+                    turmas_grade, tipo, test, fill_status_bulk, city_fallback=city_fallback
+                )
+            else:
+                c = turmas_grade[0]
+                item = _montar_lista_turma(c, tipo, test, fill_status=fill_status_bulk)
+                lista = [{
+                    "class_id": str(c.id),
+                    "cabecalho": item["cabecalho"],
+                    "estudantes": item["estudantes"],
+                }]
+        except Exception:
+            current_app.logger.exception("Erro ao montar lista de frequência em lote")
+            return jsonify({"erro": "Erro ao gerar listas em lote. Tente filtrar por escola ou série."}), 500
+        return _response_turmas_lista(lista)
 
     item = _montar_lista_turma(classe, tipo, test, fill_status=(test_id is not None))
     payload = {

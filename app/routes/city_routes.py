@@ -13,7 +13,7 @@ from flask_jwt_extended import jwt_required
 from app.decorators.role_required import role_required, get_current_user_from_token
 from app.decorators.role_required import get_current_tenant_id
 from app.services.city_schema_service import provision_city_schema
-from app.services.city_branding_service import CityBrandingService
+from app.services.city_branding_service import CityBrandingService, StorageUnavailableError
 
 bp = Blueprint('city', __name__, url_prefix='/city')
 
@@ -241,15 +241,34 @@ def _serve_branding_asset(municipio_id: str, asset_kind: str):
     municipio = City.query.get(municipio_id)
     if not municipio:
         return jsonify({"erro": "Município não encontrado"}), 404
+    svc = CityBrandingService()
+    asset_key = svc.get_asset_object_key(municipio, asset_kind)
     try:
-        data, ctype = CityBrandingService().load_asset(municipio, asset_kind)
+        data, ctype = svc.load_asset(municipio, asset_kind)
     except LookupError as e:
         return jsonify({"erro": str(e)}), 404
     except ValueError as e:
         return jsonify({"erro": str(e)}), 400
+    except StorageUnavailableError as e:
+        logging.error(
+            "Storage indisponível city_id=%s asset=%s key=%s erro=%s",
+            municipio_id,
+            asset_kind,
+            asset_key,
+            e,
+            exc_info=True,
+        )
+        return jsonify({"erro": "Armazenamento de branding indisponível no momento"}), 503
     except Exception as e:
-        logging.error("Erro ao servir branding %s: %s", asset_kind, e, exc_info=True)
-        return jsonify({"erro": "Erro ao carregar asset de branding", "detalhes": str(e)}), 500
+        logging.error(
+            "Erro ao servir branding city_id=%s asset=%s key=%s erro=%s",
+            municipio_id,
+            asset_kind,
+            asset_key,
+            e,
+            exc_info=True,
+        )
+        return jsonify({"erro": "Erro ao carregar asset de branding"}), 500
     return send_file(
         BytesIO(data),
         mimetype=ctype,
@@ -270,17 +289,25 @@ def obter_branding_municipio(municipio_id):
     if not municipio:
         return jsonify({"erro": "Município não encontrado"}), 404
 
+    svc = CityBrandingService()
+    logo_key = svc.get_asset_object_key(municipio, "logo")
+    letterhead_image_key = svc.get_asset_object_key(municipio, "letterhead_image")
+    letterhead_pdf_key = svc.get_asset_object_key(municipio, "letterhead_pdf")
+
     logo_url = (
         _branding_proxy_url("city.get_branding_logo", municipio.id)
-        if municipio.logo_url else None
+        if logo_key and svc.asset_exists(logo_key)
+        else None
     )
     letterhead_image_url = (
         _branding_proxy_url("city.get_branding_letterhead_image", municipio.id)
-        if municipio.letterhead_image_url else None
+        if letterhead_image_key and svc.asset_exists(letterhead_image_key)
+        else None
     )
     letterhead_pdf_url = (
         _branding_proxy_url("city.get_branding_letterhead_pdf", municipio.id)
-        if municipio.letterhead_pdf_url else None
+        if letterhead_pdf_key and svc.asset_exists(letterhead_pdf_key)
+        else None
     )
     # Campo `presigned` mantido por compatibilidade de contrato com o frontend,
     # mas o conteúdo agora são URLs servidas pelo próprio backend (proxy autenticado
@@ -293,9 +320,9 @@ def obter_branding_municipio(municipio_id):
     }
     return jsonify({
         "city_id": municipio.id,
-        "logo_object_key": municipio.logo_url,
-        "letterhead_image_object_key": municipio.letterhead_image_url,
-        "letterhead_pdf_object_key": municipio.letterhead_pdf_url,
+        "logo_object_key": logo_key if logo_url else None,
+        "letterhead_image_object_key": letterhead_image_key if letterhead_image_url else None,
+        "letterhead_pdf_object_key": letterhead_pdf_key if letterhead_pdf_url else None,
         "presigned": urls,
         "urls": urls,
     })

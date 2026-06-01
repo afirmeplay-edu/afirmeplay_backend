@@ -1,6 +1,7 @@
 from flask import Flask, send_from_directory, request, jsonify
 from flask_sqlalchemy import SQLAlchemy
 from flask_cors import CORS
+from flask_compress import Compress
 from flask_jwt_extended import JWTManager
 from flask_migrate import Migrate
 from markupsafe import Markup
@@ -77,6 +78,17 @@ def create_app():
     jwt.init_app(app)
     migrate.init_app(app, db)
     register_tenant_query_logging(app, db)
+
+    # Compressão gzip/brotli em respostas JSON/HTML (redeem mobile, etc.)
+    app.config.setdefault("COMPRESS_MIMETYPES", [
+        "application/json",
+        "text/html",
+        "text/css",
+        "text/javascript",
+        "application/javascript",
+    ])
+    app.config.setdefault("COMPRESS_MIN_SIZE", 1024)
+    Compress(app)
 
     # ========================================
     # POSTGRES TIMEOUTS (anti "idle in transaction")
@@ -300,7 +312,7 @@ def create_app():
         app.logger.warning("Scheduler não pôde ser iniciado: %s", e)
     
     # Importar rotas
-    from .routes import school_routes, test_routes, question_routes, login, logout, admin_route, educationStage_routes, grades_routes, persistUser_routes, city_routes, student_routes, student_preferences_routes, user_routes, class_routes, schoolTeacher, teacherClass, professor_route, subject_routes, skill_routes, student_answer_routes, userQuickLinks_routes, evaluation_results_routes, basic_endpoints, evaluation_routes, game_routes, manager_routes, report_routes, student_grades_routes, calendar_routes, dashboard_routes, answer_sheet_routes, subdomain_routes, lista_frequencia_routes, ranking_routes, monitoring_routes, saved_ata_routes, folha_rascunho_routes
+    from .routes import school_routes, test_routes, question_routes, login, logout, admin_route, educationStage_routes, grades_routes, persistUser_routes, city_routes, student_routes, student_preferences_routes, user_routes, class_routes, schoolTeacher, teacherClass, professor_route, subject_routes, skill_routes, student_answer_routes, userQuickLinks_routes, evaluation_results_routes, basic_endpoints, evaluation_routes, game_routes, manager_routes, report_routes, student_grades_routes, calendar_routes, dashboard_routes, answer_sheet_routes, subdomain_routes, lista_frequencia_routes, ranking_routes, monitoring_routes, saved_ata_routes, folha_rascunho_routes, termo_compromisso_routes, etiquetas_routes
     from app.physical_tests.routes import bp as physical_test_bp
     from app.socioeconomic_forms.routes import socioeconomic_form_routes
     from app.socioeconomic_forms.routes import filter_routes
@@ -359,6 +371,8 @@ def create_app():
     app.register_blueprint(monitoring_routes.bp)
     app.register_blueprint(saved_ata_routes.bp)
     app.register_blueprint(folha_rascunho_routes.bp)
+    app.register_blueprint(termo_compromisso_routes.bp)
+    app.register_blueprint(etiquetas_routes.bp)
     app.register_blueprint(lista_frequencia_routes.bp)
     app.register_blueprint(socioeconomic_form_routes.bp)
     app.register_blueprint(filter_routes.bp)

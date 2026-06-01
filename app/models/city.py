@@ -1,6 +1,9 @@
 from app import db
 import uuid
 
+# Literal alinhado a app.entitlements.plans.DEFAULT_PLAN_CODE (evita import circular com models)
+_DEFAULT_PLAN_CODE = "basic"
+
 class City(db.Model):
     __tablename__ = 'city'
     __table_args__ = {"schema": "public"}
@@ -9,6 +12,12 @@ class City(db.Model):
     name = db.Column(db.String(100))
     state = db.Column(db.String(100), nullable=False)
     slug = db.Column(db.String(100), unique=True, nullable=False)
+    plan_code = db.Column(
+        db.String(20),
+        nullable=False,
+        default=_DEFAULT_PLAN_CODE,
+        server_default=_DEFAULT_PLAN_CODE,
+    )
     created_at = db.Column(db.TIMESTAMP, server_default=db.func.now())
 
     # Chaves de objeto no bucket MUNICIPALITY_LOGOS (ex.: cities/<id>/logo.png)

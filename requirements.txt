@@ -21,6 +21,7 @@ docxtpl==0.20.1
 et_xmlfile==2.0.0
 fastavro==1.12.1
 Flask==3.1.0
+flask-compress==1.17
 flask-cors==5.0.1
 Flask-JWT-Extended==4.7.1
 Flask-Migrate==4.1.0

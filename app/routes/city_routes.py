@@ -14,8 +14,40 @@ from app.decorators.role_required import role_required, get_current_user_from_to
 from app.decorators.role_required import get_current_tenant_id
 from app.services.city_schema_service import provision_city_schema
 from app.services.city_branding_service import CityBrandingService, StorageUnavailableError
+from app.entitlements.plans import DEFAULT_PLAN_CODE, normalize_plan_code
+from app.entitlements.resolver import entitlements_for_city
 
 bp = Blueprint('city', __name__, url_prefix='/city')
+
+
+def _serialize_city(city: City) -> dict:
+    created = city.created_at.isoformat() if city.created_at else None
+    plan_code = city.plan_code or DEFAULT_PLAN_CODE
+    return {
+        "id": city.id,
+        "name": city.name,
+        "state": city.state,
+        "slug": city.slug,
+        "plan_code": plan_code,
+        "entitlements": entitlements_for_city(city),
+        "created_at": created,
+    }
+
+
+def _apply_plan_code_from_payload(municipio: City, data: dict, user: dict):
+    """
+    Atualiza plan_code se enviado no body. Apenas admin pode alterar.
+    Retorna (jsonify, status) em erro ou None se ok / campo ausente.
+    """
+    if "plan_code" not in data:
+        return None
+    if (user.get("role") or "").strip().lower() != "admin":
+        return jsonify({"erro": "Apenas administradores podem alterar o plano do município"}), 403
+    try:
+        municipio.plan_code = normalize_plan_code(data.get("plan_code"))
+    except ValueError as e:
+        return jsonify({"erro": str(e)}), 400
+    return None
 
 
 def _ensure_municipio_access(user: dict, municipio_id: str):
@@ -76,10 +108,21 @@ def criar_municipio():
     if City.query.filter_by(slug=slug).first():
         return jsonify({"erro": "Já existe um município com este slug"}), 409
 
+    user = get_current_user_from_token()
+    plan_code = DEFAULT_PLAN_CODE
+    if "plan_code" in data:
+        if (user.get("role") or "").strip().lower() != "admin":
+            return jsonify({"erro": "Apenas administradores podem definir o plano na criação"}), 403
+        try:
+            plan_code = normalize_plan_code(data.get("plan_code"))
+        except ValueError as e:
+            return jsonify({"erro": str(e)}), 400
+
     novo_municipio = City(
         name=name,
         state=state,
-        slug=slug
+        slug=slug,
+        plan_code=plan_code,
     )
     db.session.add(novo_municipio)
     db.session.commit()
@@ -100,8 +143,7 @@ def criar_municipio():
 
     return jsonify({
         "mensagem": "Município criado com sucesso",
-        "id": novo_municipio.id,
-        "slug": novo_municipio.slug
+        **_serialize_city(novo_municipio),
     }), 201
 
 # GET - Listar municípios
@@ -122,16 +164,7 @@ def listar_municipios():
             return jsonify({"erro": "Cidade não encontrada para este usuário"}), 404
         cities = City.query.filter_by(id=city_id).all()
 
-    return jsonify([
-        {
-            "id": c.id,
-            "name": c.name,
-            "state": c.state,
-            "slug": c.slug,
-            "created_at": c.created_at.isoformat()
-        }
-        for c in cities
-    ])
+    return jsonify([_serialize_city(c) for c in cities])
 
 
 # GET - Listar todos os domínios (subdomínios) dos municípios
@@ -147,10 +180,7 @@ def listar_dominios_municipios():
     cities = City.query.order_by(City.state, City.name).all()
     return jsonify([
         {
-            "id": c.id,
-            "name": c.name,
-            "state": c.state,
-            "slug": c.slug,
+            **_serialize_city(c),
             "dominio": f"{c.slug}.{DOMAIN_BASE}",
             "url": f"https://{c.slug}.{DOMAIN_BASE}",
         }
@@ -204,11 +234,7 @@ def listar_usuarios_municipio(municipio_id):
             }
 
         return jsonify({
-            "municipio": {
-                "id": municipio.id,
-                "name": municipio.name,
-                "state": municipio.state,
-            },
+            "municipio": _serialize_city(municipio),
             "total": len(users),
             "users": [_serialize_user(u) for u in users],
         })
@@ -485,13 +511,7 @@ def buscar_municipio(municipio_id):
     if not municipio:
         return jsonify({"erro": "Município não encontrado"}), 404
 
-    return jsonify({
-        "id": municipio.id,
-        "name": municipio.name,
-        "state": municipio.state,
-        "slug": municipio.slug,
-        "created_at": municipio.created_at.isoformat()
-    })
+    return jsonify(_serialize_city(municipio))
 
 
 # PUT - Atualizar município
@@ -532,11 +552,14 @@ def atualizar_municipio(municipio_id):
             return jsonify({"erro": "Já existe outro município com este slug"}), 409
         municipio.slug = slug
 
+    plan_err = _apply_plan_code_from_payload(municipio, data, user)
+    if plan_err:
+        return plan_err
+
     db.session.commit()
     return jsonify({
         "mensagem": "Município atualizado com sucesso",
-        "id": municipio.id,
-        "slug": municipio.slug
+        **_serialize_city(municipio),
     })
 
 # DELETE - Excluir município
@@ -650,14 +673,5 @@ def listar_municipios_por_estado(state_name):
         # Retorna apenas o município do usuário (não todos do estado)
         cities = [user_city]
 
-    return jsonify([
-        {
-            "id": c.id,
-            "name": c.name,
-            "state": c.state,
-            "slug": c.slug,
-            "created_at": c.created_at.isoformat()
-        }
-        for c in cities
-    ])
+    return jsonify([_serialize_city(c) for c in cities])
 

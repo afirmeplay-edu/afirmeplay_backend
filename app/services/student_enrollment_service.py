@@ -116,6 +116,9 @@ def transfer_student_to_class(
 
     if old_sid and str(old_sid) != str(new_sid):
         assert_same_municipality_two_schools(sess, str(old_sid), str(new_sid))
+        from app.services.student_password_log_service import delete_password_logs_for_student_at_school
+
+        delete_password_logs_for_student_at_school(sess, student.id, str(old_sid))
     else:
         if student.user and student.user.city_id and student.user.city_id != to_school.city_id:
             raise ValueError("A turma de destino deve estar no mesmo município (city_id) do cadastro do aluno.")

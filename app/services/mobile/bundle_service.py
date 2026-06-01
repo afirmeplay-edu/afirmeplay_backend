@@ -102,11 +102,15 @@ def collect_school_scope(school_id: str) -> Tuple[List[str], Dict[str, Test], Li
     class_tests = ClassTest.query.filter(ClassTest.class_id.in_(class_ids)).all()
     test_ids = list({ct.test_id for ct in class_tests})
 
+    students_by_class: Dict[str, List[Student]] = {}
+    for s in Student.query.filter(Student.class_id.in_(class_ids)).all():
+        if s.class_id:
+            students_by_class.setdefault(s.class_id, []).append(s)
+
     student_links: List[Tuple[str, str]] = []
     seen = set()
     for ct in class_tests:
-        studs = Student.query.filter_by(class_id=ct.class_id).all()
-        for s in studs:
+        for s in students_by_class.get(ct.class_id, []):
             key = (s.id, ct.test_id)
             if key not in seen:
                 seen.add(key)
@@ -211,17 +215,16 @@ def build_bundle_response(
             "student_test_links": [],
         }
 
-    test_ids, tests_map, student_links = collect_school_scope(school_id)
-    tests_payload, content_versions, questions_by_test = build_tests_questions_payload(tests_map)
-
-    links_out = [{"student_id": a, "test_id": b} for a, b in student_links]
-
-    include_full = page == 1
-    if include_full:
+    if page == 1:
+        _, tests_map, student_links = collect_school_scope(school_id)
+        tests_payload, content_versions, questions_by_test = (
+            build_tests_questions_payload(tests_map)
+        )
+        links_out = [{"student_id": a, "test_id": b} for a, b in student_links]
         students, total_students, total_pages = serialize_students_page(
             school_id, page, page_size
         )
-        body: Dict[str, Any] = {
+        return {
             "sync_bundle_version": gen_version,
             "bundle_valid_until": valid_until.isoformat() + "Z",
             "unchanged": False,
@@ -236,7 +239,6 @@ def build_bundle_response(
             "test_content_version": content_versions,
             "student_test_links": links_out,
         }
-        return body
 
     students, total_students, total_pages = serialize_students_page(
         school_id, page, page_size

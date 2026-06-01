@@ -159,6 +159,7 @@ def invalidate_pack_bundle_cache(pack: MobileOfflinePackCode) -> None:
     internal = dict(scope.get("_resolved") or {})
     internal.pop("sync_bundle_version_by_school", None)
     internal.pop("bundle_valid_until_min", None)
+    internal.pop("redeem_student_ids", None)
     if internal:
         scope["_resolved"] = internal
     else:
@@ -262,6 +263,8 @@ def collect_filtered_scope(
     all_tests: Dict[str, Test] = {}
     links_out: List[Tuple[str, str]] = []
     seen: Set[Tuple[str, str]] = set()
+    pending: List[Tuple[str, str, str]] = []
+    all_stu_ids: Set[str] = set()
 
     for sch_id in school_ids:
         try:
@@ -271,25 +274,81 @@ def collect_filtered_scope(
         for stu_id, tid in school_links:
             if test_ids and tid not in test_ids:
                 continue
-            stu = Student.query.get(stu_id)
-            if not stu or stu.school_id != sch_id:
-                continue
-            if class_ids:
-                cid = str(stu.class_id) if stu.class_id else None
-                if not cid or cid not in class_ids:
-                    continue
-            if student_ids and stu_id not in student_ids:
-                continue
-            key = (stu_id, tid)
-            if key in seen:
-                continue
-            seen.add(key)
-            links_out.append(key)
+            all_stu_ids.add(stu_id)
+            pending.append((sch_id, stu_id, tid))
             t = tests_map.get(tid)
             if t:
                 all_tests[tid] = t
 
+    students_by_id: Dict[str, Student] = {}
+    if all_stu_ids:
+        for stu in Student.query.filter(Student.id.in_(all_stu_ids)).all():
+            students_by_id[stu.id] = stu
+
+    for sch_id, stu_id, tid in pending:
+        stu = students_by_id.get(stu_id)
+        if not stu or stu.school_id != sch_id:
+            continue
+        if class_ids:
+            cid = str(stu.class_id) if stu.class_id else None
+            if not cid or cid not in class_ids:
+                continue
+        if student_ids and stu_id not in student_ids:
+            continue
+        key = (stu_id, tid)
+        if key in seen:
+            continue
+        seen.add(key)
+        links_out.append(key)
+
     return all_tests, links_out
+
+
+def _schools_touched_from_links(
+    links: List[Tuple[str, str]], fallback_school_ids: List[str]
+) -> Set[str]:
+    schools: Set[str] = set()
+    if links:
+        stu_ids = list({sid for sid, _ in links})
+        for stu in Student.query.filter(Student.id.in_(stu_ids)).all():
+            if stu.school_id:
+                schools.add(stu.school_id)
+    if not schools and fallback_school_ids:
+        schools = set(fallback_school_ids)
+    return schools
+
+
+def _cache_redeem_student_ids(
+    pack: MobileOfflinePackCode, student_keys: List[str]
+) -> None:
+    scope = dict(pack.scope_json or {})
+    internal = dict(scope.get("_resolved") or {})
+    internal["redeem_student_ids"] = list(student_keys)
+    scope["_resolved"] = internal
+    pack.scope_json = scope
+    flag_modified(pack, "scope_json")
+
+
+def _cached_redeem_student_ids(pack: MobileOfflinePackCode) -> Optional[List[str]]:
+    internal = (pack.scope_json or {}).get("_resolved") or {}
+    raw = internal.get("redeem_student_ids")
+    if isinstance(raw, list) and raw:
+        return [str(x) for x in raw]
+    return None
+
+
+def _bundle_versions_from_pack(
+    pack: MobileOfflinePackCode,
+) -> Tuple[Dict[str, int], datetime]:
+    internal = (pack.scope_json or {}).get("_resolved") or {}
+    versions_raw = internal.get("sync_bundle_version_by_school")
+    raw_min = internal.get("bundle_valid_until_min")
+    if not isinstance(versions_raw, dict) or not versions_raw or not raw_min:
+        raise ValueError(
+            "baixe a página 1 deste código neste dispositivo antes das demais páginas"
+        )
+    versions = {str(k): int(v) for k, v in versions_raw.items()}
+    return versions, _parse_iso_naive(raw_min)
 
 
 def _ensure_pack_bundle_versions(
@@ -573,25 +632,31 @@ def redeem_offline_pack_page(
     if pack.expires_at < now:
         raise ValueError("código expirado")
 
+    include_full = page == 1
     user_sc = user_scope_persisted(pack)
-    school_ids = resolve_school_ids(city_id, user_sc)
-    test_ids = _optional_id_set("test_ids", user_sc)
-    class_ids = _optional_id_set("class_ids", user_sc)
-    student_ids = _optional_id_set("student_ids", user_sc)
 
-    tests_map, links = collect_filtered_scope(
-        school_ids, test_ids, class_ids, student_ids
-    )
-    student_keys = sorted({sid for sid, _ in links})
-    schools_touched: Set[str] = set()
-    for sid, _ in links:
-        stu = Student.query.get(sid)
-        if stu and stu.school_id:
-            schools_touched.add(stu.school_id)
-    if not schools_touched and school_ids:
-        schools_touched = set(school_ids)
+    if include_full:
+        school_ids = resolve_school_ids(city_id, user_sc)
+        test_ids = _optional_id_set("test_ids", user_sc)
+        class_ids = _optional_id_set("class_ids", user_sc)
+        student_ids = _optional_id_set("student_ids", user_sc)
 
-    if page > 1:
+        tests_map, links = collect_filtered_scope(
+            school_ids, test_ids, class_ids, student_ids
+        )
+        student_keys = sorted({sid for sid, _ in links})
+        schools_touched = _schools_touched_from_links(links, school_ids)
+
+        _reserve_device_slot(pack, device_id)
+        versions, valid_min = _ensure_pack_bundle_versions(pack, schools_touched)
+        _cache_redeem_student_ids(pack, student_keys)
+
+        tests_payload, content_versions, questions_by_test = (
+            build_tests_questions_payload(tests_map)
+        )
+        links_out = [{"student_id": a, "test_id": b} for a, b in links]
+        aplicadores_payload = collect_aplicadores_for_city(city_id)
+    else:
         if not MobileOfflinePackRedeemDevice.query.filter_by(
             pack_id=pack.id, device_id=device_id
         ).first():
@@ -599,10 +664,23 @@ def redeem_offline_pack_page(
                 "baixe a página 1 deste código neste dispositivo antes das demais páginas"
             )
 
-    versions, valid_min = _ensure_pack_bundle_versions(pack, schools_touched)
+        student_keys = _cached_redeem_student_ids(pack)
+        if student_keys is None:
+            school_ids = resolve_school_ids(city_id, user_sc)
+            test_ids = _optional_id_set("test_ids", user_sc)
+            class_ids = _optional_id_set("class_ids", user_sc)
+            student_ids = _optional_id_set("student_ids", user_sc)
+            _, links = collect_filtered_scope(
+                school_ids, test_ids, class_ids, student_ids
+            )
+            student_keys = sorted({sid for sid, _ in links})
 
-    if page == 1:
-        _reserve_device_slot(pack, device_id)
+        versions, valid_min = _bundle_versions_from_pack(pack)
+        tests_payload = {}
+        content_versions = {}
+        questions_by_test = {}
+        links_out = []
+        aplicadores_payload = []
 
     if student_keys:
         eligible_query = student_bundle_query_options(
@@ -620,19 +698,9 @@ def redeem_offline_pack_page(
     rows = eligible_query.offset((page - 1) * page_size).limit(page_size).all()
     students_payload = [serialize_student_for_bundle(s) for s in rows]
 
-    tests_payload, content_versions, questions_by_test = build_tests_questions_payload(
-        tests_map
-    )
-    links_out = [{"student_id": a, "test_id": b} for a, b in links]
-
-    include_full = page == 1
     sync_single: Optional[int] = None
     if len(versions) == 1:
         sync_single = int(next(iter(versions.values())))
-
-    aplicadores_payload = (
-        collect_aplicadores_for_city(city_id) if include_full else []
-    )
 
     body: Dict[str, Any] = {
         "api_contract_version": "1.1",

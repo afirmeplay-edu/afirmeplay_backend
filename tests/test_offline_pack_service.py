@@ -66,11 +66,16 @@ class TestInvalidatePackBundleCache(unittest.TestCase):
             "_resolved": {
                 "sync_bundle_version_by_school": {"s1": 1},
                 "bundle_valid_until_min": "2026-01-01T00:00:00Z",
+                "redeem_student_ids": ["stu-1"],
             },
         }
         svc.invalidate_pack_bundle_cache(pack)
         self.assertNotIn(
             "sync_bundle_version_by_school",
+            pack.scope_json.get("_resolved", {}),
+        )
+        self.assertNotIn(
+            "redeem_student_ids",
             pack.scope_json.get("_resolved", {}),
         )
 
@@ -108,6 +113,63 @@ class TestUpdateOfflinePackValidation(unittest.TestCase):
         mock_resolve.assert_called_once()
         mock_invalidate.assert_called_once_with(pack)
         self.assertEqual(pack.scope_json, new_scope)
+
+
+class TestRedeemOfflinePackPageFastPath(unittest.TestCase):
+    @patch.object(svc, "serialize_student_for_bundle", return_value={"id": "s1"})
+    @patch.object(svc, "student_bundle_query_options")
+    @patch.object(svc, "Student")
+    @patch.object(svc, "MobileOfflinePackRedeemDevice")
+    @patch.object(svc, "build_tests_questions_payload")
+    @patch.object(svc, "collect_filtered_scope")
+    def test_page_two_skips_questions_payload(
+        self,
+        mock_scope,
+        mock_build_tests,
+        mock_redeem_device,
+        mock_student,
+        mock_query_opts,
+        mock_serialize,
+    ):
+        pack = MagicMock()
+        pack.id = "pack-1"
+        pack.revoked_at = None
+        pack.expires_at = datetime.utcnow() + timedelta(hours=24)
+        pack.scope_json = {
+            "type": "municipality",
+            "_resolved": {
+                "sync_bundle_version_by_school": {"sch-1": 3},
+                "bundle_valid_until_min": "2026-12-31T23:59:59Z",
+                "redeem_student_ids": ["s1"],
+            },
+        }
+
+        mock_redeem_device.query.filter_by.return_value.first.return_value = MagicMock()
+
+        base_query = MagicMock()
+        mock_student.query.filter.return_value = base_query
+
+        eligible = MagicMock()
+        eligible.order_by.return_value = eligible
+        eligible.count.return_value = 1
+        eligible.offset.return_value.limit.return_value.all.return_value = [MagicMock()]
+        mock_query_opts.return_value = eligible
+
+        body = svc.redeem_offline_pack_page(
+            pack=pack,
+            device_id="00000000-0000-4000-8000-000000000001",
+            page=2,
+            page_size=50,
+            city_id="city-1",
+        )
+
+        mock_build_tests.assert_not_called()
+        mock_scope.assert_not_called()
+        self.assertEqual(body["tests"], {})
+        self.assertEqual(body["questions_by_test"], {})
+        self.assertEqual(body["student_test_links"], [])
+        self.assertTrue(body["includes_full_payload"] is False)
+        self.assertEqual(body["students"], [{"id": "s1"}])
 
 
 class TestDeleteOfflinePacksBulk(unittest.TestCase):

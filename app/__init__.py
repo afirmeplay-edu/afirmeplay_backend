@@ -1,6 +1,7 @@
 from flask import Flask, send_from_directory, request, jsonify
 from flask_sqlalchemy import SQLAlchemy
 from flask_cors import CORS
+from flask_compress import Compress
 from flask_jwt_extended import JWTManager
 from flask_migrate import Migrate
 from markupsafe import Markup
@@ -77,6 +78,17 @@ def create_app():
     jwt.init_app(app)
     migrate.init_app(app, db)
     register_tenant_query_logging(app, db)
+
+    # Compressão gzip/brotli em respostas JSON/HTML (redeem mobile, etc.)
+    app.config.setdefault("COMPRESS_MIMETYPES", [
+        "application/json",
+        "text/html",
+        "text/css",
+        "text/javascript",
+        "application/javascript",
+    ])
+    app.config.setdefault("COMPRESS_MIN_SIZE", 1024)
+    Compress(app)
 
     # ========================================
     # POSTGRES TIMEOUTS (anti "idle in transaction")

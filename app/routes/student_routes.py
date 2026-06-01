@@ -1346,22 +1346,10 @@ def get_password_report():
         if not user:
             return jsonify({"error": "Usuário não encontrado"}), 401
         
-        # 2. Construir query base
-        query = get_orm_session().query(
-            StudentPasswordLog,
-            School,
-            City,
-            Class,
-            Grade
-        ).outerjoin(
-            School, StudentPasswordLog.school_id == School.id
-        ).outerjoin(
-            City, StudentPasswordLog.city_id == City.id
-        ).outerjoin(
-            Class, StudentPasswordLog.class_id == Class.id
-        ).outerjoin(
-            Grade, StudentPasswordLog.grade_id == Grade.id
-        )
+        # 2. Construir query base (somente alunos ainda matriculados na escola do log)
+        from app.services.student_password_log_service import build_password_report_query
+
+        query = build_password_report_query(get_orm_session())
         
         # 3. Aplicar filtros automáticos baseados no role
         if user['role'] == "admin":
@@ -1548,22 +1536,9 @@ def get_password_report_pdf():
         if not user:
             return jsonify({"error": "Usuário não encontrado"}), 401
 
-        # Construir query base (mesma do Excel)
-        query = get_orm_session().query(
-            StudentPasswordLog,
-            School,
-            City,
-            Class,
-            Grade
-        ).outerjoin(
-            School, StudentPasswordLog.school_id == School.id
-        ).outerjoin(
-            City, StudentPasswordLog.city_id == City.id
-        ).outerjoin(
-            Class, StudentPasswordLog.class_id == Class.id
-        ).outerjoin(
-            Grade, StudentPasswordLog.grade_id == Grade.id
-        )
+        from app.services.student_password_log_service import build_password_report_query
+
+        query = build_password_report_query(get_orm_session())
 
         # Filtros por role
         school_id_param = request.args.get('school_id')

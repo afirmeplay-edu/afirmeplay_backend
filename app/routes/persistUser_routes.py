@@ -3,6 +3,9 @@
 from flask import Blueprint, jsonify
 from app.decorators.role_required import get_current_user_from_token
 from app.models.user import User
+from app.models.city import City
+from app.entitlements.plans import DEFAULT_PLAN_CODE
+from app.entitlements.resolver import entitlements_for_city
 import datetime
 import jwt
 import os
@@ -25,18 +28,27 @@ def me():
     if not user:
         return jsonify({"erro": "Não autenticado"}), 401
 
-    # Create new access token
-    token_payload = {
-        "sub": user.get("id"),
-        "city_id": user.get("city_id"),
-        "role": user.get("role"),
-        "exp": datetime.datetime.utcnow() + datetime.timedelta(hours=3)
-    }
-    new_token = jwt.encode(token_payload, SECRET_KEY, algorithm='HS256')
-
     userData = User.query.get(user.get("id"))
     if not userData:
         return jsonify({"erro": "Usuário não encontrado"}), 404
+
+    plan_code = None
+    entitlements = None
+    if userData.city_id:
+        city = City.query.get(userData.city_id)
+        if city:
+            plan_code = city.plan_code or DEFAULT_PLAN_CODE
+            entitlements = entitlements_for_city(city)
+
+    token_payload = {
+        "sub": user.get("id"),
+        "city_id": user.get("city_id") or userData.city_id,
+        "role": user.get("role"),
+        "exp": datetime.datetime.utcnow() + datetime.timedelta(hours=3),
+    }
+    if plan_code:
+        token_payload["plan_code"] = plan_code
+    new_token = jwt.encode(token_payload, SECRET_KEY, algorithm='HS256')
 
     usuario_data = {
         "id": userData.id,
@@ -44,8 +56,12 @@ def me():
         "email": userData.email,
         "registration": userData.registration,
         "role": userData.role.value,
-        "city_id": userData.city_id
+        "city_id": userData.city_id,
     }
+    if plan_code:
+        usuario_data["plan_code"] = plan_code
+    if entitlements:
+        usuario_data["entitlements"] = entitlements
 
     needs_onboarding = _needs_onboarding(userData)
     response = {

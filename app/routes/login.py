@@ -135,12 +135,18 @@ def login():
 
         # Buscar informações da cidade (se houver tenant_id)
         from app.models.city import City
+        from app.entitlements.plans import DEFAULT_PLAN_CODE
+        from app.entitlements.resolver import entitlements_for_city
         city = None
         city_slug = None
+        plan_code = None
+        entitlements = None
         if tenant_id:
             city = City.query.get(tenant_id)
             if city:
                 city_slug = city.slug
+                plan_code = city.plan_code or DEFAULT_PLAN_CODE
+                entitlements = entitlements_for_city(city)
         
         token_payload = {
             "sub": usuario.id,
@@ -149,6 +155,8 @@ def login():
             "city_slug": city_slug,  # Incluir slug no token para facilitar resolução
             "exp": datetime.datetime.utcnow() + datetime.timedelta(hours=3)
         }
+        if plan_code:
+            token_payload["plan_code"] = plan_code
 
         token = jwt.encode(token_payload, SECRET_KEY, algorithm='HS256')
 
@@ -160,8 +168,12 @@ def login():
             "tenant_id": tenant_id,
             "city_slug": city_slug,  # Incluir slug na resposta
             "created_at": usuario.created_at,
-            "role": usuario.role.value
+            "role": usuario.role.value,
         }
+        if plan_code:
+            usuario_data["plan_code"] = plan_code
+        if entitlements:
+            usuario_data["entitlements"] = entitlements
 
         logging.info(f"Login bem-sucedido para usuário: {usuario.email} com papel: {usuario.role} e tenant_id: {tenant_id}")
         response = jsonify({

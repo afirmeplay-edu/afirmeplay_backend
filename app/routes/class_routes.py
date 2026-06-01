@@ -979,6 +979,7 @@ def remove_student_from_class(class_id):
             return jsonify({"message": f"Student {student_id} is not in class {class_id}"}), 200
 
         # Update the student's class_id to null
+        old_school_id = student.school_id
         student.class_id = None
         
         # Verificar se o aluno ainda está em outras turmas da mesma escola
@@ -993,6 +994,19 @@ def remove_student_from_class(class_id):
             if other_classes_in_school == 0:
                 logging.info(f"Aluno {student_id} não está em nenhuma turma da escola {student.school_id}, desvinculando da escola")
                 student.school_id = None
+                if old_school_id:
+                    from app.services.student_password_log_service import (
+                        delete_password_logs_for_student_at_school,
+                    )
+
+                    removed_logs = delete_password_logs_for_student_at_school(
+                        db.session, student_id, str(old_school_id)
+                    )
+                    if removed_logs:
+                        logging.info(
+                            f"Removidos {removed_logs} log(s) de senha do aluno {student_id} "
+                            f"na escola {old_school_id}"
+                        )
             else:
                 logging.info(f"Aluno {student_id} ainda está em {other_classes_in_school} turma(s) da escola {student.school_id}")
         

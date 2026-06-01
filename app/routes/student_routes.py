@@ -34,7 +34,7 @@ from jinja2 import Environment, FileSystemLoader, select_autoescape
 from weasyprint import HTML
 
 bp = Blueprint('students', __name__, url_prefix="/students")
-STUDENTS_PER_PDF_PAGE = 14
+STUDENTS_PER_PDF_PAGE = 11
 
 
 def _get_logo_path():
@@ -1635,16 +1635,22 @@ def get_password_report_pdf():
         for turma in turmas_map.values():
             alunos = turma["alunos"]
             total_pages = max(1, (len(alunos) + STUDENTS_PER_PDF_PAGE - 1) // STUDENTS_PER_PDF_PAGE)
+            pages = []
             for page_idx, start in enumerate(range(0, len(alunos), STUDENTS_PER_PDF_PAGE), start=1):
-                turmas.append({
-                    "class_name": turma["class_name"],
-                    "grade_name": turma["grade_name"],
+                pages.append({
                     "alunos": alunos[start:start + STUDENTS_PER_PDF_PAGE],
                     "chunk_page": page_idx,
                     "chunk_total_pages": total_pages,
                     # Índice inicial (1-based) para numeração contínua entre páginas da mesma turma
                     "start_index": start + 1,
                 })
+
+            turmas.append({
+                "class_name": turma["class_name"],
+                "grade_name": turma["grade_name"],
+                "pages": pages,
+                "total_alunos": len(alunos),
+            })
 
         # Metadados para a capa
         escola_nome = None
@@ -1665,7 +1671,7 @@ def get_password_report_pdf():
                 city_obj = get_orm_session().query(City).get(school_obj.city_id)
                 municipio_nome = city_obj.name if city_obj else None
 
-        total_alunos = sum(len(t["alunos"]) for t in turmas)
+        total_alunos = sum(t["total_alunos"] for t in turmas)
         data_geracao = datetime.now().strftime("%d/%m/%Y %H:%M")
 
         metadados = {

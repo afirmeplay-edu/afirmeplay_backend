@@ -1,4 +1,24 @@
 <!DOCTYPE html>
+<!--
+  =============================================================================
+  TEMPLATE OFICIAL EM PRODUÇÃO — PROVA FÍSICA + CARTÃO OMR (AfirmePlay)
+  =============================================================================
+  Arquivo: app/templates/institutional_test_hybrid.html
+  Status: ATIVO — substitui institutional_test.html para WeasyPrint.
+
+  Usado por:
+    - app/services/institutional_test_weasyprint_generator.py
+      (capa, questões, e cartão em include_answer_sheet=True)
+
+  Cartão-resposta OMR: mesma geometria de answer_sheet.html (seção .answer-sheet).
+  Correção: correction_new_grid.py
+
+  NÃO usar para novos desenvolvimentos OMR:
+    - institutional_test.html, institutional_test_repo.html (legado / tentativas)
+
+  ⚠️ Mesmas regras de answer_sheet.html para a área OMR (.answer-block, triângulos).
+  =============================================================================
+-->
 <html lang="pt-BR">
 	<head>
 		<meta charset="UTF-8" />
@@ -910,13 +930,49 @@
 		}
 
 		.block-header {
+			margin: 0 0 3px 0; /* ✅ Margem abaixo do header para separar do bloco */
+			padding: 2px;
+			background: transparent; /* ✅ Fora da borda preta (OMR) */
+			flex-shrink: 0;
+			min-height: 2.5em;
+			display: flex;
+			flex-direction: column;
+			align-items: stretch;
+			box-sizing: border-box;
+		}
+
+		.block-title {
 			text-align: center;
 			font-weight: bold;
 			font-size: 8pt;
-			margin: 0 0 3px 0; /* ✅ Margem abaixo do header para separar do bloco */
-			padding: 2px;
-			background: transparent; /* ✅ Sem background para ficar fora do quadrado */
 			line-height: 1.2;
+		}
+
+		.block-column-labels {
+			display: flex;
+			align-items: center;
+			margin-top: 2px;
+		}
+
+		.question-num-spacer {
+			width: 25px;
+			min-width: 25px;
+			flex-shrink: 0;
+		}
+
+		.column-labels {
+			display: flex;
+			gap: 4px;
+			align-items: center;
+		}
+
+		.column-label {
+			width: 15px;
+			min-width: 15px;
+			font-size: 7pt;
+			font-weight: bold;
+			color: #374151;
+			text-align: center;
 			flex-shrink: 0;
 		}
 
@@ -983,20 +1039,8 @@
 				border: 1px solid #7c3aed;
 				border-radius: 50%;
 				background: white;
-				display: inline-flex;
-				align-items: center;
-				justify-content: center;
-				font-size: 7pt;
-				font-weight: bold;
-				color: #ccc;
-				line-height: 1;
+				display: inline-block;
 				flex-shrink: 0;
-			}
-
-			.bubble-label {
-				font-size: 6pt;
-				text-align: center;
-				margin-top: -2px;
 			}
 
 			.page-break {
@@ -1483,9 +1527,18 @@
 					block.questions | length %} 					{% if questions_in_block > 0 %}
 					<div class="block-wrapper">
 						<div class="block-header">
-							BLOCO {{ "%02d"|format(block.block_number) }}{% if
-							block.subject_name %} - {{ block.subject_name }}{%
-							endif %}
+							<div class="block-title">
+								{% if block.subject_name %}{{ block.subject_name }}{% else %}BLOCO {{ "%02d"|format(block.block_number) }}{% endif %}
+							</div>
+							<div class="block-column-labels">
+								<span class="question-num-spacer" aria-hidden="true"></span>
+								<div class="column-labels">
+									<span class="column-label">A</span>
+									<span class="column-label">B</span>
+									<span class="column-label">C</span>
+									<span class="column-label">D</span>
+								</div>
+							</div>
 						</div>
 						<div class="answer-block">
 						<!-- Linhas de resposta -->
@@ -1498,13 +1551,15 @@
 							</span>
 
 							<div class="bubbles">
-								{% if questions_map and questions_map[question.question_number] %} {% for opt in questions_map[question.question_number] %}
-								<div class="bubble">{{ opt }}</div>
-								{% endfor %} {% else %}
-								<div class="bubble">A</div>
-								<div class="bubble">B</div>
-								<div class="bubble">C</div>
-								<div class="bubble">D</div>
+								{% if question.options %}{% for _ in question.options %}
+								<div class="bubble"></div>
+								{% endfor %}{% elif questions_map and questions_map[question.question_number] %}{% for _ in questions_map[question.question_number] %}
+								<div class="bubble"></div>
+								{% endfor %}{% else %}
+								<div class="bubble"></div>
+								<div class="bubble"></div>
+								<div class="bubble"></div>
+								<div class="bubble"></div>
 								{% endif %}
 							</div>
 						</div>
@@ -1517,7 +1572,16 @@
 					end_question = block_num * questions_per_block %}
 					<div class="block-wrapper">
 						<div class="block-header">
-							BLOCO {{ "%02d"|format(block_num) }}
+							<div class="block-title">BLOCO {{ "%02d"|format(block_num) }}</div>
+							<div class="block-column-labels">
+								<span class="question-num-spacer" aria-hidden="true"></span>
+								<div class="column-labels">
+									<span class="column-label">A</span>
+									<span class="column-label">B</span>
+									<span class="column-label">C</span>
+									<span class="column-label">D</span>
+								</div>
+							</div>
 						</div>
 						<div class="answer-block">
 
@@ -1530,13 +1594,13 @@
 								>
 							</span>
 							<div class="bubbles">
-								{% if questions_map and questions_map[q_num] %} {% for opt in questions_map[q_num] %}
-								<div class="bubble">{{ opt }}</div>
-								{% endfor %} {% else %}
-								<div class="bubble">A</div>
-								<div class="bubble">B</div>
-								<div class="bubble">C</div>
-								<div class="bubble">D</div>
+								{% if questions_map and questions_map[q_num] %}{% for _ in questions_map[q_num] %}
+								<div class="bubble"></div>
+								{% endfor %}{% else %}
+								<div class="bubble"></div>
+								<div class="bubble"></div>
+								<div class="bubble"></div>
+								<div class="bubble"></div>
 								{% endif %}
 							</div>
 						</div>
@@ -1555,7 +1619,16 @@
 					%} {% if questions_in_block > 0 %}
 					<div class="block-wrapper">
 						<div class="block-header">
-							BLOCO {{ "%02d"|format(block) }}
+							<div class="block-title">BLOCO {{ "%02d"|format(block) }}</div>
+							<div class="block-column-labels">
+								<span class="question-num-spacer" aria-hidden="true"></span>
+								<div class="column-labels">
+									<span class="column-label">A</span>
+									<span class="column-label">B</span>
+									<span class="column-label">C</span>
+									<span class="column-label">D</span>
+								</div>
+							</div>
 						</div>
 						<div class="answer-block">
 
@@ -1568,15 +1641,13 @@
 								>
 							</span>
 							<div class="bubbles">
-								{% if questions_map and
-								questions_map[question_num] %} {% for opt in
-								questions_map[question_num] %}
-								<div class="bubble">{{ opt }}</div>
-								{% endfor %} {% else %}
-								<div class="bubble">A</div>
-								<div class="bubble">B</div>
-								<div class="bubble">C</div>
-								<div class="bubble">D</div>
+								{% if questions_map and questions_map[question_num] %}{% for _ in questions_map[question_num] %}
+								<div class="bubble"></div>
+								{% endfor %}{% else %}
+								<div class="bubble"></div>
+								<div class="bubble"></div>
+								<div class="bubble"></div>
+								<div class="bubble"></div>
 								{% endif %}
 							</div>
 						</div>

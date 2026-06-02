@@ -1,8 +1,9 @@
 # -*- coding: utf-8 -*-
 """
-Serviço de Correção Híbrida de Provas Institucionais
-Combina detecção geométrica (OpenCV) com estrutura de salvamento do correcaoIA
-Usa algoritmo comprovado de test_correction para detectar marcações
+LEGADO — tentativa anterior de correção geométrica (pré correction_new_grid.py).
+Ainda referenciado por answer_sheet_correction.py / answer_sheet_correction_service.py.
+Correção OMR oficial em produção: app/services/cartao_resposta/correction_new_grid.py
+Candidato à remoção após validar que nenhum endpoint ativo depende deste módulo.
 """
 
 import cv2

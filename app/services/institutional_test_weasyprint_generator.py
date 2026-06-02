@@ -747,8 +747,8 @@ class InstitutionalTestWeasyPrintGenerator:
             }
             
 
-            # Renderizar template HTML
-            #template = self.env.get_template('institutional_test.html')
+            # Template OFICIAL em produção (ver cabeçalho em institutional_test_hybrid.html)
+            # Legado: institutional_test.html — não usar
             template = self.env.get_template('institutional_test_hybrid.html')
             html_content = template.render(**template_data)
 

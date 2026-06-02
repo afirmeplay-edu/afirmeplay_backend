@@ -1,6 +1,9 @@
 # -*- coding: utf-8 -*-
 """
-Serviço para geração de PDFs de cartões resposta usando WeasyPrint + Jinja2
+LEGADO — cópia antiga; NENHUM import ativo no projeto.
+Gerador oficial: app/services/cartao_resposta/answer_sheet_generator.py
+Template oficial: app/templates/answer_sheet.html
+Candidato à remoção na limpeza OMR.
 """
 
 from weasyprint import HTML

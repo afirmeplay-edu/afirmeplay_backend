@@ -1,7 +1,22 @@
 # -*- coding: utf-8 -*-
 """
-Pipeline OMR Robusto e Determinístico
-Baseado em Template Fixo + JSON de Topologia
+=============================================================================
+CORRETOR OFICIAL EM PRODUÇÃO — OMR CARTÃO-RESPOSTA (AfirmePlay)
+=============================================================================
+Arquivo: app/services/cartao_resposta/correction_new_grid.py
+Status: ATIVO — único pipeline usado nas rotas de correção atuais.
+
+Templates calibrados:
+  - app/templates/answer_sheet.html
+  - app/templates/institutional_test_hybrid.html (bloco .answer-sheet)
+
+Usado por:
+  - app/routes/answer_sheet_routes.py
+  - app/physical_tests/routes.py
+
+Legado (não usar em produção; candidatos à limpeza):
+  - correction_n.py, correcao_hybrid.py, answer_sheet_correction_service.py
+  - answer_sheet_correction.py (pacote antigo)
 
 PRINCÍPIO FUNDAMENTAL:
     "O template define o espaço.
@@ -2322,7 +2337,7 @@ class AnswerSheetCorrectionNewGrid:
                 existing_result.classification = classification
                 existing_result.proficiency_by_subject = proficiency_by_subject
                 existing_result.corrected_at = datetime.utcnow()
-                existing_result.detection_method = 'new_grid'
+                existing_result.detection_method = correction.get('detection_method', 'new_grid')
                 
                 db.session.flush()
                 payload = existing_result.to_dict()
@@ -2355,7 +2370,7 @@ class AnswerSheetCorrectionNewGrid:
                     proficiency=proficiency,
                     classification=classification,
                     proficiency_by_subject=proficiency_by_subject,
-                    detection_method='new_grid'
+                    detection_method=correction.get('detection_method', 'new_grid')
                 )
                 
                 db.session.add(result)

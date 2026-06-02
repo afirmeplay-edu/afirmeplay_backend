@@ -1,7 +1,15 @@
 # -*- coding: utf-8 -*-
 """
-Serviço para geração de PDFs de cartões resposta usando WeasyPrint + Jinja2
-NOVO: Suporte a template base + overlay (Architecture 4)
+=============================================================================
+GERADOR OFICIAL EM PRODUÇÃO — PDF CARTÃO-RESPOSTA (AfirmePlay)
+=============================================================================
+Arquivo: app/services/cartao_resposta/answer_sheet_generator.py
+Status: ATIVO
+
+Template oficial: app/templates/answer_sheet.html
+Correção pareada: app/services/cartao_resposta/correction_new_grid.py
+
+NÃO confundir com app/services/answer_sheet_generator.py (cópia legada, sem imports).
 """
 
 from weasyprint import HTML

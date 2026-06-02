@@ -18,6 +18,12 @@ from app.models.user import User
 from app.services.cartao_resposta.answer_sheet_generator import AnswerSheetGenerator
 from app.services.cartao_resposta.answer_sheet_correction_service import AnswerSheetCorrectionService
 from app.services.cartao_resposta.correction_new_grid import AnswerSheetCorrectionNewGrid
+from app.services.cartao_resposta.manual_answer_sheet_service import (
+    ManualAnswerSheetError,
+    get_manual_entry_form,
+    list_students_for_gabarito,
+    submit_manual_correction,
+)
 from app.config import Config
 from app.services.progress_store import (
     create_job, update_item_processing, update_item_done,
@@ -2059,6 +2065,121 @@ def delete_gabarito(gabarito_id):
         db.session.rollback()
         logging.error(f"Erro ao excluir gabarito: {str(e)}", exc_info=True)
         return jsonify({"error": f"Erro ao excluir gabarito: {str(e)}"}), 500
+
+
+@bp.route('/manual-entry', methods=['GET'])
+@jwt_required()
+@role_required("admin", "professor", "coordenador", "diretor", "tecadm")
+@requires_city_context
+def get_manual_answer_sheet_entry():
+    """
+    Dados para a tela de entrada manual (cartão resposta ou prova física com gabarito).
+
+    Query: gabarito_id OU test_id (pelo menos um), student_id (obrigatório).
+    """
+    try:
+        user = get_current_user_from_token()
+        if not user:
+            return jsonify({"error": "Usuário não encontrado"}), 401
+
+        student_id = (request.args.get("student_id") or "").strip()
+        if not student_id:
+            return jsonify({"error": "student_id é obrigatório"}), 400
+
+        payload = get_manual_entry_form(
+            gabarito_id=request.args.get("gabarito_id"),
+            test_id=request.args.get("test_id"),
+            student_id=student_id,
+            user=user,
+        )
+        return jsonify(payload), 200
+    except ManualAnswerSheetError as e:
+        return jsonify({"error": e.message}), e.status_code
+    except Exception as e:
+        logging.error(f"Erro em manual-entry GET: {e}", exc_info=True)
+        return jsonify({"error": "Erro ao carregar formulário de entrada manual"}), 500
+
+
+@bp.route('/manual-correction', methods=['POST'])
+@jwt_required()
+@role_required("admin", "professor", "coordenador", "diretor", "tecadm")
+@requires_city_context
+def post_manual_answer_sheet_correction():
+    """
+    Registra respostas marcadas no cartão sem usar imagem/OMR.
+    Escopo: cartão resposta (gabarito) e prova física (gabarito ligado ao test_id).
+
+    Body:
+        gabarito_id (opcional), test_id (opcional) — pelo menos um
+        student_id (obrigatório)
+        answers: { "1": "A", "2": null, ... } — vazio/null = em branco
+    """
+    try:
+        user = get_current_user_from_token()
+        if not user:
+            return jsonify({"error": "Usuário não encontrado"}), 401
+
+        data = request.get_json() or {}
+        student_id = (data.get("student_id") or "").strip()
+        if not student_id:
+            return jsonify({"error": "student_id é obrigatório"}), 400
+
+        raw_answers = data.get("answers")
+        if raw_answers is None:
+            return jsonify({"error": "Campo 'answers' é obrigatório"}), 400
+
+        result = submit_manual_correction(
+            gabarito_id=data.get("gabarito_id"),
+            test_id=data.get("test_id"),
+            student_id=student_id,
+            raw_answers=raw_answers,
+            user=user,
+        )
+        return jsonify(result), 200
+    except ManualAnswerSheetError as e:
+        return jsonify({"error": e.message}), e.status_code
+    except Exception as e:
+        logging.error(f"Erro em manual-correction POST: {e}", exc_info=True)
+        return jsonify({"error": "Erro ao registrar respostas manuais"}), 500
+
+
+@bp.route('/gabarito/<string:gabarito_id>/students', methods=['GET'])
+@jwt_required()
+@role_required("admin", "professor", "coordenador", "diretor", "tecadm")
+@requires_city_context
+def get_gabarito_students(gabarito_id):
+    """
+    Lista alunos das turmas-alvo do gabarito (escopo de geração/relatório).
+
+    Query opcional: class_id, grade_id, school_id, flat (true/1 para lista plana).
+    """
+    try:
+        user = get_current_user_from_token()
+        if not user:
+            return jsonify({"error": "Usuário não encontrado"}), 401
+
+        context = get_current_tenant_context()
+        if not context or not context.city_id:
+            return jsonify({"error": "Contexto de município é obrigatório"}), 400
+
+        flat_raw = (request.args.get("flat") or "").strip().lower()
+        flat = flat_raw in ("1", "true", "yes")
+
+        payload = list_students_for_gabarito(
+            gabarito_id=gabarito_id,
+            user=user,
+            city_id=str(context.city_id),
+            class_id=request.args.get("class_id"),
+            grade_id=request.args.get("grade_id"),
+            school_id=request.args.get("school_id"),
+            flat=flat,
+        )
+        return jsonify(payload), 200
+    except ManualAnswerSheetError as e:
+        return jsonify({"error": e.message}), e.status_code
+    except Exception as e:
+        logging.error(f"Erro em gabarito students GET: {e}", exc_info=True)
+        return jsonify({"error": "Erro ao listar alunos do gabarito"}), 500
 
 
 @bp.route('/correct-new', methods=['POST'])

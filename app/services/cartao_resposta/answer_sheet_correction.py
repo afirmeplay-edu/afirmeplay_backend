@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
-Serviço de Correção de Cartões Resposta usando Detecção Geométrica
-Reutiliza lógica do CorrecaoHybrid mas busca gabarito do AnswerSheetGabarito
+LEGADO — wrapper antigo sobre correcao_hybrid.py (AnswerSheetGabarito).
+Correção oficial: correction_new_grid.py. Candidato à remoção na limpeza OMR.
 """
 
 import cv2

@@ -1,5 +1,12 @@
 # -*- coding: utf-8 -*-
 """
+LEGADO — NÃO USADO NAS ROTAS DE PRODUÇÃO ATUAIS.
+Corretor oficial: correction_new_grid.py (answer_sheet_routes, physical_tests/routes).
+
+Mantido temporariamente: referência de tentativas anteriores / geração de template digital.
+Candidato à remoção na limpeza de tentativas OMR (validar antes se algum script local ainda importa).
+
+---
 Nova Implementação de Correção de Cartões Resposta
 Baseado no repositório OMR com adaptações:
 - Duplo ROI: triângulos + blocos com borda preta

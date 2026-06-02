@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
 """
-Serviço de Correção de Cartões Resposta
-Sistema independente que reutiliza funções de detecção do correcao_hybrid
-mas trabalha exclusivamente com AnswerSheetGabarito e AnswerSheetResult
+LEGADO — importado em answer_sheet_routes.py mas substituído por AnswerSheetCorrectionNewGrid
+nas rotas de correção ativas. Baseado em correcao_hybrid.py.
+Corretor oficial: correction_new_grid.py + template answer_sheet.html
 """
 
 import cv2

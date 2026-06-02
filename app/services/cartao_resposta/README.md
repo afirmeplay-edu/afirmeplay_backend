@@ -4,6 +4,25 @@ Este documento descreve o funcionamento do sistema de **cartões resposta** (ans
 
 ---
 
+## Arquivos oficiais em produção (fonte da verdade OMR)
+
+| Papel | Arquivo | Status |
+|-------|---------|--------|
+| Template cartão (turmas / Celery) | `app/templates/answer_sheet.html` | **ATIVO** |
+| Template prova física + cartão | `app/templates/institutional_test_hybrid.html` | **ATIVO** |
+| Geração PDF cartão | `app/services/cartao_resposta/answer_sheet_generator.py` | **ATIVO** |
+| Correção OMR | `app/services/cartao_resposta/correction_new_grid.py` | **ATIVO** |
+
+**Legado / limpeza futura (comentários no topo de cada arquivo):**
+
+- Templates: `institutional_test.html`, `institutional_test_repo.html`, `answer_grid_only.html`
+- Correção: `correction_n.py`, `correcao_hybrid.py`, `answer_sheet_correction*.py`
+- Gerador duplicado: `app/services/answer_sheet_generator.py`
+
+**Outro fluxo (manter):** `answer_sheet_reference.html` + `answer_sheet_reference_generator.py` (gabarito de referência, não cartão do aluno).
+
+---
+
 ## Índice
 
 1. [Visão geral](#1-visão-geral)
@@ -43,8 +62,8 @@ app/services/cartao_resposta/
 ├── answer_sheet_generator.py     # Geração de PDFs (WeasyPrint + Jinja2 + QR)
 ├── answer_sheet_correction.py     # Correção legada (AnswerSheetGabarito + AnswerSheetResult)
 ├── answer_sheet_correction_service.py  # Serviço de correção (QR, bolhas, resultado)
-├── correction_new_grid.py         # Corretor principal (nova grade; usado em physical_test e answer_sheet)
-├── correction_n.py                # Corretor com template digital e _generate_individual_answer_sheet
+├── correction_new_grid.py         # ✅ OFICIAL — corretor em produção (physical_test + answer_sheet)
+├── correction_n.py                # ⚠️ LEGADO — candidato à remoção (ver cabeçalho do arquivo)
 ├── coordinate_generator.py        # Geração de coordenadas (ROIs) das bolhas para correção
 ├── hierarchical_generator.py      # Escopo hierárquico (cidade → escola → série → turma)
 ├── block_01_coordinates_adjustment.json
@@ -53,7 +72,7 @@ app/services/cartao_resposta/
 └── block_04_coordinates_adjustment.json
 ```
 
-**Template usado na geração:** `app/templates/answer_sheet.html` (carregado pelo `AnswerSheetGenerator` a partir de `app/templates/`).
+**Template oficial:** `app/templates/answer_sheet.html` — ver seção [Arquivos oficiais](#arquivos-oficiais-em-produção-fonte-da-verdade-omr).
 
 ---
 

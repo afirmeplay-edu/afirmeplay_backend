@@ -1,4 +1,25 @@
 <!doctype html>
+<!--
+  =============================================================================
+  TEMPLATE OFICIAL EM PRODUÇÃO — CARTÃO-RESPOSTA OMR (AfirmePlay)
+  =============================================================================
+  Arquivo: app/templates/answer_sheet.html
+  Status: ATIVO — fonte da verdade para layout OMR (triângulos + borda preta).
+
+  Usado por:
+    - app/services/cartao_resposta/answer_sheet_generator.py
+    - app/services/celery_tasks/answer_sheet_tasks.py
+    - Correção: app/services/cartao_resposta/correction_new_grid.py (calibrado neste layout)
+
+  NÃO confundir com tentativas antigas:
+    - answer_grid_only.html, answer_sheet_reference.html (outros fluxos)
+    - institutional_test.html / institutional_test_repo.html (legado)
+
+  ⚠️ Antes de alterar CSS dentro de .answer-block (bolhas, linhas, bordas,
+     .answer-grid-wrapper, triângulos): recalibrar correction_new_grid.py.
+  Alterações só em .block-header (títulos, legenda A–D) são seguras para OMR.
+  =============================================================================
+-->
 <html lang="pt-BR">
 	<head>
 		<meta charset="UTF-8" />

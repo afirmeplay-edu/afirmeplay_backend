@@ -1,4 +1,24 @@
 <!DOCTYPE html>
+<!--
+  =============================================================================
+  TEMPLATE OFICIAL EM PRODUÇÃO — PROVA FÍSICA + CARTÃO OMR (AfirmePlay)
+  =============================================================================
+  Arquivo: app/templates/institutional_test_hybrid.html
+  Status: ATIVO — substitui institutional_test.html para WeasyPrint.
+
+  Usado por:
+    - app/services/institutional_test_weasyprint_generator.py
+      (capa, questões, e cartão em include_answer_sheet=True)
+
+  Cartão-resposta OMR: mesma geometria de answer_sheet.html (seção .answer-sheet).
+  Correção: correction_new_grid.py
+
+  NÃO usar para novos desenvolvimentos OMR:
+    - institutional_test.html, institutional_test_repo.html (legado / tentativas)
+
+  ⚠️ Mesmas regras de answer_sheet.html para a área OMR (.answer-block, triângulos).
+  =============================================================================
+-->
 <html lang="pt-BR">
 	<head>
 		<meta charset="UTF-8" />

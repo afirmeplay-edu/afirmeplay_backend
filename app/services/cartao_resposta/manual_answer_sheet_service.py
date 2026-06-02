@@ -32,7 +32,14 @@ from app.utils.uuid_helpers import ensure_uuid
 
 logger = logging.getLogger(__name__)
 
-STAFF_ROLES = frozenset({"admin", "professor", "coordenador", "diretor", "tecadm"})
+STAFF_ROLES = frozenset({
+    "admin",
+    "professor",
+    "coordenador",
+    "diretor",
+    "tecadm",
+    "aplicador",
+})
 
 
 class ManualAnswerSheetError(Exception):

@@ -2069,7 +2069,7 @@ def delete_gabarito(gabarito_id):
 
 @bp.route('/manual-entry', methods=['GET'])
 @jwt_required()
-@role_required("admin", "professor", "coordenador", "diretor", "tecadm")
+@role_required("admin", "professor", "coordenador", "diretor", "tecadm", "aplicador")
 @requires_city_context
 def get_manual_answer_sheet_entry():
     """
@@ -2102,7 +2102,7 @@ def get_manual_answer_sheet_entry():
 
 @bp.route('/manual-correction', methods=['POST'])
 @jwt_required()
-@role_required("admin", "professor", "coordenador", "diretor", "tecadm")
+@role_required("admin", "professor", "coordenador", "diretor", "tecadm", "aplicador")
 @requires_city_context
 def post_manual_answer_sheet_correction():
     """
@@ -2145,7 +2145,7 @@ def post_manual_answer_sheet_correction():
 
 @bp.route('/gabarito/<string:gabarito_id>/students', methods=['GET'])
 @jwt_required()
-@role_required("admin", "professor", "coordenador", "diretor", "tecadm")
+@role_required("admin", "professor", "coordenador", "diretor", "tecadm", "aplicador")
 @requires_city_context
 def get_gabarito_students(gabarito_id):
     """

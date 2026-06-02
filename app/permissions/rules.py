@@ -671,6 +671,26 @@ def get_user_permission_scope(user: Dict[str, Any]) -> Dict[str, Any]:
                 'avaliacoes': 'vinculadas'
             }
         }
+
+    elif role == Roles.APLICADOR:
+        if not city_id:
+            return {
+                'permitted': False,
+                'error': 'Aplicador não vinculado a um município',
+            }
+        return {
+            'permitted': True,
+            'scope': 'municipio',
+            'city_id': city_id,
+            'filters': {
+                'estados': 'specific',
+                'municipios': 'specific',
+                'escolas': 'municipio',
+                'series': 'municipio',
+                'turmas': 'municipio',
+                'avaliacoes': 'municipio',
+            },
+        }
     
     else:
         return {

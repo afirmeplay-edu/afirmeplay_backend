@@ -4735,7 +4735,7 @@ def _obter_turmas_por_serie_cartao(
 
 @bp.route('/opcoes-filtros-results', methods=['GET'])
 @jwt_required()
-@role_required("admin", "professor", "coordenador", "diretor", "tecadm")
+@role_required("admin", "professor", "coordenador", "diretor", "tecadm", "aplicador")
 def obter_opcoes_filtros_cartao():
     """
     Retorna opções hierárquicas de filtros para resultados de cartões resposta.
@@ -6693,7 +6693,7 @@ def _obter_turmas_por_serie(escola_id: str, serie_id: str, municipio_id: str, us
 
 @bp.route('/opcoes-filtros', methods=['GET'])
 @jwt_required()
-@role_required("admin", "professor", "coordenador", "diretor", "tecadm")
+@role_required("admin", "professor", "coordenador", "diretor", "tecadm", "aplicador")
 def obter_opcoes_filtros():
     """
     Retorna opções hierárquicas de filtros para CARTÃO RESPOSTA.
